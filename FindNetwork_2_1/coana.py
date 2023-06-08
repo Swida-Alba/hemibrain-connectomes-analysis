@@ -51,7 +51,7 @@ class FindNeuronConnection():
     dataset: str = 'hemibrain:v1.2.1'
     '''the hemibrain dataset to visit, see https://neuprint.janelia.org for more information'''
     
-    token: str = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJlbWFpbCI6ImtybGVuZzEyMTg0QGdtYWlsLmNvbSIsImxldmVsIjoibm9hdXRoIiwiaW1hZ2UtdXJsIjoiaHR0cHM6Ly9saDMuZ29vZ2xldXNlcmNvbnRlbnQuY29tL2EvQUFUWEFKeTdKZ1JCeUFZYkt6YzFSbTl3ejV4X0luQmJydXNPOEg5MnllSVc9czk2LWM_c3o9NTA_c3o9NTAiLCJleHAiOjE4MzI1MzQzNjJ9.ejDfFvsUcDuIm_3opGSGI0VDW_1ImNvD9zKEDImN9GA'
+    token: str = ''
     '''
     provide your own user token for accessing the hemibrain dataset\n
     visit https://neuprint.janelia.org to get your own Auth Token, you can find it in your account information
@@ -819,10 +819,6 @@ class FindNeuronConnection():
                 )
         sv.ConcatenateIMG2PDF(save_path)
 
-
-
-
-
 @dataclass
 class VisualizeSkeleton:
     '''3-D visualize skeleton with synapses and brain roi meshes'''
@@ -902,7 +898,11 @@ class VisualizeSkeleton:
     '''
 
     def __post_init__(self):
-        # fetching neuron skeletons
+        if self.synapse_mode not in ['scatter', 'sphere']:
+            raise ValueError('synapse_mode can only be "scatter" or "sphere"')
+        if self.legend_mode not in ['normal', 'merge']:
+            raise ValueError('legend_mode can only be "normal" or "merge"')
+        
         if self.synapse_mode == 'scatter' and self.synapse_size == 0:
             self.synapse_size = 3
         elif self.synapse_mode == 'sphere' and self.synapse_size < 100:
@@ -911,6 +911,8 @@ class VisualizeSkeleton:
 
         if not self.mesh_roi:
             self.mesh_roi = ['LH(R)','AL(R)','EB']
+        
+        # fetching neuron skeletons
         self.neuron_dfs = []
         self.layer_criteria = []
         self.layer_names = []
@@ -1047,19 +1049,16 @@ class VisualizeSkeleton:
         mesh_units = []
         mesh_list = os.listdir(os.path.join('navis_roi_meshes_json','primary_rois'))
         for roi in mesh_list:
-            mesh_units.append(roi.split('.')[0])
-        print(mesh_units)
-        # for roi in mesh_list:
-        #     print(roi)
-        #     mesh_file = os.path.join('navis_roi_meshes_json','primary_rois',roi)
-        #     print(mesh_file)
-        #     if os.path.exists(mesh_file) and not os.path.basename(mesh_file).startswith('.'):
-        #         mesh = navis.Volume.from_json(mesh_file)
-        #         mesh_units.append(mesh)
-        #     else:
-        #         print('mesh file %s.json not found!'%(roi))
-        # roimesh = navis.Volume.combine(mesh_units)
-        # roimesh.to_json(os.path.join('navis_roi_meshes_json','merged.json'))
+            print(roi)
+            mesh_file = os.path.join('navis_roi_meshes_json','primary_rois',roi)
+            print(mesh_file)
+            if os.path.exists(mesh_file) and not os.path.basename(mesh_file).startswith('.'):
+                mesh = navis.Volume.from_json(mesh_file)
+                mesh_units.append(mesh)
+            else:
+                print('mesh file %s.json not found!'%(roi))
+        roimesh = navis.Volume.combine(mesh_units)
+        roimesh.to_json(os.path.join('navis_roi_meshes_json','merged.json'))
     
     def save_figure(self):
         # add sliders
