@@ -26,6 +26,7 @@ def findpath():
     # appoint the target neuron and source neuron of interest and input parameters
     from datetime import datetime
     import pandas as pd
+    token = '' # please provide your own neuprint token, which can be found at https://neuprint.janelia.org/account
     database = 'hemibrain:v1.2.1' # specify dataset version
     # directory = '/Users/apple/Desktop/Oscillator_to_DAN/Oscillator_to_PAM_subsets/' # absolute directory to save all results, format for MacOS.
     directory = R'C:\Users\krlen\Desktop'
@@ -171,7 +172,7 @@ def findpath():
     # Create a Client to visit neuPrint
     c = Client('neuprint.janelia.org',
                dataset = database, # select dataset v1.0.1 or v1.1
-               token   = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJlbWFpbCI6ImtybGVuZzEyMTg0QGdtYWlsLmNvbSIsImxldmVsIjoibm9hdXRoIiwiaW1hZ2UtdXJsIjoiaHR0cHM6Ly9saDYuZ29vZ2xldXNlcmNvbnRlbnQuY29tLy1VX3VwaU9BUXRPOC9BQUFBQUFBQUFBSS9BQUFBQUFBQUFBQS9BTVp1dWNuWEIxbkJHVjVBRFZEVlB2N0RyZVZoWnpZb0xBL3Bob3RvLmpwZz9zej01MD9zej01MCIsImV4cCI6MTc4MDIyMjU2Mn0.qFNak5jXGNuHmAhtt7ZAesANhmkxDz_kDiObEW5uErc')
+               token   = token)
     c.fetch_version()
 
     if timeFlag == 1: tt = t; t = time.time(); print('Logged in:', t-tt, 's')  # time checkpoint
