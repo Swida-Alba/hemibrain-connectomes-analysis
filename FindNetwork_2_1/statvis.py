@@ -17,13 +17,11 @@ import seaborn as sns
 from neuprint import *
 
 
-def LogInHemibrain(dataset='hemibrain:v1.2.1',token=''): # log in to hemibrain dataset
+def LogInHemibrain(token,dataset='hemibrain:v1.2.1'): # log in to hemibrain dataset
     '''
     Log in to hemibrain dataset;
     Please provide your own token, which can be obtained from https://neuprint.janelia.org/account
     '''
-    if token == '':
-        token = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJlbWFpbCI6ImtybGVuZzEyMTg0QGdtYWlsLmNvbSIsImxldmVsIjoibm9hdXRoIiwiaW1hZ2UtdXJsIjoiaHR0cHM6Ly9saDMuZ29vZ2xldXNlcmNvbnRlbnQuY29tL2EvQUFUWEFKeTdKZ1JCeUFZYkt6YzFSbTl3ejV4X0luQmJydXNPOEg5MnllSVc9czk2LWM_c3o9NTA_c3o9NTAiLCJleHAiOjE4MzI1MzQzNjJ9.ejDfFvsUcDuIm_3opGSGI0VDW_1ImNvD9zKEDImN9GA'
     client = Client(
         'neuprint.janelia.org',
         dataset = dataset,

@@ -3,7 +3,9 @@ import pandas as pd
 warnings.filterwarnings("ignore")
 from coana import FindNeuronConnection
 
+
 fc = FindNeuronConnection(
+    token='', # please provide your own neuprint token, which can be found at https://neuprint.janelia.org/account
     dataset = 'hemibrain:v1.2.1', 
     sourceNeurons = ['aMe12'], # pd.read_excel('sourceNeurons.xlsx', header=None).iloc[:,0].tolist()
     targetNeurons = ['ER5'], # pd.read_excel('targetNeurons.xlsx', header=None).iloc[:,0].tolist()

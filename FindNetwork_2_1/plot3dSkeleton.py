@@ -2,16 +2,21 @@ import statvis as sv
 import bokeh.palettes as bp
 from coana import VisualizeSkeleton
 
-
-server_client, dataset = sv.LogInHemibrain()
-layers = ['aMe12','SMP238','ExR1.*_R','ER5.*_R']
+# please provide your own neuprint token, which can be found at https://neuprint.janelia.org/account
+server_client, dataset = sv.LogInHemibrain(token='')
+layers = ['aMe12','SMP238','ExR1','ER5']
 
 vs = VisualizeSkeleton(
-    neuron_layers=layers,
-    min_synapse_num = 10,
-    synapse_size = 100, 
-    synapse_mode='sphere',
+    neuron_layers = layers,
+    custom_layer_names = [],
+    neuron_alpha=0.1,
+    saveas=None,
+    min_synapse_num = 1,
+    synapse_size = 3, 
+    synapse_alpha = 0.6,
+    synapse_mode = 'sphere',
     mesh_roi = ['LH(R)','AL(R)','EB'],
-    use_size_slider = False,
+    use_size_slider = True,
+    legend_mode = 'normal',
 )
 vs.plot_neurons()
