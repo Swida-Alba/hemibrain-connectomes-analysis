@@ -868,7 +868,11 @@ class VisualizeSkeleton:
     '''alpha of synapse, only works when synapse_mode='sphere' '''
 
     mesh_roi: list = field(default_factory=list)
-    '''meshes of brain ROIs to plot'''
+    '''
+    meshes of brain ROIs to plot\n
+    defaultly use ['LH(R)', 'AL(R)', 'EB'] to mark the position of the brain\n
+    Available meshes: ["a'L(L)", "a'L(R)", 'AB(L)', 'AB(R)', 'AL(L)_', 'AL(R)', 'alphaL(L)', 'alphaL(R)', 'AME(R)', 'AOTU(R)', 'ATL(L)', 'ATL(R)', 'AVLP(R)', "b'L(L)", "b'L(R)", 'bL(L)', 'bL(R)', 'BU(L)', 'BU(R)', 'CA(L)', 'CA(R)', 'CAN(R)', 'CRE(L)', 'CRE(R)', 'EB', 'EPA(L)', 'EPA(R)', 'FB', 'FLA(R)', 'gL(L)', 'gL(R)', 'GNG', 'GOR(L)', 'GOR(R)', 'IB', 'ICL(L)', 'ICL(R)', 'IPS(R)', 'LAL(L)', 'LAL(R)', 'LH(R)', 'LO(R)', 'LOP(R)', 'ME(R)', 'NO', 'PB', 'PED(R)', 'PLP(R)', 'PRW', 'PVLP(R)', 'SAD', 'SCL(L)', 'SCL(R)', 'SIP(L)', 'SIP(R)', 'SLP(R)', 'SMP(L)', 'SMP(R)', 'SPS(L)', 'SPS(R)', 'VES(L)', 'VES(R)', 'WED(R)']
+    '''
 
     mesh_color: tuple | list = (100, 100, 100, 0.2)
     '''color of brain meshes, single color or list of colors matching the length of mesh_roi'''
@@ -905,7 +909,8 @@ class VisualizeSkeleton:
             self.synapse_size = 100
             print('\033[33mSynapse size is too small (< 100) for sphere mode, automatically reset to 100\033[0m')
 
-        self.mesh_roi = ['LH(R)','AL(R)','EB']
+        if not self.mesh_roi:
+            self.mesh_roi = ['LH(R)','AL(R)','EB']
         self.neuron_dfs = []
         self.layer_criteria = []
         self.layer_names = []
@@ -1042,16 +1047,19 @@ class VisualizeSkeleton:
         mesh_units = []
         mesh_list = os.listdir(os.path.join('navis_roi_meshes_json','primary_rois'))
         for roi in mesh_list:
-            mesh_file = os.path.join('navis_roi_meshes_json','primary_rois',roi)
-            print(mesh_file)
-            if os.path.exists(mesh_file) and not os.path.basename(mesh_file).startswith('.'):
-                mesh = navis.Volume.from_json(mesh_file)
-                mesh_units.append(mesh)
-            else:
-                print('mesh file %s.json not found!'%(roi))
+            mesh_units.append(roi.split('.')[0])
         print(mesh_units)
-        roimesh = navis.Volume.combine(mesh_units)
-        roimesh.to_json(os.path.join('navis_roi_meshes_json','merged.json'))
+        # for roi in mesh_list:
+        #     print(roi)
+        #     mesh_file = os.path.join('navis_roi_meshes_json','primary_rois',roi)
+        #     print(mesh_file)
+        #     if os.path.exists(mesh_file) and not os.path.basename(mesh_file).startswith('.'):
+        #         mesh = navis.Volume.from_json(mesh_file)
+        #         mesh_units.append(mesh)
+        #     else:
+        #         print('mesh file %s.json not found!'%(roi))
+        # roimesh = navis.Volume.combine(mesh_units)
+        # roimesh.to_json(os.path.join('navis_roi_meshes_json','merged.json'))
     
     def save_figure(self):
         # add sliders
