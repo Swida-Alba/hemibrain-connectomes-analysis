@@ -830,22 +830,24 @@ class VisualizeSkeleton:
     neuron_layers: list = field(default_factory=list)
     '''layers of neurons to plot'''
 
+    custom_layer_names: list = field(default_factory=list)
+
     min_synapse_num: int = 10
     '''minimum number of synapses to fetch and plot'''
 
     saveas: str = None
     '''filename and path to save the plot'''
 
-    neuron_colors: tuple = bokeh.palettes.Paired10[0::2]
+    neuron_colors: tuple = bokeh.palettes.Paired10[1::2]
     '''colors of neuron layers to plot'''
 
-    neuron_alpha: float = 0.5
+    neuron_alpha: float = 0.3
     '''alpha of neuron, only works when the radius of neuron exists (show_skeleton_radius=True)'''
 
     synapse_colors: tuple = bokeh.palettes.Paired10[1::2]
     '''colors of synapse layers to plot'''
 
-    synapse_size: int = 3
+    synapse_size: int = 0
     '''
     size of synapse\n
     when synapse_mode='scatter', 1 to 10 is recommended\n
@@ -889,38 +891,72 @@ class VisualizeSkeleton:
     only works when synapse_mode='scatter'
     '''
 
+    legend_mode: str = 'normal'
+    '''
+    'normal': show legend for individual neurons\n
+    'merge': merge all neurons in the same layer and show legend for each layer\n
+    '''
+
     def __post_init__(self):
         # fetching neuron skeletons
+        if self.synapse_mode == 'scatter' and self.synapse_size == 0:
+            self.synapse_size = 3
+        elif self.synapse_mode == 'sphere' and self.synapse_size < 100:
+            self.synapse_size = 100
+            print('\033[33mSynapse size is too small (< 100) for sphere mode, automatically reset to 100\033[0m')
+
         self.mesh_roi = ['LH(R)','AL(R)','EB']
         self.neuron_dfs = []
         self.layer_criteria = []
-        layer_names = []
+        self.layer_names = []
         for i in range(len(self.neuron_layers)):
             print(f'\rfetching neuron info of layer {i}...', end='   ')
             neuron_criteria, auto_name = sv.getCriteriaAndName([self.neuron_layers[i]])
             neuron_df,_ = fetch_neurons(neuron_criteria)
             self.neuron_dfs.append(neuron_df)
             self.layer_criteria.append(neuron_criteria)
-            layer_names.append(auto_name)
+            self.layer_names.append(auto_name)
         print('Done')
         if self.saveas is None:
-            self.saveas = os.path.join('connection_data', '_'.join(layer_names)+'.html')
+            self.saveas = os.path.join('connection_data', '_'.join(self.layer_names)+'.html')
+        if self.custom_layer_names:
+            self.layer_names = self.custom_layer_names
         self.fig_3d = go.Figure()
     
     def plot_skeleton(self):
         for i in range(len(self.neuron_layers)):
             print(f'fetching and plotting skeletons of layer {i}...')
             neuron_vols = neu.fetch_skeletons(self.neuron_dfs[i],with_synapses=self.show_connectors)
-            navis.plot3d(
+            fig_layer = navis.plot3d(
                 neuron_vols,
                 backend='plotly',
                 color=self.neuron_colors[i],
                 alpha=self.neuron_alpha,
                 soma=self.show_soma,
-                fig=self.fig_3d,
+                # fig=self.fig_3d,
                 radius=self.show_skeleton_radius,
                 connectors=self.show_connectors,
             )
+            fig_traces = fig_layer.data
+
+            for j,trace in enumerate(fig_traces):
+                if self.legend_mode == 'merge':
+                    if j == 0:
+                        trace.showlegend = True
+                    else:
+                        trace.showlegend = False
+                    trace.name = self.layer_names[i]
+                    trace.hovertemplate = '<b>%{fullData.name}</b><extra></extra>'  # show full name in hover tooltip
+                    trace.legendgroup = self.layer_names[i]
+                    trace.hoverinfo = 'name'
+                    self.fig_3d.add_trace(trace)
+                elif self.legend_mode == 'normal':
+                    trace.hoverinfo = 'name'
+                    trace.hovertemplate = '<b>%{fullData.name}</b><extra></extra>'
+                    self.fig_3d.add_trace(trace)
+                else:
+                    raise ValueError(f'legend_mode {self.legend_mode} not supported')
+
             print('Done')
         return 0
     
@@ -941,21 +977,21 @@ class VisualizeSkeleton:
             Y = (conn_df['y_pre']+conn_df['y_post'])/2
             Z = (conn_df['z_pre']+conn_df['z_post'])/2
             if self.synapse_mode == 'scatter':
-                self.fig_3d.add_trace(
-                    go.Scatter3d(
-                        x = X,
-                        y = Y,
-                        z = Z,
-                        mode = 'markers',
-                        name = f'synapses {i} -> {i+1} ({len(conn_df)})',
-                        hoverinfo = 'all',
-                        marker = dict(
-                            size = self.synapse_size,
-                            color = self.synapse_colors[i],
-                            symbol = 'circle',
-                        ),
-                    )
+                sp = go.Scatter3d(
+                    x = X,
+                    y = Y,
+                    z = Z,
+                    mode = 'markers',
+                    name = f'synapses {i} -> {i+1} ({len(conn_df)})',
+                    hoverinfo = 'all',
+                    legendgroup = f'synapses {i} -> {i+1} ({len(conn_df)})',
+                    marker = dict(
+                        size = self.synapse_size,
+                        color = self.synapse_colors[i],
+                        symbol = 'circle',
+                    ),
                 )
+                self.fig_3d.add_trace(sp)
             elif self.synapse_mode == 'sphere':
                 for ind in range(len(X)):
                     x = X[ind]
@@ -983,23 +1019,46 @@ class VisualizeSkeleton:
                 print('mesh file %s.json not found!'%(roi))
         # roimesh = navis.Volume.combine(roiunits)
         # roimesh.color = options['mesh_color']
-        if type(self.mesh_color) == list:
-            for roi_i in range(len(roiunits)):
-                roiunits[roi_i].color = self.mesh_color[roi_i]
-        else:
-            for roi_i in range(len(roiunits)):
-                roiunits[roi_i].color = self.mesh_color
+        
         print('plotting mesh of ROIs...')
-        navis.plot3d(roiunits,backend='plotly',fig=self.fig_3d)
+        for roi_i in range(len(roiunits)):
+            if type(self.mesh_color) == list:
+                roiunits[roi_i].color = self.mesh_color[roi_i]
+            else:
+                roiunits[roi_i].color = self.mesh_color
+            fig_mesh = navis.plot3d(roiunits[roi_i],backend='plotly')
+            mesh_traces = fig_mesh.data
+            for trace in mesh_traces:
+                trace.showlegend = False
+                trace.legendgroup = self.mesh_roi[roi_i]
+                trace.name = self.mesh_roi[roi_i]
+                trace.hoverinfo = 'name'
+            self.fig_3d.add_traces(mesh_traces)
+        # navis.plot3d(roiunits,backend='plotly',fig=self.fig_3d)
         print('Done')
         return 0
+    
+    def merge_mesh(self):
+        mesh_units = []
+        mesh_list = os.listdir(os.path.join('navis_roi_meshes_json','primary_rois'))
+        for roi in mesh_list:
+            mesh_file = os.path.join('navis_roi_meshes_json','primary_rois',roi)
+            print(mesh_file)
+            if os.path.exists(mesh_file) and not os.path.basename(mesh_file).startswith('.'):
+                mesh = navis.Volume.from_json(mesh_file)
+                mesh_units.append(mesh)
+            else:
+                print('mesh file %s.json not found!'%(roi))
+        print(mesh_units)
+        roimesh = navis.Volume.combine(mesh_units)
+        roimesh.to_json(os.path.join('navis_roi_meshes_json','merged.json'))
     
     def save_figure(self):
         # add sliders
         if self.use_size_slider:
             sliders = [
                 dict(
-                    active=0,
+                    active=self.synapse_size,
                     currentvalue={"prefix": "Synapse Size: "},
                     pad={"t": 50},
                     steps=[
@@ -1008,7 +1067,7 @@ class VisualizeSkeleton:
                             method="update",
                             args=[{"marker": {"size": size}}]
                         )
-                        for size in list(range(1,11))
+                        for size in list(range(0,11))
                     ],
                 ),
             ]
@@ -1017,6 +1076,7 @@ class VisualizeSkeleton:
         
         # set layout
         self.fig_3d.update_layout(
+            colorway = self.synapse_colors,
             sliders=sliders,
             scene=dict(
                 dragmode='orbit',
@@ -1029,6 +1089,7 @@ class VisualizeSkeleton:
                 eye=dict(x=0, y=1.5, z=0),
             ),
         )
+    
         # save figure
         print('saving figure to',self.saveas,'...')
         self.fig_3d.write_html(self.saveas,auto_open=self.show_fig)
@@ -1039,6 +1100,7 @@ class VisualizeSkeleton:
         self.plot_synapses()
         self.plot_mesh()
         self.save_figure()
+        
     
 
 
