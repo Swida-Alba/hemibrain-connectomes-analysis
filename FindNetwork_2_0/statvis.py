@@ -12,11 +12,12 @@ import networkx as nx
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
+import plotly
 import seaborn as sns
 from neuprint import *
 
 
-def LogInHemibrain(dataset='hemibrain:v1.2.1',token=''): # log in to hemibrain dataset
+def LogInHemibrain(token,dataset='hemibrain:v1.2.1'): # log in to hemibrain dataset
     '''
     Log in to hemibrain dataset;
     Please provide your own token, which can be obtained from https://neuprint.janelia.org/account
@@ -24,7 +25,7 @@ def LogInHemibrain(dataset='hemibrain:v1.2.1',token=''): # log in to hemibrain d
     client = Client(
         'neuprint.janelia.org',
         dataset = dataset,
-        token = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJlbWFpbCI6ImtybGVuZzEyMTg0QGdtYWlsLmNvbSIsImxldmVsIjoibm9hdXRoIiwiaW1hZ2UtdXJsIjoiaHR0cHM6Ly9saDMuZ29vZ2xldXNlcmNvbnRlbnQuY29tL2EvQUFUWEFKeTdKZ1JCeUFZYkt6YzFSbTl3ejV4X0luQmJydXNPOEg5MnllSVc9czk2LWM_c3o9NTA_c3o9NTAiLCJleHAiOjE4MzI1MzQzNjJ9.ejDfFvsUcDuIm_3opGSGI0VDW_1ImNvD9zKEDImN9GA'
+        token = token,
     )
     print("Logged in \ndataset: " + dataset)
     return client, dataset
@@ -34,12 +35,14 @@ def getCriteriaAndName(requiredNeurons):
     if requiredNeurons == None:
         criteria = None
         fname = 'ALL'
+    elif type(requiredNeurons) != list:
+        raise ValueError('requiredNeurons must be a list or None')
     elif type(requiredNeurons[0]) == int:
         criteria = NC(bodyId=requiredNeurons)
         fname = str(requiredNeurons[0])
     elif requiredNeurons[0].find('.*') != -1:
-        criteria = NC(type=requiredNeurons,regex=True)
-        fname = requiredNeurons[0][:-2]
+        criteria = NC(instance=requiredNeurons)
+        fname = requiredNeurons[0].replace('.*','')
     else:
         criteria = NC(type=requiredNeurons)
         fname = requiredNeurons[0]
@@ -526,19 +529,19 @@ def ConcatenateIMG2PDF(folder_path,file_format=['png','jpg'],filename='PDF_sum',
         print('Found no pictures to concatenate.')
     
 def Vis3S(data_df,**kwargs): 
-    """ Visualize Soma, Synapses, Synapse ditributions
+    """ Visualize Soma, Skeletons, Synapses or synapse distributions
     Args:
         data_df (pandas.DataFrame): dataframe contains centroid, classification, axis lengths (Ellipse) or radius (Circle).
     """
     
     options = {
         "save_path" : '_3S',
-        "title"     : None,
+        "title"     : 'MyTitle',
         "classby"   : 'type',
         "plane"     : 'xz',
         "alpha"     : .3,
         "dpi"       : 300,
-        "toPlot"    : 'soma', # "soma" or "synapse_distribution" or "synapse"
+        "toPlot"    : 'soma', # "soma" or "synapse_distribution" or "synapse" or "skeleton"
         "xlim"      : (0,50000),
         "ylim"      : (50000,0), # reversed
         "showfig"   : False, # faster than True
@@ -556,8 +559,12 @@ def Vis3S(data_df,**kwargs):
         "save_format": '.png',
     }
     options.update(kwargs)
-    if options['snp_rois'] != None and options['mesh_roi'] == None: options['mesh_roi'] = options['snp_rois']
+    if options['snp_rois'] != None and options['mesh_roi'] == None: 
+        options['mesh_roi'] = options['snp_rois']
+    elif options['snp_rois'] == None and options['mesh_roi'] == None:
+        options['mesh_roi'] = ['LH(R)', 'AL(R)', 'EB']
     op = SimpleNamespace(**options)
+    print(op.mesh_roi)
     
     if op.show_mesh:
         roiunits = []
@@ -603,71 +610,78 @@ def Vis3S(data_df,**kwargs):
     colN = max(colN,2)
     print("subplot size: rowN = %d,colN = %d"%(rowN,colN))
     
+    fig, ax = plt.subplots(tight_layout=True,dpi=op.dpi,subplot_kw={'aspect': 'equal'})
     fig_sup, axes = plt.subplots(nrows=rowN,ncols=colN,sharex=True,sharey=True,dpi=op.dpi,subplot_kw={'aspect': 'equal'})
     np.vectorize(lambda axes:axes.axis('off'))(axes)
     fig_sup.suptitle(op.title+'_subplots')
     ellipses = []
+    skeletons = []
     for i,cla in enumerate(classes):
         df = summary_df[summary_df[op.classby] == cla]
-        ellipse_class = []
         ax_x = i % rowN
         ax_y = int(i / rowN)
         # print("subplot pos: row = %d,col = %d"%(ax_x,ax_y))
-        for ind in df.index:
-            if op.toPlot == 'soma':
-                somaLoc_str = df.at[ind,'somaLocation'][1:-1].split(', ')
-                name_str = 'xyz'
-                somaLoc = {name_str[i]: int(somaLoc_str[i]) for i in range(3)}
-                e = mp.Circle(xy = (somaLoc[op.plane[0]], somaLoc[op.plane[1]]),
-                        radius = df.at[ind,'somaRadius'],
-                        alpha = op.alpha,
-                        facecolor = op.facecolor[i],
-                )
-                ellipse_class.append(e)
-                ellipses.append(copy(e))
-            elif op.toPlot == 'synapse_distribution':
-                e = mp.Ellipse(xy = (df.at[ind,'centroid_'+op.plane[0]], df.at[ind,'centroid_'+op.plane[1]]),
-                            width = df.at[ind,'error_'+op.plane[0]] * 2,
-                            height = df.at[ind,'error_'+op.plane[1]] * 2,
-                            angle = 0,
+        navis.plot2d(roimesh,method='2d',ax=axes[ax_x,ax_y],view=(op.plane[0],op.plane[1]),color=op.mesh_color,alpha=op.mesh_alpha)
+        if op.toPlot != 'skeleton':
+            ellipse_class = []
+            for ind in df.index:
+                if op.toPlot == 'soma':
+                    somaLoc_str = df.at[ind,'somaLocation'][1:-1].split(', ')
+                    name_str = 'xyz'
+                    somaLoc = {name_str[i]: int(somaLoc_str[i]) for i in range(3)}
+                    e = mp.Circle(xy = (somaLoc[op.plane[0]], somaLoc[op.plane[1]]),
+                            radius = df.at[ind,'somaRadius'],
                             alpha = op.alpha,
                             facecolor = op.facecolor[i],
-                )
-                ellipse_class.append(e)
-                ellipses.append(copy(e))
-            elif op.toPlot == 'synapse':
-                bodyid = int(df.at[ind,'bodyId'])
-                snp_info = snp_file.parse(str(bodyid))
-                if op.site != None:
-                    snp_info = snp_info[snp_info.type == op.site]
-                if op.snp_rois != None:
-                    snp_info = snp_info[snp_info.roi.isin(op.snp_rois)]
-                if op.confidence != None:
-                    snp_info = snp_info[snp_info.confidence >= op.confidence]
-                for ind in snp_info.index:
-                    x = snp_info.at[ind,op.plane[0]]
-                    y = snp_info.at[ind,op.plane[1]]
-                    e = mp.Circle(xy=(x,y),
-                                    radius=op.synapseRadius,
-                                    alpha=op.alpha,
-                                    facecolor=op.facecolor[i])
+                    )
                     ellipse_class.append(e)
-                    ellipses.append(copy(e))     
-        for e in ellipse_class:
-            axes[ax_x,ax_y].add_artist(e)
-        navis.plot2d(roimesh,method='2d',ax=axes[ax_x,ax_y],view=(op.plane[0],op.plane[1]),color=op.mesh_color,alpha=op.mesh_alpha)
+                    ellipses.append(copy(e))
+                elif op.toPlot == 'synapse_distribution':
+                    e = mp.Ellipse(xy = (df.at[ind,'centroid_'+op.plane[0]], df.at[ind,'centroid_'+op.plane[1]]),
+                                width = df.at[ind,'error_'+op.plane[0]] * 2,
+                                height = df.at[ind,'error_'+op.plane[1]] * 2,
+                                angle = 0,
+                                alpha = op.alpha,
+                                facecolor = op.facecolor[i],
+                    )
+                    ellipse_class.append(e)
+                    ellipses.append(copy(e))
+                elif op.toPlot == 'synapse':
+                    bodyid = int(df.at[ind,'bodyId'])
+                    snp_info = snp_file.parse(str(bodyid))
+                    if op.site != None:
+                        snp_info = snp_info[snp_info.type == op.site]
+                    if op.snp_rois != None:
+                        snp_info = snp_info[snp_info.roi.isin(op.snp_rois)]
+                    if op.confidence != None:
+                        snp_info = snp_info[snp_info.confidence >= op.confidence]
+                    for ind in snp_info.index:
+                        x = snp_info.at[ind,op.plane[0]]
+                        y = snp_info.at[ind,op.plane[1]]
+                        e = mp.Circle(xy=(x,y),
+                                        radius=op.synapseRadius,
+                                        alpha=op.alpha,
+                                        facecolor=op.facecolor[i])
+                        ellipse_class.append(e)
+                        ellipses.append(copy(e))     
+            for e in ellipse_class:
+                axes[ax_x,ax_y].add_artist(e)
+        elif op.toPlot == 'skeleton':
+            skeletons_cla = neu.fetch_skeletons(df.bodyId.tolist())
+            skeletons += skeletons_cla
+            navis.plot2d(skeletons_cla,method='2d',ax=axes[ax_x,ax_y],view=(op.plane[0],op.plane[1]),color=op.facecolor[i],alpha=op.alpha)
+            navis.plot2d(skeletons_cla,method='2d',ax=ax,view=(op.plane[0],op.plane[1]),color=op.facecolor[i],alpha=op.alpha)
         axes[ax_x,ax_y].set_ylim(*op.ylim)
         axes[ax_x,ax_y].set_xlim(*op.xlim)
         axes[ax_x,ax_y].legend(handles=[legend_handles[i]],fancybox=True,framealpha=0)
         axes[ax_x,ax_y].set_alpha(0)
     fig_sup.savefig(op.save_path+'_sup'+op.save_format,transparent=True)
     if not op.showfig: plt.close(fig_sup)
-    
-    fig, ax = plt.subplots(tight_layout=True,dpi=op.dpi,subplot_kw={'aspect': 'equal'})
-    
+
     fig.suptitle(op.title)
-    for i,e in enumerate(ellipses):
-        ax.add_artist(e)
+    if op.toPlot != 'skeleton':
+        for i,e in enumerate(ellipses):
+            ax.add_artist(e)
     navis.plot2d(roimesh,method='2d',ax=ax,view=(op.plane[0],op.plane[1]),color=op.mesh_color,alpha=op.mesh_alpha) #########################################
     ax.set_ylim(*op.ylim)
     ax.set_xlim(*op.xlim)
@@ -802,3 +816,157 @@ def SankeyDirect(conn_matrix_type,**kwargs):
     if options['file_path'] is None:
         options['file_path'] = options['title'] + '.html'
     fig.write_html(options['file_path'], auto_open=options['showfig'])
+
+def PlotSkeletonSynapse(neuron_layers,min_synapse_num=10,**kwargs):
+    options = {
+        'saveas': None,
+        'neuron_colors': bokeh.palettes.Paired10[0::2],
+        'neuron_alpha': 0.5, # only works when show_skeleton_radius is True
+        'synapse_colors': bokeh.palettes.Paired10[1::2],
+        'synapse_size': 3,
+        'synapse_criteria': None,
+        'mesh_roi': ['LH(R)','AL(R)','EB'],
+        'mesh_color': (100, 100, 100, 0.1),
+        'show_soma': True,
+        'show_fig': True,
+        'show_skeleton_radius': True,
+        'show_connectors': False,
+        'use_size_sliders': True,
+    }
+    options.update(kwargs)
+    
+    fig_3d = go.Figure()
+    # fetching neuron skeletons
+    neuron_dfs = []
+    layer_criteria = []
+    layer_names = []
+    for i in range(len(neuron_layers)):
+        print('fetching skeletons of layer',i,'...')
+        neuron_criteria, auto_name = getCriteriaAndName([neuron_layers[i]])
+        neuron_df,_ = fetch_neurons(neuron_criteria)
+        neuron_dfs.append(neuron_df)
+        layer_criteria.append(neuron_criteria)
+        layer_names.append(auto_name)
+        neuron_vols = neu.fetch_skeletons(neuron_df,with_synapses=options['show_connectors'])
+        print('Done')
+        print('plotting skeletons of layer',i,'...')
+        navis.plot3d(
+            neuron_vols,
+            backend='plotly',
+            color=options['neuron_colors'][i],
+            alpha=options['neuron_alpha'],
+            soma=options['show_soma'],
+            fig=fig_3d,
+            radius=options['show_skeleton_radius'],
+            connectors=options['show_connectors'],
+        )
+        print('Done')
+    if options['saveas'] is None:
+        options['saveas'] = os.path.join('connection_data', '_'.join(layer_names)+'.html')
+    
+    # fetching synapses
+    for i in range(len(neuron_layers)-1):
+        source_criteria = layer_criteria[i]
+        target_criteria = layer_criteria[i+1]
+        print('fetching synapses of layer',i,'->',i+1,'...')
+        conn_df = fetch_synapse_connections(
+            source_criteria=source_criteria,
+            target_criteria=target_criteria,
+            min_total_weight=min_synapse_num,
+            synapse_criteria=options['synapse_criteria'],
+        )
+        print('Done')
+        print('plotting synapses of layer',i,'->',i+1,'...', end='')
+        fig_3d.add_trace(
+            go.Scatter3d(
+                x = (conn_df['x_pre']+conn_df['x_post'])/2,
+                y = (conn_df['y_pre']+conn_df['y_post'])/2,
+                z = (conn_df['z_pre']+conn_df['z_post'])/2,
+                mode = 'markers',
+                name = f'synapses {i} -> {i+1} ({len(conn_df)})',
+                marker = dict(
+                    size = options['synapse_size'],
+                    color = options['synapse_colors'][i],
+                    symbol = 'circle',
+                ),
+            )
+        )
+        print('Done')
+    
+    # plot meshes of ROIs
+    if options['mesh_roi'] != None:
+        roiunits = []
+        for roi in options['mesh_roi']:
+            mesh_file = os.path.join('navis_roi_meshes_json','primary_rois',roi+'.json')
+            if os.path.exists(mesh_file):
+                mesh = navis.Volume.from_json(mesh_file)
+                roiunits.append(mesh)
+            else:
+                print('mesh file %s.json not found!'%(roi))
+        # roimesh = navis.Volume.combine(roiunits)
+        # roimesh.color = options['mesh_color']
+        if type(options['mesh_color']) == list:
+            for roi_i in range(len(roiunits)):
+                roiunits[roi_i].color = options['mesh_color'][roi_i]
+        else:
+            for roi_i in range(len(roiunits)):
+                roiunits[roi_i].color = options['mesh_color']
+        print('plotting mesh of ROIs...')
+        navis.plot3d(roiunits,backend='plotly',fig=fig_3d)
+        print('Done')
+    
+    # add sliders
+    if options['use_size_sliders']:
+        sliders = [
+            dict(
+                active=0,
+                currentvalue={"prefix": "Synapse Size: "},
+                pad={"t": 50},
+                steps=[
+                    dict(
+                        label=str(size),
+                        method="update",
+                        args=[{"marker": {"size": size}}]
+                    )
+                    for size in list(range(1,11))
+                ],
+            ),
+        ]
+    else:
+        sliders = []
+    # set layout
+    fig_3d.update_layout(
+        sliders=sliders,
+        scene=dict(
+            dragmode='orbit',
+            xaxis={'visible':False}, 
+            yaxis={'visible':False},
+            zaxis={'visible':False},
+        ),
+        scene_camera=dict(
+            up=dict(x=0, y=0.1, z=-1),
+            eye=dict(x=0, y=1.5, z=0),
+        ),
+    )
+
+    # save figure
+    print('saving figure to',options['saveas'],'...')
+    fig_3d.write_html(options['saveas'],auto_open=options['show_fig'])
+    print('Done')
+        
+def build_sphere(x, y, z, r, color_scale=['green', 'green'], opacity=0.2):
+    u = np.linspace(0, 2 * np.pi, 12)
+    v = np.linspace(0, np.pi, 6)
+    x_s = x + r * np.outer(np.cos(u), np.sin(v))
+    y_s = y + r * np.outer(np.sin(u), np.sin(v))
+    z_s = z + r * np.outer(np.ones(np.size(u)), np.cos(v))
+    sphere = go.Surface(
+        x=x_s,
+        y=y_s,
+        z=z_s,
+        opacity=opacity,
+        colorscale=color_scale,
+        showscale=False,
+    )
+
+    return sphere

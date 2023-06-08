@@ -10,6 +10,7 @@ import networkx as nx
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
+import plotly
 import seaborn as sns
 from neuprint import *
 from neuprint.utils import connection_table_to_matrix
@@ -28,11 +29,11 @@ import statvis as sv
 class FindNeuronConnection():
     '''
     Through the neuprint-python API, visit the hemibrain database for connectome data analysis:\n
-    https://github.com/connectome-neuprint/neuprint-python\n
-    https://connectome-neuprint.github.io/neuprint-python/docs/\n
+    https://github.com/connectome-neuprint/neuprint-python \n
+    https://connectome-neuprint.github.io/neuprint-python/docs \n
     see also the following links for more information:\n
-    https://github.com/connectome-neuprint/neuPrintExplorer\n
-    https://neuprint.janelia.org\n
+    https://github.com/connectome-neuprint/neuPrintExplorer \n
+    https://neuprint.janelia.org \n
     '''
     
     script_path: str = os.path.dirname(os.path.abspath(__file__))
@@ -50,7 +51,7 @@ class FindNeuronConnection():
     dataset: str = 'hemibrain:v1.2.1'
     '''the hemibrain dataset to visit, see https://neuprint.janelia.org for more information'''
     
-    token: str = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJlbWFpbCI6ImtybGVuZzEyMTg0QGdtYWlsLmNvbSIsImxldmVsIjoibm9hdXRoIiwiaW1hZ2UtdXJsIjoiaHR0cHM6Ly9saDMuZ29vZ2xldXNlcmNvbnRlbnQuY29tL2EvQUFUWEFKeTdKZ1JCeUFZYkt6YzFSbTl3ejV4X0luQmJydXNPOEg5MnllSVc9czk2LWM_c3o9NTA_c3o9NTAiLCJleHAiOjE4MzI1MzQzNjJ9.ejDfFvsUcDuIm_3opGSGI0VDW_1ImNvD9zKEDImN9GA'
+    token: str = ''
     '''
     provide your own user token for accessing the hemibrain dataset\n
     visit https://neuprint.janelia.org to get your own Auth Token, you can find it in your account information
@@ -67,7 +68,7 @@ class FindNeuronConnection():
     To search for all neurons, use None as input.\n
     To search for all neurons having a given type, use empty list [] as input.\n
     e.g. ['MBON01', MBON02', 'MBON03'] # neuron types\n
-    e.g. ['MBON.*'] # all neurons whose type matches the regular expression\n
+    e.g. ['MBON.*'] or ['MBON.*_R'] or ['.*_.*PN.*'] ... # all neurons whose type matches the regular expression\n
     e.g. [12345, 23456, 34567] # neuron bodyIds\n
     e.g. None # all neurons in the dataset\n
     e.g. [ ] or list() # all neurons having a given type\n
@@ -817,4 +818,297 @@ class FindNeuronConnection():
                 dpi=600,
                 )
         sv.ConcatenateIMG2PDF(save_path)
+
+@dataclass
+class VisualizeSkeleton:
+    '''3-D visualize skeleton with synapses and brain roi meshes'''
+
+    neuron_layers: list = field(default_factory=list)
+    '''layers of neurons to plot'''
+
+    custom_layer_names: list = field(default_factory=list)
+
+    min_synapse_num: int = 10
+    '''minimum number of synapses to fetch and plot'''
+
+    saveas: str = None
+    '''filename and path to save the plot'''
+
+    neuron_colors: tuple = bokeh.palettes.Paired10[1::2]
+    '''colors of neuron layers to plot'''
+
+    neuron_alpha: float = 0.3
+    '''alpha of neuron, only works when the radius of neuron exists (show_skeleton_radius=True)'''
+
+    synapse_colors: tuple = bokeh.palettes.Paired10[1::2]
+    '''colors of synapse layers to plot'''
+
+    synapse_size: int = 0
+    '''
+    size of synapse\n
+    when synapse_mode='scatter', 1 to 10 is recommended\n
+    when synapse_mode='sphere', 100 is recommended\n
+    '''
+
+    synapse_criteria: SynapseCriteria = None
+    '''criteria to filter synapses'''
+
+    synapse_mode: str = 'scatter'
+    '''
+    mode to plot synapses, 'scatter' or 'sphere' \n
+    'scatter': plot synapses as scatter points, relative size to the view\n
+    'sphere': plot synapses as spheres, absolute size in the figure \n
+    '''
     
+    synapse_alpha: float = 0.6
+    '''alpha of synapse, only works when synapse_mode='sphere' '''
+
+    mesh_roi: list = field(default_factory=list)
+    '''
+    meshes of brain ROIs to plot\n
+    defaultly use ['LH(R)', 'AL(R)', 'EB'] to mark the position of the brain\n
+    Available meshes: ["a'L(L)", "a'L(R)", 'AB(L)', 'AB(R)', 'AL(L)_', 'AL(R)', 'alphaL(L)', 'alphaL(R)', 'AME(R)', 'AOTU(R)', 'ATL(L)', 'ATL(R)', 'AVLP(R)', "b'L(L)", "b'L(R)", 'bL(L)', 'bL(R)', 'BU(L)', 'BU(R)', 'CA(L)', 'CA(R)', 'CAN(R)', 'CRE(L)', 'CRE(R)', 'EB', 'EPA(L)', 'EPA(R)', 'FB', 'FLA(R)', 'gL(L)', 'gL(R)', 'GNG', 'GOR(L)', 'GOR(R)', 'IB', 'ICL(L)', 'ICL(R)', 'IPS(R)', 'LAL(L)', 'LAL(R)', 'LH(R)', 'LO(R)', 'LOP(R)', 'ME(R)', 'NO', 'PB', 'PED(R)', 'PLP(R)', 'PRW', 'PVLP(R)', 'SAD', 'SCL(L)', 'SCL(R)', 'SIP(L)', 'SIP(R)', 'SLP(R)', 'SMP(L)', 'SMP(R)', 'SPS(L)', 'SPS(R)', 'VES(L)', 'VES(R)', 'WED(R)']
+    '''
+
+    mesh_color: tuple | list = (100, 100, 100, 0.2)
+    '''color of brain meshes, single color or list of colors matching the length of mesh_roi'''
+
+    show_soma: bool = True
+    '''whether to show soma'''
+
+    show_fig: bool = True
+    '''whether to show the figure'''
+
+    show_skeleton_radius: bool = True
+    '''whether to plot the radius of skeleton or only skeleton lines'''
+
+    show_connectors: bool = False
+    '''whether to fetch and plot the connectors, all pre- and post-synaptic sites of the neurons, for single layer of neurons'''
+
+    use_size_slider: bool = True
+    '''
+    whether to use size slider to adjust the size of synapses\n
+    only works when synapse_mode='scatter'
+    '''
+
+    legend_mode: str = 'normal'
+    '''
+    'normal': show legend for individual neurons\n
+    'merge': merge all neurons in the same layer and show legend for each layer\n
+    '''
+
+    def __post_init__(self):
+        if self.synapse_mode not in ['scatter', 'sphere']:
+            raise ValueError('synapse_mode can only be "scatter" or "sphere"')
+        if self.legend_mode not in ['normal', 'merge']:
+            raise ValueError('legend_mode can only be "normal" or "merge"')
+        
+        if self.synapse_mode == 'scatter' and self.synapse_size == 0:
+            self.synapse_size = 3
+        elif self.synapse_mode == 'sphere' and self.synapse_size < 100:
+            self.synapse_size = 100
+            print('\033[33mSynapse size is too small (< 100) for sphere mode, automatically reset to 100\033[0m')
+
+        if not self.mesh_roi:
+            self.mesh_roi = ['LH(R)','AL(R)','EB']
+        
+        # fetching neuron skeletons
+        self.neuron_dfs = []
+        self.layer_criteria = []
+        self.layer_names = []
+        for i in range(len(self.neuron_layers)):
+            print(f'\rfetching neuron info of layer {i}...', end='   ')
+            neuron_criteria, auto_name = sv.getCriteriaAndName([self.neuron_layers[i]])
+            neuron_df,_ = fetch_neurons(neuron_criteria)
+            self.neuron_dfs.append(neuron_df)
+            self.layer_criteria.append(neuron_criteria)
+            self.layer_names.append(auto_name)
+        print('Done')
+        if self.saveas is None:
+            self.saveas = os.path.join('connection_data', '_'.join(self.layer_names)+'.html')
+        if self.custom_layer_names:
+            self.layer_names = self.custom_layer_names
+        self.fig_3d = go.Figure()
+    
+    def plot_skeleton(self):
+        for i in range(len(self.neuron_layers)):
+            print(f'fetching and plotting skeletons of layer {i}...')
+            neuron_vols = neu.fetch_skeletons(self.neuron_dfs[i],with_synapses=self.show_connectors)
+            fig_layer = navis.plot3d(
+                neuron_vols,
+                backend='plotly',
+                color=self.neuron_colors[i],
+                alpha=self.neuron_alpha,
+                soma=self.show_soma,
+                # fig=self.fig_3d,
+                radius=self.show_skeleton_radius,
+                connectors=self.show_connectors,
+            )
+            fig_traces = fig_layer.data
+
+            for j,trace in enumerate(fig_traces):
+                if self.legend_mode == 'merge':
+                    if j == 0:
+                        trace.showlegend = True
+                    else:
+                        trace.showlegend = False
+                    trace.name = self.layer_names[i]
+                    trace.hovertemplate = '<b>%{fullData.name}</b><extra></extra>'  # show full name in hover tooltip
+                    trace.legendgroup = self.layer_names[i]
+                    trace.hoverinfo = 'name'
+                    self.fig_3d.add_trace(trace)
+                elif self.legend_mode == 'normal':
+                    trace.hoverinfo = 'name'
+                    trace.hovertemplate = '<b>%{fullData.name}</b><extra></extra>'
+                    self.fig_3d.add_trace(trace)
+                else:
+                    raise ValueError(f'legend_mode {self.legend_mode} not supported')
+
+            print('Done')
+        return 0
+    
+    def plot_synapses(self):
+        for i in range(len(self.neuron_layers)-1):
+            source_criteria = self.layer_criteria[i]
+            target_criteria = self.layer_criteria[i+1]
+            print(f'\rfetching synapses of layer {i} -> layer {i+1}...', end='   ')
+            conn_df = fetch_synapse_connections(
+                source_criteria=source_criteria,
+                target_criteria=target_criteria,
+                min_total_weight=self.min_synapse_num,
+                synapse_criteria=self.synapse_criteria,
+            )
+            print('Done')
+            print(f'plotting synapses of layer {i} -> layer {i+1}...')
+            X = (conn_df['x_pre']+conn_df['x_post'])/2
+            Y = (conn_df['y_pre']+conn_df['y_post'])/2
+            Z = (conn_df['z_pre']+conn_df['z_post'])/2
+            if self.synapse_mode == 'scatter':
+                sp = go.Scatter3d(
+                    x = X,
+                    y = Y,
+                    z = Z,
+                    mode = 'markers',
+                    name = f'synapses {i} -> {i+1} ({len(conn_df)})',
+                    hoverinfo = 'all',
+                    legendgroup = f'synapses {i} -> {i+1} ({len(conn_df)})',
+                    marker = dict(
+                        size = self.synapse_size,
+                        color = self.synapse_colors[i],
+                        symbol = 'circle',
+                    ),
+                )
+                self.fig_3d.add_trace(sp)
+            elif self.synapse_mode == 'sphere':
+                for ind in range(len(X)):
+                    x = X[ind]
+                    y = Y[ind]
+                    z = Z[ind]
+                    sp = sv.build_sphere(x,y,z,r=self.synapse_size,color_scale=[self.synapse_colors[i]]*2,opacity=self.synapse_alpha)
+                    sp.name = f'synapses {i} -> {i+1} ({len(conn_df)})'
+                    sp.hoverinfo = 'all'
+                    sp.legendgroup = f'synapses {i} -> {i+1} ({len(conn_df)})'
+                    if ind == 0: sp.showlegend = True
+                    self.fig_3d.add_trace(sp)
+            print('Done')
+        return 0
+    
+    def plot_mesh(self):
+        if self.mesh_roi is None:
+            return
+        roiunits = []
+        for roi in self.mesh_roi:
+            mesh_file = os.path.join('navis_roi_meshes_json','primary_rois',roi+'.json')
+            if os.path.exists(mesh_file):
+                mesh = navis.Volume.from_json(mesh_file)
+                roiunits.append(mesh)
+            else:
+                print('mesh file %s.json not found!'%(roi))
+        # roimesh = navis.Volume.combine(roiunits)
+        # roimesh.color = options['mesh_color']
+        
+        print('plotting mesh of ROIs...')
+        for roi_i in range(len(roiunits)):
+            if type(self.mesh_color) == list:
+                roiunits[roi_i].color = self.mesh_color[roi_i]
+            else:
+                roiunits[roi_i].color = self.mesh_color
+            fig_mesh = navis.plot3d(roiunits[roi_i],backend='plotly')
+            mesh_traces = fig_mesh.data
+            for trace in mesh_traces:
+                trace.showlegend = False
+                trace.legendgroup = self.mesh_roi[roi_i]
+                trace.name = self.mesh_roi[roi_i]
+                trace.hoverinfo = 'name'
+            self.fig_3d.add_traces(mesh_traces)
+        # navis.plot3d(roiunits,backend='plotly',fig=self.fig_3d)
+        print('Done')
+        return 0
+    
+    def merge_mesh(self):
+        mesh_units = []
+        mesh_list = os.listdir(os.path.join('navis_roi_meshes_json','primary_rois'))
+        for roi in mesh_list:
+            print(roi)
+            mesh_file = os.path.join('navis_roi_meshes_json','primary_rois',roi)
+            print(mesh_file)
+            if os.path.exists(mesh_file) and not os.path.basename(mesh_file).startswith('.'):
+                mesh = navis.Volume.from_json(mesh_file)
+                mesh_units.append(mesh)
+            else:
+                print('mesh file %s.json not found!'%(roi))
+        roimesh = navis.Volume.combine(mesh_units)
+        roimesh.to_json(os.path.join('navis_roi_meshes_json','merged.json'))
+    
+    def save_figure(self):
+        # add sliders
+        if self.use_size_slider:
+            sliders = [
+                dict(
+                    active=self.synapse_size,
+                    currentvalue={"prefix": "Synapse Size: "},
+                    pad={"t": 50},
+                    steps=[
+                        dict(
+                            label=str(size),
+                            method="update",
+                            args=[{"marker": {"size": size}}]
+                        )
+                        for size in list(range(0,11))
+                    ],
+                ),
+            ]
+        else:
+            sliders = []
+        
+        # set layout
+        self.fig_3d.update_layout(
+            colorway = self.synapse_colors,
+            sliders=sliders,
+            scene=dict(
+                dragmode='orbit',
+                xaxis={'visible':False}, 
+                yaxis={'visible':False},
+                zaxis={'visible':False},
+            ),
+            scene_camera=dict(
+                up=dict(x=0, y=0.1, z=-1),
+                eye=dict(x=0, y=1.5, z=0),
+            ),
+        )
+    
+        # save figure
+        print('saving figure to',self.saveas,'...')
+        self.fig_3d.write_html(self.saveas,auto_open=self.show_fig)
+        print('Done')
+    
+    def plot_neurons(self):
+        self.plot_skeleton()
+        self.plot_synapses()
+        self.plot_mesh()
+        self.save_figure()
+        
+    
+
+
+
