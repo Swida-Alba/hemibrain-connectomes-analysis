@@ -5,7 +5,7 @@ from coana import VisualizeSkeleton
 # please provide your own neuprint token, which can be found at https://neuprint.janelia.org/account
 server_client, dataset = sv.LogInHemibrain(token='')
 vs = VisualizeSkeleton(
-    neuron_layers = ['ORN_VC5', 'VP2+VC5_l2PN', 'SAD087', 'DNp26'], # or in the format: 'ORN_VC5 -> VP2+VC5_l2PN -> SAD087 -> DNp26'
+    neuron_layers = ['M_l2PN3t18','PLP209','DNp26'], # or in the format: 'M_l2PN3t18 -> PLP209 -> DNp26'
     custom_layer_names = [],
     neuron_alpha = 0.2,
     saveas = None,

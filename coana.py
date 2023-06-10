@@ -1032,6 +1032,9 @@ class VisualizeSkeleton:
         if self.custom_layer_names:
             self.layer_names = self.custom_layer_names
         self.fig_3d = go.Figure()
+        
+        if not os.path.exists(os.path.join(self.script_path, 'connection_data')):
+            os.makedirs(os.path.join(self.script_path, 'connection_data'))
     
     def get_neuron_dfs(self):
         self.neuron_dfs = []
