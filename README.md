@@ -18,7 +18,7 @@ I. Download python 3.11.3 in [Python Downloads](https://www.python.org/downloads
 
 ![Install Python](assets/python_install.jpg)
 
-II. Download Visual Studio Code (vscode) in [Visual Studio Code](https://code.visualstudio.com/) and install it. Click the "Extensions" button at the left bar to search for "Python" and install it.
+II. Download Visual Studio Code (vscode) in [Visual Studio Code](https://code.visualstudio.com/) and install it. Click the "Extensions" button at the left bar to search for "Python" and "VSC-Essentials" and install them, respectively. Then, It's highly recommended to press 'Ctrl + ,' (or click the "manage" button in the bottom left corner and click 'Settings') to open the 'Settings' and search for "Auto Save" and select "OnFocusChange" to automatically save the codes, and search for "Execute In File Dir" and check the box to automatically run the codes in the current file directory.
 
 ![Add Extensions](assets/add_extensions.jpg)
 

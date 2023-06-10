@@ -22,5 +22,5 @@ fc = FindNeuronConnection(
 )
 
 fc.InitializeNeuronInfo()
-# fc.FindDirectConnections()
+fc.FindDirectConnections(full_data=False)
 fc.FindPath()
