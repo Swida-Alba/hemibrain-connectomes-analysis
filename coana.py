@@ -874,7 +874,70 @@ class VisualizeSkeleton:
     '''
     meshes of brain ROIs to plot\n
     defaultly use ['LH(R)', 'AL(R)', 'EB'] to mark the position of the brain\n
-    Available meshes: ["a'L(L)", "a'L(R)", 'AB(L)', 'AB(R)', 'AL(L)_', 'AL(R)', 'alphaL(L)', 'alphaL(R)', 'AME(R)', 'AOTU(R)', 'ATL(L)', 'ATL(R)', 'AVLP(R)', "b'L(L)", "b'L(R)", 'bL(L)', 'bL(R)', 'BU(L)', 'BU(R)', 'CA(L)', 'CA(R)', 'CAN(R)', 'CRE(L)', 'CRE(R)', 'EB', 'EPA(L)', 'EPA(R)', 'FB', 'FLA(R)', 'gL(L)', 'gL(R)', 'GNG', 'GOR(L)', 'GOR(R)', 'IB', 'ICL(L)', 'ICL(R)', 'IPS(R)', 'LAL(L)', 'LAL(R)', 'LH(R)', 'LO(R)', 'LOP(R)', 'ME(R)', 'NO', 'PB', 'PED(R)', 'PLP(R)', 'PRW', 'PVLP(R)', 'SAD', 'SCL(L)', 'SCL(R)', 'SIP(L)', 'SIP(R)', 'SLP(R)', 'SMP(L)', 'SMP(R)', 'SPS(L)', 'SPS(R)', 'VES(L)', 'VES(R)', 'WED(R)']
+    Available meshes: \n
+    a'L(L) \n
+    a'L(R) \n   
+    AB(L) \n    
+    AB(R) \n    
+    AL(L)_ \n   
+    AL(R) \n    
+    alphaL(L) \n
+    alphaL(R) \n
+    AME(R) \n   
+    AOTU(R) \n  
+    ATL(L) \n   
+    ATL(R) \n   
+    AVLP(R) \n  
+    b'L(L) \n   
+    b'L(R) \n   
+    bL(L) \n    
+    bL(R) \n    
+    BU(L) \n    
+    BU(R) \n    
+    CA(L) \n    
+    CA(R) \n    
+    CAN(R) \n   
+    CRE(L) \n   
+    CRE(R) \n   
+    EB \n       
+    EPA(L) \n   
+    EPA(R) \n
+    FB \n
+    FLA(R) \n
+    gL(L) \n
+    gL(R) \n
+    GNG \n
+    GOR(L) \n
+    GOR(R) \n
+    IB \n
+    ICL(L) \n
+    ICL(R) \n
+    IPS(R) \n
+    LAL(L) \n
+    LAL(R) \n
+    LH(R) \n
+    LO(R) \n
+    LOP(R) \n
+    ME(R) \n
+    NO \n
+    PB \n
+    PED(R) \n
+    PLP(R) \n
+    PRW \n
+    PVLP(R) \n
+    SAD \n
+    SCL(L) \n
+    SCL(R) \n
+    SIP(L) \n
+    SIP(R) \n
+    SLP(R) \n
+    SMP(L) \n
+    SMP(R) \n
+    SPS(L) \n
+    SPS(R) \n
+    VES(L) \n
+    VES(R) \n
+    WED(R) \n
     '''
 
     mesh_color: tuple | list = (100, 100, 100, 0.2)
@@ -1069,7 +1132,7 @@ class VisualizeSkeleton:
             return
         roiunits = []
         for roi in self.mesh_roi:
-            mesh_file = os.path.join('navis_roi_meshes_json','primary_rois',roi+'.json')
+            mesh_file = os.path.join(self.script_path, 'navis_roi_meshes_json','primary_rois',roi+'.json')
             if os.path.exists(mesh_file):
                 mesh = navis.Volume.from_json(mesh_file)
                 roiunits.append(mesh)
@@ -1154,6 +1217,7 @@ class VisualizeSkeleton:
         print('Done')
     
     def plot_neurons(self):
+        self.get_neuron_dfs()
         self.plot_skeleton()
         self.plot_synapses()
         self.plot_mesh()
