@@ -3,7 +3,11 @@ import pandas as pd
 warnings.filterwarnings("ignore")
 from coana import FindNeuronConnection
 
-fc = FindNeuronConnection(dataset = 'hemibrain:v1.2.1', showfig = False,)
+fc = FindNeuronConnection(
+    token='', # your token
+    dataset = 'hemibrain:v1.2.1', 
+    showfig = False,
+)
 
 required_neurons = ['MBON.*']
 

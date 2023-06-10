@@ -175,8 +175,7 @@ class FindNeuronConnection():
             self.target_fname = target_fname_auto
         
         self.save_folder = os.path.join(self.data_folder, self.source_fname + '_to_' + self.target_fname)
-        if not os.path.exists(self.data_folder): os.mkdir(self.data_folder)
-        if not os.path.exists(self.save_folder): os.mkdir(self.save_folder)
+        if not os.path.exists(self.save_folder): os.makedirs(self.save_folder)
         print(f'data will be saved in: {self.save_folder}\n')
         
         self.parameter_dict = {
@@ -222,7 +221,7 @@ class FindNeuronConnection():
         full_data: whether to save the full connection table, if False, only visualize in heatmap, if True, run clustering and ...
         '''
         self.direct_folder = os.path.join(self.save_folder, 'direct')
-        if not os.path.exists(self.direct_folder): os.mkdir(self.direct_folder)
+        if not os.path.exists(self.direct_folder): os.makedirs(self.direct_folder)
         # fetch connection table
         self.conn_df: pd.DataFrame = fetch_simple_connections(upstream_criteria=self.source_criteria, downstream_criteria=self.target_criteria, min_weight=self.min_synapse_num)
         if self.conn_df.empty:
@@ -322,7 +321,7 @@ class FindNeuronConnection():
         # Visualize connection distribution
         print('plotting connection distribution...')
         save_path = os.path.join(self.direct_folder,'connection distribution')
-        if not os.path.exists(save_path): os.mkdir(save_path)
+        if not os.path.exists(save_path): os.makedirs(save_path)
         sv.VisConnDist(self.conn_matrix_type,save_path,suffix='type',showfig=self.showfig)
         sv.VisConnDist(self.conn_matrix_bodyId,save_path,suffix='bodyId',showfig=self.showfig)
         print('Done')
@@ -330,7 +329,7 @@ class FindNeuronConnection():
         ## clustering
         save_path = os.path.join(self.direct_folder,'clustering')
         save_format = '.svg'
-        if not os.path.exists(save_path): os.mkdir(save_path)
+        if not os.path.exists(save_path): os.makedirs(save_path)
         # clustering by type
         print('clustering by type...')
         _,matt_n = sv.ClusterMap(self.conn_matrix_type,cmap='Blues',filename=os.path.join(save_path,'cluster_type_snp'+str(self.min_synapse_num)+save_format),showfig=self.showfig)
@@ -358,7 +357,7 @@ class FindNeuronConnection():
         ## 2-D sorting by maximums
         print('2-D sorting by maximums...')
         save_path = os.path.join(self.direct_folder,'Expansion or Convergence')
-        if not os.path.exists(save_path): os.mkdir(save_path)
+        if not os.path.exists(save_path): os.makedirs(save_path)
         
         sourceMR_ranges = [[0.7,1],[0,0.7]]
         sourceN_ranges = [[1,1],[2,np.Inf]]
@@ -386,7 +385,7 @@ class FindNeuronConnection():
     def FindPath(self, find_bodyId_path=True):
         '''Find path between source and target neurons, adapted from FindInterClusterConnection.ipynb'''
         self.path_folder = os.path.join(self.save_folder,'paths')
-        if not os.path.exists(self.path_folder): os.mkdir(self.path_folder)
+        if not os.path.exists(self.path_folder): os.makedirs(self.path_folder)
         targetNum = len(self.target_df)
         self.target_df.insert(loc=0,column='Checked',value=False)
         source_ID = self.source_df['bodyId'].unique() # convert to np.ndarray
@@ -619,7 +618,7 @@ class FindNeuronConnection():
         neuron_df: pd.DataFrame = neuron_df
         neuron_df.sort_values(by='type',inplace=True) # The order of neuron_df will be the order in the distribution matrix.
         rpath = os.path.join(self.data_folder, '_'.join(['roi_distribution',folder_name,site]))
-        if not os.path.exists(rpath): os.mkdir(rpath)
+        if not os.path.exists(rpath): os.makedirs(rpath)
         
         roi_list = roi_count_df.roi.unique().tolist()
         roi_list.sort()
@@ -717,7 +716,7 @@ class FindNeuronConnection():
             folder_name = auto_name
             para_dict.update({'name': folder_name})
         rpath = os.path.join(self.data_folder, '_'.join(['synapse_distribution',folder_name,site]))
-        if not os.path.exists(rpath): os.mkdir(rpath)
+        if not os.path.exists(rpath): os.makedirs(rpath)
         
         neuron_info_path = os.path.join(rpath,'neuron_info_'+folder_name+'.xlsx')
         if not os.path.isfile(neuron_info_path):
@@ -750,7 +749,7 @@ class FindNeuronConnection():
         site_info = str(para_dict['site'])
         save_path = os.path.join(rpath,site_info)
         print("current path to save data: ", save_path)
-        if not os.path.exists(save_path): os.mkdir(save_path)
+        if not os.path.exists(save_path): os.makedirs(save_path)
         for roi in para_dict['snp_rois']:
             print()
             summary_path = os.path.join(rpath,'_'.join(['summary',folder_name,roi,para_dict['site']]) + '.xlsx')
@@ -774,7 +773,7 @@ class FindNeuronConnection():
         # plot soma locations
         save_path = os.path.join(rpath,'soma_location')
         print("current path to save data: ", save_path)
-        if not os.path.exists(save_path): os.mkdir(save_path)
+        if not os.path.exists(save_path): os.makedirs(save_path)
         pic_names = [folder_name+'_soma_'+suf for suf in categories]
         if para_dict['snp_rois'] != None:
             show_mesh_rois = self.default_mesh_rois + para_dict['snp_rois']
@@ -796,7 +795,7 @@ class FindNeuronConnection():
         site_info = str(para_dict['site'])
         save_path = os.path.join(rpath,site_info+'_synpases')
         print("current path to save data: ", save_path)
-        if not os.path.exists(save_path): os.mkdir(save_path)
+        if not os.path.exists(save_path): os.makedirs(save_path)
         pic_names = [folder_name+'_snp_'+site_info+'_'+suf for suf in categories]
         if para_dict['snp_rois'] != None:
             show_mesh_rois = self.default_mesh_rois + para_dict['snp_rois']
@@ -823,8 +822,16 @@ class FindNeuronConnection():
 class VisualizeSkeleton:
     '''3-D visualize skeleton with synapses and brain roi meshes'''
 
-    neuron_layers: list = field(default_factory=list)
-    '''layers of neurons to plot'''
+    script_path: str = os.path.dirname(os.path.abspath(__file__))
+
+    neuron_layers: str | list = ''
+    '''
+    layers of neurons to plot\n
+    list of neuron layers: e.g. ['L1', 'L2', 'L3']\n
+    str of neuron layers separated by '->': e.g. 'L1->L2->L3', not surpport bodyIds\n
+    when use list, each layer can be neuron bodyIds, types, instances in regular expressions, or a list of them\n
+    e.g. [['L1_0','L1_1'], ['L2_0','L2_1'], ['L3_0','L3_1']]\n
+    '''
 
     custom_layer_names: list = field(default_factory=list)
 
@@ -834,13 +841,13 @@ class VisualizeSkeleton:
     saveas: str = None
     '''filename and path to save the plot'''
 
-    neuron_colors: tuple = bokeh.palettes.Paired10[1::2]
+    neuron_colors: tuple = bokeh.palettes.Category10[10]
     '''colors of neuron layers to plot'''
 
     neuron_alpha: float = 0.3
     '''alpha of neuron, only works when the radius of neuron exists (show_skeleton_radius=True)'''
 
-    synapse_colors: tuple = bokeh.palettes.Paired10[1::2]
+    synapse_colors: tuple = bokeh.palettes.Category10[10]
     '''colors of synapse layers to plot'''
 
     synapse_size: int = 0
@@ -871,7 +878,11 @@ class VisualizeSkeleton:
     '''
 
     mesh_color: tuple | list = (100, 100, 100, 0.2)
-    '''color of brain meshes, single color or list of colors matching the length of mesh_roi'''
+    '''
+    color of brain meshes, single color or list of colors matching the length of mesh_roi
+    single color: tuple including an alpha channel: (R, G, B, alpha)
+    multiple colors: list of tuples, each tuple including an alpha channel: [(R1, G1, B1, alpha1), (R2, G2, B2, alpha2), ...]
+    '''
 
     show_soma: bool = True
     '''whether to show soma'''
@@ -879,8 +890,13 @@ class VisualizeSkeleton:
     show_fig: bool = True
     '''whether to show the figure'''
 
-    show_skeleton_radius: bool = True
-    '''whether to plot the radius of skeleton or only skeleton lines'''
+    skeleton_mode: str = 'tube'
+    '''
+    whether to plot the radius of skeleton or only skeleton lines\n
+    'tube': plot the radius of skeleton\n
+    'line': only plot skeleton lines\n
+    when 'line', the file size will be significantly smaller and the rendering will be faster
+    '''
 
     show_connectors: bool = False
     '''whether to fetch and plot the connectors, all pre- and post-synaptic sites of the neurons, for single layer of neurons'''
@@ -902,38 +918,71 @@ class VisualizeSkeleton:
             raise ValueError('synapse_mode can only be "scatter" or "sphere"')
         if self.legend_mode not in ['normal', 'merge']:
             raise ValueError('legend_mode can only be "normal" or "merge"')
+        if self.skeleton_mode not in ['line','tube']:
+            raise ValueError('skeleton_mode can only be "line" or "tube"')
+        
+        # convert neuron_layers str to list, if is str
+        if type(self.neuron_layers) is str:
+            self.neuron_layers = self.neuron_layers.replace(' ','').split('->')
         
         if self.synapse_mode == 'scatter' and self.synapse_size == 0:
             self.synapse_size = 3
         elif self.synapse_mode == 'sphere' and self.synapse_size < 100:
             self.synapse_size = 100
+            if self.use_size_slider:
+                self.use_size_slider = False
+                print('\033[33msize slider is not available for synapse_mode="sphere", automatically reset to False\033[0m')
             print('\033[33mSynapse size is too small (< 100) for sphere mode, automatically reset to 100\033[0m')
+        
 
         if not self.mesh_roi:
             self.mesh_roi = ['LH(R)','AL(R)','EB']
         
+        
+        if len(self.neuron_layers) < len(self.neuron_colors): 
+            self.neuron_colors = self.neuron_colors[:len(self.neuron_layers)]
+        if len(self.neuron_layers)-1 < len(self.synapse_colors):
+            self.synapse_colors = self.synapse_colors[:len(self.neuron_layers)-1]
+
+        if self.skeleton_mode == 'line':
+            self.show_skeleton_radius = False
+            if self.neuron_alpha < 1:
+                self.neuron_alpha = 1
+                print('\033[33mneuron_alpha is not available for skeleton_mode="line", automatically reset to 1\033[0m')
+        elif self.skeleton_mode == 'tube':
+            self.show_skeleton_radius = True
+        
         # fetching neuron skeletons
-        self.neuron_dfs = []
         self.layer_criteria = []
         self.layer_names = []
         for i in range(len(self.neuron_layers)):
-            print(f'\rfetching neuron info of layer {i}...', end='   ')
             neuron_criteria, auto_name = sv.getCriteriaAndName([self.neuron_layers[i]])
-            neuron_df,_ = fetch_neurons(neuron_criteria)
-            self.neuron_dfs.append(neuron_df)
             self.layer_criteria.append(neuron_criteria)
             self.layer_names.append(auto_name)
-        print('Done')
         if self.saveas is None:
-            self.saveas = os.path.join('connection_data', '_'.join(self.layer_names)+'.html')
+            self.saveas = os.path.join(self.script_path, 'connection_data', '_'.join(self.layer_names))
+        elif not os.path.isabs(self.saveas):
+            self.saveas = os.path.join(self.script_path, 'connection_data', self.saveas)
+        if not self.saveas.endswith('.html'):
+            self.saveas += '.html'
+        
         if self.custom_layer_names:
             self.layer_names = self.custom_layer_names
         self.fig_3d = go.Figure()
     
+    def get_neuron_dfs(self):
+        self.neuron_dfs = []
+        for i in range(len(self.neuron_layers)):
+            print(f'\rfetching neuron info of layer {i}...', end='   ')
+            neuron_df,_ = fetch_neurons(self.layer_criteria[i])
+            self.neuron_dfs.append(neuron_df)
+        print('Done')
+    
     def plot_skeleton(self):
         for i in range(len(self.neuron_layers)):
-            print(f'fetching and plotting skeletons of layer {i}...')
+            print(f'fetching skeletons of layer {i}...')
             neuron_vols = neu.fetch_skeletons(self.neuron_dfs[i],with_synapses=self.show_connectors)
+            print(f'plotting skeletons of layer {i}...')
             fig_layer = navis.plot3d(
                 neuron_vols,
                 backend='plotly',
@@ -990,7 +1039,8 @@ class VisualizeSkeleton:
                     z = Z,
                     mode = 'markers',
                     name = f'synapses {i} -> {i+1} ({len(conn_df)})',
-                    hoverinfo = 'all',
+                    hoverinfo = 'name',
+                    hovertemplate = 'x: %{x}<br>y: %{y}<br>z: %{z}<br>name: %{fullData.name}<extra></extra>',
                     legendgroup = f'synapses {i} -> {i+1} ({len(conn_df)})',
                     marker = dict(
                         size = self.synapse_size,
@@ -1006,8 +1056,9 @@ class VisualizeSkeleton:
                     z = Z[ind]
                     sp = sv.build_sphere(x,y,z,r=self.synapse_size,color_scale=[self.synapse_colors[i]]*2,opacity=self.synapse_alpha)
                     sp.name = f'synapses {i} -> {i+1} ({len(conn_df)})'
-                    sp.hoverinfo = 'all'
+                    sp.hoverinfo = 'name'
                     sp.legendgroup = f'synapses {i} -> {i+1} ({len(conn_df)})'
+                    sp.hovertemplate = '<b>%{fullData.name}</b><extra></extra>'
                     if ind == 0: sp.showlegend = True
                     self.fig_3d.add_trace(sp)
             print('Done')
