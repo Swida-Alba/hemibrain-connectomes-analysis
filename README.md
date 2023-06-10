@@ -44,3 +44,9 @@ VI. You can find the introduction of the functions and their arguments in the co
 ![Function Introduction](assets/function_introduction.jpg)
 
 Now you can run the codes and get the results.
+
+<iframe src="aMe12_SMP238_ExR1.html" width="100%" height="500px"></iframe>
+
+<object data="aMe12_SMP238_ExR1.html" width="100%" height="500px">
+    <embed src="aMe12_SMP238_ExR1.html" width="100%" height="500px" />
+</object>
