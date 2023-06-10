@@ -24,11 +24,11 @@ II. Download Visual Studio Code (vscode) in [Visual Studio Code](https://code.vi
 
 ![Install Extensions](assets/add_extensions1.jpg)
 
-III. Use vscode to open setup.py, then select the python3.11.3 at the bottom right corner. Click run at the top right corner (red circle in the picture below) to install the requirements.
+III. Use vscode to open setup.py, then select the python3.11.3 at the bottom right corner. Click run at the top right corner (red circle in the picture below) to install the requirements. If any error raised, please disconnect the VPN proxy and try again.
 
 ![Run Setup](assets/run_setup.jpg)
 
-IV. Get your own token from [NeuPrint](https://neuprint.janelia.org/account).
+IV. Get your own token from [NeuPrint](https://neuprint.janelia.org/account). You should log in with your Google account and found your token in the "Account" page by clicking the "LOGIN" button at the top right corner.
 
 V. Input the token in the downloaded codes, you can specify the token in statvis.LogInHemigrain() or coana.FindConnection() functions, which should be embraced by the quotation marks ('  ') as:
 
