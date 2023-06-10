@@ -10,7 +10,6 @@ Find direct or indirect connections between neuron clusters and visulize them.
 
 package requirements are in the setup.py (pandas should be 1.5.1)
 
-
 ## For users who have troubles with preparing the environments
 
 I. Download python 3.11.3 in [Python Downloads](https://www.python.org/downloads/release/python-3113/). Please scroll down and download the circled installer according to your operating system (MacOS or Windows) and install it. Remember to check the "Add Python 3.11 to PATH" at the bottom of the installer.
