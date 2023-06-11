@@ -3,14 +3,25 @@
 Use these python codes to visit the NeuPrint hemibrain connectomes datasets.
 
 Find direct or indirect connections between neuron clusters and visulize them.
+## Basic functions
 
-## Set up the python environments
+### FindDirect.py
 
-## For users who can prepare the python environments by themselves
+use this function to find direct connections between neuron clusters
+
+### FindPath.py
+
+use this function to find direct and indirect connection paths between the neuron clusters
+
+### plot3dSkeleton.py
+
+use this function to plot the 3D skeleton of the neuron clusters at different layers, you can also input a single layer to plot the skeleton of all the neurons in that layer.
+
+## Installation: For users who can prepare the python environments by themselves
 
 package requirements are in the setup.py (pandas should be 1.5.1)
 
-## For users who have troubles with preparing the environments
+## Installation: For users who have troubles with preparing the environments
 
 I. Download python 3.11.3 in [Python Downloads](https://www.python.org/downloads/release/python-3113/). Please scroll down and download the circled installer according to your operating system (MacOS or Windows) and install it. Remember to check the "Add Python 3.11 to PATH" at the bottom of the installer.
 
