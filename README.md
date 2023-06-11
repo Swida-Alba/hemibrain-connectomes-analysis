@@ -3,6 +3,7 @@
 Use these python codes to visit the NeuPrint hemibrain connectomes datasets.
 
 Find direct or indirect connections between neuron clusters and visulize them.
+
 ## Basic functions
 
 ### FindDirect.py
