@@ -1,4 +1,4 @@
-# FindNetwork 2.1 (Beta)
+# FindNetwork v2.1 (Beta)
 
 Use these python codes to visit the NeuPrint hemibrain connectomes datasets.
 
