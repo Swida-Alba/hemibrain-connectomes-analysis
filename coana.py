@@ -162,17 +162,26 @@ class FindNeuronConnection():
     
     def InitializeNeuronInfo(self):
         ''' initialize neuron info '''
-        self.source_criteria, source_fname_auto = sv.getCriteriaAndName(self.sourceNeurons)
-        self.target_criteria, target_fname_auto = sv.getCriteriaAndName(self.targetNeurons)
+        print('Fetching source and target neurons...')
+        self.source_df, _, source_fname_auto, self.source_criteria = sv.getNeurons(self.sourceNeurons)
+        self.target_df, _, target_fname_auto, self.target_criteria = sv.getNeurons(self.targetNeurons)
+
+        if len(self.target_df) > 16383: # 16383 is the maximum number of excel sheet rows
+            self.largeTargetSet = True
         
         if self.custom_source_name:
             self.source_fname = self.custom_source_name
+        else:
+            self.source_fname = source_fname_auto
+        
         if self.custom_target_name:
             self.target_fname = self.custom_target_name
-        if not self.source_fname:
-            self.source_fname = source_fname_auto
-        if not self.target_fname:
+        else:
             self.target_fname = target_fname_auto
+        
+        print('Processing:',self.source_fname,'to',self.target_fname)
+        print(f'Source neurons ({self.source_fname}) in processing: {len(self.source_df)}')
+        print(f'Target neurons ({self.target_fname}) in processing: {len(self.target_df)}')
         
         self.save_folder = os.path.join(self.data_folder, self.source_fname + '_to_' + self.target_fname)
         if not os.path.exists(self.save_folder): os.makedirs(self.save_folder)
@@ -190,6 +199,8 @@ class FindNeuronConnection():
             'dataset': self.dataset,
             'run date': self.run_date,
         }
+        
+        # write parameters to txt file
         self.parameter_df = pd.DataFrame.from_dict(self.parameter_dict, orient='index', columns=['value'])
         self.parameter_txt = os.path.join(self.save_folder,'parameters.txt')
         with open(self.parameter_txt, 'w') as f: 
@@ -198,16 +209,6 @@ class FindNeuronConnection():
                 keylen = len(key)
                 f.write(f'{key}:{" "*(30-keylen)}{value}\n')
             f.write('\n')
-        
-        print('Processing:',self.source_fname,'to',self.target_fname)
-        self.source_df,_ = fetch_neurons(self.source_criteria)
-        self.target_df,_ = fetch_neurons(self.target_criteria)
-        self.source_df: pd.DataFrame = self.source_df
-        self.target_df: pd.DataFrame = self.target_df
-        if len(self.target_df) > 16383:
-            self.largeTargetSet = True
-        print(f'Source neurons ({self.source_fname}) in processing: {len(self.source_df)}')
-        print(f'Target neurons ({self.target_fname}) in processing: {len(self.target_df)}')
     
     def PrintROIHierarchy(self):
         '''print the ROI hierarchy, with primary ROIs marked with *'''
@@ -823,6 +824,13 @@ class VisualizeSkeleton:
     '''3-D visualize skeleton with synapses and brain roi meshes'''
 
     script_path: str = os.path.dirname(os.path.abspath(__file__))
+    '''path to the script folder'''
+
+    data_folder: str = os.path.join(script_path, 'connection_data')
+    '''folder to save all data'''
+    
+    save_folder: str = '' # initialized in __post_init__
+    '''folder to save the current data'''
 
     neuron_layers: str | list = ''
     '''
@@ -839,7 +847,7 @@ class VisualizeSkeleton:
     '''minimum number of synapses to fetch and plot'''
 
     saveas: str = None
-    '''filename and path to save the plot'''
+    '''filename to save the plot, if an absolute path is given, ignore data_folder'''
 
     neuron_colors: tuple = bokeh.palettes.Category10[10]
     '''colors of neuron layers to plot'''
@@ -997,10 +1005,8 @@ class VisualizeSkeleton:
                 print('\033[33msize slider is not available for synapse_mode="sphere", automatically reset to False\033[0m')
             print('\033[33mSynapse size is too small (< 100) for sphere mode, automatically reset to 100\033[0m')
         
-
         if not self.mesh_roi:
             self.mesh_roi = ['LH(R)','AL(R)','EB']
-        
         
         if len(self.neuron_layers) < len(self.neuron_colors): 
             self.neuron_colors = self.neuron_colors[:len(self.neuron_layers)]
@@ -1015,35 +1021,38 @@ class VisualizeSkeleton:
         elif self.skeleton_mode == 'tube':
             self.show_skeleton_radius = True
         
-        # fetching neuron skeletons
+        # fetch neurons and automatically generate layer names
+        self.neuron_dfs = []
+        self.roi_dfs = []
         self.layer_criteria = []
         self.layer_names = []
         for i in range(len(self.neuron_layers)):
-            neuron_criteria, auto_name = sv.getCriteriaAndName([self.neuron_layers[i]])
-            self.layer_criteria.append(neuron_criteria)
+            print(f'fetching neuron info of layer {i}...')
+            ndf, rdf, auto_name, cri = sv.getNeurons(self.neuron_layers[i])
+            self.neuron_dfs.append(ndf)
+            self.roi_dfs.append(rdf)
+            self.layer_criteria.append(cri)
             self.layer_names.append(auto_name)
+        print('Done')
+
         if self.saveas is None:
-            self.saveas = os.path.join(self.script_path, 'connection_data', '_'.join(self.layer_names))
-        elif not os.path.isabs(self.saveas):
-            self.saveas = os.path.join(self.script_path, 'connection_data', self.saveas)
-        if not self.saveas.endswith('.html'):
-            self.saveas += '.html'
-        
+            self.saveas = '_'.join(self.layer_names)
         if self.custom_layer_names:
             self.layer_names = self.custom_layer_names
+        self.save_folder = os.path.join(self.data_folder, 'plot3d_' + self.saveas.split('.')[0])
+        if not os.path.exists(self.save_folder): os.makedirs(self.save_folder)
         self.fig_3d = go.Figure()
         
-        if not os.path.exists(os.path.join(self.script_path, 'connection_data')):
-            os.makedirs(os.path.join(self.script_path, 'connection_data'))
-    
-    def get_neuron_dfs(self):
-        self.neuron_dfs = []
+        # save neuron dataframes to excel file
+        file_path = os.path.join(self.save_folder, self.saveas+'_neuron_info.xlsx')
         for i in range(len(self.neuron_layers)):
-            print(f'fetching neuron info of layer {i}...', end='')
-            neuron_df,_ = fetch_neurons(self.layer_criteria[i])
-            self.neuron_dfs.append(neuron_df)
-            print(f'{len(neuron_df)} neurons')
-        print('Done')
+            if i == 0:
+                mode = 'w'
+            else:
+                mode = 'a'
+            with pd.ExcelWriter(file_path,mode=mode) as writer:
+                self.neuron_dfs[i].to_excel(writer, sheet_name=f'neuron_df{i}')
+                self.roi_dfs[i].to_excel(writer, sheet_name=f'roi_count_df{i}')
     
     def plot_skeleton(self):
         for i in range(len(self.neuron_layers)):
@@ -1084,6 +1093,7 @@ class VisualizeSkeleton:
         return 0
     
     def plot_synapses(self):
+        file_path = os.path.join(self.save_folder, self.saveas+'_connection_info.xlsx')
         for i in range(len(self.neuron_layers)-1):
             source_criteria = self.layer_criteria[i]
             target_criteria = self.layer_criteria[i+1]
@@ -1094,7 +1104,14 @@ class VisualizeSkeleton:
                 min_total_weight=self.min_synapse_num,
                 synapse_criteria=self.synapse_criteria,
             )
+            if i == 0:
+                mode = 'w'
+            else:
+                mode = 'a'
+            with pd.ExcelWriter(file_path, mode=mode) as writer:
+                conn_df.to_excel(writer, sheet_name=f'conn_df{i}_{i+1}')
             print('Done')
+            
             print(f'plotting synapses of layer {i} -> layer {i+1}...')
             X = (conn_df['x_pre']+conn_df['x_post'])/2
             Y = (conn_df['y_pre']+conn_df['y_post'])/2
@@ -1214,14 +1231,15 @@ class VisualizeSkeleton:
                 eye=dict(x=0, y=1.5, z=0),
             ),
         )
-    
+
         # save figure
-        print('saving figure to',self.saveas,'...')
-        self.fig_3d.write_html(self.saveas,auto_open=self.show_fig)
+        fig_path = os.path.join(self.save_folder,self.saveas)
+        print('saving figure to',fig_path,'...')
+        self.fig_3d.write_html(fig_path+'.html',auto_open=self.show_fig)
+        # self.fig_3d.write_image(fig_path+'.png',scale=2)
         print('Done')
     
     def plot_neurons(self):
-        self.get_neuron_dfs()
         self.plot_skeleton()
         self.plot_synapses()
         self.plot_mesh()
