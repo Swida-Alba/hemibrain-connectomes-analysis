@@ -18,6 +18,10 @@ use this function to find direct and indirect connection paths between the neuro
 
 use this function to plot the 3D skeleton of the neuron clusters at different layers, you can also input a single layer to plot the skeleton of all the neurons in that layer.
 
+### Essential Notes
+
+When you are searching for olfactory Projection Neurons (PNs) or other neurons whose This text is <span style="color:yellow"> type or instance including "+"</span>, e.g. "VC3+_vPN", Please use bodyId in the functions. The type/instance including "+" cannot be recognized properly by neuprint-python API.
+
 ## Installation: For users who can prepare the python environments by themselves
 
 package requirements are in the setup.py (pandas should be 1.5.1)
