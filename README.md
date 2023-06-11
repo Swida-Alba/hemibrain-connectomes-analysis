@@ -20,7 +20,7 @@ use this function to plot the 3D skeleton of the neuron clusters at different la
 
 ### Essential Notes
 
-When you are searching for olfactory Projection Neurons (PNs) or other neurons whose This text is <span style="color:yellow"> type or instance including "+"</span>, e.g. "VC3+_vPN", Please use bodyId in the functions. The type/instance including "+" cannot be recognized properly by neuprint-python API.
+When you are searching for olfactory Projection Neurons (PNs) or other neurons whose type or instance including "+", e.g. "VC3+_vPN", Please use bodyId in the functions. The type/instance including "+" cannot be recognized properly by neuprint-python API.
 
 ## Installation: For users who can prepare the python environments by themselves
 
