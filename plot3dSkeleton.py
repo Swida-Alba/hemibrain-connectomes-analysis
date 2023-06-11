@@ -5,14 +5,14 @@ from coana import VisualizeSkeleton
 # please provide your own neuprint token, which can be found at https://neuprint.janelia.org/account
 server_client, dataset = sv.LogInHemibrain(token='')
 vs = VisualizeSkeleton(
-    neuron_layers = ['M_l2PN3t18','PLP209','DNp26'], # or in the format: 'M_l2PN3t18 -> PLP209 -> DNp26'
+    neuron_layers = ['VA1d_adPN','LHCENT3','MBON01'], # or in the format: 'VA1d_adPN -> LHCENT3 -> MBON01'
     custom_layer_names = [],
     neuron_alpha = 0.2,
     saveas = None,
     min_synapse_num = 1,
     synapse_size = 3, 
     synapse_alpha = 0.6,
-    mesh_roi = ['LH(R)','AL(R)','EB'],
+    mesh_roi = ['LH(R)','AL(R)','EB','gL(R)'],
     skeleton_mode = 'tube',
     synapse_mode = 'scatter',
     legend_mode = 'merge',
