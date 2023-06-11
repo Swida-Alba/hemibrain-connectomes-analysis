@@ -311,7 +311,7 @@ class FindNeuronConnection():
         print('Visualizing by Sankey diagram and network graph...')
         sankey_name = 'sankey_type_snp'+str(self.min_synapse_num)+'.html'
         sv.SankeyDirect(self.conn_matrix_type,file_path=os.path.join(self.direct_folder,sankey_name),showfig=self.showfig,node_color=self.node_color,link_color=self.link_color)
-        sv.NetworkVis(self.source_df,self.target_df,self.conn_type,save_path=self.direct_folder,by='type',showfig=self.showfig,save_format='.svg')
+        # sv.NetworkVis(self.source_df,self.target_df,self.conn_type,save_path=self.direct_folder,by='type',showfig=self.showfig,save_format='.svg')
         print('Done\n')
     
     
