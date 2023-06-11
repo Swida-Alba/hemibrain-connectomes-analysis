@@ -37,18 +37,70 @@ def getCriteriaAndName(requiredNeurons):
         fname = 'ALL'
     elif type(requiredNeurons) != list:
         raise ValueError('requiredNeurons must be a list or None')
-    elif type(requiredNeurons[0]) == int:
+    elif type(requiredNeurons[0]) == int: # bodyId
         criteria = NC(bodyId=requiredNeurons)
         fname = str(requiredNeurons[0])
-    elif requiredNeurons[0].find('.*') != -1:
+    elif requiredNeurons[0].find('.*') != -1: # instance
         criteria = NC(instance=requiredNeurons)
         fname = requiredNeurons[0].replace('.*','')
-    else:
+    else: # type
         criteria = NC(type=requiredNeurons)
         fname = requiredNeurons[0]
     if requiredNeurons != None and len(requiredNeurons) > 1:
         fname += '_etc'
     return criteria, fname
+
+def getNeurons(requiredNeurons, dataset='hemibrain:v1.2.1'):
+    from neuprint import NeuronCriteria as NC
+    if requiredNeurons == None:
+        criteria = None
+        auto_name = 'ALL'
+        neuron_df, roi_count_df = fetch_neurons(criteria)
+        return neuron_df, roi_count_df, auto_name, criteria
+    if type(requiredNeurons) != list:
+        requiredNeurons = [requiredNeurons]
+    
+    data_file = pd.ExcelFile(os.path.join(os.path.dirname(__file__),"datasets",f"{dataset.replace(':','_').replace('.','_')}_alltypes.xlsx"))
+    ndf_alltypes = data_file.parse(sheet_name='neuron_df',header=0,index_col=0)
+    rdf_alltypes = data_file.parse(sheet_name='roi_count_df',header=0,index_col=0)
+    bodyId_alltypes = ndf_alltypes['bodyId'].tolist()
+    if len(requiredNeurons) == 0:
+        neuron_df = ndf_alltypes
+        roi_count_df = rdf_alltypes
+        auto_name = 'alltypes'
+    else:
+        bodyId_list = []
+        for i, requiredNeuron in enumerate(requiredNeurons):
+            if i == 0:
+                auto_name = str(requiredNeuron).replace('.*','')
+            elif i == 1:
+                auto_name += '_etc'
+            if type(requiredNeuron) == int:
+                # bodyId
+                if requiredNeuron in bodyId_alltypes:
+                    bodyId_list.append(requiredNeuron)
+                else:
+                    print(f'\033[33mbodyId {requiredNeuron} not found, please check your input (skipped)\033[0m')
+            elif requiredNeuron.find('.*') != -1: 
+                # regex of instance
+                find_df = ndf_alltypes[ndf_alltypes['instance'].str.match(requiredNeuron)]
+                if len(find_df) > 0:
+                    bodyId_list += find_df['bodyId'].tolist()
+                    print(f'Found {len(find_df)} neurons of instance "{requiredNeuron}"')
+                else:
+                    print(f'\033[33minstance "{requiredNeuron}" not found, please check your input (skipped)\033[0m')
+            else:
+                # type
+                find_df = ndf_alltypes[ndf_alltypes['type']==requiredNeuron]
+                if len(find_df) > 0:
+                    bodyId_list += find_df['bodyId'].tolist()
+                    print(f'Found {len(find_df)} neurons of type "{requiredNeuron}"')
+                else:
+                    print(f'\033[33mtype "{requiredNeuron}" not found, please check your input (skipped)\033[0m')
+    neuron_df = ndf_alltypes[ndf_alltypes['bodyId'].isin(bodyId_list)]
+    roi_count_df = rdf_alltypes[rdf_alltypes['bodyId'].isin(bodyId_list)]
+    criteria = NC(bodyId=bodyId_list)
+    return neuron_df, roi_count_df, auto_name, criteria
 
 def removeSearchedNeurons(conn_df,searchedNeurons):
     '''remove neurons on searched layers'''
