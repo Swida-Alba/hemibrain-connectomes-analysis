@@ -1039,9 +1039,10 @@ class VisualizeSkeleton:
     def get_neuron_dfs(self):
         self.neuron_dfs = []
         for i in range(len(self.neuron_layers)):
-            print(f'\rfetching neuron info of layer {i}...', end='   ')
+            print(f'fetching neuron info of layer {i}...', end='')
             neuron_df,_ = fetch_neurons(self.layer_criteria[i])
             self.neuron_dfs.append(neuron_df)
+            print(f'{len(neuron_df)} neurons')
         print('Done')
     
     def plot_skeleton(self):
