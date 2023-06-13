@@ -1319,10 +1319,10 @@ class VisualizeSkeleton:
         video_dir = os.path.join(self.save_folder,f'{self.saveas}_video_forward.mp4')
         out = cv2.VideoWriter(
             video_dir, cv2.VideoWriter_fourcc(*'mp4v'), fps, frameSize=(width,height))
-        for i,imgfile in enumerate(imglist):
-            img = cv2.imread(os.path.join(pic_folder,imgfile))
+        for i,deg in enumerate(steps_to_write):
+            img = cv2.imread(os.path.join(pic_folder,f'deg_{deg}.jpeg'))
             out.write(img)
-            print(f'\rwriting forward video: {i+1}/{len(imglist)}...',end='  ')
+            print(f'\rwriting forward video: {i+1}/{len(steps_to_write)}...',end='  ')
         out.release()
         print('Done')
 
@@ -1330,10 +1330,10 @@ class VisualizeSkeleton:
         video_dir = os.path.join(self.save_folder,f'{self.saveas}_video_backward.mp4')
         out = cv2.VideoWriter(
             video_dir, cv2.VideoWriter_fourcc(*'mp4v'), fps, frameSize=(width,height))
-        for i,imgfile in enumerate(imglist[::-1]):
-            img = cv2.imread(os.path.join(pic_folder,imgfile))
+        for i,deg in enumerate(steps_to_write):
+            img = cv2.imread(os.path.join(pic_folder,f'deg_{deg}.jpeg'))
             out.write(img)
-            print(f'\rwriting backward video: {i+1}/{len(imglist)}...',end='  ')
+            print(f'\rwriting backward video: {i+1}/{len(steps_to_write)}...',end='  ')
         out.release()
         print('Done')
 
