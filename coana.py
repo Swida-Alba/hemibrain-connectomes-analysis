@@ -1,7 +1,11 @@
 # connectome analysis module -- coana
 import os
+import shutil
+import time
+import logging
 from dataclasses import dataclass, field
 
+import cv2
 import matplotlib.patches as mp
 import matplotlib.pyplot as plt
 import navis
@@ -9,8 +13,8 @@ import navis.interfaces.neuprint as neu
 import networkx as nx
 import numpy as np
 import pandas as pd
+import plotly.io
 import plotly.graph_objects as go
-import plotly
 import seaborn as sns
 from neuprint import *
 from neuprint.utils import connection_table_to_matrix
@@ -24,6 +28,9 @@ import bokeh.palettes
 import img2pdf
 
 import statvis as sv
+
+# Ignore the navis warning
+logging.getLogger('navis').setLevel(logging.WARNING)
 
 @dataclass
 class FindNeuronConnection():
@@ -1033,7 +1040,7 @@ class VisualizeSkeleton:
             self.roi_dfs.append(rdf)
             self.layer_criteria.append(cri)
             self.layer_names.append(auto_name)
-        print('Done')
+        print('Fetched neuron layers')
 
         if self.saveas is None:
             self.saveas = '_'.join(self.layer_names)
@@ -1058,7 +1065,7 @@ class VisualizeSkeleton:
         for i in range(len(self.neuron_layers)):
             print(f'fetching skeletons of layer {i}...')
             neuron_vols = neu.fetch_skeletons(self.neuron_dfs[i],with_synapses=self.show_connectors)
-            print(f'plotting skeletons of layer {i}...')
+            print('plotting...', end='')
             fig_layer = navis.plot3d(
                 neuron_vols,
                 backend='plotly',
@@ -1097,7 +1104,7 @@ class VisualizeSkeleton:
         for i in range(len(self.neuron_layers)-1):
             source_criteria = self.layer_criteria[i]
             target_criteria = self.layer_criteria[i+1]
-            print(f'\rfetching synapses of layer {i} -> layer {i+1}...', end='   ')
+            print(f'\rfetching synapses of layer {i} -> layer {i+1}...')
             conn_df = fetch_synapse_connections(
                 source_criteria=source_criteria,
                 target_criteria=target_criteria,
@@ -1110,9 +1117,8 @@ class VisualizeSkeleton:
                 mode = 'a'
             with pd.ExcelWriter(file_path, mode=mode) as writer:
                 conn_df.to_excel(writer, sheet_name=f'conn_df{i}_{i+1}')
-            print('Done')
             
-            print(f'plotting synapses of layer {i} -> layer {i+1}...')
+            print('plotting...', end='')
             X = (conn_df['x_pre']+conn_df['x_post'])/2
             Y = (conn_df['y_pre']+conn_df['y_post'])/2
             Z = (conn_df['z_pre']+conn_df['z_post'])/2
@@ -1162,7 +1168,7 @@ class VisualizeSkeleton:
         # roimesh = navis.Volume.combine(roiunits)
         # roimesh.color = options['mesh_color']
         
-        print('plotting mesh of ROIs...')
+        print('plotting mesh of ROIs...',end='')
         for roi_i in range(len(roiunits)):
             if type(self.mesh_color) == list:
                 roiunits[roi_i].color = self.mesh_color[roi_i]
@@ -1227,16 +1233,16 @@ class VisualizeSkeleton:
                 zaxis={'visible':False},
             ),
             scene_camera=dict(
-                up=dict(x=0, y=0.1, z=-1),
+                up=dict(x=0, y=0, z=-1),
                 eye=dict(x=0, y=1.5, z=0),
+                center=dict(x=0, y=0, z=0),
             ),
         )
 
         # save figure
-        fig_path = os.path.join(self.save_folder,self.saveas)
-        print('saving figure to',fig_path,'...')
-        self.fig_3d.write_html(fig_path+'.html',auto_open=self.show_fig)
-        # self.fig_3d.write_image(fig_path+'.png',scale=2)
+        self.fig_path = os.path.join(self.save_folder,self.saveas)
+        print(f'saving figure to \033[34m{self.fig_path}.html\033[0m...', end='')
+        self.fig_3d.write_html(self.fig_path+'.html',auto_open=self.show_fig)
         print('Done')
     
     def plot_neurons(self):
@@ -1245,7 +1251,96 @@ class VisualizeSkeleton:
         self.plot_mesh()
         self.save_figure()
         
-    
+    def export_video(self, fps=30, rotate_plane='xy', **kwargs):
+        '''
+        export the rotating 3-D object to a video. rendering is slow, it helps to visualize complex objects and the video file is more portable and versatile.
+        
+        when file is too large, exporting may fail. try to reduce the resolution by setting "scale" in kwargs, or set "width" and "height" to specific values.
+        
+        fps: default 30
+            frames per second, also determines the step size of rotation, 30 degrees per second.
+        rotate_plane: default 'xy'
+            the plane to rotate the object. can be 'xy', 'xz', 'yz'.
+        **kwargs: other arguments for plotly.offline.plot. see https://plotly.github.io/plotly.py-docs/generated/plotly.io.write_image.html\n
+            In the kwargs, you can use "scale" to set the resolution of the video (e.g. scale=2 doubles the resolution), 
+        or set "width" and "height" to specific values
+        defautly, scale is set to 2.
+        '''
+        
+        kwargs = {'scale': 2,}
+        kwargs.update(kwargs)
+        step = 30 / fps
+        html_size = os.path.getsize(self.fig_path+'.html') / 1024 / 1024 # in MB
+        if html_size > 100:
+            print(f'\033[33mFigure is large. If rendering hangs, try to reduce the resolution by setting "scale" in kwargs, or set "width" and "height" to smaller values.\033[0m')
+        # set layout
+        self.fig_3d.update_layout(
+            sliders=[], # remove sliders
+            scene=dict(
+                dragmode='orbit',
+                xaxis={'visible':False}, 
+                yaxis={'visible':False},
+                zaxis={'visible':False},
+            ),
+            scene_camera=dict(
+                up=dict(x=0, y=0, z=-1),
+                eye=dict(x=0, y=2, z=0),
+            ),
+        )
+        pic_folder = os.path.join(self.save_folder,f'pics_{fps}fps_{rotate_plane}')
+        if os.path.exists(pic_folder):
+            shutil.rmtree(pic_folder)
+        os.makedirs(pic_folder)
+        if step > 0:
+            steps_to_write = np.linspace(0,360,int(360/step),endpoint=False)
+        elif step < 0:
+            steps_to_write = np.linspace(360,0,int(360/step),endpoint=False)
+        t0 = time.time()
+        for i,deg in enumerate(steps_to_write):
+            rad_i = np.deg2rad(deg)
+            x = 2 * np.sin(rad_i)
+            y = 2 * np.cos(rad_i)
+            if rotate_plane == 'xy':
+                self.fig_3d.update_layout(scene_camera=dict(eye=dict(x=x, y=y, z=0)))
+            elif rotate_plane == 'yz':
+                self.fig_3d.update_layout(scene_camera=dict(eye=dict(x=0, y=x, z=y)))
+            elif rotate_plane == 'xz':
+                self.fig_3d.update_layout(scene_camera=dict(eye=dict(x=x, y=0, z=y)))
+            fig_path = os.path.join(pic_folder,f'deg_{deg}.jpeg')
+            self.fig_3d.write_image(fig_path,**kwargs)
+            ti = time.time()
+            print(f'\rExporting image: {i+1}/{len(steps_to_write)}...Elapsed {ti-t0:.2f}s. Remaining {(ti-t0)/(i+1)*(len(steps_to_write)-i-1):.2f}s',end='  ')
+        print('\nDone')
+        imglist = os.listdir(pic_folder)
+        img_eg = cv2.imread(os.path.join(pic_folder,imglist[0]))
+        height, width, layers = img_eg.shape
+
+        # forward video
+        video_dir = os.path.join(self.save_folder,f'{self.saveas}_video_forward.mp4')
+        out = cv2.VideoWriter(
+            video_dir, cv2.VideoWriter_fourcc(*'mp4v'), fps, frameSize=(width,height))
+        for i,imgfile in enumerate(imglist):
+            img = cv2.imread(os.path.join(pic_folder,imgfile))
+            out.write(img)
+            print(f'\rwriting forward video: {i+1}/{len(imglist)}...',end='  ')
+        out.release()
+        print('Done')
+
+        # backward video
+        video_dir = os.path.join(self.save_folder,f'{self.saveas}_video_backward.mp4')
+        out = cv2.VideoWriter(
+            video_dir, cv2.VideoWriter_fourcc(*'mp4v'), fps, frameSize=(width,height))
+        for i,imgfile in enumerate(imglist[::-1]):
+            img = cv2.imread(os.path.join(pic_folder,imgfile))
+            out.write(img)
+            print(f'\rwriting backward video: {i+1}/{len(imglist)}...',end='  ')
+        out.release()
+        print('Done')
+
+        return 0
+
+
+
 
 
 

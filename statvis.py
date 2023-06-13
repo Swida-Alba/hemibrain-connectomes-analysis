@@ -51,6 +51,7 @@ def getCriteriaAndName(requiredNeurons):
     return criteria, fname
 
 def getNeurons(requiredNeurons, dataset='hemibrain:v1.2.1'):
+    '''get neurons locally from a given dataset'''
     from neuprint import NeuronCriteria as NC
     if requiredNeurons == None:
         criteria = None
