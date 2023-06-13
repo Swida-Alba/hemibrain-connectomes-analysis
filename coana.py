@@ -1267,14 +1267,18 @@ class VisualizeSkeleton:
         defautly, scale is set to 2.
         '''
         
-        kwargs = {'scale': 2,}
+        kwargs = {'scale': 5,}
         kwargs.update(kwargs)
         step = 30 / fps
         html_size = os.path.getsize(self.fig_path+'.html') / 1024 / 1024 # in MB
         if html_size > 100:
             print(f'\033[33mFigure is large. If rendering hangs, try to reduce the resolution by setting "scale" in kwargs, or set "width" and "height" to smaller values.\033[0m')
         # set layout
-        self.fig_3d.update_layout(
+        fig_traces = self.fig_3d.data
+        for trace in fig_traces:
+            trace.showlegend = False
+        fig_new = go.Figure(data=fig_traces)
+        fig_new.update_layout(
             sliders=[], # remove sliders
             scene=dict(
                 dragmode='orbit',
@@ -1301,13 +1305,13 @@ class VisualizeSkeleton:
             x = 2 * np.sin(rad_i)
             y = 2 * np.cos(rad_i)
             if rotate_plane == 'xy':
-                self.fig_3d.update_layout(scene_camera=dict(eye=dict(x=x, y=y, z=0)))
+                fig_new.update_layout(scene_camera=dict(eye=dict(x=x, y=y, z=0)))
             elif rotate_plane == 'yz':
-                self.fig_3d.update_layout(scene_camera=dict(eye=dict(x=0, y=x, z=y)))
+                fig_new.update_layout(scene_camera=dict(eye=dict(x=0, y=x, z=y)))
             elif rotate_plane == 'xz':
-                self.fig_3d.update_layout(scene_camera=dict(eye=dict(x=x, y=0, z=y)))
+                fig_new.update_layout(scene_camera=dict(eye=dict(x=x, y=0, z=y)))
             fig_path = os.path.join(pic_folder,f'deg_{deg}.jpeg')
-            self.fig_3d.write_image(fig_path,**kwargs)
+            fig_new.write_image(fig_path,**kwargs)
             ti = time.time()
             print(f'\rExporting image: {i+1}/{len(steps_to_write)}...Elapsed {ti-t0:.2f}s. Remaining {(ti-t0)/(i+1)*(len(steps_to_write)-i-1):.2f}s',end='  ')
         print('\nDone')
@@ -1330,7 +1334,7 @@ class VisualizeSkeleton:
         video_dir = os.path.join(self.save_folder,f'{self.saveas}_video_backward.mp4')
         out = cv2.VideoWriter(
             video_dir, cv2.VideoWriter_fourcc(*'mp4v'), fps, frameSize=(width,height))
-        for i,deg in enumerate(steps_to_write):
+        for i,deg in enumerate(steps_to_write[::-1]):
             img = cv2.imread(os.path.join(pic_folder,f'deg_{deg}.jpeg'))
             out.write(img)
             print(f'\rwriting backward video: {i+1}/{len(steps_to_write)}...',end='  ')
