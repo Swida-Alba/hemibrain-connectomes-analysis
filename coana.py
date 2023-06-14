@@ -1251,7 +1251,7 @@ class VisualizeSkeleton:
         self.plot_mesh()
         self.save_figure()
         
-    def export_video(self, fps=30, rotate_plane='xy', **kwargs):
+    def export_video(self, fps=30, rotate_plane='xy', view_distance=1.6, synapse_size=1,**kwargs):
         '''
         export the rotating 3-D object to a video. rendering is slow, it helps to visualize complex objects and the video file is more portable and versatile.
         
@@ -1267,7 +1267,6 @@ class VisualizeSkeleton:
         defautly, scale is set to 2.
         '''
         
-        kwargs = {'scale': 5,}
         kwargs.update(kwargs)
         step = 30 / fps
         html_size = os.path.getsize(self.fig_path+'.html') / 1024 / 1024 # in MB
@@ -1277,7 +1276,18 @@ class VisualizeSkeleton:
         fig_traces = self.fig_3d.data
         for trace in fig_traces:
             trace.showlegend = False
-        fig_new = go.Figure(data=fig_traces)
+            if hasattr(trace,'marker'):
+                trace.marker.size = synapse_size
+        fig_layout = go.Layout(
+            margin=dict(
+                l=1,
+                r=1,
+                b=1,
+                t=1,
+                pad=0,
+            ),
+        )
+        fig_new = go.Figure(data=fig_traces, layout=fig_layout)
         fig_new.update_layout(
             sliders=[], # remove sliders
             scene=dict(
@@ -1288,7 +1298,7 @@ class VisualizeSkeleton:
             ),
             scene_camera=dict(
                 up=dict(x=0, y=0, z=-1),
-                eye=dict(x=0, y=2, z=0),
+                eye=dict(x=0, y=view_distance, z=0),
             ),
         )
         pic_folder = os.path.join(self.save_folder,f'pics_{fps}fps_{rotate_plane}')
@@ -1302,8 +1312,8 @@ class VisualizeSkeleton:
         t0 = time.time()
         for i,deg in enumerate(steps_to_write):
             rad_i = np.deg2rad(deg)
-            x = 2 * np.sin(rad_i)
-            y = 2 * np.cos(rad_i)
+            x = view_distance * np.sin(rad_i)
+            y = view_distance * np.cos(rad_i)
             if rotate_plane == 'xy':
                 fig_new.update_layout(scene_camera=dict(eye=dict(x=x, y=y, z=0)))
             elif rotate_plane == 'yz':
@@ -1312,6 +1322,7 @@ class VisualizeSkeleton:
                 fig_new.update_layout(scene_camera=dict(eye=dict(x=x, y=0, z=y)))
             fig_path = os.path.join(pic_folder,f'deg_{deg}.jpeg')
             fig_new.write_image(fig_path,**kwargs)
+            cv2.waitKey(2000)
             ti = time.time()
             print(f'\rExporting image: {i+1}/{len(steps_to_write)}...Elapsed {ti-t0:.2f}s. Remaining {(ti-t0)/(i+1)*(len(steps_to_write)-i-1):.2f}s',end='  ')
         print('\nDone')
