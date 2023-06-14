@@ -841,11 +841,12 @@ class VisualizeSkeleton:
 
     neuron_layers: str | list = ''
     '''
-    layers of neurons to plot\n
-    list of neuron layers: e.g. ['L1', 'L2', 'L3']\n
-    str of neuron layers separated by '->': e.g. 'L1->L2->L3', not surpport bodyIds\n
+    layers of neurons to plot, can be:
+        list of neuron layers: e.g. ['L1', 'L2', 'L3']; or \n
+        str of neuron layers separated by '->': \n
+        e.g. 'L1->L2->L3'. All type, instance (in regular expression), and bodyId are compatible.\n
     when use list, each layer can be neuron bodyIds, types, instances in regular expressions, or a list of them\n
-    e.g. [['L1_0','L1_1'], ['L2_0','L2_1'], ['L3_0','L3_1']]\n
+    e.g. [['L1_0','L1_1'], ['L2_0','L2_1'], ['L3_0','L3_1']]
     '''
 
     custom_layer_names: list = field(default_factory=list)
@@ -1002,6 +1003,9 @@ class VisualizeSkeleton:
         # convert neuron_layers str to list, if is str
         if type(self.neuron_layers) is str:
             self.neuron_layers = self.neuron_layers.replace(' ','').split('->')
+            for i,layer in enumerate(self.neuron_layers): # convert bodyId str to int
+                if layer.isnumeric():
+                    self.neuron_layers[i] = int(layer)
         
         if self.synapse_mode == 'scatter' and self.synapse_size == 0:
             self.synapse_size = 3
