@@ -1327,7 +1327,7 @@ class VisualizeSkeleton:
             fig_new.write_image(fig_path,**kwargs)
             cv2.waitKey(2000)
             ti = time.time()
-            print(f'\rExporting image: {i+1}/{len(steps_to_write)}...Elapsed {ti-t0:.2f}s. Remaining {(ti-t0)/(i+1)*(len(steps_to_write)-i-1):.2f}s',end='  ')
+            print(f'\rExporting image: {i+1}/{len(steps_to_write)}...Elapsed {ti-t0:.2f}s. Remaining {(ti-t0)/(i+1)*(len(steps_to_write)-i-1):.2f}s',end='    ')
         print('\nDone')
         imglist = os.listdir(pic_folder)
         img_eg = cv2.imread(os.path.join(pic_folder,imglist[0]))
