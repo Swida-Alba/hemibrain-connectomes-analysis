@@ -10,7 +10,7 @@ vs = VisualizeSkeleton(
     neuron_alpha = 0.2,
     saveas = None,
     min_synapse_num = 1,
-    synapse_size = 1,
+    synapse_size = 3,
     synapse_alpha = 0.6,
     mesh_roi = ['LH(R)','AL(R)','EB','gL(R)'],
     skeleton_mode = 'tube',
@@ -21,4 +21,4 @@ vs = VisualizeSkeleton(
 )
 
 vs.plot_neurons()
-vs.export_video(fps=30,rotate_plane='xy')
+vs.export_video(fps=30,rotate_plane='xy',synapse_size=1,scale=2,)

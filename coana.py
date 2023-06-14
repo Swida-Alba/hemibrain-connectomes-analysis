@@ -1261,10 +1261,13 @@ class VisualizeSkeleton:
             frames per second, also determines the step size of rotation, 30 degrees per second.
         rotate_plane: default 'xy'
             the plane to rotate the object. can be 'xy', 'xz', 'yz'.
-        **kwargs: other arguments for plotly.offline.plot. see https://plotly.github.io/plotly.py-docs/generated/plotly.io.write_image.html\n
-            In the kwargs, you can use "scale" to set the resolution of the video (e.g. scale=2 doubles the resolution), 
-        or set "width" and "height" to specific values
-        defautly, scale is set to 2.
+        view_distance: default 1.6,
+            the relative distance between the camera and the center of the object.
+        synapse_size: default 1,
+            the size of the synapse markers.
+        **kwargs: other arguments for plotly.offline.plot. see https://plotly.github.io/plotly.py-docs/generated/plotly.io.write_image.html
+            In the kwargs, you can use "scale" to set the resolution of the video (e.g. scale=2 doubles the resolution), or set "width" and "height" to specific values.
+            recommended values for scale: 2
         '''
         
         kwargs.update(kwargs)
