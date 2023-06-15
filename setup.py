@@ -2,6 +2,7 @@ import subprocess
 
 # Install packages
 subprocess.check_call(['pip3', 'install', 'numpy'])
+subprocess.check_call(['pip3', 'install', 'xlsxwriter'])
 subprocess.check_call(['pip3', 'install', 'openpyxl'])
 subprocess.check_call(['pip3', 'install', 'pandas<2']) ### don't use pandas >= 2.0.0
 subprocess.check_call(['pip3', 'install', 'plotly'])
