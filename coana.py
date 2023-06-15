@@ -1368,7 +1368,6 @@ class VisualizeSkeleton:
             print(f'\rwriting forward video: {i+1}/{len(steps_to_write)}...',end='  ')
         out.release()
         print('Done')
-
         # backward video
         video_dir = os.path.join(self.save_folder,f'{self.saveas}_video_backward.mp4')
         out = cv2.VideoWriter(
@@ -1379,11 +1378,4 @@ class VisualizeSkeleton:
             print(f'\rwriting backward video: {i+1}/{len(steps_to_write)}...',end='  ')
         out.release()
         print('Done')
-
         return 0
-
-
-
-
-
-
