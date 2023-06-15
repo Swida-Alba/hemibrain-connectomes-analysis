@@ -69,6 +69,7 @@ def getNeurons(requiredNeurons, dataset='hemibrain:v1.2.1'):
         neuron_df = ndf_alltypes
         roi_count_df = rdf_alltypes
         auto_name = 'alltypes'
+        bodyId_list = neuron_df['bodyId'].tolist()
     else:
         bodyId_list = []
         for i, requiredNeuron in enumerate(requiredNeurons):
@@ -98,8 +99,8 @@ def getNeurons(requiredNeurons, dataset='hemibrain:v1.2.1'):
                     print(f'Found {len(find_df)} neurons of type "{requiredNeuron}"')
                 else:
                     print(f'\033[33mtype "{requiredNeuron}" not found, please check your input (skipped)\033[0m')
-    neuron_df = ndf_alltypes[ndf_alltypes['bodyId'].isin(bodyId_list)]
-    roi_count_df = rdf_alltypes[rdf_alltypes['bodyId'].isin(bodyId_list)]
+        neuron_df = ndf_alltypes[ndf_alltypes['bodyId'].isin(bodyId_list)]
+        roi_count_df = rdf_alltypes[rdf_alltypes['bodyId'].isin(bodyId_list)]
     criteria = NC(bodyId=bodyId_list)
     return neuron_df, roi_count_df, auto_name, criteria
 

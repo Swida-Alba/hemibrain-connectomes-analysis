@@ -159,14 +159,6 @@ class FindNeuronConnection():
         
         if self.sourceNeurons is None or self.targetNeurons is None:
             print('\033[33mIt is not recommended to search for all neurons in the dataset.\n Using [] or list() to search for all neurons having a given type, instead.\033[0m')
-        
-        if self.sourceNeurons == [] and self.dataset == 'hemibrain:v1.2.1':
-            self.sourceNeurons = pd.read_excel(os.path.join(self.script_path, 'hemibrain_v1_2_1_info.xlsx'), header=0).bodyId.tolist()
-            self.source_fname = 'alltypes'
-        if self.targetNeurons == [] and self.dataset == 'hemibrain:v1.2.1':
-            self.targetNeurons = pd.read_excel(os.path.join(self.script_path, 'hemibrain_v1_2_1_info.xlsx'), header=0).bodyId.tolist()
-            self.target_fname = 'alltypes'
-        
         elif self.targetNeurons is None:
             self.largeTargetSet = True
     
@@ -232,12 +224,12 @@ class FindNeuronConnection():
         print('*: Primary ROI')
         print(fetch_roi_hierarchy(False, mark_primary=True, format='text'))
             
-    def FindDirectConnections(self, full_data=True):
+    def FindDirectConnections(self, full_data=False):
         '''
         find direct connections between source and target neurons
         full_data: whether to save the full connection table, if False, only visualize in heatmap, if True, run clustering and ...
         '''
-        self.direct_folder = os.path.join(self.save_folder, 'direct')
+        self.direct_folder = os.path.join(self.save_folder, f'direct_{self.min_synapse_num}snp')
         if not os.path.exists(self.direct_folder): os.makedirs(self.direct_folder)
         # fetch connection table
         self.conn_df: pd.DataFrame = fetch_simple_connections(upstream_criteria=self.source_criteria, downstream_criteria=self.target_criteria, min_weight=self.min_synapse_num)
@@ -405,7 +397,7 @@ class FindNeuronConnection():
     
     def FindPath(self, find_bodyId_path=True):
         '''Find path between source and target neurons, adapted from FindInterClusterConnection.ipynb'''
-        self.path_folder = os.path.join(self.save_folder,'paths')
+        self.path_folder = os.path.join(self.save_folder,f'paths_{self.max_interlayer}L_{self.min_synapse_num}snp')
         if not os.path.exists(self.path_folder): os.makedirs(self.path_folder)
         targetNum = len(self.target_df)
         self.target_df.insert(loc=0,column='Checked',value=False)
