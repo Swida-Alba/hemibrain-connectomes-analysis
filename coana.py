@@ -148,6 +148,9 @@ class FindNeuronConnection():
     default_mesh_rois = ['LH(R)','AL(R)','EB']
     '''default mesh rois to be plotted'''
     
+    keyword_in_path_to_remove: str = 'None'
+    '''path blocks including these keywords will be removed'''
+    
     def __post_init__(self):
         print('Initializing...')
         if self.client_hemibrain is None:
@@ -202,6 +205,7 @@ class FindNeuronConnection():
             'min synapse number': str(self.min_synapse_num),
             'min traversal probability': str(self.min_traversal_probability),
             'max interlayer': str(self.max_interlayer),
+            'keyword in path to remove': self.keyword_in_path_to_remove,
             'server': self.server,
             'dataset': self.dataset,
             'run date': self.run_date,
@@ -478,8 +482,10 @@ class FindNeuronConnection():
         path_df_type,_ = sv.getAllPath(conn_data = conn_types,
                                     targets = self.target_df.loc[self.target_df.Checked,'type'].unique().tolist(),
                                     traversal_probability_threshold = self.min_traversal_probability)
+        path_df_type, path_df_type_excluded = sv.path_filter(path_df_type,self.keyword_in_path_to_remove)
         with pd.ExcelWriter(output_excel_name, mode='a') as writer:
             path_df_type.to_excel(writer,sheet_name='path_type')
+            path_df_type_excluded.to_excel(writer,sheet_name='path_type_excluded')
         
         # get connection path (by bodyId)
         if find_bodyId_path:
@@ -1278,7 +1284,7 @@ class VisualizeSkeleton:
         step = 30 / fps
         html_size = os.path.getsize(self.fig_path+'.html') / 1024 / 1024 # in MB
         if html_size > 100:
-            print(f'\033[33mFigure is large. If rendering hangs, try to reduce the resolution by setting "scale" in kwargs, or set "width" and "height" to smaller values.\033[0m')
+            print(f'\033[33mFigure is large. If rendering hangs, try to reduce the resolution by setting "scale", or "width" and "height" in kwargs to smaller values.\033[0m')
         # set layout
         fig_traces = self.fig_3d.data
         for trace in fig_traces:
@@ -1327,7 +1333,7 @@ class VisualizeSkeleton:
                 fig_new.update_layout(scene_camera=dict(eye=dict(x=0, y=x, z=y)))
             elif rotate_plane == 'xz':
                 fig_new.update_layout(scene_camera=dict(eye=dict(x=x, y=0, z=y)))
-            fig_path = os.path.join(pic_folder,f'deg_{deg}.jpeg')
+            fig_path = os.path.join(pic_folder,f'deg_{deg:1f}.jpeg')
             fig_new.write_image(fig_path,**kwargs)
             cv2.waitKey(2000)
             ti = time.time()
@@ -1342,7 +1348,7 @@ class VisualizeSkeleton:
         out = cv2.VideoWriter(
             video_dir, cv2.VideoWriter_fourcc(*'mp4v'), fps, frameSize=(width,height))
         for i,deg in enumerate(steps_to_write):
-            img = cv2.imread(os.path.join(pic_folder,f'deg_{deg}.jpeg'))
+            img = cv2.imread(os.path.join(pic_folder,f'deg_{deg:1f}.jpeg'))
             out.write(img)
             print(f'\rwriting forward video: {i+1}/{len(steps_to_write)}...',end='  ')
         out.release()
@@ -1353,7 +1359,7 @@ class VisualizeSkeleton:
         out = cv2.VideoWriter(
             video_dir, cv2.VideoWriter_fourcc(*'mp4v'), fps, frameSize=(width,height))
         for i,deg in enumerate(steps_to_write[::-1]):
-            img = cv2.imread(os.path.join(pic_folder,f'deg_{deg}.jpeg'))
+            img = cv2.imread(os.path.join(pic_folder,f'deg_{deg:1f}.jpeg'))
             out.write(img)
             print(f'\rwriting backward video: {i+1}/{len(steps_to_write)}...',end='  ')
         out.release()
