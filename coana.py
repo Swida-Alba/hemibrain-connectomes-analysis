@@ -49,7 +49,7 @@ class FindNeuronConnection():
     data_folder: str = os.path.join(script_path, 'connection_data')
     '''folder to save all data'''
     
-    save_folder: str = '' # initialized in __post_init__
+    save_folder: str = '' # initialized in InitializeNeuronInfo()
     '''folder to save the current data'''
     
     server: str = 'https://neuprint.janelia.org'
@@ -193,7 +193,10 @@ class FindNeuronConnection():
         print(f'Source neurons ({self.source_fname}) in processing: {len(self.source_df)}')
         print(f'Target neurons ({self.target_fname}) in processing: {len(self.target_df)}')
         
-        self.save_folder = os.path.join(self.data_folder, self.source_fname + '_to_' + self.target_fname)
+        if not self.save_folder: # if save_folder is not specified, save in data_folder, with auto-generated name
+            self.save_folder = os.path.join(self.data_folder, self.source_fname + '_to_' + self.target_fname)
+        elif not os.path.isabs(self.save_folder): # if save_folder is not absolute path, save in data_folder with specified relative path and name
+            self.save_folder = os.path.join(self.data_folder, self.save_folder)
         if not os.path.exists(self.save_folder): os.makedirs(self.save_folder)
         print(f'data will be saved in: {self.save_folder}\n')
         
@@ -213,6 +216,8 @@ class FindNeuronConnection():
         
         # write parameters to txt file
         self.parameter_df = pd.DataFrame.from_dict(self.parameter_dict, orient='index', columns=['value'])
+        self.parameter_df.reset_index(inplace=True)
+        self.parameter_df.columns = ['parameter','value']
         self.parameter_txt = os.path.join(self.save_folder,'parameters.txt')
         with open(self.parameter_txt, 'w') as f: 
             f.write(f'Parameters for processing {self.source_fname} to {self.target_fname}:\n')
@@ -270,8 +275,12 @@ class FindNeuronConnection():
         
         output_excel_name = os.path.join(self.direct_folder,self.source_fname+'_to_'+self.target_fname+'_info_snp'+str(self.min_synapse_num)+'.xlsx')
         print(f'Saving connection info to excel file...')
-        with pd.ExcelWriter(output_excel_name) as dataWriter:
+        with pd.ExcelWriter(output_excel_name, engine='xlsxwriter') as dataWriter:
             self.parameter_df.to_excel(dataWriter,sheet_name='parameters')
+            worksheet = dataWriter.sheets['parameters']
+            worksheet.set_column('A:A', 30, dataWriter.book.add_format({'bold': True, 'font_name': 'Arial', 'font_size': 11, 'align': 'left'}))
+            worksheet.set_column('B:B', 30, dataWriter.book.add_format({'font_name': 'Arial', 'font_size': 11, 'align': 'left'}))
+            
             self.source_df.to_excel(dataWriter,sheet_name='source_info')
             self.target_df.to_excel(dataWriter,sheet_name='target_info')
             self.source_in_conn.to_excel(dataWriter,sheet_name='source_in_connection')
@@ -468,8 +477,12 @@ class FindNeuronConnection():
         
         # saving data
         output_excel_name = os.path.join(self.path_folder,self.source_fname+'_to_'+self.target_fname+'_info_snp'+str(self.min_synapse_num)+'.xlsx')
-        with pd.ExcelWriter(output_excel_name,mode='w') as writer:
-            self.parameter_df.to_excel(writer,sheet_name='parameters')
+        with pd.ExcelWriter(output_excel_name,mode='w',engine='xlsxwriter') as writer:
+            self.parameter_df.to_excel(writer,sheet_name='parameters',index=False)
+            worksheet = writer.sheets['parameters']
+            worksheet.set_column('A:A', 30, writer.book.add_format({'bold': True, 'font_name': 'Arial', 'font_size': 11, 'align': 'left'}))
+            worksheet.set_column('B:B', 30, writer.book.add_format({'font_name': 'Arial', 'font_size': 11, 'align': 'left'}))
+            
             self.source_df.to_excel(writer,sheet_name='source_neurons')
             self.target_df.to_excel(writer,sheet_name='target_neurons')
             totalweight_df.to_excel(writer,sheet_name='total_weight_layer')
@@ -482,8 +495,10 @@ class FindNeuronConnection():
         path_df_type,_ = sv.getAllPath(conn_data = conn_types,
                                     targets = self.target_df.loc[self.target_df.Checked,'type'].unique().tolist(),
                                     traversal_probability_threshold = self.min_traversal_probability)
+        path_df_type = sv.split_path(path_df_type)
         path_df_type, path_df_type_excluded = sv.path_filter(path_df_type,self.keyword_in_path_to_remove)
-        with pd.ExcelWriter(output_excel_name, mode='a') as writer:
+        
+        with pd.ExcelWriter(output_excel_name, mode='a', engine='openpyxl') as writer:
             path_df_type.to_excel(writer,sheet_name='path_type')
             path_df_type_excluded.to_excel(writer,sheet_name='path_type_excluded')
         
@@ -494,7 +509,7 @@ class FindNeuronConnection():
             path_df_bodyId,_ = sv.getAllPath(conn_data = conn_inpath,
                                         targets = self.target_df.loc[self.target_df.Checked,'bodyId'].tolist(),
                                         traversal_probability_threshold = self.min_traversal_probability)
-            with pd.ExcelWriter(output_excel_name, mode='a') as writer:
+            with pd.ExcelWriter(output_excel_name, mode='a', engine='openpyxl') as writer:
                 path_df_bodyId.to_excel(writer,sheet_name='path_bodyId')
         
         # save interlayer info to excel
@@ -502,7 +517,7 @@ class FindNeuronConnection():
         for neurons in neuron_layers[1:]:
             n_df,_ = fetch_neurons(NeuronCriteria(bodyId=neurons))
             interlayers.append(n_df)
-        with pd.ExcelWriter(output_excel_name, mode='a') as writer:
+        with pd.ExcelWriter(output_excel_name, mode='a', engine='openpyxl') as writer:
             for i in range(len(interlayers)):
                 interlayers[i].to_excel(writer,sheet_name='layer_'+str(i+1))
         print('Done\n')
