@@ -18,6 +18,7 @@ fc = FindNeuronConnection(
     min_traversal_probability = 1e-6,
     showfig = False,
     max_interlayer=1,
+    keyword_in_path_to_remove=['None','DN1a','DN1p']
 )
 
 fc.InitializeNeuronInfo()
