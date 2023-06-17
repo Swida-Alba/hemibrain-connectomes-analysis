@@ -534,6 +534,24 @@ def getAllPath(conn_data,targets,traversal_probability_threshold=0): ### debuggi
     path_df = path_df.loc[path_df.traversal_probability >= traversal_probability_threshold]
     return path_df,paths
 
+def merge_conn_roi(neuron_df, roi_conn_df):
+    '''
+    used for merging the roi_conn_df and neuron_df fetched by neuprint.fetch_adjacencies() \n
+    return a merged dataframe with columns: bodyId_pre, bodyId_post, weight, type_pre, type_post \n
+    same as output of neuprint.fetch_simple_connections()
+    '''
+    conn_df:pd.DataFrame = roi_conn_df.groupby(['bodyId_pre','bodyId_post'],as_index=False)['weight'].sum()
+    # add the neuron type information to conn_df from ndf, as type_pre and type_post, according to bodyId_pre and bodyId_post
+    conn_df = conn_df.merge(neuron_df[['bodyId','type']],left_on='bodyId_pre',right_on='bodyId',how='left').drop(columns=['bodyId'])
+    # change the column name from type to type_pre
+    conn_df = conn_df.rename(columns={'type':'type_pre'})
+    # add type_post
+    conn_df = conn_df.merge(neuron_df[['bodyId','type']],left_on='bodyId_post',right_on='bodyId',how='left').drop(columns=['bodyId'])
+    conn_df = conn_df.rename(columns={'type':'type_post'})
+    # sort by weight and reset index
+    conn_df = conn_df.sort_values(by=['weight','bodyId_pre','bodyId_post'],ascending=[False,True,True]).reset_index(drop=True)
+    return conn_df
+
 def EnrichConnectionTable(conn_table,traversal_probability_threshold=0):
     '''Add traversal probability, layer information to the connection table'''
     conn_df = conn_table.copy()

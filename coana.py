@@ -151,6 +151,12 @@ class FindNeuronConnection():
     keyword_in_path_to_remove: str = 'None'
     '''path blocks including these keywords will be removed'''
     
+    simple_fetch: bool = True
+    '''
+    when True, use neuprint.fetch_simple_connections() to fetch connections, for small sets of neurons and fast speed\n
+    when False, use neuprint.fetch_adjacencies(), for large sets of neurons but slower
+    '''
+    
     def __post_init__(self):
         print('Initializing...')
         if self.client_hemibrain is None:
@@ -167,6 +173,10 @@ class FindNeuronConnection():
         print('Fetching source and target neurons...')
         self.source_df, _, source_fname_auto, self.source_criteria = sv.getNeurons(self.sourceNeurons)
         self.target_df, _, target_fname_auto, self.target_criteria = sv.getNeurons(self.targetNeurons)
+        
+        if self.max_interlayer > 2 or len(self.source_df) > 200:
+            self.simple_fetch = False
+            print('\033[33mLarge data detected!!! simple_fetch is set to False, using fetch_adjacencies()\033[0m')
 
         if len(self.target_df) > 16383: # 16383 is the maximum number of excel sheet rows
             self.largeTargetSet = True
@@ -232,7 +242,11 @@ class FindNeuronConnection():
         self.direct_folder = os.path.join(self.save_folder, f'direct_{self.min_synapse_num}snp')
         if not os.path.exists(self.direct_folder): os.makedirs(self.direct_folder)
         # fetch connection table
-        self.conn_df: pd.DataFrame = fetch_simple_connections(upstream_criteria=self.source_criteria, downstream_criteria=self.target_criteria, min_weight=self.min_synapse_num)
+        if self.simple_fetch:
+            self.conn_df: pd.DataFrame = fetch_simple_connections(upstream_criteria=self.source_criteria, downstream_criteria=self.target_criteria, min_weight=self.min_synapse_num)
+        else:
+            neuron_df, roi_conn_df = fetch_adjacencies(sources=self.source_criteria,targets=self.target_criteria,min_total_weight=self.min_synapse_num)
+            conn_df = sv.merge_conn_roi(neuron_df, roi_conn_df)
         if self.conn_df.empty:
             print('\033[33mNo direct connections found.\033[0m\n')
             return
@@ -267,7 +281,7 @@ class FindNeuronConnection():
         
         output_excel_name = os.path.join(self.direct_folder,self.source_fname+'_to_'+self.target_fname+'_info_snp'+str(self.min_synapse_num)+'.xlsx')
         print(f'Saving connection info to excel file...')
-        with pd.ExcelWriter(output_excel_name, engine='xlsxwriter') as dataWriter:
+        with pd.ExcelWriter(output_excel_name, mode='w', engine='xlsxwriter') as dataWriter:
             self.parameter_df.to_excel(dataWriter,sheet_name='parameters')
             worksheet = dataWriter.sheets['parameters']
             worksheet.set_column('A:A', 30, dataWriter.book.add_format({'bold': True, 'font_name': 'Arial', 'font_size': 11, 'align': 'left'}))
@@ -411,7 +425,11 @@ class FindNeuronConnection():
         searchedNeurons = source_ID
         # searching for target neurons
         while Flag and currLayer <= self.max_interlayer:
-            conn_df: pd.DataFrame = fetch_simple_connections(upstream_criteria=NeuronCriteria(bodyId=source_ID),downstream_criteria=None,min_weight=self.min_synapse_num)
+            if self.simple_fetch:
+                conn_df: pd.DataFrame = fetch_simple_connections(upstream_criteria=NeuronCriteria(bodyId=source_ID),downstream_criteria=None,min_weight=self.min_synapse_num)
+            else:
+                neuron_df,roi_conn_df = fetch_adjacencies(sources=source_ID,targets=None,min_total_weight=self.min_synapse_num)
+                conn_df = sv.merge_conn_roi(neuron_df,roi_conn_df)
             conn_df = sv.removeSearchedNeurons(conn_df,searchedNeurons)
             conn_layers.append(conn_df)
             post_ID = conn_df['bodyId_post'].unique()
@@ -442,6 +460,7 @@ class FindNeuronConnection():
         for i in reversed(range(len(conn_layers))): # searching for connection path from target neurons to source neurons
             conn: pd.DataFrame = conn_layers[i]
             conn_df = conn[conn['bodyId_post'].isin(post_ID)] # remove neurons not in the connection path
+            if len(conn_df) == 0: continue # if not found target neurons in the last x searched layers, skip these layers (when max_interlayer is too large)
             conn_df, conn_type = sv.EnrichConnectionTable(conn_df)
             conn_df.insert(loc=0,column='conn_layer',value=str(i)+'->'+str(i+1))
             conn_type.insert(loc=0,column='conn_layer',value=str(i)+'->'+str(i+1))

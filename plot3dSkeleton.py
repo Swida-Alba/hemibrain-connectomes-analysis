@@ -21,4 +21,4 @@ vs = VisualizeSkeleton(
 )
 
 vs.plot_neurons()
-vs.export_video(fps=30,rotate_plane='xy',synapse_size=1,scale=2,)
+vs.export_video(fps=30,rotate_plane='xy',synapse_size=2,scale=2,)

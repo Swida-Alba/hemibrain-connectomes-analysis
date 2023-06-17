@@ -3,7 +3,6 @@ import pandas as pd
 warnings.filterwarnings("ignore")
 from coana import FindNeuronConnection
 
-
 fc = FindNeuronConnection(
     # please provide your own neuprint token, which can be found at https://neuprint.janelia.org/account
     token='',
