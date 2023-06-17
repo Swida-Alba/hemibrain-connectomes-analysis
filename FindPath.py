@@ -3,7 +3,6 @@ import pandas as pd
 warnings.filterwarnings("ignore")
 from coana import FindNeuronConnection
 
-
 fc = FindNeuronConnection(
     # please provide your own neuprint token, which can be found at https://neuprint.janelia.org/account
     token='',
@@ -17,8 +16,8 @@ fc = FindNeuronConnection(
     min_synapse_num = 10,
     min_traversal_probability = 1e-6,
     showfig = False,
-    max_interlayer=1,
-    keyword_in_path_to_remove=['None','DN1a','DN1p']
+    max_interlayer=2,
+    keyword_in_path_to_remove=['None','DN1a']
 )
 
 fc.InitializeNeuronInfo()
