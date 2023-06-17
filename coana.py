@@ -33,7 +33,7 @@ import statvis as sv
 logging.getLogger('navis').setLevel(logging.WARNING)
 
 @dataclass
-class FindNeuronConnection():
+class FindNeuronConnection:
     '''
     Through the neuprint-python API, visit the hemibrain database for connectome data analysis:\n
     https://github.com/connectome-neuprint/neuprint-python \n
@@ -56,7 +56,16 @@ class FindNeuronConnection():
     '''the neuprint server to visit, see https://neuprint.janelia.org for more information'''
     
     dataset: str = 'hemibrain:v1.2.1'
-    '''the hemibrain dataset to visit, see https://neuprint.janelia.org for more information'''
+    '''
+    the hemibrain dataset to visit, see https://neuprint.janelia.org for more information
+    All available datasets are listed below:
+    'fib19:v1.0', 
+    'hemibrain:v0.9', 
+    'hemibrain:v1.0.1', 
+    'hemibrain:v1.1', 
+    'hemibrain:v1.2.1', 
+    'manc:v1.0'
+    '''
     
     token: str = ''
     '''
