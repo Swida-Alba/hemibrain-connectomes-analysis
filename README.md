@@ -27,7 +27,7 @@ fc = FindNeuronConnection(
 )
 ```
 
-in the main codes, we call the FindNeuronConnection class at first. In the class, you should input your own token obtained from [Neuprint Account Page](https://neuprint.janelia.org/account).
+in the main codes, we call the ```FindNeuronConnection``` class at first. In the class, you should input your own token obtained from [Neuprint Account Page](https://neuprint.janelia.org/account).
 
 ```python
 fc = FindNeuronConnection(
@@ -37,7 +37,7 @@ fc = FindNeuronConnection(
 )
 ```
 
-And you can specify the dataset to use (default is "hemibrain:v1.2.1").
+And you can specify the ```dataset``` to use (default is ```"hemibrain:v1.2.1"```).
 
 ```python
 fc = FindNeuronConnection(
@@ -57,7 +57,7 @@ fc = FindNeuronConnection(
 '''
 ```
 
-If data_folder was not specified, all fetched data will be saved in the "connection_data" folder in the current directory. We highly recommand you to specify the data_folder to save all data in a specific directory. Then each time you run the codes, the data will be saved in a new folder with auto-generated name in the specified data_folder directory.
+If ```data_folder``` was not specified, all fetched data will be saved in the "connection_data" folder in the current directory. We highly recommand you to specify the ```data_folder``` to save all data in a specific directory. Then each time you run the codes, the data will be saved in a new folder with auto-generated name in the specified ```data_folder``` directory.
 
 ```python
 fc = FindNeuronConnection(
@@ -78,7 +78,7 @@ fc = FindNeuronConnection(
 )
 ```
 
-Source neurons and target neurons should be specified as bodyId, type, or instance (use regular expression to search for instances matching the regular expression). See details in the docstrings by hanging your cursor over the parameter name.
+Source neurons and target neurons should be specified as ```bodyId```, ```type```, or ```instance``` (use regular expression to search for instances matching the regular expression). See details in the docstrings by hanging your cursor over the parameter name.
 
 ```python
 fc = FindNeuronConnection(
@@ -110,7 +110,7 @@ fc = FindNeuronConnection(
 )
 ```
 
-In the min_synapse_num parameter, you can specify the minimum number of synapses between each pair of the connected neurons.
+In the ```min_synapse_num``` parameter, you can specify the minimum number of synapses between each pair of the connected neurons.
 
 ```python
 fc = FindNeuronConnection(
@@ -120,7 +120,7 @@ fc = FindNeuronConnection(
 )
 ```
 
-In the min_traversal_probability parameter, you can specify the minimum traversal probability between each pair of the connected neurons. This probability is calculated by the number of synapses between each pair of the connected neurons divided by the (30% total number) of input synapses of the downstream neuron. $p = max(1, w_{ij} / (W_j*0.3))$, where $w_{ij}$ is the number of synapses between neuron $i$ and $j$, and $W_j$ is the total number of input synapses of neuron $j$.
+In the ```min_traversal_probability``` parameter, you can specify the minimum traversal probability between each pair of the connected neurons. This probability is calculated by the number of synapses between each pair of the connected neurons divided by the (30% total number) of input synapses of the downstream neuron. $p = max(1, w_{ij} / (W_j*0.3))$, where $w_{ij}$ is the number of synapses between neuron $i$ and $j$, and $W_j$ is the total number of input synapses of neuron $j$.
 
 ```python
 fc = FindNeuronConnection(
@@ -130,7 +130,7 @@ fc = FindNeuronConnection(
 )
 ```
 
-If you want to show the figure of the connection matrix, set showfig to True, otherwise set it to False.
+If you want to show the figure of the connection matrix, set ```showfig``` to ```True```, otherwise set it to False.
 
 ```python
 fc = FindNeuronConnection(
@@ -142,14 +142,14 @@ fc = FindNeuronConnection(
 
 after specified necessary parameters, you can run the codes to find the direct connections between the source neurons and the target neurons.
 
-To find the direct connections, we call the FindNeuronConnection.InitializeNeuronInfo() method to initialize before running the FindNeuronConnection.FindDirectConnection() method.
+To find the direct connections, we call the ```FindNeuronConnection.InitializeNeuronInfo()``` method to initialize before running the ```FindNeuronConnection.FindDirectConnection()``` method.
 
 ```python
 fc.InitializeNeuronInfo()
 fc.FindDirectConnection()
 ```
 
-In the FindNeuronConnection.FindDirectConnection() method, you can specify the full_data parameter to True (defaulty False) to do clustering and other analysis on the connection data.
+In the ```FindNeuronConnection.FindDirectConnection()``` method, you can specify the ```full_data``` parameter to ```True``` (defaulty ```False```) to do clustering and other analysis on the connection data.
 
 ```python
 fc.FindDirectConnection(full_data=True) # defaultly, full_data is False
@@ -157,11 +157,83 @@ fc.FindDirectConnection(full_data=True) # defaultly, full_data is False
 
 ### FindPath.py
 
-use this function to find direct and indirect connection paths between the neuron clusters.
+Use this function to find direct and indirect connection paths between the neuron clusters.
+
+```python
+fc = FindNeuronConnection(
+    token='',
+    dataset = 'hemibrain:v1.2.1',
+    data_folder=R'D:\connectome_data',
+    sourceNeurons = ['.*_.*PN.*'], 
+    targetNeurons = ['MBON.*'], 
+    custom_source_name = '', 
+    custom_target_name = '',
+    min_synapse_num = 1,
+    min_traversal_probability = 0.001,
+    showfig = False,
+    max_interlayer=2,
+    keyword_in_path_to_remove=['None'],
+)
+```
+
+Comparing with the FindDirect.py, the call of FindNeuronConnection in FindPath.py uses two more parameters: ```max_interlayer``` and ```keyword_in_path_to_remove```.
+
+the max_interlayer parameter is used to specify the maximum number of layers between the source neurons and the target neurons to search for the indirect connection paths.
+
+The ```keyword_in_path_to_remove``` parameter is used to specify the keywords in the indirect connection paths to remove. For example, if you want to remove the paths that contain the keyword 'None', you can set the ```keyword_in_path_to_remove``` parameter to ['None'] (most neurons in the dataset are not labels, which has a type of "None" in the found paths). If you want to remove paths containing the APL neuron and the "None" neurons, you can set the ```keyword_in_path_to_remove``` parameter to ['APL','None'].
+
+```python
+fc = FindNeuronConnection(
+    ... # other parameters
+    max_interlayer=2, # default is 2
+    keyword_in_path_to_remove=['APL', 'None'],
+    ... # other parameters
+)
+```
+
+Optionally, there are more parameters you can specify in the ```FindNeuronConnection``` call.
 
 ### plot3dSkeleton.py
 
-use this function to plot the 3D skeleton of the neuron clusters at different layers, you can also input a single layer to plot the skeleton of all the neurons in that layer.
+Use this function to plot the 3D skeleton of the neuron clusters at different layers, you can also input a single layer to plot the skeleton of all the neurons in that layer.
+
+We use ```statvis.LogInHemibrain()``` to provide your token and specify the dataset.
+
+```python
+import statvis as sv
+sv.LogInHemibrain(token='', dataset='hemibrain:v1.2.1')
+```
+
+Then, by calling the ```VisualizeSkeleton``` class, we can initialize the parameters for plotting the 3D skeleton.
+
+```python
+from coana import VisualizeSkeleton as vs
+vs = VisualizeSkeleton(
+    data_folder = R'',
+    neuron_layers = ['VA1d_adPN', 'LHCENT3', 'MBON01'], # or in the format: 'VA1d_adPN -> LHCENT3 -> MBON01'
+    custom_layer_names = ['VA1d PN', 'my LHN', 'MBON_1'],
+    neuron_alpha = 0.2,
+    saveas = None,
+    min_synapse_num = 1,
+    synapse_size = 3,
+    synapse_alpha = 0.6,
+    mesh_roi = ['LH(R)','AL(R)','EB','gL(R)'],
+    skeleton_mode = 'tube',
+    synapse_mode = 'scatter',
+    legend_mode = 'merge',
+    use_size_slider = True,
+    show_fig = True,
+)
+```
+
+After that, we use the ```plot_neuron()``` method to plot the 3D skeleton. and export the 3-D skeleton to a video with rotating objects by using the ```export_video()``` method. See details in the docstrings of the methods.
+
+```python
+vs.plot_neurons()
+vs.export_video(fps=30,rotate_plane='xy',synapse_size=2,scale=2,)
+```
+
+parameters of the ```export_video()``` determines the properties of the video.
 
 ## Installation: For users who can prepare the python environments by themselves
 
