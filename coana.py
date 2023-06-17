@@ -520,6 +520,9 @@ class FindNeuronConnection():
             path_df_bodyId,_ = sv.getAllPath(conn_data = conn_inpath,
                                         targets = self.target_df.loc[self.target_df.Checked,'bodyId'].tolist(),
                                         traversal_probability_threshold = self.min_traversal_probability)
+            if len(path_df_bodyId) > 1048575:
+                path_df_bodyId = path_df_bodyId.iloc[:1048575,:]
+                print('\033[33mWarning: Excel has a limit of 1048576 rows, only the first 1048575 rows are saved.\033[0m')
             with pd.ExcelWriter(output_excel_name, mode='a', engine='openpyxl') as writer:
                 path_df_bodyId.to_excel(writer,sheet_name='path_bodyId')
         
