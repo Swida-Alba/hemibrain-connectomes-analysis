@@ -1105,7 +1105,7 @@ class VisualizeSkeleton:
                 mode = 'w'
             else:
                 mode = 'a'
-            with pd.ExcelWriter(file_path,mode=mode) as writer:
+            with pd.ExcelWriter(file_path,mode=mode,engine='openpyxl') as writer:
                 self.neuron_dfs[i].to_excel(writer, sheet_name=f'neuron_df{i}')
                 self.roi_dfs[i].to_excel(writer, sheet_name=f'roi_count_df{i}')
     
@@ -1163,7 +1163,7 @@ class VisualizeSkeleton:
                 mode = 'w'
             else:
                 mode = 'a'
-            with pd.ExcelWriter(file_path, mode=mode) as writer:
+            with pd.ExcelWriter(file_path, mode=mode, engine='openpyxl') as writer:
                 conn_df.to_excel(writer, sheet_name=f'conn_df{i}_{i+1}')
             
             print('plotting...', end='')
