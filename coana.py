@@ -880,8 +880,11 @@ class VisualizeSkeleton:
     data_folder: str = os.path.join(script_path, 'connection_data')
     '''folder to save all data'''
     
-    save_folder: str = '' # initialized in __post_init__
-    '''folder to save the current data'''
+    save_folder: str = '' 
+    '''
+    folder to save the current data
+    # initialized in __post_init__, not customizable
+    # You can set the "saveas" parameter to customize the folder name'''
 
     neuron_layers: str | list = ''
     '''
@@ -902,9 +905,15 @@ class VisualizeSkeleton:
     '''filename to save the plot, if an absolute path is given, ignore data_folder'''
 
     neuron_colors: tuple = bokeh.palettes.Category10[10]
-    '''colors of neuron layers to plot'''
+    '''
+    colors of neuron layers to plot \n
+    list of colors, each item for each layer, i.e., item i for layer i, and item i can be a list of colors for each neuron in layer i, or a single color for all neurons in layer i \n
+    if you want to assign different colors to different neurons in the same layer, the color list should be the same length as the number of neurons in the layer. \n
+    color format: 'red', '#ff0000', (255,0,0), or a dict mapping bodyId to color, {bodyId: color}. \n
+    See https://navis.readthedocs.io/en/latest/source/tutorials/generated/navis.plot3d.html#navis.plot3d for more details.
+    '''
 
-    neuron_alpha: float = 0.3
+    neuron_alpha: float = 0.2
     '''alpha of neuron, only works when the radius of neuron exists (show_skeleton_radius=True)'''
 
     synapse_colors: tuple = bokeh.palettes.Category10[10]
@@ -1035,6 +1044,11 @@ class VisualizeSkeleton:
     'normal': show legend for individual neurons\n
     'merge': merge all neurons in the same layer and show legend for each layer\n
     '''
+    
+    hemibrain_mesh: bool = False
+    ''' whether to plot the hemibrain mesh, if True, plot the hemibrain mesh, else only plot the meshes in mesh_roi'''
+    
+    hemibrain_mesh_color: tuple = (200, 230, 240, 0.05)
 
     def __post_init__(self):
         if self.synapse_mode not in ['scatter', 'sphere']:
@@ -1090,10 +1104,11 @@ class VisualizeSkeleton:
             self.layer_names.append(auto_name)
         print('Fetched neuron layers')
 
-        if self.saveas is None:
-            self.saveas = '_'.join(self.layer_names)
+        
         if self.custom_layer_names:
             self.layer_names = self.custom_layer_names
+        if self.saveas is None:
+            self.saveas = '_'.join(self.layer_names)
         self.save_folder = os.path.join(self.data_folder, 'plot3d_' + self.saveas.split('.')[0])
         if not os.path.exists(self.save_folder): os.makedirs(self.save_folder)
         self.fig_3d = go.Figure()
@@ -1216,7 +1231,7 @@ class VisualizeSkeleton:
         # roimesh = navis.Volume.combine(roiunits)
         # roimesh.color = options['mesh_color']
         
-        print('plotting mesh of ROIs...',end='')
+        print('plotting mesh of rois...')
         for roi_i in range(len(roiunits)):
             if type(self.mesh_color) == list:
                 roiunits[roi_i].color = self.mesh_color[roi_i]
@@ -1224,13 +1239,32 @@ class VisualizeSkeleton:
                 roiunits[roi_i].color = self.mesh_color
             fig_mesh = navis.plot3d(roiunits[roi_i],backend='plotly')
             mesh_traces = fig_mesh.data
-            for trace in mesh_traces:
-                trace.showlegend = False
-                trace.legendgroup = self.mesh_roi[roi_i]
-                trace.name = self.mesh_roi[roi_i]
-                trace.hoverinfo = 'name'
+            for ti, trace in enumerate(mesh_traces):
+                if self.legend_mode == 'merge':
+                    if ti == 0:
+                        trace.showlegend = True
+                    else:
+                        trace.showlegend = False
+                    trace.name = 'rois [' + self.mesh_roi[roi_i] + '...]'
+                    trace.legendgroup = 'roi_mesh'
+                    trace.hoverinfo = 'name'
+                elif self.legend_mode == 'normal':
+                    trace.showlegend = True
+                    trace.legendgroup = self.mesh_roi[roi_i]
+                    trace.name = 'rois [' + self.mesh_roi[roi_i] + '...]'
+                    trace.hoverinfo = 'name'
             self.fig_3d.add_traces(mesh_traces)
-        # navis.plot3d(roiunits,backend='plotly',fig=self.fig_3d)
+        if self.hemibrain_mesh:
+            print('generating hemibrain mesh...')
+            hemibrain_meshes = self.merge_mesh()
+            hemibrain_meshes.color = self.hemibrain_mesh_color
+            fig_hemi = navis.plot3d(hemibrain_meshes,backend='plotly')
+            hemi_traces = fig_hemi.data
+            for trace in hemi_traces:
+                trace.showlegend = True
+                trace.name = 'hemibrain'
+                trace.hoverinfo = 'none'
+            self.fig_3d.add_traces(hemi_traces)
         print('Done')
         return 0
     
@@ -1238,9 +1272,7 @@ class VisualizeSkeleton:
         mesh_units = []
         mesh_list = os.listdir(os.path.join('navis_roi_meshes_json','primary_rois'))
         for roi in mesh_list:
-            print(roi)
             mesh_file = os.path.join('navis_roi_meshes_json','primary_rois',roi)
-            print(mesh_file)
             if os.path.exists(mesh_file) and not os.path.basename(mesh_file).startswith('.'):
                 mesh = navis.Volume.from_json(mesh_file)
                 mesh_units.append(mesh)
@@ -1248,6 +1280,7 @@ class VisualizeSkeleton:
                 print('mesh file %s.json not found!'%(roi))
         roimesh = navis.Volume.combine(mesh_units)
         roimesh.to_json(os.path.join('navis_roi_meshes_json','merged.json'))
+        return roimesh
     
     def save_figure(self):
         # add sliders
@@ -1371,7 +1404,7 @@ class VisualizeSkeleton:
                 fig_new.update_layout(scene_camera=dict(eye=dict(x=0, y=x, z=y)))
             elif rotate_plane == 'xz':
                 fig_new.update_layout(scene_camera=dict(eye=dict(x=x, y=0, z=y)))
-            fig_path = os.path.join(pic_folder,f'deg_{deg:1f}.jpeg')
+            fig_path = os.path.join(pic_folder,f'deg_{deg:.1f}.jpeg')
             fig_new.write_image(fig_path,**kwargs)
             cv2.waitKey(2000)
             ti = time.time()
@@ -1386,7 +1419,7 @@ class VisualizeSkeleton:
         out = cv2.VideoWriter(
             video_dir, cv2.VideoWriter_fourcc(*'mp4v'), fps, frameSize=(width,height))
         for i,deg in enumerate(steps_to_write):
-            img = cv2.imread(os.path.join(pic_folder,f'deg_{deg:1f}.jpeg'))
+            img = cv2.imread(os.path.join(pic_folder,f'deg_{deg:.1f}.jpeg'))
             out.write(img)
             print(f'\rwriting forward video: {i+1}/{len(steps_to_write)}...',end='  ')
         out.release()
