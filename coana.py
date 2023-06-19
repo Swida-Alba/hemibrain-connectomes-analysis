@@ -1048,7 +1048,7 @@ class VisualizeSkeleton:
     hemibrain_mesh: bool = False
     ''' whether to plot the hemibrain mesh, if True, plot the hemibrain mesh, else only plot the meshes in mesh_roi'''
     
-    hemibrain_mesh_color: tuple = (200, 230, 240, 0.05)
+    hemibrain_mesh_color: str = 'rgba(200, 230, 240, 0.1)'
 
     def __post_init__(self):
         if self.synapse_mode not in ['scatter', 'sphere']:
@@ -1231,7 +1231,7 @@ class VisualizeSkeleton:
         # roimesh = navis.Volume.combine(roiunits)
         # roimesh.color = options['mesh_color']
         
-        print('plotting mesh of rois...')
+        print('plotting mesh of brain regions...')
         for roi_i in range(len(roiunits)):
             if type(self.mesh_color) == list:
                 roiunits[roi_i].color = self.mesh_color[roi_i]
@@ -1251,18 +1251,19 @@ class VisualizeSkeleton:
                     trace.legendgroup = self.mesh_roi[roi_i]
                 trace.hovertemplate = '<b>%{fullData.name}</b><extra></extra>'  # show full name in hover tooltip
                 trace.hoverinfo = 'name'
-                trace.name = 'rois [' + self.mesh_roi[roi_i] + '...]'
+                trace.name = 'brain regions [' + self.mesh_roi[roi_i] + '...]'
             self.fig_3d.add_traces(mesh_traces)
         if self.hemibrain_mesh:
+            import flybrains
             print('generating hemibrain mesh...')
-            hemibrain_meshes = self.merge_mesh()
-            hemibrain_meshes.color = self.hemibrain_mesh_color
-            fig_hemi = navis.plot3d(hemibrain_meshes,backend='plotly')
+            hemibrain_mesh = flybrains.JRCFIB2018Fraw
+            fig_hemi = navis.plot3d(hemibrain_mesh,backend='plotly')
             hemi_traces = fig_hemi.data
             for trace in hemi_traces:
                 trace.showlegend = True
                 trace.name = 'hemibrain'
                 trace.hoverinfo = 'none'
+                trace.color = self.hemibrain_mesh_color
             self.fig_3d.add_traces(hemi_traces)
         print('Done')
         return 0
