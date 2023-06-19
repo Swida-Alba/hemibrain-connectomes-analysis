@@ -1245,14 +1245,13 @@ class VisualizeSkeleton:
                         trace.showlegend = True
                     else:
                         trace.showlegend = False
-                    trace.name = 'rois [' + self.mesh_roi[roi_i] + '...]'
                     trace.legendgroup = 'roi_mesh'
-                    trace.hoverinfo = 'name'
                 elif self.legend_mode == 'normal':
                     trace.showlegend = True
                     trace.legendgroup = self.mesh_roi[roi_i]
-                    trace.name = 'rois [' + self.mesh_roi[roi_i] + '...]'
-                    trace.hoverinfo = 'name'
+                trace.hovertemplate = '<b>%{fullData.name}</b><extra></extra>'  # show full name in hover tooltip
+                trace.hoverinfo = 'name'
+                trace.name = 'rois [' + self.mesh_roi[roi_i] + '...]'
             self.fig_3d.add_traces(mesh_traces)
         if self.hemibrain_mesh:
             print('generating hemibrain mesh...')
