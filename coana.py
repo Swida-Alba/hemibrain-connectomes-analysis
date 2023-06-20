@@ -1075,13 +1075,15 @@ class VisualizeSkeleton:
                     self.neuron_layers[i] = int(layer)
         
         if self.synapse_mode == 'scatter' and self.synapse_size == 0:
-            self.synapse_size = 3
-        elif self.synapse_mode == 'sphere' and self.synapse_size < 100:
-            self.synapse_size = 100
+            self.synapse_size = 2
+        elif self.synapse_mode == 'sphere':
+            if self.synapse_size < 100:
+                self.synapse_size = 100
+                print('\033[33mSynapse size is too small (< 100) for sphere mode, automatically reset to 100\033[0m')
             if self.use_size_slider:
                 self.use_size_slider = False
-                print('\033[33msize slider is not available for synapse_mode="sphere", automatically reset to False\033[0m')
-            print('\033[33mSynapse size is too small (< 100) for sphere mode, automatically reset to 100\033[0m')
+                print('\033[33msize slider is not available for synapse_mode="sphere", automatically reset use_size_slider to False\033[0m')
+            
         
         if not self.mesh_roi:
             self.mesh_roi = ['LH(R)','AL(R)','EB']
