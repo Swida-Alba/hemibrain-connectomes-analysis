@@ -1429,7 +1429,7 @@ class VisualizeSkeleton:
         out = cv2.VideoWriter(
             video_dir, cv2.VideoWriter_fourcc(*'mp4v'), fps, frameSize=(width,height))
         for i,deg in enumerate(steps_to_write[::-1]):
-            img = cv2.imread(os.path.join(pic_folder,f'deg_{deg:1f}.jpeg'))
+            img = cv2.imread(os.path.join(pic_folder,f'deg_{deg:.1f}.jpeg'))
             out.write(img)
             print(f'\rwriting backward video: {i+1}/{len(steps_to_write)}...',end='  ')
         out.release()
