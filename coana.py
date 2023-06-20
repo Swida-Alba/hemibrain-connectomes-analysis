@@ -943,6 +943,7 @@ class VisualizeSkeleton:
     '''
     meshes of brain ROIs to plot\n
     defaultly use ['LH(R)', 'AL(R)', 'EB'] to mark the position of the brain\n
+    if you want to show the whole hemibrain, see show_hemibrain_mesh parameter. \n
     Available meshes: \n
     a'L(L) \n
     a'L(R) \n   
@@ -1045,10 +1046,18 @@ class VisualizeSkeleton:
     'merge': merge all neurons in the same layer and show legend for each layer\n
     '''
     
-    hemibrain_mesh: bool = False
-    ''' whether to plot the hemibrain mesh, if True, plot the hemibrain mesh, else only plot the meshes in mesh_roi'''
+    show_hemibrain_mesh: bool = False
+    ''' 
+    whether to plot the hemibrain mesh, if True, plot the hemibrain mesh, else only plot the meshes in mesh_roi \n
+    change the color of hemibrain mesh by hemibrain_mesh_color parameter \n
+    '''
     
     hemibrain_mesh_color: str = 'rgba(200, 230, 240, 0.1)'
+    ''' 
+    color of the hemibrain mesh, only works when show_hemibrain_mesh = True \n
+    e.g. 'rgba(200, 230, 240, 0.1)' \n
+    see more at https://plotly.com/python/discrete-color/ \n
+    '''
 
     def __post_init__(self):
         if self.synapse_mode not in ['scatter', 'sphere']:
@@ -1253,11 +1262,11 @@ class VisualizeSkeleton:
                 trace.hoverinfo = 'name'
                 trace.name = 'brain regions [' + self.mesh_roi[roi_i] + '...]'
             self.fig_3d.add_traces(mesh_traces)
-        if self.hemibrain_mesh:
+        if self.show_hemibrain_mesh:
             import flybrains
             print('generating hemibrain mesh...')
-            hemibrain_mesh = flybrains.JRCFIB2018Fraw
-            fig_hemi = navis.plot3d(hemibrain_mesh,backend='plotly')
+            show_hemibrain_mesh = flybrains.JRCFIB2018Fraw
+            fig_hemi = navis.plot3d(show_hemibrain_mesh,backend='plotly')
             hemi_traces = fig_hemi.data
             for trace in hemi_traces:
                 trace.showlegend = True
