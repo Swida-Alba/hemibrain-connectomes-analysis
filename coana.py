@@ -1264,7 +1264,7 @@ class VisualizeSkeleton:
             self.fig_3d.add_traces(mesh_traces)
         if self.show_hemibrain_mesh:
             import flybrains
-            print('generating hemibrain mesh...')
+            print('plotting hemibrain mesh...')
             show_hemibrain_mesh = flybrains.JRCFIB2018Fraw
             fig_hemi = navis.plot3d(show_hemibrain_mesh,backend='plotly')
             hemi_traces = fig_hemi.data
@@ -1288,7 +1288,7 @@ class VisualizeSkeleton:
             else:
                 print('mesh file %s.json not found!'%(roi))
         roimesh = navis.Volume.combine(mesh_units)
-        roimesh.to_json(os.path.join('navis_roi_meshes_json','merged.json'))
+        # roimesh.to_json(os.path.join('navis_roi_meshes_json','merged.json'))
         return roimesh
     
     def save_figure(self):
