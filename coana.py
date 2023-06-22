@@ -1075,13 +1075,15 @@ class VisualizeSkeleton:
                     self.neuron_layers[i] = int(layer)
         
         if self.synapse_mode == 'scatter' and self.synapse_size == 0:
-            self.synapse_size = 3
-        elif self.synapse_mode == 'sphere' and self.synapse_size < 100:
-            self.synapse_size = 100
+            self.synapse_size = 2
+        elif self.synapse_mode == 'sphere':
+            if self.synapse_size < 100:
+                self.synapse_size = 100
+                print('\033[33mSynapse size is too small (< 100) for sphere mode, automatically reset to 100\033[0m')
             if self.use_size_slider:
                 self.use_size_slider = False
-                print('\033[33msize slider is not available for synapse_mode="sphere", automatically reset to False\033[0m')
-            print('\033[33mSynapse size is too small (< 100) for sphere mode, automatically reset to 100\033[0m')
+                print('\033[33msize slider is not available for synapse_mode="sphere", automatically reset use_size_slider to False\033[0m')
+            
         
         if not self.mesh_roi:
             self.mesh_roi = ['LH(R)','AL(R)','EB']
@@ -1264,7 +1266,7 @@ class VisualizeSkeleton:
             self.fig_3d.add_traces(mesh_traces)
         if self.show_hemibrain_mesh:
             import flybrains
-            print('generating hemibrain mesh...')
+            print('plotting hemibrain mesh...')
             show_hemibrain_mesh = flybrains.JRCFIB2018Fraw
             fig_hemi = navis.plot3d(show_hemibrain_mesh,backend='plotly')
             hemi_traces = fig_hemi.data
@@ -1288,7 +1290,7 @@ class VisualizeSkeleton:
             else:
                 print('mesh file %s.json not found!'%(roi))
         roimesh = navis.Volume.combine(mesh_units)
-        roimesh.to_json(os.path.join('navis_roi_meshes_json','merged.json'))
+        # roimesh.to_json(os.path.join('navis_roi_meshes_json','merged.json'))
         return roimesh
     
     def save_figure(self):
