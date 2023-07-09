@@ -1050,7 +1050,7 @@ class VisualizeSkeleton:
     brain_mesh: bool = 'none'
     ''' 
     brain_mesh = 'none', only plot the meshes in mesh_roi \n
-    brain_mesh = 'whole', plot the whole brain mesh. Run flybrains.download_jrc_transforms() for setup, see https://github.com/navis-org/navis-flybrains \n
+    brain_mesh = 'whole', plot the whole brain mesh. Run flybrains.download_jrc_transforms() to download the transformations, see https://github.com/navis-org/navis-flybrains \n
     brain_mesh = 'hemi', plot the hemibrain mesh \n
     change the color of hemibrain mesh by brain_mesh_color parameter \n
     '''
@@ -1144,7 +1144,11 @@ class VisualizeSkeleton:
             neuron_vols = neu.fetch_skeletons(self.neuron_dfs[i],with_synapses=self.show_connectors)
             if self.brain_mesh == 'whole':
                 print(f'Transforming skeletons of layer {i}...', end='')
-                neuron_vols = navis.xform_brain(neuron_vols, source='JRCFIB2018Fraw', target='JRC2018F')
+                try:
+                    neuron_vols = navis.xform_brain(neuron_vols, source='JRCFIB2018Fraw', target='JRC2018F')
+                except:
+                    print('\033[33mTransforming skeletons failed. Please install transformations at first. Run flybrains.download_jrc_transforms() to download the transformations. See https://github.com/navis-org/navis-flybrains for more details\n\nbrain_mesh is automatically reset to "none"\n\033[0m')
+                    self.brain_mesh = 'none'
             print('plotting...', end='')
             fig_layer = navis.plot3d(
                 neuron_vols,
@@ -1324,7 +1328,7 @@ class VisualizeSkeleton:
         if self.brain_mesh == 'hemi' or self.brain_mesh == 'none':
             scene_camera_parameters = dict(
                 up=dict(x=0, y=0, z=-1),
-                eye=dict(x=0, y=1.4, z=0),
+                eye=dict(x=0, y=1.6, z=0),
                 center=dict(x=0, y=0, z=0),
             )
         elif self.brain_mesh == 'whole':
