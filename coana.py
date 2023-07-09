@@ -13,7 +13,7 @@ import navis.interfaces.neuprint as neu
 import networkx as nx
 import numpy as np
 import pandas as pd
-import plotly.io
+import flybrains
 import plotly.graph_objects as go
 import seaborn as sns
 from neuprint import *
@@ -943,7 +943,8 @@ class VisualizeSkeleton:
     '''
     meshes of brain ROIs to plot\n
     defaultly use ['LH(R)', 'AL(R)', 'EB'] to mark the position of the brain\n
-    if you want to show the whole hemibrain, see show_hemibrain_mesh parameter. \n
+    if you want to show the whole brain or hemibrain, see brain_mesh parameter. \n
+    hide all meshes by setting mesh_roi = None \n
     Available meshes: \n
     a'L(L) \n
     a'L(R) \n   
@@ -1046,15 +1047,17 @@ class VisualizeSkeleton:
     'merge': merge all neurons in the same layer and show legend for each layer\n
     '''
     
-    show_hemibrain_mesh: bool = False
+    brain_mesh: bool = 'none'
     ''' 
-    whether to plot the hemibrain mesh, if True, plot the hemibrain mesh, else only plot the meshes in mesh_roi \n
-    change the color of hemibrain mesh by hemibrain_mesh_color parameter \n
+    brain_mesh = 'none', only plot the meshes in mesh_roi \n
+    brain_mesh = 'whole', plot the whole brain mesh. Run flybrains.download_jrc_transforms() for setup, see https://github.com/navis-org/navis-flybrains \n
+    brain_mesh = 'hemi', plot the hemibrain mesh \n
+    change the color of hemibrain mesh by brain_mesh_color parameter \n
     '''
     
-    hemibrain_mesh_color: str = 'rgba(200, 230, 240, 0.1)'
+    brain_mesh_color: str = 'rgba(200, 230, 240, 0.1)'
     ''' 
-    color of the hemibrain mesh, only works when show_hemibrain_mesh = True \n
+    color of the hemibrain mesh, only works when brain_mesh = 'whole' or 'hemi' \n
     e.g. 'rgba(200, 230, 240, 0.1)' \n
     see more at https://plotly.com/python/discrete-color/ \n
     '''
@@ -1066,6 +1069,8 @@ class VisualizeSkeleton:
             raise ValueError('legend_mode can only be "normal" or "merge"')
         if self.skeleton_mode not in ['line','tube']:
             raise ValueError('skeleton_mode can only be "line" or "tube"')
+        if self.brain_mesh not in ['none', 'whole', 'hemi']:
+            raise ValueError('brain_mesh can only be "none", "whole" or "hemi"')
         
         # convert neuron_layers str to list, if is str
         if type(self.neuron_layers) is str:
@@ -1077,20 +1082,18 @@ class VisualizeSkeleton:
         if self.synapse_mode == 'scatter' and self.synapse_size == 0:
             self.synapse_size = 2
         elif self.synapse_mode == 'sphere':
-            if self.synapse_size < 100:
+            if self.synapse_size < 100 and self.brain_mesh != 'whole':
                 self.synapse_size = 100
                 print('\033[33mSynapse size is too small (< 100) for sphere mode, automatically reset to 100\033[0m')
             if self.use_size_slider:
                 self.use_size_slider = False
                 print('\033[33msize slider is not available for synapse_mode="sphere", automatically reset use_size_slider to False\033[0m')
             
+        if self.mesh_roi == None:
+            self.mesh_roi = []
         
-        if not self.mesh_roi:
-            self.mesh_roi = ['LH(R)','AL(R)','EB']
-        
-        if len(self.neuron_layers) < len(self.neuron_colors): 
+        if len(self.neuron_layers) <= len(self.neuron_colors): 
             self.neuron_colors = self.neuron_colors[:len(self.neuron_layers)]
-        if len(self.neuron_layers)-1 < len(self.synapse_colors):
             self.synapse_colors = self.synapse_colors[:len(self.neuron_layers)-1]
 
         if self.skeleton_mode == 'line':
@@ -1139,6 +1142,9 @@ class VisualizeSkeleton:
         for i in range(len(self.neuron_layers)):
             print(f'fetching skeletons of layer {i}...')
             neuron_vols = neu.fetch_skeletons(self.neuron_dfs[i],with_synapses=self.show_connectors)
+            if self.brain_mesh == 'whole':
+                print(f'Transforming skeletons of layer {i}...', end='')
+                neuron_vols = navis.xform_brain(neuron_vols, source='JRCFIB2018Fraw', target='JRC2018F')
             print('plotting...', end='')
             fig_layer = navis.plot3d(
                 neuron_vols,
@@ -1196,11 +1202,15 @@ class VisualizeSkeleton:
             X = (conn_df['x_pre']+conn_df['x_post'])/2
             Y = (conn_df['y_pre']+conn_df['y_post'])/2
             Z = (conn_df['z_pre']+conn_df['z_post'])/2
+            xyz_df = pd.DataFrame({'x':X, 'y':Y, 'z':Z})
+            if self.brain_mesh == 'whole':
+                print(f'Transforming synapses of layer {i} -> {i+1}...', end='')
+                xyz_df = navis.xform_brain(xyz_df, source='JRCFIB2018Fraw', target='JRC2018F')
             if self.synapse_mode == 'scatter':
                 sp = go.Scatter3d(
-                    x = X,
-                    y = Y,
-                    z = Z,
+                    x = xyz_df['x'],
+                    y = xyz_df['y'],
+                    z = xyz_df['z'],
                     mode = 'markers',
                     name = f'synapses {i} -> {i+1} ({len(conn_df)})',
                     hoverinfo = 'name',
@@ -1214,10 +1224,10 @@ class VisualizeSkeleton:
                 )
                 self.fig_3d.add_trace(sp)
             elif self.synapse_mode == 'sphere':
-                for ind in range(len(X)):
-                    x = X[ind]
-                    y = Y[ind]
-                    z = Z[ind]
+                for ind in range(len(xyz_df)):
+                    x = xyz_df['x'][ind]
+                    y = xyz_df['y'][ind]
+                    z = xyz_df['z'][ind]
                     sp = sv.build_sphere(x,y,z,r=self.synapse_size,color_scale=[self.synapse_colors[i]]*2,opacity=self.synapse_alpha)
                     sp.name = f'synapses {i} -> {i+1} ({len(conn_df)})'
                     sp.hoverinfo = 'name'
@@ -1236,12 +1246,12 @@ class VisualizeSkeleton:
             mesh_file = os.path.join(self.script_path, 'navis_roi_meshes_json','primary_rois',roi+'.json')
             if os.path.exists(mesh_file):
                 mesh = navis.Volume.from_json(mesh_file)
+                if self.brain_mesh == 'whole':
+                    print(f'Transforming brain region {roi}...', end='')
+                    mesh = navis.xform_brain(mesh, source='JRCFIB2018Fraw', target='JRC2018F')
                 roiunits.append(mesh)
             else:
-                print('mesh file %s.json not found!'%(roi))
-        # roimesh = navis.Volume.combine(roiunits)
-        # roimesh.color = options['mesh_color']
-        
+                print(f'mesh file {roi}.json not found!')
         print('plotting mesh of brain regions...')
         for roi_i in range(len(roiunits)):
             if type(self.mesh_color) == list:
@@ -1264,34 +1274,30 @@ class VisualizeSkeleton:
                 trace.hoverinfo = 'name'
                 trace.name = 'brain regions [' + self.mesh_roi[roi_i] + '...]'
             self.fig_3d.add_traces(mesh_traces)
-        if self.show_hemibrain_mesh:
-            import flybrains
+        if self.brain_mesh == 'hemi':
             print('plotting hemibrain mesh...')
-            show_hemibrain_mesh = flybrains.JRCFIB2018Fraw
-            fig_hemi = navis.plot3d(show_hemibrain_mesh,backend='plotly')
+            brain_meshes = flybrains.JRCFIB2018Fraw
+            fig_hemi = navis.plot3d(brain_meshes,backend='plotly')
             hemi_traces = fig_hemi.data
             for trace in hemi_traces:
                 trace.showlegend = True
                 trace.name = 'hemibrain'
                 trace.hoverinfo = 'none'
-                trace.color = self.hemibrain_mesh_color
+                trace.color = self.brain_mesh_color
             self.fig_3d.add_traces(hemi_traces)
+        if self.brain_mesh == 'whole':
+            print('plotting whole brain mesh...')
+            brain_meshes = flybrains.JRC2018F
+            fig_whole = navis.plot3d(brain_meshes,backend='plotly')
+            whole_traces = fig_whole.data
+            for trace in whole_traces:
+                trace.showlegend = True
+                trace.name = 'whole brain'
+                trace.hoverinfo = 'none'
+                trace.color = self.brain_mesh_color
+            self.fig_3d.add_traces(whole_traces)
         print('Done')
         return 0
-    
-    def merge_mesh(self):
-        mesh_units = []
-        mesh_list = os.listdir(os.path.join('navis_roi_meshes_json','primary_rois'))
-        for roi in mesh_list:
-            mesh_file = os.path.join('navis_roi_meshes_json','primary_rois',roi)
-            if os.path.exists(mesh_file) and not os.path.basename(mesh_file).startswith('.'):
-                mesh = navis.Volume.from_json(mesh_file)
-                mesh_units.append(mesh)
-            else:
-                print('mesh file %s.json not found!'%(roi))
-        roimesh = navis.Volume.combine(mesh_units)
-        # roimesh.to_json(os.path.join('navis_roi_meshes_json','merged.json'))
-        return roimesh
     
     def save_figure(self):
         # add sliders
@@ -1315,6 +1321,19 @@ class VisualizeSkeleton:
             sliders = []
         
         # set layout
+        if self.brain_mesh == 'hemi' or self.brain_mesh == 'none':
+            scene_camera_parameters = dict(
+                up=dict(x=0, y=0, z=-1),
+                eye=dict(x=0, y=1.4, z=0),
+                center=dict(x=0, y=0, z=0),
+            )
+        elif self.brain_mesh == 'whole':
+            scene_camera_parameters = dict(
+                up=dict(x=0, y=-1, z=0),
+                eye=dict(x=0, y=0, z=-1.0),
+                center=dict(x=0, y=0, z=0),
+            )
+        
         self.fig_3d.update_layout(
             colorway = self.synapse_colors,
             sliders=sliders,
@@ -1324,11 +1343,7 @@ class VisualizeSkeleton:
                 yaxis={'visible':False},
                 zaxis={'visible':False},
             ),
-            scene_camera=dict(
-                up=dict(x=0, y=0, z=-1),
-                eye=dict(x=0, y=1.5, z=0),
-                center=dict(x=0, y=0, z=0),
-            ),
+            scene_camera=scene_camera_parameters,
         )
 
         # save figure
@@ -1343,7 +1358,7 @@ class VisualizeSkeleton:
         self.plot_mesh()
         self.save_figure()
         
-    def export_video(self, fps=30, rotate_plane='xy', view_distance=1.6, synapse_size=1,**kwargs):
+    def export_video(self, fps=30, rotate_plane=None, view_direction = None, view_distance=None, synapse_size=1,**kwargs):
         '''
         export the rotating 3-D object to a video. rendering is slow, it helps to visualize complex objects and the video file is more portable and versatile.
         
@@ -1351,9 +1366,11 @@ class VisualizeSkeleton:
         
         fps: default 30
             frames per second, also determines the step size of rotation, 30 degrees per second.
-        rotate_plane: default 'xy'
+        rotate_plane: default 'xy' for hemibrain, 'xz' for transformed whole brain mesh
             the plane to rotate the object. can be 'xy', 'xz', 'yz'.
-        view_distance: default 1.6,
+        view_direction: default (1, 1) or (1, -1) depending on the brain mesh
+            the direction of the camera. can be (1, 1), (1, -1), (-1, 1), (-1, -1).
+        view_distance: default 1.6 or 2.2 depending on the brain mesh
             the relative distance between the camera and the center of the object.
         synapse_size: default 1,
             the size of the synapse markers.
@@ -1361,7 +1378,24 @@ class VisualizeSkeleton:
             In the kwargs, you can use "scale" to set the resolution of the video (e.g. scale=2 doubles the resolution), or set "width" and "height" to specific values.
             recommended values for scale: 2
         '''
+        if rotate_plane is None:
+            if self.brain_mesh == 'hemi' or self.brain_mesh == 'none':
+                rotate_plane = 'xy'
+            elif self.brain_mesh == 'whole':
+                rotate_plane = 'xz'
+        if view_direction is None:
+            if self.brain_mesh == 'hemi' or self.brain_mesh == 'none':
+                view_direction = (1, 1)
+            elif self.brain_mesh == 'whole':
+                view_direction = (1, -1)
+        if view_distance is None:
+            if self.brain_mesh == 'hemi' or self.brain_mesh == 'none':
+                view_distance = 1.6
+            elif self.brain_mesh == 'whole':
+                view_distance = 2.2
         
+        if kwargs.get('scale') is None and kwargs.get('width') is None and kwargs.get('height') is None:
+            kwargs['scale'] = 2
         kwargs.update(kwargs)
         step = 30 / fps
         html_size = os.path.getsize(self.fig_path+'.html') / 1024 / 1024 # in MB
@@ -1383,6 +1417,17 @@ class VisualizeSkeleton:
             ),
         )
         fig_new = go.Figure(data=fig_traces, layout=fig_layout)
+        
+        if self.brain_mesh == 'hemi' or self.brain_mesh == 'none':
+            scene_camera_parameters = dict(
+                up=dict(x=0, y=0, z=-1),
+                eye=dict(x=0, y=view_distance, z=0),
+            )
+        elif self.brain_mesh == 'whole':
+            scene_camera_parameters = dict(
+                up=dict(x=0, y=-1, z=0),
+                eye=dict(x=0, y=0, z=-view_distance),
+            )
         fig_new.update_layout(
             sliders=[], # remove sliders
             scene=dict(
@@ -1391,11 +1436,9 @@ class VisualizeSkeleton:
                 yaxis={'visible':False},
                 zaxis={'visible':False},
             ),
-            scene_camera=dict(
-                up=dict(x=0, y=0, z=-1),
-                eye=dict(x=0, y=view_distance, z=0),
-            ),
+            scene_camera=scene_camera_parameters,
         )
+        
         pic_folder = os.path.join(self.save_folder,f'pics_{fps}fps_{rotate_plane}')
         if os.path.exists(pic_folder):
             shutil.rmtree(pic_folder)
@@ -1407,8 +1450,8 @@ class VisualizeSkeleton:
         t0 = time.time()
         for i,deg in enumerate(steps_to_write):
             rad_i = np.deg2rad(deg)
-            x = view_distance * np.sin(rad_i)
-            y = view_distance * np.cos(rad_i)
+            x = view_distance * np.sin(rad_i) * view_direction[0]
+            y = view_distance * np.cos(rad_i) * view_direction[1]
             if rotate_plane == 'xy':
                 fig_new.update_layout(scene_camera=dict(eye=dict(x=x, y=y, z=0)))
             elif rotate_plane == 'yz':
