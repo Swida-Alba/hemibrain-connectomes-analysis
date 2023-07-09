@@ -649,7 +649,7 @@ class FindNeuronConnection:
         fig_bodyId.update_layout(title_text='Sankey diagram of connection map<br>based on neuron bodyId',font_size=6)
         fig_bodyId.write_html(os.path.join(self.path_folder,'Sankey_bodyId_snp'+str(self.min_synapse_num)+'.html'), auto_open=self.showfig)
     
-    def ROImat(self, requiredNeurons: list = None, folder_name: str = None, site: str = 'post', break_threshod: int = 1e3):
+    def ROImat(self, requiredNeurons: list = None, folder_name: str = None, site: str = 'post', break_threshod: int = 1e3, roi_list = None, roi_name = None):
         """ get the distribution matrix of ROI by the given site of neurons.
         
         Only the R hemisphere is considered.
@@ -658,6 +658,8 @@ class FindNeuronConnection:
             requiredNeurons (list, optional): _description_. Defaults to self.sourceNeurons.
             folder_name (str, optional): _description_. Defaults to self.source_fname.
             break_threshod (int, optional): _description_. Defaults to 1e3. synapse number of one neuron, if synapse number is greater than the break_threshod, it will be breaked in the axis.
+            roi_list (list, optional): _description_. Defaults to None. if None, all the ROIs will be considered.
+            roi_name (list, optional): _description_. Defaults to None. if None, roi_name will be the same as roi_list except stripping the "(R)" suffix, that is, "AL(R)" -> "AL", "AL(L)" -> "AL(L)", "EB" -> "EB".
         """
         
         if requiredNeurons == None:
@@ -672,15 +674,18 @@ class FindNeuronConnection:
         rpath = os.path.join(self.data_folder, '_'.join(['roi_distribution',folder_name,site]))
         if not os.path.exists(rpath): os.makedirs(rpath)
         
-        roi_list = roi_count_df.roi.unique().tolist()
+        if roi_list is None:
+            roi_list = roi_count_df.roi.unique().tolist()
         roi_list.sort()
-        roi_name = [] # custom name corresponding to "roi" property
-        for roi in roi_list:
-            if '(R)' in roi:
-                name = roi[:-3]
-            else:
-                name = roi
-            roi_name.append(name)
+        
+        if roi_name is None:
+            roi_name = [] # custom name corresponding to "roi" property
+            for roi in roi_list:
+                if '(R)' in roi:
+                    name = roi[:-3]
+                else:
+                    name = roi
+                roi_name.append(name)
         
         # generate a template for the roi matrix
         distMat = pd.DataFrame(
