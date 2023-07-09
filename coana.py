@@ -255,7 +255,7 @@ class FindNeuronConnection:
             self.conn_df: pd.DataFrame = fetch_simple_connections(upstream_criteria=self.source_criteria, downstream_criteria=self.target_criteria, min_weight=self.min_synapse_num)
         else:
             neuron_df, roi_conn_df = fetch_adjacencies(sources=self.source_criteria,targets=self.target_criteria,min_total_weight=self.min_synapse_num)
-            conn_df = sv.merge_conn_roi(neuron_df, roi_conn_df)
+            self.conn_df = sv.merge_conn_roi(neuron_df, roi_conn_df)
         if self.conn_df.empty:
             print('\033[33mNo direct connections found.\033[0m\n')
             return
@@ -1350,6 +1350,7 @@ class VisualizeSkeleton:
         self.fig_path = os.path.join(self.save_folder,self.saveas)
         print(f'saving figure to \033[34m{self.fig_path}.html\033[0m...', end='')
         self.fig_3d.write_html(self.fig_path+'.html',auto_open=self.show_fig)
+        self.fig_3d.write_image(self.fig_path+'.png',scale=3)
         print('Done')
     
     def plot_neurons(self):
