@@ -1328,7 +1328,7 @@ class VisualizeSkeleton:
         if self.brain_mesh == 'hemi' or self.brain_mesh == 'none':
             scene_camera_parameters = dict(
                 up=dict(x=0, y=0, z=-1),
-                eye=dict(x=0, y=1.6, z=0),
+                eye=dict(x=0, y=1.4, z=0),
                 center=dict(x=0, y=0, z=0),
             )
         elif self.brain_mesh == 'whole':
@@ -1395,7 +1395,7 @@ class VisualizeSkeleton:
                 view_direction = (1, -1)
         if view_distance is None:
             if self.brain_mesh == 'hemi' or self.brain_mesh == 'none':
-                view_distance = 1.6
+                view_distance = 1.8
             elif self.brain_mesh == 'whole':
                 view_distance = 2.2
         
