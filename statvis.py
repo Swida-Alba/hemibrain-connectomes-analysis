@@ -769,7 +769,7 @@ def fetchSynapseData(file,noi_df,start_point=0,mode='w'):
         bodyid = noi_df.at[ind,'bodyId']
         # snp_info_raw = fetch_synapses(bodyid)
         snp_info_raw = fetch_synapses(bodyid)
-        with pd.ExcelWriter(file,mode=mode) as snp_writer:
+        with pd.ExcelWriter(file,mode=mode,engine='openpyxl') as snp_writer:
             snp_info_raw.to_excel(snp_writer,sheet_name=str(bodyid))
         if mode == 'w': mode = 'a'
         print('\rfetched synapses: ','{:.2%}'.format((ind+1)/len(noi_df)),end='  ')

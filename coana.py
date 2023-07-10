@@ -180,8 +180,8 @@ class FindNeuronConnection:
     def InitializeNeuronInfo(self):
         ''' initialize neuron info '''
         print('Fetching source and target neurons...')
-        self.source_df, _, source_fname_auto, self.source_criteria = sv.getNeurons(self.sourceNeurons)
-        self.target_df, _, target_fname_auto, self.target_criteria = sv.getNeurons(self.targetNeurons)
+        self.source_df, _, source_fname_auto, self.source_criteria = sv.getNeurons(self.sourceNeurons, dataset=self.dataset)
+        self.target_df, _, target_fname_auto, self.target_criteria = sv.getNeurons(self.targetNeurons, dataset=self.dataset)
         
         if self.max_interlayer > 2 or len(self.source_df) > 200:
             self.simple_fetch = False
@@ -649,7 +649,7 @@ class FindNeuronConnection:
         fig_bodyId.update_layout(title_text='Sankey diagram of connection map<br>based on neuron bodyId',font_size=6)
         fig_bodyId.write_html(os.path.join(self.path_folder,'Sankey_bodyId_snp'+str(self.min_synapse_num)+'.html'), auto_open=self.showfig)
     
-    def ROImat(self, requiredNeurons: list = None, folder_name: str = None, site: str = 'post', break_threshod: int = 1e3, roi_list = None, roi_name = None):
+    def ROImat(self, requiredNeurons: list = None, folder_name: str = None, site: str = 'post', break_threshod: int = 1e3, roi_list = None, roi_name = None, roi_kw: list | None = None, roi_kw_exclude: list | None = None):
         """ get the distribution matrix of ROI by the given site of neurons.
         
         Only the R hemisphere is considered.
@@ -660,15 +660,17 @@ class FindNeuronConnection:
             break_threshod (int, optional): _description_. Defaults to 1e3. synapse number of one neuron, if synapse number is greater than the break_threshod, it will be breaked in the axis.
             roi_list (list, optional): _description_. Defaults to None. if None, all the ROIs will be considered.
             roi_name (list, optional): _description_. Defaults to None. if None, roi_name will be the same as roi_list except stripping the "(R)" suffix, that is, "AL(R)" -> "AL", "AL(L)" -> "AL(L)", "EB" -> "EB".
+            roi_kw (str, optional): _description_. roi_keyword, Defaults to None. if None, all the ROIs will be considered, else only ROIs containing the keyword will be considered, such as 'AL-'.
         """
         
         if requiredNeurons == None:
             requiredNeurons = self.sourceNeurons
-        required_criteria, auto_name = sv.getCriteriaAndName(requiredNeurons)
-        if folder_name == None or folder_name == '':
+        # required_criteria, auto_name = sv.getCriteriaAndName(requiredNeurons)
+        neuron_df, roi_count_df, auto_name, required_criteria = sv.getNeurons(requiredNeurons, dataset=self.dataset)
+        if folder_name is None or folder_name == '':
             folder_name = auto_name
         print(f'Generating ROI distribution matrix of {folder_name} {site} synaptic sites...')
-        neuron_df,roi_count_df = fetch_neurons(required_criteria) # Fetch neuron info from hemibrain server.
+        # neuron_df,roi_count_df = fetch_neurons(required_criteria) # Fetch neuron info from hemibrain server.
         neuron_df: pd.DataFrame = neuron_df
         neuron_df.sort_values(by='type',inplace=True) # The order of neuron_df will be the order in the distribution matrix.
         rpath = os.path.join(self.data_folder, '_'.join(['roi_distribution',folder_name,site]))
@@ -678,6 +680,28 @@ class FindNeuronConnection:
             roi_list = roi_count_df.roi.unique().tolist()
         roi_list.sort()
         
+        roi_list_new = [] # keep only ROIs containing the keyword in roi_kw
+        if roi_kw is not None and roi_kw != '' and roi_kw != []:
+            if type(roi_kw) == str:
+                roi_kw = [roi_kw]
+            for roi in roi_list:
+                for kw in roi_kw:
+                    if kw in roi:
+                        roi_list_new.append(roi)
+                        break
+        roi_list = roi_list_new
+        
+        roi_list_new = [] # exclude ROIs containing the keyword in roi_kw_exclude
+        if roi_kw_exclude is not None and roi_kw_exclude != '' and roi_kw_exclude != []:
+            if type(roi_kw_exclude) == str:
+                roi_kw_exclude = [roi_kw_exclude]
+            for roi in roi_list:
+                for kw in roi_kw_exclude:
+                    if kw in roi: break
+                else:
+                    roi_list_new.append(roi)
+        roi_list = roi_list_new
+        
         if roi_name is None:
             roi_name = [] # custom name corresponding to "roi" property
             for roi in roi_list:
@@ -686,6 +710,9 @@ class FindNeuronConnection:
                 else:
                     name = roi
                 roi_name.append(name)
+        
+        if len(roi_list) != len(roi_name):
+            raise ValueError('roi_list and roi_name must have the same length.')
         
         # generate a template for the roi matrix
         distMat = pd.DataFrame(
@@ -1116,7 +1143,7 @@ class VisualizeSkeleton:
         self.layer_names = []
         for i in range(len(self.neuron_layers)):
             print(f'fetching neuron info of layer {i}...')
-            ndf, rdf, auto_name, cri = sv.getNeurons(self.neuron_layers[i])
+            ndf, rdf, auto_name, cri = sv.getNeurons(self.neuron_layers[i], dataset=self.dataset)
             self.neuron_dfs.append(ndf)
             self.roi_dfs.append(rdf)
             self.layer_criteria.append(cri)
