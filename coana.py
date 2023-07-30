@@ -166,6 +166,18 @@ class FindNeuronConnection:
     when False, use neuprint.fetch_adjacencies(), for large sets of neurons but slower
     '''
     
+    kwargs_fetch: dict = field(default_factory=dict)
+    '''
+    kwargs to be passed to neuprint.fetch_simple_connections() or neuprint.fetch_adjacencies() \n
+    upstream_criteria, downstream_criteria, min_weight of fetch_simple_connections() should NOT be included here \n
+    sources, targets, min_total_weight of fetch_adjacencies() should NOT be included here \n
+    they should be specified in sourceNeurons, targetNeurons, min_synapse_num \n
+    see more in: \n
+    https://connectome-neuprint.github.io/neuprint-python/docs/queries.html#neuprint.queries.fetch_simple_connections \n 
+    and \n
+    https://connectome-neuprint.github.io/neuprint-python/docs/queries.html#neuprint.queries.fetch_adjacencies \n
+    '''
+    
     def __post_init__(self):
         print('Initializing...')
         if self.client_hemibrain is None:
@@ -252,9 +264,9 @@ class FindNeuronConnection:
         if not os.path.exists(self.direct_folder): os.makedirs(self.direct_folder)
         # fetch connection table
         if self.simple_fetch:
-            self.conn_df: pd.DataFrame = fetch_simple_connections(upstream_criteria=self.source_criteria, downstream_criteria=self.target_criteria, min_weight=self.min_synapse_num)
+            self.conn_df: pd.DataFrame = fetch_simple_connections(upstream_criteria=self.source_criteria, downstream_criteria=self.target_criteria, min_weight=self.min_synapse_num, **self.kwargs_fetch)
         else:
-            neuron_df, roi_conn_df = fetch_adjacencies(sources=self.source_criteria,targets=self.target_criteria,min_total_weight=self.min_synapse_num)
+            neuron_df, roi_conn_df = fetch_adjacencies(sources=self.source_criteria,targets=self.target_criteria,min_total_weight=self.min_synapse_num, **self.kwargs_fetch)
             self.conn_df = sv.merge_conn_roi(neuron_df, roi_conn_df)
         if self.conn_df.empty:
             print('\033[33mNo direct connections found.\033[0m\n')
@@ -372,22 +384,22 @@ class FindNeuronConnection:
         _,matt_col = sv.ClusterMap(self.conn_matrix_type,zs=0,filename=os.path.join(save_path,'cluster_type_normCol_snp'+str(self.min_synapse_num)+save_format),showfig=self.showfig) # normalize vertically
         _,matt_row = sv.ClusterMap(self.conn_matrix_type,zs=1,filename=os.path.join(save_path,'cluster_type_normRow_snp'+str(self.min_synapse_num)+save_format),showfig=self.showfig) # normalize horizontally
         print('Done')
-        # clustering by bodyId
-        print('clustering by bodyId...')
-        _,matb_n = sv.ClusterMap(self.conn_matrix_bodyId,cmap='Blues',scale_ratio=9,filename=os.path.join(save_path,'cluster_bodyId_snp'+str(self.min_synapse_num)+save_format),showfig=self.showfig)
-        _,matb_col = sv.ClusterMap(self.conn_matrix_bodyId,zs=0,scale_ratio=9,filename=os.path.join(save_path,'cluster_bodyId_normCol_snp'+str(self.min_synapse_num)+save_format),showfig=self.showfig)
-        _,matb_row = sv.ClusterMap(self.conn_matrix_bodyId,zs=1,scale_ratio=9,filename=os.path.join(save_path,'cluster_bodyId_normRow_snp'+str(self.min_synapse_num)+save_format),showfig=self.showfig)
-        print('Done')
+        # # clustering by bodyId
+        # print('clustering by bodyId...')
+        # _,matb_n = sv.ClusterMap(self.conn_matrix_bodyId,cmap='Blues',scale_ratio=9,filename=os.path.join(save_path,'cluster_bodyId_snp'+str(self.min_synapse_num)+save_format),showfig=self.showfig)
+        # _,matb_col = sv.ClusterMap(self.conn_matrix_bodyId,zs=0,scale_ratio=9,filename=os.path.join(save_path,'cluster_bodyId_normCol_snp'+str(self.min_synapse_num)+save_format),showfig=self.showfig)
+        # _,matb_row = sv.ClusterMap(self.conn_matrix_bodyId,zs=1,scale_ratio=9,filename=os.path.join(save_path,'cluster_bodyId_normRow_snp'+str(self.min_synapse_num)+save_format),showfig=self.showfig)
+        # print('Done')
         
         # save clustered matrix
         print('saving clustered matrix...')
         with pd.ExcelWriter(os.path.join(save_path,'clustered_mat.xlsx')) as dataWriter:
             matt_n.to_excel(dataWriter,sheet_name='cluster_type')
             matt_col.to_excel(dataWriter,sheet_name='cluster_type_normCol')
-            matt_row.to_excel(dataWriter,sheet_name='cluster_type_normRow')
-            matb_n.to_excel(dataWriter,sheet_name='cluster_bodyId')
-            matb_col.to_excel(dataWriter,sheet_name='cluster_bodyId_normCol')
-            matb_row.to_excel(dataWriter,sheet_name='cluster_bodyId_normRow')
+            # matt_row.to_excel(dataWriter,sheet_name='cluster_type_normRow')
+            # matb_n.to_excel(dataWriter,sheet_name='cluster_bodyId')
+            # matb_col.to_excel(dataWriter,sheet_name='cluster_bodyId_normCol')
+            # matb_row.to_excel(dataWriter,sheet_name='cluster_bodyId_normRow')
         print('Done\n')
         
         ## 2-D sorting by maximums
@@ -905,6 +917,9 @@ class FindNeuronConnection:
 @dataclass
 class VisualizeSkeleton:
     '''3-D visualize skeleton with synapses and brain roi meshes'''
+    
+    dataset: str = 'hemibrain:v1.2.1'
+    '''dataset to use, default is hemibrain:v1.2.1'''
 
     script_path: str = os.path.dirname(os.path.abspath(__file__))
     '''path to the script folder'''
