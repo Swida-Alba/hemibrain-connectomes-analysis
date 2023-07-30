@@ -1,5 +1,6 @@
 # connectome analysis module -- coana
 import os
+import json
 import shutil
 import time
 import logging
@@ -223,6 +224,10 @@ class FindNeuronConnection:
         if not os.path.exists(self.save_folder): os.makedirs(self.save_folder)
         print(f'data will be saved in: {self.save_folder}\n')
         
+        # save all attributes to json file
+        with open(os.path.join(self.save_folder,'all_attributes.json'), 'w') as f:
+            json.dump(self.__dict__, f, indent=4, default=lambda o: '<not serializable>')
+        
         self.parameter_dict = {
             'source neurons': str(self.sourceNeurons),
             'source name': self.source_fname,
@@ -236,6 +241,8 @@ class FindNeuronConnection:
             'dataset': self.dataset,
             'run date': self.run_date,
         }
+        self.parameter_dict.update(self.kwargs_fetch)
+        
         
         # write parameters to txt file
         self.parameter_df = pd.DataFrame.from_dict(self.parameter_dict, orient='index', columns=['value'])
