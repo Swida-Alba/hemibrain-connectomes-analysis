@@ -1,0 +1,186 @@
+Metadata-Version: 2.4
+Name: vispath
+Version: 1.0.0
+Summary: Visualization toolkit for neural pathways - standalone component from Hemibrain Connectomes Analysis
+Author: Kun-Da Wu
+License: MIT
+Project-URL: Homepage, https://github.com/Swida-Alba/hemibrain-connectomes-analysis
+Project-URL: Repository, https://github.com/Swida-Alba/hemibrain-connectomes-analysis
+Project-URL: Documentation, https://github.com/Swida-Alba/hemibrain-connectomes-analysis/blob/main/README.md
+Project-URL: Parent Project, https://github.com/Swida-Alba/hemibrain-connectomes-analysis
+Keywords: neuroscience,visualization,pathways,connectomics,network-analysis
+Classifier: Development Status :: 4 - Beta
+Classifier: Intended Audience :: Science/Research
+Classifier: Topic :: Scientific/Engineering :: Bio-Informatics
+Classifier: Topic :: Scientific/Engineering :: Visualization
+Classifier: License :: OSI Approved :: MIT License
+Classifier: Programming Language :: Python :: 3
+Classifier: Programming Language :: Python :: 3.8
+Classifier: Programming Language :: Python :: 3.9
+Classifier: Programming Language :: Python :: 3.10
+Classifier: Programming Language :: Python :: 3.11
+Classifier: Programming Language :: Python :: 3.12
+Requires-Python: >=3.8
+Description-Content-Type: text/markdown
+Requires-Dist: numpy<2.0.0,>=1.20.0
+Requires-Dist: pandas<2.0.0,>=1.3.0
+Requires-Dist: scipy>=1.7.0
+Requires-Dist: plotly>=5.0.0
+Requires-Dist: networkx>=2.6.0
+Requires-Dist: openpyxl>=3.0.0
+Provides-Extra: gui
+Requires-Dist: PyQt5>=5.15.0; extra == "gui"
+Provides-Extra: all
+Requires-Dist: vispath[gui]; extra == "all"
+
+# VisualizePath - Neural Pathway Visualization Toolkit
+
+A standalone visualization toolkit for neural pathways discovered through connectome analysis.
+
+## Overview
+
+VisualizePath provides interactive visualization capabilities for neural pathways, including:
+- **Sankey diagrams** - Flow-based pathway visualization
+- **Interactive heatmaps** - Connection matrices with hierarchical clustering
+- **Network graphs** - Interactive network visualization with Cytoscape.js
+- **Excel export** - Data export for further analysis
+
+## Features
+
+✅ **Fully Standalone** - All visualization features work without neuroscience dependencies  
+✅ **Interactive Sankey Diagrams** - Flow-based pathway visualization with edge filtering  
+✅ **Network Graphs** - Multiple layout algorithms (hierarchical, spring, circular)  
+✅ **Connection Heatmaps** - With hierarchical clustering and metric toggle  
+✅ **Flexible Input** - CSV/Excel edge-lists or path-based formats  
+✅ **Custom Styling** - Node colors, edge colors, fonts, sizes  
+✅ **Export Support** - Save visualizations as SVG/PNG
+
+## Installation
+
+### Recommended: Using Conda Environment
+
+```bash
+# Create environment with Python 3.11
+conda create -n vispath python=3.11 -y
+conda activate vispath
+
+# Install the package
+cd vispath-subproject
+pip install -e .
+```
+
+### As a standalone package:
+
+```bash
+pip install git+https://github.com/Swida-Alba/hemibrain-connectomes-analysis.git#subdirectory=vispath-subproject
+```
+
+### As part of the main project:
+
+```bash
+pip install git+https://github.com/Swida-Alba/hemibrain-connectomes-analysis.git
+```
+
+### Development installation:
+
+```bash
+cd vispath-subproject
+pip install -e .
+```
+
+## Quick Start
+
+```python
+from vispath_pkg import VisualizePath
+
+# Create visualizer
+vp = VisualizePath(
+    path_file='paths.xlsx',
+    output_folder='./output',
+    showfig=True
+)
+
+# Generate all visualizations
+vp.visualize_all()
+```
+
+## Dependencies
+
+### Core:
+- numpy>=1.20.0,<2.0.0 (constrained for pandas compatibility)
+- pandas>=1.3.0,<2.0.0
+- networkx>=2.6.0
+- plotly>=5.0.0
+- scipy>=1.7.0
+- openpyxl>=3.0.0
+
+**Important:** numpy is constrained to <2.0.0 for binary compatibility with pandas 1.x.
+
+### Optional:
+- PyQt5>=5.15.0 (for fast file dialogs)
+
+## Data Formats
+
+VisualizePath supports two input formats:
+
+### 1. Path-based format (Multi-hop paths):
+
+**Required columns:**
+- `path_block` (str): Path as "A -> B -> C -> D" format
+- `weights` (list): Weights for each hop, e.g., `[10, 20, 15]`
+
+**Optional columns:**
+- `connection_ratios` (list): Connection ratios for each hop
+- `traversal_probabilities` (list): Traversal probabilities for each hop
+- `layer` (int): Layer number for the path
+
+**Example:**
+
+| path_block     | weights      | connection_ratios | traversal_probabilities |
+|----------------|--------------|-------------------|-------------------------|
+| A -> B -> C    | [10, 5]      | [0.5, 0.3]        | [0.8, 0.6]              |
+| A -> D -> C    | [15, 8]      | [0.6, 0.4]        | [0.9, 0.7]              |
+
+### 2. Edge-list format (Direct connections):
+
+**Required columns (flexible naming):**
+- Source: `source`, `from`, `pre`, or `*_pre` (e.g., `bodyId_pre`, `type_pre`)
+- Target: `target`, `to`, `post`, or `*_post` (e.g., `bodyId_post`, `type_post`)
+- Weight: `weight`, `weights`, `synapse_count`, or `count`
+
+**Optional columns:**
+- `color`: Edge color in hex (#RRGGBB) or rgba format
+- Any numeric column (e.g., `ratio`, `probability`) will be preserved
+
+**Example:**
+
+| source | target | weight | ratio | probability |
+|--------|--------|--------|-------|-------------|
+| A      | B      | 10     | 0.5   | 0.8         |
+| B      | C      | 5      | 0.3   | 0.6         |
+| D      | C      | 8      | 0.4   | 0.7         |
+
+**Note:** Edge-list format is automatically converted to path-based format internally.
+
+## Output
+
+- `{basename}_Sankey.html` - Interactive Sankey diagram
+- `{basename}_heatmap.html` - Interactive heatmap
+- `{basename}_network.html` - Interactive network graph
+- `{basename}_data.xlsx` - Processed data
+
+## Documentation
+
+For full documentation, see the [main project README](../README.md).
+
+## License
+
+MIT License
+
+## Author
+
+Kang-Rui Leng
+
+## Part of
+
+[Hemibrain Connectomes Analysis](https://github.com/Swida-Alba/hemibrain-connectomes-analysis)

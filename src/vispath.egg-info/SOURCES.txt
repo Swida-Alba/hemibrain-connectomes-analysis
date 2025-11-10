@@ -1,0 +1,10 @@
+README.md
+pyproject.toml
+setup.py
+src/vispath.egg-info/PKG-INFO
+src/vispath.egg-info/SOURCES.txt
+src/vispath.egg-info/dependency_links.txt
+src/vispath.egg-info/requires.txt
+src/vispath.egg-info/top_level.txt
+src/vispath_pkg/__init__.py
+src/vispath_pkg/vispath.py

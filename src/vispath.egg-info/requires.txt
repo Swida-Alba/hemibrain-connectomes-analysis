@@ -1,0 +1,12 @@
+numpy<2.0.0,>=1.20.0
+pandas<2.0.0,>=1.3.0
+scipy>=1.7.0
+plotly>=5.0.0
+networkx>=2.6.0
+openpyxl>=3.0.0
+
+[all]
+vispath[gui]
+
+[gui]
+PyQt5>=5.15.0
