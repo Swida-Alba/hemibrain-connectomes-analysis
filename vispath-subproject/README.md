@@ -144,7 +144,7 @@ MIT License
 
 ## Author
 
-Kang-Rui Leng
+Swida Alba & Copilot
 
 ## Part of
 

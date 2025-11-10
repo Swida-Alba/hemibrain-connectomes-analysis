@@ -172,5 +172,5 @@ Both improvements enhance readability and professional appearance of the network
 
 ---
 
-**Author**: Kang-Rui Leng  
+**Author**: Swida Alba & Copilot  
 **Date**: October 27, 2025

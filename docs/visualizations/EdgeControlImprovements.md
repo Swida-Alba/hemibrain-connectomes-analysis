@@ -289,6 +289,6 @@ vp.visualize()
 
 ---
 
-**Author**: Kang-Rui Leng  
+**Author**: Swida Alba & Copilot  
 **Date**: October 27, 2025  
 **Version**: v2.1

@@ -304,7 +304,7 @@ Right-click to hide | Double-click to highlight
 
 ---
 
-**Author**: Kang-Rui Leng  
+**Author**: Swida Alba & Copilot  
 **Date**: October 27, 2025  
 **Status**: ✅ ALL ISSUES RESOLVED  
 **Testing**: Passed on real pathway data with 5 paths, 8 connections, 5 nodes

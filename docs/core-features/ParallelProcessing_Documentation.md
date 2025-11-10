@@ -460,4 +460,4 @@ for neurons_set, edges_set, edges_layer_set, path_count, pairs_with_paths in res
 ---
 
 **Last Updated**: 2024
-**Author**: Kang-Rui Leng
+**Author**: Swida Alba & Copilot
