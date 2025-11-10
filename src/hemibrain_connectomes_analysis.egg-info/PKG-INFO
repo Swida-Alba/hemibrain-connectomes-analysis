@@ -1,3 +1,66 @@
+Metadata-Version: 2.4
+Name: hemibrain-connectomes-analysis
+Version: 2.1.0
+Summary: Hemibrain connectome analysis and visualization toolkit with reorganized modular structure
+Author: Hemibrain Analysis Team
+License: MIT
+Project-URL: Homepage, https://github.com/Swida-Alba/hemibrain-connectomes-analysis
+Project-URL: Repository, https://github.com/Swida-Alba/hemibrain-connectomes-analysis
+Project-URL: Documentation, https://github.com/Swida-Alba/hemibrain-connectomes-analysis/blob/main/README.md
+Keywords: neuroscience,connectomics,visualization,network-analysis,neuprint,drosophila
+Classifier: Development Status :: 4 - Beta
+Classifier: Intended Audience :: Science/Research
+Classifier: Topic :: Scientific/Engineering :: Bio-Informatics
+Classifier: Topic :: Scientific/Engineering :: Visualization
+Classifier: License :: OSI Approved :: MIT License
+Classifier: Programming Language :: Python :: 3
+Classifier: Programming Language :: Python :: 3.8
+Classifier: Programming Language :: Python :: 3.9
+Classifier: Programming Language :: Python :: 3.10
+Classifier: Programming Language :: Python :: 3.11
+Classifier: Programming Language :: Python :: 3.12
+Requires-Python: >=3.8
+Description-Content-Type: text/markdown
+Requires-Dist: numpy<2.0.0,>=1.20.0
+Requires-Dist: pandas<2.0.0,>=1.3.0
+Requires-Dist: scipy>=1.7.0
+Requires-Dist: plotly>=5.0.0
+Requires-Dist: matplotlib>=3.4.0
+Requires-Dist: seaborn>=0.11.0
+Requires-Dist: opencv-python>=4.5.0
+Requires-Dist: networkx>=2.6.0
+Requires-Dist: openpyxl>=3.0.0
+Requires-Dist: PyQt5>=5.15.0
+Requires-Dist: neuprint-python>=0.4.0
+Requires-Dist: bokeh>=2.4.0
+Requires-Dist: navis>=1.0.0
+Requires-Dist: flybrains>=0.2.0
+Requires-Dist: img2pdf>=0.4.0
+Provides-Extra: vispath
+Requires-Dist: numpy<2.0.0,>=1.20.0; extra == "vispath"
+Requires-Dist: pandas<2.0.0,>=1.3.0; extra == "vispath"
+Requires-Dist: scipy>=1.7.0; extra == "vispath"
+Requires-Dist: plotly>=5.0.0; extra == "vispath"
+Requires-Dist: networkx>=2.6.0; extra == "vispath"
+Requires-Dist: openpyxl>=3.0.0; extra == "vispath"
+Requires-Dist: PyQt5>=5.15.0; extra == "vispath"
+Provides-Extra: dev
+Requires-Dist: pytest>=7.0.0; extra == "dev"
+Requires-Dist: pytest-cov>=3.0.0; extra == "dev"
+Requires-Dist: jupyter>=1.0.0; extra == "dev"
+Requires-Dist: ipykernel>=6.0.0; extra == "dev"
+Requires-Dist: black>=22.0.0; extra == "dev"
+Requires-Dist: flake8>=4.0.0; extra == "dev"
+Provides-Extra: viz
+Requires-Dist: trimesh>=3.9.0; extra == "viz"
+Requires-Dist: kaleido>=0.2.0; extra == "viz"
+Requires-Dist: vispy>=0.11.0; extra == "viz"
+Provides-Extra: gui
+Requires-Dist: PyQt6>=6.0.0; extra == "gui"
+Requires-Dist: wxPython>=4.2.0; extra == "gui"
+Provides-Extra: all
+Requires-Dist: hemibrain-connectomes-analysis[dev,gui,viz]; extra == "all"
+
 # Hemibrain Connectomes Analysis v2.1
 
 A comprehensive Python toolkit for analyzing and visualizing *Drosophila* hemibrain connectome data from NeuPrint. Find direct and indirect neural connections, visualize pathways, and perform network analysis with high-performance caching and parallel processing.
@@ -624,17 +687,8 @@ pip install -e .
 pip install git+https://github.com/Swida-Alba/hemibrain-connectomes-analysis.git#subdirectory=vispath-subproject
 ```
 
-**Recommended with conda:**
-```bash
-# Create dedicated environment for vispath
-conda create -n vispath python=3.11 -y
-conda activate vispath
-cd vispath-subproject
-pip install -e .
-```
-
 **Minimal dependencies installed:**
-- numpy (<2.0.0), pandas (<2.0.0), scipy
+- numpy, pandas, scipy
 - plotly, networkx
 - openpyxl
 - PyQt5 (optional, for GUI)
@@ -690,48 +744,24 @@ For complete sub-project documentation, see:
 
 ## Installation: For users who can prepare the python environments by themselves
 
-### Recommended: Using Conda Environment
-
-**Create a new conda environment for better isolation:**
-
-```bash
-# Create environment with Python 3.11
-conda create -n hemibrain python=3.11 -y
-
-# Activate the environment
-conda activate hemibrain
-
-# Install dependencies
-pip install -r requirements.txt
-```
-
-**Or install the package in editable mode:**
-
-```bash
-conda activate hemibrain
-pip install -e .
-```
-
-### Quick Install (Without Conda)
+### Quick Install (Recommended)
 
 ```bash
 pip install -r requirements.txt
 ```
 
 This will install all necessary dependencies including:
-- Core packages: numpy (<2.0.0), pandas (<2.0.0), scipy
+- Core packages: numpy, pandas, scipy
 - Visualization: plotly, matplotlib, seaborn, networkx
 - Data processing: openpyxl, xlrd
 - **PyQt5**: For fast, responsive GUI file dialogs (recommended)
 - Neuroscience: neuprint-python, navis
 
-**Important:** numpy is constrained to <2.0.0 for binary compatibility with pandas 1.x.
-
 ### Alternative Installation Methods
 
-**Editable installation (for development):**
+**Using setup.py:**
 ```bash
-pip install -e .
+python setup.py
 ```
 
 **Using pyproject.toml (Modern Python):**
@@ -740,10 +770,10 @@ pip install -e .
 pip install .
 
 # With development tools
-pip install -e ".[dev]"
+pip install ".[dev]"
 
 # With all optional dependencies
-pip install -e ".[all]"
+pip install ".[all]"
 ```
 
 ### GUI Backend for File Dialogs
@@ -794,13 +824,6 @@ pip install -r requirements.txt
 Make sure Python was installed with PATH option enabled.
 
 ### Troubleshooting
-
-**numpy/pandas Binary Compatibility Error:**
-```bash
-# If you see "numpy.dtype size changed" error
-pip install 'numpy<2.0.0' --force-reinstall
-```
-This is already handled in requirements.txt with the constraint `numpy>=1.20.0,<2.0.0`.
 
 **PyQt5 won't install:**
 ```bash

@@ -1,0 +1,1469 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml" lang="" xml:lang="">
+<head>
+  <meta charset="utf-8" />
+  <meta name="generator" content="pandoc" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes" />
+  <title>Hemibrain Connectomes Analysis - Complete Documentation</title>
+  <style>
+    code{white-space: pre-wrap;}
+    span.smallcaps{font-variant: small-caps;}
+    div.columns{display: flex; gap: min(4vw, 1.5em);}
+    div.column{flex: auto; overflow-x: auto;}
+    div.hanging-indent{margin-left: 1.5em; text-indent: -1.5em;}
+    /* The extra [class] is a hack that increases specificity enough to
+       override a similar rule in reveal.js */
+    ul.task-list[class]{list-style: none;}
+    ul.task-list li input[type="checkbox"] {
+      font-size: inherit;
+      width: 0.8em;
+      margin: 0 0.8em 0.2em -1.6em;
+      vertical-align: middle;
+    }
+    .display.math{display: block; text-align: center; margin: 0.5rem auto;}
+    /* CSS for syntax highlighting */
+    html { -webkit-text-size-adjust: 100%; }
+    pre > code.sourceCode { white-space: pre; position: relative; }
+    pre > code.sourceCode > span { display: inline-block; line-height: 1.25; }
+    pre > code.sourceCode > span:empty { height: 1.2em; }
+    .sourceCode { overflow: visible; }
+    code.sourceCode > span { color: inherit; text-decoration: inherit; }
+    div.sourceCode { margin: 1em 0; }
+    pre.sourceCode { margin: 0; }
+    @media screen {
+    div.sourceCode { overflow: auto; }
+    }
+    @media print {
+    pre > code.sourceCode { white-space: pre-wrap; }
+    pre > code.sourceCode > span { text-indent: -5em; padding-left: 5em; }
+    }
+    pre.numberSource code
+      { counter-reset: source-line 0; }
+    pre.numberSource code > span
+      { position: relative; left: -4em; counter-increment: source-line; }
+    pre.numberSource code > span > a:first-child::before
+      { content: counter(source-line);
+        position: relative; left: -1em; text-align: right; vertical-align: baseline;
+        border: none; display: inline-block;
+        -webkit-touch-callout: none; -webkit-user-select: none;
+        -khtml-user-select: none; -moz-user-select: none;
+        -ms-user-select: none; user-select: none;
+        padding: 0 4px; width: 4em;
+        color: #aaaaaa;
+      }
+    pre.numberSource { margin-left: 3em; border-left: 1px solid #aaaaaa;  padding-left: 4px; }
+    div.sourceCode
+      {   }
+    @media screen {
+    pre > code.sourceCode > span > a:first-child::before { text-decoration: underline; }
+    }
+    code span.al { color: #ff0000; font-weight: bold; } /* Alert */
+    code span.an { color: #60a0b0; font-weight: bold; font-style: italic; } /* Annotation */
+    code span.at { color: #7d9029; } /* Attribute */
+    code span.bn { color: #40a070; } /* BaseN */
+    code span.bu { color: #008000; } /* BuiltIn */
+    code span.cf { color: #007020; font-weight: bold; } /* ControlFlow */
+    code span.ch { color: #4070a0; } /* Char */
+    code span.cn { color: #880000; } /* Constant */
+    code span.co { color: #60a0b0; font-style: italic; } /* Comment */
+    code span.cv { color: #60a0b0; font-weight: bold; font-style: italic; } /* CommentVar */
+    code span.do { color: #ba2121; font-style: italic; } /* Documentation */
+    code span.dt { color: #902000; } /* DataType */
+    code span.dv { color: #40a070; } /* DecVal */
+    code span.er { color: #ff0000; font-weight: bold; } /* Error */
+    code span.ex { } /* Extension */
+    code span.fl { color: #40a070; } /* Float */
+    code span.fu { color: #06287e; } /* Function */
+    code span.im { color: #008000; font-weight: bold; } /* Import */
+    code span.in { color: #60a0b0; font-weight: bold; font-style: italic; } /* Information */
+    code span.kw { color: #007020; font-weight: bold; } /* Keyword */
+    code span.op { color: #666666; } /* Operator */
+    code span.ot { color: #007020; } /* Other */
+    code span.pp { color: #bc7a00; } /* Preprocessor */
+    code span.sc { color: #4070a0; } /* SpecialChar */
+    code span.ss { color: #bb6688; } /* SpecialString */
+    code span.st { color: #4070a0; } /* String */
+    code span.va { color: #19177c; } /* Variable */
+    code span.vs { color: #4070a0; } /* VerbatimString */
+    code span.wa { color: #60a0b0; font-weight: bold; font-style: italic; } /* Warning */
+  </style>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/github-markdown-css/5.1.0/github-markdown.min.css" />
+</head>
+<body>
+<header id="title-block-header">
+<h1 class="title">Hemibrain Connectomes Analysis - Complete
+Documentation</h1>
+</header>
+<h1
+id="hemibrain-connectomes-analysis---complete-documentation">Hemibrain
+Connectomes Analysis - Complete Documentation</h1>
+<p><strong>Version 2.1 | Complete Reference Guide</strong></p>
+<p>This document contains the complete documentation for the Hemibrain
+Connectomes Analysis toolkit in a single file for easy HTML
+rendering.</p>
+<hr />
+<p><strong>Table of Contents</strong></p>
+<ol type="1">
+<li><a href="#overview--key-features">Overview &amp; Key
+Features</a></li>
+<li><a href="#installation">Installation</a></li>
+<li><a href="#basic-usage">Basic Usage</a></li>
+<li><a href="#core-features">Core Features</a></li>
+<li><a href="#visualization-guides">Visualization Guides</a></li>
+<li><a href="#technical-documentation">Technical Documentation</a></li>
+<li><a href="#examples--tutorials">Examples &amp; Tutorials</a></li>
+</ol>
+<hr />
+<h1 id="overview-key-features">Overview &amp; Key Features</h1>
+<p>A comprehensive Python toolkit for analyzing and visualizing
+<em>Drosophila</em> hemibrain connectome data from NeuPrint. Find direct
+and indirect neural connections, visualize pathways, and perform network
+analysis with high-performance caching and parallel processing.</p>
+<p><a href="https://www.python.org/downloads/"><img
+src="https://img.shields.io/badge/python-3.8%2B-blue"
+alt="Python Version" /></a> <a
+href="https://opensource.org/licenses/MIT"><img
+src="https://img.shields.io/badge/License-MIT-yellow.svg"
+alt="License: MIT" /></a></p>
+<h2 id="key-features">✨ Key Features</h2>
+<ul>
+<li>🔍 <strong>Connection Discovery</strong>: Find direct and multi-hop
+paths between neuron populations</li>
+<li>⚡ <strong>High Performance</strong>: 10-100x speedup with local
+caching, 4-14x with parallel processing</li>
+<li>📊 <strong>Rich Visualizations</strong>: Interactive networks,
+Sankey diagrams, heatmaps, and 3D skeletons</li>
+<li>🎯 <strong>Flexible Filtering</strong>: Multiple filtering modes
+(synapse count, connection ratio, traversal probability)</li>
+<li>💾 <strong>Smart Caching</strong>: Efficient local storage with
+automatic complete dataset handling</li>
+<li>🔧 <strong>Modular Design</strong>: Reorganized src/ layout for
+better maintainability</li>
+</ul>
+<hr />
+<h1 id="installation">Installation</h1>
+<h2 id="quick-install-recommended">Quick Install (Recommended)</h2>
+<div class="sourceCode" id="cb1"><pre
+class="sourceCode bash"><code class="sourceCode bash"><span id="cb1-1"><a href="#cb1-1" aria-hidden="true" tabindex="-1"></a><span class="ex">pip</span> install <span class="at">-r</span> requirements.txt</span></code></pre></div>
+<p>This will install all necessary dependencies including: - Core
+packages: numpy, pandas, scipy - Visualization: plotly, matplotlib,
+seaborn, networkx - Data processing: openpyxl, xlrd -
+<strong>PyQt5</strong>: For fast, responsive GUI file dialogs
+(recommended) - Neuroscience: neuprint-python, navis</p>
+<h2 id="step-by-step-guide-for-beginners">Step-by-Step Guide for
+Beginners</h2>
+<h3 id="step-1-install-python">Step 1: Install Python</h3>
+<p><strong>Download Python 3.11.3</strong> (or any version 3.8-3.11): -
+Visit <a href="https://www.python.org/downloads/">Python Downloads</a> -
+Download the installer for your operating system: -
+<strong>Windows</strong>: Windows installer (64-bit) -
+<strong>macOS</strong>: macOS installer (Intel or Apple Silicon) -
+<strong>Linux</strong>: Usually pre-installed, or use your package
+manager</p>
+<p><strong>Important for Windows users:</strong> - ✅ Check “Add Python
+to PATH” during installation - ✅ Check “Install pip” (usually checked
+by default)</p>
+<p><strong>Verify installation:</strong></p>
+<div class="sourceCode" id="cb2"><pre
+class="sourceCode bash"><code class="sourceCode bash"><span id="cb2-1"><a href="#cb2-1" aria-hidden="true" tabindex="-1"></a><span class="co"># Open Terminal (Mac/Linux) or Command Prompt (Windows)</span></span>
+<span id="cb2-2"><a href="#cb2-2" aria-hidden="true" tabindex="-1"></a><span class="ex">python</span> <span class="at">--version</span></span>
+<span id="cb2-3"><a href="#cb2-3" aria-hidden="true" tabindex="-1"></a><span class="co"># Should show: Python 3.11.3 (or your installed version)</span></span>
+<span id="cb2-4"><a href="#cb2-4" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb2-5"><a href="#cb2-5" aria-hidden="true" tabindex="-1"></a><span class="ex">pip</span> <span class="at">--version</span></span>
+<span id="cb2-6"><a href="#cb2-6" aria-hidden="true" tabindex="-1"></a><span class="co"># Should show: pip 23.x.x or similar</span></span></code></pre></div>
+<h3 id="step-2-download-this-repository">Step 2: Download This
+Repository</h3>
+<p><strong>Option A: Download as ZIP (easier for beginners)</strong> 1.
+Click the green “Code” button at the top of this page 2. Select
+“Download ZIP” 3. Extract the ZIP file to a location you can remember
+(e.g., <code>Documents/hemibrain-analysis</code>)</p>
+<p><strong>Option B: Using Git (recommended for developers)</strong></p>
+<div class="sourceCode" id="cb3"><pre
+class="sourceCode bash"><code class="sourceCode bash"><span id="cb3-1"><a href="#cb3-1" aria-hidden="true" tabindex="-1"></a><span class="fu">git</span> clone https://github.com/Swida-Alba/hemibrain-connectomes-analysis.git</span>
+<span id="cb3-2"><a href="#cb3-2" aria-hidden="true" tabindex="-1"></a><span class="bu">cd</span> hemibrain-connectomes-analysis</span></code></pre></div>
+<h3 id="step-3-install-dependencies">Step 3: Install Dependencies</h3>
+<p><strong>Open Terminal/Command Prompt</strong> in the project folder:
+- <strong>Windows</strong>: Right-click in the folder → “Open in
+Terminal” - <strong>macOS</strong>: Right-click in the folder → “New
+Terminal at Folder” - <strong>Linux</strong>: Right-click in the folder
+→ “Open in Terminal”</p>
+<p><strong>Install all required packages:</strong></p>
+<div class="sourceCode" id="cb4"><pre
+class="sourceCode bash"><code class="sourceCode bash"><span id="cb4-1"><a href="#cb4-1" aria-hidden="true" tabindex="-1"></a><span class="co"># Upgrade pip first (recommended)</span></span>
+<span id="cb4-2"><a href="#cb4-2" aria-hidden="true" tabindex="-1"></a><span class="ex">pip</span> install <span class="at">--upgrade</span> pip</span>
+<span id="cb4-3"><a href="#cb4-3" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-4"><a href="#cb4-4" aria-hidden="true" tabindex="-1"></a><span class="co"># Install all dependencies</span></span>
+<span id="cb4-5"><a href="#cb4-5" aria-hidden="true" tabindex="-1"></a><span class="ex">pip</span> install <span class="at">-r</span> requirements.txt</span></code></pre></div>
+<p>This will install ~20 packages including: - Data processing: numpy,
+pandas, scipy - Visualization: plotly, matplotlib, networkx -
+Neuroscience: neuprint-python, navis - GUI dialogs: PyQt5 (for faster
+file pickers)</p>
+<p><strong>Installation time:</strong> Usually 2-5 minutes depending on
+your internet speed.</p>
+<h3 id="step-4-set-up-vs-code-optional-but-recommended">Step 4: Set Up
+VS Code (Optional but Recommended)</h3>
+<p><strong>Download and install VS Code:</strong> - Visit <a
+href="https://code.visualstudio.com/">Visual Studio Code</a> - Download
+and install for your operating system</p>
+<p><strong>Install Python extension:</strong> 1. Open VS Code 2. Click
+the Extensions icon (square icon on left sidebar) 3. Search for “Python”
+(by Microsoft) 4. Click “Install”</p>
+<p><strong>Configure VS Code settings (recommended):</strong> 1. Press
+<code>Ctrl+,</code> (Windows/Linux) or <code>Cmd+,</code> (Mac) to open
+Settings 2. Search for “Auto Save” → Select “onFocusChange” 3. Search
+for “Execute In File Dir” → Check the box</p>
+<p><strong>Select Python interpreter:</strong> 1. Open any
+<code>.py</code> file in the project 2. Click the Python version in the
+bottom-right corner 3. Select your installed Python version (e.g.,
+Python 3.11.3)</p>
+<h3 id="step-5-get-your-neuprint-token">Step 5: Get Your NeuPrint
+Token</h3>
+<p><strong>Register and get authentication token:</strong> 1. Visit <a
+href="https://neuprint.janelia.org/">NeuPrint</a> 2. Click “LOGIN”
+(top-right corner) 3. Log in with your Google account 4. Click “Account”
+→ Copy your Auth Token</p>
+<p><strong>Important:</strong> Keep your token private! Don’t share it
+or commit it to version control.</p>
+<h3 id="step-6-configure-your-first-script">Step 6: Configure Your First
+Script</h3>
+<p><strong>Edit <code>scripts/FindDirect.py</code> or
+<code>scripts/PlotPath.py</code>:</strong></p>
+<ol type="1">
+<li>Open the script in VS Code or any text editor</li>
+<li>Find the line with <code>token=''</code></li>
+<li>Paste your NeuPrint token between the quotes:</li>
+</ol>
+<div class="sourceCode" id="cb5"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb5-1"><a href="#cb5-1" aria-hidden="true" tabindex="-1"></a>fc <span class="op">=</span> FindNeuronConnection(</span>
+<span id="cb5-2"><a href="#cb5-2" aria-hidden="true" tabindex="-1"></a>    token<span class="op">=</span><span class="st">&#39;eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...&#39;</span>,  <span class="co"># Your actual token here</span></span>
+<span id="cb5-3"><a href="#cb5-3" aria-hidden="true" tabindex="-1"></a>    dataset<span class="op">=</span><span class="st">&#39;hemibrain:v1.2.1&#39;</span>,</span>
+<span id="cb5-4"><a href="#cb5-4" aria-hidden="true" tabindex="-1"></a>    sourceNeurons<span class="op">=</span>[<span class="st">&#39;KC.*&#39;</span>],</span>
+<span id="cb5-5"><a href="#cb5-5" aria-hidden="true" tabindex="-1"></a>    targetNeurons<span class="op">=</span>[<span class="st">&#39;MBON03&#39;</span>],</span>
+<span id="cb5-6"><a href="#cb5-6" aria-hidden="true" tabindex="-1"></a>    <span class="co"># ... other parameters</span></span>
+<span id="cb5-7"><a href="#cb5-7" aria-hidden="true" tabindex="-1"></a>)</span></code></pre></div>
+<h3 id="step-7-run-your-first-analysis">Step 7: Run Your First
+Analysis</h3>
+<p><strong>In VS Code:</strong> 1. Open
+<code>scripts/FindDirect.py</code> 2. Press <code>F5</code> or click the
+“Run” button (▶️) in the top-right 3. Check the output in the Terminal
+panel</p>
+<p><strong>In Terminal/Command Prompt:</strong></p>
+<div class="sourceCode" id="cb6"><pre
+class="sourceCode bash"><code class="sourceCode bash"><span id="cb6-1"><a href="#cb6-1" aria-hidden="true" tabindex="-1"></a><span class="co"># Navigate to the scripts folder</span></span>
+<span id="cb6-2"><a href="#cb6-2" aria-hidden="true" tabindex="-1"></a><span class="bu">cd</span> scripts</span>
+<span id="cb6-3"><a href="#cb6-3" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb6-4"><a href="#cb6-4" aria-hidden="true" tabindex="-1"></a><span class="co"># Run the script</span></span>
+<span id="cb6-5"><a href="#cb6-5" aria-hidden="true" tabindex="-1"></a><span class="ex">python</span> FindDirect.py</span></code></pre></div>
+<p><strong>Expected output:</strong> - Progress messages showing data
+fetching - Connection data saved to <code>connection_data/</code> folder
+- HTML visualizations automatically opened in your browser</p>
+<h3 id="step-8-explore-functionality">Step 8: Explore Functionality</h3>
+<p><strong>Hover over function names</strong> in VS Code to see
+documentation and parameter descriptions.</p>
+<p><strong>Try different scripts:</strong> -
+<code>scripts/FindDirect.py</code> - Find direct connections between
+neuron types - <code>scripts/FindPath.py</code> - Find multi-hop
+pathways (2-3 layers) - <code>scripts/PlotPath.py</code> - Visualize
+pathways with custom colors - <code>scripts/plot3dSkeleton.py</code> -
+Render 3D neuron morphology</p>
+<p><strong>Modify parameters:</strong> - Change
+<code>sourceNeurons</code> and <code>targetNeurons</code> to analyze
+different connections - Adjust <code>min_synapse_num</code> to filter
+weak connections - Try different <code>network_layout</code> options:
+‘hierarchical’, ‘spring’, ‘circular’</p>
+<h2 id="troubleshooting">Troubleshooting</h2>
+<p><strong>Problem: “python: command not found”</strong> - Solution:
+Python is not in PATH. Reinstall Python with “Add to PATH” checked.</p>
+<p><strong>Problem: “pip: command not found”</strong> - Solution: Try
+<code>python -m pip install -r requirements.txt</code> instead.</p>
+<p><strong>Problem: “ModuleNotFoundError: No module named ‘X’”</strong>
+- Solution: Run <code>pip install -r requirements.txt</code> again.</p>
+<p><strong>Problem: Installation errors with PyQt5</strong> - Solution:
+Skip PyQt5 (optional), use tkinter instead:
+<code>bash   pip install -r requirements.txt --no-deps   pip install numpy pandas scipy plotly matplotlib networkx neuprint-python navis</code></p>
+<p><strong>Problem: “SSL Certificate Error” during pip install</strong>
+- Solution: Temporarily disable VPN/proxy or use:
+<code>bash   pip install -r requirements.txt --trusted-host pypi.org --trusted-host files.pythonhosted.org</code></p>
+<p><strong>Problem: Script runs but no output files</strong> - Solution:
+Check the <code>connection_data/</code> folder. File paths are printed
+in the terminal.</p>
+<hr />
+<h1 id="basic-usage">Basic Usage</h1>
+<h2 id="finddirect.py---finding-direct-connections">FindDirect.py -
+Finding Direct Connections</h2>
+<p>This script is located in <code>scripts/FindDirect.py</code> and is
+used for finding direct connections between neuron clusters.</p>
+<h3 id="basic-configuration">Basic Configuration</h3>
+<div class="sourceCode" id="cb7"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb7-1"><a href="#cb7-1" aria-hidden="true" tabindex="-1"></a><span class="im">from</span> coana <span class="im">import</span> FindNeuronConnection</span>
+<span id="cb7-2"><a href="#cb7-2" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb7-3"><a href="#cb7-3" aria-hidden="true" tabindex="-1"></a>fc <span class="op">=</span> FindNeuronConnection(</span>
+<span id="cb7-4"><a href="#cb7-4" aria-hidden="true" tabindex="-1"></a>    token<span class="op">=</span><span class="st">&#39;your_neuprint_token&#39;</span>,</span>
+<span id="cb7-5"><a href="#cb7-5" aria-hidden="true" tabindex="-1"></a>    dataset<span class="op">=</span><span class="st">&#39;hemibrain:v1.2.1&#39;</span>,</span>
+<span id="cb7-6"><a href="#cb7-6" aria-hidden="true" tabindex="-1"></a>    data_folder<span class="op">=</span><span class="st">&#39;./connectome_data&#39;</span>,</span>
+<span id="cb7-7"><a href="#cb7-7" aria-hidden="true" tabindex="-1"></a>    sourceNeurons<span class="op">=</span>[<span class="st">&#39;KC.*&#39;</span>], </span>
+<span id="cb7-8"><a href="#cb7-8" aria-hidden="true" tabindex="-1"></a>    targetNeurons<span class="op">=</span>[<span class="st">&#39;MBON03&#39;</span>], </span>
+<span id="cb7-9"><a href="#cb7-9" aria-hidden="true" tabindex="-1"></a>    custom_source_name<span class="op">=</span><span class="st">&#39;&#39;</span>, </span>
+<span id="cb7-10"><a href="#cb7-10" aria-hidden="true" tabindex="-1"></a>    custom_target_name<span class="op">=</span><span class="st">&#39;&#39;</span>,</span>
+<span id="cb7-11"><a href="#cb7-11" aria-hidden="true" tabindex="-1"></a>    min_synapse_num<span class="op">=</span><span class="dv">1</span>,</span>
+<span id="cb7-12"><a href="#cb7-12" aria-hidden="true" tabindex="-1"></a>    min_traversal_probability<span class="op">=</span><span class="fl">0.001</span>,</span>
+<span id="cb7-13"><a href="#cb7-13" aria-hidden="true" tabindex="-1"></a>    showfig<span class="op">=</span><span class="va">False</span>,</span>
+<span id="cb7-14"><a href="#cb7-14" aria-hidden="true" tabindex="-1"></a>)</span>
+<span id="cb7-15"><a href="#cb7-15" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb7-16"><a href="#cb7-16" aria-hidden="true" tabindex="-1"></a><span class="co"># Initialize and find connections</span></span>
+<span id="cb7-17"><a href="#cb7-17" aria-hidden="true" tabindex="-1"></a>fc.InitializeNeuronInfo()</span>
+<span id="cb7-18"><a href="#cb7-18" aria-hidden="true" tabindex="-1"></a>fc.FindDirectConnection()</span></code></pre></div>
+<h3 id="available-datasets">Available Datasets</h3>
+<div class="sourceCode" id="cb8"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb8-1"><a href="#cb8-1" aria-hidden="true" tabindex="-1"></a><span class="co"># All available datasets:</span></span>
+<span id="cb8-2"><a href="#cb8-2" aria-hidden="true" tabindex="-1"></a><span class="co">&#39;fib19:v1.0&#39;</span></span>
+<span id="cb8-3"><a href="#cb8-3" aria-hidden="true" tabindex="-1"></a><span class="co">&#39;hemibrain:v0.9&#39;</span></span>
+<span id="cb8-4"><a href="#cb8-4" aria-hidden="true" tabindex="-1"></a><span class="co">&#39;hemibrain:v1.0.1&#39;</span></span>
+<span id="cb8-5"><a href="#cb8-5" aria-hidden="true" tabindex="-1"></a><span class="co">&#39;hemibrain:v1.1&#39;</span></span>
+<span id="cb8-6"><a href="#cb8-6" aria-hidden="true" tabindex="-1"></a><span class="co">&#39;hemibrain:v1.2.1&#39;</span>  <span class="co"># Default</span></span>
+<span id="cb8-7"><a href="#cb8-7" aria-hidden="true" tabindex="-1"></a><span class="co">&#39;manc:v1.0&#39;</span></span></code></pre></div>
+<h3 id="specifying-neurons">Specifying Neurons</h3>
+<p>Source neurons and target neurons can be specified as: -
+<strong>bodyId</strong>: Exact neuron identifier (e.g.,
+<code>123456789</code>) - <strong>type</strong>: Neuron type name (e.g.,
+<code>'KC_alpha'</code>, <code>'MBON03'</code>) -
+<strong>instance</strong>: Use regular expressions (e.g.,
+<code>'KC.*'</code>, <code>'.*_R'</code> for right hemisphere)</p>
+<div class="sourceCode" id="cb9"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb9-1"><a href="#cb9-1" aria-hidden="true" tabindex="-1"></a><span class="co"># Example: Using regular expressions</span></span>
+<span id="cb9-2"><a href="#cb9-2" aria-hidden="true" tabindex="-1"></a>fc <span class="op">=</span> FindNeuronConnection(</span>
+<span id="cb9-3"><a href="#cb9-3" aria-hidden="true" tabindex="-1"></a>    sourceNeurons<span class="op">=</span>[<span class="st">&#39;KC.*&#39;</span>],           <span class="co"># All KC neurons</span></span>
+<span id="cb9-4"><a href="#cb9-4" aria-hidden="true" tabindex="-1"></a>    targetNeurons<span class="op">=</span>[<span class="st">&#39;MBON.*&#39;</span>],         <span class="co"># All MBON neurons</span></span>
+<span id="cb9-5"><a href="#cb9-5" aria-hidden="true" tabindex="-1"></a>)</span>
+<span id="cb9-6"><a href="#cb9-6" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb9-7"><a href="#cb9-7" aria-hidden="true" tabindex="-1"></a><span class="co"># Example: From external file</span></span>
+<span id="cb9-8"><a href="#cb9-8" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> pandas <span class="im">as</span> pd</span>
+<span id="cb9-9"><a href="#cb9-9" aria-hidden="true" tabindex="-1"></a>source_list <span class="op">=</span> pd.read_excel(<span class="st">&#39;sourceNeurons.xlsx&#39;</span>, header<span class="op">=</span><span class="va">None</span>).iloc[:,<span class="dv">0</span>].tolist()</span>
+<span id="cb9-10"><a href="#cb9-10" aria-hidden="true" tabindex="-1"></a>target_list <span class="op">=</span> pd.read_csv(<span class="st">&#39;targetNeurons.csv&#39;</span>, header<span class="op">=</span><span class="va">None</span>).iloc[:,<span class="dv">0</span>].tolist()</span>
+<span id="cb9-11"><a href="#cb9-11" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb9-12"><a href="#cb9-12" aria-hidden="true" tabindex="-1"></a>fc <span class="op">=</span> FindNeuronConnection(</span>
+<span id="cb9-13"><a href="#cb9-13" aria-hidden="true" tabindex="-1"></a>    sourceNeurons<span class="op">=</span>source_list,</span>
+<span id="cb9-14"><a href="#cb9-14" aria-hidden="true" tabindex="-1"></a>    targetNeurons<span class="op">=</span>target_list,</span>
+<span id="cb9-15"><a href="#cb9-15" aria-hidden="true" tabindex="-1"></a>)</span></code></pre></div>
+<h3 id="filtering-options">Filtering Options</h3>
+<h4 id="three-complementary-filters">Three Complementary Filters:</h4>
+<ol type="1">
+<li><strong>min_synapse_num</strong>: Absolute synapse count</li>
+</ol>
+<div class="sourceCode" id="cb10"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb10-1"><a href="#cb10-1" aria-hidden="true" tabindex="-1"></a>fc <span class="op">=</span> FindNeuronConnection(</span>
+<span id="cb10-2"><a href="#cb10-2" aria-hidden="true" tabindex="-1"></a>    min_synapse_num<span class="op">=</span><span class="dv">10</span>,  <span class="co"># Keep connections with ≥10 synapses</span></span>
+<span id="cb10-3"><a href="#cb10-3" aria-hidden="true" tabindex="-1"></a>)</span></code></pre></div>
+<ol start="2" type="1">
+<li><strong>min_ratio</strong>: Direct connection ratio (proportion of
+downstream inputs)</li>
+</ol>
+<div class="sourceCode" id="cb11"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb11-1"><a href="#cb11-1" aria-hidden="true" tabindex="-1"></a>fc <span class="op">=</span> FindNeuronConnection(</span>
+<span id="cb11-2"><a href="#cb11-2" aria-hidden="true" tabindex="-1"></a>    min_ratio<span class="op">=</span><span class="fl">0.01</span>,  <span class="co"># Keep connections that are ≥1% of downstream neuron&#39;s inputs</span></span>
+<span id="cb11-3"><a href="#cb11-3" aria-hidden="true" tabindex="-1"></a>)</span></code></pre></div>
+<ol start="3" type="1">
+<li><strong>min_traversal_probability</strong>: Scaled probability</li>
+</ol>
+<div class="sourceCode" id="cb12"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb12-1"><a href="#cb12-1" aria-hidden="true" tabindex="-1"></a>fc <span class="op">=</span> FindNeuronConnection(</span>
+<span id="cb12-2"><a href="#cb12-2" aria-hidden="true" tabindex="-1"></a>    min_traversal_probability<span class="op">=</span><span class="fl">0.001</span>,  <span class="co"># Keep connections with ≥0.1% probability</span></span>
+<span id="cb12-3"><a href="#cb12-3" aria-hidden="true" tabindex="-1"></a>)</span></code></pre></div>
+<p><strong>Note:</strong> All three filters can be used together. Output
+includes all three metrics: <code>weight</code>,
+<code>connection_ratio</code>, and
+<code>traversal_probability</code>.</p>
+<h2 id="findpath.py---finding-multi-hop-pathways">FindPath.py - Finding
+Multi-Hop Pathways</h2>
+<p>Use this function to find direct and indirect connection paths
+between neuron clusters.</p>
+<div class="sourceCode" id="cb13"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb13-1"><a href="#cb13-1" aria-hidden="true" tabindex="-1"></a><span class="im">from</span> coana <span class="im">import</span> FindNeuronConnection</span>
+<span id="cb13-2"><a href="#cb13-2" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb13-3"><a href="#cb13-3" aria-hidden="true" tabindex="-1"></a>fc <span class="op">=</span> FindNeuronConnection(</span>
+<span id="cb13-4"><a href="#cb13-4" aria-hidden="true" tabindex="-1"></a>    token<span class="op">=</span><span class="st">&#39;your_neuprint_token&#39;</span>,</span>
+<span id="cb13-5"><a href="#cb13-5" aria-hidden="true" tabindex="-1"></a>    dataset<span class="op">=</span><span class="st">&#39;hemibrain:v1.2.1&#39;</span>,</span>
+<span id="cb13-6"><a href="#cb13-6" aria-hidden="true" tabindex="-1"></a>    data_folder<span class="op">=</span><span class="st">&#39;./connectome_data&#39;</span>,</span>
+<span id="cb13-7"><a href="#cb13-7" aria-hidden="true" tabindex="-1"></a>    sourceNeurons<span class="op">=</span>[<span class="st">&#39;.*_.*PN.*&#39;</span>],     <span class="co"># All projection neurons</span></span>
+<span id="cb13-8"><a href="#cb13-8" aria-hidden="true" tabindex="-1"></a>    targetNeurons<span class="op">=</span>[<span class="st">&#39;MBON.*&#39;</span>],        <span class="co"># All mushroom body output neurons</span></span>
+<span id="cb13-9"><a href="#cb13-9" aria-hidden="true" tabindex="-1"></a>    min_synapse_num<span class="op">=</span><span class="dv">1</span>,</span>
+<span id="cb13-10"><a href="#cb13-10" aria-hidden="true" tabindex="-1"></a>    min_traversal_probability<span class="op">=</span><span class="fl">0.001</span>,</span>
+<span id="cb13-11"><a href="#cb13-11" aria-hidden="true" tabindex="-1"></a>    showfig<span class="op">=</span><span class="va">False</span>,</span>
+<span id="cb13-12"><a href="#cb13-12" aria-hidden="true" tabindex="-1"></a>    max_interlayer<span class="op">=</span><span class="dv">2</span>,                <span class="co"># Maximum intermediate layers</span></span>
+<span id="cb13-13"><a href="#cb13-13" aria-hidden="true" tabindex="-1"></a>    keyword_in_path_to_remove<span class="op">=</span>[<span class="st">&#39;None&#39;</span>],  <span class="co"># Remove paths with unlabeled neurons</span></span>
+<span id="cb13-14"><a href="#cb13-14" aria-hidden="true" tabindex="-1"></a>)</span>
+<span id="cb13-15"><a href="#cb13-15" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb13-16"><a href="#cb13-16" aria-hidden="true" tabindex="-1"></a><span class="co"># Initialize and find all paths</span></span>
+<span id="cb13-17"><a href="#cb13-17" aria-hidden="true" tabindex="-1"></a>fc.InitializeNeuronInfo()</span>
+<span id="cb13-18"><a href="#cb13-18" aria-hidden="true" tabindex="-1"></a>fc.FindAllPath()</span></code></pre></div>
+<h3 id="path-finding-parameters">Path Finding Parameters</h3>
+<p><strong>max_interlayer</strong>: Maximum number of intermediate
+layers</p>
+<div class="sourceCode" id="cb14"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb14-1"><a href="#cb14-1" aria-hidden="true" tabindex="-1"></a>max_interlayer<span class="op">=</span><span class="dv">1</span>  <span class="co"># Source → Target (direct only)</span></span>
+<span id="cb14-2"><a href="#cb14-2" aria-hidden="true" tabindex="-1"></a>max_interlayer<span class="op">=</span><span class="dv">2</span>  <span class="co"># Source → Intermediate → Target</span></span>
+<span id="cb14-3"><a href="#cb14-3" aria-hidden="true" tabindex="-1"></a>max_interlayer<span class="op">=</span><span class="dv">3</span>  <span class="co"># Source → Int1 → Int2 → Target</span></span></code></pre></div>
+<p><strong>keyword_in_path_to_remove</strong>: Filter out unwanted
+paths</p>
+<div class="sourceCode" id="cb15"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb15-1"><a href="#cb15-1" aria-hidden="true" tabindex="-1"></a><span class="co"># Remove paths containing unlabeled neurons</span></span>
+<span id="cb15-2"><a href="#cb15-2" aria-hidden="true" tabindex="-1"></a>keyword_in_path_to_remove<span class="op">=</span>[<span class="st">&#39;None&#39;</span>]</span>
+<span id="cb15-3"><a href="#cb15-3" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb15-4"><a href="#cb15-4" aria-hidden="true" tabindex="-1"></a><span class="co"># Remove paths through specific neurons</span></span>
+<span id="cb15-5"><a href="#cb15-5" aria-hidden="true" tabindex="-1"></a>keyword_in_path_to_remove<span class="op">=</span>[<span class="st">&#39;APL&#39;</span>, <span class="st">&#39;None&#39;</span>]</span>
+<span id="cb15-6"><a href="#cb15-6" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb15-7"><a href="#cb15-7" aria-hidden="true" tabindex="-1"></a><span class="co"># Remove paths through multiple neuron types</span></span>
+<span id="cb15-8"><a href="#cb15-8" aria-hidden="true" tabindex="-1"></a>keyword_in_path_to_remove<span class="op">=</span>[<span class="st">&#39;APL&#39;</span>, <span class="st">&#39;None&#39;</span>, <span class="st">&#39;ExR.*&#39;</span>]</span></code></pre></div>
+<hr />
+<h1 id="core-features">Core Features</h1>
+<h2 id="cache-system-v4.0">Cache System v4.0</h2>
+<p>To avoid repeated API calls and speed up analysis, the toolkit
+includes a <strong>local caching system</strong> that stores fetched
+connection data.</p>
+<h3 id="enabling-cache">Enabling Cache</h3>
+<p>Simply set <code>use_cache=True</code> when creating a
+<code>FindNeuronConnection</code> instance:</p>
+<div class="sourceCode" id="cb16"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb16-1"><a href="#cb16-1" aria-hidden="true" tabindex="-1"></a>fc <span class="op">=</span> FindNeuronConnection(</span>
+<span id="cb16-2"><a href="#cb16-2" aria-hidden="true" tabindex="-1"></a>    token<span class="op">=</span><span class="st">&#39;your_token&#39;</span>,</span>
+<span id="cb16-3"><a href="#cb16-3" aria-hidden="true" tabindex="-1"></a>    dataset<span class="op">=</span><span class="st">&#39;hemibrain:v1.2.1&#39;</span>,</span>
+<span id="cb16-4"><a href="#cb16-4" aria-hidden="true" tabindex="-1"></a>    sourceNeurons<span class="op">=</span>[<span class="st">&#39;KC.*&#39;</span>],</span>
+<span id="cb16-5"><a href="#cb16-5" aria-hidden="true" tabindex="-1"></a>    targetNeurons<span class="op">=</span>[<span class="st">&#39;MBON.*&#39;</span>],</span>
+<span id="cb16-6"><a href="#cb16-6" aria-hidden="true" tabindex="-1"></a>    min_synapse_num<span class="op">=</span><span class="dv">10</span>,</span>
+<span id="cb16-7"><a href="#cb16-7" aria-hidden="true" tabindex="-1"></a>    use_cache<span class="op">=</span><span class="va">True</span>  <span class="co"># Enable caching</span></span>
+<span id="cb16-8"><a href="#cb16-8" aria-hidden="true" tabindex="-1"></a>)</span></code></pre></div>
+<h3 id="key-features-1">Key Features</h3>
+<p>✅ <strong>Automatic Caching</strong>: Connection data is
+automatically saved to local disk<br />
+✅ <strong>Smart Reuse</strong>: Cached data is reused for different
+<code>min_synapse_num</code> values<br />
+✅ <strong>Neuron Registry</strong>: Search cached neurons without API
+calls<br />
+✅ <strong>Database Architecture</strong>: Efficient parquet-based
+storage with query indexing<br />
+✅ <strong>Complete Dataset</strong>: Automatically downloads all
+neurons (including type=None) for cache enrichment</p>
+<h3 id="cache-benefits">Cache Benefits</h3>
+<ul>
+<li><strong>10-100x faster</strong> for repeated queries</li>
+<li><strong>Offline analysis</strong> once data is cached</li>
+<li><strong>Flexible filtering</strong> - fetch once with
+<code>min_weight=1</code>, filter locally for any threshold</li>
+<li><strong>Neuron search</strong> - find cached neurons by
+type/instance/bodyId</li>
+<li><strong>40-60% smaller cache</strong> - stores only bodyId pairs,
+joins neuron metadata from local files</li>
+<li><strong>Complete coverage</strong> - handles all neurons including
+those without types</li>
+</ul>
+<h3 id="first-use-one-time-setup">First Use (One-Time Setup)</h3>
+<p>When you enable caching for the first time on a dataset, the system
+automatically downloads a complete neuron dataset:</p>
+<pre><code>📥 Complete dataset not found, downloading ALL neurons (including type=None)...
+   This is a one-time download for cache enrichment.
+Pulled 53847 neurons from hemibrain:v1.2.1
+✅ Complete dataset saved</code></pre>
+<p>This ensures cache can enrich all connections, even those involving
+untyped neurons. Takes ~15-30 seconds depending on dataset size.</p>
+<h3 id="cache-management">Cache Management</h3>
+<p><strong>View cache information:</strong></p>
+<div class="sourceCode" id="cb18"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb18-1"><a href="#cb18-1" aria-hidden="true" tabindex="-1"></a>fc.print_cache_info()</span></code></pre></div>
+<p><strong>Clear cache:</strong></p>
+<div class="sourceCode" id="cb19"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb19-1"><a href="#cb19-1" aria-hidden="true" tabindex="-1"></a>fc.clear_cache()</span></code></pre></div>
+<p><strong>Search cached neurons:</strong></p>
+<div class="sourceCode" id="cb20"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb20-1"><a href="#cb20-1" aria-hidden="true" tabindex="-1"></a><span class="co"># Search by neuron type</span></span>
+<span id="cb20-2"><a href="#cb20-2" aria-hidden="true" tabindex="-1"></a>kc_neurons <span class="op">=</span> fc.search_cached_neurons(<span class="st">&#39;KC.*&#39;</span>, <span class="st">&#39;type&#39;</span>)</span>
+<span id="cb20-3"><a href="#cb20-3" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb20-4"><a href="#cb20-4" aria-hidden="true" tabindex="-1"></a><span class="co"># Search by instance (e.g., right hemisphere)</span></span>
+<span id="cb20-5"><a href="#cb20-5" aria-hidden="true" tabindex="-1"></a>right_neurons <span class="op">=</span> fc.search_cached_neurons(<span class="st">&#39;.*_R$&#39;</span>, <span class="st">&#39;instance&#39;</span>)</span></code></pre></div>
+<h2 id="parallel-processing">Parallel Processing</h2>
+<p>For large datasets with many source-target neuron pairs, pathfinding
+can be accelerated using parallel processing:</p>
+<div class="sourceCode" id="cb21"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb21-1"><a href="#cb21-1" aria-hidden="true" tabindex="-1"></a><span class="co"># Enable parallel processing (recommended for &gt;100 source-target pairs)</span></span>
+<span id="cb21-2"><a href="#cb21-2" aria-hidden="true" tabindex="-1"></a>fc <span class="op">=</span> FindNeuronConnection(</span>
+<span id="cb21-3"><a href="#cb21-3" aria-hidden="true" tabindex="-1"></a>    token<span class="op">=</span><span class="st">&#39;your_token_here&#39;</span>,</span>
+<span id="cb21-4"><a href="#cb21-4" aria-hidden="true" tabindex="-1"></a>    dataset<span class="op">=</span><span class="st">&#39;hemibrain:v1.2.1&#39;</span>,</span>
+<span id="cb21-5"><a href="#cb21-5" aria-hidden="true" tabindex="-1"></a>    sourceNeurons<span class="op">=</span>[<span class="st">&#39;PPL1-01&#39;</span>, <span class="st">&#39;PPL1-02&#39;</span>, <span class="st">&#39;PPL1-03&#39;</span>],</span>
+<span id="cb21-6"><a href="#cb21-6" aria-hidden="true" tabindex="-1"></a>    targetNeurons<span class="op">=</span>[<span class="st">&#39;MBON14&#39;</span>, <span class="st">&#39;MBON11&#39;</span>, <span class="st">&#39;MBON01&#39;</span>],</span>
+<span id="cb21-7"><a href="#cb21-7" aria-hidden="true" tabindex="-1"></a>    max_interlayer<span class="op">=</span><span class="dv">3</span>,</span>
+<span id="cb21-8"><a href="#cb21-8" aria-hidden="true" tabindex="-1"></a>    use_parallel<span class="op">=</span><span class="va">True</span>,    <span class="co"># Enable parallel processing</span></span>
+<span id="cb21-9"><a href="#cb21-9" aria-hidden="true" tabindex="-1"></a>    n_jobs<span class="op">=-</span><span class="dv">1</span>             <span class="co"># Use all CPU cores (-1 = auto-detect)</span></span>
+<span id="cb21-10"><a href="#cb21-10" aria-hidden="true" tabindex="-1"></a>)</span>
+<span id="cb21-11"><a href="#cb21-11" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb21-12"><a href="#cb21-12" aria-hidden="true" tabindex="-1"></a>fc.InitializeNeuronInfo()</span>
+<span id="cb21-13"><a href="#cb21-13" aria-hidden="true" tabindex="-1"></a>fc.FindAllPath()  <span class="co"># Will automatically use parallel processing if beneficial</span></span></code></pre></div>
+<h3 id="performance-benefits">Performance Benefits</h3>
+<ul>
+<li><strong>4-core CPU</strong>: 3-4x faster for large datasets</li>
+<li><strong>8-core CPU</strong>: 6-8x faster for large datasets</li>
+<li><strong>16+ core CPU</strong>: 10-14x faster for large datasets</li>
+</ul>
+<h3 id="parameters">Parameters</h3>
+<ul>
+<li><code>use_parallel</code>: Enable/disable parallel processing
+(default: <code>False</code>)</li>
+<li><code>n_jobs</code>: Number of processes to use
+<ul>
+<li><code>-1</code>: Use all CPU cores (recommended)</li>
+<li><code>1</code>: Sequential processing</li>
+<li><code>N</code>: Use exactly N processes</li>
+</ul></li>
+</ul>
+<h3 id="automatic-optimization">Automatic Optimization</h3>
+<ul>
+<li>Datasets with &lt;100 pairs: Uses sequential processing (overhead
+not worth it)</li>
+<li>Datasets with &gt;100 pairs: Uses parallel processing (significant
+speedup)</li>
+</ul>
+<hr />
+<h1 id="visualization-guides">Visualization Guides</h1>
+<h2 id="heatmap-visualization">1. Heatmap Visualization</h2>
+<p>Interactive connection matrix heatmaps for visualizing
+neuron-to-neuron connectivity patterns.</p>
+<h3 id="overview">Overview</h3>
+<p>The heatmap visualization displays connectivity data as a color-coded
+matrix where: - <strong>Rows</strong> represent source neurons
+(presynaptic) - <strong>Columns</strong> represent target neurons
+(postsynaptic) - <strong>Cell colors</strong> represent connection
+strength (synapse count, ratio, or probability) - <strong>Interactive
+controls</strong> allow real-time exploration and customization</p>
+<h3 id="example-input-data">Example Input Data</h3>
+<p>Your connection dataframe should contain these columns:</p>
+<table>
+<colgroup>
+<col style="width: 21%" />
+<col style="width: 35%" />
+<col style="width: 43%" />
+</colgroup>
+<thead>
+<tr>
+<th>Column</th>
+<th>Description</th>
+<th>Example Values</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>source</code> or <code>sourcetype</code></td>
+<td>Source neuron names/types</td>
+<td>‘KC_alpha’, ‘MBON01’, ‘PPL1-01’</td>
+</tr>
+<tr>
+<td><code>target</code> or <code>targettype</code></td>
+<td>Target neuron names/types</td>
+<td>‘MBON03’, ‘MBON14’, ‘DAN’</td>
+</tr>
+<tr>
+<td><code>weight</code></td>
+<td>Synapse count (required)</td>
+<td>10, 25, 150</td>
+</tr>
+<tr>
+<td><code>ratio</code></td>
+<td>Connection ratio (optional)</td>
+<td>0.05, 0.15, 0.8</td>
+</tr>
+<tr>
+<td><code>probability</code></td>
+<td>Traversal probability (optional)</td>
+<td>0.1, 0.5, 0.9</td>
+</tr>
+</tbody>
+</table>
+<h3 id="quick-start">Quick Start</h3>
+<div class="sourceCode" id="cb22"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb22-1"><a href="#cb22-1" aria-hidden="true" tabindex="-1"></a><span class="im">from</span> statvis <span class="im">import</span> plot_stat</span>
+<span id="cb22-2"><a href="#cb22-2" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb22-3"><a href="#cb22-3" aria-hidden="true" tabindex="-1"></a><span class="co"># Create heatmap from connection data</span></span>
+<span id="cb22-4"><a href="#cb22-4" aria-hidden="true" tabindex="-1"></a>plot_stat(</span>
+<span id="cb22-5"><a href="#cb22-5" aria-hidden="true" tabindex="-1"></a>    conn_df<span class="op">=</span>connection_dataframe,</span>
+<span id="cb22-6"><a href="#cb22-6" aria-hidden="true" tabindex="-1"></a>    output_folder<span class="op">=</span><span class="st">&#39;./output&#39;</span>,</span>
+<span id="cb22-7"><a href="#cb22-7" aria-hidden="true" tabindex="-1"></a>    metric<span class="op">=</span><span class="st">&#39;weight&#39;</span>,           <span class="co"># &#39;weight&#39;, &#39;ratio&#39;, or &#39;probability&#39;</span></span>
+<span id="cb22-8"><a href="#cb22-8" aria-hidden="true" tabindex="-1"></a>    custom_order<span class="op">=</span><span class="va">None</span>,         <span class="co"># Optional: custom row/column ordering</span></span>
+<span id="cb22-9"><a href="#cb22-9" aria-hidden="true" tabindex="-1"></a>    showfig<span class="op">=</span><span class="va">True</span>               <span class="co"># Open in browser automatically</span></span>
+<span id="cb22-10"><a href="#cb22-10" aria-hidden="true" tabindex="-1"></a>)</span></code></pre></div>
+<h3 id="key-features-2">Key Features</h3>
+<h4 id="multiple-scales">1. Multiple Scales</h4>
+<p>Transform data for better visualization: - <strong>Linear</strong>:
+Original values (default) - <strong>Logarithmic (log₂)</strong>:
+Emphasize smaller differences - <strong>Logarithmic (log₁₀)</strong>:
+Alternative log base - <strong>Square Root</strong>: Moderate
+compression of large values</p>
+<p><strong>Usage</strong>: Click scale buttons at the top of the
+interface</p>
+<h4 id="hierarchical-clustering">2. Hierarchical Clustering</h4>
+<p>Automatically group similar connection patterns: - <strong>Ward
+Linkage</strong> (default): Creates compact, well-separated clusters -
+<strong>Average Linkage</strong>: Balanced approach - <strong>Complete
+Linkage</strong>: Produces tight, compact clusters - <strong>Single
+Linkage</strong>: Can reveal hierarchical structures</p>
+<p><strong>Usage</strong>: 1. Click “Clustered Order” button 2. Select
+clustering method from dropdown 3. Toggle back to “Original Order”
+anytime</p>
+<h4 id="custom-colorscales">3. Custom Colorscales</h4>
+<p>Choose from 15+ built-in colorscales: - <strong>Sequential</strong>:
+Blues, Greens, Reds, Purples, Oranges, Greys -
+<strong>Diverging</strong>: RdBu, PiYG - <strong>Perceptually
+uniform</strong>: Viridis, Plasma, Inferno, Magma, Cividis -
+<strong>Specialized</strong>: Turbo, Jet</p>
+<p><strong>Custom 2-Color Scale</strong>: 1. Select “Custom” from
+colorscale dropdown 2. Choose minimum color (e.g., white for low values)
+3. Choose maximum color (e.g., dark purple for high values)</p>
+<h3 id="example-files">Example Files</h3>
+<ul>
+<li><code>examples/sample_network_data.csv</code> - Sample connection
+data</li>
+<li><code>datasets/hemibrain_v1_2_1_alltypes_neuron_df.csv</code> - All
+neuron types with metadata</li>
+<li>Output from <code>scripts/FindDirect.py</code> - Direct
+connections</li>
+</ul>
+<hr />
+<h2 id="network-visualization">2. Network Visualization</h2>
+<p>Interactive network graph visualization for exploring neural pathways
+and connectivity structures.</p>
+<h3 id="overview-1">Overview</h3>
+<p>The network visualization displays connectivity as an interactive
+graph where: - <strong>Nodes</strong> represent neurons (colored by
+role: source, intermediate, target) - <strong>Edges</strong> represent
+connections (thickness = synapse count, ratio, or probability) -
+<strong>Layout algorithms</strong> arrange nodes to reveal structure -
+<strong>Interactive controls</strong> enable exploration, editing, and
+customization</p>
+<h3 id="example-input-data-1">Example Input Data</h3>
+<p>Your edge list should contain these columns:</p>
+<table style="width:100%;">
+<colgroup>
+<col style="width: 17%" />
+<col style="width: 27%" />
+<col style="width: 34%" />
+<col style="width: 21%" />
+</colgroup>
+<thead>
+<tr>
+<th>Column</th>
+<th>Description</th>
+<th>Example Values</th>
+<th>Required</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>source</code>, <code>from</code>, or <code>*_pre</code></td>
+<td>Source neuron</td>
+<td>‘KC_alpha’, ‘PN1’, ‘L3_R’</td>
+<td>✅ Yes</td>
+</tr>
+<tr>
+<td><code>target</code>, <code>to</code>, or <code>*_post</code></td>
+<td>Target neuron</td>
+<td>‘MBON03’, ‘LN1’, ‘Mi1_R’</td>
+<td>✅ Yes</td>
+</tr>
+<tr>
+<td><code>weight</code> or <code>synapse_count</code></td>
+<td>Connection strength</td>
+<td>10, 25, 150</td>
+<td>✅ Yes</td>
+</tr>
+<tr>
+<td><code>ratio</code></td>
+<td>Connection ratio</td>
+<td>0.05, 0.15, 0.8</td>
+<td>❌ Optional</td>
+</tr>
+<tr>
+<td><code>probability</code></td>
+<td>Traversal probability</td>
+<td>0.1, 0.5, 0.9</td>
+<td>❌ Optional</td>
+</tr>
+</tbody>
+</table>
+<h3 id="quick-start-1">Quick Start</h3>
+<div class="sourceCode" id="cb23"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb23-1"><a href="#cb23-1" aria-hidden="true" tabindex="-1"></a><span class="im">from</span> vispath <span class="im">import</span> VisualizePath</span>
+<span id="cb23-2"><a href="#cb23-2" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb23-3"><a href="#cb23-3" aria-hidden="true" tabindex="-1"></a><span class="co"># Create network from path analysis results</span></span>
+<span id="cb23-4"><a href="#cb23-4" aria-hidden="true" tabindex="-1"></a>vp <span class="op">=</span> VisualizePath(</span>
+<span id="cb23-5"><a href="#cb23-5" aria-hidden="true" tabindex="-1"></a>    path_file<span class="op">=</span><span class="st">&#39;path_results.xlsx&#39;</span>,    <span class="co"># Excel, CSV, or DataFrame</span></span>
+<span id="cb23-6"><a href="#cb23-6" aria-hidden="true" tabindex="-1"></a>    sheet_name<span class="op">=</span><span class="va">None</span>,                   <span class="co"># Auto-select sheet</span></span>
+<span id="cb23-7"><a href="#cb23-7" aria-hidden="true" tabindex="-1"></a>    output_folder<span class="op">=</span><span class="st">&#39;./visualizations&#39;</span>,</span>
+<span id="cb23-8"><a href="#cb23-8" aria-hidden="true" tabindex="-1"></a>    network_layout<span class="op">=</span><span class="st">&#39;hierarchical&#39;</span>,     <span class="co"># Layout algorithm</span></span>
+<span id="cb23-9"><a href="#cb23-9" aria-hidden="true" tabindex="-1"></a>    showfig<span class="op">=</span><span class="va">True</span>                       <span class="co"># Open in browser</span></span>
+<span id="cb23-10"><a href="#cb23-10" aria-hidden="true" tabindex="-1"></a>)</span>
+<span id="cb23-11"><a href="#cb23-11" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb23-12"><a href="#cb23-12" aria-hidden="true" tabindex="-1"></a><span class="co"># Generate visualizations</span></span>
+<span id="cb23-13"><a href="#cb23-13" aria-hidden="true" tabindex="-1"></a>conn_df, G <span class="op">=</span> vp.visualize()</span></code></pre></div>
+<h3 id="layout-algorithms">Layout Algorithms</h3>
+<h4 id="hierarchical-dagre">Hierarchical (Dagre)</h4>
+<ul>
+<li><strong>Best for</strong>: Layered pathways, feedforward
+networks</li>
+<li><strong>Algorithm</strong>: Sugiyama’s algorithm with edge crossing
+minimization</li>
+<li><strong>Direction</strong>: Top-to-bottom flow</li>
+<li><strong>Use case</strong>: Source → Intermediate → Target
+pathways</li>
+</ul>
+<h4 id="force-directed-spring">Force-Directed (Spring)</h4>
+<ul>
+<li><strong>Best for</strong>: General networks, community
+detection</li>
+<li><strong>Algorithm</strong>: Force-atlas with
+attraction/repulsion</li>
+<li><strong>Behavior</strong>: Connected nodes attract, others
+repel</li>
+<li><strong>Use case</strong>: Exploring network communities</li>
+</ul>
+<h4 id="circular">Circular</h4>
+<ul>
+<li><strong>Best for</strong>: Small networks, showing all
+connections</li>
+<li><strong>Algorithm</strong>: Evenly spaced around circle</li>
+<li><strong>Benefit</strong>: No overlapping nodes</li>
+<li><strong>Use case</strong>: Dense connectivity, comparison view</li>
+</ul>
+<h4 id="distributed">Distributed</h4>
+<ul>
+<li><strong>Best for</strong>: Multiple disconnected components</li>
+<li><strong>Algorithm</strong>: Separates components, uses
+force-directed within</li>
+<li><strong>Benefit</strong>: Prevents component overlap</li>
+</ul>
+<h3 id="interactive-features">Interactive Features</h3>
+<ul>
+<li><strong>Drag nodes</strong>: Rearrange manually</li>
+<li><strong>Hide nodes</strong>: Right-click → Hide</li>
+<li><strong>Hover</strong>: View connection details</li>
+<li><strong>Zoom/Pan</strong>: Mouse wheel and drag</li>
+<li><strong>Export layout</strong>: Save custom arrangements</li>
+<li><strong>Edit mode</strong>: Add/remove nodes and edges</li>
+</ul>
+<h3 id="example-files-1">Example Files</h3>
+<ul>
+<li><code>examples/example_neuron_network.csv</code> - Multi-layer
+network</li>
+<li><code>examples/example_bodyid_network.csv</code> - BodyId-level
+network</li>
+<li><code>examples/simple_network_data.csv</code> - Minimal 3-column
+format</li>
+<li>Output from <code>scripts/FindPath.py</code> - Path analysis
+results</li>
+</ul>
+<hr />
+<h2 id="sankey-diagram">3. Sankey Diagram</h2>
+<p>Flow-based visualization showing the magnitude of connections between
+neuron layers.</p>
+<h3 id="overview-2">Overview</h3>
+<p>Sankey diagrams visualize neural pathways as flowing connections
+where: - <strong>Nodes</strong> represent neurons or neuron types -
+<strong>Links</strong> are connections with width proportional to
+strength - <strong>Flow direction</strong> shows signal progression
+(left to right) - <strong>Colors</strong> distinguish source,
+intermediate, and target populations</p>
+<h3 id="example-input-data-2">Example Input Data</h3>
+<p>Your edge list should contain these columns:</p>
+<table>
+<thead>
+<tr>
+<th>Column</th>
+<th>Description</th>
+<th>Example Values</th>
+<th>Required</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>source</code> or <code>from</code></td>
+<td>Source neuron</td>
+<td>‘KC_alpha’, ‘MBON01’</td>
+<td>✅ Yes</td>
+</tr>
+<tr>
+<td><code>target</code> or <code>to</code></td>
+<td>Target neuron</td>
+<td>‘MBON03’, ‘DAN_a’</td>
+<td>✅ Yes</td>
+</tr>
+<tr>
+<td><code>weight</code></td>
+<td>Connection strength</td>
+<td>10, 25, 150</td>
+<td>✅ Yes</td>
+</tr>
+<tr>
+<td><code>ratio</code></td>
+<td>Connection ratio</td>
+<td>0.05, 0.15, 0.8</td>
+<td>❌ Optional</td>
+</tr>
+<tr>
+<td><code>probability</code></td>
+<td>Traversal probability</td>
+<td>0.1, 0.5, 0.9</td>
+<td>❌ Optional</td>
+</tr>
+</tbody>
+</table>
+<h3 id="quick-start-2">Quick Start</h3>
+<div class="sourceCode" id="cb24"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb24-1"><a href="#cb24-1" aria-hidden="true" tabindex="-1"></a><span class="im">from</span> vispath <span class="im">import</span> VisualizePath</span>
+<span id="cb24-2"><a href="#cb24-2" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb24-3"><a href="#cb24-3" aria-hidden="true" tabindex="-1"></a><span class="co"># Create Sankey diagram from path data</span></span>
+<span id="cb24-4"><a href="#cb24-4" aria-hidden="true" tabindex="-1"></a>vp <span class="op">=</span> VisualizePath(</span>
+<span id="cb24-5"><a href="#cb24-5" aria-hidden="true" tabindex="-1"></a>    path_file<span class="op">=</span><span class="st">&#39;path_results.xlsx&#39;</span>,</span>
+<span id="cb24-6"><a href="#cb24-6" aria-hidden="true" tabindex="-1"></a>    output_folder<span class="op">=</span><span class="st">&#39;./visualizations&#39;</span>,</span>
+<span id="cb24-7"><a href="#cb24-7" aria-hidden="true" tabindex="-1"></a>    showfig<span class="op">=</span><span class="va">True</span></span>
+<span id="cb24-8"><a href="#cb24-8" aria-hidden="true" tabindex="-1"></a>)</span>
+<span id="cb24-9"><a href="#cb24-9" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb24-10"><a href="#cb24-10" aria-hidden="true" tabindex="-1"></a>conn_df, G <span class="op">=</span> vp.visualize()</span></code></pre></div>
+<p>The Sankey diagram is automatically generated as
+<code>sankey_*.html</code> alongside the network visualization.</p>
+<h3 id="key-features-3">Key Features</h3>
+<h4 id="connection-metrics">1. Connection Metrics</h4>
+<p>Toggle between different strength measures: - <strong>Synapse Count
+(weight)</strong>: Total synapses in connection - <strong>Connection
+Ratio</strong>: Proportion of source neuron’s output - <strong>Traversal
+Probability</strong>: Likelihood of signal propagation</p>
+<p><strong>Usage</strong>: Click metric buttons at top of interface</p>
+<h4 id="layout-modes">2. Layout Modes</h4>
+<p><strong>Snap Layout (Default)</strong>: - Nodes snap to vertical
+layers - Best for clearly layered pathways - Automatic vertical
+positioning</p>
+<p><strong>Freeform Layout</strong>: - Nodes can be positioned anywhere
+- Best for custom arrangements - Full manual positioning</p>
+<h4 id="node-ordering">3. Node Ordering</h4>
+<p>Control vertical order within layers: - <strong>Automatic
+Ordering</strong>: Sorts by node name (alphabetical) - <strong>Manual
+Ordering</strong>: Drag nodes vertically - <strong>Custom
+Ordering</strong>: Provide ordering via API</p>
+<h3 id="interactive-features-1">Interactive Features</h3>
+<ul>
+<li><strong>Drag nodes</strong>: Rearrange vertically (snap mode) or
+freely (freeform mode)</li>
+<li><strong>Hover</strong>: View connection details</li>
+<li><strong>Click links</strong>: Highlight specific pathways</li>
+<li><strong>Toggle metrics</strong>: Switch between
+weight/ratio/probability</li>
+<li><strong>Export</strong>: Save diagram as PNG or SVG</li>
+</ul>
+<h3 id="example-files-2">Example Files</h3>
+<ul>
+<li><code>examples/example_neuron_network.csv</code> - Multi-layer
+pathways</li>
+<li><code>examples/simple_network_data.csv</code> - Basic format</li>
+<li>Output from <code>scripts/PlotPath.py</code> - Visualized
+pathways</li>
+</ul>
+<hr />
+<h2 id="d-skeleton-visualization">4. 3D Skeleton Visualization</h2>
+<p>Three-dimensional rendering of neuron morphologies and spatial
+connectivity in the Drosophila brain.</p>
+<h3 id="overview-3">Overview</h3>
+<p>The 3D skeleton visualization displays: - <strong>Neuron
+morphologies</strong> as 3D skeletons with accurate spatial coordinates
+- <strong>Brain regions</strong> (ROIs) as semi-transparent meshes -
+<strong>Connections</strong> between neurons with spatial context -
+<strong>Interactive exploration</strong> with rotation, zoom, and
+selection</p>
+<h3 id="example-input-data-3">Example Input Data</h3>
+<p>3D skeleton visualization requires <strong>neuron bodyIds</strong>
+from NeuPrint:</p>
+<table>
+<colgroup>
+<col style="width: 28%" />
+<col style="width: 30%" />
+<col style="width: 21%" />
+<col style="width: 19%" />
+</colgroup>
+<thead>
+<tr>
+<th>Input Type</th>
+<th>Description</th>
+<th>Example</th>
+<th>Source</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>bodyId</strong></td>
+<td>Unique neuron identifier</td>
+<td>123456789, 987654321</td>
+<td>NeuPrint database</td>
+</tr>
+<tr>
+<td><strong>Neuron types</strong></td>
+<td>Type name (converted to bodyIds)</td>
+<td>‘KC_alpha’, ‘MBON03’</td>
+<td>Fetched via NeuPrint API</td>
+</tr>
+<tr>
+<td><strong>Layer specification</strong></td>
+<td>Multi-layer pathway</td>
+<td>[‘KC.<em>’, ’MBON.</em>’, ’DAN.*’]</td>
+<td>From path analysis</td>
+</tr>
+</tbody>
+</table>
+<h3 id="quick-start-3">Quick Start</h3>
+<div class="sourceCode" id="cb25"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb25-1"><a href="#cb25-1" aria-hidden="true" tabindex="-1"></a><span class="im">from</span> navis_related <span class="im">import</span> plot_navis_3d</span>
+<span id="cb25-2"><a href="#cb25-2" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb25-3"><a href="#cb25-3" aria-hidden="true" tabindex="-1"></a><span class="co"># Visualize neurons with 3D skeletons</span></span>
+<span id="cb25-4"><a href="#cb25-4" aria-hidden="true" tabindex="-1"></a>plot_navis_3d(</span>
+<span id="cb25-5"><a href="#cb25-5" aria-hidden="true" tabindex="-1"></a>    bodyIds<span class="op">=</span>[<span class="dv">123456789</span>, <span class="dv">987654321</span>],  <span class="co"># List of neuron bodyIds</span></span>
+<span id="cb25-6"><a href="#cb25-6" aria-hidden="true" tabindex="-1"></a>    dataset<span class="op">=</span><span class="st">&#39;hemibrain:v1.2.1&#39;</span>,</span>
+<span id="cb25-7"><a href="#cb25-7" aria-hidden="true" tabindex="-1"></a>    token<span class="op">=</span><span class="st">&#39;your_neuprint_token&#39;</span>,</span>
+<span id="cb25-8"><a href="#cb25-8" aria-hidden="true" tabindex="-1"></a>    show_rois<span class="op">=</span><span class="va">True</span>,                   <span class="co"># Display brain regions</span></span>
+<span id="cb25-9"><a href="#cb25-9" aria-hidden="true" tabindex="-1"></a>    show_connectors<span class="op">=</span><span class="va">True</span>,             <span class="co"># Show synapse locations</span></span>
+<span id="cb25-10"><a href="#cb25-10" aria-hidden="true" tabindex="-1"></a>    output_folder<span class="op">=</span><span class="st">&#39;./3d_output&#39;</span>,</span>
+<span id="cb25-11"><a href="#cb25-11" aria-hidden="true" tabindex="-1"></a>    showfig<span class="op">=</span><span class="va">True</span></span>
+<span id="cb25-12"><a href="#cb25-12" aria-hidden="true" tabindex="-1"></a>)</span></code></pre></div>
+<h3 id="prerequisites">Prerequisites</h3>
+<p><strong>Required packages</strong>:</p>
+<div class="sourceCode" id="cb26"><pre
+class="sourceCode bash"><code class="sourceCode bash"><span id="cb26-1"><a href="#cb26-1" aria-hidden="true" tabindex="-1"></a><span class="ex">pip</span> install navis</span>
+<span id="cb26-2"><a href="#cb26-2" aria-hidden="true" tabindex="-1"></a><span class="ex">pip</span> install navis-flybrains</span>
+<span id="cb26-3"><a href="#cb26-3" aria-hidden="true" tabindex="-1"></a><span class="ex">pip</span> install plotly</span></code></pre></div>
+<p><strong>Data requirements</strong>: - Valid NeuPrint authentication
+token - Neuron bodyIds from chosen dataset - Internet connection (first
+time, to fetch skeleton data)</p>
+<h3 id="key-features-4">Key Features</h3>
+<h4 id="neuron-skeleton-rendering">1. Neuron Skeleton Rendering</h4>
+<p><strong>Display multiple neurons together</strong>:</p>
+<div class="sourceCode" id="cb27"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb27-1"><a href="#cb27-1" aria-hidden="true" tabindex="-1"></a>plot_navis_3d(</span>
+<span id="cb27-2"><a href="#cb27-2" aria-hidden="true" tabindex="-1"></a>    bodyIds<span class="op">=</span>[</span>
+<span id="cb27-3"><a href="#cb27-3" aria-hidden="true" tabindex="-1"></a>        <span class="dv">123456789</span>,  <span class="co"># Neuron 1</span></span>
+<span id="cb27-4"><a href="#cb27-4" aria-hidden="true" tabindex="-1"></a>        <span class="dv">987654321</span>,  <span class="co"># Neuron 2</span></span>
+<span id="cb27-5"><a href="#cb27-5" aria-hidden="true" tabindex="-1"></a>        <span class="dv">111222333</span>   <span class="co"># Neuron 3</span></span>
+<span id="cb27-6"><a href="#cb27-6" aria-hidden="true" tabindex="-1"></a>    ],</span>
+<span id="cb27-7"><a href="#cb27-7" aria-hidden="true" tabindex="-1"></a>    color_by<span class="op">=</span><span class="st">&#39;neuron&#39;</span>  <span class="co"># Color each neuron differently</span></span>
+<span id="cb27-8"><a href="#cb27-8" aria-hidden="true" tabindex="-1"></a>)</span></code></pre></div>
+<h4 id="brain-region-roi-meshes">2. Brain Region (ROI) Meshes</h4>
+<p><strong>Show specific ROIs</strong>:</p>
+<div class="sourceCode" id="cb28"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb28-1"><a href="#cb28-1" aria-hidden="true" tabindex="-1"></a>plot_navis_3d(</span>
+<span id="cb28-2"><a href="#cb28-2" aria-hidden="true" tabindex="-1"></a>    bodyIds<span class="op">=</span>[<span class="dv">123456789</span>],</span>
+<span id="cb28-3"><a href="#cb28-3" aria-hidden="true" tabindex="-1"></a>    show_rois<span class="op">=</span><span class="va">True</span>,</span>
+<span id="cb28-4"><a href="#cb28-4" aria-hidden="true" tabindex="-1"></a>    roi_list<span class="op">=</span>[<span class="st">&#39;MB_CA&#39;</span>, <span class="st">&#39;MB_PED&#39;</span>, <span class="st">&#39;SLP_R&#39;</span>],  <span class="co"># Mushroom body regions</span></span>
+<span id="cb28-5"><a href="#cb28-5" aria-hidden="true" tabindex="-1"></a>    roi_opacity<span class="op">=</span><span class="fl">0.2</span>  <span class="co"># Semi-transparent</span></span>
+<span id="cb28-6"><a href="#cb28-6" aria-hidden="true" tabindex="-1"></a>)</span></code></pre></div>
+<p><strong>Available ROIs</strong>: - <strong>Mushroom Body</strong>:
+MB_CA (calyx), MB_PED (pedunculus), MB_VL (vertical lobe) -
+<strong>Central Complex</strong>: FB (fan-shaped body), EB (ellipsoid
+body), PB (protocerebral bridge) - <strong>Optic Lobes</strong>: ME
+(medulla), LO (lobula), LOP (lobula plate) - <strong>Antennal
+Lobe</strong>: AL_R, AL_L - <strong>Lateral Horn</strong>: LH_R,
+LH_L</p>
+<h4 id="synapse-visualization">3. Synapse Visualization</h4>
+<p>Show synaptic connections in 3D space: - <strong>Presynaptic
+sites</strong> (outputs): Red (default) - <strong>Postsynaptic
+sites</strong> (inputs): Blue (default) - <strong>Size</strong>:
+Proportional to partner count - <strong>Location</strong>: Exact spatial
+coordinates</p>
+<h3 id="getting-bodyids">Getting BodyIds</h3>
+<p><strong>From neuron types</strong>:</p>
+<div class="sourceCode" id="cb29"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb29-1"><a href="#cb29-1" aria-hidden="true" tabindex="-1"></a><span class="im">from</span> neuprint <span class="im">import</span> fetch_neurons, Client</span>
+<span id="cb29-2"><a href="#cb29-2" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb29-3"><a href="#cb29-3" aria-hidden="true" tabindex="-1"></a>client <span class="op">=</span> Client(<span class="st">&#39;neuprint.janelia.org&#39;</span>, dataset<span class="op">=</span><span class="st">&#39;hemibrain:v1.2.1&#39;</span>, token<span class="op">=</span><span class="st">&#39;your_token&#39;</span>)</span>
+<span id="cb29-4"><a href="#cb29-4" aria-hidden="true" tabindex="-1"></a>neurons_df, roi_counts <span class="op">=</span> fetch_neurons(NC(<span class="bu">type</span><span class="op">=</span><span class="st">&#39;KC_alpha&#39;</span>))</span>
+<span id="cb29-5"><a href="#cb29-5" aria-hidden="true" tabindex="-1"></a>bodyIds <span class="op">=</span> neurons_df[<span class="st">&#39;bodyId&#39;</span>].tolist()</span></code></pre></div>
+<p><strong>From path analysis results</strong>:</p>
+<div class="sourceCode" id="cb30"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb30-1"><a href="#cb30-1" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> pandas <span class="im">as</span> pd</span>
+<span id="cb30-2"><a href="#cb30-2" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb30-3"><a href="#cb30-3" aria-hidden="true" tabindex="-1"></a><span class="co"># Load path results</span></span>
+<span id="cb30-4"><a href="#cb30-4" aria-hidden="true" tabindex="-1"></a>paths <span class="op">=</span> pd.read_excel(<span class="st">&#39;path_results.xlsx&#39;</span>, sheet_name<span class="op">=</span><span class="st">&#39;path_bodyId&#39;</span>)</span>
+<span id="cb30-5"><a href="#cb30-5" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb30-6"><a href="#cb30-6" aria-hidden="true" tabindex="-1"></a><span class="co"># Extract unique bodyIds</span></span>
+<span id="cb30-7"><a href="#cb30-7" aria-hidden="true" tabindex="-1"></a>all_bodyIds <span class="op">=</span> <span class="bu">set</span>()</span>
+<span id="cb30-8"><a href="#cb30-8" aria-hidden="true" tabindex="-1"></a><span class="cf">for</span> col <span class="kw">in</span> paths.columns:</span>
+<span id="cb30-9"><a href="#cb30-9" aria-hidden="true" tabindex="-1"></a>    <span class="cf">if</span> <span class="st">&#39;bodyId&#39;</span> <span class="kw">in</span> col <span class="kw">or</span> col <span class="kw">in</span> [<span class="st">&#39;source&#39;</span>, <span class="st">&#39;target&#39;</span>]:</span>
+<span id="cb30-10"><a href="#cb30-10" aria-hidden="true" tabindex="-1"></a>        all_bodyIds.update(paths[col].dropna().unique())</span></code></pre></div>
+<h3 id="example-files-3">Example Files</h3>
+<ul>
+<li>Sample script: <code>scripts/plot3dSkeleton.py</code></li>
+<li>Type-level data:
+<code>datasets/hemibrain_v1_2_1_alltypes_neuron_df.csv</code></li>
+<li>Path results with bodyIds: Output from
+<code>scripts/FindPath.py</code></li>
+</ul>
+<hr />
+<h1 id="technical-documentation">Technical Documentation</h1>
+<h2 id="performance-optimization">Performance Optimization</h2>
+<h3 id="caching-system-architecture">Caching System Architecture</h3>
+<p>The caching system uses a parquet-based database architecture:</p>
+<p><strong>Storage Format</strong>: - <strong>Connection cache</strong>:
+Parquet files with gzip compression - <strong>Neuron metadata</strong>:
+CSV files with type/instance information - <strong>Index files</strong>:
+Fast lookup tables for query optimization</p>
+<p><strong>Cache Location</strong>:</p>
+<pre><code>cache/
+├── hemibrain_v1_2_1/
+│   ├── connections/
+│   │   ├── all_connections.parquet  # All cached connections
+│   │   └── metadata.json             # Cache metadata
+│   └── neurons/
+│       ├── all_neurons.csv           # Complete neuron list
+│       └── typed_neurons.csv         # Neurons with assigned types
+└── optic-lobe_v1_1/
+    └── ...</code></pre>
+<p><strong>Query Optimization</strong>: - Indexed by bodyId pairs for
+O(1) lookup - Pre-filtered by minimum weight threshold - Lazy loading of
+neuron metadata</p>
+<h3 id="parallel-processing-architecture">Parallel Processing
+Architecture</h3>
+<p>The parallel processing system uses multiprocessing with process
+pools:</p>
+<p><strong>Architecture</strong>:</p>
+<pre><code>Main Process
+├── Task Queue (source-target pairs)
+├── Process Pool (N workers)
+│   ├── Worker 1: Process pair batch 1
+│   ├── Worker 2: Process pair batch 2
+│   └── Worker N: Process pair batch N
+└── Result Aggregation</code></pre>
+<p><strong>Optimization Strategies</strong>: - <strong>Batch
+processing</strong>: Groups pairs to minimize overhead - <strong>Load
+balancing</strong>: Distributes work evenly across cores -
+<strong>Memory management</strong>: Each worker has isolated memory -
+<strong>Progress tracking</strong>: Real-time progress updates</p>
+<p><strong>When to Use</strong>: - ✅ &gt;100 source-target pairs - ✅
+max_interlayer ≥ 2 - ✅ Multi-core CPU available - ❌ Small datasets
+(&lt;100 pairs) - ❌ Single-core systems</p>
+<h2 id="data-formats">Data Formats</h2>
+<h3 id="connection-data-format">Connection Data Format</h3>
+<p>Output CSV/Excel files contain:</p>
+<table>
+<thead>
+<tr>
+<th>Column</th>
+<th>Type</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>source</code></td>
+<td>str</td>
+<td>Source neuron type/name</td>
+</tr>
+<tr>
+<td><code>target</code></td>
+<td>str</td>
+<td>Target neuron type/name</td>
+</tr>
+<tr>
+<td><code>weight</code></td>
+<td>int</td>
+<td>Synapse count</td>
+</tr>
+<tr>
+<td><code>ratio</code></td>
+<td>float</td>
+<td>Connection ratio (weight/post_inputs)</td>
+</tr>
+<tr>
+<td><code>probability</code></td>
+<td>float</td>
+<td>Traversal probability</td>
+</tr>
+<tr>
+<td><code>source_bodyId</code></td>
+<td>int</td>
+<td>Source neuron bodyId (optional)</td>
+</tr>
+<tr>
+<td><code>target_bodyId</code></td>
+<td>int</td>
+<td>Target neuron bodyId (optional)</td>
+</tr>
+</tbody>
+</table>
+<h3 id="path-data-format">Path Data Format</h3>
+<p>Multi-hop pathway files contain:</p>
+<table>
+<thead>
+<tr>
+<th>Column</th>
+<th>Type</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>path_id</code></td>
+<td>int</td>
+<td>Unique path identifier</td>
+</tr>
+<tr>
+<td><code>source</code></td>
+<td>str</td>
+<td>Starting neuron</td>
+</tr>
+<tr>
+<td><code>target</code></td>
+<td>str</td>
+<td>Ending neuron</td>
+</tr>
+<tr>
+<td><code>intermediate_1</code></td>
+<td>str</td>
+<td>First intermediate (if exists)</td>
+</tr>
+<tr>
+<td><code>intermediate_2</code></td>
+<td>str</td>
+<td>Second intermediate (if exists)</td>
+</tr>
+<tr>
+<td><code>total_weight</code></td>
+<td>int</td>
+<td>Sum of all connection weights</td>
+</tr>
+<tr>
+<td><code>path_probability</code></td>
+<td>float</td>
+<td>Product of all connection probabilities</td>
+</tr>
+<tr>
+<td><code>inter_layer_num</code></td>
+<td>int</td>
+<td>Number of intermediate layers</td>
+</tr>
+</tbody>
+</table>
+<h3 id="neuron-metadata-format">Neuron Metadata Format</h3>
+<p>Neuron information files contain:</p>
+<table>
+<thead>
+<tr>
+<th>Column</th>
+<th>Type</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>bodyId</code></td>
+<td>int</td>
+<td>Unique neuron identifier</td>
+</tr>
+<tr>
+<td><code>type</code></td>
+<td>str</td>
+<td>Neuron type name (or None)</td>
+</tr>
+<tr>
+<td><code>instance</code></td>
+<td>str</td>
+<td>Neuron instance name</td>
+</tr>
+<tr>
+<td><code>status</code></td>
+<td>str</td>
+<td>Tracing status</td>
+</tr>
+<tr>
+<td><code>cropped</code></td>
+<td>bool</td>
+<td>Whether neuron is cropped</td>
+</tr>
+<tr>
+<td><code>soma</code></td>
+<td>bool</td>
+<td>Whether soma is present</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h1 id="examples-tutorials">Examples &amp; Tutorials</h1>
+<h2 id="example-1-simple-direct-connection-analysis">Example 1: Simple
+Direct Connection Analysis</h2>
+<div class="sourceCode" id="cb33"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb33-1"><a href="#cb33-1" aria-hidden="true" tabindex="-1"></a><span class="im">from</span> coana <span class="im">import</span> FindNeuronConnection</span>
+<span id="cb33-2"><a href="#cb33-2" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb33-3"><a href="#cb33-3" aria-hidden="true" tabindex="-1"></a><span class="co"># Find direct connections from Kenyon Cells to MBONs</span></span>
+<span id="cb33-4"><a href="#cb33-4" aria-hidden="true" tabindex="-1"></a>fc <span class="op">=</span> FindNeuronConnection(</span>
+<span id="cb33-5"><a href="#cb33-5" aria-hidden="true" tabindex="-1"></a>    token<span class="op">=</span><span class="st">&#39;your_token&#39;</span>,</span>
+<span id="cb33-6"><a href="#cb33-6" aria-hidden="true" tabindex="-1"></a>    dataset<span class="op">=</span><span class="st">&#39;hemibrain:v1.2.1&#39;</span>,</span>
+<span id="cb33-7"><a href="#cb33-7" aria-hidden="true" tabindex="-1"></a>    sourceNeurons<span class="op">=</span>[<span class="st">&#39;KC.*&#39;</span>],</span>
+<span id="cb33-8"><a href="#cb33-8" aria-hidden="true" tabindex="-1"></a>    targetNeurons<span class="op">=</span>[<span class="st">&#39;MBON.*&#39;</span>],</span>
+<span id="cb33-9"><a href="#cb33-9" aria-hidden="true" tabindex="-1"></a>    min_synapse_num<span class="op">=</span><span class="dv">5</span>,</span>
+<span id="cb33-10"><a href="#cb33-10" aria-hidden="true" tabindex="-1"></a>    showfig<span class="op">=</span><span class="va">True</span></span>
+<span id="cb33-11"><a href="#cb33-11" aria-hidden="true" tabindex="-1"></a>)</span>
+<span id="cb33-12"><a href="#cb33-12" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb33-13"><a href="#cb33-13" aria-hidden="true" tabindex="-1"></a>fc.InitializeNeuronInfo()</span>
+<span id="cb33-14"><a href="#cb33-14" aria-hidden="true" tabindex="-1"></a>fc.FindDirectConnection()</span></code></pre></div>
+<h2 id="example-2-multi-hop-pathway-analysis">Example 2: Multi-Hop
+Pathway Analysis</h2>
+<div class="sourceCode" id="cb34"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb34-1"><a href="#cb34-1" aria-hidden="true" tabindex="-1"></a><span class="im">from</span> coana <span class="im">import</span> FindNeuronConnection</span>
+<span id="cb34-2"><a href="#cb34-2" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb34-3"><a href="#cb34-3" aria-hidden="true" tabindex="-1"></a><span class="co"># Find 2-layer pathways from PNs to MBONs</span></span>
+<span id="cb34-4"><a href="#cb34-4" aria-hidden="true" tabindex="-1"></a>fc <span class="op">=</span> FindNeuronConnection(</span>
+<span id="cb34-5"><a href="#cb34-5" aria-hidden="true" tabindex="-1"></a>    token<span class="op">=</span><span class="st">&#39;your_token&#39;</span>,</span>
+<span id="cb34-6"><a href="#cb34-6" aria-hidden="true" tabindex="-1"></a>    dataset<span class="op">=</span><span class="st">&#39;hemibrain:v1.2.1&#39;</span>,</span>
+<span id="cb34-7"><a href="#cb34-7" aria-hidden="true" tabindex="-1"></a>    sourceNeurons<span class="op">=</span>[<span class="st">&#39;.*PN.*&#39;</span>],</span>
+<span id="cb34-8"><a href="#cb34-8" aria-hidden="true" tabindex="-1"></a>    targetNeurons<span class="op">=</span>[<span class="st">&#39;MBON.*&#39;</span>],</span>
+<span id="cb34-9"><a href="#cb34-9" aria-hidden="true" tabindex="-1"></a>    max_interlayer<span class="op">=</span><span class="dv">2</span>,</span>
+<span id="cb34-10"><a href="#cb34-10" aria-hidden="true" tabindex="-1"></a>    min_synapse_num<span class="op">=</span><span class="dv">10</span>,</span>
+<span id="cb34-11"><a href="#cb34-11" aria-hidden="true" tabindex="-1"></a>    keyword_in_path_to_remove<span class="op">=</span>[<span class="st">&#39;None&#39;</span>, <span class="st">&#39;APL&#39;</span>],</span>
+<span id="cb34-12"><a href="#cb34-12" aria-hidden="true" tabindex="-1"></a>    use_cache<span class="op">=</span><span class="va">True</span>,</span>
+<span id="cb34-13"><a href="#cb34-13" aria-hidden="true" tabindex="-1"></a>    use_parallel<span class="op">=</span><span class="va">True</span></span>
+<span id="cb34-14"><a href="#cb34-14" aria-hidden="true" tabindex="-1"></a>)</span>
+<span id="cb34-15"><a href="#cb34-15" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb34-16"><a href="#cb34-16" aria-hidden="true" tabindex="-1"></a>fc.InitializeNeuronInfo()</span>
+<span id="cb34-17"><a href="#cb34-17" aria-hidden="true" tabindex="-1"></a>fc.FindAllPath()</span></code></pre></div>
+<h2 id="example-3-filtered-path-visualization">Example 3: Filtered Path
+Visualization</h2>
+<div class="sourceCode" id="cb35"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb35-1"><a href="#cb35-1" aria-hidden="true" tabindex="-1"></a><span class="im">from</span> vispath <span class="im">import</span> VisualizePath</span>
+<span id="cb35-2"><a href="#cb35-2" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> pandas <span class="im">as</span> pd</span>
+<span id="cb35-3"><a href="#cb35-3" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb35-4"><a href="#cb35-4" aria-hidden="true" tabindex="-1"></a><span class="co"># Load all paths</span></span>
+<span id="cb35-5"><a href="#cb35-5" aria-hidden="true" tabindex="-1"></a>all_paths <span class="op">=</span> pd.read_excel(<span class="st">&#39;path_results.xlsx&#39;</span>, sheet_name<span class="op">=</span><span class="st">&#39;path_type&#39;</span>)</span>
+<span id="cb35-6"><a href="#cb35-6" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb35-7"><a href="#cb35-7" aria-hidden="true" tabindex="-1"></a><span class="co"># Filter for high-quality paths</span></span>
+<span id="cb35-8"><a href="#cb35-8" aria-hidden="true" tabindex="-1"></a>high_quality <span class="op">=</span> all_paths[</span>
+<span id="cb35-9"><a href="#cb35-9" aria-hidden="true" tabindex="-1"></a>    (all_paths[<span class="st">&#39;traversal_probability&#39;</span>] <span class="op">&gt;</span> <span class="fl">0.5</span>) <span class="op">&amp;</span></span>
+<span id="cb35-10"><a href="#cb35-10" aria-hidden="true" tabindex="-1"></a>    (all_paths[<span class="st">&#39;weight&#39;</span>] <span class="op">&gt;</span> <span class="dv">20</span>) <span class="op">&amp;</span></span>
+<span id="cb35-11"><a href="#cb35-11" aria-hidden="true" tabindex="-1"></a>    (all_paths[<span class="st">&#39;inter_layer_num&#39;</span>] <span class="op">&lt;=</span> <span class="dv">2</span>)</span>
+<span id="cb35-12"><a href="#cb35-12" aria-hidden="true" tabindex="-1"></a>]</span>
+<span id="cb35-13"><a href="#cb35-13" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb35-14"><a href="#cb35-14" aria-hidden="true" tabindex="-1"></a><span class="co"># Visualize filtered paths</span></span>
+<span id="cb35-15"><a href="#cb35-15" aria-hidden="true" tabindex="-1"></a>vp <span class="op">=</span> VisualizePath(</span>
+<span id="cb35-16"><a href="#cb35-16" aria-hidden="true" tabindex="-1"></a>    path_file<span class="op">=</span>high_quality,</span>
+<span id="cb35-17"><a href="#cb35-17" aria-hidden="true" tabindex="-1"></a>    output_folder<span class="op">=</span><span class="st">&#39;./high_quality_paths&#39;</span>,</span>
+<span id="cb35-18"><a href="#cb35-18" aria-hidden="true" tabindex="-1"></a>    network_layout<span class="op">=</span><span class="st">&#39;hierarchical&#39;</span>,</span>
+<span id="cb35-19"><a href="#cb35-19" aria-hidden="true" tabindex="-1"></a>    source_color<span class="op">=</span><span class="st">&#39;#3498db&#39;</span>,</span>
+<span id="cb35-20"><a href="#cb35-20" aria-hidden="true" tabindex="-1"></a>    target_color<span class="op">=</span><span class="st">&#39;#e74c3c&#39;</span>,</span>
+<span id="cb35-21"><a href="#cb35-21" aria-hidden="true" tabindex="-1"></a>    showfig<span class="op">=</span><span class="va">True</span></span>
+<span id="cb35-22"><a href="#cb35-22" aria-hidden="true" tabindex="-1"></a>)</span>
+<span id="cb35-23"><a href="#cb35-23" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb35-24"><a href="#cb35-24" aria-hidden="true" tabindex="-1"></a>conn_df, G <span class="op">=</span> vp.visualize()</span></code></pre></div>
+<h2 id="example-4-custom-color-visualization">Example 4: Custom Color
+Visualization</h2>
+<div class="sourceCode" id="cb36"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb36-1"><a href="#cb36-1" aria-hidden="true" tabindex="-1"></a><span class="im">from</span> vispath <span class="im">import</span> VisualizePath</span>
+<span id="cb36-2"><a href="#cb36-2" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb36-3"><a href="#cb36-3" aria-hidden="true" tabindex="-1"></a><span class="co"># Create custom color scheme</span></span>
+<span id="cb36-4"><a href="#cb36-4" aria-hidden="true" tabindex="-1"></a>vp <span class="op">=</span> VisualizePath(</span>
+<span id="cb36-5"><a href="#cb36-5" aria-hidden="true" tabindex="-1"></a>    path_file<span class="op">=</span><span class="st">&#39;path_results.xlsx&#39;</span>,</span>
+<span id="cb36-6"><a href="#cb36-6" aria-hidden="true" tabindex="-1"></a>    output_folder<span class="op">=</span><span class="st">&#39;./custom_viz&#39;</span>,</span>
+<span id="cb36-7"><a href="#cb36-7" aria-hidden="true" tabindex="-1"></a>    source_color<span class="op">=</span><span class="st">&#39;#FF6B6B&#39;</span>,           <span class="co"># Red source nodes</span></span>
+<span id="cb36-8"><a href="#cb36-8" aria-hidden="true" tabindex="-1"></a>    intermediate_color<span class="op">=</span><span class="st">&#39;#FFA500&#39;</span>,     <span class="co"># Orange intermediate</span></span>
+<span id="cb36-9"><a href="#cb36-9" aria-hidden="true" tabindex="-1"></a>    target_color<span class="op">=</span><span class="st">&#39;#FFD700&#39;</span>,           <span class="co"># Gold target nodes</span></span>
+<span id="cb36-10"><a href="#cb36-10" aria-hidden="true" tabindex="-1"></a>    link_color<span class="op">=</span><span class="st">&#39;rgba(255,107,107,0.3)&#39;</span>, <span class="co"># Semi-transparent red links</span></span>
+<span id="cb36-11"><a href="#cb36-11" aria-hidden="true" tabindex="-1"></a>    network_layout<span class="op">=</span><span class="st">&#39;spring&#39;</span>,</span>
+<span id="cb36-12"><a href="#cb36-12" aria-hidden="true" tabindex="-1"></a>    showfig<span class="op">=</span><span class="va">True</span></span>
+<span id="cb36-13"><a href="#cb36-13" aria-hidden="true" tabindex="-1"></a>)</span>
+<span id="cb36-14"><a href="#cb36-14" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb36-15"><a href="#cb36-15" aria-hidden="true" tabindex="-1"></a>conn_df, G <span class="op">=</span> vp.visualize()</span></code></pre></div>
+<h2 id="example-5-3d-skeleton-visualization">Example 5: 3D Skeleton
+Visualization</h2>
+<div class="sourceCode" id="cb37"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb37-1"><a href="#cb37-1" aria-hidden="true" tabindex="-1"></a><span class="im">from</span> navis_related <span class="im">import</span> plot_navis_3d</span>
+<span id="cb37-2"><a href="#cb37-2" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb37-3"><a href="#cb37-3" aria-hidden="true" tabindex="-1"></a><span class="co"># Visualize specific neurons with ROIs</span></span>
+<span id="cb37-4"><a href="#cb37-4" aria-hidden="true" tabindex="-1"></a>plot_navis_3d(</span>
+<span id="cb37-5"><a href="#cb37-5" aria-hidden="true" tabindex="-1"></a>    bodyIds<span class="op">=</span>[<span class="dv">123456789</span>, <span class="dv">987654321</span>, <span class="dv">111222333</span>],</span>
+<span id="cb37-6"><a href="#cb37-6" aria-hidden="true" tabindex="-1"></a>    dataset<span class="op">=</span><span class="st">&#39;hemibrain:v1.2.1&#39;</span>,</span>
+<span id="cb37-7"><a href="#cb37-7" aria-hidden="true" tabindex="-1"></a>    token<span class="op">=</span><span class="st">&#39;your_token&#39;</span>,</span>
+<span id="cb37-8"><a href="#cb37-8" aria-hidden="true" tabindex="-1"></a>    show_rois<span class="op">=</span><span class="va">True</span>,</span>
+<span id="cb37-9"><a href="#cb37-9" aria-hidden="true" tabindex="-1"></a>    roi_list<span class="op">=</span>[<span class="st">&#39;MB_CA&#39;</span>, <span class="st">&#39;MB_PED&#39;</span>, <span class="st">&#39;LH_R&#39;</span>],</span>
+<span id="cb37-10"><a href="#cb37-10" aria-hidden="true" tabindex="-1"></a>    roi_opacity<span class="op">=</span><span class="fl">0.2</span>,</span>
+<span id="cb37-11"><a href="#cb37-11" aria-hidden="true" tabindex="-1"></a>    show_connectors<span class="op">=</span><span class="va">True</span>,</span>
+<span id="cb37-12"><a href="#cb37-12" aria-hidden="true" tabindex="-1"></a>    color_by<span class="op">=</span><span class="st">&#39;neuron&#39;</span>,</span>
+<span id="cb37-13"><a href="#cb37-13" aria-hidden="true" tabindex="-1"></a>    output_folder<span class="op">=</span><span class="st">&#39;./3d_output&#39;</span>,</span>
+<span id="cb37-14"><a href="#cb37-14" aria-hidden="true" tabindex="-1"></a>    showfig<span class="op">=</span><span class="va">True</span></span>
+<span id="cb37-15"><a href="#cb37-15" aria-hidden="true" tabindex="-1"></a>)</span></code></pre></div>
+<h2 id="example-6-batch-processing-with-cache">Example 6: Batch
+Processing with Cache</h2>
+<div class="sourceCode" id="cb38"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb38-1"><a href="#cb38-1" aria-hidden="true" tabindex="-1"></a><span class="im">from</span> coana <span class="im">import</span> FindNeuronConnection</span>
+<span id="cb38-2"><a href="#cb38-2" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb38-3"><a href="#cb38-3" aria-hidden="true" tabindex="-1"></a><span class="co"># Process multiple neuron pairs efficiently</span></span>
+<span id="cb38-4"><a href="#cb38-4" aria-hidden="true" tabindex="-1"></a>source_types <span class="op">=</span> [<span class="st">&#39;KC_alpha&#39;</span>, <span class="st">&#39;KC_beta&#39;</span>, <span class="st">&#39;KC_gamma&#39;</span>]</span>
+<span id="cb38-5"><a href="#cb38-5" aria-hidden="true" tabindex="-1"></a>target_types <span class="op">=</span> [<span class="st">&#39;MBON01&#39;</span>, <span class="st">&#39;MBON03&#39;</span>, <span class="st">&#39;MBON14&#39;</span>]</span>
+<span id="cb38-6"><a href="#cb38-6" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb38-7"><a href="#cb38-7" aria-hidden="true" tabindex="-1"></a><span class="cf">for</span> source <span class="kw">in</span> source_types:</span>
+<span id="cb38-8"><a href="#cb38-8" aria-hidden="true" tabindex="-1"></a>    <span class="cf">for</span> target <span class="kw">in</span> target_types:</span>
+<span id="cb38-9"><a href="#cb38-9" aria-hidden="true" tabindex="-1"></a>        fc <span class="op">=</span> FindNeuronConnection(</span>
+<span id="cb38-10"><a href="#cb38-10" aria-hidden="true" tabindex="-1"></a>            token<span class="op">=</span><span class="st">&#39;your_token&#39;</span>,</span>
+<span id="cb38-11"><a href="#cb38-11" aria-hidden="true" tabindex="-1"></a>            dataset<span class="op">=</span><span class="st">&#39;hemibrain:v1.2.1&#39;</span>,</span>
+<span id="cb38-12"><a href="#cb38-12" aria-hidden="true" tabindex="-1"></a>            sourceNeurons<span class="op">=</span>[source],</span>
+<span id="cb38-13"><a href="#cb38-13" aria-hidden="true" tabindex="-1"></a>            targetNeurons<span class="op">=</span>[target],</span>
+<span id="cb38-14"><a href="#cb38-14" aria-hidden="true" tabindex="-1"></a>            use_cache<span class="op">=</span><span class="va">True</span>,  <span class="co"># Reuse cached connections</span></span>
+<span id="cb38-15"><a href="#cb38-15" aria-hidden="true" tabindex="-1"></a>            showfig<span class="op">=</span><span class="va">False</span></span>
+<span id="cb38-16"><a href="#cb38-16" aria-hidden="true" tabindex="-1"></a>        )</span>
+<span id="cb38-17"><a href="#cb38-17" aria-hidden="true" tabindex="-1"></a>        </span>
+<span id="cb38-18"><a href="#cb38-18" aria-hidden="true" tabindex="-1"></a>        fc.InitializeNeuronInfo()</span>
+<span id="cb38-19"><a href="#cb38-19" aria-hidden="true" tabindex="-1"></a>        fc.FindDirectConnection()</span>
+<span id="cb38-20"><a href="#cb38-20" aria-hidden="true" tabindex="-1"></a>        </span>
+<span id="cb38-21"><a href="#cb38-21" aria-hidden="true" tabindex="-1"></a>        <span class="bu">print</span>(<span class="ss">f&quot;✓ Completed: </span><span class="sc">{</span>source<span class="sc">}</span><span class="ss"> → </span><span class="sc">{</span>target<span class="sc">}</span><span class="ss">&quot;</span>)</span></code></pre></div>
+<h2 id="example-7-heatmap-with-custom-ordering">Example 7: Heatmap with
+Custom Ordering</h2>
+<div class="sourceCode" id="cb39"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb39-1"><a href="#cb39-1" aria-hidden="true" tabindex="-1"></a><span class="im">from</span> statvis <span class="im">import</span> plot_stat</span>
+<span id="cb39-2"><a href="#cb39-2" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> pandas <span class="im">as</span> pd</span>
+<span id="cb39-3"><a href="#cb39-3" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb39-4"><a href="#cb39-4" aria-hidden="true" tabindex="-1"></a><span class="co"># Create connection dataframe</span></span>
+<span id="cb39-5"><a href="#cb39-5" aria-hidden="true" tabindex="-1"></a>conn_df <span class="op">=</span> pd.read_csv(<span class="st">&#39;connections.csv&#39;</span>)</span>
+<span id="cb39-6"><a href="#cb39-6" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb39-7"><a href="#cb39-7" aria-hidden="true" tabindex="-1"></a><span class="co"># Define custom ordering</span></span>
+<span id="cb39-8"><a href="#cb39-8" aria-hidden="true" tabindex="-1"></a>custom_row_order <span class="op">=</span> [<span class="st">&#39;KC_alpha&#39;</span>, <span class="st">&#39;KC_beta&#39;</span>, <span class="st">&#39;KC_gamma&#39;</span>]</span>
+<span id="cb39-9"><a href="#cb39-9" aria-hidden="true" tabindex="-1"></a>custom_col_order <span class="op">=</span> [<span class="st">&#39;MBON01&#39;</span>, <span class="st">&#39;MBON03&#39;</span>, <span class="st">&#39;MBON14&#39;</span>]</span>
+<span id="cb39-10"><a href="#cb39-10" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb39-11"><a href="#cb39-11" aria-hidden="true" tabindex="-1"></a><span class="co"># Create heatmap with custom order</span></span>
+<span id="cb39-12"><a href="#cb39-12" aria-hidden="true" tabindex="-1"></a>plot_stat(</span>
+<span id="cb39-13"><a href="#cb39-13" aria-hidden="true" tabindex="-1"></a>    conn_df<span class="op">=</span>conn_df,</span>
+<span id="cb39-14"><a href="#cb39-14" aria-hidden="true" tabindex="-1"></a>    output_folder<span class="op">=</span><span class="st">&#39;./heatmap_output&#39;</span>,</span>
+<span id="cb39-15"><a href="#cb39-15" aria-hidden="true" tabindex="-1"></a>    metric<span class="op">=</span><span class="st">&#39;weight&#39;</span>,</span>
+<span id="cb39-16"><a href="#cb39-16" aria-hidden="true" tabindex="-1"></a>    custom_order<span class="op">=</span>{<span class="st">&#39;rows&#39;</span>: custom_row_order, <span class="st">&#39;cols&#39;</span>: custom_col_order},</span>
+<span id="cb39-17"><a href="#cb39-17" aria-hidden="true" tabindex="-1"></a>    showfig<span class="op">=</span><span class="va">True</span></span>
+<span id="cb39-18"><a href="#cb39-18" aria-hidden="true" tabindex="-1"></a>)</span></code></pre></div>
+<hr />
+<h1 id="quick-reference">Quick Reference</h1>
+<h2 id="command-cheat-sheet">Command Cheat Sheet</h2>
+<div class="sourceCode" id="cb40"><pre
+class="sourceCode bash"><code class="sourceCode bash"><span id="cb40-1"><a href="#cb40-1" aria-hidden="true" tabindex="-1"></a><span class="co"># Installation</span></span>
+<span id="cb40-2"><a href="#cb40-2" aria-hidden="true" tabindex="-1"></a><span class="ex">pip</span> install <span class="at">-r</span> requirements.txt</span>
+<span id="cb40-3"><a href="#cb40-3" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb40-4"><a href="#cb40-4" aria-hidden="true" tabindex="-1"></a><span class="co"># Run basic scripts</span></span>
+<span id="cb40-5"><a href="#cb40-5" aria-hidden="true" tabindex="-1"></a><span class="ex">python</span> scripts/FindDirect.py</span>
+<span id="cb40-6"><a href="#cb40-6" aria-hidden="true" tabindex="-1"></a><span class="ex">python</span> scripts/FindPath.py</span>
+<span id="cb40-7"><a href="#cb40-7" aria-hidden="true" tabindex="-1"></a><span class="ex">python</span> scripts/PlotPath.py</span>
+<span id="cb40-8"><a href="#cb40-8" aria-hidden="true" tabindex="-1"></a><span class="ex">python</span> scripts/plot3dSkeleton.py</span>
+<span id="cb40-9"><a href="#cb40-9" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb40-10"><a href="#cb40-10" aria-hidden="true" tabindex="-1"></a><span class="co"># Cache management</span></span>
+<span id="cb40-11"><a href="#cb40-11" aria-hidden="true" tabindex="-1"></a><span class="ex">python</span> ManageCache.py</span>
+<span id="cb40-12"><a href="#cb40-12" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb40-13"><a href="#cb40-13" aria-hidden="true" tabindex="-1"></a><span class="co"># Run tests</span></span>
+<span id="cb40-14"><a href="#cb40-14" aria-hidden="true" tabindex="-1"></a><span class="ex">python</span> scripts/test_comprehensive.py</span></code></pre></div>
+<h2 id="common-parameter-values">Common Parameter Values</h2>
+<h3 id="datasets">Datasets</h3>
+<ul>
+<li><code>hemibrain:v1.2.1</code> (default, most comprehensive)</li>
+<li><code>optic-lobe:v1.1</code> (visual system)</li>
+<li><code>manc:v1.0</code> (ventral nerve cord)</li>
+</ul>
+<h3 id="neuron-specifications">Neuron Specifications</h3>
+<ul>
+<li><strong>By type</strong>: <code>'KC_alpha'</code>,
+<code>'MBON03'</code>, <code>'PPL1-01'</code></li>
+<li><strong>Regular expression</strong>: <code>'KC.*'</code>,
+<code>'MBON.*'</code>, <code>'.*_R'</code></li>
+<li><strong>By bodyId</strong>: <code>123456789</code>,
+<code>987654321</code></li>
+</ul>
+<h3 id="filtering-thresholds">Filtering Thresholds</h3>
+<ul>
+<li><strong>min_synapse_num</strong>: <code>1</code> (all),
+<code>5</code> (weak filter), <code>10</code> (moderate),
+<code>20+</code> (strong)</li>
+<li><strong>min_ratio</strong>: <code>0.001</code> (all),
+<code>0.01</code> (1% filter), <code>0.05</code> (5% filter)</li>
+<li><strong>min_traversal_probability</strong>: <code>0.001</code>
+(all), <code>0.01</code> (moderate), <code>0.1</code> (strong)</li>
+</ul>
+<h3 id="network-layouts">Network Layouts</h3>
+<ul>
+<li><code>'hierarchical'</code> - Best for layered pathways</li>
+<li><code>'spring'</code> - Best for general networks</li>
+<li><code>'circular'</code> - Best for small networks</li>
+<li><code>'distributed'</code> - Best for disconnected components</li>
+</ul>
+<h3 id="color-schemes-rgb-hex">Color Schemes (RGB Hex)</h3>
+<ul>
+<li><strong>Blue</strong>: <code>#3498db</code>, <code>#2980b9</code>,
+<code>#1f77b4</code></li>
+<li><strong>Red</strong>: <code>#e74c3c</code>, <code>#c0392b</code>,
+<code>#d62728</code></li>
+<li><strong>Green</strong>: <code>#2ecc71</code>, <code>#27ae60</code>,
+<code>#2ca02c</code></li>
+<li><strong>Orange</strong>: <code>#e67e22</code>, <code>#d35400</code>,
+<code>#ff7f0e</code></li>
+<li><strong>Purple</strong>: <code>#9b59b6</code>, <code>#8e44ad</code>,
+<code>#9467bd</code></li>
+</ul>
+<hr />
+<h1 id="appendix">Appendix</h1>
+<h2 id="file-structure">File Structure</h2>
+<pre><code>hemibrain-connectomes-analysis/
+├── README.md                    # Main documentation
+├── requirements.txt             # Python dependencies
+├── setup.py                     # Installation script
+├── pyproject.toml              # Project configuration
+│
+├── src/                        # Source code
+│   ├── __init__.py
+│   ├── coana.py               # Core analysis functions
+│   ├── statvis.py             # Heatmap visualization
+│   ├── vispath.py             # Network/Sankey visualization
+│   ├── core/                  # Core modules
+│   ├── plotting/              # Plotting utilities
+│   └── utils/                 # Utility functions
+│
+├── scripts/                   # Example scripts
+│   ├── FindDirect.py          # Find direct connections
+│   ├── FindPath.py            # Find multi-hop paths
+│   ├── PlotPath.py            # Visualize pathways
+│   └── plot3dSkeleton.py      # 3D skeleton rendering
+│
+├── examples/                  # Example data and notebooks
+│   ├── Example_SimpleEdgeList.py
+│   ├── Example_Clustering_Demo.py
+│   ├── example_paths.csv
+│   └── README.md
+│
+├── docs/                      # Documentation
+│   ├── README.md              # Documentation index
+│   ├── visualizations/        # Visualization guides
+│   ├── core-features/         # Core feature docs
+│   ├── technical/             # Technical documentation
+│   └── archive/               # Historical documentation
+│
+├── datasets/                  # Sample datasets
+│   ├── hemibrain_v1_2_1_allneurons_neuron_df.csv
+│   └── hemibrain_v1_2_1_alltypes_neuron_df.csv
+│
+└── cache/                     # Cache directory
+    ├── hemibrain_v1_2_1/
+    └── optic-lobe_v1_1/</code></pre>
+<h2 id="license">License</h2>
+<p>MIT License - See LICENSE file for details</p>
+<h2 id="citation">Citation</h2>
+<p>If you use this toolkit in your research, please cite:</p>
+<div class="sourceCode" id="cb42"><pre
+class="sourceCode bibtex"><code class="sourceCode bibtex"><span id="cb42-1"><a href="#cb42-1" aria-hidden="true" tabindex="-1"></a><span class="co">@software{hemibrain_connectomes_analysis,</span></span>
+<span id="cb42-2"><a href="#cb42-2" aria-hidden="true" tabindex="-1"></a><span class="co">  title = {Hemibrain Connectomes Analysis},</span></span>
+<span id="cb42-3"><a href="#cb42-3" aria-hidden="true" tabindex="-1"></a><span class="co">  author = {[Your Name]},</span></span>
+<span id="cb42-4"><a href="#cb42-4" aria-hidden="true" tabindex="-1"></a><span class="co">  year = {2025},</span></span>
+<span id="cb42-5"><a href="#cb42-5" aria-hidden="true" tabindex="-1"></a><span class="co">  url = {https://github.com/Swida-Alba/hemibrain-connectomes-analysis},</span></span>
+<span id="cb42-6"><a href="#cb42-6" aria-hidden="true" tabindex="-1"></a><span class="co">  version = {2.1}</span></span>
+<span id="cb42-7"><a href="#cb42-7" aria-hidden="true" tabindex="-1"></a><span class="co">}</span></span></code></pre></div>
+<h2 id="contact-support">Contact &amp; Support</h2>
+<ul>
+<li><strong>GitHub Issues</strong>:
+https://github.com/Swida-Alba/hemibrain-connectomes-analysis/issues</li>
+<li><strong>Documentation</strong>:
+https://github.com/Swida-Alba/hemibrain-connectomes-analysis/tree/main/docs</li>
+<li><strong>NeuPrint Help</strong>:
+https://neuprint.janelia.org/help</li>
+</ul>
+<hr />
+<p><strong>End of Complete Documentation</strong></p>
+<p><em>Generated: November 5, 2025</em><br />
+<em>Version: 2.1</em><br />
+<em>Repository: hemibrain-connectomes-analysis</em></p>
+</body>
+</html>

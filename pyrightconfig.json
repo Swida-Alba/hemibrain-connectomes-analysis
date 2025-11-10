@@ -1,0 +1,22 @@
+{
+    "include": [
+        "src",
+        "vispath-subproject/src",
+        "scripts",
+        "examples"
+    ],
+    "exclude": [
+        "**/node_modules",
+        "**/__pycache__",
+        ".git"
+    ],
+    "extraPaths": [
+        "vispath-subproject/src",
+        "src"
+    ],
+    "pythonVersion": "3.11",
+    "pythonPlatform": "Darwin",
+    "typeCheckingMode": "off",
+    "reportMissingImports": "none",
+    "reportMissingModuleSource": "none"
+}

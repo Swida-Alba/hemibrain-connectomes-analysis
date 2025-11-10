@@ -1,19 +1,14 @@
-import subprocess
+"""
+Hemibrain Connectomes Analysis - Setup Script
 
-# Install packages
-subprocess.check_call(['pip3', 'install', 'numpy'])
-subprocess.check_call(['pip3', 'install', 'xlsxwriter'])
-subprocess.check_call(['pip3', 'install', 'openpyxl'])
-subprocess.check_call(['pip3', 'install', 'pandas<2']) ### don't use pandas >= 2.0.0
-subprocess.check_call(['pip3', 'install', 'plotly'])
-subprocess.check_call(['pip3', 'install', 'bokeh'])
-subprocess.check_call(['pip3', 'install', 'matplotlib'])
-subprocess.check_call(['pip3', 'install', 'opencv-python'])
-subprocess.check_call(['pip3', 'install', 'seaborn'])
-subprocess.check_call(['pip3', 'install', 'scipy'])
-subprocess.check_call(['pip3', 'install', 'neuprint-python'])
-subprocess.check_call(['pip3', 'install', 'navis'])
-subprocess.check_call(['pip3', 'install', 'networkx'])
-subprocess.check_call(['pip3', 'install', 'img2pdf'])
-subprocess.check_call(['pip3', 'install', 'kaleido'])
-subprocess.check_call(['pip3', 'install', 'flybrains'])
+Minimal setup.py for compatibility. Package configuration is in pyproject.toml.
+For installation, use:
+    pip install -e .               # Editable install (recommended)
+    pip install -r requirements.txt  # Direct requirements install
+"""
+from setuptools import setup
+
+# All configuration is in pyproject.toml
+setup()
+
+

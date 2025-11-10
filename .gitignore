@@ -1,0 +1,39 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# Data folders
+connection_data/
+datasets/
+
+# Neuprint cache (local only, do not commit)
+neuprint_cache/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Temporary files
+*.tmp
+*.bak
+*~
+
+# Reorganization updates
+output/
+cache/
+test_output/
+*.pyc
+__pycache__/
+.backup_before_reorganization/

@@ -1,0 +1,154 @@
+[build-system]
+requires = ["setuptools>=45", "wheel", "setuptools_scm[toml]>=6.2"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hemibrain-connectomes-analysis"
+version = "2.1.0"
+description = "Hemibrain connectome analysis and visualization toolkit with reorganized modular structure"
+readme = {file = "README.md", content-type = "text/markdown"}
+requires-python = ">=3.8"
+license = {text = "MIT"}
+authors = [
+    {name = "Hemibrain Analysis Team"}
+]
+keywords = ["neuroscience", "connectomics", "visualization", "network-analysis", "neuprint", "drosophila"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Bio-Informatics",
+    "Topic :: Scientific/Engineering :: Visualization",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+]
+
+# Read dependencies from requirements.txt for better maintenance
+# This ensures single source of truth for dependencies
+dependencies = [
+    "numpy>=1.20.0,<2.0.0",
+    "pandas>=1.3.0,<2.0.0",
+    "scipy>=1.7.0",
+    "plotly>=5.0.0",
+    "matplotlib>=3.4.0",
+    "seaborn>=0.11.0",
+    "opencv-python>=4.5.0",
+    "networkx>=2.6.0",
+    "openpyxl>=3.0.0",
+    "PyQt5>=5.15.0",
+    "neuprint-python>=0.4.0",
+    "bokeh>=2.4.0",
+    "navis>=1.0.0",
+    "flybrains>=0.2.0",
+    "img2pdf>=0.4.0",
+]
+
+[project.optional-dependencies]
+# Visualization sub-project (minimal dependencies for standalone vispath)
+vispath = [
+    "numpy>=1.20.0,<2.0.0",
+    "pandas>=1.3.0,<2.0.0",
+    "scipy>=1.7.0",
+    "plotly>=5.0.0",
+    "networkx>=2.6.0",
+    "openpyxl>=3.0.0",
+    "PyQt5>=5.15.0",
+]
+
+dev = [
+    "pytest>=7.0.0",
+    "pytest-cov>=3.0.0",
+    "jupyter>=1.0.0",
+    "ipykernel>=6.0.0",
+    "black>=22.0.0",
+    "flake8>=4.0.0",
+]
+
+viz = [
+    "trimesh>=3.9.0",
+    "kaleido>=0.2.0",
+    "vispy>=0.11.0",
+]
+
+gui = [
+    "PyQt6>=6.0.0",
+    "wxPython>=4.2.0",
+]
+
+all = [
+    "hemibrain-connectomes-analysis[dev,viz,gui]"
+]
+
+[project.urls]
+Homepage = "https://github.com/Swida-Alba/hemibrain-connectomes-analysis"
+Repository = "https://github.com/Swida-Alba/hemibrain-connectomes-analysis"
+Documentation = "https://github.com/Swida-Alba/hemibrain-connectomes-analysis/blob/main/README.md"
+
+[tool.setuptools]
+# Package discovery - src layout (v2.1.0 reorganization)
+# Core modules are in src/: coana.py, statvis.py, vispath.py
+# Executable scripts are in scripts/: FindPath.py, FindDirect.py, etc.
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["*"]
+namespaces = false
+
+# Note: Scripts are in scripts/ directory and use:
+#   sys.path.insert(0, str(Path(__file__).parent.parent / 'src'))
+# to import from src/ modules
+
+[tool.setuptools.package-data]
+"*" = ["*.json", "*.csv", "*.md"]
+
+[tool.black]
+line-length = 100
+target-version = ['py38', 'py39', 'py310', 'py311']
+include = '\.pyi?$'
+extend-exclude = '''
+/(
+  # directories
+  \.eggs
+  | \.git
+  | \.hg
+  | \.mypy_cache
+  | \.tox
+  | \.venv
+  | build
+  | dist
+  | cache
+  | __pycache__
+)/
+'''
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = "test_*.py"
+python_classes = "Test*"
+python_functions = "test_*"
+pythonpath = ["src"]
+
+[tool.coverage.run]
+source = ["src"]
+omit = [
+    "tests/*",
+    "setup.py",
+    "*/__pycache__/*",
+    "scripts/*",
+    "examples/*",
+    "dev/*",
+]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "raise AssertionError",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+]
