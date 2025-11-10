@@ -5,7 +5,7 @@
 Successfully implemented fast hierarchical clustering with interactive toggle for heatmap visualizations, allowing users to switch between original and clustered ordering to reveal connectivity patterns.
 
 **Date**: October 31, 2024  
-**Version**: v2.1.0+  
+**Version**: v3.0.0+  
 **Status**: ✅ Complete and Tested
 
 ---

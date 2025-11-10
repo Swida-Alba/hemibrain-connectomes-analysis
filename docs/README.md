@@ -221,7 +221,7 @@ Historical documentation and fixes are in the [archive](./archive/) directory:
 - Test cleanup: 2025-11-05
 
 ### Version
-Documentation version 2.1 (matches software version)
+Documentation version 3.0 (matches software version)
 
 ### Feedback
 Documentation feedback welcome via GitHub Issues or pull requests.

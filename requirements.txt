@@ -1,6 +1,6 @@
 # =============================================================================
 # Hemibrain Connectomes Analysis - Requirements
-# Project Structure: Reorganized with src/ layout (v2.1.0)
+# Project Structure: Reorganized with src/ layout (v3.0.0)
 # =============================================================================
 
 # Core Dependencies

@@ -258,7 +258,7 @@ vp.create_heatmap()  # ✅ Works (now includes VisConnMatInteractive)
 
 3. **Version Management**
    - vispath-subproject: v1.0.0 (standalone)
-   - Main package: v2.1.0 (includes vispath)
+   - Main package: v3.0.0 (includes vispath)
    - Consider semantic versioning strategy
 
 ## Conclusion

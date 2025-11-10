@@ -251,7 +251,7 @@ The standalone package version should match the parent project version:
 version = "1.0.0"
 
 # ../pyproject.toml
-version = "2.1.0"  # Can be different, but document relationship
+version = "3.0.0"  # Can be different, but document relationship
 ```
 
 ## Troubleshooting

@@ -1,4 +1,4 @@
-# Hemibrain Connectomes Analysis v2.1
+# Hemibrain Connectomes Analysis v3.0
 
 A comprehensive Python toolkit for analyzing and visualizing *Drosophila* hemibrain connectome data from NeuPrint. Find direct and indirect neural connections, visualize pathways, and perform network analysis with high-performance caching and parallel processing.
 
@@ -21,7 +21,7 @@ A comprehensive Python toolkit for analyzing and visualizing *Drosophila* hemibr
 ### 🚀 Getting Started
 - **[Installation Guide](#installation-for-users-who-can-prepare-the-python-environments-by-themselves)** - Setup and dependencies
 - **[Basic Usage](#basic-functions)** - FindDirect.py and FindPath.py tutorials
-- **[Quick Start After Reorganization](docs/QUICK_START_AFTER_REORGANIZATION.md)** - Get started with v2.1 structure
+- **[Quick Start After Reorganization](docs/QUICK_START_AFTER_REORGANIZATION.md)** - Get started with v3.0 structure
 - **[Performance Optimization](#performance-optimization)** - Caching and parallel processing
 
 ### 📖 Core Documentation
@@ -603,7 +603,7 @@ vis = VisualizePath(
 
 ## VisualizePath Sub-Project: Standalone Installation
 
-**NEW in v2.1**: The `VisualizePath` visualization toolkit is now available as a standalone sub-project that can be installed **independently** without the full neuroscience analysis suite!
+**NEW in v3.0**: The `VisualizePath` visualization toolkit is now available as a standalone sub-project that can be installed **independently** without the full neuroscience analysis suite!
 
 ### Why Use the Standalone Sub-Project?
 

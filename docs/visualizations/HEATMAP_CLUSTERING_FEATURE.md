@@ -5,7 +5,7 @@
 The interactive heatmap visualization now includes a **clustering toggle** feature that reorders rows and columns to reveal connectivity patterns and modular structure in neural networks.
 
 **Date**: October 31, 2024  
-**Version**: v2.1.0+  
+**Version**: v3.0.0+  
 **Status**: ✅ Complete and Tested
 
 ---
