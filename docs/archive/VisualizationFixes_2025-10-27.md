@@ -296,5 +296,6 @@ Example: `#FF5733` with 50% opacity → `rgba(255, 87, 51, 0.5)`
 ---
 
 ## Author
-Fixes implemented: 2025-10-27  
+**Author**: Kang-Rui Leng  
+**Date**: 2025-10-27  
 Based on user feedback and `coana.py` reference implementation

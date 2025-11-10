@@ -172,5 +172,5 @@ Both improvements enhance readability and professional appearance of the network
 
 ---
 
-**Author**: GitHub Copilot  
+**Author**: Kang-Rui Leng  
 **Date**: October 27, 2025

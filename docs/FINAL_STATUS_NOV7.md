@@ -384,5 +384,5 @@ The project is ready for production use! 🚀
 ---
 
 **Document Generated:** November 7, 2025  
-**Author:** GitHub Copilot  
+**Author:** Kang-Rui Leng  
 **Verification Status:** ✅ ALL TESTS PASSED

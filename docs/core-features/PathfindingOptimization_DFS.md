@@ -364,4 +364,4 @@ Potential enhancements:
 ---
 
 **Last Updated**: January 2025
-**Author**: Hemibrain Connectomes Analysis Team
+**Author**: Kang-Rui Leng

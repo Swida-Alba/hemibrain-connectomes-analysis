@@ -289,6 +289,6 @@ vp.visualize()
 
 ---
 
-**Author**: GitHub Copilot  
+**Author**: Kang-Rui Leng  
 **Date**: October 27, 2025  
 **Version**: v2.1

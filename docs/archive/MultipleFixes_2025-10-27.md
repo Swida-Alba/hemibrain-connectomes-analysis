@@ -304,6 +304,7 @@ Right-click to hide | Double-click to highlight
 
 ---
 
-**Author**: Multiple fixes implemented October 27, 2025  
+**Author**: Kang-Rui Leng  
+**Date**: October 27, 2025  
 **Status**: ✅ ALL ISSUES RESOLVED  
 **Testing**: Passed on real pathway data with 5 paths, 8 connections, 5 nodes

@@ -450,6 +450,6 @@ All features work together seamlessly for complete visualization control!
 
 ---
 
-**Author**: GitHub Copilot  
+**Author**: Kang-Rui Leng  
 **Date**: October 27, 2025  
 **Version**: v3.0

@@ -215,5 +215,6 @@ The fallback system ensures fonts work across:
 
 ---
 
-**Author**: Font system fix implemented 2025-10-27  
+**Author**: Kang-Rui Leng  
+**Date**: 2025-10-27  
 **Related docs**: `VisualizationFixes_2025-10-27.md`
