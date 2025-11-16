@@ -1,4 +1,4 @@
-# NeuPrint Connectome Analysis v3.0
+# NeuPrint Connectome Analysis v3.1
 
 A comprehensive Python toolkit for analyzing and visualizing connectome data from **all NeuPrint databases**. Features type-based pathfinding algorithms, interactive network visualizations, 3D neuron morphology rendering with video export, and high-performance caching. Supports hemibrain, optic lobe, FIB, MANC, and other NeuPrint datasets.
 
@@ -682,7 +682,7 @@ vp.create_sankey()
 
 **Use standalone if you:**
 - ✅ Only need network visualization features
-- ✅ Have your own network data (CSV/Excel edge lists)
+- ✅ Have your own network data (CSV/Excel)
 - ✅ Want minimal dependencies
 - ✅ Don't need NeuPrint API access or neuron morphology features
 
@@ -1041,3 +1041,12 @@ python FindDirect.py
 4. Browse [Visualization Guides](docs/visualizations/README.md) for customization options
 
 **Happy analyzing! 🧠✨**
+
+---
+
+## 🆕 What’s New in V3.1 (November 2025)
+
+- **Reciprocal Edge Offset & Mode Toggle**: Network visualization now supports parallel reciprocal edges with a user-adjustable offset slider and a toggle for straight/curved edge modes. Curved mode disables the offset slider for clarity. See [Network Guide](docs/visualizations/Network_Guide.md#new-feature-reciprocal-edge-offset--mode-toggle-v31-nov-2025) for details.
+- Documentation and UI updated to reflect these features.
+
+---
