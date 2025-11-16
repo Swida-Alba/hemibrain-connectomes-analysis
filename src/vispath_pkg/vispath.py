@@ -128,6 +128,7 @@ class VisualizePath:
         intermediate_color=None,
         target_color=None,
         link_color=None,
+        highlight_color=None,    # NEW: Highlight color for selected elements
         node_color=None,  # For backward compatibility
         node_colors=None,  # NEW: Custom node colors
         network_layout='hierarchical',
@@ -143,6 +144,7 @@ class VisualizePath:
         max_node_size=80,        # NEW: Maximum node size in pixels
         heatmap_row_order=None,  # NEW: Custom row order for heatmap
         heatmap_col_order=None,  # NEW: Custom column order for heatmap
+        straight_reciprocal_edges=False,  # NEW: Use straight lines for reciprocal edges
         generate_empty_network=False  # NEW: Generate empty network HTML template
     ):
         """
@@ -179,8 +181,14 @@ class VisualizePath:
             Default: '#d62728' (red)
             
         link_color : str, optional
-            Color for connections in Sankey diagram.
+            Color for connections in Sankey diagram and network edges.
             Default: 'rgba(100,100,100,0.3)' (semi-transparent gray)
+            
+        highlight_color : str, optional
+            Color for highlighted/selected nodes and edges in network visualization.
+            Used when clicking on nodes or edges to highlight them.
+            Default: '#FFFFE0' (light yellow)
+            Format: Any valid CSS color (hex, rgb, rgba, named)
             
         node_color : list of str, optional
             [DEPRECATED] Colors for [source_nodes, intermediate_nodes].
@@ -271,6 +279,13 @@ class VisualizePath:
             Example: ['LHN_X', 'MBON_1', 'MBON_2']
             Default: None
             
+        straight_reciprocal_edges : bool, optional
+            If True, reciprocal (bidirectional) edges in network visualization will be 
+            displayed as straight lines instead of curved lines.
+            This makes it easier to see both directions clearly without visual overlap.
+            Cytoscape.js supports this via 'curve-style' and 'control-point-distances'.
+            Default: False (uses curved lines for reciprocal edges)
+            
         generate_empty_network : bool, optional
             If True, generates an empty network HTML template without requiring
             path_file data. Useful for creating blank network visualizations that
@@ -351,6 +366,14 @@ class VisualizePath:
         self.link_color = link_color or 'rgba(100,100,100,0.3)'  # Keep original for Sankey
         self.edge_color = link_hex  # Hex color for network edges
         self.edge_opacity = link_opacity  # Opacity for network edges
+        
+        # Parse highlight color - default to light yellow
+        highlight_hex, highlight_opacity = parse_color_to_hex_opacity(highlight_color or '#FFFFE0')
+        self.highlight_color = highlight_hex  # Hex color for highlighted elements
+        self.highlight_opacity = highlight_opacity  # Opacity for highlighted elements
+        
+        # Reciprocal edges style
+        self.straight_reciprocal_edges = straight_reciprocal_edges
         
         # Create node_color array for compatibility with internal methods
         self.node_color = [self.source_color, self.intermediate_color]
@@ -3507,6 +3530,15 @@ class VisualizePath:
             <div style="display: grid; grid-template-columns: 1fr; gap: 6px; margin-bottom: 8px;">
                 <button class="btn" onclick="refreshEdgeStyles()" style="background: #9c27b0; font-size: 12px; padding: 6px; width: 100%;">🔄 Refresh Edges</button>
             </div>
+
+            <div id="reciprocalOffsetControls" class="slider-container" style="margin-bottom: 8px; display: none;">
+                <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 4px;">
+                    <label for="reciprocalOffsetSlider" style="margin: 0;">Reciprocal Offset</label>
+                    <button id="reciprocalModeToggle" onclick="toggleReciprocalMode()" style="padding: 4px 8px; font-size: 11px; border-radius: 4px; border: 1px solid #ddd; background: #4caf50; color: white; cursor: pointer;">Straight</button>
+                </div>
+                <input type="range" id="reciprocalOffsetSlider" min="0" max="40" step="1" value="14">
+                <span id="reciprocalOffsetValue">14px</span>
+            </div>
             
             <!-- Save/Load -->
             <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 6px; padding-top: 8px; border-top: 1px solid #ddd;">
@@ -3869,7 +3901,7 @@ class VisualizePath:
                     selector: 'node:selected',
                     style: {{
                         'border-width': '3px',
-                        'border-color': '#FFD700'
+                        'border-color': '{self.highlight_color}'
                     }}
                 }},
                 {{
@@ -3934,16 +3966,16 @@ class VisualizePath:
                 {{
                     selector: 'edge:selected',
                     style: {{
-                        'line-color': '#FFD700',
-                        'target-arrow-color': '#FFD700',
+                        'line-color': '{self.highlight_color}',
+                        'target-arrow-color': '{self.highlight_color}',
                         'width': 'mapData(scaled_width, {min_scaled_width}, {max_scaled_width}, 2, 15)'
                     }}
                 }},
                 {{
                     selector: 'edge.highlighted',
                     style: {{
-                        'line-color': '#FF6B6B',
-                        'target-arrow-color': '#FF6B6B',
+                        'line-color': '{self.highlight_color}',
+                        'target-arrow-color': '{self.highlight_color}',
                         'width': 'mapData(scaled_width, {min_scaled_width}, {max_scaled_width}, 3, 20)',
                         'z-index': 999
                     }}
@@ -3962,6 +3994,12 @@ class VisualizePath:
             autoungrabify: false,
             autounselectify: false
         }});
+
+        let straightReciprocalEdgesEnabled = {'true' if self.straight_reciprocal_edges else 'false'};
+        const highlightColor = '{self.highlight_color}';
+        const highlightOpacity = {self.highlight_opacity};
+        const defaultReciprocalOffset = 14;
+        let reciprocalOffset = defaultReciprocalOffset;
 
         // Initialize layout algorithm variable and configuration function
         let currentLayoutAlgorithm = '{cytoscape_layout}';
@@ -4075,6 +4113,13 @@ class VisualizePath:
         // Fix for click position drift - ensure Cytoscape canvas is properly sized
         cy.resize();
         cy.fit();
+
+        initializeReciprocalOffsetControls();
+
+        const applyReciprocalOffsets = () => refreshEdgeStyles(false);
+        setTimeout(applyReciprocalOffsets, 0);
+        cy.on('layoutstop', applyReciprocalOffsets);
+        cy.on('dragfree', 'node', applyReciprocalOffsets);
         
         // Add window resize handler to keep canvas in sync
         window.addEventListener('resize', function() {{
@@ -4203,6 +4248,15 @@ class VisualizePath:
             }}
         }});
 
+        // Keep inline highlight overrides in sync with Cytoscape's selection
+        cy.on('select', 'edge', function(evt) {{
+            applyEdgeHighlightOverride(evt.target);
+        }});
+
+        cy.on('unselect', 'edge', function(evt) {{
+            clearEdgeHighlightOverride(evt.target);
+        }});
+
         // Keyboard shortcut: L to toggle label position (center/outside)
         document.addEventListener('keydown', function(e) {{
             if (e.key === 'l' || e.key === 'L') {{
@@ -4220,14 +4274,14 @@ class VisualizePath:
 
         // Double-click to highlight connections
         cy.on('dblclick', 'node', function(evt) {{
-            cy.edges().removeClass('highlighted');
-            evt.target.connectedEdges().addClass('highlighted');
+            removeHighlightFromEdges(cy.edges('.highlighted'), true);
+            addHighlightToEdges(evt.target.connectedEdges());
         }});
 
         // Click empty space to clear highlights
         cy.on('tap', function(evt) {{
             if (evt.target === cy) {{
-                cy.edges().removeClass('highlighted');
+                removeHighlightFromEdges(cy.edges('.highlighted'), true);
             }}
         }});
 
@@ -4494,12 +4548,30 @@ class VisualizePath:
             document.getElementById('showAllBtn').style.display = 'none';
         }}
         
-        function refreshEdgeStyles() {{
+        function clearEdgeEndpointOverrides(edge) {{
+            edge.removeStyle('source-endpoint');
+            edge.removeStyle('target-endpoint');
+            edge.removeStyle('edge-distances');
+            edge.removeStyle('source-distance-from-node');
+            edge.removeStyle('target-distance-from-node');
+        }}
+
+        function applyStraightEdgeStyle(edge) {{
+            edge.style('curve-style', 'straight');
+            edge.removeStyle('control-point-distances');
+            edge.removeStyle('control-point-weights');
+        }}
+
+        function refreshEdgeStyles(showStatus) {{
+            const shouldShowStatus = (showStatus === undefined) ? true : showStatus;
+            const offsetMagnitude = Math.max(0, parseFloat(reciprocalOffset) || 0);  // Keep reciprocal edges parallel but separated
+
             // Recalculate edge styles to make single edges straight (no curve)
             // This is useful when parallel/reciprocal edges are hidden
             cy.edges().forEach(edge => {{
                 const source = edge.source().id();
                 const target = edge.target().id();
+                const canonicalSign = source.localeCompare(target) < 0 ? 1 : -1;
                 
                 // Check if there's a parallel edge (both directions)
                 const parallelEdge = cy.edges(`[source = "${{target}}"][target = "${{source}}"]`);
@@ -4508,21 +4580,149 @@ class VisualizePath:
                 const visibleParallel = parallelEdge.filter(e => 
                     !e.hasClass('hidden') && !e.hasClass('filtered')
                 );
-                
-                // If no visible parallel edge, make this edge straight
-                if (visibleParallel.length === 0) {{
-                    edge.style('curve-style', 'bezier');
-                    edge.style('control-point-distances', 0);
-                    edge.style('control-point-weights', 0.5);
-                }} else {{
-                    // Has visible parallel edge, use curved style
+                const hasVisibleParallel = visibleParallel.length > 0;
+
+                if (source === target) {{
+                    // Keep loops curved for readability
                     edge.style('curve-style', 'bezier');
                     edge.style('control-point-distances', 40);
                     edge.style('control-point-weights', 0.5);
+                    return;
+                }}
+
+                if (!hasVisibleParallel) {{
+                    clearEdgeEndpointOverrides(edge);
+                    applyStraightEdgeStyle(edge);
+                    return;
+                }}
+
+                // Get current node size to ensure arrows stay outside nodes
+                const nodeSize = parseFloat(document.getElementById('nodeSizeSlider')?.value || 40);
+                const nodeRadius = nodeSize / 2;
+                
+                // Compute perpendicular offset in CANONICAL direction (smaller ID -> larger ID)
+                // to ensure reciprocal edges offset in opposite directions relative to canvas
+                const canonicalSourceId = source < target ? source : target;
+                const canonicalTargetId = source < target ? target : source;
+                const canonicalSourcePos = cy.getElementById(canonicalSourceId).position();
+                const canonicalTargetPos = cy.getElementById(canonicalTargetId).position();
+                
+                const canonicalDx = canonicalTargetPos.x - canonicalSourcePos.x;
+                const canonicalDy = canonicalTargetPos.y - canonicalSourcePos.y;
+                const canonicalDistance = Math.hypot(canonicalDx, canonicalDy);
+                
+                let sourceOffsetX = 0;
+                let sourceOffsetY = 0;
+                let targetOffsetX = 0;
+                let targetOffsetY = 0;
+                let sourceDistance = nodeRadius;
+                let targetDistance = nodeRadius;
+                let perpX = 0;
+                let perpY = 0;
+
+                if (canonicalDistance > 0) {{
+                    // Perpendicular vector to canonical direction
+                    perpX = -canonicalDy / canonicalDistance;
+                    perpY = canonicalDx / canonicalDistance;
+                    
+                    // Apply offset: canonicalSign determines which side of the canonical line
+                    // This ensures reciprocal edges move to opposite sides relative to canvas
+                    sourceOffsetX = perpX * offsetMagnitude * canonicalSign;
+                    sourceOffsetY = perpY * offsetMagnitude * canonicalSign;
+                    targetOffsetX = perpX * offsetMagnitude * canonicalSign;
+                    targetOffsetY = perpY * offsetMagnitude * canonicalSign;
+                }} else {{
+                    sourceOffsetY = offsetMagnitude * canonicalSign;
+                    targetOffsetY = offsetMagnitude * canonicalSign;
+                }}
+
+                if (straightReciprocalEdgesEnabled) {{
+                    // Reciprocal edges: keep them straight but offset slightly so they don't overlap
+                    applyStraightEdgeStyle(edge);
+
+                    edge.style({{
+                        'edge-distances': 'node-position',
+                        'source-endpoint': `${{sourceOffsetX.toFixed(2)}} ${{sourceOffsetY.toFixed(2)}}`,
+                        'target-endpoint': `${{targetOffsetX.toFixed(2)}} ${{targetOffsetY.toFixed(2)}}`,
+                        'source-distance-from-node': sourceDistance,
+                        'target-distance-from-node': targetDistance
+                    }});
+                }} else {{
+                    // Has visible parallel edge, use curved style (no offsets in curved mode)
+                    edge.style('curve-style', 'bezier');
+                    edge.style('control-point-distances', 40);
+                    edge.style('control-point-weights', 0.5);
+
+                    // Clear any endpoint offsets and distance overrides from straight mode
+                    edge.removeStyle('source-endpoint');
+                    edge.removeStyle('target-endpoint');
+                    edge.removeStyle('edge-distances');
+                    edge.removeStyle('source-distance-from-node');
+                    edge.removeStyle('target-distance-from-node');
                 }}
             }});
             
-            updateHoverInfo('✓ Edge styles refreshed - parallel edges updated');
+            if (shouldShowStatus) {{
+                updateHoverInfo('✓ Edge styles refreshed - parallel edges updated');
+            }}
+        }}
+
+        function initializeReciprocalOffsetControls() {{
+            const container = document.getElementById('reciprocalOffsetControls');
+            const slider = document.getElementById('reciprocalOffsetSlider');
+            const valueLabel = document.getElementById('reciprocalOffsetValue');
+
+            if (!container || !slider || !valueLabel) {{
+                return;
+            }}
+
+            container.style.display = 'flex';
+            slider.value = defaultReciprocalOffset;
+            reciprocalOffset = defaultReciprocalOffset;
+            valueLabel.textContent = `${{defaultReciprocalOffset}}px`;
+            
+            // Update slider enabled state based on current mode
+            updateReciprocalSliderState();
+
+            if (!slider.dataset.bound) {{
+                slider.addEventListener('input', function(event) {{
+                    reciprocalOffset = parseFloat(event.target.value) || 0;
+                    valueLabel.textContent = `${{Math.round(reciprocalOffset)}}px`;
+                    refreshEdgeStyles(false);
+                }});
+                slider.dataset.bound = 'true';
+            }}
+        }}
+        
+        function updateReciprocalSliderState() {{
+            const slider = document.getElementById('reciprocalOffsetSlider');
+            if (!slider) return;
+            
+            if (straightReciprocalEdgesEnabled) {{
+                slider.disabled = false;
+                slider.style.opacity = '1';
+                slider.style.cursor = 'pointer';
+            }} else {{
+                slider.disabled = true;
+                slider.style.opacity = '0.4';
+                slider.style.cursor = 'not-allowed';
+            }}
+        }}
+        
+        function toggleReciprocalMode() {{
+            straightReciprocalEdgesEnabled = !straightReciprocalEdgesEnabled;
+            const toggleBtn = document.getElementById('reciprocalModeToggle');
+            
+            if (straightReciprocalEdgesEnabled) {{
+                toggleBtn.textContent = 'Straight';
+                toggleBtn.style.background = '#4caf50';
+            }} else {{
+                toggleBtn.textContent = 'Curved';
+                toggleBtn.style.background = '#ff9800';
+            }}
+            
+            updateReciprocalSliderState();
+            refreshEdgeStyles(true);
         }}
 
         function toggleLabels() {{
@@ -4558,6 +4758,9 @@ class VisualizePath:
                     'height': size + 'px'
                 }})
                 .update();
+            
+            // Refresh edge styles to update arrow positions when node size changes
+            refreshEdgeStyles(false);
         }}
 
         function updateEdgeWidth(width) {{
@@ -4810,6 +5013,82 @@ class VisualizePath:
             document.getElementById('individualColorText').value = e.target.value;
         }});
 
+        const EDGE_BASE_COLOR_KEY = '__baseColor';
+        const EDGE_BASE_OPACITY_KEY = '__baseOpacity';
+
+        function setEdgeBaseAppearance(edge, color, opacity, applyImmediately = true) {{
+            edge.data(EDGE_BASE_COLOR_KEY, color);
+            edge.data(EDGE_BASE_OPACITY_KEY, opacity);
+            if (applyImmediately) {{
+                edge.style({{
+                    'line-color': color,
+                    'target-arrow-color': color,
+                    'opacity': opacity
+                }});
+            }}
+        }}
+
+        function ensureEdgeBaseAppearance(edge) {{
+            if (!edge.data(EDGE_BASE_COLOR_KEY)) {{
+                const currentColor = edge.style('line-color');
+                const currentOpacity = parseFloat(edge.style('opacity')) || 1;
+                setEdgeBaseAppearance(edge, currentColor, currentOpacity, false);
+            }}
+        }}
+
+        function restoreEdgeBaseAppearance(edge) {{
+            const color = edge.data(EDGE_BASE_COLOR_KEY) || edge.style('line-color');
+            const opacityData = edge.data(EDGE_BASE_OPACITY_KEY);
+            const opacity = (opacityData !== undefined) ? opacityData : (parseFloat(edge.style('opacity')) || 1);
+            edge.style({{
+                'line-color': color,
+                'target-arrow-color': color,
+                'opacity': opacity
+            }});
+        }}
+
+        function applyEdgeHighlightOverride(edge) {{
+            ensureEdgeBaseAppearance(edge);
+            const baseOpacity = edge.data(EDGE_BASE_OPACITY_KEY);
+            const fallbackOpacity = (baseOpacity !== undefined) ? baseOpacity : (parseFloat(edge.style('opacity')) || 1);
+            const targetOpacity = Math.max(fallbackOpacity, highlightOpacity || 0.85);
+            edge.style({{
+                'line-color': highlightColor,
+                'target-arrow-color': highlightColor,
+                'opacity': targetOpacity
+            }});
+        }}
+
+        function clearEdgeHighlightOverride(edge) {{
+            if (edge.selected() || edge.hasClass('highlighted')) {{
+                return;
+            }}
+            restoreEdgeBaseAppearance(edge);
+        }}
+
+        function removeHighlightFromEdges(edges, skipSelected = false) {{
+            edges.forEach(edge => {{
+                edge.removeClass('highlighted');
+                if (skipSelected && edge.selected()) {{
+                    return;
+                }}
+                clearEdgeHighlightOverride(edge);
+            }});
+        }}
+
+        function addHighlightToEdges(edges) {{
+            edges.addClass('highlighted');
+            edges.forEach(edge => applyEdgeHighlightOverride(edge));
+        }}
+
+        function initializeEdgeBaseStyles() {{
+            cy.edges().forEach(edge => {{
+                const color = edge.style('line-color');
+                const opacity = parseFloat(edge.style('opacity')) || 1;
+                setEdgeBaseAppearance(edge, color, opacity, false);
+            }});
+        }}
+
         // Apply global colors to all nodes by type using CSS-based opacity (coana approach)
         function applyGlobalColors() {{
             const sourceColor = document.getElementById('sourceColor').value;
@@ -4828,8 +5107,9 @@ class VisualizePath:
             
             // Update nodes by type with color AND opacity (only if they haven't been individually customized)
             // Using CSS style update (coana's approach) instead of data modification
+            // Exclude selected nodes to keep highlight color static
             cy.nodes().forEach(function(node) {{
-                if (!node.data('customColor')) {{  // Only update if not customized
+                if (!node.data('customColor') && !node.selected()) {{  // Skip selected nodes
                     const nodeType = node.data('node_type');
                     if (nodeType === 'source') {{
                         node.style({{
@@ -4852,16 +5132,19 @@ class VisualizePath:
             
             // Update edges with separate colors for positive and negative edges
             cy.edges().forEach(function(edge) {{
-                if (!edge.data('customColor')) {{
-                    const isNegative = edge.data('is_negative') === 1;
-                    const color = isNegative ? negativeEdgeColor : edgeColor;
-                    const opacity = isNegative ? negativeEdgeOpacity : edgeOpacity;
-                    
-                    edge.style({{
-                        'line-color': color,
-                        'target-arrow-color': color,
-                        'opacity': opacity  // CSS opacity property, not rgba
-                    }});
+                if (edge.data('customColor')) {{
+                    return;  // Respect individually customized edges
+                }}
+
+                const isNegative = edge.data('is_negative') === 1;
+                const color = isNegative ? negativeEdgeColor : edgeColor;
+                const opacity = isNegative ? negativeEdgeOpacity : edgeOpacity;
+                const canApplyImmediately = !edge.selected() && !edge.hasClass('highlighted');
+
+                setEdgeBaseAppearance(edge, color, opacity, canApplyImmediately);
+
+                if (!canApplyImmediately) {{
+                    applyEdgeHighlightOverride(edge);
                 }}
             }});
             
@@ -4979,11 +5262,11 @@ class VisualizePath:
                     element.data('customColor', true);  // Mark as customized
                     nodesUpdated++;
                 }} else {{
-                    element.style({{
-                        'line-color': color,
-                        'target-arrow-color': color,
-                        'opacity': opacity  // CSS opacity property (coana's approach)
-                    }});
+                    const canApplyEdgeStyle = !element.selected() && !element.hasClass('highlighted');
+                    setEdgeBaseAppearance(element, color, opacity, canApplyEdgeStyle);
+                    if (!canApplyEdgeStyle) {{
+                        applyEdgeHighlightOverride(element);
+                    }}
                     element.data('customColor', true);  // Mark as customized
                     edgesUpdated++;
                 }}
@@ -5038,6 +5321,8 @@ class VisualizePath:
             // Apply initial opacity to all edges
             cy.edges().forEach(function(edge) {{
                 edge.style('opacity', edgeOpacity);
+                const currentColor = edge.style('line-color');
+                setEdgeBaseAppearance(edge, currentColor, edgeOpacity, false);
             }});
             
             console.log('✓ Initial opacity applied from input colors (nodes + edges)');
@@ -5219,17 +5504,14 @@ class VisualizePath:
             const scaledWidth = calculateEdgeWidth(Math.abs(weightNum));
             edge.data('scaled_width', scaledWidth);
             
-            // Update edge color if negative
-            if (weightNum < 0) {{
-                edge.style({{
-                    'line-color': document.getElementById('negativeEdgeColor').value,
-                    'target-arrow-color': document.getElementById('negativeEdgeColor').value
-                }});
-            }} else {{
-                edge.style({{
-                    'line-color': document.getElementById('edgeColor').value,
-                    'target-arrow-color': document.getElementById('edgeColor').value
-                }});
+            const positiveEdgeColor = document.getElementById('edgeColor').value;
+            const negativeEdgeColor = document.getElementById('negativeEdgeColor').value;
+            const updatedColor = weightNum < 0 ? negativeEdgeColor : positiveEdgeColor;
+            const currentOpacity = edge.data(EDGE_BASE_OPACITY_KEY) !== undefined ? edge.data(EDGE_BASE_OPACITY_KEY) : (parseFloat(edge.style('opacity')) || 1);
+            const canApplyNow = !edge.selected() && !edge.hasClass('highlighted');
+            setEdgeBaseAppearance(edge, updatedColor, currentOpacity, canApplyNow);
+            if (!canApplyNow) {{
+                applyEdgeHighlightOverride(edge);
             }}
             
             // Apply the width update
@@ -5310,11 +5592,7 @@ class VisualizePath:
                     }});
                     
                     // Apply default edge color and opacity to newly created edge
-                    newEdge.style({{
-                        'line-color': defaultEdgeColor,
-                        'target-arrow-color': defaultEdgeColor,
-                        'opacity': defaultEdgeOpacity
-                    }});
+                    setEdgeBaseAppearance(newEdge, defaultEdgeColor, defaultEdgeOpacity, true);
                     
                     updateHoverInfo('Edge created: ' + sourceId + ' → ' + targetId);
                 }} else {{
@@ -5765,13 +6043,17 @@ class VisualizePath:
                                 
                                 // Apply custom styles if available
                                 if (edgeData.style && edge.length > 0) {{
-                                    if (edgeData.style['line-color']) {{
-                                        edge.style('line-color', edgeData.style['line-color']);
-                                        edge.style('target-arrow-color', edgeData.style['line-color']);
-                                    }}
-                                    if (edgeData.style['opacity'] !== undefined) {{
-                                        edge.style('opacity', edgeData.style['opacity']);
-                                    }}
+                                    edge.forEach(function(e) {{
+                                        const importedColor = edgeData.style['line-color'] || e.style('line-color');
+                                        const importedOpacity = (edgeData.style['opacity'] !== undefined)
+                                            ? edgeData.style['opacity']
+                                            : (parseFloat(e.style('opacity')) || 1);
+                                        const canApplyBase = !e.selected() && !e.hasClass('highlighted');
+                                        setEdgeBaseAppearance(e, importedColor, importedOpacity, canApplyBase);
+                                        if (!canApplyBase) {{
+                                            applyEdgeHighlightOverride(e);
+                                        }}
+                                    }});
                                 }}
                                 addedEdges++;
                             }}
@@ -5986,6 +6268,7 @@ class VisualizePath:
         // Initial fit and apply opacity
         cy.fit(null, 50);
         applyInitialOpacity();
+        initializeEdgeBaseStyles();
         initializeLogBaseVisibility();
     </script>
 </body>
