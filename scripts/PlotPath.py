@@ -107,11 +107,13 @@ if __name__ == '__main__':
         intermediate_color=intermediate_color,  # Custom intermediate node color
         target_color=target_color,          # Custom target node color
         link_color=link_color,              # Custom link color
+        highlight_color='#FFFF80',      # Light yellow for highlighted nodes/edges
         network_layout='hierarchical',      # 'hierarchical', 'spring', 'circular', 'distributed'
         edge_width_scale='sqrt',            # Edge width scaling method
         showfig=True,                        # Open visualizations in browser
         max_edge_width=30,
-        generate_empty_network=True, # Set to True to generate empty network for manual editing, ignore path_file
+        generate_empty_network=False, # Set to True to generate empty network for manual editing, ignore path_file
+        # straight_reciprocal_edges=True,
     )
     
     # Generate all visualizations

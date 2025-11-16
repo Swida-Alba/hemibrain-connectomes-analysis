@@ -1,15 +1,18 @@
-# Hemibrain Connectomes Analysis v3.0
+# NeuPrint Connectome Analysis v3.0
 
-A comprehensive Python toolkit for analyzing and visualizing *Drosophila* hemibrain connectome data from NeuPrint. Find direct and indirect neural connections, visualize pathways, and perform network analysis with high-performance caching and parallel processing.
+A comprehensive Python toolkit for analyzing and visualizing connectome data from **all NeuPrint databases**. Features type-based pathfinding algorithms, interactive network visualizations, 3D neuron morphology rendering with video export, and high-performance caching. Supports hemibrain, optic lobe, FIB, MANC, and other NeuPrint datasets.
 
 [![Python Version](https://img.shields.io/badge/python-3.8%2B-blue)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 ## ✨ Key Features
 
-- 🔍 **Connection Discovery**: Find direct and multi-hop paths between neuron populations
+- 🔍 **Type-Based Pathfinding**: Comprehensive multi-hop path discovery between neuron populations with forward-only validation
+- 🎬 **3D Visualization**: Interactive neuron skeleton rendering with rotating video export (navis-based)
+- 🌐 **Interactive Networks**: Cytoscape.js-powered network graphs with hierarchical and force-directed layouts
+- 📊 **Rich Visualizations**: Sankey diagrams, heatmaps with clustering, and connection matrices
+- 🗄️ **Universal Dataset Support**: Works with all NeuPrint datasets (hemibrain, optic-lobe, FIB, MANC, etc.)
 - ⚡ **High Performance**: 10-100x speedup with local caching, 4-14x with parallel processing
-- 📊 **Rich Visualizations**: Interactive networks, Sankey diagrams, heatmaps, and 3D skeletons
 - 🎯 **Flexible Filtering**: Multiple filtering modes (synapse count, connection ratio, traversal probability)
 - 💾 **Smart Caching**: Efficient local storage with automatic complete dataset handling
 - 🔧 **Modular Design**: Reorganized src/ layout for better maintainability
@@ -204,6 +207,27 @@ fc = FindNeuronConnection(
 - `min_traversal_probability`: Scaled probability (e.g., ≥0.1 probability)
 
 All output data includes: `weight`, `connection_ratio`, and `traversal_probability` columns.
+
+#### Excluding Intra-Type Connections
+
+You can exclude connections within the same neuron type using the `exclude_intra_type_connections` parameter. This is particularly useful when analyzing cross-type connectivity patterns or building network visualizations that focus on inter-type communication.
+
+```python
+fc = FindNeuronConnection(
+    ... # other parameters
+    sourceNeurons=['MBON.*'],
+    targetNeurons=['MBON.*'],
+    exclude_intra_type_connections=True,  # Exclude MBON→MBON connections
+    ... # other parameters
+)
+```
+
+**Use cases:**
+- Analyzing cross-type connectivity patterns while excluding self-connections
+- Building cleaner network visualizations focused on inter-type pathways
+- Studying how different neuron types interact without intra-type noise
+
+See **[Example: Network Visualization with Excluded Intra-Type Connections](examples/Example_ExcludeIntraType.py)** for a complete demonstration.
 
 If you want to show the figure of the connection matrix, set ```showfig``` to ```True```, otherwise set it to False.
 

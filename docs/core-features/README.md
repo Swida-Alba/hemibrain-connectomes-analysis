@@ -6,6 +6,7 @@ Documentation for the fundamental features of the Hemibrain Connectomes Analysis
 
 This directory contains documentation for the core analytical capabilities:
 - **Path Finding**: Finding direct and multi-hop connections
+- **Custom Groups**: Flexible neuron grouping for custom analysis
 - **Cache System**: High-performance local data storage
 - **Parallel Processing**: Multi-core acceleration
 - **Filtering**: Connection and neuron filtering options
@@ -41,6 +42,7 @@ paths_df = fap.find_all_paths()
 ```
 
 ### Related Documents
+- [Custom Groups Feature](./CustomGroups_Feature.md)
 - [Forward-Only Mode Guide](./ForwardOnly_Guide.md)
 - [Multiple Connections Example](./FindAllPath_MultipleConnections_Example.md)
 - [Caching Improvements](./FindAllPath_CachingImprovement.md)
@@ -210,6 +212,33 @@ Depth-first search algorithm details and optimizations.
 ---
 
 ## Quick Reference
+
+### Connection Filtering Options
+
+The toolkit provides multiple filtering methods:
+
+```python
+# Synapse count threshold
+min_synapse_num = 10
+
+# Connection ratio (direct proportion)
+min_ratio = 0.01  # weight/post
+
+# Traversal probability (scaled)
+min_traversal_probability = 0.001  # min(1, weight/(post*0.3))
+
+# Filtering level
+filter_by = 'bodyId'  # or 'type' for aggregation
+
+# Exclude intra-type connections (NEW)
+exclude_intra_type_connections = True  # Remove type_pre == type_post
+```
+
+**Intra-Type Exclusion Use Cases:**
+- Cross-type connectivity analysis
+- Cleaner network visualizations
+- Inter-type communication studies
+- See **[Example_ExcludeIntraType.py](../../examples/Example_ExcludeIntraType.py)**
 
 ### Path Finding Commands
 

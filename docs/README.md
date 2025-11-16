@@ -23,6 +23,7 @@ Comprehensive guides for all visualization types:
 ### 🔧 [Core Features](./core-features/)
 Essential functionality documentation:
 - **Path Finding**: Multi-hop connection discovery
+- **Custom Groups**: Flexible neuron grouping for custom analysis (NEW)
 - **Cache System**: High-performance local storage (10-100x speedup)
 - **Parallel Processing**: Multi-core acceleration (4-14x speedup)
 - **Filtering**: Connection and neuron filtering options
@@ -71,6 +72,7 @@ Advanced technical documentation:
 ### Core Functionality
 - **[Cache System Guide](./core-features/CacheSystem_Guide.md)**: Caching for 10-100x speedup
 - **[Path Finding](./core-features/FindAllPath_Documentation.md)**: Multi-hop path discovery
+- **[Custom Groups](./core-features/CustomGroups_Feature.md)**: Flexible neuron grouping
 - **[Parallel Processing](./core-features/ParallelProcessing_Documentation.md)**: Multi-core acceleration
 
 ---
@@ -82,6 +84,7 @@ Advanced technical documentation:
 |------|--------------|
 | Direct connections | [Main README](../README.md#finddirectpy) |
 | Multi-hop paths | [FindAllPath](./core-features/FindAllPath_Documentation.md) |
+| Custom neuron groups | [Custom Groups](./core-features/CustomGroups_Feature.md) |
 | Forward-only paths | [Forward-Only Guide](./core-features/ForwardOnly_Guide.md) |
 | Filter connections | [Connection Filters](./core-features/README.md#filtering) |
 

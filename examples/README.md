@@ -106,6 +106,32 @@ python examples/Example_VisualizeSelectedPaths.py
 
 ---
 
+### 6. Network Visualization with Excluded Intra-Type Connections
+**File:** `Example_ExcludeIntraType.py`
+
+Demonstrates how to build and visualize networks focused on inter-type connectivity by excluding connections within the same neuron type.
+
+```bash
+python examples/Example_ExcludeIntraType.py
+```
+
+**Features shown:**
+- Using `exclude_intra_type_connections` parameter
+- Building cleaner network visualizations
+- Analyzing cross-type connectivity patterns
+- Comparing results with and without intra-type exclusion
+- Applications in direct connections and multi-hop pathfinding
+
+**Use cases:**
+- Understanding inter-type communication pathways
+- Creating focused network diagrams without self-connections
+- Studying functional connectivity between different neuron types
+- Reducing visual clutter in network visualizations
+
+**Related documentation:** [README.md - Excluding Intra-Type Connections](../README.md)
+
+---
+
 ## 🎯 Usage Pattern
 
 All example scripts follow the same pattern:

@@ -18,6 +18,7 @@ import pandas as pd
 import flybrains
 import plotly.graph_objects as go
 import seaborn as sns
+from tqdm import tqdm
 from neuprint import *
 from neuprint.utils import connection_table_to_matrix
 
@@ -171,6 +172,18 @@ class FindNeuronConnection:
     then filters are applied to the aggregated weights
     '''
     
+    exclude_intra_type_connections: bool = False
+    '''
+    whether to exclude connections within the same neuron type (type_pre == type_post)\n
+    when True, removes all connections where source and target neurons have the same type\n
+    when False (default), keeps all connections including intra-type connections\n
+    applies to all connection searches (FindDirect, FindPath, FindAllPath)\n
+    This feature is particularly useful when analyzing cross-type connectivity patterns\n
+    while excluding self-connections within the same neuron type.\n
+    It's also useful when building networks and illustrating connections of given neurons,\n
+    helping to focus on inter-type communication pathways.
+    '''
+    
     max_interlayer: int = 2
     '''maximum number of interlayers to be considered in connection'''
     
@@ -194,6 +207,12 @@ class FindNeuronConnection:
     
     custom_target_name: str = ''
     '''custom name for target neurons, used in plot and file name'''
+    
+    custom_source_group_names: list = field(default_factory=list)
+    '''custom names for source neuron groups when using nested lists. If empty, auto-generated names will be used.'''
+    
+    custom_target_group_names: list = field(default_factory=list)
+    '''custom names for target neuron groups when using nested lists. If empty, auto-generated names will be used.'''
     
     parameter_dict = dict()
     '''dictionary to store all specified parameters'''
@@ -242,6 +261,13 @@ class FindNeuronConnection:
     https://connectome-neuprint.github.io/neuprint-python/docs/queries.html#neuprint.queries.fetch_simple_connections \n 
     and \n
     https://connectome-neuprint.github.io/neuprint-python/docs/queries.html#neuprint.queries.fetch_adjacencies \n
+    '''
+    
+    output_format: str = 'xlsx'
+    '''
+    output data format: 'xlsx' (default) or 'csv'\n
+    'xlsx': save all data in Excel files\n
+    'csv': save all data in CSV files in a subfolder named 'output_data'
     '''
     
     use_cache: bool = True
@@ -294,6 +320,8 @@ class FindNeuronConnection:
             print(f'Cache enabled: {self.cache_folder}')
             # Ensure complete dataset with ALL neurons exists (including type=None)
             self._ensure_complete_dataset()
+        if self.exclude_intra_type_connections:
+            print('⚠️  Intra-type connections will be excluded (type_pre == type_post)')
         if self.sourceNeurons is None or self.targetNeurons is None:
             print('\033[33mIt is not recommended to search for all neurons in the dataset.\n Using [] or list() to search for all neurons having a given type, instead.\033[0m')
         elif self.targetNeurons is None:
@@ -356,7 +384,10 @@ class FindNeuronConnection:
         db_path = self._get_connection_db_path()
         if os.path.exists(db_path):
             try:
+                file_size_mb = os.path.getsize(db_path) / (1024 * 1024)
+                print(f'  ⏳ Loading connection database ({file_size_mb:.1f} MB)...')
                 df = pd.read_parquet(db_path)
+                print(f'  ✓ Loaded {len(df):,} cached connections')
                 return df
             except Exception as e:
                 print(f'  ⚠️ Warning: Failed to load connection database: {e}')
@@ -367,7 +398,9 @@ class FindNeuronConnection:
         '''Save unified connection database with compression'''
         db_path = self._get_connection_db_path()
         try:
+            # Progress is already shown by caller, just add completion message
             conn_db.to_parquet(db_path, index=False, compression='gzip')
+            print(f'  ✓ Database saved successfully')
         except Exception as e:
             print(f'  ⚠️ Warning: Failed to save connection database: {e}')
     
@@ -379,7 +412,13 @@ class FindNeuronConnection:
         index_path = self._get_neuron_index_path()
         if os.path.exists(index_path):
             try:
-                return pd.read_parquet(index_path)
+                file_size_mb = os.path.getsize(index_path) / (1024 * 1024)
+                if file_size_mb > 1:  # Only show for larger files
+                    print(f'  ⏳ Loading neuron index ({file_size_mb:.1f} MB)...')
+                df = pd.read_parquet(index_path)
+                if file_size_mb > 1:
+                    print(f'  ✓ Loaded index for {len(df):,} neurons')
+                return df
             except Exception as e:
                 print(f'  ⚠️ Warning: Failed to load neuron index: {e}')
                 return pd.DataFrame(columns=[
@@ -395,7 +434,9 @@ class FindNeuronConnection:
         '''Save neuron index with compression'''
         index_path = self._get_neuron_index_path()
         try:
+            # Progress message already shown by caller
             index_df.to_parquet(index_path, index=False, compression='gzip')
+            print(f'  ✓ Neuron index saved successfully')
         except Exception as e:
             print(f'  ⚠️ Warning: Failed to save neuron index: {e}')
     
@@ -417,21 +458,23 @@ class FindNeuronConnection:
         
         Returns:
         --------
-        tuple: (cached_connections_df, list_of_uncached_upstream_ids)
+        tuple: (cached_connections_df, list_of_uncached_upstream_ids, list_of_partially_cached_ids)
         '''
         if not self.use_cache:
-            return pd.DataFrame(), upstream_bodyIds
+            return pd.DataFrame(), upstream_bodyIds, []
         
+        print(f'  ⏳ Querying cache for {len(upstream_bodyIds):,} neurons...')
         conn_db = self._load_connection_db()
         neuron_index = self._load_neuron_index()
         
         if conn_db.empty:
             # No cache yet
-            return pd.DataFrame(), upstream_bodyIds
+            return pd.DataFrame(), upstream_bodyIds, []
         
         # Separate cached vs uncached neurons
         cached_upstream = []
         uncached_upstream = []
+        partially_cached = []  # Neurons with connections but not marked complete
         
         for bodyId in upstream_bodyIds:
             if bodyId in neuron_index['bodyId'].values:
@@ -451,20 +494,84 @@ class FindNeuronConnection:
                     else:
                         uncached_upstream.append(bodyId)
             else:
-                # Not in index = not cached
+                # Not in index - treat as uncached to refetch (skip recovery)
                 uncached_upstream.append(bodyId)
         
         # Retrieve cached connections
-        if len(cached_upstream) > 0:
-            cached_conn = conn_db[conn_db['bodyId_pre'].isin(cached_upstream)].copy()
+        all_cached = cached_upstream + partially_cached  # partially_cached will be empty (no recovery)
+        if len(all_cached) > 0:
+            print(f'  ⏳ Retrieving {len(all_cached):,} neurons from cache...')
+            cached_conn = conn_db[conn_db['bodyId_pre'].isin(all_cached)].copy()
             
             # Filter by downstream if specified
             if downstream_bodyIds is not None:
                 cached_conn = cached_conn[cached_conn['bodyId_post'].isin(downstream_bodyIds)].copy()
             
-            return cached_conn, uncached_upstream
+            # Note: Neurons with 0 connections are valid! Don't refetch them.
+            # The neuron_index already tracks which neurons are complete via downstream_complete flag.
+            # Only refetch if they're marked incomplete (which is already handled above in the loop).
+            
+            # Return both cached connections and list of partially cached neurons for later marking
+            return cached_conn, uncached_upstream, partially_cached
         
-        return pd.DataFrame(), uncached_upstream
+        return pd.DataFrame(), uncached_upstream, []
+    
+    def _try_recover_neuron_metadata(self, bodyId, conn_db, neuron_index):
+        '''
+        Attempt to recover neuron metadata from local dataset and add to neuron index.
+        Called during crash recovery when connections exist but neuron not in index.
+        
+        Parameters:
+        -----------
+        bodyId : int
+            Neuron bodyId to recover
+        conn_db : pd.DataFrame
+            Connection database (used to count existing connections)
+        neuron_index : pd.DataFrame
+            Current neuron index (will be updated and saved)
+        '''
+        # Try to get metadata from local dataset
+        dataset_path = os.path.join(
+            self.script_path,
+            'datasets',
+            f"{self.dataset.replace(':', '_').replace('.', '_')}_allneurons_neuron_df.csv"
+        )
+        
+        if os.path.exists(dataset_path):
+            try:
+                ndf_complete = pd.read_csv(dataset_path, header=0, index_col=0)
+                neuron_row = ndf_complete[ndf_complete['bodyId'] == bodyId]
+                
+                if not neuron_row.empty:
+                    # Found neuron metadata - add to index as incomplete
+                    neuron_type = neuron_row.iloc[0]['type'] if 'type' in neuron_row.columns else ''
+                    neuron_instance = neuron_row.iloc[0]['instance'] if 'instance' in neuron_row.columns else ''
+                    neuron_post = neuron_row.iloc[0]['post'] if 'post' in neuron_row.columns else 0
+                    
+                    # Count connections from database
+                    conn_count = len(conn_db[conn_db['bodyId_pre'] == bodyId])
+                    
+                    # Add to neuron index (but not marked as complete yet)
+                    new_entry = pd.DataFrame([{
+                        'bodyId': bodyId,
+                        'type': neuron_type,
+                        'instance': neuron_instance,
+                        'post': neuron_post,
+                        'downstream_complete': False,  # Not complete yet - needs enrichment validation
+                        'last_fetched': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                        'connection_count': conn_count
+                    }])
+                    
+                    # Update and save neuron_index immediately
+                    updated_index = pd.concat([neuron_index, new_entry], ignore_index=True)
+                    self._save_neuron_index(updated_index)
+                    
+                    return True  # Successfully recovered
+            except Exception as e:
+                # If recovery fails, just skip - will be marked as complete after enrichment
+                pass
+        
+        return False  # Recovery failed or not possible
     
     def _update_connection_db(self, new_connections, upstream_bodyIds, downstream_bodyIds=None):
         '''
@@ -500,6 +607,7 @@ class FindNeuronConnection:
         
         # Merge with existing, removing duplicates (keep existing entries)
         if not conn_db.empty:
+            print(f'  ⏳ Merging {len(new_conn):,} connections with existing database...')
             # Remove any new connections that already exist (based on bodyId_pre, bodyId_post, roi)
             merge_cols = ['bodyId_pre', 'bodyId_post', 'roi']
             combined = pd.concat([conn_db, new_conn])
@@ -508,6 +616,7 @@ class FindNeuronConnection:
             combined = new_conn
         
         # Save updated database
+        print(f'  ⏳ Saving connection database ({len(combined):,} connections)...')
         self._save_connection_db(combined)
         
         new_count = len(combined) - len(conn_db)
@@ -518,6 +627,88 @@ class FindNeuronConnection:
         
         # Update neuron index
         self._update_neuron_index_after_fetch(new_conn, upstream_bodyIds, downstream_bodyIds)
+    
+    def _save_connections_only(self, new_connections, upstream_bodyIds):
+        '''
+        Save connections to database without updating neuron index.
+        Used when we want to delay marking neurons as cached until after enrichment succeeds.
+        
+        Parameters:
+        -----------
+        new_connections : pd.DataFrame
+            New connections to add (must have bodyId_pre, bodyId_post, weight, optionally roi)
+        upstream_bodyIds : list
+            List of upstream neurons that were queried (not marked as cached yet)
+        '''
+        if new_connections.empty:
+            print(f'  📂 No connections found for {len(upstream_bodyIds)} neurons')
+            return
+        
+        # Load existing database
+        conn_db = self._load_connection_db()
+        
+        # Prepare new connections
+        new_conn = new_connections[['bodyId_pre', 'bodyId_post', 'weight']].copy()
+        if 'roi' in new_connections.columns:
+            new_conn['roi'] = new_connections['roi']
+        else:
+            new_conn['roi'] = ''
+        
+        new_conn['cached_date'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        
+        # Merge with existing, removing duplicates (keep existing entries)
+        if not conn_db.empty:
+            print(f'  ⏳ Merging {len(new_conn):,} connections with existing database...')
+            merge_cols = ['bodyId_pre', 'bodyId_post', 'roi']
+            combined = pd.concat([conn_db, new_conn])
+            combined = combined.drop_duplicates(subset=merge_cols, keep='first')
+        else:
+            combined = new_conn
+        
+        # Save updated database
+        print(f'  ⏳ Saving connection database ({len(combined):,} connections)...')
+        self._save_connection_db(combined)
+        
+        new_count = len(combined) - len(conn_db)
+        if new_count > 0:
+            print(f'  💾 Added {new_count} new connections to database (total: {len(combined):,})')
+        else:
+            print(f'  📂 All connections already in database ({len(conn_db):,} total)')
+    
+    def _mark_neurons_as_cached(self, upstream_bodyIds, connections, downstream_bodyIds=None):
+        '''
+        Mark neurons as cached in neuron index after successful enrichment.
+        This is called AFTER enrichment to ensure data integrity.
+        Neurons with empty/None type are valid and will be marked as complete.
+        Neurons with 0 connections are valid and will be marked as complete.
+        
+        Parameters:
+        -----------
+        upstream_bodyIds : list
+            List of upstream neurons to mark as cached
+        connections : pd.DataFrame
+            Successfully fetched and enriched connections (may be empty for neurons with 0 connections)
+        downstream_bodyIds : list or None
+            If None, marks neurons as downstream_complete. If list, doesn't mark as complete.
+        '''
+        # If connections is empty, all neurons have 0 connections - that's valid, mark them all
+        if connections.empty:
+            self._update_neuron_index_after_fetch(connections, upstream_bodyIds, downstream_bodyIds)
+            return
+        
+        # Validate that connections are properly enriched before marking
+        required_cols = ['bodyId_pre', 'bodyId_post', 'weight', 'type_pre', 'instance_pre']
+        missing_cols = [col for col in required_cols if col not in connections.columns]
+        if missing_cols:
+            print(f'  ⚠️  Warning: Connections missing required columns {missing_cols}, skipping cache update')
+            return
+        
+        # Note: Neurons with None or empty type/instance are VALID
+        # The dataset legitimately has neurons without type assignments
+        # We should NOT treat them as incomplete and refuse to cache them
+        
+        # All neurons can be marked as complete - no validation needed for type/instance
+        self._update_neuron_index_after_fetch(connections, upstream_bodyIds, downstream_bodyIds)
     
     def _update_neuron_index_after_fetch(self, connections, upstream_bodyIds, downstream_bodyIds=None):
         '''
@@ -533,6 +724,7 @@ class FindNeuronConnection:
             f"{self.dataset.replace(':', '_').replace('.', '_')}_allneurons_neuron_df.csv"
         )
         
+        print(f'  ⏳ Loading neuron metadata for {len(upstream_bodyIds):,} neurons...')
         if os.path.exists(dataset_path):
             ndf_complete = pd.read_csv(dataset_path, header=0, index_col=0)
             neuron_info = ndf_complete[ndf_complete['bodyId'].isin(upstream_bodyIds)][['bodyId', 'type', 'instance', 'post']].copy()
@@ -545,6 +737,7 @@ class FindNeuronConnection:
                 neuron_info = pd.DataFrame(columns=['bodyId', 'type', 'instance', 'post'])
         
         # Count connections per neuron
+        print(f'  ⏳ Counting connections per neuron...')
         if not connections.empty:
             conn_counts = connections.groupby('bodyId_pre').size().reset_index(name='connection_count')
         else:
@@ -553,7 +746,7 @@ class FindNeuronConnection:
         # Only mark as downstream_complete if we fetched ALL downstream
         mark_complete = (downstream_bodyIds is None)
         
-        for bodyId in upstream_bodyIds:
+        for bodyId in tqdm(upstream_bodyIds, desc='  ⏳ Updating neuron index', leave=False):
             neuron_row = neuron_info[neuron_info['bodyId'] == bodyId]
             if not neuron_row.empty:
                 neuron_type = neuron_row.iloc[0]['type'] if 'type' in neuron_row.columns else ''
@@ -588,6 +781,7 @@ class FindNeuronConnection:
                 }])
                 neuron_index = pd.concat([neuron_index, new_entry], ignore_index=True)
         
+        print(f'  ⏳ Saving neuron index ({len(neuron_index):,} total neurons)...')
         self._save_neuron_index(neuron_index)
         
         if mark_complete:
@@ -601,10 +795,12 @@ class FindNeuronConnection:
     def _enrich_connections_with_neuron_info(self, conn_df):
         '''
         Enrich connection dataframe with type and instance from complete local dataset.
+        Also adds custom_group columns if source/target dataframes have them.
         '''
         if conn_df.empty:
             return conn_df
         
+        print(f'  ⏳ Enriching {len(conn_df):,} connections with neuron info...')
         # Get unique bodyIds that need enrichment
         all_bodyids = list(set(conn_df['bodyId_pre'].tolist() + conn_df['bodyId_post'].tolist()))
         
@@ -616,46 +812,88 @@ class FindNeuronConnection:
         )
         
         if not os.path.exists(dataset_path):
-            # Fallback: try to use standard dataset (may miss type=None neurons)
-            print(f'  ⚠️ Warning: Complete dataset not found, using standard dataset')
-            print(f'     Some neurons without types may be missing.')
-            try:
-                import statvis as sv
-                neuron_df, _, _, _ = sv.getNeurons(all_bodyids, dataset=self.dataset)
-            except:
-                neuron_df = pd.DataFrame(columns=['bodyId', 'type', 'instance'])
+            # Fallback: fetch from API
+            print(f'  ⚠️ Warning: Complete dataset not found, fetching from API...')
+            neuron_df = self._fetch_neurons_local_or_api(all_bodyids, columns=['bodyId', 'type', 'instance'])
         else:
             # Load complete dataset from CSV
             ndf_complete = pd.read_csv(dataset_path, header=0, index_col=0)
             # Filter to only neurons we need
             neuron_df = ndf_complete[ndf_complete['bodyId'].isin(all_bodyids)].copy()
+            
+            # Check for missing neurons and fetch from API if needed
+            found_bodyids = set(neuron_df['bodyId'].unique())
+            missing_bodyids = set(all_bodyids) - found_bodyids
+            
+            if missing_bodyids:
+                print(f'  ℹ️  {len(missing_bodyids)} neurons not in local dataset, fetching from API...')
+                missing_neuron_df = self._fetch_neurons_local_or_api(
+                    list(missing_bodyids), 
+                    columns=['bodyId', 'type', 'instance']
+                )
+                if not missing_neuron_df.empty:
+                    neuron_df = pd.concat([neuron_df, missing_neuron_df], ignore_index=True)
         
         neuron_info = neuron_df[['bodyId', 'type', 'instance']].copy()
         
-        # Drop existing type/instance columns if they exist (to avoid _x, _y suffixes after merge)
+        # Add custom_group from source_df and target_df if available
+        if hasattr(self, 'source_df') and 'custom_group' in self.source_df.columns:
+            source_custom = self.source_df[['bodyId', 'custom_group']].rename(
+                columns={'custom_group': 'custom_group_pre'}
+            )
+            neuron_info = neuron_info.merge(source_custom, on='bodyId', how='left')
+        
+        if hasattr(self, 'target_df') and 'custom_group' in self.target_df.columns:
+            target_custom = self.target_df[['bodyId', 'custom_group']].rename(
+                columns={'custom_group': 'custom_group_post'}
+            )
+            neuron_info = neuron_info.merge(target_custom, on='bodyId', how='left')
+        
+        # Drop existing type/instance/custom_group columns if they exist (to avoid _x, _y suffixes after merge)
         columns_to_drop = []
-        for col in ['type_pre', 'instance_pre', 'type_post', 'instance_post']:
+        for col in ['type_pre', 'instance_pre', 'type_post', 'instance_post', 
+                    'custom_group_pre', 'custom_group_post']:
             if col in conn_df.columns:
                 columns_to_drop.append(col)
         if columns_to_drop:
             conn_df = conn_df.drop(columns=columns_to_drop)
         
+        # Prepare columns to merge
+        merge_cols = {'type': 'type_pre', 'instance': 'instance_pre'}
+        if 'custom_group_pre' in neuron_info.columns:
+            merge_cols['custom_group_pre'] = 'custom_group_pre'
+        if 'custom_group_post' in neuron_info.columns:
+            merge_cols['custom_group_post'] = 'custom_group_post'
+        
         # Join type and instance for pre-synaptic neurons
+        merge_info_pre = neuron_info.rename(columns={'type': 'type_pre', 'instance': 'instance_pre'})
+        if 'custom_group_pre' in merge_info_pre.columns:
+            merge_info_pre = merge_info_pre[['bodyId', 'type_pre', 'instance_pre', 'custom_group_pre']]
+        else:
+            merge_info_pre = merge_info_pre[['bodyId', 'type_pre', 'instance_pre']]
+        
         conn_df = conn_df.merge(
-            neuron_info.rename(columns={'type': 'type_pre', 'instance': 'instance_pre'}),
+            merge_info_pre,
             left_on='bodyId_pre',
             right_on='bodyId',
             how='left'
         ).drop(columns=['bodyId'])
         
-        # Join type and instance for post-synaptic neurons
+        # Join type and instance for post-synaptic neurons  
+        merge_info_post = neuron_info.rename(columns={'type': 'type_post', 'instance': 'instance_post'})
+        if 'custom_group_post' in merge_info_post.columns:
+            merge_info_post = merge_info_post[['bodyId', 'type_post', 'instance_post', 'custom_group_post']]
+        else:
+            merge_info_post = merge_info_post[['bodyId', 'type_post', 'instance_post']]
+        
         conn_df = conn_df.merge(
-            neuron_info.rename(columns={'type': 'type_post', 'instance': 'instance_post'}),
+            merge_info_post,
             left_on='bodyId_post',
             right_on='bodyId',
             how='left'
         ).drop(columns=['bodyId'])
         
+        print(f'  ✓ Enrichment complete')
         return conn_df
     
     def _fetch_neurons_local_or_api(self, bodyIds, columns=None):
@@ -840,7 +1078,7 @@ class FindNeuronConnection:
             min_conn_ratio = self.min_ratio
         
         # Step 1: Query database for cached connections
-        cached_conn, uncached_upstream = self._query_connection_db(upstream_bodyIds, downstream_bodyIds)
+        cached_conn, uncached_upstream, partially_cached = self._query_connection_db(upstream_bodyIds, downstream_bodyIds)
         
         if not cached_conn.empty:
             print(f'  📂 Found {len(set(upstream_bodyIds) - set(uncached_upstream))}/{len(upstream_bodyIds)} neurons in cache')
@@ -876,8 +1114,8 @@ class FindNeuronConnection:
                     **self.kwargs_fetch
                 )
                 api_conn = sv.merge_conn_roi(neuron_df, roi_conn_df)
-            # Always update database, even if empty (marks neurons as cached)
-            self._update_connection_db(api_conn, uncached_upstream, downstream_bodyIds)
+            # Save connections to database (but don't mark neurons as cached yet)
+            self._save_connections_only(api_conn, uncached_upstream)
         
         # Step 3: Combine cached and API results
         if cached_conn.empty and api_conn.empty:
@@ -892,7 +1130,34 @@ class FindNeuronConnection:
         # Enrich with type and instance info (needed for both filtering modes)
         combined = self._enrich_connections_with_neuron_info(combined)
         
+        # NOW mark neurons as cached (after successful enrichment)
+        # Mark newly fetched neurons (partially_cached will be empty)
+        neurons_to_mark = list(set(uncached_upstream + partially_cached))
+        if len(neurons_to_mark) > 0:
+            print(f'  ⏳ Preparing to mark {len(neurons_to_mark):,} neurons as cached...')
+            # Get the connections for these neurons from the combined dataframe
+            neurons_conn = combined[combined['bodyId_pre'].isin(neurons_to_mark)]
+            
+            # Debug: Check if some neurons have no connections
+            neurons_with_conns = set(neurons_conn['bodyId_pre'].unique())
+            neurons_without_conns = set(neurons_to_mark) - neurons_with_conns
+            if neurons_without_conns:
+                print(f'  ℹ️  Note: {len(neurons_without_conns)} neurons have 0 connections (will still be marked as complete)')
+            
+            self._mark_neurons_as_cached(neurons_to_mark, neurons_conn, downstream_bodyIds)
+            print(f'  ✓ Cache update complete - {len(neurons_to_mark)} neurons marked as fetched')
+        
+        # Exclude intra-type connections if requested (before applying other filters)
+        if self.exclude_intra_type_connections and len(combined) > 0:
+            before_count = len(combined)
+            # Remove connections where type_pre == type_post
+            combined = combined[combined['type_pre'] != combined['type_post']].copy()
+            after_count = len(combined)
+            if before_count > after_count:
+                print(f'  ⚠️  Excluded {before_count - after_count:,} intra-type connections (type_pre == type_post)')
+        
         # Apply filters at the specified level
+        print(f'  ⏳ Applying filters to {len(combined):,} connections...')
         if self.filter_by == 'type':
             # Type-level filtering: aggregate first, then filter
             # Weight filter applied at type level (sum of all weights per type pair)
@@ -1060,8 +1325,16 @@ class FindNeuronConnection:
         ''' initialize neuron info '''
         ''' initialize neuron info '''
         print('Fetching source and target neurons...')
-        self.source_df, _, source_fname_auto, self.source_criteria = sv.getNeurons(self.sourceNeurons, dataset=self.dataset)
-        self.target_df, _, target_fname_auto, self.target_criteria = sv.getNeurons(self.targetNeurons, dataset=self.dataset)
+        self.source_df, _, source_fname_auto, self.source_criteria = sv.getNeurons(
+            self.sourceNeurons, 
+            dataset=self.dataset,
+            custom_group_names=self.custom_source_group_names if self.custom_source_group_names else None
+        )
+        self.target_df, _, target_fname_auto, self.target_criteria = sv.getNeurons(
+            self.targetNeurons, 
+            dataset=self.dataset,
+            custom_group_names=self.custom_target_group_names if self.custom_target_group_names else None
+        )
         
         if self.max_interlayer > 2 or len(self.source_df) > 200:
             self.simple_fetch = False
@@ -1102,6 +1375,7 @@ class FindNeuronConnection:
             'min connection ratio': str(self.min_ratio),
             'min traversal probability': str(self.min_traversal_probability),
             'filter by': self.filter_by,
+            'exclude intra-type connections': str(self.exclude_intra_type_connections),
             'max interlayer': str(self.max_interlayer),
             'keyword in path to remove': self.keyword_in_path_to_remove,
             'server': self.server,
@@ -1197,7 +1471,7 @@ class FindNeuronConnection:
         # Type-level prob = 1 - product(bodyId-level block_prob)
         # Don't pass target_neurons_df - let EnrichConnectionTable use neurons from connections
         # This uses sum(post) of neurons that actually received connections as denominator
-        self.conn_df, self.conn_type = sv.EnrichConnectionTable(
+        self.conn_df, self.conn_type, self.conn_group = sv.EnrichConnectionTable(
             self.conn_df, 
             traversal_probability_threshold=0,
             dataset=self.dataset,
@@ -1230,6 +1504,22 @@ class FindNeuronConnection:
         self.conn_matrix_ratio_type.columns = self.conn_matrix_ratio_type.columns.astype(str)
         # Create full rectangular ratio matrices (source rows × target cols)
         self.ratioMat_full_bodyId,self.ratioMat_full_type = sv.Conn2FullMat(self.source_df,self.target_df,self.conn_df,self.conn_type,weight_col='connection_ratio')
+        
+        # Create custom group matrices if custom grouping was used
+        if self.conn_group is not None:
+            # Create connection matrices for custom groups
+            self.conn_matrix_group: pd.DataFrame = self.conn_group.pivot_table(
+                index='group_pre', columns='group_post', values='weight', fill_value=0
+            )
+            self.conn_matrix_group.index = self.conn_matrix_group.index.astype(str)
+            self.conn_matrix_group.columns = self.conn_matrix_group.columns.astype(str)
+            
+            self.conn_matrix_ratio_group: pd.DataFrame = self.conn_group.pivot_table(
+                index='group_pre', columns='group_post', values='connection_ratio', fill_value=0
+            )
+            self.conn_matrix_ratio_group.index = self.conn_matrix_ratio_group.index.astype(str)
+            self.conn_matrix_ratio_group.columns = self.conn_matrix_ratio_group.columns.astype(str)
+        
         # 
         self.source_in_conn: pd.DataFrame = self.source_df[self.source_df['bodyId'].isin(self.conn_df['bodyId_pre'].unique())]
         self.source_in_conn = self.source_in_conn.reset_index(drop=True)
@@ -1242,8 +1532,9 @@ class FindNeuronConnection:
             f.write(f'{len(self.target_in_conn)} / {len(self.target_df)} target {self.target_fname} neurons involved in connections\n')
             f.write('\n')
         
+        # Save main file with type-level and custom group data
         output_excel_name = os.path.join(self.direct_folder,self.source_fname+'_to_'+self.target_fname+'_info_snp'+str(self.min_synapse_num)+'.xlsx')
-        print(f'Saving connection info to excel file...')
+        print(f'Saving type-level connection info to excel file...')
         with pd.ExcelWriter(output_excel_name, mode='w', engine='xlsxwriter') as dataWriter:
             self.parameter_df.to_excel(dataWriter,sheet_name='parameters')
             worksheet = dataWriter.sheets['parameters']
@@ -1254,31 +1545,85 @@ class FindNeuronConnection:
             self.target_df.to_excel(dataWriter,sheet_name='target_info')
             self.source_in_conn.to_excel(dataWriter,sheet_name='source_in_connection')
             self.target_in_conn.to_excel(dataWriter,sheet_name='target_in_connection')
-            self.conn_df.to_excel(dataWriter,sheet_name='connection_info')
             self.conn_type.to_excel(dataWriter,sheet_name='connection_groupby_type')
+            
+            # Add custom group sheets if custom grouping was used
+            if self.conn_group is not None:
+                self.conn_group.to_excel(dataWriter,sheet_name='connection_groupby_custom')
+                if not self.largeTargetSet:
+                    self.conn_matrix_group.to_excel(dataWriter,sheet_name='connectionMatrix_group')
+                    self.conn_matrix_ratio_group.to_excel(dataWriter,sheet_name='connectionRatioMat_group')
+                else:
+                    self.conn_matrix_group.transpose().to_excel(dataWriter,sheet_name='connectionMatrix_group')
+                    self.conn_matrix_ratio_group.transpose().to_excel(dataWriter,sheet_name='connectionRatioMat_group')
+            
+            # Type-level matrices
             if not self.largeTargetSet:
-                self.conn_matrix_bodyId.to_excel(dataWriter,sheet_name='connectionMatrix_bodyId')
                 self.conn_matrix_type.to_excel(dataWriter,sheet_name='connectionMatrix_type')
-                self.cmat_full_bodyId.to_excel(dataWriter,sheet_name='connMat_bodyId_full')
                 self.cmat_full_type.to_excel(dataWriter,sheet_name='connMat_type_full')
-                self.transitionMat_bodyId.to_excel(dataWriter,sheet_name='transmissionMat_bodyId')
                 self.transitionMat_type.to_excel(dataWriter,sheet_name='transmissionMat_type')
-                self.conn_matrix_ratio_bodyId.to_excel(dataWriter,sheet_name='connectionRatioMat_bodyId')
                 self.conn_matrix_ratio_type.to_excel(dataWriter,sheet_name='connectionRatioMat_type')
-                self.ratioMat_full_bodyId.to_excel(dataWriter,sheet_name='ratioMat_bodyId_full')
                 self.ratioMat_full_type.to_excel(dataWriter,sheet_name='ratioMat_type_full')
             else:
-                self.conn_matrix_bodyId.transpose().to_excel(dataWriter,sheet_name='connectionMatrix_bodyId')
-                self.conn_matrix_bodyId.transpose().to_excel(dataWriter,sheet_name='connectionMatrix_bodyId')
                 self.conn_matrix_type.transpose().to_excel(dataWriter,sheet_name='connectionMatrix_type')
-                self.cmat_full_bodyId.transpose().to_excel(dataWriter,sheet_name='connMat_bodyId_full')
                 self.cmat_full_type.transpose().to_excel(dataWriter,sheet_name='connMat_type_full')
-                self.transitionMat_bodyId.transpose().to_excel(dataWriter,sheet_name='transmissionMat_bodyId')
                 self.transitionMat_type.transpose().to_excel(dataWriter,sheet_name='transmissionMat_type')
-                self.conn_matrix_ratio_bodyId.transpose().to_excel(dataWriter,sheet_name='connectionRatioMat_bodyId')
                 self.conn_matrix_ratio_type.transpose().to_excel(dataWriter,sheet_name='connectionRatioMat_type')
-                self.ratioMat_full_bodyId.transpose().to_excel(dataWriter,sheet_name='ratioMat_bodyId_full')
-                self.ratioMat_full_type.transpose().to_excel(dataWriter,sheet_name='ratioMat_type_full')
+        
+        # Save bodyId-level data (use CSV for large data)
+        print(f'Saving bodyId-level data (rows: {len(self.conn_df):,})...')
+        
+        EXCEL_ROW_LIMIT = 1_048_576
+        use_csv = len(self.conn_df) >= EXCEL_ROW_LIMIT * 0.9
+        
+        if use_csv:
+            print(f'  ⚠️  Data too large for Excel ({len(self.conn_df):,} rows), saving as CSV')
+            
+            # Save parameters as small Excel file
+            output_params_excel = os.path.join(self.direct_folder,self.source_fname+'_to_'+self.target_fname+'_bodyId_parameters_snp'+str(self.min_synapse_num)+'.xlsx')
+            with pd.ExcelWriter(output_params_excel, mode='w', engine='xlsxwriter') as dataWriter:
+                self.parameter_df.to_excel(dataWriter,sheet_name='parameters')
+                worksheet = dataWriter.sheets['parameters']
+                worksheet.set_column('A:A', 30, dataWriter.book.add_format({'bold': True, 'font_name': 'Arial', 'font_size': 11, 'align': 'left'}))
+                worksheet.set_column('B:B', 30, dataWriter.book.add_format({'font_name': 'Arial', 'font_size': 11, 'align': 'left'}))
+            
+            # Save bodyId connection data as CSV
+            output_bodyid_csv = os.path.join(self.direct_folder,self.source_fname+'_to_'+self.target_fname+'_bodyId_connections_snp'+str(self.min_synapse_num)+'.csv')
+            self.conn_df.to_csv(output_bodyid_csv, index=False)
+            print(f'  ✓ Saved to: {output_bodyid_csv}')
+            
+            # Save matrices as separate CSVs
+            if not self.largeTargetSet:
+                self.conn_matrix_bodyId.to_csv(os.path.join(self.direct_folder,self.source_fname+'_to_'+self.target_fname+'_connectionMatrix_bodyId.csv'))
+                self.transitionMat_bodyId.to_csv(os.path.join(self.direct_folder,self.source_fname+'_to_'+self.target_fname+'_transmissionMat_bodyId.csv'))
+            else:
+                self.conn_matrix_bodyId.transpose().to_csv(os.path.join(self.direct_folder,self.source_fname+'_to_'+self.target_fname+'_connectionMatrix_bodyId.csv'))
+                self.transitionMat_bodyId.transpose().to_csv(os.path.join(self.direct_folder,self.source_fname+'_to_'+self.target_fname+'_transmissionMat_bodyId.csv'))
+        else:
+            # Data fits in Excel
+            output_bodyid_excel = os.path.join(self.direct_folder,self.source_fname+'_to_'+self.target_fname+'_bodyId_data_snp'+str(self.min_synapse_num)+'.xlsx')
+            with pd.ExcelWriter(output_bodyid_excel, mode='w', engine='xlsxwriter') as dataWriter:
+                self.parameter_df.to_excel(dataWriter,sheet_name='parameters')
+                worksheet = dataWriter.sheets['parameters']
+                worksheet.set_column('A:A', 30, dataWriter.book.add_format({'bold': True, 'font_name': 'Arial', 'font_size': 11, 'align': 'left'}))
+                worksheet.set_column('B:B', 30, dataWriter.book.add_format({'font_name': 'Arial', 'font_size': 11, 'align': 'left'}))
+                
+                self.conn_df.to_excel(dataWriter,sheet_name='connection_info_bodyId')
+                
+                if not self.largeTargetSet:
+                    self.conn_matrix_bodyId.to_excel(dataWriter,sheet_name='connectionMatrix_bodyId')
+                    self.cmat_full_bodyId.to_excel(dataWriter,sheet_name='connMat_bodyId_full')
+                    self.transitionMat_bodyId.to_excel(dataWriter,sheet_name='transmissionMat_bodyId')
+                    self.conn_matrix_ratio_bodyId.to_excel(dataWriter,sheet_name='connectionRatioMat_bodyId')
+                    self.ratioMat_full_bodyId.to_excel(dataWriter,sheet_name='ratioMat_bodyId_full')
+                else:
+                    self.conn_matrix_bodyId.transpose().to_excel(dataWriter,sheet_name='connectionMatrix_bodyId')
+                    self.cmat_full_bodyId.transpose().to_excel(dataWriter,sheet_name='connMat_bodyId_full')
+                    self.transitionMat_bodyId.transpose().to_excel(dataWriter,sheet_name='transmissionMat_bodyId')
+                    self.conn_matrix_ratio_bodyId.transpose().to_excel(dataWriter,sheet_name='connectionRatioMat_bodyId')
+                    self.ratioMat_full_bodyId.transpose().to_excel(dataWriter,sheet_name='ratioMat_bodyId_full')
+            print(f'  ✓ Saved to: {output_bodyid_excel}')
+        
         print('Done\n')
         self.VisualizeDirectConnections_simple(heatmap_scale=heatmap_scale, filter_zeros=filter_zeros_in_heatmap)
         if full_data:
@@ -1446,6 +1791,46 @@ class FindNeuronConnection:
                 
             else:
                 print('  No connections to visualize')
+                
+            # Create visualization for custom groups if available
+            if self.conn_group is not None and len(self.conn_group) > 0:
+                print('\nCreating VisualizePath visualization for custom groups...')
+                group_path_data = []
+                for idx in self.conn_group.index:
+                    source = self.conn_group.at[idx, 'group_pre']
+                    target = self.conn_group.at[idx, 'group_post']
+                    weight = self.conn_group.at[idx, 'weight']
+                    ratio = self.conn_group.at[idx, 'connection_ratio'] if 'connection_ratio' in self.conn_group.columns else 0.0
+                    prob = self.conn_group.at[idx, 'traversal_probability'] if 'traversal_probability' in self.conn_group.columns else 0.0
+                    
+                    # Create a single-hop path
+                    group_path_data.append({
+                        'path_block': f'{source} -> {target}',
+                        'weights': [weight],
+                        'connection_ratios': [ratio],
+                        'traversal_probabilities': [prob]
+                    })
+                
+                # Create DataFrame from path data
+                group_path_df = pd.DataFrame(group_path_data)
+                
+                # Create VisualizePath visualization for custom groups
+                vp_group = VisualizePath(
+                    path_file=group_path_df,
+                    output_folder=os.path.join(self.direct_folder, 'custom_groups'),
+                    source_color=self.source_color if hasattr(self, 'source_color') else '#1f77b4',
+                    intermediate_color=self.intermediate_color if hasattr(self, 'intermediate_color') else '#2ca02c',
+                    target_color=self.target_color if hasattr(self, 'target_color') else '#d62728',
+                    link_color=self.link_color if hasattr(self, 'link_color') else 'rgba(100,100,100,0.3)',
+                    network_layout=self.network_layout if hasattr(self, 'network_layout') else 'hierarchical',
+                    showfig=self.showfig
+                )
+                vp_group.visualize()
+                print('  ✓ Created VisualizePath visualization for custom groups:')
+                print('    - Interactive heatmap (custom group connections)')
+                print('    - Sankey diagram (group flow visualization)')
+                print('    - Network graph (group topology)')
+                
         except Exception as e:
             import traceback
             print(f'  Warning: VisualizePath visualization failed: {e}')
@@ -1602,7 +1987,7 @@ class FindNeuronConnection:
             bodyIds_in_layer = np.unique(np.concatenate([conn_df['bodyId_pre'].unique(), conn_df['bodyId_post'].unique()]))
             neurons_in_layer_df = self._fetch_neurons_local_or_api(bodyIds_in_layer.tolist(), columns=['bodyId', 'type', 'post'])
             
-            conn_df, conn_type = sv.EnrichConnectionTable(
+            conn_df, conn_type, conn_group = sv.EnrichConnectionTable(
                 conn_df, 
                 traversal_probability_threshold=0,
                 dataset=self.dataset,
@@ -1611,6 +1996,8 @@ class FindNeuronConnection:
             )
             conn_df.insert(loc=0,column='conn_layer',value=str(i)+'->'+str(i+1))
             conn_type.insert(loc=0,column='conn_layer',value=str(i)+'->'+str(i+1))
+            if conn_group is not None:
+                conn_group.insert(loc=0,column='conn_layer',value=str(i)+'->'+str(i+1))
             conn_inpath = pd.concat([conn_inpath,conn_df])
             conn_types = pd.concat([conn_types,conn_type])
             
@@ -1633,30 +2020,118 @@ class FindNeuronConnection:
         self.source_df.insert(loc=0,column='isInPath',value=False)
         self.source_df.loc[self.source_df.bodyId.isin(source_inpath),'isInPath'] = True
         
-        # saving data
-        output_excel_name = os.path.join(self.path_folder,self.source_fname+'_to_'+self.target_fname+'_path_info.xlsx')
-        with pd.ExcelWriter(output_excel_name,mode='w',engine='xlsxwriter') as writer:
-            self.parameter_df.to_excel(writer,sheet_name='parameters',index=False)
-            worksheet = writer.sheets['parameters']
-            worksheet.set_column('A:A', 30, writer.book.add_format({'bold': True, 'font_name': 'Arial', 'font_size': 11, 'align': 'left'}))
-            worksheet.set_column('B:B', 30, writer.book.add_format({'font_name': 'Arial', 'font_size': 11, 'align': 'left'}))
-            
-            self.source_df.to_excel(writer,sheet_name='source_neurons')
-            self.target_df.to_excel(writer,sheet_name='target_neurons')
-            totalweight_df.to_excel(writer,sheet_name='total_weight_layer')
-            conn_inpath.to_excel(writer,sheet_name='connection_info')
-            conn_types.to_excel(writer,sheet_name='connection_type')
+        # Save main file with type-level data
+        print('Saving type-level path info...')
+        if self.output_format == 'csv':
+            # Create output_data subfolder
+            csv_folder = os.path.join(self.path_folder, 'output_data')
+            os.makedirs(csv_folder, exist_ok=True)
+            print(f'  💾 Saving data as CSV files to: {csv_folder}')
+            self.parameter_df.to_csv(os.path.join(csv_folder, 'parameters.csv'), index=False)
+            self.source_df.to_csv(os.path.join(csv_folder, 'source_neurons.csv'))
+            self.target_df.to_csv(os.path.join(csv_folder, 'target_neurons.csv'))
+            totalweight_df.to_csv(os.path.join(csv_folder, 'total_weight_layer.csv'))
+            conn_types.to_csv(os.path.join(csv_folder, 'connection_type.csv'))
+        else:
+            output_excel_name = os.path.join(self.path_folder,self.source_fname+'_to_'+self.target_fname+'_path_info.xlsx')
+            with pd.ExcelWriter(output_excel_name,mode='w',engine='xlsxwriter') as writer:
+                self.parameter_df.to_excel(writer,sheet_name='parameters',index=False)
+                worksheet = writer.sheets['parameters']
+                worksheet.set_column('A:A', 30, writer.book.add_format({'bold': True, 'font_name': 'Arial', 'font_size': 11, 'align': 'left'}))
+                worksheet.set_column('B:B', 30, writer.book.add_format({'font_name': 'Arial', 'font_size': 11, 'align': 'left'}))
+                
+                self.source_df.to_excel(writer,sheet_name='source_neurons')
+                self.target_df.to_excel(writer,sheet_name='target_neurons')
+                totalweight_df.to_excel(writer,sheet_name='total_weight_layer')
+                conn_types.to_excel(writer,sheet_name='connection_type')
         
-        # get connection path (by type)
+        # Save bodyId-level data (use CSV if too large or if output_format='csv')
+        print(f'Saving bodyId-level path data (rows: {len(conn_inpath):,})...')
+        
+        EXCEL_ROW_LIMIT = 1_048_576
+        use_csv = (self.output_format == 'csv') or (len(conn_inpath) >= EXCEL_ROW_LIMIT * 0.9)
+        
+        if use_csv:
+            if self.output_format == 'csv':
+                print(f'  💾 Saving bodyId data as CSV (output_format="csv")')
+            else:
+                print(f'  ⚠️  Data too large for Excel ({len(conn_inpath):,} rows), saving as CSV')
+            
+            # Create bodyId subfolder
+            bodyid_folder = os.path.join(self.path_folder, 'output_data', 'bodyId_connection')
+            os.makedirs(bodyid_folder, exist_ok=True)
+            
+            # Save parameters
+            self.parameter_df.to_csv(os.path.join(bodyid_folder, 'parameters.csv'), index=False)
+            
+            # Save bodyId connection data as CSV
+            output_bodyid_csv = os.path.join(bodyid_folder, 'connection_info_bodyId.csv')
+            conn_inpath.to_csv(output_bodyid_csv, index=False)
+            print(f'  ✓ Saved to: {bodyid_folder}/')
+        else:
+            # Data fits in Excel
+            output_bodyid_excel = os.path.join(self.path_folder,self.source_fname+'_to_'+self.target_fname+'_path_bodyId_data.xlsx')
+            with pd.ExcelWriter(output_bodyid_excel,mode='w',engine='xlsxwriter') as writer:
+                self.parameter_df.to_excel(writer,sheet_name='parameters',index=False)
+                worksheet = writer.sheets['parameters']
+                worksheet.set_column('A:A', 30, writer.book.add_format({'bold': True, 'font_name': 'Arial', 'font_size': 11, 'align': 'left'}))
+                worksheet.set_column('B:B', 30, writer.book.add_format({'font_name': 'Arial', 'font_size': 11, 'align': 'left'}))
+                
+                conn_inpath.to_excel(writer,sheet_name='connection_info_bodyId')
+            print(f'  ✓ Saved to: {output_bodyid_excel}')
+        
+        # get connection path (by type) - OPTIMIZED: Use direct graph pathfinding
         path_df_type = pd.DataFrame()
         print('Analyzing path info by type:')
-        # Note: FindPath uses layer-by-layer discovery which already ensures forward-only paths
-        # No need for real_layer_map validation here
-        path_df_type,_ = sv.getAllPath(conn_data = conn_types,
-                                    targets = self.target_df.loc[self.target_df.Checked,'type'].unique().tolist(),
-                                    traversal_probability_threshold = self.min_traversal_probability,
-                                    max_path_length = self.max_interlayer + 1,
-                                    real_layer_map = None)
+        print('Building type-level graph and finding paths...')
+        
+        # Build type-level graph from conn_types
+        G_type = nx.DiGraph()
+        for idx in conn_types.index:
+            row = conn_types.loc[idx]
+            type_pre = row['type_pre']
+            type_post = row['type_post']
+            weight = row['weight']
+            # Ensure scalar values (not Series)
+            if isinstance(type_pre, pd.Series):
+                type_pre = type_pre.iloc[0]
+            if isinstance(type_post, pd.Series):
+                type_post = type_post.iloc[0]
+            if isinstance(weight, pd.Series):
+                weight = weight.iloc[0]
+                
+            if G_type.has_edge(type_pre, type_post):
+                G_type[type_pre][type_post]['weight'] += weight
+            else:
+                G_type.add_edge(type_pre, type_post, weight=weight)
+        
+        print(f'  Type-level graph: {G_type.number_of_nodes()} types, {G_type.number_of_edges()} edges')
+        
+        # Get source and target types
+        source_types = self.source_df['type'].unique().tolist()
+        target_types = self.target_df.loc[self.target_df.Checked, 'type'].unique().tolist()
+        
+        # Find paths using DFS on type graph
+        type_paths = []
+        for source_type in source_types:
+            if source_type not in G_type:
+                continue
+            for target_type in target_types:
+                if nx.has_path(G_type, source_type, target_type):
+                    # Find all simple paths with length <= max_interlayer + 1
+                    for path in nx.all_simple_paths(G_type, source_type, target_type, cutoff=self.max_interlayer + 1):
+                        type_paths.append(path)
+        
+        print(f'  Found {len(type_paths):,} type-level paths')
+        
+        # Build DataFrame from type paths (no real_layer_map needed - layer-by-layer ensures forward-only)
+        path_df_type = sv.build_path_dataframe_from_paths(
+            paths=type_paths,
+            conn_data=conn_types,
+            targets=target_types,
+            real_layer_map=None,
+            level='type'
+        )
         
         # Filter out paths with any zero-weight hops
         # This happens when bodyId-level connections exist but type-level aggregation results in 0 weight
@@ -1752,23 +2227,78 @@ class FindNeuronConnection:
             path_df_type_excluded.to_excel(writer,sheet_name='path_type_excluded')
         print('   ✓ path_type sheets saved')
         
-        # get connection path (by bodyId)
+        # get connection path (by bodyId) - OPTIMIZED: Use direct graph pathfinding
         if find_bodyId_path:
             path_df_bodyId = pd.DataFrame()
             print('Analyzing path info by bodyId:')
-            # Note: FindPath uses layer-by-layer discovery which already ensures forward-only paths
-            path_df_bodyId,_ = sv.getAllPath(conn_data = conn_inpath,
-                                        targets = self.target_df.loc[self.target_df.Checked,'bodyId'].tolist(),
-                                        traversal_probability_threshold = self.min_traversal_probability,
-                                        max_path_length = self.max_interlayer + 1,
-                                        real_layer_map = None)
-            if len(path_df_bodyId) > 1048575:
-                path_df_bodyId = path_df_bodyId.iloc[:1048575,:]
-                print('\033[33mWarning: Excel has a limit of 1048576 rows, only the first 1048575 rows are saved.\033[0m')
-            print('💾 Saving path_bodyId data to Excel...')
-            with pd.ExcelWriter(output_excel_name, mode='a', engine='openpyxl') as writer:
-                path_df_bodyId.to_excel(writer,sheet_name='path_bodyId')
-            print('   ✓ path_bodyId sheet saved')
+            print('Building bodyId-level graph and finding paths...')
+            
+            # Build bodyId-level graph from conn_inpath
+            G_bodyId = nx.DiGraph()
+            for idx in conn_inpath.index:
+                row = conn_inpath.loc[idx]
+                bodyId_pre = row['bodyId_pre']
+                bodyId_post = row['bodyId_post']
+                weight = row['weight']
+                # Ensure scalar values (not Series)
+                if isinstance(bodyId_pre, pd.Series):
+                    bodyId_pre = bodyId_pre.iloc[0]
+                if isinstance(bodyId_post, pd.Series):
+                    bodyId_post = bodyId_post.iloc[0]
+                if isinstance(weight, pd.Series):
+                    weight = weight.iloc[0]
+                    
+                if G_bodyId.has_edge(bodyId_pre, bodyId_post):
+                    G_bodyId[bodyId_pre][bodyId_post]['weight'] += weight
+                else:
+                    G_bodyId.add_edge(bodyId_pre, bodyId_post, weight=weight)
+            
+            print(f'  BodyId-level graph: {G_bodyId.number_of_nodes()} neurons, {G_bodyId.number_of_edges()} edges')
+            
+            # Get source and target bodyIds
+            source_bodyIds = self.source_df['bodyId'].unique().tolist()
+            target_bodyIds = self.target_df.loc[self.target_df.Checked, 'bodyId'].tolist()
+            
+            # Find paths using DFS on bodyId graph
+            bodyId_paths = []
+            for source_id in source_bodyIds:
+                if source_id not in G_bodyId:
+                    continue
+                for target_id in target_bodyIds:
+                    if nx.has_path(G_bodyId, source_id, target_id):
+                        # Find all simple paths with length <= max_interlayer + 1
+                        for path in nx.all_simple_paths(G_bodyId, source_id, target_id, cutoff=self.max_interlayer + 1):
+                            bodyId_paths.append(path)
+            
+            print(f'  Found {len(bodyId_paths):,} bodyId-level paths')
+            
+            # Build DataFrame from bodyId paths (no real_layer_map needed - layer-by-layer ensures forward-only)
+            path_df_bodyId = sv.build_path_dataframe_from_paths(
+                paths=bodyId_paths,
+                conn_data=conn_inpath,
+                targets=target_bodyIds,
+                real_layer_map=None,
+                level='bodyId'
+            )
+            
+            # Save path_bodyId to the bodyId data file
+            print(f'💾 Saving path_bodyId data (rows: {len(path_df_bodyId):,})...')
+            if use_csv:
+                # Save as CSV if connection data was saved as CSV
+                output_path_csv = os.path.join(self.path_folder,self.source_fname+'_to_'+self.target_fname+'_path_bodyId_paths.csv')
+                path_df_bodyId.to_csv(output_path_csv, index=False)
+                print(f'   ✓ Saved to: {output_path_csv}')
+            else:
+                # Add to the bodyId Excel file if it was created
+                if len(path_df_bodyId) < EXCEL_ROW_LIMIT:
+                    with pd.ExcelWriter(output_bodyid_excel, mode='a', engine='openpyxl') as writer:
+                        path_df_bodyId.to_excel(writer,sheet_name='path_bodyId')
+                    print(f'   ✓ Added path_bodyId sheet to: {output_bodyid_excel}')
+                else:
+                    print(f'   ⚠️  path_bodyId too large ({len(path_df_bodyId):,} rows), saving as separate CSV')
+                    output_path_csv = os.path.join(self.path_folder,self.source_fname+'_to_'+self.target_fname+'_path_bodyId_paths.csv')
+                    path_df_bodyId.to_csv(output_path_csv, index=False)
+                    print(f'   ✓ Saved to: {output_path_csv}')
         
         # save interlayer info to excel
         print('💾 Saving interlayer neuron info to Excel...')
@@ -1794,348 +2324,62 @@ class FindNeuronConnection:
         interlayers = []
         num_layers = len(neuron_layers[1:])
         for layer_idx, neurons in enumerate(neuron_layers[1:], 1):
-            print(f'   Fetching layer {layer_idx}/{num_layers} info ({len(neurons)} neurons)...', end='', flush=True)
+            # Filter to only neurons that are actually in connections
+            layer_label = f'{layer_idx-1}->{layer_idx}'
+            neurons_in_conn = set(
+                conn_inpath[conn_inpath['conn_layer'] == layer_label]['bodyId_post'].unique()
+            )
+            # Also include neurons from next layer if they appear as bodyId_pre
+            next_layer_label = f'{layer_idx}->{layer_idx+1}'
+            if next_layer_label in conn_inpath['conn_layer'].values:
+                neurons_in_conn.update(
+                    conn_inpath[conn_inpath['conn_layer'] == next_layer_label]['bodyId_pre'].unique()
+                )
             
-            if use_local_dataset:
+            # Only fetch neurons that are actually in connections
+            neurons_to_fetch = list(set(neurons) & neurons_in_conn)
+            print(f'   Fetching layer {layer_idx}/{num_layers} info ({len(neurons_to_fetch)}/{len(neurons)} neurons in connections)...', end='', flush=True)
+            
+            if len(neurons_to_fetch) == 0:
+                # No neurons in this layer are in connections, create empty dataframe
+                n_df = pd.DataFrame()
+            elif use_local_dataset:
                 # Fast: lookup from local CSV
-                n_df = ndf_complete[ndf_complete['bodyId'].isin(neurons)].copy()
+                n_df = ndf_complete[ndf_complete['bodyId'].isin(neurons_to_fetch)].copy()
             else:
                 # Slow: API call to neuprint (client already logged in above)
-                n_df,_ = fetch_neurons(NeuronCriteria(bodyId=neurons))
+                n_df,_ = fetch_neurons(NeuronCriteria(bodyId=neurons_to_fetch))
             
             interlayers.append(n_df)
             print(' ✓')
         
-        print('   Writing to Excel...', end='', flush=True)
-        with pd.ExcelWriter(output_excel_name, mode='a', engine='openpyxl') as writer:
+        print('   Writing interlayer sheets to bodyId file...', end='', flush=True)
+        if use_csv:
+            # Save each layer as CSV in bodyId subfolder
             for i in range(len(interlayers)):
-                interlayers[i].to_excel(writer,sheet_name='layer_'+str(i+1))
+                layer_csv = os.path.join(bodyid_folder, f'layer_{i+1}.csv')
+                interlayers[i].to_csv(layer_csv, index=False)
+        else:
+            # Save to bodyId Excel file
+            with pd.ExcelWriter(output_bodyid_excel, mode='a', engine='openpyxl') as writer:
+                for i in range(len(interlayers)):
+                    interlayers[i].to_excel(writer, sheet_name='layer_'+str(i+1), index=False)
         print(' ✓')
-        print('   ✓ Interlayer sheets saved')
+        print('   ✓ Interlayer sheets saved to bodyId file')
         print('Done\n')
         
+        # ============================================================================
+        # OLD VISUALIZATION CODE - REPLACED BY VisualizePath (see below)
+        # ============================================================================
         # Build Sankey diagrams from path data (not from conn_types)
         # This ensures only paths TO TARGETS are shown (no non-target terminals)
-        print('Creating Sankey diagrams from path data...')
+        # BLOCKED: Old Sankey/heatmap code replaced by VisualizePath for better consistency
+        # See VisualizePath calls below for current visualization approach
+        # ============================================================================
         
-        def parse_path_to_edges(path_block):
-            """Parse 'A -> B -> C' into list of (layer_idx, source, target)"""
-            nodes = [n.strip() for n in path_block.split('->')]
-            return [(i, nodes[i], nodes[i+1]) for i in range(len(nodes) - 1)]
-
-        def weighted_average(values, weights):
-            weights = np.asarray(weights)
-            total = weights.sum()
-            if total <= 0:
-                return 0.0
-            values = np.asarray(values)
-            return float(np.dot(values, weights) / total)
-
-        # Pre-compute metrics from connection info to ensure accurate weights
-        type_edge_metrics = {}
-        body_edge_metrics = {}
-
-        if len(conn_types) > 0:
-            # Aggregate conn_types by (conn_layer, type_pre, type_post) to handle duplicate edges
-            # Sum weights, compute weighted average for ratios, and use product for traversal probabilities
-            grouped = conn_types.groupby(['conn_layer', 'type_pre', 'type_post'])
-            for (layer_label, type_pre, type_post), df_edge in grouped:
-                layer_idx = int(layer_label.split('->')[0])
-                weight_sum = float(df_edge['weight'].sum())
-                
-                # For connection_ratio: weighted average by weight
-                ratio_avg = weighted_average(df_edge['connection_ratio'], df_edge['weight'])
-                
-                # For traversal_probability: product of block probabilities
-                if 'block_probability' in df_edge.columns:
-                    block_prod = df_edge['block_probability'].prod()
-                    prob_agg = 1 - block_prod
-                else:
-                    prob_avg = weighted_average(df_edge['traversal_probability'], df_edge['weight'])
-                    prob_agg = prob_avg
-                
-                type_edge_metrics[(layer_idx, type_pre, type_post)] = {
-                    'weight': weight_sum,
-                    'ratio': max(0.0, min(1.0, ratio_avg)),  # Clamp to [0, 1]
-                    'prob': max(0.0, min(1.0, prob_agg))  # Clamp to [0, 1]
-                }
-
-        if len(conn_inpath) > 0:
-            body_group = conn_inpath.groupby(['conn_layer', 'bodyId_pre', 'bodyId_post'])
-            for (layer_label, body_pre, body_post), df_edge in body_group:
-                layer_idx = int(layer_label.split('->')[0])
-                weight_sum = float(df_edge['weight'].sum())
-                ratio_avg = weighted_average(df_edge['connection_ratio'], df_edge['weight'])
-                prob_avg = weighted_average(df_edge['traversal_probability'], df_edge['weight'])
-                body_edge_metrics[(layer_idx, int(body_pre), int(body_post))] = {
-                    'weight': weight_sum,
-                    'ratio': max(0.0, min(1.0, ratio_avg)),  # Clamp to [0, 1]
-                    'prob': max(0.0, min(1.0, prob_avg))  # Clamp to [0, 1]
-                }
-
-        # Build Sankey diagram from connection_type sheet (conn_types)
-        # Show ALL connections in the network, not just those in specific paths
-        if len(conn_types) > 0:
-            # Extract all edges directly from conn_types DataFrame
-            edge_agg = {}
-            for idx, row in conn_types.iterrows():
-                layer_label = row['conn_layer']
-                layer_idx = int(layer_label.split('->')[0])
-                source = row['type_pre']
-                target = row['type_post']
-                edge_key = (layer_idx, source, target)
-                
-                # Read values directly without modification for debugging
-                weight_val = float(row['weight'])
-                ratio_val = float(row['connection_ratio'])
-                prob_val = float(row['traversal_probability'])
-                
-                # Check for unexpected values
-                if ratio_val > 1.0 or ratio_val < 0.0:
-                    print(f'\033[33mWarning: connection_ratio out of range [0,1]: {ratio_val} for {source}->{target}\033[0m')
-                if prob_val > 1.0 or prob_val < 0.0:
-                    print(f'\033[33mWarning: traversal_probability out of range [0,1]: {prob_val} for {source}->{target}\033[0m')
-                
-                edge_agg[edge_key] = {
-                    'weight': weight_val,
-                    'ratio': ratio_val,  # Use raw value without clamping
-                    'prob': prob_val     # Use raw value without clamping
-                }
-            
-            if len(edge_agg) == 0:
-                print('\033[33mWarning: No connections found in connection_type sheet for Sankey diagrams.\033[0m')
-            else:
-                
-                # Build node list and track all layers each type appears in
-                all_types_by_layer = {}
-                type_all_layers = {}  # Track all layers for each neuron type
-                for (layer_idx, source, target) in edge_agg.keys():
-                    all_types_by_layer.setdefault(layer_idx, set()).add(source)
-                    all_types_by_layer.setdefault(layer_idx + 1, set()).add(target)
-                    
-                    # Track all layers for each type
-                    type_all_layers.setdefault(source, set()).add(layer_idx)
-                    type_all_layers.setdefault(target, set()).add(layer_idx + 1)
-
-                node_type = []
-                node_layers = []  # Track primary layer for positioning
-                node_labels = []  # Labels with all layers
-                for layer_idx in sorted(all_types_by_layer.keys()):
-                    layer_nodes = sorted(all_types_by_layer[layer_idx])
-                    for node in layer_nodes:
-                        node_type.append(node)
-                        node_layers.append(layer_idx)
-                        # Create label showing all layers
-                        all_layers = sorted(type_all_layers[node])
-                        if len(all_layers) == 1:
-                            node_labels.append(f"{node} (L{all_layers[0]})")
-                        else:
-                            layers_str = ','.join(map(str, all_layers))
-                            node_labels.append(f"{node} (L{layers_str})")
-
-                node_to_idx = {node: idx for idx, node in enumerate(node_type)}
-                node_type_color = [self.node_color] * len(node_type)
-                
-                # Create custom hover text for nodes
-                node_hover_text = []
-                for idx, node in enumerate(node_type):
-                    all_layers = sorted(type_all_layers[node])
-                    layers_display = ', '.join(map(str, all_layers))
-                    if node in target_type:
-                        node_type_color[idx] = self.target_color
-                        node_hover_text.append(f"{node}<br>Layers: {layers_display}<br>(Target)")
-                    else:
-                        node_hover_text.append(f"{node}<br>Layers: {layers_display}")
-
-                source_indices = []
-                target_indices = []
-                weights_for_links = []
-                ratios_for_links = []
-                probs_for_links = []
-
-                for (layer_idx, source, target), metrics in edge_agg.items():
-                    source_indices.append(node_to_idx[source])
-                    target_indices.append(node_to_idx[target])
-                    weights_for_links.append(metrics['weight'])
-                    ratios_for_links.append(metrics['ratio'])
-                    probs_for_links.append(metrics['prob'])
-
-                # Debug: Print value ranges
-                print(f"\nSankey value ranges:")
-                print(f"  Weights: min={min(weights_for_links):.1f}, max={max(weights_for_links):.1f}")
-                print(f"  Ratios: min={min(ratios_for_links):.4f}, max={max(ratios_for_links):.4f}")
-                print(f"  Probs: min={min(probs_for_links):.4f}, max={max(probs_for_links):.4f}")
-
-                fig_type_weight = go.Figure(data=[go.Sankey(
-                    node=dict(
-                        pad=5,
-                        thickness=5,
-                        line=dict(color="black", width=0),
-                        label=node_labels,
-                        color=node_type_color,
-                        customdata=node_hover_text,
-                        hovertemplate='%{customdata}<extra></extra>'
-                    ),
-                    link=dict(
-                        source=source_indices,
-                        target=target_indices,
-                        value=weights_for_links,
-                        color=self.link_color,
-                        customdata=weights_for_links,
-                        hovertemplate='%{customdata:.1f} synapses<extra></extra>'
-                    )
-                )])
-                fig_type_weight.update_layout(
-                    title_text='Sankey diagram of connections to targets<br>based on neuron type (by synapse count)',
-                    font_size=12
-                )
-                fig_type_weight.write_html(os.path.join(self.path_folder, 'Sankey_type_path_snp.html'), auto_open=self.showfig, include_plotlyjs='cdn')
-
-                # Create custom hover text for ratio values
-                ratio_hover_text = [f"{node_type[source_indices[i]]} → {node_type[target_indices[i]]}<br>Ratio: {ratios_for_links[i]:.4f}" 
-                                   for i in range(len(source_indices))]
-
-                fig_type_ratio = go.Figure(data=[go.Sankey(
-                    node=dict(
-                        pad=5,
-                        thickness=5,
-                        line=dict(color="black", width=0),
-                        label=node_labels,
-                        color=node_type_color,
-                        customdata=node_hover_text,
-                        hovertemplate='%{customdata}<extra></extra>'
-                    ),
-                    link=dict(
-                        source=source_indices,
-                        target=target_indices,
-                        value=ratios_for_links,
-                        color=self.link_color,
-                        customdata=ratios_for_links,
-                        hovertemplate='%{customdata:.4f}<extra></extra>'
-                    )
-                )])
-                fig_type_ratio.update_layout(
-                    title_text='Sankey diagram of connections to targets<br>based on neuron type (by connection ratio)',
-                    font_size=12
-                )
-                fig_type_ratio.write_html(os.path.join(self.path_folder, 'Sankey_type_path_ratio.html'), auto_open=self.showfig, include_plotlyjs='cdn')
-
-                # Create custom hover text for probability values
-                prob_hover_text = [f"{node_type[source_indices[i]]} → {node_type[target_indices[i]]}<br>Prob: {probs_for_links[i]:.4f}" 
-                                  for i in range(len(source_indices))]
-
-                fig_type_prob = go.Figure(data=[go.Sankey(
-                    node=dict(
-                        pad=5,
-                        thickness=5,
-                        line=dict(color="black", width=0),
-                        label=node_labels,
-                        color=node_type_color,
-                        customdata=node_hover_text,
-                        hovertemplate='%{customdata}<extra></extra>'
-                    ),
-                    link=dict(
-                        source=source_indices,
-                        target=target_indices,
-                        value=probs_for_links,
-                        color=self.link_color,
-                        customdata=probs_for_links,
-                        hovertemplate='%{customdata:.4f}<extra></extra>'
-                    )
-                )])
-                fig_type_prob.update_layout(
-                    title_text='Sankey diagram of connections to targets<br>based on neuron type (by traversal probability)',
-                    font_size=12
-                )
-                fig_type_prob.write_html(os.path.join(self.path_folder, 'Sankey_type_path_prob.html'), auto_open=self.showfig, include_plotlyjs='cdn')
-
-                print(f'Created 3 type-level Sankey diagrams with {len(node_type)} nodes and {len(weights_for_links)} edges')
-
-        # Build bodyId-level Sankey from connection_info sheet (conn_inpath)
-        # Show ALL connections in the network, not just those in specific paths
-        if find_bodyId_path and len(conn_inpath) > 0:
-            # Extract all edges directly from conn_inpath DataFrame
-            edge_weight_bodyId = {}
-            edge_ratio_bodyId = {}
-            edge_prob_bodyId = {}
-            
-            for idx, row in conn_inpath.iterrows():
-                layer_label = row['conn_layer']
-                layer_idx = int(layer_label.split('->')[0])
-                source_id = int(row['bodyId_pre'])
-                target_id = int(row['bodyId_post'])
-                edge_key = (layer_idx, source_id, target_id)
-                
-                # Aggregate if same edge appears multiple times (shouldn't happen but be safe)
-                if edge_key in edge_weight_bodyId:
-                    edge_weight_bodyId[edge_key] += float(row['weight'])
-                    # For ratio and prob, use weighted average
-                    edge_ratio_bodyId[edge_key] = max(edge_ratio_bodyId[edge_key], float(row['connection_ratio']))
-                    edge_prob_bodyId[edge_key] = max(edge_prob_bodyId[edge_key], float(row['traversal_probability']))
-                else:
-                    edge_weight_bodyId[edge_key] = float(row['weight'])
-                    edge_ratio_bodyId[edge_key] = max(0.0, min(1.0, float(row['connection_ratio'])))
-                    edge_prob_bodyId[edge_key] = max(0.0, min(1.0, float(row['traversal_probability'])))
-            
-            if len(edge_weight_bodyId) == 0:
-                print('\033[33mWarning: No connections found in connection_info sheet for bodyId Sankey diagrams.\033[0m')
-            else:
-                # Build node list by layer
-                all_bodyIds_by_layer = {}
-                for (layer_idx, source, target) in edge_weight_bodyId.keys():
-                    all_bodyIds_by_layer.setdefault(layer_idx, set()).add(source)
-                    all_bodyIds_by_layer.setdefault(layer_idx + 1, set()).add(target)
-
-                node_bodyId = []
-                for layer_idx in sorted(all_bodyIds_by_layer.keys()):
-                    node_bodyId.extend(sorted(all_bodyIds_by_layer[layer_idx]))
-
-                # Fetch neuron types for labels (use local dataset if available)
-                node_df = self._fetch_neurons_local_or_api(node_bodyId, columns=['bodyId', 'type'])
-                for ind in node_df.index:
-                    if node_df.at[ind, 'type'] is None:
-                        node_df.at[ind, 'type'] = 'None'
-                bodyId_to_type = dict(zip(node_df['bodyId'], node_df['type']))
-                node_bodyId_labels = [f"{bodyId_to_type.get(bid, 'Unknown')}_{bid}" for bid in node_bodyId]
-
-                node_to_idx_bodyId = {node: idx for idx, node in enumerate(node_bodyId)}
-                node_bodyId_color = [self.node_color] * len(node_bodyId)
-                for idx, bodyId in enumerate(node_bodyId):
-                    if bodyId in target_ID:
-                        node_bodyId_color[idx] = self.target_color
-
-                source_indices_bodyId = []
-                target_indices_bodyId = []
-                weights_bodyId = []
-
-                for (layer_idx, source, target), weight in edge_weight_bodyId.items():
-                    source_indices_bodyId.append(node_to_idx_bodyId[source])
-                    target_indices_bodyId.append(node_to_idx_bodyId[target])
-                    weights_bodyId.append(weight)
-
-                fig_bodyId = go.Figure(data=[go.Sankey(
-                    node=dict(
-                        pad=1,
-                        thickness=5,
-                        line=dict(color="black", width=0),
-                        label=node_bodyId_labels,
-                        color=node_bodyId_color
-                    ),
-                    link=dict(
-                        source=source_indices_bodyId,
-                        target=target_indices_bodyId,
-                        value=weights_bodyId,
-                        color=self.link_color
-                    )
-                )])
-                fig_bodyId.update_layout(
-                    title_text='Sankey diagram of connections to targets<br>based on neuron bodyId',
-                    font_size=6
-                )
-                fig_bodyId.write_html(os.path.join(self.path_folder, 'Sankey_bodyId_path.html'), auto_open=self.showfig, include_plotlyjs='cdn')
-
-                print(f'Created bodyId-level Sankey diagram with {len(node_bodyId)} nodes and {len(weights_bodyId)} edges')
-
+        # ============================================================================
+        # VISUALIZATION: Using VisualizePath only
+        # ============================================================================
         
         # VisualizePath network visualization
         print('\nCreating interactive network visualizations...')
@@ -2323,7 +2567,8 @@ class FindNeuronConnection:
         
         Returns:
         --------
-        tuple: (neurons_set, edges_set, edges_with_layer_set, path_count, pairs_with_paths)
+        tuple: (neurons_set, edges_set, edges_with_layer_set, path_count, pairs_with_paths, total_pairs_checked, paths_found)
+               paths_found is list of paths (each path is list of node IDs)
         '''
         import networkx as nx
         
@@ -2343,6 +2588,7 @@ class FindNeuronConnection:
         edges_in_paths_with_layer = set()
         path_count = 0
         pairs_with_paths_dict = {}  # Track (source, target) pairs that have paths
+        paths_found = []  # Store actual paths
         
         def dfs_find_all_paths(current, target_set, path, visited):
             '''
@@ -2359,7 +2605,7 @@ class FindNeuronConnection:
             visited : set
                 Nodes in current path (to prevent cycles)
             '''
-            nonlocal path_count, neurons_in_paths, edges_in_paths, edges_in_paths_with_layer
+            nonlocal path_count, neurons_in_paths, edges_in_paths, edges_in_paths_with_layer, paths_found
             
             # Check if current node is a target
             if current in target_set:
@@ -2371,16 +2617,19 @@ class FindNeuronConnection:
                 source_node = path[0]
                 pairs_with_paths_dict[(source_node, current)] = True
                 
+                # Store the complete path
+                paths_found.append(list(path))
+                
                 # Add edges from this path
                 for i in range(len(path) - 1):
                     pre_node = path[i]
                     post_node = path[i+1]
                     edges_in_paths.add((pre_node, post_node))
                     
-                    # Determine layer(s) for this edge
-                    for layer_idx, layer_set in enumerate(layer_neurons):
-                        if pre_node in layer_set:
-                            edges_in_paths_with_layer.add((layer_idx, pre_node, post_node))
+                    # Edge layer is determined by position in path (path starts at layer 0)
+                    # i=0 means layer 0->1, i=1 means layer 1->2, etc.
+                    edge_layer = i
+                    edges_in_paths_with_layer.add((edge_layer, pre_node, post_node))
                 
                 # Continue searching for more paths through this target
                 # (in case this target is also an intermediate node to other targets)
@@ -2415,7 +2664,7 @@ class FindNeuronConnection:
         total_pairs_checked = len(sources) * len(targets_set)
         
         return (neurons_in_paths, edges_in_paths, edges_in_paths_with_layer, 
-                path_count, pairs_with_paths, total_pairs_checked)
+                path_count, pairs_with_paths, total_pairs_checked, paths_found)
     
     def FindAllPath(self, find_bodyId_path=True, forward_only=True, exclude_searched_neurons=None):
         '''
@@ -2468,7 +2717,9 @@ class FindNeuronConnection:
         param_suffix += f"_{timestamp}"
         
         self.allpath_folder = os.path.join(self.save_folder, f'allpaths{param_suffix}')
-        if not os.path.exists(self.allpath_folder): os.makedirs(self.allpath_folder)
+        if not os.path.exists(self.allpath_folder): 
+            os.makedirs(self.allpath_folder, exist_ok=True)
+            print(f'  📁 Created output folder: {self.allpath_folder}')
         
         # Save all attributes and parameters to the allpaths folder
         with open(os.path.join(self.allpath_folder, 'all_attributes.json'), 'w') as f:
@@ -2697,33 +2948,49 @@ class FindNeuronConnection:
                 avg_degree = G.number_of_edges() / G.number_of_nodes() if G.number_of_nodes() > 0 else 1
                 path_complexity = self.max_interlayer + 1  # Maximum path length
                 
-                # Empirical formula - DFS is generally faster than pair-wise NetworkX
-                # - Small graphs (<10k nodes, degree<10): ~100 sources/sec per process
-                # - Medium graphs (10k-100k nodes, degree 10-100): ~20 sources/sec per process
-                # - Large graphs (>100k nodes, degree>100): ~5 sources/sec per process
+                # Time estimation based on empirical measurements from hemibrain connectome
+                # Calibrated with: 142K nodes, avg_degree=36.8, depth=3 → 12 sec/source with 12 workers
+                # Observed: 0.0069 sources/sec/process for very dense graphs
                 
-                if G.number_of_nodes() < 10000 and avg_degree < 10:
-                    base_speed = 100  # sources/sec per process
-                elif G.number_of_nodes() < 100000 and avg_degree < 100:
-                    base_speed = 20
+                # Base speed estimates (sources/sec per process) - calibrated to real performance
+                if avg_degree < 3:
+                    base_speed = 50   # Very sparse: trivial pathfinding
+                elif avg_degree < 8:
+                    base_speed = 10   # Sparse: fast pathfinding
+                elif avg_degree < 15:
+                    base_speed = 2    # Medium: moderate complexity
+                elif avg_degree < 25:
+                    base_speed = 0.3  # Dense: significant path explosion
+                elif avg_degree < 40:
+                    base_speed = 0.05 # Very dense: severe path explosion
                 else:
-                    base_speed = 5
+                    base_speed = 0.01 # Extremely dense: exponential explosion
                 
-                # Adjust for path length (longer paths = exponentially slower)
-                # Each additional layer approximately doubles the search space
-                complexity_factor = 2 ** (path_complexity - 2)  # Normalized to length 2
-                adjusted_speed = base_speed / max(1, complexity_factor * 0.5)
+                # Depth penalty - each layer multiplies search space
+                # Empirically: depth=3, degree=37 → penalty ~5x from depth=2
+                if path_complexity <= 2:
+                    depth_factor = 1.0
+                elif path_complexity == 3:
+                    depth_factor = (avg_degree / 10) ** 1.2  # Calibrated: 36.8/10^1.2 = 5.1
+                else:
+                    depth_factor = (avg_degree / 10) ** (path_complexity - 2)
                 
-                # Adjust for number of targets (more targets = slightly longer per source)
-                # But much less impact than in pair-wise approach since we explore tree once
-                target_factor = 1 + (len(targets_set) / 1000) * 0.1  # Small penalty for many targets
-                adjusted_speed = adjusted_speed / target_factor
+                adjusted_speed = base_speed / max(1, depth_factor)
                 
-                # Total estimated speed with parallel processing
+                # Large graph overhead (memory, cache misses)
+                if G.number_of_nodes() > 100000:
+                    # Calibrated: 142K nodes → 1.4x penalty
+                    size_factor = 1 + ((G.number_of_nodes() - 100000) / 100000) * 0.4
+                    adjusted_speed = adjusted_speed / size_factor
+                
+                # Ensure minimum speed (avoid infinity)
+                adjusted_speed = max(0.0001, adjusted_speed)
+                
+                # Total with parallelization
                 total_estimated_speed = adjusted_speed * n_processes
                 estimated_time = len(sources_list) / total_estimated_speed if total_estimated_speed > 0 else 0
                 
-                # Add some buffer (actual time is often 20-50% longer due to overhead)
+                # Overhead: startup (excluded), load imbalance, synchronization
                 estimated_time *= 1.3
                 
                 if estimated_time < 10:
@@ -2753,10 +3020,9 @@ class FindNeuronConnection:
                 pairs_with_paths = 0
                 chunks_completed = 0
                 sources_processed = 0
+                all_paths = []  # Collect paths from all workers
                 
-                # For dynamic ETA calculation using exponentially weighted moving average (EWMA)
-                ewma_speed = None  # Exponentially weighted moving average of speed
-                alpha = 0.3  # Smoothing factor (0.2-0.4 is typical, lower = smoother but slower to adapt)
+                # For simple observed-speed ETA calculation
                 first_chunk_time = None  # Track when first chunk completes (exclude startup overhead)
                 productive_start_time = None  # Start time for actual work (after first chunk)
                 
@@ -2766,7 +3032,7 @@ class FindNeuronConnection:
                 
                 with mp.Pool(processes=n_processes) as pool:
                     # Use imap_unordered for progress tracking (returns results as they complete)
-                    for neurons_set, edges_set, edges_layer_set, p_count, p_with_paths, chunk_size_actual in pool.imap_unordered(
+                    for neurons_set, edges_set, edges_layer_set, p_count, p_with_paths, chunk_size_actual, paths_chunk in pool.imap_unordered(
                         self._find_paths_dfs_optimized, args_list
                     ):
                         # Update totals
@@ -2775,6 +3041,7 @@ class FindNeuronConnection:
                         edges_in_paths_with_layer.update(edges_layer_set)
                         path_count += p_count
                         pairs_with_paths += p_with_paths
+                        all_paths.extend(paths_chunk)  # Collect paths from this worker
                         chunks_completed += 1
                         sources_processed += len(source_chunks[chunks_completed - 1])  # Actual sources in this chunk
                         
@@ -2793,24 +3060,23 @@ class FindNeuronConnection:
                         productive_elapsed = current_time - productive_start_time if productive_start_time else 0.1
                         current_speed = sources_processed / productive_elapsed if productive_elapsed > 0 else 0
                         
-                        # Update EWMA speed (adapts to changing processing rates)
-                        if ewma_speed is None:
-                            # Initialize with first measurement
-                            ewma_speed = current_speed
-                        else:
-                            # EWMA formula: new_avg = alpha * current + (1 - alpha) * old_avg
-                            # This gives more weight to recent speeds while smoothing out noise
-                            ewma_speed = alpha * current_speed + (1 - alpha) * ewma_speed
-                        
                         progress_pct = (sources_processed / len(sources_list)) * 100
                         remaining_sources = len(sources_list) - sources_processed
-                        eta_seconds = remaining_sources / ewma_speed if ewma_speed > 0 else 0
                         
-                        # Format ETA in HH:mm:ss
-                        hours = int(eta_seconds // 3600)
-                        minutes = int((eta_seconds % 3600) // 60)
-                        seconds = int(eta_seconds % 60)
-                        eta_str = f'{hours:02d}:{minutes:02d}:{seconds:02d}'
+                        # Simple reliable ETA: remaining / observed_speed
+                        # Wait for minimum samples before showing ETA
+                        min_samples_for_eta = max(3, int(len(sources_list) * 0.05))  # At least 3 sources or 5%
+                        
+                        if sources_processed >= min_samples_for_eta and current_speed > 0:
+                            eta_seconds = remaining_sources / current_speed
+                            
+                            # Format ETA in HH:mm:ss
+                            hours = int(eta_seconds // 3600)
+                            minutes = int((eta_seconds % 3600) // 60)
+                            seconds = int(eta_seconds % 60)
+                            eta_str = f'{hours:02d}:{minutes:02d}:{seconds:02d}'
+                        else:
+                            eta_str = 'calculating...'
                         
                         # Update more frequently - show every chunk or every 0.5 seconds
                         should_update = (current_time - last_update >= update_interval or 
@@ -2830,6 +3096,7 @@ class FindNeuronConnection:
                 print(f'\n✅ Parallel pathfinding complete in {elapsed:.1f}s!')
                 print(f'   Average: {len(sources_list)/elapsed:.1f} sources/s (explored {len(targets_set)} targets per source)')
                 print(f'   Processed by {n_processes} workers across {len(source_chunks)} chunks')
+                print(f'   📦 Collected {len(all_paths):,} paths in memory (~{len(all_paths) * 50 / 1024 / 1024:.1f} MB)')
         
         if not use_parallel:
             print('Using sequential processing (optimized DFS)...')
@@ -2838,15 +3105,13 @@ class FindNeuronConnection:
             path_count = 0
             sources_processed = 0
             pairs_with_paths_dict = {}
+            all_paths = []  # Initialize empty list for sequential mode (not collected in sequential)
             
-            # Progress tracking with EWMA for dynamic ETA
+            # Progress tracking for simple observed-speed ETA
             import time
             start_time = time.time()
             last_update = start_time
             update_interval = 2.0  # Update every 2 seconds
-            
-            ewma_speed = None  # Exponentially weighted moving average of speed
-            alpha = 0.3  # Smoothing factor (same as parallel mode)
             
             targets_set = set(targets_found)
             
@@ -2870,10 +3135,10 @@ class FindNeuronConnection:
                         post_node = path[i+1]
                         edges_in_paths.add((pre_node, post_node))
                         
-                        # Determine layer(s) for this edge
-                        for layer_idx, layer_set in enumerate(layer_neurons):
-                            if pre_node in layer_set:
-                                edges_in_paths_with_layer.add((layer_idx, pre_node, post_node))
+                        # Edge layer is determined by position in path (path starts at layer 0)
+                        # i=0 means layer 0->1, i=1 means layer 1->2, etc.
+                        edge_layer = i
+                        edges_in_paths_with_layer.add((edge_layer, pre_node, post_node))
                 
                 # Stop if we've reached maximum depth
                 if len(path) - 1 >= self.max_interlayer + 1:
@@ -2908,24 +3173,25 @@ class FindNeuronConnection:
                 if current_time - last_update >= update_interval:
                     elapsed = current_time - start_time
                     
-                    # Calculate current speed
+                    # Simple reliable ETA: remaining / observed_speed
                     current_speed = sources_processed / elapsed if elapsed > 0 else 0
                     
-                    # Update EWMA speed (same algorithm as parallel mode)
-                    if ewma_speed is None:
-                        ewma_speed = current_speed
-                    else:
-                        ewma_speed = alpha * current_speed + (1 - alpha) * ewma_speed
+                    # Wait for minimum samples before showing ETA
+                    min_samples_for_eta = max(3, int(len(source_ID) * 0.05))  # At least 3 sources or 5%
                     
                     progress_pct = (sources_processed / len(source_ID)) * 100
                     remaining_sources = len(source_ID) - sources_processed
-                    eta_seconds = remaining_sources / ewma_speed if ewma_speed > 0 else 0
                     
-                    # Format ETA in HH:mm:ss
-                    hours = int(eta_seconds // 3600)
-                    minutes = int((eta_seconds % 3600) // 60)
-                    seconds = int(eta_seconds % 60)
-                    eta_str = f'{hours:02d}:{minutes:02d}:{seconds:02d}'
+                    if sources_processed >= min_samples_for_eta and current_speed > 0:
+                        eta_seconds = remaining_sources / current_speed
+                        
+                        # Format ETA in HH:mm:ss
+                        hours = int(eta_seconds // 3600)
+                        minutes = int((eta_seconds % 3600) // 60)
+                        seconds = int(eta_seconds % 60)
+                        eta_str = f'{hours:02d}:{minutes:02d}:{seconds:02d}'
+                    else:
+                        eta_str = 'calculating...'
                     
                     pairs_with_paths = len(pairs_with_paths_dict)
                     
@@ -2950,6 +3216,7 @@ class FindNeuronConnection:
         # This means if neuron A→B exists in both Layer 0→1 and Layer 2→3, both are kept
         conn_inpath = pd.DataFrame()
         conn_types = pd.DataFrame()
+        conn_groups = pd.DataFrame()  # For custom group aggregations
         weight_layers = {}
         
         for layer_idx, conn_df in enumerate(all_connections):
@@ -2976,7 +3243,7 @@ class FindNeuronConnection:
             neurons_in_layer_df = self._fetch_neurons_local_or_api(bodyIds_in_layer.tolist(), columns=['bodyId', 'type', 'post'])
             
             # Enrich with traversal probability (use local dataset if available)
-            conn_enriched, conn_type = sv.EnrichConnectionTable(
+            conn_enriched, conn_type, conn_group = sv.EnrichConnectionTable(
                 conn_filtered_no_layer, 
                 dataset=self.dataset, 
                 script_path=self.script_path,
@@ -2986,9 +3253,13 @@ class FindNeuronConnection:
             # Add conn_layer column AFTER enrichment
             conn_enriched.insert(loc=0, column='conn_layer', value=layer_label)
             conn_type.insert(loc=0, column='conn_layer', value=layer_label)
+            if conn_group is not None:
+                conn_group.insert(loc=0, column='conn_layer', value=layer_label)
             
             conn_inpath = pd.concat([conn_inpath, conn_enriched])
             conn_types = pd.concat([conn_types, conn_type])
+            if conn_group is not None:
+                conn_groups = pd.concat([conn_groups, conn_group])
             
             weight_layers[layer_label] = conn_enriched['weight'].sum()
             
@@ -3023,7 +3294,8 @@ class FindNeuronConnection:
             neuron_layers = [np.array(list(set(source_ID) & neurons_in_paths))]
         
         # Update target real layers based on their actual appearance in paths
-        # Targets should have real_layer = their latest appearance layer to allow all paths
+        # Targets should have real_layer = their earliest appearance layer
+        # This is assigned AFTER pathfinding completes to avoid interfering with the search
         print('\n=== Updating target real layers based on path appearances ===')
         target_appearance_layers = {}  # Track all layers each target appears in
         
@@ -3034,26 +3306,18 @@ class FindNeuronConnection:
                         target_appearance_layers[neuron_id] = []
                     target_appearance_layers[neuron_id].append(layer_idx)
         
-        # Update real_layer_map for targets to their latest appearance
+        # Update real_layer_map for targets to their earliest appearance
         for target_id, appearance_layers in target_appearance_layers.items():
-            latest_layer = max(appearance_layers)
-            # Assign target real_layer as max(latest_appearance, max_interlayer+1)
-            # This ensures all intermediate → target connections are valid
-            real_layer_map_bodyId[target_id] = max(latest_layer, self.max_interlayer + 1)
+            earliest_layer = min(appearance_layers)
+            # Assign target real_layer as earliest appearance
+            # This is done after pathfinding to avoid backward connection issues during search
+            real_layer_map_bodyId[target_id] = earliest_layer
         
-        # Print target appearance information
-        print(f'\nTarget neurons appearance in paths:')
-        for target_id in sorted(target_appearance_layers.keys()):
-            appearance_layers = target_appearance_layers[target_id]
-            real_layer = real_layer_map_bodyId[target_id]
-            layers_str = ', '.join(map(str, sorted(appearance_layers)))
-            if len(appearance_layers) == 1:
-                print(f'  Target {target_id}: appears in layer {appearance_layers[0]}, real_layer = {real_layer}')
-            else:
-                print(f'  Target {target_id}: appears in layers [{layers_str}], real_layer = {real_layer}')
-        
-        if len(target_appearance_layers) == 0:
-            print('  No targets found in paths')
+        # Print summary only
+        if len(target_appearance_layers) > 0:
+            print(f'  ✓ Updated real_layer for {len(target_appearance_layers)} target neurons')
+        else:
+            print('  ⚠ No targets found in paths')
         
         # Sort the combined connection data
         conn_inpath = conn_inpath.sort_values(by=['conn_layer','traversal_probability','weight'],ascending=[True,False,False])
@@ -3104,17 +3368,70 @@ class FindNeuronConnection:
         
         print(f'\nCreated type-level real layer map for {len(real_layer_map_type)} types')
         
-        # Print target type appearance information
+        # Print target type appearance summary
         if target_type_appearances:
-            print(f'\nTarget types appearance in paths:')
-            for target_type in sorted(target_type_appearances.keys()):
-                appearance_layers = sorted(list(target_type_appearances[target_type]))
-                real_layer = real_layer_map_type.get(target_type, -1)
-                layers_str = ', '.join(map(str, appearance_layers))
-                if len(appearance_layers) == 1:
-                    print(f'  Type {target_type}: appears in layer {appearance_layers[0]}, real_layer = {real_layer}')
-                else:
-                    print(f'  Type {target_type}: appears in layers [{layers_str}], real_layer = {real_layer}')
+            print(f'  ✓ Updated real_layer for {len(target_type_appearances)} target types')
+        
+        # Create group-level real layer map if custom groups exist
+        real_layer_map_group = {}
+        if not conn_groups.empty and 'custom_group' in self.source_df.columns:
+            target_groups_set = set(self.target_df.loc[self.target_df.Checked, 'custom_group'].unique())
+            target_group_appearances = {}  # Track appearance layers for target groups
+            
+            # Build bodyId to custom_group mapping from source and target dataframes
+            bodyid_to_group = {}
+            for df in [self.source_df, self.target_df]:
+                if 'custom_group' in df.columns:
+                    for idx in df.index:
+                        bodyid = df.at[idx, 'bodyId']
+                        group = df.at[idx, 'custom_group']
+                        if pd.notna(group):
+                            bodyid_to_group[bodyid] = group
+            
+            # Map each group to earliest real layer of any neuron in that group
+            for bodyid, real_layer in real_layer_map_bodyId.items():
+                if bodyid in bodyid_to_group:
+                    group = bodyid_to_group[bodyid]
+                    if group not in real_layer_map_group or real_layer < real_layer_map_group[group]:
+                        real_layer_map_group[group] = real_layer
+                    
+                    # Track target group appearances
+                    if group in target_groups_set and bodyid in target_appearance_layers:
+                        if group not in target_group_appearances:
+                            target_group_appearances[group] = set()
+                        target_group_appearances[group].update(target_appearance_layers[bodyid])
+            
+            # Ensure all groups in conn_groups have layer assignments
+            # Use type-level real_layer_map to assign layers to groups
+            if 'type_pre' in conn_inpath.columns and 'custom_group_pre' in conn_inpath.columns:
+                # Build type to group mapping from conn_inpath
+                type_to_group = {}
+                for idx in conn_inpath.index:
+                    group_pre = conn_inpath.at[idx, 'custom_group_pre']
+                    type_pre = conn_inpath.at[idx, 'type_pre']
+                    if pd.notna(group_pre) and group_pre not in real_layer_map_group:
+                        # Use type's layer for this group if type has layer
+                        if type_pre in real_layer_map_type:
+                            if group_pre not in type_to_group:
+                                type_to_group[group_pre] = []
+                            type_to_group[group_pre].append(real_layer_map_type[type_pre])
+                    
+                    group_post = conn_inpath.at[idx, 'custom_group_post']
+                    type_post = conn_inpath.at[idx, 'type_post']
+                    if pd.notna(group_post) and group_post not in real_layer_map_group:
+                        if type_post in real_layer_map_type:
+                            if group_post not in type_to_group:
+                                type_to_group[group_post] = []
+                            type_to_group[group_post].append(real_layer_map_type[type_post])
+                
+                # Assign minimum layer to each group
+                for group, layers in type_to_group.items():
+                    if layers:
+                        real_layer_map_group[group] = min(layers)
+            
+            print(f'\nCreated group-level real layer map for {len(real_layer_map_group)} custom groups')
+            if target_group_appearances:
+                print(f'  ✓ Updated real_layer for {len(target_group_appearances)} target groups')
 
         # Mark which source neurons are in paths to targets
         if len(conn_inpath) > 0:
@@ -3161,29 +3478,221 @@ class FindNeuronConnection:
         
         print(f'\nTotal found targets: {len(all_found_targets)}/{total_checked_targets}')
         
-        # saving data
-        output_excel_name = os.path.join(self.allpath_folder, self.source_fname + '_to_' + self.target_fname + '_allpaths_info.xlsx')
-        with pd.ExcelWriter(output_excel_name, mode='w', engine='xlsxwriter') as writer:
-            self.parameter_df.to_excel(writer,sheet_name='parameters',index=False)
-            worksheet = writer.sheets['parameters']
-            worksheet.set_column('A:A', 30, writer.book.add_format({'bold': True, 'font_name': 'Arial', 'font_size': 11, 'align': 'left'}))
-            worksheet.set_column('B:B', 30, writer.book.add_format({'font_name': 'Arial', 'font_size': 11, 'align': 'left'}))
-            
-            self.source_df.to_excel(writer,sheet_name='source_neurons')
-            self.target_df.to_excel(writer,sheet_name='target_neurons')
-            totalweight_df.to_excel(writer,sheet_name='total_weight_layer')
-            conn_inpath.to_excel(writer,sheet_name='connection_info')
-            conn_types.to_excel(writer,sheet_name='connection_type')
+        # Ensure output directory exists before saving
+        if not os.path.exists(self.allpath_folder):
+            os.makedirs(self.allpath_folder, exist_ok=True)
+            print(f'  📁 Recreated output folder: {self.allpath_folder}')
         
-        # Get all paths (by type) - this includes paths of all lengths
-        path_df_type = pd.DataFrame()
-        print('\nAnalyzing all paths by type (all lengths):')
-        print('Applying real layer validation: excluding backward and recurrent paths...')
-        path_df_type,_ = sv.getAllPath(conn_data = conn_types,
-                                    targets = self.target_df.loc[self.target_df.Checked,'type'].unique().tolist(),
-                                    traversal_probability_threshold = self.min_traversal_probability,
-                                    max_path_length = self.max_interlayer + 1,
-                                    real_layer_map = real_layer_map_type if forward_only else None)
+        # Save main data (type-level aggregations)
+        print('\nSaving connection data...')
+        
+        # Determine if using CSV or Excel based on output_format or data size
+        EXCEL_ROW_LIMIT = 1_048_576
+        use_csv = (self.output_format == 'csv') or (len(conn_types) >= EXCEL_ROW_LIMIT * 0.9)
+        
+        if use_csv:
+            if self.output_format == 'csv':
+                print(f'  💾 Saving data as CSV files (output_format="csv")')
+            else:
+                print(f'  ⚠️  Data too large for Excel ({len(conn_types):,} rows), saving as CSV')
+            
+            # Create data_details folder
+            csv_folder = os.path.join(self.allpath_folder, 'data_details')
+            os.makedirs(csv_folder, exist_ok=True)
+            print(f'  💾 Saving data as CSV files to: {csv_folder}')
+            self.parameter_df.to_csv(os.path.join(csv_folder, 'parameters.csv'), index=False)
+            self.source_df.to_csv(os.path.join(csv_folder, 'source_neurons.csv'))
+            self.target_df.to_csv(os.path.join(csv_folder, 'target_neurons.csv'))
+            totalweight_df.to_csv(os.path.join(csv_folder, 'total_weight_layer.csv'))
+            conn_types.to_csv(os.path.join(csv_folder, 'connection_type.csv'))
+            if not conn_groups.empty:
+                conn_groups.to_csv(os.path.join(csv_folder, 'connection_custom_groups.csv'))
+        else:
+            output_excel_name = os.path.join(self.allpath_folder, self.source_fname + '_to_' + self.target_fname + '_allpaths_info.xlsx')
+            print(f'  💾 Saving type-level data to: {output_excel_name}')
+            with pd.ExcelWriter(output_excel_name, mode='w', engine='xlsxwriter') as writer:
+                self.parameter_df.to_excel(writer,sheet_name='parameters',index=False)
+                worksheet = writer.sheets['parameters']
+                worksheet.set_column('A:A', 30, writer.book.add_format({'bold': True, 'font_name': 'Arial', 'font_size': 11, 'align': 'left'}))
+                worksheet.set_column('B:B', 30, writer.book.add_format({'font_name': 'Arial', 'font_size': 11, 'align': 'left'}))
+                
+                self.source_df.to_excel(writer,sheet_name='source_neurons')
+                self.target_df.to_excel(writer,sheet_name='target_neurons')
+                totalweight_df.to_excel(writer,sheet_name='total_weight_layer')
+                conn_types.to_excel(writer,sheet_name='connection_type')
+                
+                # Add custom group sheet if custom grouping was used
+                if not conn_groups.empty:
+                    conn_groups.to_excel(writer,sheet_name='connection_custom_groups')
+        
+        # Save bodyId-level data
+        print(f'Saving bodyId-level allpaths data (rows: {len(conn_inpath):,})...')
+        
+        # Recalculate use_csv for bodyId data
+        use_csv = (self.output_format == 'csv') or (len(conn_inpath) >= EXCEL_ROW_LIMIT * 0.9)
+        
+        if use_csv:
+            if self.output_format == 'csv':
+                print(f'  💾 Saving bodyId data as CSV (output_format="csv")')
+            else:
+                print(f'  ⚠️  Data too large for Excel ({len(conn_inpath):,} rows), saving as CSV')
+            
+            # Use data_details folder (same as type-level data)
+            bodyid_folder = os.path.join(self.allpath_folder, 'data_details')
+            os.makedirs(bodyid_folder, exist_ok=True)
+            
+            # Save bodyId connection data as CSV (parameters.csv already saved with type-level data)
+            output_bodyid_csv = os.path.join(bodyid_folder, 'connection_info_bodyId.csv')
+            conn_inpath.to_csv(output_bodyid_csv, index=False)
+            print(f'  ✓ Saved to: {bodyid_folder}/')
+        else:
+            # Data fits in Excel
+            output_bodyid_excel = os.path.join(self.allpath_folder, self.source_fname + '_to_' + self.target_fname + '_allpaths_bodyId_data.xlsx')
+            with pd.ExcelWriter(output_bodyid_excel, mode='w', engine='xlsxwriter') as writer:
+                self.parameter_df.to_excel(writer,sheet_name='parameters',index=False)
+                worksheet = writer.sheets['parameters']
+                worksheet.set_column('A:A', 30, writer.book.add_format({'bold': True, 'font_name': 'Arial', 'font_size': 11, 'align': 'left'}))
+                worksheet.set_column('B:B', 30, writer.book.add_format({'font_name': 'Arial', 'font_size': 11, 'align': 'left'}))
+                
+                # Save bodyId-level connection info
+                conn_inpath.to_excel(writer,sheet_name='connection_info_bodyId')
+            print(f'  ✓ Saved to: {output_bodyid_excel}')
+        
+        print(f'  ✓ Saved connection data')
+        
+        # Build path DataFrames directly from collected paths (OPTIMIZED - no re-pathfinding!)
+        print('\n=== Building path DataFrames from collected paths ===')
+        if use_parallel:
+            print(f'Processing {len(all_paths):,} paths found during parallel DFS...')
+            print('Note: Path structure already found by DFS, now extracting connection metrics (weights, probabilities, ratios)...')
+        else:
+            print(f'Found {path_count:,} paths during sequential DFS')
+            print('Note: Now building type/group level summaries...')
+        
+        # Type-level paths - Use separate DFS on type-level graph (much faster!)
+        print('\nFinding type-level paths using type-level graph...')
+        
+        # Build type-level graph from conn_types
+        G_type = nx.DiGraph()
+        for idx in conn_types.index:
+            type_pre = conn_types.at[idx, 'type_pre']
+            type_post = conn_types.at[idx, 'type_post']
+            weight = conn_types.at[idx, 'weight']
+            if G_type.has_edge(type_pre, type_post):
+                G_type[type_pre][type_post]['weight'] += weight
+            else:
+                G_type.add_edge(type_pre, type_post, weight=weight)
+        
+        print(f'  Type-level graph: {G_type.number_of_nodes()} types, {G_type.number_of_edges()} edges')
+        
+        # Get source and target types
+        source_types = self.source_df['type'].unique().tolist()
+        target_types = self.target_df.loc[self.target_df.Checked, 'type'].unique().tolist()
+        
+        # Find paths using DFS on type graph
+        type_paths = []
+        for source_type in source_types:
+            if source_type not in G_type:
+                continue
+            for target_type in target_types:
+                if nx.has_path(G_type, source_type, target_type):
+                    # Find all simple paths with length <= max_interlayer + 1
+                    for path in nx.all_simple_paths(G_type, source_type, target_type, cutoff=self.max_interlayer + 1):
+                        type_paths.append(path)
+        
+        print(f'  Found {len(type_paths):,} type-level paths')
+        
+        # Build DataFrame from type paths
+        path_df_type = sv.build_path_dataframe_from_paths(
+            paths=type_paths,
+            conn_data=conn_types,
+            targets=target_types,
+            real_layer_map=real_layer_map_type if forward_only else None,
+            level='type'
+        )
+        
+        # Group-level paths - Use separate DFS on group-level graph (if custom groups exist)
+        path_df_group = pd.DataFrame()
+        path_df_group_excluded = pd.DataFrame()
+        
+        if not conn_groups.empty and 'custom_group' in self.source_df.columns:
+            print('\nFinding group-level paths using group-level graph...')
+            
+            # Build group-level graph from conn_groups
+            G_group = nx.DiGraph()
+            for idx in conn_groups.index:
+                row = conn_groups.loc[idx]
+                group_pre = row['group_pre']
+                group_post = row['group_post']
+                weight = row['weight']
+                # Ensure scalar values (not Series)
+                if isinstance(group_pre, pd.Series):
+                    group_pre = group_pre.iloc[0]
+                if isinstance(group_post, pd.Series):
+                    group_post = group_post.iloc[0]
+                if isinstance(weight, pd.Series):
+                    weight = weight.iloc[0]
+                    
+                if G_group.has_edge(group_pre, group_post):
+                    G_group[group_pre][group_post]['weight'] += weight
+                else:
+                    G_group.add_edge(group_pre, group_post, weight=weight)
+            
+            print(f'  Group-level graph: {G_group.number_of_nodes()} groups, {G_group.number_of_edges()} edges')
+            
+            # Get source and target groups
+            source_groups = self.source_df['custom_group'].unique().tolist()
+            target_groups = self.target_df.loc[self.target_df.Checked, 'custom_group'].unique().tolist()
+            
+            # Find paths using DFS on group graph
+            group_paths = []
+            for source_group in source_groups:
+                if pd.isna(source_group) or source_group not in G_group:
+                    continue
+                for target_group in target_groups:
+                    if pd.isna(target_group):
+                        continue
+                    if nx.has_path(G_group, source_group, target_group):
+                        # Find all simple paths with length <= max_interlayer + 1
+                        for path in nx.all_simple_paths(G_group, source_group, target_group, cutoff=self.max_interlayer + 1):
+                            group_paths.append(path)
+            
+            print(f'  Found {len(group_paths):,} group-level paths')
+            
+            # Debug: Check if all groups in paths have layer assignments
+            if forward_only and len(group_paths) > 0:
+                all_groups_in_paths = set()
+                for path in group_paths:
+                    all_groups_in_paths.update(path)
+                missing_groups = [g for g in all_groups_in_paths if g not in real_layer_map_group]
+                if missing_groups:
+                    print(f'  ⚠ Warning: {len(missing_groups)} groups in paths missing from real_layer_map_group')
+                    print(f'    First few missing: {missing_groups[:5]}')
+            
+            # Build DataFrame from group paths
+            # Rename columns to match expected format (type_pre/type_post)
+            conn_groups_for_paths = conn_groups.rename(columns={'group_pre': 'type_pre', 'group_post': 'type_post'})
+            
+            path_df_group = sv.build_path_dataframe_from_paths(
+                paths=group_paths,
+                conn_data=conn_groups_for_paths,
+                targets=target_groups,
+                real_layer_map=real_layer_map_group if forward_only else None,
+                level='type'  # Use 'type' level since groups are treated like types
+            )
+            
+            # Filter out paths with any zero-weight hops
+            if len(path_df_group) > 0:
+                before_filter = len(path_df_group)
+                path_df_group = path_df_group[
+                    path_df_group['weights'].apply(lambda w_list: all(w > 0 for w in w_list))
+                ]
+                after_filter = len(path_df_group)
+                if before_filter > after_filter:
+                    print(f'  Removed {before_filter - after_filter} paths with zero-weight hops at group level')
+            
+            path_df_group = sv.split_path(path_df_group)
+            path_df_group, path_df_group_excluded = sv.path_filter(path_df_group, self.keyword_in_path_to_remove)
         
         # Filter out paths with any zero-weight hops
         # This happens when bodyId-level connections exist but type-level aggregation results in 0 weight
@@ -3199,29 +3708,88 @@ class FindNeuronConnection:
         path_df_type = sv.split_path(path_df_type)
         path_df_type, path_df_type_excluded = sv.path_filter(path_df_type,self.keyword_in_path_to_remove)
         
-        print('💾 Saving path_type data to Excel...')
-        with pd.ExcelWriter(output_excel_name, mode='a', engine='openpyxl') as writer:
-            path_df_type.to_excel(writer,sheet_name='path_type')
-            path_df_type_excluded.to_excel(writer,sheet_name='path_type_excluded')
-        print('   ✓ path_type sheets saved')
+        EXCEL_ROW_LIMIT = 1_048_576
         
-        # Get all paths (by bodyId) - this includes paths of all lengths
-        if find_bodyId_path:
-            path_df_bodyId = pd.DataFrame()
-            print('Analyzing all paths by bodyId (all lengths):')
-            print('Applying real layer validation: excluding backward and recurrent paths...')
-            path_df_bodyId,_ = sv.getAllPath(conn_data = conn_inpath,
-                                        targets = self.target_df.loc[self.target_df.Checked,'bodyId'].tolist(),
-                                        traversal_probability_threshold = self.min_traversal_probability,
-                                        max_path_length = self.max_interlayer + 1,
-                                        real_layer_map = real_layer_map_bodyId if forward_only else None)
-            if len(path_df_bodyId) > 1048575:
-                path_df_bodyId = path_df_bodyId.iloc[:1048575,:]
-                print('\033[33mWarning: Excel has a limit of 1048576 rows, only the first 1048575 rows are saved.\033[0m')
-            print('💾 Saving path_bodyId data to Excel...')
+        # Save group-level paths if they exist
+        if len(path_df_group) > 0:
+            print(f'💾 Saving path_group data (rows: {len(path_df_group):,})...')
+            # Check if we should save as CSV (matches type-level data format OR group data too large)
+            save_group_as_csv = use_csv or (len(path_df_group) >= EXCEL_ROW_LIMIT * 0.9)
+            
+            if save_group_as_csv:
+                # Save as CSV
+                if len(path_df_group) >= EXCEL_ROW_LIMIT * 0.9:
+                    print(f'   ⚠️  Group path data too large for Excel ({len(path_df_group):,} rows), saving as CSV')
+                output_path_group_csv = os.path.join(self.allpath_folder, self.source_fname+'_to_'+self.target_fname+'_allpaths_group.csv')
+                path_df_group.to_csv(output_path_group_csv, index=False)
+                if len(path_df_group_excluded) > 0:
+                    # Save excluded paths to data_details folder
+                    details_folder = os.path.join(self.allpath_folder, 'data_details')
+                    output_path_group_excluded_csv = os.path.join(details_folder, self.source_fname+'_to_'+self.target_fname+'_allpaths_group_excluded.csv')
+                    path_df_group_excluded.to_csv(output_path_group_excluded_csv, index=False)
+                print(f'   ✓ Saved to: {self.allpath_folder}/')
+            else:
+                # Add to Excel file (type-level was saved to Excel, so output_excel_name exists)
+                output_excel_name = os.path.join(self.allpath_folder, self.source_fname + '_to_' + self.target_fname + '_allpaths_info.xlsx')
+                with pd.ExcelWriter(output_excel_name, mode='a', engine='openpyxl') as writer:
+                    path_df_group.to_excel(writer,sheet_name='path_group')
+                    if len(path_df_group_excluded) > 0:
+                        path_df_group_excluded.to_excel(writer,sheet_name='path_group_excluded')
+                print('   ✓ path_group sheets saved')
+        
+        print(f'💾 Saving path_type data (rows: {len(path_df_type):,})...')
+        # Check if we should save as CSV (matches type-level data format OR path data too large)
+        save_type_as_csv = use_csv or (len(path_df_type) >= EXCEL_ROW_LIMIT * 0.9)
+        
+        if save_type_as_csv:
+            # Save as CSV
+            if len(path_df_type) >= EXCEL_ROW_LIMIT * 0.9:
+                print(f'   ⚠️  Path data too large for Excel ({len(path_df_type):,} rows), saving as CSV')
+            output_path_type_csv = os.path.join(self.allpath_folder, self.source_fname+'_to_'+self.target_fname+'_allpaths_type.csv')
+            path_df_type.to_csv(output_path_type_csv, index=False)
+            if len(path_df_type_excluded) > 0:
+                # Save excluded paths to data_details folder
+                details_folder = os.path.join(self.allpath_folder, 'data_details')
+                output_path_type_excluded_csv = os.path.join(details_folder, self.source_fname+'_to_'+self.target_fname+'_allpaths_type_excluded.csv')
+                path_df_type_excluded.to_csv(output_path_type_excluded_csv, index=False)
+            print(f'   ✓ Saved to: {self.allpath_folder}/')
+        else:
+            # Add to Excel file (type-level was saved to Excel, so output_excel_name exists)
+            output_excel_name = os.path.join(self.allpath_folder, self.source_fname + '_to_' + self.target_fname + '_allpaths_info.xlsx')
             with pd.ExcelWriter(output_excel_name, mode='a', engine='openpyxl') as writer:
-                path_df_bodyId.to_excel(writer,sheet_name='path_bodyId')
-            print('   ✓ path_bodyId sheet saved')
+                path_df_type.to_excel(writer,sheet_name='path_type')
+                path_df_type_excluded.to_excel(writer,sheet_name='path_type_excluded')
+            print('   ✓ path_type sheets saved')
+        
+        # BodyId-level paths
+        if find_bodyId_path:
+            print('\nBuilding bodyId-level paths with real_layer validation...')
+            path_df_bodyId = sv.build_path_dataframe_from_paths(
+                paths=all_paths,
+                conn_data=conn_inpath,
+                targets=self.target_df.loc[self.target_df.Checked,'bodyId'].tolist(),
+                real_layer_map=real_layer_map_bodyId if forward_only else None,
+                level='bodyId'
+            )
+            
+            # Save path_bodyId to the bodyId data file
+            print(f'💾 Saving path_bodyId data (rows: {len(path_df_bodyId):,})...')
+            if use_csv:
+                # Save as CSV if connection data was saved as CSV
+                output_path_csv = os.path.join(self.allpath_folder,self.source_fname+'_to_'+self.target_fname+'_allpaths_bodyId_paths.csv')
+                path_df_bodyId.to_csv(output_path_csv, index=False)
+                print(f'   ✓ Saved to: {output_path_csv}')
+            else:
+                # Add to the bodyId Excel file if it was created
+                if len(path_df_bodyId) < EXCEL_ROW_LIMIT:
+                    with pd.ExcelWriter(output_bodyid_excel, mode='a', engine='openpyxl') as writer:
+                        path_df_bodyId.to_excel(writer,sheet_name='path_bodyId')
+                    print(f'   ✓ Added path_bodyId sheet to: {output_bodyid_excel}')
+                else:
+                    print(f'   ⚠️  path_bodyId too large ({len(path_df_bodyId):,} rows), saving as separate CSV')
+                    output_path_csv = os.path.join(self.allpath_folder,self.source_fname+'_to_'+self.target_fname+'_allpaths_bodyId_paths.csv')
+                    path_df_bodyId.to_csv(output_path_csv, index=False)
+                    print(f'   ✓ Saved to: {output_path_csv}')
         
         # save interlayer info to excel
         print('💾 Saving interlayer neuron info to Excel...')
@@ -3247,354 +3815,53 @@ class FindNeuronConnection:
         interlayers = []
         num_layers = len(neuron_layers[1:])
         for layer_idx, neurons in enumerate(neuron_layers[1:], 1):
-            print(f'   Fetching layer {layer_idx}/{num_layers} info ({len(neurons)} neurons)...', end='', flush=True)
+            # Filter to only neurons that are actually in connections
+            layer_label = f'{layer_idx-1}->{layer_idx}'
+            neurons_in_conn = set(
+                conn_inpath[conn_inpath['conn_layer'] == layer_label]['bodyId_post'].unique()
+            )
+            # Also include neurons from next layer if they appear as bodyId_pre
+            next_layer_label = f'{layer_idx}->{layer_idx+1}'
+            if next_layer_label in conn_inpath['conn_layer'].values:
+                neurons_in_conn.update(
+                    conn_inpath[conn_inpath['conn_layer'] == next_layer_label]['bodyId_pre'].unique()
+                )
             
-            if use_local_dataset:
+            # Only fetch neurons that are actually in connections
+            neurons_to_fetch = list(set(neurons) & neurons_in_conn)
+            print(f'   Fetching layer {layer_idx}/{num_layers} info ({len(neurons_to_fetch)}/{len(neurons)} neurons in connections)...', end='', flush=True)
+            
+            if len(neurons_to_fetch) == 0:
+                # No neurons in this layer are in connections, create empty dataframe
+                n_df = pd.DataFrame()
+            elif use_local_dataset:
                 # Fast: lookup from local CSV
-                n_df = ndf_complete[ndf_complete['bodyId'].isin(neurons)].copy()
+                n_df = ndf_complete[ndf_complete['bodyId'].isin(neurons_to_fetch)].copy()
             else:
                 # Slow: API call to neuprint (client already logged in above)
-                n_df,_ = fetch_neurons(NeuronCriteria(bodyId=neurons))
+                n_df,_ = fetch_neurons(NeuronCriteria(bodyId=neurons_to_fetch))
             
             interlayers.append(n_df)
             print(' ✓')
         
-        print('   Writing to Excel...', end='', flush=True)
-        with pd.ExcelWriter(output_excel_name, mode='a', engine='openpyxl') as writer:
+        print('   Writing interlayer sheets to bodyId file...', end='', flush=True)
+        if use_csv:
+            # Save each layer as CSV in bodyId subfolder
             for i in range(len(interlayers)):
-                interlayers[i].to_excel(writer,sheet_name='layer_'+str(i+1))
+                layer_csv = os.path.join(bodyid_folder, f'layer_{i+1}.csv')
+                interlayers[i].to_csv(layer_csv, index=False)
+        else:
+            # Save to bodyId Excel file
+            with pd.ExcelWriter(output_bodyid_excel, mode='a', engine='openpyxl') as writer:
+                for i in range(len(interlayers)):
+                    interlayers[i].to_excel(writer, sheet_name='layer_'+str(i+1), index=False)
         print(' ✓')
-        print('   ✓ Interlayer sheets saved')
+        print('   ✓ Interlayer sheets saved to bodyId file')
         print('Done\n')
         
-        # Build Sankey diagrams from path data (ensures only paths to targets are shown)
-        print('Building Sankey diagrams from path data...')
-        
-        # Helper function to parse path_block and extract edges with their positions
-        def parse_path_to_edges(path_block):
-            """Parse 'A -> B -> C' into list of (A, B), (B, C) with layer info"""
-            nodes = [n.strip() for n in path_block.split('->')]
-            edges = []
-            for i in range(len(nodes) - 1):
-                edges.append((i, nodes[i], nodes[i+1]))  # (layer_idx, source, target)
-            return edges
-        
-        # If forward_only=True, extract edges from path_type to filter visualizations
-        edges_in_path_type = set()
-        if forward_only and len(path_df_type) > 0:
-            print('Extracting edges from path_type for filtered visualization...')
-            for idx in path_df_type.index:
-                path_block = path_df_type.at[idx, 'path_block']
-                edges = parse_path_to_edges(path_block)
-                for layer_idx, source, target in edges:
-                    # Skip self-connections at type level for cleaner visualization
-                    if source != target:
-                        edges_in_path_type.add((layer_idx, source, target))
-            print(f'  Extracted {len(edges_in_path_type)} unique edges from paths (excluding type self-connections)')
-        
-        # Build Sankey diagram from connection_type sheet
-        # forward_only=True: Show only edges in path_type (filtered)
-        # forward_only=False: Show ALL connections in conn_types (complete graph)
-        if len(conn_types) > 0:
-            # Extract all edges directly from conn_types DataFrame
-            edge_weight_type = {}
-            edge_ratio_type = {}
-            edge_prob_type = {}
-            for idx, row in conn_types.iterrows():
-                layer_label = row['conn_layer']
-                layer_idx = int(layer_label.split('->')[0])
-                source = row['type_pre']
-                target = row['type_post']
-                edge_key = (layer_idx, source, target)
-                
-                # If forward_only=True, only include edges that are in path_type
-                # This filters visualization to show only connections in valid paths
-                if forward_only and edge_key not in edges_in_path_type:
-                    continue
-                
-                # Read values directly without modification for debugging
-                weight_val = float(row['weight'])
-                ratio_val = float(row['connection_ratio'])
-                prob_val = float(row['traversal_probability'])
-                
-                # Check for unexpected values
-                if ratio_val > 1.0 or ratio_val < 0.0:
-                    print(f'\033[33mWarning: connection_ratio out of range [0,1]: {ratio_val} for {source}->{target}\033[0m')
-                if prob_val > 1.0 or prob_val < 0.0:
-                    print(f'\033[33mWarning: traversal_probability out of range [0,1]: {prob_val} for {source}->{target}\033[0m')
-                
-                edge_weight_type[edge_key] = weight_val
-                edge_ratio_type[edge_key] = ratio_val  # Use raw value without clamping
-                edge_prob_type[edge_key] = prob_val    # Use raw value without clamping
-            
-            if forward_only:
-                print(f'Filtered to {len(edge_weight_type)} edges for visualization (forward_only=True)')
-            
-            if len(edge_weight_type) == 0:
-                print('\033[33mWarning: No connections found in connection_type sheet for Sankey diagrams.\033[0m')
-            else:
-                # Build node list and track all layers each type appears in
-                all_types_by_layer = {}
-                type_all_layers = {}  # Track all layers for each neuron type
-                for (layer_idx, source, target) in edge_weight_type.keys():
-                    if layer_idx not in all_types_by_layer:
-                        all_types_by_layer[layer_idx] = set()
-                    all_types_by_layer[layer_idx].add(source)
-                    if layer_idx + 1 not in all_types_by_layer:
-                        all_types_by_layer[layer_idx + 1] = set()
-                    all_types_by_layer[layer_idx + 1].add(target)
-                    
-                    # Track all layers for each type
-                    type_all_layers.setdefault(source, set()).add(layer_idx)
-                    type_all_layers.setdefault(target, set()).add(layer_idx + 1)
-                
-                # Create ordered node list with labels showing all layers
-                node_type = []
-                node_type_layers = []  # Primary layer for positioning
-                node_labels = []  # Labels with all layers
-                for layer_idx in sorted(all_types_by_layer.keys()):
-                    layer_types = sorted(list(all_types_by_layer[layer_idx]))
-                    for node in layer_types:
-                        node_type.append(node)
-                        node_type_layers.append(layer_idx)
-                        # Create label showing all layers
-                        all_layers = sorted(type_all_layers[node])
-                        if len(all_layers) == 1:
-                            node_labels.append(f"{node} (L{all_layers[0]})")
-                        else:
-                            layers_str = ','.join(map(str, all_layers))
-                            node_labels.append(f"{node} (L{layers_str})")
-                
-                # Create node index mapping
-                node_to_idx = {node: idx for idx, node in enumerate(node_type)}
-                
-                # Color nodes and create hover text (mark targets)
-                node_type_color = [self.node_color] * len(node_type)
-                node_hover_text = []
-                for idx, node in enumerate(node_type):
-                    all_layers = sorted(type_all_layers[node])
-                    layers_display = ', '.join(map(str, all_layers))
-                    if node in target_type:
-                        node_type_color[idx] = self.target_color
-                        node_hover_text.append(f"{node}<br>Layers: {layers_display}<br>(Target)")
-                    else:
-                        node_hover_text.append(f"{node}<br>Layers: {layers_display}")
-                
-                # Build link data for all three visualizations
-                source_indices = []
-                target_indices = []
-                weights_for_links = []
-                ratios_for_links = []
-                probs_for_links = []
-                
-                for (layer_idx, source, target), weight in edge_weight_type.items():
-                    source_indices.append(node_to_idx[source])
-                    target_indices.append(node_to_idx[target])
-                    weights_for_links.append(weight)
-                    ratios_for_links.append(edge_ratio_type[(layer_idx, source, target)])
-                    probs_for_links.append(edge_prob_type[(layer_idx, source, target)])
-                
-                # Debug: Print value ranges
-                print(f"\nSankey value ranges:")
-                print(f"  Weights: min={min(weights_for_links):.1f}, max={max(weights_for_links):.1f}")
-                print(f"  Ratios: min={min(ratios_for_links):.4f}, max={max(ratios_for_links):.4f}")
-                print(f"  Probs: min={min(probs_for_links):.4f}, max={max(probs_for_links):.4f}")
-                
-                # Visualization 1: Weight-based (synapse count)
-                fig_type_weight = go.Figure(data=[go.Sankey(
-                    node = dict(
-                        pad = 5,
-                        thickness = 5,
-                        line = dict(color = "black", width = 0),
-                        label = node_labels,
-                        color = node_type_color,
-                        customdata = node_hover_text,
-                        hovertemplate = '%{customdata}<extra></extra>'
-                    ),
-                    link = dict(
-                        source = source_indices,
-                        target = target_indices,
-                        value = weights_for_links,
-                        color = self.link_color,
-                        customdata = weights_for_links,
-                        hovertemplate = '%{customdata:.1f} synapses<extra></extra>'
-                    )
-                )])
-                fig_type_weight.update_layout(
-                    title_text='Sankey diagram of all connections to targets<br>based on neuron type (by synapse count)',
-                    font_size=12
-                )
-                fig_type_weight.write_html(os.path.join(self.allpath_folder,'Sankey_type_allpaths_snp.html'), auto_open=self.showfig, include_plotlyjs='cdn')
-                
-                # Visualization 2: Connection Ratio-based
-                fig_type_ratio = go.Figure(data=[go.Sankey(
-                    node = dict(
-                        pad = 5,
-                        thickness = 5,
-                        line = dict(color = "black", width = 0),
-                        label = node_labels,
-                        color = node_type_color,
-                        customdata = node_hover_text,
-                        hovertemplate = '%{customdata}<extra></extra>'
-                    ),
-                    link = dict(
-                        source = source_indices,
-                        target = target_indices,
-                        value = ratios_for_links,
-                        color = self.link_color,
-                        customdata = ratios_for_links,
-                        hovertemplate = '%{customdata:.4f}<extra></extra>'
-                    )
-                )])
-                fig_type_ratio.update_layout(
-                    title_text='Sankey diagram of all connections to targets<br>based on neuron type (by connection ratio)',
-                    font_size=12
-                )
-                fig_type_ratio.write_html(os.path.join(self.allpath_folder,'Sankey_type_allpaths_ratio.html'), auto_open=self.showfig, include_plotlyjs='cdn')
-                
-                # Visualization 3: Traversal Probability-based
-                fig_type_prob = go.Figure(data=[go.Sankey(
-                    node = dict(
-                        pad = 5,
-                        thickness = 5,
-                        line = dict(color = "black", width = 0),
-                        label = node_labels,
-                        color = node_type_color,
-                        customdata = node_hover_text,
-                        hovertemplate = '%{customdata}<extra></extra>'
-                    ),
-                    link = dict(
-                        source = source_indices,
-                        target = target_indices,
-                        value = probs_for_links,
-                        color = self.link_color,
-                        customdata = probs_for_links,
-                        hovertemplate = '%{customdata:.4f}<extra></extra>'
-                    )
-                )])
-                fig_type_prob.update_layout(
-                    title_text='Sankey diagram of all connections to targets<br>based on neuron type (by traversal probability)',
-                    font_size=12
-                )
-                fig_type_prob.write_html(os.path.join(self.allpath_folder,'Sankey_type_allpaths_prob.html'), auto_open=self.showfig, include_plotlyjs='cdn')
-                
-                print(f'Created 3 type-level Sankey diagrams with {len(node_type)} nodes and {len(weights_for_links)} edges')
-        
-        # Build bodyId-level Sankey from connection_info sheet (conn_inpath)
-        # forward_only=True: Show only edges in path_bodyId (filtered)
-        # forward_only=False: Show ALL connections in conn_inpath (complete graph)
-        if find_bodyId_path and len(conn_inpath) > 0:
-            # If forward_only=True, extract edges from path_bodyId for filtering
-            edges_in_path_bodyId = set()
-            if forward_only and 'path_df_bodyId' in locals() and len(path_df_bodyId) > 0:
-                print('\nExtracting edges from path_bodyId for filtered visualization...')
-                for idx in path_df_bodyId.index:
-                    path_block = path_df_bodyId.at[idx, 'path_block']
-                    edges = parse_path_to_edges(path_block)
-                    for layer_idx, source_str, target_str in edges:
-                        # Convert to int (path_block has strings)
-                        edges_in_path_bodyId.add((layer_idx, int(source_str), int(target_str)))
-                print(f'  Extracted {len(edges_in_path_bodyId)} unique edges from bodyId paths')
-            
-            # Extract all edges directly from conn_inpath DataFrame
-            edge_weight_bodyId = {}
-            edge_ratio_bodyId = {}
-            edge_prob_bodyId = {}
-            
-            for idx, row in conn_inpath.iterrows():
-                layer_label = row['conn_layer']
-                layer_idx = int(layer_label.split('->')[0])
-                source_id = int(row['bodyId_pre'])
-                target_id = int(row['bodyId_post'])
-                edge_key = (layer_idx, source_id, target_id)
-                
-                # If forward_only=True, only include edges that are in path_bodyId
-                if forward_only and edge_key not in edges_in_path_bodyId:
-                    continue
-                
-                # Aggregate if same edge appears multiple times (shouldn't happen but be safe)
-                if edge_key in edge_weight_bodyId:
-                    edge_weight_bodyId[edge_key] += float(row['weight'])
-                    edge_ratio_bodyId[edge_key] = max(edge_ratio_bodyId[edge_key], float(row['connection_ratio']))
-                    edge_prob_bodyId[edge_key] = max(edge_prob_bodyId[edge_key], float(row['traversal_probability']))
-                else:
-                    edge_weight_bodyId[edge_key] = float(row['weight'])
-                    edge_ratio_bodyId[edge_key] = max(0.0, min(1.0, float(row['connection_ratio'])))
-                    edge_prob_bodyId[edge_key] = max(0.0, min(1.0, float(row['traversal_probability'])))
-            
-            if forward_only:
-                print(f'Filtered to {len(edge_weight_bodyId)} bodyId edges for visualization (forward_only=True)')
-            
-            if len(edge_weight_bodyId) == 0:
-                print('\033[33mWarning: No connections found in connection_info sheet for bodyId Sankey diagrams.\033[0m')
-            else:
-                # Build node list by layer
-                all_bodyIds_by_layer = {}
-                for (layer_idx, source, target) in edge_weight_bodyId.keys():
-                    if layer_idx not in all_bodyIds_by_layer:
-                        all_bodyIds_by_layer[layer_idx] = set()
-                    all_bodyIds_by_layer[layer_idx].add(source)
-                    if layer_idx + 1 not in all_bodyIds_by_layer:
-                        all_bodyIds_by_layer[layer_idx + 1] = set()
-                    all_bodyIds_by_layer[layer_idx + 1].add(target)
-                
-                # Create ordered node list
-                node_bodyId = []
-                for layer_idx in sorted(all_bodyIds_by_layer.keys()):
-                    layer_bodyIds = sorted(list(all_bodyIds_by_layer[layer_idx]))
-                    node_bodyId.extend(layer_bodyIds)
-                
-                # Fetch neuron info for labels (use local dataset if available)
-                node_df = self._fetch_neurons_local_or_api(node_bodyId, columns=['bodyId', 'type'])
-                for ind in node_df.index:
-                    if node_df.at[ind, 'type'] == None:
-                        node_df.at[ind, 'type'] = 'None'
-                
-                bodyId_to_type = dict(zip(node_df['bodyId'], node_df['type']))
-                node_bodyId_labels = [f"{bodyId_to_type.get(bid, 'Unknown')}_{bid}" for bid in node_bodyId]
-                
-                # Create node index mapping
-                node_to_idx_bodyId = {node: idx for idx, node in enumerate(node_bodyId)}
-                
-                # Color nodes
-                node_bodyId_color = [self.node_color] * len(node_bodyId)
-                for idx, bodyId in enumerate(node_bodyId):
-                    if bodyId in target_ID:
-                        node_bodyId_color[idx] = self.target_color
-                
-                # Build links
-                source_indices_bodyId = []
-                target_indices_bodyId = []
-                weights_bodyId = []
-                
-                for (layer_idx, source, target), weight in edge_weight_bodyId.items():
-                    source_indices_bodyId.append(node_to_idx_bodyId[source])
-                    target_indices_bodyId.append(node_to_idx_bodyId[target])
-                    weights_bodyId.append(weight)
-                
-                # Create bodyId Sankey
-                fig_bodyId = go.Figure(data=[go.Sankey(
-                    node = dict(
-                        pad = 1,
-                        thickness = 5,
-                        line = dict(color = "black", width = 0),
-                        label = node_bodyId_labels,
-                        color = node_bodyId_color
-                    ),
-                    link = dict(
-                        source = source_indices_bodyId,
-                        target = target_indices_bodyId,
-                        value = weights_bodyId,
-                        color = self.link_color
-                    )
-                )])
-                fig_bodyId.update_layout(
-                    title_text='Sankey diagram of all connections to targets<br>based on neuron bodyId',
-                    font_size=6
-                )
-                fig_bodyId.write_html(os.path.join(self.allpath_folder,'Sankey_bodyId_allpaths.html'), auto_open=self.showfig, include_plotlyjs='cdn')
-                
-                print(f'Created bodyId-level Sankey diagram with {len(node_bodyId)} nodes and {len(weights_bodyId)} edges')
+        # ============================================================================
+        # VISUALIZATION: Using VisualizePath only
+        # ============================================================================
         
         # VisualizePath network visualization
         print('\nCreating interactive network visualizations...')
@@ -3627,46 +3894,22 @@ class FindNeuronConnection:
                 print('  Created network_selected_paths.html and sankey_selected_paths.html')
             else:
                 print('  No paths found to visualize')
+                
+            # Create custom group visualizations if available
+            if len(path_df_group) > 0:
+                print('\nCreating custom group visualizations...')
+                group_paths_to_viz = path_df_group.head(self.pathN_to_show) if self.pathN_to_show > 0 else path_df_group
+                vp_group = VisualizePath(path_file=group_paths_to_viz, output_folder=os.path.join(self.allpath_folder, 'custom_groups'),
+                                        source_color=self.source_color if hasattr(self, 'source_color') else '#1f77b4', showfig=self.showfig)
+                vp_group.visualize()
+                print(f'  ✓ Custom group visualizations created ({len(group_paths_to_viz)} paths)')
+                    
         except Exception as e:
             print(f'  Warning: VisualizePath visualization failed: {e}')
             import traceback
             traceback.print_exc()
         
-        # Create type-level heatmap visualization
-        print('Creating type-level connection heatmap...')
-        try:
-            if len(conn_types) > 0:
-                # Build connection matrix from conn_types
-                # Group by type_pre and type_post, summing weights
-                conn_matrix_data = conn_types.groupby(['type_pre', 'type_post'])['weight'].sum().reset_index()
-                
-                # Create matrix
-                conn_matrix_type = conn_matrix_data.pivot(
-                    index='type_pre', 
-                    columns='type_post', 
-                    values='weight'
-                ).fillna(0)
-                
-                # Use CreateHeatmap class
-                heatmap_gen = sv.CreateHeatmap(
-                    output_folder=self.allpath_folder,
-                    showfig=self.showfig
-                )
-                heatmap_gen.add_heatmap(
-                    matrix=conn_matrix_type,
-                    name='heatmap_allpaths_type',
-                    title=f'Connection Heatmap: {self.source_fname} to {self.target_fname}<br>Type-level connections in all paths',
-                    color_scale='purple',
-                    interactive=True
-                )
-                heatmap_gen.create_all()
-                print('  Created heatmap_allpaths_type.html')
-            else:
-                print('  No connections to visualize in heatmap')
-        except Exception as e:
-            print(f'  Warning: Heatmap visualization failed: {e}')
-            import traceback
-            traceback.print_exc()
+        # Heatmap generation removed - use VisualizePath.visualize() for heatmaps instead
         
         print('Done\n')
     

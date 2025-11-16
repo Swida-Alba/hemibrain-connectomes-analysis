@@ -307,8 +307,31 @@ def pull_dataset(dataset, save_path=None, omitNoneType=True):
     roi_count_df.to_csv(save_path + '_roi_count_df.csv',index=True)
     print('Done!')
 
-def getNeurons(requiredNeurons, dataset='hemibrain:v1.2.1'):
-    '''get neurons locally from a given dataset'''
+def getNeurons(requiredNeurons, dataset='hemibrain:v1.2.1', custom_group_names=None):
+    '''get neurons locally from a given dataset
+    
+    Parameters
+    ----------
+    requiredNeurons : list or None
+        List of neuron identifiers (types, instances, bodyIds).
+        Supports nested lists for custom grouping: e.g., ['A', 'B', ['C', 'D']]
+        Nested lists will be merged into a single custom group.
+    dataset : str
+        Dataset name
+    custom_group_names : list, optional
+        Custom names for groups when using nested lists
+        
+    Returns
+    -------
+    neuron_df : pd.DataFrame
+        DataFrame of neurons with 'custom_group' column for nested list groups
+    roi_count_df : pd.DataFrame
+        ROI count DataFrame
+    auto_name : str
+        Auto-generated name for the neuron set
+    criteria : NeuronCriteria
+        Neuprint criteria object
+    '''
     from neuprint import NeuronCriteria as NC
     if requiredNeurons == None:
         criteria = None
@@ -317,6 +340,7 @@ def getNeurons(requiredNeurons, dataset='hemibrain:v1.2.1'):
         return neuron_df, roi_count_df, auto_name, criteria
     if type(requiredNeurons) != list:
         requiredNeurons = [requiredNeurons]
+    
     # Go up from src/ to project root, then into datasets/
     dataset_path_body = os.path.join(os.path.dirname(os.path.dirname(__file__)),"datasets",f"{dataset.replace(':','_').replace('.','_')}_alltypes")
     if not os.path.exists(dataset_path_body + '_neuron_df.csv') or not os.path.exists(dataset_path_body + '_roi_count_df.csv'):
@@ -325,44 +349,135 @@ def getNeurons(requiredNeurons, dataset='hemibrain:v1.2.1'):
     ndf_alltypes = pd.read_csv(dataset_path_body + '_neuron_df.csv',header=0,index_col=0)
     rdf_alltypes = pd.read_csv(dataset_path_body + '_roi_count_df.csv',header=0,index_col=0)
     bodyId_alltypes = ndf_alltypes['bodyId'].tolist()
+    
     if len(requiredNeurons) == 0:
         neuron_df = ndf_alltypes
         roi_count_df = rdf_alltypes
         auto_name = 'alltypes'
         bodyId_list = neuron_df['bodyId'].tolist()
     else:
-        bodyId_list = []
-        for i, requiredNeuron in enumerate(requiredNeurons):
-            if i == 0: 
-                auto_name = str(requiredNeuron).replace('.*','')
-            elif i == 1:
-                auto_name += '_etc'
-            if type(requiredNeuron) == int:
-                # bodyId
-                if requiredNeuron in bodyId_alltypes:
-                    bodyId_list.append(requiredNeuron)
+        # Check if we have nested lists for custom grouping
+        has_nested = any(isinstance(item, list) for item in requiredNeurons)
+        
+        if has_nested:
+            # Process with custom grouping
+            bodyId_list = []
+            group_names = []
+            group_custom_idx = 0
+            
+            for i, requiredNeuron in enumerate(requiredNeurons):
+                if isinstance(requiredNeuron, list):
+                    # Nested list - create custom group
+                    group_bodyIds = []
+                    group_items = []
+                    
+                    for item in requiredNeuron:
+                        group_items.append(str(item).replace('.*', ''))
+                        item_bodyIds = _process_single_neuron(item, ndf_alltypes, bodyId_alltypes)
+                        group_bodyIds.extend(item_bodyIds)
+                    
+                    # Generate group name
+                    if custom_group_names and group_custom_idx < len(custom_group_names):
+                        group_name = custom_group_names[group_custom_idx]
+                    else:
+                        # Auto-generate name from first item
+                        if len(group_items) == 1:
+                            group_name = group_items[0]
+                        else:
+                            group_name = group_items[0] + '_etc'
+                    
+                    group_names.append(group_name)
+                    bodyId_list.extend(group_bodyIds)
+                    group_custom_idx += 1
+                    
+                    print(f'Custom group "{group_name}": {len(group_bodyIds)} neurons from {len(requiredNeuron)} items')
                 else:
-                    print(f'\033[33mbodyId {requiredNeuron} not found, please check your input (skipped)\033[0m')
-            elif requiredNeuron.find('.*') != -1: 
-                # regex of instance
-                find_df = ndf_alltypes[ndf_alltypes['instance'].str.match(requiredNeuron)]
-                if len(find_df) > 0:
-                    bodyId_list += find_df['bodyId'].tolist()
-                    print(f'Found {len(find_df)} neurons of instance "{requiredNeuron}"')
-                else:
-                    print(f'\033[33minstance "{requiredNeuron}" not found, please check your input (skipped)\033[0m')
+                    # Regular item
+                    item_bodyIds = _process_single_neuron(requiredNeuron, ndf_alltypes, bodyId_alltypes)
+                    bodyId_list.extend(item_bodyIds)
+                    group_names.append(str(requiredNeuron).replace('.*', ''))
+            
+            # Create auto_name from group names
+            if len(group_names) == 1:
+                auto_name = group_names[0]
+            elif len(group_names) == 2:
+                auto_name = '_'.join(group_names)
             else:
-                # type
-                find_df = ndf_alltypes[ndf_alltypes['type']==requiredNeuron]
-                if len(find_df) > 0:
-                    bodyId_list += find_df['bodyId'].tolist()
-                    print(f'Found {len(find_df)} neurons of type "{requiredNeuron}"')
-                else:
-                    print(f'\033[33mtype "{requiredNeuron}" not found, please check your input (skipped)\033[0m')
-        neuron_df = ndf_alltypes[ndf_alltypes['bodyId'].isin(bodyId_list)]
-        roi_count_df = rdf_alltypes[rdf_alltypes['bodyId'].isin(bodyId_list)]
+                auto_name = group_names[0] + '_etc'
+            
+            # Build neuron_df with custom_group column
+            neuron_df = ndf_alltypes[ndf_alltypes['bodyId'].isin(bodyId_list)].copy()
+            roi_count_df = rdf_alltypes[rdf_alltypes['bodyId'].isin(bodyId_list)]
+            
+            # Add custom_group column by matching original type or creating merged type
+            neuron_df['custom_group'] = neuron_df['type']  # Default to original type
+            
+            # Reassign custom groups for nested list items
+            group_custom_idx = 0
+            for i, requiredNeuron in enumerate(requiredNeurons):
+                if isinstance(requiredNeuron, list):
+                    # Get bodyIds for this custom group
+                    group_bodyIds = []
+                    for item in requiredNeuron:
+                        item_bodyIds = _process_single_neuron(item, ndf_alltypes, bodyId_alltypes)
+                        group_bodyIds.extend(item_bodyIds)
+                    
+                    # Assign custom group name
+                    if custom_group_names and group_custom_idx < len(custom_group_names):
+                        group_name = custom_group_names[group_custom_idx]
+                    else:
+                        items_str = [str(item).replace('.*', '') for item in requiredNeuron]
+                        group_name = items_str[0] + '_etc' if len(items_str) > 1 else items_str[0]
+                    
+                    neuron_df.loc[neuron_df['bodyId'].isin(group_bodyIds), 'custom_group'] = group_name
+                    group_custom_idx += 1
+            
+        else:
+            # Original logic for flat list
+            bodyId_list = []
+            for i, requiredNeuron in enumerate(requiredNeurons):
+                if i == 0: 
+                    auto_name = str(requiredNeuron).replace('.*','')
+                elif i == 1:
+                    auto_name += '_etc'
+                
+                item_bodyIds = _process_single_neuron(requiredNeuron, ndf_alltypes, bodyId_alltypes)
+                bodyId_list.extend(item_bodyIds)
+            
+            neuron_df = ndf_alltypes[ndf_alltypes['bodyId'].isin(bodyId_list)]
+            roi_count_df = rdf_alltypes[rdf_alltypes['bodyId'].isin(bodyId_list)]
+    
     criteria = NC(bodyId=bodyId_list)
     return neuron_df, roi_count_df, auto_name, criteria
+
+def _process_single_neuron(requiredNeuron, ndf_alltypes, bodyId_alltypes):
+    '''Helper function to process a single neuron identifier and return bodyIds'''
+    bodyId_list = []
+    
+    if type(requiredNeuron) == int:
+        # bodyId
+        if requiredNeuron in bodyId_alltypes:
+            bodyId_list.append(requiredNeuron)
+        else:
+            print(f'\033[33mbodyId {requiredNeuron} not found, please check your input (skipped)\033[0m')
+    elif isinstance(requiredNeuron, str) and requiredNeuron.find('.*') != -1:
+        # regex of instance
+        find_df = ndf_alltypes[ndf_alltypes['instance'].str.match(requiredNeuron)]
+        if len(find_df) > 0:
+            bodyId_list = find_df['bodyId'].tolist()
+            print(f'Found {len(find_df)} neurons of instance "{requiredNeuron}"')
+        else:
+            print(f'\033[33minstance "{requiredNeuron}" not found, please check your input (skipped)\033[0m')
+    else:
+        # type
+        find_df = ndf_alltypes[ndf_alltypes['type']==requiredNeuron]
+        if len(find_df) > 0:
+            bodyId_list = find_df['bodyId'].tolist()
+            print(f'Found {len(find_df)} neurons of type "{requiredNeuron}"')
+        else:
+            print(f'\033[33mtype "{requiredNeuron}" not found, please check your input (skipped)\033[0m')
+    
+    return bodyId_list
 
 def removeSearchedNeurons(conn_df,searchedNeurons):
     '''remove neurons on searched layers'''
@@ -4022,6 +4137,219 @@ def NetworkVis(source_df,target_df,conn_df,save_path='',by='bodyId',node_size=30
         fig.savefig(os.path.join(save_path,'Network_'+by+save_format))
         if not showfig: plt.close(fig)
 
+def build_path_dataframe_from_paths(paths, conn_data, targets, real_layer_map=None, level='bodyId'):
+    """
+    Build path DataFrame directly from pre-computed paths (bypasses pathfinding).
+    
+    This function takes paths found during parallel DFS and converts them to a DataFrame
+    with connection metrics. This avoids re-running pathfinding via getAllPath().
+    
+    Parameters:
+    -----------
+    paths : list of lists
+        Pre-computed paths, where each path is a list of neuron IDs
+    conn_data : DataFrame
+        DataFrame with connection metrics (conn_layer, pre, post, weight, ratio, prob)
+    targets : list
+        List of target neuron IDs/types
+    real_layer_map : dict, optional
+        Mapping of neuron ID/type -> real layer for validation
+    level : str
+        'bodyId' or 'type' - determines column names and conversion
+    
+    Returns:
+    --------
+    DataFrame with columns: path_block, path_length, weights, ratios, travPs, etc.
+    """
+    import pandas as pd
+    import networkx as nx
+    
+    # Convert paths to type-level if needed (BEFORE building graph)
+    if level == 'type':
+        # Check if paths are already type-level (strings) or bodyId-level (integers)
+        # If first path's first element is a string, assume already type-level
+        needs_conversion = False
+        if len(paths) > 0 and len(paths[0]) > 0:
+            first_node = paths[0][0]
+            # If it's an integer or can be converted to int, it's a bodyId
+            try:
+                int(first_node)
+                needs_conversion = True
+            except (ValueError, TypeError):
+                needs_conversion = False
+        
+        if needs_conversion:
+            # Get bodyId to type mapping from conn_data
+            bodyid_to_type = {}
+            if 'bodyId_pre' in conn_data.columns and 'type_pre' in conn_data.columns:
+                for i in range(len(conn_data)):
+                    bodyid_to_type[conn_data.iat[i, conn_data.columns.get_loc('bodyId_pre')]] = conn_data.iat[i, conn_data.columns.get_loc('type_pre')]
+                    bodyid_to_type[conn_data.iat[i, conn_data.columns.get_loc('bodyId_post')]] = conn_data.iat[i, conn_data.columns.get_loc('type_post')]
+            
+            # Convert bodyId paths to type paths
+            type_paths = []
+            for path in paths:
+                type_path = [str(bodyid_to_type.get(node, node)) for node in path]
+                # Remove consecutive duplicates (same type appearing multiple times)
+                deduplicated = [type_path[0]]
+                for i in range(1, len(type_path)):
+                    if type_path[i] != type_path[i-1]:
+                        deduplicated.append(type_path[i])
+                type_paths.append(deduplicated)
+            paths = type_paths
+        
+        # Aggregate conn_data to type level for graph building if needed
+        if 'bodyId_pre' in conn_data.columns and 'type_pre' in conn_data.columns:
+            # conn_data has bodyId columns, aggregate to type level
+            conn_type_agg = conn_data.groupby(['conn_layer', 'type_pre', 'type_post']).agg({
+                'weight': 'sum',
+                'connection_ratio': 'mean',
+                'traversal_probability': 'mean'
+            }).reset_index()
+            conn_data = conn_type_agg
+    
+    # Build graph with connection metrics
+    G = nx.DiGraph()
+    for i in range(len(conn_data)):
+        layer = conn_data.iat[i,0]
+        node_pre = str(conn_data.iat[i,1])
+        node_post = str(conn_data.iat[i,2])
+        weight_i = conn_data.iat[i,3]
+        ratio_i = conn_data.iat[i, conn_data.columns.get_loc('connection_ratio')] if 'connection_ratio' in conn_data.columns else 0.0
+        travP_i = conn_data.iat[i, conn_data.columns.get_loc('traversal_probability')] if 'traversal_probability' in conn_data.columns else 0.0
+        
+        if G.has_edge(node_pre, node_post):
+            if 'layers' not in G[node_pre][node_post]:
+                existing = G[node_pre][node_post]
+                G[node_pre][node_post]['layers'] = {
+                    existing['layer']: {'weight': existing['weight'], 'probability': existing['probability'], 'ratio': existing['ratio']}
+                }
+            G[node_pre][node_post]['layers'][layer] = {'weight': weight_i, 'probability': travP_i, 'ratio': ratio_i}
+        else:
+            G.add_edge(node_pre, node_post, layer=layer, weight=weight_i, probability=travP_i, ratio=ratio_i)
+    
+    # Filter paths with real_layer_map
+    if real_layer_map is not None:
+        filtered_paths = []
+        rejected_count = 0
+        for path in paths:
+            path_str = [str(node) for node in path]
+            valid = True
+            for i in range(len(path_str) - 1):
+                curr_layer = real_layer_map.get(path_str[i], -1)
+                next_layer = real_layer_map.get(path_str[i+1], -1)
+                if next_layer < curr_layer:  # Backward connection
+                    valid = False
+                    rejected_count += 1
+                    break
+            if valid:
+                filtered_paths.append(path)
+        
+        if rejected_count > 0:
+            print(f'  ℹ️  Filtered out {rejected_count} paths with backward connections (forward_only mode)')
+        paths = filtered_paths
+    
+    # Build DataFrame
+    path_blocks = []
+    weights = []
+    travPs = []
+    travP = []
+    ratios = []
+    ratio = []
+    weights_min = []
+    inter_layer_num = []
+    
+    # Track unique paths to avoid duplicates (use dict to keep best metrics for each path)
+    unique_paths = {}  # path_block -> {weights, travPs, travP, etc.}
+    
+    print(f'Building path data for {len(paths):,} found paths...', end='', flush=True)
+    
+    paths_processed = 0
+    for path_idx, p in enumerate(paths, 1):
+        if path_idx % 50000 == 0 or path_idx == len(paths):
+            print(f'\rBuilding path data for {len(paths):,} found paths... {path_idx:,}/{len(paths):,} ({path_idx/len(paths):.1%})\033[K', end='', flush=True)
+        
+        block = ''
+        w_p = []
+        travP_p = []
+        ratio_p = []
+        
+        for ind in range(len(p)):
+            block += (str(p[ind])+' -> ')
+            if ind + 1 < len(p):
+                # All edges should exist since paths were found from the same filtered graph
+                edge_data = G[str(p[ind])][str(p[ind+1])]
+                if 'layers' in edge_data:
+                    layer_idx = ind
+                    layer_key = f'{layer_idx}->{layer_idx+1}'
+                    if layer_key in edge_data['layers']:
+                        w_p.append(edge_data['layers'][layer_key]['weight'])
+                        travP_p.append(edge_data['layers'][layer_key]['probability'])
+                        ratio_p.append(edge_data['layers'][layer_key]['ratio'])
+                    else:
+                        w_p.append(edge_data['weight'])
+                        travP_p.append(edge_data['probability'])
+                        ratio_p.append(edge_data['ratio'])
+                else:
+                    w_p.append(edge_data['weight'])
+                    travP_p.append(edge_data['probability'])
+                    ratio_p.append(edge_data['ratio'])
+        
+        block = block[:-4]
+        curr_travP = np.prod(travP_p) if len(travP_p) > 0 else 0.0
+        
+        # Only keep this path if it's new or has better traversal probability than existing
+        if block not in unique_paths or curr_travP > unique_paths[block]['traversal_probability']:
+            unique_paths[block] = {
+                'weights': w_p,
+                'traversal_probabilities': travP_p,
+                'traversal_probability': curr_travP,
+                'connection_ratios': ratio_p,
+                'connection_ratio': min(ratio_p) if len(ratio_p) > 0 else 0.0,
+                'weight_min': min(w_p) if len(w_p) > 0 else 0,
+                'inter_layer_num': len(p) - 1
+            }
+        
+        paths_processed += 1
+    
+    # Final progress update to ensure 100% is shown
+    print(f'\rBuilding path data for {len(paths):,} found paths... {len(paths):,}/{len(paths):,} (100.0%)\033[K')
+    
+    # Convert unique_paths dict to lists for DataFrame
+    for block, metrics in unique_paths.items():
+        path_blocks.append(block)
+        weights.append(metrics['weights'])
+        travPs.append(metrics['traversal_probabilities'])
+        travP.append(metrics['traversal_probability'])
+        ratios.append(metrics['connection_ratios'])
+        ratio.append(metrics['connection_ratio'])
+        weights_min.append(metrics['weight_min'])
+        inter_layer_num.append(metrics['inter_layer_num'])
+    
+    if len(paths) > 0:
+        print(f'  → {len(unique_paths):,} unique paths ({len(unique_paths)/len(paths):.1%} of total)')
+    else:
+        print(f'  → {len(unique_paths):,} unique paths (no paths to process)')
+    print()
+    
+    # Create DataFrame
+    path_df = pd.DataFrame({
+        'path_block': path_blocks,
+        'inter_layer_num': inter_layer_num,  # Use inter_layer_num for compatibility with split_path()
+        'weights': weights,
+        'traversal_probabilities': travPs,
+        'traversal_probability': travP,
+        'connection_ratios': ratios,
+        'connection_ratio': ratio,
+        'weight_min': weights_min
+    })
+    
+    # Sort by traversal probability
+    path_df = path_df.sort_values(by='traversal_probability', ascending=False).reset_index(drop=True)
+    
+    return path_df
+
+
 def getAllPath(conn_data,targets,traversal_probability_threshold=0, max_path_length=None, real_layer_map=None):
     """
     Find all paths from sources to targets through a connection network.
@@ -4111,39 +4439,62 @@ def getAllPath(conn_data,targets,traversal_probability_threshold=0, max_path_len
     paths = []
     pairN = len(sources) * len(targets)
     count = 0
+    
+    # Use optimized DFS instead of nx.all_simple_paths for better performance
+    target_set = set(str(t) for t in targets)
+    
+    def dfs_find_paths(G, source, targets_set, cutoff, real_layer_map=None):
+        """
+        Find all paths from source to targets using DFS with backtracking.
+        Much faster than nx.all_simple_paths for large graphs.
+        """
+        found_paths = []
+        
+        def dfs(current, path, visited):
+            # Check if we reached a target
+            if current in targets_set:
+                # Validate path with real_layer_map if provided
+                if real_layer_map is not None:
+                    valid = True
+                    for i in range(len(path) - 1):
+                        curr_layer = real_layer_map.get(path[i], -1)
+                        next_layer = real_layer_map.get(path[i+1], -1)
+                        if next_layer < curr_layer:  # Backward connection
+                            valid = False
+                            break
+                    if valid:
+                        found_paths.append(list(path))
+                else:
+                    found_paths.append(list(path))
+            
+            # Stop if reached max depth
+            if len(path) - 1 >= cutoff:
+                return
+            
+            # Explore neighbors
+            if current in G:
+                for neighbor in G.neighbors(current):
+                    if neighbor not in visited:
+                        path.append(neighbor)
+                        visited.add(neighbor)
+                        dfs(neighbor, path, visited)
+                        path.pop()
+                        visited.remove(neighbor)
+        
+        if source in G:
+            dfs(source, [source], {source})
+        return found_paths
+    
     for source_i in sources:
         for target_j in targets:
             count += 1
             print(f'\rsource-target pairs processed: {count}/{pairN} ({count/pairN:.1%})\033[K', end='', flush=True)
             if nx.has_path(G,str(source_i),str(target_j)):
-                # Add cutoff parameter to prevent exponential explosion
-                curr_paths = list(nx.all_simple_paths(G, str(source_i), str(target_j), cutoff=max_path_length))
+                # Use optimized DFS instead of nx.all_simple_paths
+                curr_paths = dfs_find_paths(G, str(source_i), target_set, max_path_length, real_layer_map)
                 
-                # Filter paths based on real layer information if provided
-                if real_layer_map is not None:
-                    for p in reversed(range(len(curr_paths))):
-                        pp = curr_paths[p]
-                        should_remove = False
-                        
-                        # Check 1: No repeated nodes (already guaranteed by all_simple_paths)
-                        # Check 2: Real layers must be monotonically non-decreasing
-                        for i in range(len(pp) - 1):
-                            current_node = pp[i]
-                            next_node = pp[i + 1]
-                            
-                            # Get real layers (discovery order)
-                            current_real_layer = real_layer_map.get(current_node, -1)
-                            next_real_layer = real_layer_map.get(next_node, -1)
-                            
-                            # Exclude if next node is in an earlier real layer (backward connection)
-                            if next_real_layer < current_real_layer:
-                                should_remove = True
-                                break
-                        
-                        if should_remove:
-                            curr_paths.pop(p)
-                else:
-                    # Original validation: check appearance layer (position in path) matches node layer attribute
+                # Apply original layer validation if real_layer_map not used
+                if real_layer_map is None:
                     for p in reversed(range(len(curr_paths))):
                         pp = curr_paths[p]
                         if len(pp) > layerN: # exclude paths whose layers are not monotonically increasing
@@ -4281,8 +4632,21 @@ def EnrichConnectionTable(conn_table, traversal_probability_threshold=0, dataset
         Method for aggregating type-level traversal probabilities from bodyId level:
         - 'product': compound probability (product of block probs) for paths (default)
         - 'average': weighted average for direct parallel connections
+    
+    Returns
+    -------
+    conn_df : DataFrame
+        Enriched connection table with bodyId-level metrics
+    conn_type : DataFrame
+        Type-level aggregation (always based on original type column)
+    conn_group : DataFrame or None
+        Custom group-level aggregation (only if custom_group columns exist)
     '''
     conn_df = conn_table.copy()
+    
+    # Determine grouping columns (use custom_group if available, otherwise type)
+    group_pre = 'custom_group_pre' if 'custom_group_pre' in conn_df.columns else 'type_pre'
+    group_post = 'custom_group_post' if 'custom_group_post' in conn_df.columns else 'type_post'
     
     # Try to use local dataset first
     use_local = False
@@ -4311,6 +4675,11 @@ def EnrichConnectionTable(conn_table, traversal_probability_threshold=0, dataset
         conn_df.loc[conn_df.type_pre.isnull(),'type_pre'] = 'None'
     if 'type_post' in conn_df.columns:
         conn_df.loc[conn_df.type_post.isnull(),'type_post'] = 'None'
+    # Fill custom_group columns if they exist
+    if 'custom_group_pre' in conn_df.columns:
+        conn_df.loc[conn_df.custom_group_pre.isnull(),'custom_group_pre'] = conn_df.loc[conn_df.custom_group_pre.isnull(),'type_pre']
+    if 'custom_group_post' in conn_df.columns:
+        conn_df.loc[conn_df.custom_group_post.isnull(),'custom_group_post'] = conn_df.loc[conn_df.custom_group_post.isnull(),'type_post']
     
     conn_df = conn_df.merge(post_info,how='left',on='bodyId_post')
     conn_df.insert(loc=len(conn_df.columns),column='connection_ratio',value=conn_df.weight/conn_df.post)
@@ -4320,97 +4689,185 @@ def EnrichConnectionTable(conn_table, traversal_probability_threshold=0, dataset
     
     conn_df = conn_df.loc[conn_df.traversal_probability >= traversal_probability_threshold]
     
-    # Aggregate connection data by neuron type
-    # connection_ratio: sum(weight) / sum(post) for type-to-type pairs
-    # traversal_probability: product of (1 - block_probability) across individual neuron pairs
+    # Aggregate connection data by neuron type/group
+    # Use custom_group if available, otherwise fall back to type
+    # Calculate from bodyId level to ensure accuracy (neurons in connections, not types in connections)
+    # First deduplicate by bodyId pairs to avoid counting same connection multiple times
+    bodyid_pairs = conn_df[['bodyId_pre', 'bodyId_post', group_pre, group_post, 'weight']].drop_duplicates(subset=['bodyId_pre', 'bodyId_post'])
+    weight_sum = bodyid_pairs.groupby([group_pre, group_post])['weight'].sum().reset_index(name='weight')
     
-    weight_sum = conn_df.groupby(['type_pre', 'type_post'])['weight'].sum().reset_index(name='weight')
-    
-    # Calculate total incoming weights per type_post (sum across all type_pre sources)
-    # This will be used as the denominator for connection ratios
-    total_incoming_per_type = weight_sum.groupby('type_post')['weight'].sum().reset_index(name='total_incoming_weight')
+    # Calculate total incoming weights per group_post (sum across all group_pre sources)
+    total_incoming_per_type = weight_sum.groupby(group_post)['weight'].sum().reset_index(name='total_incoming_weight')
 
-    # Calculate total post-synaptic sites for ALL neurons of each type_post
-    # This is the correct denominator for type-to-type ratios
-    # 
-    # CRITICAL: Must use ALL neurons of each type, not just those receiving connections
-    # Otherwise ratio is incorrect (too high) because denominator is too small
-    
-    if target_neurons_df is not None and 'type' in target_neurons_df.columns and 'post' in target_neurons_df.columns:
-        # Use provided target neurons dataframe (contains ALL target neurons)
-        # This gives the correct denominator for type-level ratios
-        all_post_neurons = target_neurons_df[['type', 'post']].copy()
-        all_post_neurons = all_post_neurons.rename(columns={'type': 'type_post'})
-        # Remove None types and empty strings
-        all_post_neurons = all_post_neurons[all_post_neurons['type_post'].notnull()]
-        all_post_neurons = all_post_neurons[all_post_neurons['type_post'] != '']
-        all_post_neurons = all_post_neurons[all_post_neurons['type_post'] != 'None']
-        type_post_totals = all_post_neurons.groupby('type_post')['post'].sum().reset_index(name='total_post')
-    else:
-        # Auto-load ALL neurons of each type from local dataset if available
-        # This ensures correct denominators even when target_neurons_df is not provided
-        if use_local and 'type_post' in conn_df.columns:
-            # Get all types that appear in connections
-            types_in_conn = conn_df['type_post'].unique().tolist()
-            # Filter complete dataset to these types
-            all_post_neurons = ndf_complete[ndf_complete['type'].isin(types_in_conn)][['type', 'post']].copy()
-            all_post_neurons = all_post_neurons.rename(columns={'type': 'type_post'})
+    # Calculate total post-synaptic sites for ALL neurons of each group_post
+    if target_neurons_df is not None:
+        # Determine which column to use for grouping in target_neurons_df
+        target_group_col = 'custom_group' if 'custom_group' in target_neurons_df.columns else 'type'
+        if target_group_col in target_neurons_df.columns and 'post' in target_neurons_df.columns:
+            all_post_neurons = target_neurons_df[[target_group_col, 'post']].copy()
+            all_post_neurons = all_post_neurons.rename(columns={target_group_col: group_post})
             # Remove None types and empty strings
-            all_post_neurons = all_post_neurons[all_post_neurons['type_post'].notnull()]
-            all_post_neurons = all_post_neurons[all_post_neurons['type_post'] != '']
-            all_post_neurons = all_post_neurons[all_post_neurons['type_post'] != 'None']
-            type_post_totals = all_post_neurons.groupby('type_post')['post'].sum().reset_index(name='total_post')
+            all_post_neurons = all_post_neurons[all_post_neurons[group_post].notnull()]
+            all_post_neurons = all_post_neurons[all_post_neurons[group_post] != '']
+            all_post_neurons = all_post_neurons[all_post_neurons[group_post] != 'None']
+            type_post_totals = all_post_neurons.groupby(group_post)['post'].sum().reset_index(name='total_post')
         else:
-            # Last resort: use only neurons appearing in connections (less accurate)
-            # This will underestimate denominators for types where not all neurons receive connections
-            all_post_neurons = conn_df[['type_post', 'bodyId_post', 'post']].drop_duplicates(subset=['bodyId_post'])
-            type_post_totals = all_post_neurons.groupby('type_post')['post'].sum().reset_index(name='total_post')
+            # Fallback
+            type_post_totals = None
+    else:
+        type_post_totals = None
     
-    # Calculate type-to-type connection_ratio
-    # IMPORTANT: Ratio = weight / total_post (sum of all post-synaptic sites for that type)
-    # This gives the actual connection ratio (fraction of available post-synaptic sites occupied)
-    # 
-    # Example: If type T has 100,000 total post-synaptic sites:
-    #   A→T: 100 synapses → ratio = 100/100000 = 0.001
-    #   B→T: 9000 synapses → ratio = 9000/100000 = 0.09
-    #   C→T: 500 synapses → ratio = 500/100000 = 0.005
-    #   Ratios don't necessarily sum to 1.0 (can be <1 or >1)
+    # Auto-load if not provided
+    if type_post_totals is None:
+        if use_local and group_post in conn_df.columns:
+            # Get all groups that appear in connections
+            groups_in_conn = conn_df[group_post].unique().tolist()
+            
+            # Need to match back to original neurons for dataset lookup
+            if group_post == 'custom_group_post' and 'bodyId_post' in conn_df.columns:
+                # Get all bodyIds that belong to each custom group from connections
+                # This gives us the mapping, but we need ALL neurons in each group, not just those in connections
+                group_to_bodyids = conn_df[['custom_group_post', 'bodyId_post']].drop_duplicates()
+                
+                # For nested groups, we need ALL neurons that belong to each group
+                # Use target_neurons_df if available (should have custom_group column)
+                if target_neurons_df is not None and 'custom_group' in target_neurons_df.columns and 'bodyId' in target_neurons_df.columns:
+                    # Get all neurons with their groups
+                    neurons_with_groups = target_neurons_df[['bodyId', 'custom_group', 'post']].copy()
+                    neurons_with_groups = neurons_with_groups[neurons_with_groups['custom_group'].notnull()]
+                    neurons_with_groups = neurons_with_groups[neurons_with_groups['custom_group'].isin(groups_in_conn)]
+                    # Sum post by custom_group
+                    type_post_totals = neurons_with_groups.groupby('custom_group')['post'].sum().reset_index()
+                    type_post_totals.columns = ['custom_group_post', 'total_post']
+                else:
+                    # Fallback: use bodyIds from connections to find their groups, then get ALL neurons of those types
+                    # Get unique bodyIds and their groups
+                    all_bodyids_in_groups = conn_df[['bodyId_post', 'custom_group_post']].drop_duplicates()
+                    # Fetch neuron data for these bodyIds to get their types
+                    if 'type_post' in conn_df.columns:
+                        # Use type information from conn_df
+                        bodyid_type_group = conn_df[['bodyId_post', 'type_post', 'custom_group_post']].drop_duplicates()
+                        # Get all types for each group
+                        group_to_types = bodyid_type_group.groupby('custom_group_post')['type_post'].apply(lambda x: x.unique().tolist()).reset_index()
+                        
+                        # For each group, get ALL neurons of its constituent types
+                        group_post_totals = []
+                        for idx in group_to_types.index:
+                            grp = group_to_types.at[idx, 'custom_group_post']
+                            types = group_to_types.at[idx, 'type_post']
+                            # Get all neurons of these types from local dataset
+                            neurons_in_group = ndf_complete[ndf_complete['type'].isin(types)][['bodyId', 'post']].copy()
+                            total_post = neurons_in_group['post'].sum()
+                            group_post_totals.append({'custom_group_post': grp, 'total_post': total_post})
+                        
+                        type_post_totals = pd.DataFrame(group_post_totals)
+                    else:
+                        # Last resort: use only neurons appearing in connections
+                        all_post_neurons = conn_df[['custom_group_post', 'bodyId_post', 'post']].drop_duplicates(subset=['bodyId_post'])
+                        type_post_totals = all_post_neurons.groupby('custom_group_post')['post'].sum().reset_index(name='total_post')
+            else:
+                # Standard type-based grouping
+                all_post_neurons = ndf_complete[ndf_complete['type'].isin(groups_in_conn)][['type', 'post']].copy()
+                all_post_neurons = all_post_neurons.rename(columns={'type': group_post})
+                all_post_neurons = all_post_neurons[all_post_neurons[group_post].notnull()]
+                all_post_neurons = all_post_neurons[all_post_neurons[group_post] != '']
+                all_post_neurons = all_post_neurons[all_post_neurons[group_post] != 'None']
+                type_post_totals = all_post_neurons.groupby(group_post)['post'].sum().reset_index(name='total_post')
+        else:
+            # Last resort: use only neurons appearing in connections
+            all_post_neurons = conn_df[[group_post, 'bodyId_post', 'post']].drop_duplicates(subset=['bodyId_post'])
+            type_post_totals = all_post_neurons.groupby(group_post)['post'].sum().reset_index(name='total_post')
     
-    # Merge weight sums with total post-synaptic sites for each type_post
-    conn_type = weight_sum.merge(type_post_totals, on='type_post', how='left')
+    # Calculate group-to-group connection_ratio
+    conn_type = weight_sum.merge(type_post_totals, on=group_post, how='left')
     
     # Calculate ratio using total post-synaptic sites as denominator
     conn_type['connection_ratio'] = conn_type.apply(
         lambda row: row['weight'] / row['total_post'] if pd.notnull(row['total_post']) and row['total_post'] > 0 else 0.0,
         axis=1
     )
-    
-    # Note: connection_ratio can exceed 1.0 when total incoming synapses exceed total post-synaptic sites
-    # This is valid and indicates strong convergence of connections onto the target type
 
-    # Type-to-type traversal_probability aggregation
+    # Group-to-group traversal_probability aggregation
     if aggregate_method == 'product':
-        # Product method: compound probability for paths (series of neurons)
-        # P(path) = 1 - product(block_probabilities)
-        conn_traversal = conn_df[['type_pre', 'type_post', 'block_probability']]
-        conn_traversal = conn_traversal.groupby(['type_pre', 'type_post']).prod().reset_index()
-        conn_type = conn_type.merge(conn_traversal, how='left', on=['type_pre', 'type_post'])
+        # Product method: compound probability for paths
+        conn_traversal = conn_df[[group_pre, group_post, 'block_probability']]
+        conn_traversal = conn_traversal.groupby([group_pre, group_post]).prod().reset_index()
+        conn_type = conn_type.merge(conn_traversal, how='left', on=[group_pre, group_post])
         conn_type['traversal_probability'] = 1 - conn_type['block_probability']
     else:
-        # Average method: weighted average for direct connections (parallel neurons)
-        # P(type) = weighted_average(traversal_probabilities) weighted by synapse count
-        conn_traversal = conn_df[['type_pre', 'type_post', 'weight', 'traversal_probability']]
-        # Calculate weighted average: sum(weight * prob) / sum(weight)
-        weighted_sum = conn_traversal.groupby(['type_pre', 'type_post']).apply(
+        # Average method: weighted average for direct connections
+        conn_traversal = conn_df[[group_pre, group_post, 'weight', 'traversal_probability']]
+        weighted_sum = conn_traversal.groupby([group_pre, group_post]).apply(
             lambda g: (g['weight'] * g['traversal_probability']).sum() / g['weight'].sum() if g['weight'].sum() > 0 else 0.0
         ).reset_index(name='traversal_probability')
-        conn_type = conn_type.merge(weighted_sum, how='left', on=['type_pre', 'type_post'])
+        conn_type = conn_type.merge(weighted_sum, how='left', on=[group_pre, group_post])
         conn_type['block_probability'] = 1 - conn_type['traversal_probability']
     
-    conn_type = conn_type.fillna({'connection_ratio': 0.0, 'traversal_probability': 0.0, 'block_probability': 1.0})
-    conn_type = conn_type[['type_pre', 'type_post', 'weight', 'connection_ratio', 'traversal_probability', 'block_probability']]
+    conn_aggregated = conn_type.fillna({'connection_ratio': 0.0, 'traversal_probability': 0.0, 'block_probability': 1.0})
+    conn_aggregated = conn_aggregated[[group_pre, group_post, 'weight', 'connection_ratio', 'traversal_probability', 'block_probability']]
     
-    return conn_df,conn_type
+    # Check if we're using custom groups
+    has_custom_groups = (group_pre == 'custom_group_pre' and group_post == 'custom_group_post')
+    
+    if has_custom_groups:
+        # Compute BOTH type-based and custom group-based aggregations
+        # 1. Custom group aggregation (already computed)
+        conn_group = conn_aggregated.rename(columns={group_pre: 'group_pre', group_post: 'group_post'})
+        
+        # 2. Original type-based aggregation
+        # Calculate from bodyId level for accuracy
+        bodyid_pairs_type = conn_df[['bodyId_pre', 'bodyId_post', 'type_pre', 'type_post', 'weight']].drop_duplicates(subset=['bodyId_pre', 'bodyId_post'])
+        weight_sum_type = bodyid_pairs_type.groupby(['type_pre', 'type_post'])['weight'].sum().reset_index(name='weight')
+        total_incoming_per_type_orig = weight_sum_type.groupby('type_post')['weight'].sum().reset_index(name='total_incoming_weight')
+        
+        # Calculate type-level denominators
+        if target_neurons_df is not None and 'type' in target_neurons_df.columns and 'post' in target_neurons_df.columns:
+            all_post_neurons_type = target_neurons_df[['type', 'post']].copy()
+            all_post_neurons_type = all_post_neurons_type.rename(columns={'type': 'type_post'})
+            all_post_neurons_type = all_post_neurons_type[all_post_neurons_type['type_post'].notnull()]
+            all_post_neurons_type = all_post_neurons_type[all_post_neurons_type['type_post'] != '']
+            all_post_neurons_type = all_post_neurons_type[all_post_neurons_type['type_post'] != 'None']
+            type_post_totals_orig = all_post_neurons_type.groupby('type_post')['post'].sum().reset_index(name='total_post')
+        elif use_local and 'type_post' in conn_df.columns:
+            types_in_conn = conn_df['type_post'].unique().tolist()
+            all_post_neurons_type = ndf_complete[ndf_complete['type'].isin(types_in_conn)][['type', 'post']].copy()
+            all_post_neurons_type = all_post_neurons_type.rename(columns={'type': 'type_post'})
+            all_post_neurons_type = all_post_neurons_type[all_post_neurons_type['type_post'].notnull()]
+            all_post_neurons_type = all_post_neurons_type[all_post_neurons_type['type_post'] != '']
+            all_post_neurons_type = all_post_neurons_type[all_post_neurons_type['type_post'] != 'None']
+            type_post_totals_orig = all_post_neurons_type.groupby('type_post')['post'].sum().reset_index(name='total_post')
+        else:
+            all_post_neurons_type = conn_df[['type_post', 'bodyId_post', 'post']].drop_duplicates(subset=['bodyId_post'])
+            type_post_totals_orig = all_post_neurons_type.groupby('type_post')['post'].sum().reset_index(name='total_post')
+        
+        conn_type = weight_sum_type.merge(type_post_totals_orig, on='type_post', how='left')
+        conn_type['connection_ratio'] = conn_type.apply(
+            lambda row: row['weight'] / row['total_post'] if pd.notnull(row['total_post']) and row['total_post'] > 0 else 0.0,
+            axis=1
+        )
+        
+        # Type-level traversal probability
+        if aggregate_method == 'product':
+            conn_traversal_type = conn_df[['type_pre', 'type_post', 'block_probability']]
+            conn_traversal_type = conn_traversal_type.groupby(['type_pre', 'type_post']).prod().reset_index()
+            conn_type = conn_type.merge(conn_traversal_type, how='left', on=['type_pre', 'type_post'])
+            conn_type['traversal_probability'] = 1 - conn_type['block_probability']
+        else:
+            conn_traversal_type = conn_df[['type_pre', 'type_post', 'weight', 'traversal_probability']]
+            weighted_sum_type = conn_traversal_type.groupby(['type_pre', 'type_post']).apply(
+                lambda g: (g['weight'] * g['traversal_probability']).sum() / g['weight'].sum() if g['weight'].sum() > 0 else 0.0
+            ).reset_index(name='traversal_probability')
+            conn_type = conn_type.merge(weighted_sum_type, how='left', on=['type_pre', 'type_post'])
+            conn_type['block_probability'] = 1 - conn_type['traversal_probability']
+        
+        conn_type = conn_type.fillna({'connection_ratio': 0.0, 'traversal_probability': 0.0, 'block_probability': 1.0})
+        conn_type = conn_type[['type_pre', 'type_post', 'weight', 'connection_ratio', 'traversal_probability', 'block_probability']]
+        
+        return conn_df, conn_type, conn_group
+    else:
+        # No custom groups - return original type aggregation only
+        conn_type = conn_aggregated.rename(columns={group_pre: 'type_pre', group_post: 'type_post'})
+        return conn_df, conn_type, None
     
 def ConcatenateIMG2PDF(folder_path,file_format=['png','jpg'],filename='PDF_sum',include_subfolder=False):
     ''' Concatenate all images in a folder to a single PDF file.'''

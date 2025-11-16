@@ -558,3 +558,28 @@ vp = VisualizePath(
 - [Custom Colors Guide](../CUSTOM_COLORS_GUIDE.md)
 - [Enhanced Edge-List Format](../Enhanced_EdgeList_Format.md)
 - [Layout Persistence](../LAYOUT_PERSISTENCE_FEATURE.md)
+
+## New Feature: Reciprocal Edge Offset & Mode Toggle (Nov 2025)
+
+### Parallel Reciprocal Edges
+- **Reciprocal connections** (A→B and B→A) are now drawn as parallel straight lines with a user-adjustable perpendicular offset.
+- **Offset Slider**: Adjusts the separation between reciprocal edges (0–40px). Keeps arrows visually distinct and prevents overlap.
+- **Arrowhead Placement**: Arrowheads are positioned outside node boundaries for clarity.
+
+### Curved vs. Straight Edge Modes
+- **Mode Toggle Button**: Switch between 'Straight' (parallel lines) and 'Curved' (bezier) edge styles for reciprocal connections.
+    - Located beside the reciprocal offset slider.
+    - Button color: Green for Straight, Orange for Curved.
+- **Slider Disablement**: When in Curved mode, the offset slider is disabled (grayed out) since curved edges do not use offset.
+- **Live Update**: Changing the mode or slider value updates the network instantly.
+
+#### How to Use
+1. **Enable Reciprocal Offset Controls**: Controls appear when reciprocal edge mode is active.
+2. **Adjust Offset**: Use the slider to set the distance between parallel reciprocal edges (only in Straight mode).
+3. **Toggle Mode**: Click the button to switch between Straight and Curved reciprocal edge styles.
+4. **Observe**: Edges update immediately; curved mode uses standard bezier curves with no offset.
+
+#### Technical Notes
+- Offset is computed relative to a canonical direction (lexicographically ordered node IDs) to ensure reciprocal edges are always separated on opposite sides.
+- Curved mode disables all offset and edge-length adjustments for reciprocal edges.
+- Node size changes automatically update arrowhead positions to remain outside node boundaries.

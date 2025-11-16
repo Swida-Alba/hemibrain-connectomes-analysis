@@ -31,4 +31,4 @@ if __name__ == '__main__':
     )
 
     fc.InitializeNeuronInfo()
-    fc.FindPath()
+    fc.FindAllPath()
