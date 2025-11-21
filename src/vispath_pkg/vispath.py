@@ -417,15 +417,62 @@ class VisualizePath:
             self._load_custom_colors()
         
     def _load_data(self):
-        """Load pathway data from file or DataFrame."""
+        """Load pathway data from file or DataFrame. Supports 1. connection matrix input, 2. [source, target, weight, ratio(optional), probability(optional)] 3-column edge list, and 3. path blocks."""
         if isinstance(self.path_file, pd.DataFrame):
-            self.path_df = self.path_file.copy()
-            # Set default output folder for DataFrame input
-            if self.output_folder is None:
-                self.output_folder = './selected_paths'
-                self.base_filename = 'selected_paths'
+            df = self.path_file.copy()
+            edge_list_colsets = [
+                {"source", "target", "weight"},
+                {"from", "to", "weight"},
+                {"pre", "post", "weight"},
+            ]
+            def has_prefixed_cols(cols):
+                # Convert columns to strings to handle numeric column names
+                str_cols = [str(c) for c in cols]
+                has_pre = any(c.endswith('_pre') for c in str_cols)
+                has_post = any(c.endswith('_post') for c in str_cols)
+                has_weight = 'weight' in str_cols
+                return has_pre and has_post and has_weight
+            is_edge_list = any(set(df.columns) == s for s in edge_list_colsets) or has_prefixed_cols(df.columns)
+            # Detect connection matrix: 2D numeric DataFrame, not edge-list
+            is_numeric_matrix = (
+                not is_edge_list and
+                df.ndim == 2 and
+                df.shape[0] > 1 and df.shape[1] > 1 and
+                all(np.issubdtype(dtype, np.number) for dtype in df.dtypes)
+            )
+            if is_numeric_matrix:
+                print("✓ Recognized input format: connection matrix ({}x{} DataFrame)".format(df.shape[0], df.shape[1]))
+                # If index/columns are not all strings, auto-generate node names
+                if not (all(isinstance(x, str) for x in df.index) and all(isinstance(x, str) for x in df.columns)):
+                    n, m = df.shape
+                    row_names = [f"N{i}" for i in range(n)]
+                    col_names = [f"N{j}" for j in range(m)]
+                    df.index = row_names
+                    df.columns = col_names
+                # Convert matrix to edge list
+                edge_list = []
+                for src in df.index:
+                    for tgt in df.columns:
+                        val = df.at[src, tgt]
+                        if pd.notna(val) and val != 0:
+                            edge_list.append({"source": src, "target": tgt, "weight": val})
+                self.path_df = pd.DataFrame(edge_list)
+                if self.output_folder is None:
+                    self.output_folder = './selected_paths'
+                    self.base_filename = 'selected_paths_matrix'
+                else:
+                    self.base_filename = os.path.basename(self.output_folder.rstrip(os.sep))
             else:
-                self.base_filename = os.path.basename(self.output_folder.rstrip(os.sep))
+                if is_edge_list:
+                    print("✓ Recognized input format: edge-list DataFrame (columns: {} )".format(list(df.columns)))
+                else:
+                    print("✓ Recognized input format: generic DataFrame (columns: {} )".format(list(df.columns)))
+                self.path_df = df
+                if self.output_folder is None:
+                    self.output_folder = './selected_paths'
+                    self.base_filename = 'selected_paths'
+                else:
+                    self.base_filename = os.path.basename(self.output_folder.rstrip(os.sep))
         else:
             # Track if file picker was used (affects sheet selection behavior)
             file_picker_used = False
@@ -2137,9 +2184,9 @@ class VisualizePath:
         with open(output_path, 'w', encoding='utf-8') as f:
             f.write(html_content)
         
-        if self.showfig:
-            import webbrowser
-            webbrowser.open('file://' + os.path.abspath(output_path))
+        # if self.showfig:
+        #     import webbrowser
+        #     webbrowser.open('file://' + os.path.abspath(output_path))
         
         print(f"  Sankey diagram saved with {len(node_list)} nodes and {len(weights)} edges")
         print(f"  Output: {output_path}")
@@ -3536,8 +3583,8 @@ class VisualizePath:
                     <label for="reciprocalOffsetSlider" style="margin: 0;">Reciprocal Offset</label>
                     <button id="reciprocalModeToggle" onclick="toggleReciprocalMode()" style="padding: 4px 8px; font-size: 11px; border-radius: 4px; border: 1px solid #ddd; background: #4caf50; color: white; cursor: pointer;">Straight</button>
                 </div>
-                <input type="range" id="reciprocalOffsetSlider" min="0" max="40" step="1" value="14">
-                <span id="reciprocalOffsetValue">14px</span>
+                <input type="range" id="reciprocalOffsetSlider" min="0" max="40" step="1" value="5">
+                <span id="reciprocalOffsetValue">5px</span>
             </div>
             
             <!-- Save/Load -->
@@ -3998,7 +4045,7 @@ class VisualizePath:
         let straightReciprocalEdgesEnabled = {'true' if self.straight_reciprocal_edges else 'false'};
         const highlightColor = '{self.highlight_color}';
         const highlightOpacity = {self.highlight_opacity};
-        const defaultReciprocalOffset = 14;
+        const defaultReciprocalOffset = 5;
         let reciprocalOffset = defaultReciprocalOffset;
 
         // Initialize layout algorithm variable and configuration function
@@ -6614,7 +6661,7 @@ class VisualizePath:
         print("\nNote: Nodes in 'Both' category appear in BOTH rows AND columns")
         print("=" * 80 + "\n")
     
-    def visualize(self):
+    def visualize(self, plot_heatmap=True, plot_Sankey=True, plot_network=True):
         """
         Create all visualizations (Heatmap + Sankey + Network + Data export).
         
@@ -6670,22 +6717,27 @@ class VisualizePath:
         import time
         
         # 1. Create heatmap and show immediately
-        heatmap_path = self.create_heatmap()
-        if self.showfig:
-            import webbrowser
-            webbrowser.open('file://' + os.path.abspath(heatmap_path))
-            time.sleep(0.5)  # Small delay before next visualization
+        if plot_heatmap:
+            heatmap_path = self.create_heatmap()
+            if self.showfig:
+                import webbrowser
+                webbrowser.open('file://' + os.path.abspath(heatmap_path))
+                time.sleep(0.5)  # Small delay before next visualization
         
         # 2. Create sankey and show immediately (already handles showfig internally)
-        sankey_path = self.create_sankey()
-        if self.showfig:
-            time.sleep(0.5)  # Small delay before next visualization
+        if plot_Sankey:
+            sankey_path = self.create_sankey()
+            if self.showfig:
+                import webbrowser
+                webbrowser.open('file://' + os.path.abspath(sankey_path))
+                time.sleep(0.5)  # Small delay before next visualization
         
         # 3. Create network and show immediately
-        network_path = self.create_network()
-        if self.showfig:
-            import webbrowser
-            webbrowser.open('file://' + os.path.abspath(network_path))
+        if plot_network:
+            network_path = self.create_network()
+            if self.showfig:
+                import webbrowser
+                webbrowser.open('file://' + os.path.abspath(network_path))
         
         # Save data
         self.save_data()
@@ -6694,9 +6746,12 @@ class VisualizePath:
         print("✓ Visualization complete!")
         print("=" * 80)
         print(f"\nOutput files in: {self.output_folder}")
-        print(f"  • {self.base_filename}_heatmap.html - Connection matrix")
-        print(f"  • {self.base_filename}_Sankey.html - Flow-based diagram")
-        print(f"  • {self.base_filename}_network.html - Interactive network")
+        if plot_heatmap:
+            print(f"  • {self.base_filename}_heatmap.html - Connection matrix")
+        if plot_Sankey:
+            print(f"  • {self.base_filename}_Sankey.html - Flow-based diagram")
+        if plot_network:
+            print(f"  • {self.base_filename}_network.html - Interactive network")
         print(f"  • {self.base_filename}_data.xlsx - Connection data")
         
         return self.conn_df, self.G_network
