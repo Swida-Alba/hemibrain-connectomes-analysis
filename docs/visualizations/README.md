@@ -2,6 +2,11 @@
 
 Comprehensive guides for all visualization types in the Hemibrain Connectomes Analysis toolkit.
 
+## Recent Updates
+
+- **[VisualizeSkeleton Multi-Dataset Support (Nov 2024)](./VisualizeSkeleton_Updates_Nov2024.md)** - New dataset-specific ROI mesh caching, automatic ROI discovery, and brain transformation confirmation
+- **[VisualizePath Connection Matrix Support (Nov 2024)](./VisualizePath_Updates_Nov2025.md)** - Connection matrix input, individual visualization control, and enhanced format detection
+
 ## Available Visualizations
 
 ### 1. [Heatmap Visualization](./Heatmap_Guide.md)
@@ -102,17 +107,15 @@ Comprehensive guides for all visualization types in the Hemibrain Connectomes An
 
 ### By Data Type
 
-| Data Type | Recommended Visualization |
-|-----------|--------------------------|
-| **Dense connectivity matrix** | Heatmap |
-| **Sparse pathways** | Network or Sankey |
-| **Multi-hop paths** | Sankey (flow) or Network (topology) |
-| **Single neuron morphology** | 3D Skeleton |
-| **Population-level connectivity** | Heatmap or Sankey |
-| **Circuit motifs** | Network |
-| **Layered feedforward** | Sankey |
-
-### By Audience
+| Data Type | Recommended Visualization | Input Format |
+|-----------|--------------------------|-------------|
+| **Dense connectivity matrix** | Heatmap | Connection matrix or edge-list |
+| **Sparse pathways** | Network or Sankey | Edge-list or path-based |
+| **Multi-hop paths** | Sankey (flow) or Network (topology) | Path-based |
+| **Single neuron morphology** | 3D Skeleton | N/A |
+| **Population-level connectivity** | Heatmap or Sankey | Connection matrix |
+| **Circuit motifs** | Network | Edge-list |
+| **Layered feedforward** | Sankey | Path-based |### By Audience
 
 | Audience | Best Choice | Reason |
 |----------|------------|--------|
@@ -147,30 +150,45 @@ Comprehensive guides for all visualization types in the Hemibrain Connectomes An
 ### Typical Workflow Example
 
 ```python
-from vispath import VisualizePath
+from vispath_pkg import VisualizePath
+import pandas as pd
 
-# Load pathway analysis results
+# Example 1: Path-based analysis
 vp = VisualizePath(
     path_file='my_paths.xlsx',
     output_folder='./visualizations',
     showfig=True
 )
-
-# Generates automatically:
+# Generate all visualizations
+vp.visualize()
+# Generates:
 # - network_*.html (interactive network)
 # - sankey_*.html (flow diagram)
-
-# Additionally, for connection matrix:
-from statvis import plot_stat
-
-plot_stat(
-    conn_df=connection_data,
-    output_folder='./visualizations',
-    metric='weight',
-    showfig=True
-)
-# Generates:
 # - heatmap_*.html (connection matrix)
+
+# Example 2: Connection matrix input
+matrix_df = pd.read_csv('connectivity_matrix.csv', index_col=0)
+vp = VisualizePath(matrix_df, showfig=True)
+vp.visualize()
+# Automatically detects matrix format and generates all visualizations
+
+# Example 3: Generate only specific visualizations
+vp = VisualizePath('edge_list.csv')
+vp.visualize(
+    plot_heatmap=True,   # Generate heatmap
+    plot_Sankey=False,   # Skip Sankey
+    plot_network=True    # Generate network
+)
+# Only generates heatmap and network, skips Sankey diagram
+
+# Example 4: Edge-list with flexible column names
+edge_df = pd.DataFrame({
+    'bodyId_pre': [123, 456, 789],
+    'bodyId_post': [456, 789, 123],
+    'weight': [10, 15, 8]
+})
+vp = VisualizePath(edge_df)
+vp.visualize()  # Automatically recognizes edge-list format
 ```
 
 ### Cross-Referencing Visualizations

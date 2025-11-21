@@ -82,18 +82,25 @@ for col in paths.columns:
 ### Basic Usage
 
 ```python
-from navis_related import plot_navis_3d
+import statvis as sv
+from coana import VisualizeSkeleton
+
+# Login to NeuPrint
+sv.LogInHemibrain(token='your_token', dataset='hemibrain:v1.2.1')
 
 # Visualize neurons with 3D skeletons
-plot_navis_3d(
-    bodyIds=[123456789, 987654321],  # List of neuron bodyIds
-    dataset='hemibrain:v1.2.1',
-    token='your_neuprint_token',
-    show_rois=True,                   # Display brain regions
-    show_connectors=True,             # Show synapse locations
-    output_folder='./3d_output',
-    showfig=True
+vs = VisualizeSkeleton(
+    neuron_layers=['KC.*', 'MBON03'],  # Neuron types to visualize
+    brain_mesh='template',              # 'none', 'template', or 'whole'
+    mesh_roi=['MB(R)', 'CA(R)'],       # ROI meshes to display
+    neuron_alpha=0.2,                   # Neuron transparency
+    synapse_size=3,                     # Synapse marker size
+    skeleton_mode='tube',               # 'tube' or 'line'
+    show_fig=True
 )
+
+vs.plot_neurons()
+vs.export_video(fps=30, rotate_plane='xy')
 ```
 
 ### Prerequisites
@@ -101,14 +108,82 @@ plot_navis_3d(
 **Required packages**:
 ```bash
 pip install navis
-pip install navis-flybrains
+pip install flybrains  # For brain templates and transforms
 pip install plotly
+pip install neuprint-python
 ```
 
 **Data requirements**:
 - Valid NeuPrint authentication token ([get yours here](https://neuprint.janelia.org/account))
-- Neuron bodyIds from chosen dataset
+- Neuron bodyIds or types from chosen dataset
 - Internet connection (first time, to fetch skeleton data)
+- **Optional**: ~10GB disk space for whole-brain transforms (one-time download, ~1-2 hours)
+
+### Multi-Dataset Support (NEW)
+
+**Supported Datasets:**
+- **hemibrain:v1.2.1** / **optic-lobe:v1.1**: Adult brain
+- **manc:v1.2.3**: Male VNC (ventral nerve cord)
+- **male-cns:v0.9**: Full CNS (brain + VNC combined)
+
+**Brain Mesh Options:**
+
+```python
+# Option 1: No brain mesh (fastest, clearest for single neurons)
+vs = VisualizeSkeleton(
+    dataset='hemibrain:v1.2.1',
+    neuron_layers=['KC.*'],
+    brain_mesh='none'  # No background mesh
+)
+
+# Option 2: Template mesh (native EM resolution, 0.5-2s load time)
+vs = VisualizeSkeleton(
+    dataset='hemibrain:v1.2.1',
+    neuron_layers=['KC.*'],
+    brain_mesh='template'  # JRCFIB2018F for hemibrain, MANC for manc
+)
+
+# Option 3: Whole brain/VNC mesh (standard resolution, requires download)
+vs = VisualizeSkeleton(
+    dataset='hemibrain:v1.2.1',
+    neuron_layers=['KC.*'],
+    brain_mesh='whole'  # JRC2018F whole brain, ~500MB one-time download
+)
+```
+
+**Dataset-Specific Templates:**
+
+| Dataset | `brain_mesh='template'` | `brain_mesh='whole'` | Transform Required |
+|---------|------------------------|---------------------|-------------------|
+| **hemibrain:v1.2.1** | JRCFIB2018F (EM) | JRC2018F (confocal) | ✅ Yes (~10GB) |
+| **optic-lobe:v1.1** | JRCFIB2018F (EM) | JRC2018F (confocal) | ✅ Yes (~10GB) |
+| **manc:v1.2.3** | MANC (native VNC) | — | ❌ No |
+| **male-cns:v0.9** | JRCFIB2022M (native) | — | ❌ No |
+
+**Transform Storage:**
+
+Transforms for `brain_mesh='whole'` are stored in `~/flybrain-data` (managed by flybrains). First use will prompt:
+
+```
+⚠ Brain transforms not found for hemibrain:v1.2.1
+  Target template: JRC2018F (whole brain)
+  Transform size: ~10GB total (8 files, one-time download)
+  Download time: ~1-2 hours
+  Storage location: ~/flybrain-data
+
+Download transforms? [y/N]:
+```
+
+**Important:** Only **JRC2018F_JRCFIB2018F.h5 (~1.3 GB)** is needed for hemibrain/optic-lobe whole-brain visualization. However, the flybrains package downloads ALL JRC transforms (8 files, ~10GB total) as a bundle - selective download is not supported.
+
+**Actual transform path used:**
+```
+JRCFIB2018Fraw → JRCFIB2018F → JRCFIB2018Fum → JRC2018F
+```
+
+The other 7 files (~8.7GB) enable cross-dataset registration and support for other brain templates (FAFB, JFRC2013, etc.).
+
+Type `y` to download. Transforms persist and are shared across all NeuPrint projects.
 
 ## Key Features
 

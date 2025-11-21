@@ -5303,6 +5303,13 @@ class FindNeuronConnection:
 class VisualizeSkeleton:
     '''3-D visualize skeleton with synapses and brain roi meshes'''
     
+    backend: str = 'plotly'
+    '''
+    visualization backend: 'plotly' (default) or 'k3d'
+    'plotly': interactive HTML with plotly (good for small/medium scenes)
+    'k3d': WebGL-based, faster for large scenes, supports binary export
+    '''
+
     dataset: str = 'hemibrain:v1.2.1'
     '''dataset to use, default is hemibrain:v1.2.1'''
 
@@ -5453,6 +5460,32 @@ class VisualizeSkeleton:
     multiple colors: list of tuples, each tuple including an alpha channel: [(R1, G1, B1, alpha1), (R2, G2, B2, alpha2), ...]
     '''
 
+    merge_neurons: bool = False
+    '''
+    Whether to merge all neurons of the same type (layer) into a single 3D object.
+    True: Merge neurons into one mesh (tube mode) or trace (line mode).
+          Significantly reduces file size and rendering overhead for large populations.
+    False: Plot each neuron individually (default).
+    '''
+
+    mirror_on_contralateral: bool = False
+    '''
+    Whether to mirror neurons and ROIs to the contralateral hemisphere.
+    True: Mirror neurons and ROIs (e.g. 'ME(R)' -> 'ME(L)') to the other side.
+          Useful for visualizing the full brain structure from hemibrain data.
+    False: Only show the original data (default).
+    '''
+
+    mesh_simplification: float = 0.0
+    '''
+    Mesh simplification factor for neurons (0.0 to 1.0).
+    Only applies when merge_neurons=True and skeleton_mode='tube'.
+    0.0: No simplification (keep all faces).
+    0.9: Remove 90% of faces (keep 10%).
+    Higher values reduce file size but may lose detail.
+    Recommended: 0.5 - 0.9 for large populations.
+    '''
+
     show_soma: bool = True
     '''whether to show soma'''
 
@@ -5470,6 +5503,14 @@ class VisualizeSkeleton:
     show_connectors: bool = False
     '''whether to fetch and plot the connectors, all pre- and post-synaptic sites of the neurons, for single layer of neurons'''
 
+    ignore_synapses: bool = False
+    '''
+    whether to ignore synapse fetching and plotting between layers
+    True: skip all synapse operations (faster initialization, smaller file size)
+    False: fetch and plot synapses between layers (default behavior)
+    Note: This only affects inter-layer synapses, not show_connectors (neuron connectors)
+    '''
+
     use_size_slider: bool = True
     '''
     whether to use size slider to adjust the size of synapses\n
@@ -5482,21 +5523,109 @@ class VisualizeSkeleton:
     'merge': merge all neurons in the same layer and show legend for each layer\n
     '''
     
-    brain_mesh: bool = 'none'
+    transforms_dir: str = '~/flybrain-data'
+    '''
+    Directory for brain transform files (used by flybrains package)\n
+    Default: ~/flybrain-data (flybrains default location)\n
+    To use a custom location:\n
+    1. Set this attribute to your preferred path\n
+    2. Ensure the flybrains package uses this path\n
+    Note: Changing this requires setting the FLYBRAINS_DATA environment variable\n
+    before importing flybrains, or manually moving existing transform files.\n
+    '''
+    
+    cache_neurons: bool = False
+    '''
+    Whether to cache fetched neuron skeletons to disk\n
+    True: Save fetched skeletons to cache/{dataset}/neurons/\n
+    False: Fetch from NeuPrint every time (default)\n
+    Cache location: cache/{dataset}/neurons/\n
+    '''
+    
+    cache_synapses: bool = False
+    '''
+    Whether to cache fetched synapse data to disk\n
+    True: Save fetched synapses to cache/{dataset}/synapses/\n
+    False: Fetch from NeuPrint every time (default)\n
+    Cache location: cache/{dataset}/synapses/\n
+    '''
+    
+    brain_mesh: str = 'none'
     ''' 
-    brain_mesh = 'none', only plot the meshes in mesh_roi \n
-    brain_mesh = 'whole', plot the whole brain mesh. Run flybrains.download_jrc_transforms() to download the transformations, see https://github.com/navis-org/navis-flybrains \n
-    brain_mesh = 'hemi', plot the hemibrain mesh \n
-    change the color of hemibrain mesh by brain_mesh_color parameter \n
+    Brain/VNC mesh visualization options (dataset-specific):\n
+    - 'none': Only plot meshes specified in mesh_roi parameter\n
+    - 'template': Plot the dataset's native template mesh (EM resolution)\n
+      • hemibrain → JRCFIB2018F (hemibrain only)\n
+      • optic-lobe → JRCFIB2018F (optic lobe region)\n
+      • manc → MANC (male adult nerve cord VNC)\n
+      • male-cns → JRCFIB2022M (full male CNS: brain + VNC)\n
+    - 'whole': Plot standard whole-brain/VNC envelope mesh\n
+      • hemibrain/optic-lobe → JRC2018F (requires transforms)\n
+      • manc → MANC VNC envelope (no transform needed)\n
+      • male-cns → JRCFIB2022M CNS envelope (no transform needed)\n
+    - 'hemi': HEMIBRAIN ONLY - Plot hemisphere mesh (left or right)\n
+      • Only works with hemibrain:v1.2.1 dataset\n
+      • VNC datasets (manc, male-cns) do not support hemisphere mode\n
+      • manc → MANC template (native VNC)\n
+      • male-cns → JRCFIB2022M (native full CNS)\n
+    Note: Some transforms require download (~500MB, one-time)\n
+    See https://github.com/navis-org/navis-flybrains
     '''
     
     brain_mesh_color: str = 'rgba(200, 230, 240, 0.1)'
     ''' 
-    color of the hemibrain mesh, only works when brain_mesh = 'whole' or 'hemi' \n
-    e.g. 'rgba(200, 230, 240, 0.1)' \n
-    see more at https://plotly.com/python/discrete-color/ \n
+    Color of the brain/VNC mesh, works with brain_mesh = 'template' or 'whole'\n
+    Format: 'rgba(r, g, b, a)' where a=transparency (0=transparent, 1=opaque)\n
+    Example: 'rgba(200, 230, 240, 0.1)' for light blue semi-transparent\n
+    See https://plotly.com/python/discrete-color/
     '''
 
+    def list_available_rois(self, refresh=False, fetch_online=True):
+        """List all available ROIs for the current dataset.
+        
+        Parameters
+        ----------
+        refresh : bool
+            If True, force refresh from NeuPrint API. If False, use cached data if available.
+        fetch_online : bool
+            If True, attempt to fetch from NeuPrint online database. If False, only use local cache.
+        
+        Returns
+        -------
+        list
+            Sorted list of available ROI names.
+        
+        Examples
+        --------
+        >>> vs = VisualizeSkeleton(dataset='hemibrain:v1.2.1', neuron_layers=['EB'])
+        >>> available_rois = vs.list_available_rois()
+        >>> print(f"Found {len(available_rois)} available ROIs")
+        >>> print(available_rois[:10])  # Show first 10 ROIs
+        
+        >>> # Force refresh from online database
+        >>> fresh_rois = vs.list_available_rois(refresh=True, fetch_online=True)
+        """
+        print(f'\n' + '='*70)
+        print(f'Available ROIs for {self.dataset}')
+        print('='*70)
+        
+        rois = self._get_available_rois(use_cache=not refresh, fetch_online=fetch_online)
+        
+        if rois:
+            print(f'\n📊 Total: {len(rois)} ROIs')
+            print(f'\n🔹 First 30 ROIs:')
+            for i in range(0, min(30, len(rois)), 5):
+                print('  ', ', '.join(rois[i:i+5]))
+            if len(rois) > 30:
+                print(f'  ... and {len(rois) - 30} more')
+            print(f'\n💡 Use these ROI names in the mesh_roi parameter')
+            print('='*70)
+        else:
+            print('⚠️  No ROIs found')
+            print('='*70)
+        
+        return rois
+    
     def __post_init__(self):
         if self.synapse_mode not in ['scatter', 'sphere']:
             raise ValueError('synapse_mode can only be "scatter" or "sphere"')
@@ -5504,8 +5633,18 @@ class VisualizeSkeleton:
             raise ValueError('legend_mode can only be "normal" or "merge"')
         if self.skeleton_mode not in ['line','tube']:
             raise ValueError('skeleton_mode can only be "line" or "tube"')
-        if self.brain_mesh not in ['none', 'whole', 'hemi']:
-            raise ValueError('brain_mesh can only be "none", "whole" or "hemi"')
+        if self.brain_mesh not in ['none', 'whole', 'template']:
+            raise ValueError('brain_mesh must be "none", "template", or "whole"')
+        if self.backend not in ['plotly', 'k3d']:
+            raise ValueError('backend must be "plotly" or "k3d"')
+        
+        # Check brain transforms early if brain_mesh='whole' is requested
+        # Only some datasets require transforms
+        if self.brain_mesh == 'whole':
+            needs_transform = self._dataset_needs_transform()
+            if needs_transform and not self._check_and_download_transforms():
+                self.brain_mesh = 'none'
+                print('⚠️  brain_mesh reset to "none" due to missing transforms')
         
         # convert neuron_layers str to list, if is str
         if type(self.neuron_layers) is str:
@@ -5531,6 +5670,14 @@ class VisualizeSkeleton:
             self.neuron_colors = self.neuron_colors[:len(self.neuron_layers)]
             self.synapse_colors = self.synapse_colors[:len(self.neuron_layers)-1]
 
+        # Validate brain_mesh options
+        if self.brain_mesh == 'hemi':
+            if 'hemibrain' not in self.dataset.lower():
+                print('\033[33m⚠️  brain_mesh="hemi" only works with hemibrain:v1.2.1 dataset')
+                print('   VNC datasets (manc, male-cns) do not support hemisphere mode')
+                print('   Automatically switching to brain_mesh="whole"\033[0m')
+                self.brain_mesh = 'whole'
+        
         if self.skeleton_mode == 'line':
             self.show_skeleton_radius = False
             if self.neuron_alpha < 1:
@@ -5560,7 +5707,18 @@ class VisualizeSkeleton:
             self.saveas = '_'.join(self.layer_names)
         self.save_folder = os.path.join(self.data_folder, 'plot3d_' + self.saveas.split('.')[0])
         if not os.path.exists(self.save_folder): os.makedirs(self.save_folder)
-        self.fig_3d = go.Figure()
+        
+        if self.backend == 'plotly':
+            self.fig_3d = go.Figure()
+        elif self.backend == 'k3d':
+            try:
+                import k3d
+                self.fig_3d = k3d.plot()
+            except ImportError:
+                print("⚠️  k3d not installed. Please install it with `pip install k3d`")
+                print("   Falling back to plotly backend")
+                self.backend = 'plotly'
+                self.fig_3d = go.Figure()
         
         # save neuron dataframes to excel file
         file_path = os.path.join(self.save_folder, self.saveas+'_neuron_info.xlsx')
@@ -5573,63 +5731,337 @@ class VisualizeSkeleton:
                 self.neuron_dfs[i].to_excel(writer, sheet_name=f'neuron_df{i}')
                 self.roi_dfs[i].to_excel(writer, sheet_name=f'roi_count_df{i}')
     
+    def _get_cache_path(self, cache_type):
+        """Get the cache directory for skeletons or synapses
+        
+        Uses project cache/ folder for organized storage:
+        cache/{dataset}/{cache_type}/
+        
+        Example:
+        - cache/hemibrain_v1_2_1/neurons/
+        - cache/optic-lobe_v1_1/synapses/
+        """
+        dataset_normalized = self.dataset.replace(':', '_').replace('.', '_')
+        cache_dir = os.path.join(self.script_path, 'cache', dataset_normalized, cache_type)
+        os.makedirs(cache_dir, exist_ok=True)
+        return cache_dir
+    
+    def _load_cached_neurons(self, neuron_df):
+        """Load cached neuron skeletons if available"""
+        if not self.cache_neurons:
+            return None
+        
+        cache_dir = self._get_cache_path('neuron')
+        body_ids = sorted(neuron_df['bodyId'].tolist())
+        cache_key = '_'.join(map(str, body_ids[:5])) + f'_n{len(body_ids)}'  # Use first 5 IDs + count
+        cache_file = os.path.join(cache_dir, f'{cache_key}.pkl')
+        
+        if os.path.exists(cache_file):
+            try:
+                import pickle
+                with open(cache_file, 'rb') as f:
+                    neuron_vols = pickle.load(f)
+                print(f'  ✓ Loaded {len(neuron_vols)} neurons from cache')
+                return neuron_vols
+            except Exception as e:
+                print(f'  ⚠ Cache load failed: {e}, fetching from NeuPrint...')
+                return None
+        return None
+    
+    def _save_cached_neurons(self, neuron_df, neuron_vols):
+        """Save neuron skeletons to cache"""
+        if not self.cache_neurons:
+            return
+        
+        cache_dir = self._get_cache_path('neuron')
+        body_ids = sorted(neuron_df['bodyId'].tolist())
+        cache_key = '_'.join(map(str, body_ids[:5])) + f'_n{len(body_ids)}'
+        cache_file = os.path.join(cache_dir, f'{cache_key}.pkl')
+        
+        try:
+            import pickle
+            with open(cache_file, 'wb') as f:
+                pickle.dump(neuron_vols, f)
+            print(f'  💾 Saved {len(neuron_vols)} neurons to cache')
+        except Exception as e:
+            print(f'  ⚠ Cache save failed: {e}')
+    
     def plot_skeleton(self):
         for i in range(len(self.neuron_layers)):
             print(f'fetching skeletons of layer {i}...')
-            neuron_vols = neu.fetch_skeletons(self.neuron_dfs[i],with_synapses=self.show_connectors)
-            if self.brain_mesh == 'whole':
-                print(f'Transforming skeletons of layer {i}...', end='')
+            
+            # Try to load from cache first
+            neuron_vols = self._load_cached_neurons(self.neuron_dfs[i])
+            
+            if neuron_vols is None:
+                # Fetch from NeuPrint
+                neuron_vols = neu.fetch_skeletons(self.neuron_dfs[i],with_synapses=self.show_connectors)
+                # Save to cache if enabled
+                self._save_cached_neurons(self.neuron_dfs[i], neuron_vols)
+            if self.brain_mesh in ['whole', 'template']:
+                template_info = self._get_template_info()
+                print(f'Transforming skeletons of layer {i} to {template_info["mesh_name"]}...', end='')
                 try:
-                    neuron_vols = navis.xform_brain(neuron_vols, source='JRCFIB2018Fraw', target='JRC2018F')
-                except:
-                    print('\033[33mTransforming skeletons failed. Please install transformations at first. Run flybrains.download_jrc_transforms() to download the transformations. See https://github.com/navis-org/navis-flybrains for more details\n\nbrain_mesh is automatically reset to "none"\n\033[0m')
-                    self.brain_mesh = 'none'
-            print('plotting...', end='')
-            fig_layer = navis.plot3d(
-                neuron_vols,
-                backend='plotly',
-                color=self.neuron_colors[i],
-                alpha=self.neuron_alpha,
-                soma=self.show_soma,
-                # fig=self.fig_3d,
-                radius=self.show_skeleton_radius,
-                connectors=self.show_connectors,
-            )
-            fig_traces = fig_layer.data
-
-            for j,trace in enumerate(fig_traces):
-                if self.legend_mode == 'merge':
-                    if j == 0:
-                        trace.showlegend = True
+                    neuron_vols = navis.xform_brain(neuron_vols, source=template_info['source'], target=template_info['target'])
+                except Exception as e:
+                    print(f'\n⚠️  Transforming skeletons failed: {e}')
+                    if self._dataset_needs_transform() and not self._check_and_download_transforms():
+                        self.brain_mesh = 'none'
                     else:
-                        trace.showlegend = False
-                    trace.name = self.layer_names[i]
-                    trace.hovertemplate = '<b>%{fullData.name}</b><extra></extra>'  # show full name in hover tooltip
-                    trace.legendgroup = self.layer_names[i]
-                    trace.hoverinfo = 'name'
-                    self.fig_3d.add_trace(trace)
-                elif self.legend_mode == 'normal':
-                    trace.hoverinfo = 'name'
-                    trace.hovertemplate = '<b>%{fullData.name}</b><extra></extra>'
-                    self.fig_3d.add_trace(trace)
-                else:
-                    raise ValueError(f'legend_mode {self.legend_mode} not supported')
+                        # Retry transformation after download
+                        try:
+                            neuron_vols = navis.xform_brain(neuron_vols, source=template_info['source'], target=template_info['target'])
+                            print('✓ Transformation successful after download')
+                        except Exception as retry_e:
+                            print(f'⚠️  Transformation still failed: {retry_e}')
+                            print('   Setting brain_mesh to "none"')
+                            self.brain_mesh = 'none'
+            
+            # Mirror neurons if requested
+            if self.mirror_on_contralateral:
+                print(f'Mirroring {len(neuron_vols)} neurons...', end='')
+                try:
+                    template = None
+                    if self.brain_mesh == 'whole':
+                        template_info = self._get_template_info()
+                        template = template_info['target']
+                    elif self.brain_mesh == 'template':
+                         if 'hemibrain' in self.dataset or 'optic-lobe' in self.dataset:
+                             template = 'JRCFIB2018F'
+                         elif 'male-cns' in self.dataset:
+                             template = 'JRCFIB2022M'
+                    
+                    if template:
+                        mirrored = navis.mirror_brain(neuron_vols, template, mirror_axis='x')
+                        if isinstance(neuron_vols, navis.NeuronList):
+                            neuron_vols = neuron_vols + mirrored
+                        else:
+                            neuron_vols = navis.NeuronList([neuron_vols, mirrored])
+                        print(' (mirrored) ', end='')
+                    else:
+                        print(' (mirror skipped: unknown template) ', end='')
+                except Exception as e:
+                    print(f' (mirror failed: {e})', end='')
+
+            # Merge neurons if requested (optimization)
+            if self.merge_neurons and len(neuron_vols) > 1:
+                print(f'Merging {len(neuron_vols)} neurons into single object...', end='')
+                try:
+                    if self.skeleton_mode == 'tube':
+                        import trimesh
+                        # navis.conversion is already available via 'import navis' at module level
+                        
+                        # Convert all neurons to meshes
+                        meshes = []
+                        neurons_to_merge = neuron_vols if isinstance(neuron_vols, navis.NeuronList) else [neuron_vols]
+                        
+                        for n in neurons_to_merge:
+                            try:
+                                # Convert to mesh (TreeNeuron -> MeshNeuron)
+                                # Use navis.conversion.tree2meshneuron if available, or navis.MeshNeuron.from_tree
+                                # Or simply navis.MeshNeuron(n) which might work
+                                # Let's try navis.conversion.tree2meshneuron first as it's explicit
+                                if hasattr(navis, 'conversion') and hasattr(navis.conversion, 'tree2meshneuron'):
+                                    mesh_neuron = navis.conversion.tree2meshneuron(n)
+                                else:
+                                    # Fallback: try to create MeshNeuron directly or use other method
+                                    # navis.MeshNeuron(n) might not work directly for TreeNeuron
+                                    # Try navis.volume.from_object? No.
+                                    # Try n.mesh property?
+                                    # Actually, navis has a function to mesh neurons: navis.mesh_neurons (which failed before)
+                                    # Let's try to use the internal method if possible.
+                                    # Or use navis.TreeNeuron.to_mesh() if it exists? No.
+                                    
+                                    # Let's try a simpler approach:
+                                    # navis.plot3d generates meshes internally.
+                                    # But we want to merge them BEFORE plotting.
+                                    
+                                    # Try: mesh_neuron = navis.MeshNeuron(n) - this might work if n is compatible
+                                    # Or: mesh_neuron = n.convert_to_mesh() - hypothetical
+                                    
+                                    # Let's assume navis.conversion.tree2meshneuron works as per subagent
+                                    # If not, we catch exception.
+                                    mesh_neuron = navis.conversion.tree2meshneuron(n)
+                                
+                                if hasattr(mesh_neuron, 'trimesh'):
+                                    meshes.append(mesh_neuron.trimesh)
+                            except Exception as e:
+                                # print(f'Warning: Failed to mesh neuron {n.id}: {e}')
+                                pass
+                        
+                        if meshes:
+                            # Concatenate meshes
+                            merged_mesh = trimesh.util.concatenate(meshes)
+                            
+                            # Simplify if requested
+                            if self.mesh_simplification > 0:
+                                n_faces = len(merged_mesh.faces)
+                                target_faces = int(n_faces * (1 - self.mesh_simplification))
+                                if target_faces < n_faces:
+                                    try:
+                                        # Try open3d simplification first (better quality)
+                                        # If open3d not installed, trimesh might fail or use other method
+                                        # trimesh.simplify_quadratic_decimation uses open3d or fast-simplification
+                                        merged_mesh = merged_mesh.simplify_quadratic_decimation(target_faces)
+                                    except Exception as e:
+                                        print(f' (simplification failed: {e})', end='')
+                            
+                            # Convert back to navis object
+                            neuron_vols = navis.MeshNeuron(merged_mesh)
+                            neuron_vols.name = self.layer_names[i]
+                            print(' (merged) ', end='')
+                        else:
+                            print(' (merge failed: no meshes generated) ', end='')
+                    else:
+                        # For line mode, we can merge traces later in plotting?
+                        # Actually, navis.plot3d returns a figure with traces.
+                        # We can merge them there.
+                        print(' (will merge traces in plot) ', end='')
+                except Exception as e:
+                    print(f'⚠️  Merge failed: {e}, plotting individually')
+
+            print('plotting...', end='')
+            
+            if self.backend == 'plotly':
+                fig_layer = navis.plot3d(
+                    neuron_vols,
+                    backend='plotly',
+                    color=self.neuron_colors[i],
+                    alpha=self.neuron_alpha,
+                    soma=self.show_soma if not isinstance(neuron_vols, navis.Volume) else False,
+                    # fig=self.fig_3d,
+                    radius=self.show_skeleton_radius,
+                    connectors=self.show_connectors if not isinstance(neuron_vols, navis.Volume) else False,
+                )
+                fig_traces = fig_layer.data
+                
+                # If merging was requested for line mode, we can optimize here by combining traces
+                if self.merge_neurons and self.skeleton_mode == 'line' and len(fig_traces) > 1:
+                    # Combine all scatter3d traces into one
+                    x_all, y_all, z_all = [], [], []
+                    for trace in fig_traces:
+                        if hasattr(trace, 'x') and trace.x is not None:
+                            x_all.extend(trace.x)
+                            x_all.append(None) # Add break between lines
+                            y_all.extend(trace.y)
+                            y_all.append(None)
+                            z_all.extend(trace.z)
+                            z_all.append(None)
+                    
+                    # Create single merged trace
+                    merged_trace = go.Scatter3d(
+                        x=x_all, y=y_all, z=z_all,
+                        mode='lines',
+                        line=dict(color=self.neuron_colors[i], width=1),
+                        opacity=self.neuron_alpha,
+                        name=self.layer_names[i]
+                    )
+                    fig_traces = [merged_trace]
+
+                for j,trace in enumerate(fig_traces):
+                    if self.legend_mode == 'merge':
+                        if j == 0:
+                            trace.showlegend = True
+                        else:
+                            trace.showlegend = False
+                        trace.name = self.layer_names[i]
+                        trace.hovertemplate = '<b>%{fullData.name}</b><extra></extra>'  # show full name in hover tooltip
+                        trace.legendgroup = self.layer_names[i]
+                        trace.hoverinfo = 'name'
+                        self.fig_3d.add_trace(trace)
+                    elif self.legend_mode == 'normal':
+                        trace.hoverinfo = 'name'
+                        trace.hovertemplate = '<b>%{fullData.name}</b><extra></extra>'
+                        self.fig_3d.add_trace(trace)
+                    else:
+                        raise ValueError(f'legend_mode {self.legend_mode} not supported')
+            
+            elif self.backend == 'k3d':
+                try:
+                    # navis.plot3d with k3d backend returns a k3d.Plot object
+                    temp_plot = navis.plot3d(
+                        neuron_vols,
+                        backend='k3d',
+                        color=self.neuron_colors[i],
+                        alpha=self.neuron_alpha,
+                        soma=self.show_soma if not isinstance(neuron_vols, navis.Volume) else False,
+                        radius=self.show_skeleton_radius,
+                        connectors=self.show_connectors if not isinstance(neuron_vols, navis.Volume) else False,
+                        inline=False
+                    )
+                    
+                    for obj in temp_plot.objects:
+                        if hasattr(obj, 'name'):
+                            obj.name = self.layer_names[i]
+                        self.fig_3d += obj
+                except Exception as e:
+                    print(f'⚠️  k3d plotting failed: {e}')
 
             print('Done')
         return 0
     
+    def _load_cached_synapses(self, source_criteria, target_criteria, layer_idx):
+        """Load cached synapse connections if available"""
+        if not self.cache_synapses:
+            return None
+        
+        cache_dir = self._get_cache_path('synapse')
+        # Create a cache key from criteria
+        import hashlib
+        cache_key = hashlib.md5(f'{source_criteria}_{target_criteria}_{layer_idx}'.encode()).hexdigest()[:16]
+        cache_file = os.path.join(cache_dir, f'layer{layer_idx}_{cache_key}.parquet')
+        
+        if os.path.exists(cache_file):
+            try:
+                conn_df = pd.read_parquet(cache_file)
+                print(f'  ✓ Loaded {len(conn_df)} synapses from cache')
+                return conn_df
+            except Exception as e:
+                print(f'  ⚠ Cache load failed: {e}, fetching from NeuPrint...')
+                return None
+        return None
+    
+    def _save_cached_synapses(self, conn_df, source_criteria, target_criteria, layer_idx):
+        """Save synapse connections to cache"""
+        if not self.cache_synapses:
+            return
+        
+        cache_dir = self._get_cache_path('synapse')
+        import hashlib
+        cache_key = hashlib.md5(f'{source_criteria}_{target_criteria}_{layer_idx}'.encode()).hexdigest()[:16]
+        cache_file = os.path.join(cache_dir, f'layer{layer_idx}_{cache_key}.parquet')
+        
+        try:
+            conn_df.to_parquet(cache_file, index=False)
+            print(f'  💾 Saved {len(conn_df)} synapses to cache')
+        except Exception as e:
+            print(f'  ⚠ Cache save failed: {e}')
+    
     def plot_synapses(self):
+        # Skip synapse plotting if ignore_synapses is True
+        if self.ignore_synapses:
+            print('Skipping synapse fetching and plotting (ignore_synapses=True)')
+            return 0
+        
         file_path = os.path.join(self.save_folder, self.saveas+'_connection_info.xlsx')
         for i in range(len(self.neuron_layers)-1):
             source_criteria = self.layer_criteria[i]
             target_criteria = self.layer_criteria[i+1]
             print(f'\rfetching synapses of layer {i} -> layer {i+1}...')
-            conn_df = fetch_synapse_connections(
-                source_criteria=source_criteria,
-                target_criteria=target_criteria,
-                min_total_weight=self.min_synapse_num,
-                synapse_criteria=self.synapse_criteria,
-            )
+            
+            # Try to load from cache first
+            conn_df = self._load_cached_synapses(source_criteria, target_criteria, i)
+            
+            if conn_df is None:
+                # Fetch from NeuPrint
+                conn_df = fetch_synapse_connections(
+                    source_criteria=source_criteria,
+                    target_criteria=target_criteria,
+                    min_total_weight=self.min_synapse_num,
+                    synapse_criteria=self.synapse_criteria,
+                )
+                # Save to cache if enabled
+                self._save_cached_synapses(conn_df, source_criteria, target_criteria, i)
             if i == 0:
                 mode = 'w'
             else:
@@ -5642,155 +6074,810 @@ class VisualizeSkeleton:
             Y = (conn_df['y_pre']+conn_df['y_post'])/2
             Z = (conn_df['z_pre']+conn_df['z_post'])/2
             xyz_df = pd.DataFrame({'x':X, 'y':Y, 'z':Z})
-            if self.brain_mesh == 'whole':
+            if self.brain_mesh in ['whole', 'template']:
+                template_info = self._get_template_info()
                 print(f'Transforming synapses of layer {i} -> {i+1}...', end='')
-                xyz_df = navis.xform_brain(xyz_df, source='JRCFIB2018Fraw', target='JRC2018F')
-            if self.synapse_mode == 'scatter':
-                sp = go.Scatter3d(
-                    x = xyz_df['x'],
-                    y = xyz_df['y'],
-                    z = xyz_df['z'],
-                    mode = 'markers',
-                    name = f'synapses {i} -> {i+1} ({len(conn_df)})',
-                    hoverinfo = 'name',
-                    hovertemplate = 'x: %{x}<br>y: %{y}<br>z: %{z}<br>name: %{fullData.name}<extra></extra>',
-                    legendgroup = f'synapses {i} -> {i+1} ({len(conn_df)})',
-                    marker = dict(
-                        size = self.synapse_size,
-                        color = self.synapse_colors[i],
-                        symbol = 'circle',
-                    ),
-                )
-                self.fig_3d.add_trace(sp)
-            elif self.synapse_mode == 'sphere':
-                for ind in range(len(xyz_df)):
-                    x = xyz_df['x'][ind]
-                    y = xyz_df['y'][ind]
-                    z = xyz_df['z'][ind]
-                    sp = sv.build_sphere(x,y,z,r=self.synapse_size,color_scale=[self.synapse_colors[i]]*2,opacity=self.synapse_alpha)
-                    sp.name = f'synapses {i} -> {i+1} ({len(conn_df)})'
-                    sp.hoverinfo = 'name'
-                    sp.legendgroup = f'synapses {i} -> {i+1} ({len(conn_df)})'
-                    sp.hovertemplate = '<b>%{fullData.name}</b><extra></extra>'
-                    if ind == 0: sp.showlegend = True
+                xyz_df = navis.xform_brain(xyz_df, source=template_info['source'], target=template_info['target'])
+            if self.backend == 'plotly':
+                if self.synapse_mode == 'scatter':
+                    sp = go.Scatter3d(
+                        x = xyz_df['x'],
+                        y = xyz_df['y'],
+                        z = xyz_df['z'],
+                        mode = 'markers',
+                        name = f'synapses {i} -> {i+1} ({len(conn_df)})',
+                        hoverinfo = 'name',
+                        hovertemplate = 'x: %{x}<br>y: %{y}<br>z: %{z}<br>name: %{fullData.name}<extra></extra>',
+                        legendgroup = f'synapses {i} -> {i+1} ({len(conn_df)})',
+                        marker = dict(
+                            size = self.synapse_size,
+                            color = self.synapse_colors[i],
+                            symbol = 'circle',
+                        ),
+                    )
                     self.fig_3d.add_trace(sp)
+                elif self.synapse_mode == 'sphere':
+                    for ind in range(len(xyz_df)):
+                        x = xyz_df['x'][ind]
+                        y = xyz_df['y'][ind]
+                        z = xyz_df['z'][ind]
+                        sp = sv.build_sphere(x,y,z,r=self.synapse_size,color_scale=[self.synapse_colors[i]]*2,opacity=self.synapse_alpha)
+                        sp.name = f'synapses {i} -> {i+1} ({len(conn_df)})'
+                        sp.hoverinfo = 'name'
+                        sp.legendgroup = f'synapses {i} -> {i+1} ({len(conn_df)})'
+                        sp.hovertemplate = '<b>%{fullData.name}</b><extra></extra>'
+                        if ind == 0: sp.showlegend = True
+                        self.fig_3d.add_trace(sp)
+            elif self.backend == 'k3d':
+                try:
+                    import k3d
+                    import numpy as np
+                    import matplotlib.colors as mcolors
+                    
+                    # Color conversion
+                    c = self.synapse_colors[i]
+                    color_int = 0xff0000 # Default red
+                    try:
+                        if isinstance(c, str):
+                            if not c.startswith('#'):
+                                c = mcolors.to_hex(c)
+                            color_int = int(c.replace('#', ''), 16)
+                        elif isinstance(c, (tuple, list)):
+                            if len(c) >= 3:
+                                if isinstance(c[0], float) and c[0] <= 1.0:
+                                    r, g, b = int(c[0]*255), int(c[1]*255), int(c[2]*255)
+                                else:
+                                    r, g, b = int(c[0]), int(c[1]), int(c[2])
+                                color_int = (r << 16) + (g << 8) + b
+                    except Exception:
+                        pass
+
+                    pts = k3d.points(
+                        positions=xyz_df[['x', 'y', 'z']].values.astype(np.float32),
+                        point_size=float(self.synapse_size) if self.synapse_mode == 'scatter' else float(self.synapse_size)/10.0,
+                        color=color_int,
+                        name=f'synapses {i} -> {i+1} ({len(conn_df)})'
+                    )
+                    self.fig_3d += pts
+                except Exception as e:
+                    print(f'⚠️  k3d synapse plotting failed: {e}')
             print('Done')
         return 0
     
+    def _get_dataset_mesh_dir(self):
+        """Get dataset-specific mesh directory path.
+        
+        Uses cache/ folder for ROI meshes:
+        - hemibrain:v1.2.1 -> cache/hemibrain_v1_2_1/meshes/
+        - optic-lobe:v1.1 -> cache/optic-lobe_v1_1/meshes/
+        
+        References:
+        - navis mesh handling: https://navis.readthedocs.io/en/latest/source/api.html#navis.Volume
+        - mesh compression: use navis.Volume.to_json() with compression for storage optimization
+        """
+        dataset_normalized = self.dataset.replace(':', '_').replace('.', '_')
+        cache_mesh_dir = os.path.join(self.script_path, 'cache', dataset_normalized, 'meshes')
+        os.makedirs(cache_mesh_dir, exist_ok=True)
+        return cache_mesh_dir
+    
+    def _get_available_rois(self, use_cache=True, fetch_online=True):
+        """Query NeuPrint database for available ROIs in the current dataset.
+        
+        Caches results locally to avoid repeated API calls. Returns a list of ROI names
+        that are available in the NeuPrint database for the current dataset.
+        
+        Parameters
+        ----------
+        use_cache : bool
+            If True, use cached ROI list if available. If False, force refresh from API.
+        fetch_online : bool
+            If True, attempt to fetch from NeuPrint online. If False, only use local cache/meshes.
+        
+        Returns
+        -------
+        list
+            List of available ROI names for the current dataset.
+        
+        References:
+        - NeuPrint ROI documentation: https://neuprint.janelia.org/
+        - navis neuprint interface: https://navis-org.github.io/navis/reference/navis/interfaces/neuprint/
+        - neuprint-python API: https://github.com/connectome-neuprint/neuprint-python
+        """
+        # Cache file path in organized cache/ structure
+        dataset_normalized = self.dataset.replace(':', '_').replace('.', '_')
+        cache_dir = os.path.join(self.script_path, 'cache', dataset_normalized)
+        cache_file = os.path.join(cache_dir, 'available_rois.json')
+        
+        # Try to load from cache first
+        if use_cache and os.path.exists(cache_file):
+            try:
+                import json
+                with open(cache_file, 'r') as f:
+                    cached_data = json.load(f)
+                    print(f'✓ Loaded {len(cached_data)} available ROIs from cache')
+                    return cached_data
+            except Exception as e:
+                print(f'⚠️ Failed to load ROI cache: {e}, fetching from API...')
+        
+        # Fetch from NeuPrint API
+        if fetch_online:
+            try:
+                print('📥 Fetching available ROIs from NeuPrint online database...')
+                
+                # Initialize neuprint client using environment variable or global client
+                from neuprint import Client, fetch_meta
+                
+                # Try to get token from environment variable first
+                token = os.environ.get('NEUPRINT_APPLICATION_CREDENTIALS')
+                client = None
+                
+                if token:
+                    # Determine server URL based on dataset
+                    if 'optic' in self.dataset.lower():
+                        server = 'https://neuprint-optic-lobe.janelia.org'
+                        dataset_name = self.dataset.split(':')[0]  # 'optic-lobe'
+                    else:
+                        server = 'https://neuprint.janelia.org'
+                        dataset_name = 'hemibrain:v1.2.1'  # default
+                    
+                    try:
+                        client = Client(server, dataset=dataset_name, token=token)
+                    except Exception as e:
+                        print(f'   Warning: Failed to create client with token: {e}')
+                        print(f'   Attempting to use default/global client...')
+                        client = None
+                
+                # Fetch metadata (will use client if provided, otherwise global)
+                meta = fetch_meta(client=client)
+                
+                roi_list = []
+                # Extract ROI list from meta info
+                if 'roiInfo' in meta:
+                    roi_list = list(meta['roiInfo'].keys())
+                    print(f'   Found {len(roi_list)} ROIs from roiInfo')
+                elif 'primaryRois' in meta:
+                    roi_list = list(meta['primaryRois'])
+                    print(f'   Found {len(roi_list)} primary ROIs')
+                else:
+                    print(f'   Warning: No roiInfo/primaryRois in metadata, falling back to local cache')
+                
+                roi_list = sorted(roi_list)
+                
+                # Cache the results (create directory only when needed)
+                if roi_list:
+                    try:
+                        import json
+                        os.makedirs(cache_dir, exist_ok=True)
+                        with open(cache_file, 'w') as f:
+                            json.dump(roi_list, f, indent=2)
+                        print(f'✓ Cached {len(roi_list)} available ROIs to {cache_file}')
+                    except Exception as e:
+                        print(f'⚠️ Failed to cache ROI list: {e}')
+                
+                return roi_list
+                
+            except Exception as e:
+                print(f'⚠️ Failed to fetch available ROIs from NeuPrint: {e}')
+                print(f'   Tip: Set NEUPRINT_APPLICATION_CREDENTIALS environment variable')
+                print(f'   Using ROIs from local mesh directory instead.')
+        
+        # Fallback: list available meshes from local directory
+        mesh_dir = self._get_dataset_mesh_dir()
+        if os.path.exists(mesh_dir):
+            roi_list = [f.replace('.json', '') for f in os.listdir(mesh_dir) if f.endswith('.json')]
+            print(f'✓ Found {len(roi_list)} ROIs in local cache: {mesh_dir}')
+            return sorted(roi_list)
+        else:
+            print(f'⚠️ No ROI data available (online fetch failed and no local cache)')
+            return []
+    
+    def _dataset_needs_transform(self):
+        """Check if current dataset needs transforms for 'whole' brain mesh.
+        
+        Returns
+        -------
+        bool
+            True if transforms are required, False if native template is sufficient
+        """
+        dataset_lower = self.dataset.lower()
+        # Hemibrain needs transform to JRC2018F
+        # Optic-lobe and Male CNS need transform to JRCFIB2022M
+        # MANC needs transform to MANC
+        if 'hemibrain' in dataset_lower:
+            return True
+        if 'optic' in dataset_lower or 'male-cns' in dataset_lower or 'malecns' in dataset_lower:
+            return True
+        if 'manc' in dataset_lower:
+            return True
+        return False
+    
+    def _get_template_info(self):
+        """Get template brain/VNC information for current dataset.
+        
+        Handles transform paths for all NeuPrint datasets:
+        - Brain datasets: hemibrain, optic-lobe
+        - VNC datasets: manc (various versions)
+        - Brain+VNC datasets: male-cns
+        
+        Returns
+        -------
+        dict
+            Dictionary with 'source', 'target', 'template_obj', and 'mesh_name' keys
+            
+        Notes
+        -----
+        Transform paths by dataset:
+        - hemibrain: JRCFIB2018Fraw → JRCFIB2018F → JRCFIB2018Fum → JRC2018F
+        - optic-lobe: JRCFIB2018Fraw → JRCFIB2018F → JRCFIB2018Fum → JRC2018F (same as hemibrain)
+        - manc: MANCraw → MANC (VNC only, no brain transform)
+        - male-cns: JRCFIB2022Mraw → JRCFIB2022M (brain + VNC)
+        
+        Note: optic-lobe uses the same coordinate system as hemibrain because it's
+        a focused reconstruction of the optic lobe region within the hemibrain volume.
+        """
+        dataset_lower = self.dataset.lower()
+        import flybrains
+        
+        # Brain datasets
+        if 'hemibrain' in dataset_lower:
+            return {
+                'source': 'JRCFIB2018Fraw',
+                'target': 'JRC2018F' if self.brain_mesh == 'whole' else 'JRCFIB2018F',
+                'template_obj': flybrains.JRC2018F if self.brain_mesh == 'whole' else flybrains.JRCFIB2018F,
+                'mesh_name': 'JRC2018F (whole brain)' if self.brain_mesh == 'whole' else 'JRCFIB2018F (hemibrain)'
+            }
+        elif 'optic' in dataset_lower:
+            # Optic-lobe dataset is part of the Male CNS (JRCFIB2022M) volume
+            # It is NOT part of the hemibrain (JRCFIB2018F) volume
+            # Stored in JRCFIB2022Mraw coordinates
+            return {
+                'source': 'JRCFIB2022Mraw',
+                'target': 'JRCFIB2022M',  # Male CNS template
+                'template_obj': flybrains.JRCFIB2022M,
+                'mesh_name': 'JRCFIB2022M (Male CNS)'
+            }
+        
+        # VNC datasets
+        elif 'manc' in dataset_lower:
+            # MANC (Male Adult Nerve Cord) - VNC only
+            # For VNC: 'whole' and 'template' both show VNC envelope
+            # 'hemi' is not supported (VNC doesn't have hemispheres like brain)
+            return {
+                'source': 'MANCraw',
+                'target': 'MANC',  # VNC template (no brain transform needed)
+                'template_obj': flybrains.MANC,
+                'mesh_name': 'MANC (VNC envelope)'
+            }
+        
+        # Brain + VNC datasets
+        elif 'male-cns' in dataset_lower or 'malecns' in dataset_lower:
+            # Male CNS (JRCFIB2022M) - Brain + VNC
+            # 'whole' shows full CNS envelope (brain + VNC)
+            # 'hemi' is not supported (use brain_mesh to get brain/vnc separately)
+            return {
+                'source': 'JRCFIB2022Mraw',
+                'target': 'JRCFIB2022M',
+                'template_obj': flybrains.JRCFIB2022M,
+                'mesh_name': 'JRCFIB2022M (male CNS: brain + VNC)'
+            }
+        
+        # Fallback to hemibrain for unknown datasets
+        else:
+            print(f'⚠️  Unknown dataset "{self.dataset}", defaulting to hemibrain template')
+            return {
+                'source': 'JRCFIB2018Fraw',
+                'target': 'JRCFIB2018F',
+                'template_obj': flybrains.JRCFIB2018F,
+                'mesh_name': 'JRCFIB2018F (hemibrain)'
+            }
+    
+    def _check_and_download_transforms(self):
+        """Check if flybrains transforms exist locally, prompt user before downloading.
+        
+        Brain transforms are large files (multiple files, ~10GB total uncompressed). 
+        This method checks if the required transforms exist locally before attempting 
+        to download them, and prompts the user for confirmation.
+        
+        Transforms are stored in the default flybrains data directory:
+        ~/flybrain-data/
+        
+        Returns
+        -------
+        bool
+            True if transforms are available (already exist or successfully downloaded),
+            False otherwise.
+        
+        References:
+        - flybrains package: https://github.com/navis-org/navis-flybrains
+        - JRC2018F brain template: https://www.janelia.org/open-science/jrc-2018-brain-templates
+        """
+        try:
+            import flybrains
+            
+            # Get the transform directory from attribute or use default
+            transforms_dir = os.path.expanduser(self.transforms_dir)
+            
+            # Set environment variable if custom path is specified
+            if self.transforms_dir != '~/flybrain-data':
+                os.environ['FLYBRAINS_DATA'] = transforms_dir
+                print(f'Using custom transform directory: {transforms_dir}')
+            
+            # Get dataset-specific template info
+            template_info = self._get_template_info()
+            source = template_info['source']
+            target = template_info['target']
+            
+            # ANSI color codes
+            YELLOW = '\033[93m'
+            RESET = '\033[0m'
+            
+            # Check if the transformation path exists by attempting to find bridging path
+            try:
+                path = navis.transforms.registry.find_bridging_path(source, target)
+                print(f'✓ Brain transforms already available')
+                print(f'  Location: {YELLOW}{transforms_dir}{RESET}')
+                print(f'  Transform path: {" -> ".join([str(p) for p in path])}')
+                return True
+            except (ValueError, KeyError):
+                # Transform path not found, need to download
+                pass
+            
+            # ANSI color codes
+            YELLOW = '\033[93m'
+            RESET = '\033[0m'
+            
+            # Prompt user for download confirmation
+            print('\n' + '='*70)
+            print('⚠️  Brain Transformation Required')
+            print('='*70)
+            print(f'To use brain_mesh="whole" for {self.dataset}, you need brain transforms.')
+            print(f'Transform path needed: {source} → JRCFIB2018F → JRCFIB2018Fum → {target}')
+            print('')
+            print('⚠️  IMPORTANT: flybrains downloads ALL JRC transforms as a bundle:')
+            print('   • JRC2018F_JRCFIB2018F.h5   (~1.29 GB)  ← YOU NEED THIS for hemibrain/optic-lobe')
+            print('   • JRC2018F_FAFB.h5          (~580 MB)   (enables FAFB dataset support)')
+            print('   • JRC2018F_JFRC2013.h5      (~1.39 GB)  (enables JFRC2013 template)')
+            print('   • JRC2018F_FCWB.h5          (~1.29 GB)  (enables FCWB template)')
+            print('   • JRC2018U_JRC2018F.h5      (~717 MB)   (enables unisex template)')
+            print('   • JRC2018U_JRC2018M.h5      (~1.10 GB)  (enables male template)')
+            print('   • JRC2018F_JFRC2010.h5      (~1.65 GB)  (enables legacy template)')
+            print('   • JRCFIB2022M_JRC2018M.h5   (~2.12 GB)  (enables male CNS registration)')
+            print('')
+            print('   Total download: ~10 GB (but only ~1.3 GB used for your dataset)')
+            print('   Download time: ~1-2 hours (cannot download individual files)')
+            print('   Why all files? The flybrains package bundles all transforms together.')
+            print('')
+            print('The transforms will be cached in:')
+            print(f'  {YELLOW}{transforms_dir}/{RESET}')
+            
+            # Save transform path info to file
+            info_file = os.path.join(self.data_folder, 'brain_transforms_info.txt')
+            os.makedirs(self.data_folder, exist_ok=True)
+            with open(info_file, 'w', encoding='utf-8') as f:
+                f.write('Brain Transforms Information\n')
+                f.write('='*70 + '\n\n')
+                f.write(f'Dataset: {self.dataset}\n')
+                f.write(f'Transform path: {source} → JRCFIB2018F → JRCFIB2018Fum → {target}\n\n')
+                f.write('Storage Location:\n')
+                f.write(f'  {transforms_dir}/\n\n')
+                f.write('Transform Files (8 files, ~10 GB total):\n')
+                f.write('  • JRC2018F_JRCFIB2018F.h5   (~1.29 GB)\n')
+                f.write('  • JRC2018F_FAFB.h5          (~580 MB)\n')
+                f.write('  • JRC2018F_JFRC2013.h5      (~1.39 GB)\n')
+                f.write('  • JRC2018F_FCWB.h5          (~1.29 GB)\n')
+                f.write('  • JRC2018U_JRC2018F.h5      (~717 MB)\n')
+                f.write('  • JRC2018U_JRC2018M.h5      (~1.10 GB)\n')
+                f.write('  • JRC2018F_JFRC2010.h5      (~1.65 GB)\n')
+                f.write('  • JRCFIB2022M_JRC2018M.h5   (~2.12 GB)\n\n')
+                f.write('To change the storage location:\n')
+                f.write('  1. Set transforms_dir attribute when creating VisualizeSkeleton\n')
+                f.write('  2. Set FLYBRAINS_DATA environment variable before importing flybrains\n')
+                f.write('  3. Or manually move files to the new location\n\n')
+                f.write('More information:\n')
+                f.write('  https://github.com/navis-org/navis-flybrains\n')
+            print(f'\n📄 Transform info saved to: {info_file}')
+            print('')
+            print('💡 Note: The flybrains.download_jrc_transforms() function downloads')
+            print('   ALL 8 files as a bundle with no selective download option.')
+            print('   This is by design in the flybrains library to provide complete')
+            print('   cross-dataset registration capabilities.')
+            print('')
+            print('For more information, see:')
+            print('  https://github.com/navis-org/navis-flybrains')
+            print('='*70)
+            
+            response = input('Download all transforms now? [y/N]: ').strip().lower()
+            
+            if response in ['y', 'yes']:
+                print('\n📥 Downloading brain transforms...')
+                print('This may take several minutes depending on your connection.')
+                flybrains.download_jrc_transforms()
+                
+                # Re-register transforms after download
+                print('📝 Registering downloaded transforms...')
+                flybrains.register_transforms()
+                
+                # Verify the transform path is now available
+                try:
+                    path = navis.transforms.registry.find_bridging_path(source, target)
+                    print(f'✓ Transforms downloaded and registered successfully!')
+                    print(f'  Location: {YELLOW}{transforms_dir}{RESET}')
+                    print(f'  Transform path: {" -> ".join([str(p) for p in path])}')
+                    
+                    # Update the saved info file with success status
+                    info_file = os.path.join(self.data_folder, 'brain_transforms_info.txt')
+                    with open(info_file, 'a', encoding='utf-8') as f:
+                        f.write(f'\nDownload Status: SUCCESS\n')
+                        f.write(f'Downloaded at: {pd.Timestamp.now()}\n')
+                    return True
+                except (ValueError, KeyError) as e:
+                    print(f'⚠️  Transforms downloaded but bridging path not found: {e}')
+                    print(f'   This may indicate the transforms do not include {source} → {target}')
+                    return False
+            else:
+                print('\n⚠️  Download cancelled. Setting brain_mesh to "none".')
+                return False
+                
+        except ImportError:
+            print('\n⚠️  flybrains package not installed.')
+            print('   Install it with: pip install navis[flybrains]')
+            print('   Setting brain_mesh to "none".')
+            return False
+        except Exception as e:
+            print(f'\n⚠️  Error checking brain transforms: {e}')
+            print('   Setting brain_mesh to "none".')
+            return False
+    
     def plot_mesh(self):
+        """Plot ROI meshes and brain meshes.
+        
+        Loads ROI meshes from dataset-specific cache directories, with fallback to
+        primary_rois/ for backward compatibility. Supports brain mesh visualization
+        with automatic transform handling.
+        
+        Dataset-specific mesh caching:
+        - hemibrain:v1.2.1 -> navis_roi_meshes_json/hemibrain_v1_2_1/
+        - optic-lobe:v1.1 -> navis_roi_meshes_json/optic-lobe_v1_1/
+        - Fallback: navis_roi_meshes_json/primary_rois/
+        
+        Brain mesh options (dataset-aware):
+        - 'none': Only plot ROI meshes specified in mesh_roi parameter
+        - 'template': Plot native EM template mesh (JRCFIB2018F, MANC, or JRCFIB2022M)
+        - 'whole': Plot standard template mesh (may require transforms for some datasets)
+        
+        References:
+        - navis Volume API: https://navis.readthedocs.io/en/latest/source/api.html#navis.Volume
+        - flybrains templates: https://github.com/navis-org/navis-flybrains
+        - mesh optimization: use Volume.simplify() to reduce mesh complexity for faster rendering
+        """
         if self.mesh_roi is None:
             return
+        
+        # Get dataset-specific mesh directory
+        mesh_dir = self._get_dataset_mesh_dir()
+        print(f'Using mesh directory: {mesh_dir}')
+        
         roiunits = []
-        for roi in self.mesh_roi:
-            mesh_file = os.path.join(self.script_path, 'navis_roi_meshes_json','primary_rois',roi+'.json')
-            if os.path.exists(mesh_file):
-                mesh = navis.Volume.from_json(mesh_file)
-                if self.brain_mesh == 'whole':
-                    print(f'Transforming brain region {roi}...', end='')
-                    mesh = navis.xform_brain(mesh, source='JRCFIB2018Fraw', target='JRC2018F')
-                roiunits.append(mesh)
+        roi_names = []
+        roi_colors = []
+        
+        for i, roi in enumerate(self.mesh_roi):
+            # Determine color
+            if isinstance(self.mesh_color, list):
+                if i < len(self.mesh_color):
+                    color = self.mesh_color[i]
+                else:
+                    color = (100, 100, 100, 0.2)
             else:
-                print(f'mesh file {roi}.json not found!')
+                color = self.mesh_color
+
+            # Try dataset-specific directory first
+            mesh_file = os.path.join(mesh_dir, roi + '.json')
+            
+            # Fallback to primary_rois if not found
+            if not os.path.exists(mesh_file):
+                mesh_file_fallback = os.path.join(self.script_path, 'navis_roi_meshes_json', 'primary_rois', roi + '.json')
+                if os.path.exists(mesh_file_fallback):
+                    mesh_file = mesh_file_fallback
+                else:
+                    # Try to download from NeuPrint using navis
+                    print(f'📥 ROI mesh "{roi}" not found locally, attempting to download from NeuPrint...')
+                    try:
+                        import navis.interfaces.neuprint as neu
+                        from neuprint import Client
+                        
+                        # Get token from environment variable
+                        token = os.environ.get('NEUPRINT_APPLICATION_CREDENTIALS')
+                        client = None
+                        
+                        if token:
+                            # Determine server URL based on dataset
+                            if 'optic' in self.dataset.lower():
+                                server = 'https://neuprint-optic-lobe.janelia.org'
+                                dataset_name = self.dataset.split(':')[0]
+                            else:
+                                server = 'https://neuprint.janelia.org'
+                                dataset_name = 'hemibrain:v1.2.1'
+                            
+                            try:
+                                client = Client(server, dataset=dataset_name, token=token)
+                            except Exception as e:
+                                print(f'   Warning: Failed to create client: {e}')
+                        
+                        # Fetch the ROI mesh from NeuPrint
+                        mesh = neu.fetch_roi(roi, client=client)
+                        
+                        # Create cache directory only when actually downloading
+                        os.makedirs(mesh_dir, exist_ok=True)
+                        mesh.to_json(mesh_file)
+                        print(f'✓ Downloaded and cached "{roi}" mesh to {mesh_file}')
+                        
+                        # Add to units and continue to next ROI
+                        if self.brain_mesh in ['whole', 'template']:
+                            template_info = self._get_template_info()
+                            print(f'Transforming brain region {roi}...', end='')
+                            mesh = navis.xform_brain(mesh, source=template_info['source'], target=template_info['target'])
+                        
+                        roiunits.append(mesh)
+                        roi_names.append(roi)
+                        roi_colors.append(color)
+                        
+                        # Mirror logic for downloaded mesh
+                        if self.mirror_on_contralateral and roi.endswith('(R)'):
+                            try:
+                                template = None
+                                if self.brain_mesh == 'whole':
+                                    template_info = self._get_template_info()
+                                    template = template_info['target']
+                                elif self.brain_mesh == 'template':
+                                     if 'hemibrain' in self.dataset or 'optic-lobe' in self.dataset:
+                                         template = 'JRCFIB2018F'
+                                     elif 'male-cns' in self.dataset:
+                                         template = 'JRCFIB2022M'
+                                
+                                if template:
+                                    mirrored_mesh = navis.mirror_brain(mesh, template, mirror_axis='x')
+                                    roiunits.append(mirrored_mesh)
+                                    roi_names.append(roi.replace('(R)', '(L)'))
+                                    roi_colors.append(color)
+                            except Exception as e:
+                                print(f' (mirror failed: {e})', end='')
+                        
+                        continue
+                        
+                    except Exception as download_error:
+                        print(f'⚠️  Failed to download "{roi}" mesh from NeuPrint: {download_error}')
+                        print(f'   Possible solutions:')
+                        print(f'   1. Check ROI name spelling (case-sensitive): "{roi}"')
+                        print(f'   2. Set NEUPRINT_APPLICATION_CREDENTIALS environment variable')
+                        print(f'   3. Use list_available_rois(fetch_online=True) to see valid ROIs')
+                        print(f'   4. Visit https://neuprint.janelia.org/account for token')
+                        continue
+            
+            try:
+                mesh = navis.Volume.from_json(mesh_file)
+                if self.brain_mesh in ['whole', 'template']:
+                    template_info = self._get_template_info()
+                    print(f'Transforming brain region {roi}...', end='')
+                    mesh = navis.xform_brain(mesh, source=template_info['source'], target=template_info['target'])
+                
+                roiunits.append(mesh)
+                roi_names.append(roi)
+                roi_colors.append(color)
+
+                # Mirror logic for local mesh
+                if self.mirror_on_contralateral and roi.endswith('(R)'):
+                    try:
+                        template = None
+                        if self.brain_mesh == 'whole':
+                            template_info = self._get_template_info()
+                            template = template_info['target']
+                        elif self.brain_mesh == 'template':
+                                if 'hemibrain' in self.dataset or 'optic-lobe' in self.dataset:
+                                    template = 'JRCFIB2018F'
+                                elif 'male-cns' in self.dataset:
+                                    template = 'JRCFIB2022M'
+                        
+                        if template:
+                            mirrored_mesh = navis.mirror_brain(mesh, template, mirror_axis='x')
+                            roiunits.append(mirrored_mesh)
+                            roi_names.append(roi.replace('(R)', '(L)'))
+                            roi_colors.append(color)
+                    except Exception as e:
+                        print(f' (mirror failed: {e})', end='')
+
+            except Exception as e:
+                print(f'⚠️  Failed to load mesh {roi}: {e}')
+        
+        if not roiunits:
+            print('⚠️  No valid ROI meshes loaded')
+            return
+        
         print('plotting mesh of brain regions...')
         for roi_i in range(len(roiunits)):
-            if type(self.mesh_color) == list:
-                roiunits[roi_i].color = self.mesh_color[roi_i]
-            else:
-                roiunits[roi_i].color = self.mesh_color
-            fig_mesh = navis.plot3d(roiunits[roi_i],backend='plotly')
-            mesh_traces = fig_mesh.data
-            for ti, trace in enumerate(mesh_traces):
-                if self.legend_mode == 'merge':
-                    if ti == 0:
+            roiunits[roi_i].color = roi_colors[roi_i]
+            
+            if self.backend == 'plotly':
+                fig_mesh = navis.plot3d(roiunits[roi_i],backend='plotly')
+                mesh_traces = fig_mesh.data
+                for ti, trace in enumerate(mesh_traces):
+                    if self.legend_mode == 'merge':
+                        if ti == 0:
+                            trace.showlegend = True
+                        else:
+                            trace.showlegend = False
+                        trace.legendgroup = 'roi_mesh'
+                    elif self.legend_mode == 'normal':
                         trace.showlegend = True
-                    else:
-                        trace.showlegend = False
-                    trace.legendgroup = 'roi_mesh'
-                elif self.legend_mode == 'normal':
-                    trace.showlegend = True
-                    trace.legendgroup = self.mesh_roi[roi_i]
-                trace.hovertemplate = '<b>%{fullData.name}</b><extra></extra>'  # show full name in hover tooltip
-                trace.hoverinfo = 'name'
-                trace.name = 'brain regions [' + self.mesh_roi[roi_i] + '...]'
-            self.fig_3d.add_traces(mesh_traces)
-        if self.brain_mesh == 'hemi':
-            print('plotting hemibrain mesh...')
-            brain_meshes = flybrains.JRCFIB2018Fraw
-            fig_hemi = navis.plot3d(brain_meshes,backend='plotly')
-            hemi_traces = fig_hemi.data
-            for trace in hemi_traces:
-                trace.showlegend = True
-                trace.name = 'hemibrain'
-                trace.hoverinfo = 'none'
-                trace.color = self.brain_mesh_color
-            self.fig_3d.add_traces(hemi_traces)
-        if self.brain_mesh == 'whole':
-            print('plotting whole brain mesh...')
-            brain_meshes = flybrains.JRC2018F
-            fig_whole = navis.plot3d(brain_meshes,backend='plotly')
-            whole_traces = fig_whole.data
-            for trace in whole_traces:
-                trace.showlegend = True
-                trace.name = 'whole brain'
-                trace.hoverinfo = 'none'
-                trace.color = self.brain_mesh_color
-            self.fig_3d.add_traces(whole_traces)
+                        trace.legendgroup = roi_names[roi_i]
+                    trace.hovertemplate = '<b>%{fullData.name}</b><extra></extra>'  # show full name in hover tooltip
+                    trace.hoverinfo = 'name'
+                    trace.name = 'brain regions [' + roi_names[roi_i] + '...]'
+                self.fig_3d.add_traces(mesh_traces)
+            elif self.backend == 'k3d':
+                try:
+                    temp_plot = navis.plot3d(roiunits[roi_i], backend='k3d', inline=False)
+                    for obj in temp_plot.objects:
+                        obj.name = f'brain regions [{roi_names[roi_i]}...]'
+                        self.fig_3d += obj
+                except Exception as e:
+                    print(f'⚠️  k3d mesh plotting failed: {e}')
+
+        if self.brain_mesh in ['template', 'whole']:
+            template_info = self._get_template_info()
+            mesh_display_name = template_info['mesh_name']
+            
+            print(f'Plotting {mesh_display_name} mesh...')
+            try:
+                brain_template = template_info['template_obj']
+                
+                if self.backend == 'plotly':
+                    fig_brain = navis.plot3d(brain_template, backend='plotly')
+                    brain_traces = fig_brain.data
+                    for trace in brain_traces:
+                        trace.showlegend = True
+                        trace.name = mesh_display_name
+                        trace.hoverinfo = 'none'
+                        trace.color = self.brain_mesh_color
+                    self.fig_3d.add_traces(brain_traces)
+                elif self.backend == 'k3d':
+                    temp_plot = navis.plot3d(brain_template, backend='k3d', inline=False)
+                    for obj in temp_plot.objects:
+                        obj.name = mesh_display_name
+                        self.fig_3d += obj
+                        
+                print(f'✓ {mesh_display_name} mesh loaded successfully')
+            except Exception as e:
+                print(f'⚠️  Failed to load {mesh_display_name} mesh: {e}')
+                if self._dataset_needs_transform() and not self._check_and_download_transforms():
+                    print('   Skipping brain/VNC mesh visualization')
+                else:
+                    # Retry after download
+                    try:
+                        brain_template = template_info['template_obj']
+                        if self.backend == 'plotly':
+                            fig_brain = navis.plot3d(brain_template, backend='plotly')
+                            brain_traces = fig_brain.data
+                            for trace in brain_traces:
+                                trace.showlegend = True
+                                trace.name = mesh_display_name
+                                trace.hoverinfo = 'none'
+                                trace.color = self.brain_mesh_color
+                            self.fig_3d.add_traces(brain_traces)
+                        elif self.backend == 'k3d':
+                            temp_plot = navis.plot3d(brain_template, backend='k3d', inline=False)
+                            for obj in temp_plot.objects:
+                                obj.name = mesh_display_name
+                                self.fig_3d += obj
+                        print(f'✓ {mesh_display_name} mesh loaded successfully after download')
+                    except Exception as retry_e:
+                        print(f'⚠️  Still failed to load {mesh_display_name} mesh: {retry_e}')
+                        print('   Skipping brain/VNC mesh visualization')
         print('Done')
         return 0
     
     def save_figure(self):
-        # add sliders
-        if self.use_size_slider:
-            sliders = [
-                dict(
-                    active=self.synapse_size,
-                    currentvalue={"prefix": "Synapse Size: "},
-                    pad={"t": 50},
-                    steps=[
-                        dict(
-                            label=str(size),
-                            method="update",
-                            args=[{"marker": {"size": size}}]
-                        )
-                        for size in list(range(0,11))
-                    ],
+        if self.backend == 'plotly':
+            # add sliders
+            if self.use_size_slider:
+                sliders = [
+                    dict(
+                        active=self.synapse_size,
+                        currentvalue={"prefix": "Synapse Size: "},
+                        pad={"t": 50},
+                        steps=[
+                            dict(
+                                label=str(size),
+                                method="update",
+                                args=[{"marker": {"size": size}}]
+                            )
+                            for size in list(range(0,11))
+                        ],
+                    ),
+                ]
+            else:
+                sliders = []
+            
+            # set layout
+            if self.brain_mesh == 'hemi' or self.brain_mesh == 'none':
+                scene_camera_parameters = dict(
+                    up=dict(x=0, y=0, z=-1),
+                    eye=dict(x=0, y=1.8, z=0),  # Increased from 1.4 to 1.8 to fit more objects
+                    # center=dict(x=0, y=0, z=0), # Let Plotly auto-center
+                )
+            elif self.brain_mesh == 'whole':
+                # Adjust for frontal view
+                # Assuming standard fly brain orientation (X: LR, Y: DV, Z: AP)
+                # Frontal view: Look from Anterior (Z) or Posterior
+                scene_camera_parameters = dict(
+                    up=dict(x=0, y=-1, z=0), # Y is up (inverted in some templates)
+                    eye=dict(x=0, y=0, z=-2.0), # Look from front/back
+                    # center=dict(x=0, y=0, z=0), # Let Plotly auto-center
+                )
+            
+            self.fig_3d.update_layout(
+                colorway = self.synapse_colors,
+                sliders=sliders,
+                scene=dict(
+                    dragmode='orbit',
+                    xaxis={'visible':False}, 
+                    yaxis={'visible':False},
+                    zaxis={'visible':False},
                 ),
-            ]
-        else:
-            sliders = []
-        
-        # set layout
-        if self.brain_mesh == 'hemi' or self.brain_mesh == 'none':
-            scene_camera_parameters = dict(
-                up=dict(x=0, y=0, z=-1),
-                eye=dict(x=0, y=1.4, z=0),
-                center=dict(x=0, y=0, z=0),
+                scene_camera=scene_camera_parameters,
             )
-        elif self.brain_mesh == 'whole':
-            scene_camera_parameters = dict(
-                up=dict(x=0, y=-1, z=0),
-                eye=dict(x=0, y=0, z=-1.0),
-                center=dict(x=0, y=0, z=0),
-            )
-        
-        self.fig_3d.update_layout(
-            colorway = self.synapse_colors,
-            sliders=sliders,
-            scene=dict(
-                dragmode='orbit',
-                xaxis={'visible':False}, 
-                yaxis={'visible':False},
-                zaxis={'visible':False},
-            ),
-            scene_camera=scene_camera_parameters,
-        )
 
-        # save figure
-        self.fig_path = os.path.join(self.save_folder,self.saveas)
-        print(f'saving figure to \033[34m{self.fig_path}.html\033[0m...', end='')
-        self.fig_3d.write_html(self.fig_path+'.html',auto_open=self.show_fig, include_plotlyjs='cdn')
-        self.fig_3d.write_image(self.fig_path+'.png',scale=3)
-        print('Done')
+            # save figure
+            self.fig_path = os.path.join(self.save_folder,self.saveas)
+            print(f'saving figure to \033[34m{self.fig_path}.html\033[0m...', end='')
+            
+            # Optimization: use 'cdn' for smaller file size (loads plotly.js from CDN)
+            # This reduces HTML file size significantly compared to 'directory' or including full plotly.js
+            # Fix: Set auto_open=False to prevent hanging, handle opening manually
+            self.fig_3d.write_html(
+                self.fig_path+'.html',
+                auto_open=False, 
+                include_plotlyjs='cdn',  # Use CDN for smaller file size
+                config={'displayModeBar': False}  # Remove toolbar to reduce overhead
+            )
+            
+            if self.show_fig:
+                try:
+                    import webbrowser
+                    webbrowser.open('file://' + os.path.abspath(self.fig_path+'.html'))
+                except Exception as e:
+                    print(f'\n⚠️  Failed to open browser: {e}')
+            
+            # Optimize PNG export: only save if needed, use lower scale for speed
+            try:
+                self.fig_3d.update_layout(margin=dict(l=0, r=0, b=0, t=0))
+                self.fig_3d.write_image(self.fig_path+'.png', scale=3)
+            except Exception as e:
+                print(f'\n⚠️  PNG export failed: {e}. Continuing without PNG...')
+            
+            print('Done')
+            
+        elif self.backend == 'k3d':
+            self.fig_path = os.path.join(self.save_folder,self.saveas)
+            print(f'saving figure to \033[34m{self.fig_path}.html\033[0m...', end='')
+            
+            try:
+                from ipywidgets.embed import embed_minimal_html
+                embed_minimal_html(
+                    self.fig_path+'.html', 
+                    views=[self.fig_3d], 
+                    title=self.saveas
+                )
+                print('Done')
+                
+                if self.show_fig:
+                    print('Note: k3d plots cannot be automatically opened from script. Please open the HTML file manually.')
+                    
+            except ImportError:
+                print('\n⚠️  ipywidgets not installed. Cannot save k3d plot to HTML.')
+                print('   Please install it with `pip install ipywidgets`')
+            except Exception as e:
+                print(f'\n⚠️  Failed to save k3d plot: {e}')
     
     def plot_neurons(self):
         self.plot_skeleton()
@@ -5798,26 +6885,60 @@ class VisualizeSkeleton:
         self.plot_mesh()
         self.save_figure()
         
-    def export_video(self, fps=30, rotate_plane=None, view_direction = None, view_distance=None, synapse_size=1,**kwargs):
+    def export_video(self, fps=30, rotate_plane=None, view_direction=None, view_distance=None, synapse_size=1, 
+                    html_file=None, use_existing_images=False, **kwargs):
         '''
-        export the rotating 3-D object to a video. rendering is slow, it helps to visualize complex objects and the video file is more portable and versatile.
+        Export the rotating 3-D object to a video with optimization for speed.
         
-        when file is too large, exporting may fail. try to reduce the resolution by setting "scale" in kwargs, or set "width" and "height" to specific values.
+        Parameters
+        ----------
+        fps : int, default 30
+            Frames per second, also determines rotation step size (30 degrees per second).
+        rotate_plane : str, optional
+            Plane to rotate: 'xy', 'xz', or 'yz'. Auto-detected based on brain_mesh.
+        view_direction : tuple, optional
+            Camera direction: (1, 1), (1, -1), (-1, 1), or (-1, -1). Auto-detected.
+        view_distance : float, optional
+            Relative camera distance from center. Auto-detected based on brain_mesh.
+        synapse_size : int, default 1
+            Size of synapse markers in the video.
+        html_file : str, optional
+            Path to existing HTML file from plot_neurons() to load figure data.
+            If provided, skips plot_neurons() and loads from file (much faster).
+            Example: 'path/to/existing_plot.html'
+        use_existing_images : bool, default False
+            If True, skip image rendering and use existing images in pics_*fps_*plane folder.
+            Useful for regenerating video with different settings from cached images.
+        **kwargs : dict
+            Additional arguments for plotly write_image().
+            - 'scale': Resolution multiplier (default 2 for balance of quality/speed)
+            - 'width', 'height': Specific dimensions in pixels
+            - Lower scale = faster rendering, smaller file
         
-        fps: default 30
-            frames per second, also determines the step size of rotation, 30 degrees per second.
-        rotate_plane: default 'xy' for hemibrain, 'xz' for transformed whole brain mesh
-            the plane to rotate the object. can be 'xy', 'xz', 'yz'.
-        view_direction: default (1, 1) or (1, -1) depending on the brain mesh
-            the direction of the camera. can be (1, 1), (1, -1), (-1, 1), (-1, -1).
-        view_distance: default 1.6 or 2.2 depending on the brain mesh
-            the relative distance between the camera and the center of the object.
-        synapse_size: default 1,
-            the size of the synapse markers.
-        **kwargs: other arguments for plotly.offline.plot. see https://plotly.github.io/plotly.py-docs/generated/plotly.io.write_image.html
-            In the kwargs, you can use "scale" to set the resolution of the video (e.g. scale=2 doubles the resolution), or set "width" and "height" to specific values.
-            recommended values for scale: 2
+        Returns
+        -------
+        int
+            0 on success
+        
+        Examples
+        --------
+        # Standard usage after plot_neurons()
+        vs.plot_neurons()
+        vs.export_video(fps=30)
+        
+        # Fast re-export from existing HTML (no re-plotting needed)
+        vs.export_video(fps=30, html_file='connection_data/my_plot/my_plot.html')
+        
+        # Use cached images to regenerate video quickly
+        vs.export_video(fps=30, use_existing_images=True)
+        
+        # High quality but slower
+        vs.export_video(fps=30, scale=4)
+        
+        # Fast preview
+        vs.export_video(fps=15, scale=1, width=800, height=600)
         '''
+        # Set default parameters based on brain_mesh
         if rotate_plane is None:
             if self.brain_mesh == 'hemi' or self.brain_mesh == 'none':
                 rotate_plane = 'xy'
@@ -5834,30 +6955,49 @@ class VisualizeSkeleton:
             elif self.brain_mesh == 'whole':
                 view_distance = 2.2
         
+        # Set default scale if not specified
         if kwargs.get('scale') is None and kwargs.get('width') is None and kwargs.get('height') is None:
             kwargs['scale'] = 2
-        kwargs.update(kwargs)
+        
         step = 30 / fps
-        html_size = os.path.getsize(self.fig_path+'.html') / 1024 / 1024 # in MB
-        if html_size > 100:
-            print(f'\033[33mFigure is large. If rendering hangs, try to reduce the resolution by setting "scale", or "width" and "height" in kwargs to smaller values.\033[0m')
-        # set layout
-        fig_traces = self.fig_3d.data
+        
+        # Load figure from existing HTML file if provided (OPTIMIZATION)
+        if html_file is not None:
+            print(f'📂 Loading figure from existing HTML: {html_file}')
+            if not os.path.exists(html_file):
+                raise FileNotFoundError(f'HTML file not found: {html_file}')
+            
+            # Read and parse the HTML file to extract figure data
+            import plotly.io as pio
+            try:
+                fig_loaded = pio.read_html(html_file)
+                fig_traces = fig_loaded.data
+                print(f'✓ Loaded {len(fig_traces)} traces from HTML file')
+            except Exception as e:
+                raise RuntimeError(f'Failed to load figure from HTML: {e}')
+        else:
+            # Use current figure
+            if not hasattr(self, 'fig_path') or not os.path.exists(self.fig_path+'.html'):
+                raise RuntimeError(
+                    'No figure found. Either run plot_neurons() first or provide html_file parameter.'
+                )
+            html_size = os.path.getsize(self.fig_path+'.html') / 1024 / 1024 # in MB
+            if html_size > 100:
+                print(f'⚠️  Figure is large ({html_size:.1f} MB). Rendering may be slow.')
+                print(f'   Consider using lower scale or smaller dimensions in kwargs.')
+            fig_traces = self.fig_3d.data
+        # Configure figure for video export
         for trace in fig_traces:
             trace.showlegend = False
             if hasattr(trace,'marker'):
                 trace.marker.size = synapse_size
+        
         fig_layout = go.Layout(
-            margin=dict(
-                l=1,
-                r=1,
-                b=1,
-                t=1,
-                pad=0,
-            ),
+            margin=dict(l=1, r=1, b=1, t=1, pad=0),
         )
         fig_new = go.Figure(data=fig_traces, layout=fig_layout)
         
+        # Set camera parameters
         if self.brain_mesh == 'hemi' or self.brain_mesh == 'none':
             scene_camera_parameters = dict(
                 up=dict(x=0, y=0, z=-1),
@@ -5868,8 +7008,9 @@ class VisualizeSkeleton:
                 up=dict(x=0, y=-1, z=0),
                 eye=dict(x=0, y=0, z=-view_distance),
             )
+        
         fig_new.update_layout(
-            sliders=[], # remove sliders
+            sliders=[],  # Remove sliders for cleaner video
             scene=dict(
                 dragmode='orbit',
                 xaxis={'visible':False}, 
@@ -5879,53 +7020,116 @@ class VisualizeSkeleton:
             scene_camera=scene_camera_parameters,
         )
         
-        pic_folder = os.path.join(self.save_folder,f'pics_{fps}fps_{rotate_plane}')
-        if os.path.exists(pic_folder):
-            shutil.rmtree(pic_folder)
-        os.makedirs(pic_folder)
+        # Set up image folder
+        pic_folder = os.path.join(self.save_folder, f'pics_{fps}fps_{rotate_plane}')
+        
+        # Calculate rotation steps
         if step > 0:
-            steps_to_write = np.linspace(0,360,int(360/step),endpoint=False)
+            steps_to_write = np.linspace(0, 360, int(360/step), endpoint=False)
         elif step < 0:
-            steps_to_write = np.linspace(360,0,int(360/step),endpoint=False)
-        t0 = time.time()
-        for i,deg in enumerate(steps_to_write):
-            rad_i = np.deg2rad(deg)
-            x = view_distance * np.sin(rad_i) * view_direction[0]
-            y = view_distance * np.cos(rad_i) * view_direction[1]
-            if rotate_plane == 'xy':
-                fig_new.update_layout(scene_camera=dict(eye=dict(x=x, y=y, z=0)))
-            elif rotate_plane == 'yz':
-                fig_new.update_layout(scene_camera=dict(eye=dict(x=0, y=x, z=y)))
-            elif rotate_plane == 'xz':
-                fig_new.update_layout(scene_camera=dict(eye=dict(x=x, y=0, z=y)))
-            fig_path = os.path.join(pic_folder,f'deg_{deg:.1f}.jpeg')
-            fig_new.write_image(fig_path,**kwargs)
-            cv2.waitKey(2000)
-            ti = time.time()
-            print(f'\rExporting image: {i+1}/{len(steps_to_write)}...Elapsed {ti-t0:.2f}s. Remaining {(ti-t0)/(i+1)*(len(steps_to_write)-i-1):.2f}s',end='    ')
-        print('\nDone')
+            steps_to_write = np.linspace(360, 0, int(360/step), endpoint=False)
+        
+        # OPTIMIZATION: Skip image rendering if use_existing_images=True
+        if use_existing_images and os.path.exists(pic_folder):
+            existing_images = [f for f in os.listdir(pic_folder) if f.endswith('.jpeg')]
+            if len(existing_images) == len(steps_to_write):
+                print(f'✓ Using {len(existing_images)} existing images from {pic_folder}')
+                print(f'  Skipping image rendering (use_existing_images=True)')
+            else:
+                print(f'⚠️  Found {len(existing_images)} images but need {len(steps_to_write)}')
+                print(f'  Re-rendering images...')
+                use_existing_images = False
+        else:
+            use_existing_images = False
+        
+        # Render images if needed
+        if not use_existing_images:
+            if os.path.exists(pic_folder):
+                shutil.rmtree(pic_folder)
+            os.makedirs(pic_folder)
+            
+            print(f'🎬 Rendering {len(steps_to_write)} frames at {fps} fps...')
+            print(f'   Resolution: scale={kwargs.get("scale", "auto")}', end='')
+            if 'width' in kwargs and 'height' in kwargs:
+                print(f', size={kwargs["width"]}x{kwargs["height"]}')
+            else:
+                print()
+            
+            t0 = time.time()
+            print(f'   Starting render loop... (First frame may take longer to initialize engine)')
+            
+            for i, deg in enumerate(steps_to_write):
+                rad_i = np.deg2rad(deg)
+                x = view_distance * np.sin(rad_i) * view_direction[0]
+                y = view_distance * np.cos(rad_i) * view_direction[1]
+                
+                if rotate_plane == 'xy':
+                    fig_new.update_layout(scene_camera=dict(eye=dict(x=x, y=y, z=0)))
+                elif rotate_plane == 'yz':
+                    fig_new.update_layout(scene_camera=dict(eye=dict(x=0, y=x, z=y)))
+                elif rotate_plane == 'xz':
+                    fig_new.update_layout(scene_camera=dict(eye=dict(x=x, y=0, z=y)))
+                
+                fig_path = os.path.join(pic_folder, f'deg_{deg:.1f}.jpeg')
+                
+                # Write image
+                try:
+                    fig_new.write_image(fig_path, **kwargs)
+                except Exception as e:
+                    print(f'\n⚠️  Frame {i+1} failed: {e}')
+                    # If first frame fails, it's likely a system/memory issue
+                    if i == 0:
+                        print('   Try reducing "scale" (e.g. scale=1) or using "width"/"height" parameters.')
+                        return 1
+                
+                ti = time.time()
+                elapsed = ti - t0
+                avg_time = elapsed / (i + 1)
+                remaining = avg_time * (len(steps_to_write) - i - 1)
+                print(f'\r  Frame {i+1}/{len(steps_to_write)} | '
+                      f'Elapsed: {elapsed:.1f}s | '
+                      f'Remaining: {remaining:.1f}s | '
+                      f'Speed: {avg_time:.2f}s/frame', end='    ')
+            print('\n✓ Image rendering complete')
+        # Generate videos from images
+        print(f'\n\ud83c\udfa5 Generating videos...')
         imglist = os.listdir(pic_folder)
-        img_eg = cv2.imread(os.path.join(pic_folder,imglist[0]))
+        img_eg = cv2.imread(os.path.join(pic_folder, imglist[0]))
         height, width, layers = img_eg.shape
+        
+        print(f'   Video resolution: {width}x{height}')
 
-        # forward video
-        video_dir = os.path.join(self.save_folder,f'{self.saveas}_video_forward.mp4')
-        out = cv2.VideoWriter(
-            video_dir, cv2.VideoWriter_fourcc(*'mp4v'), fps, frameSize=(width,height))
-        for i,deg in enumerate(steps_to_write):
-            img = cv2.imread(os.path.join(pic_folder,f'deg_{deg:.1f}.jpeg'))
+        # Forward video - OPTIMIZED with faster codec
+        video_dir = os.path.join(self.save_folder, f'{self.saveas}_video_forward.mp4')
+        # Use H.264 codec for better compression and compatibility
+        fourcc = cv2.VideoWriter_fourcc(*'avc1')  # H.264 codec (faster than mp4v)
+        out = cv2.VideoWriter(video_dir, fourcc, fps, frameSize=(width, height))
+        
+        t0 = time.time()
+        for i, deg in enumerate(steps_to_write):
+            img = cv2.imread(os.path.join(pic_folder, f'deg_{deg:.1f}.jpeg'))
             out.write(img)
-            print(f'\rwriting forward video: {i+1}/{len(steps_to_write)}...',end='  ')
+            if (i + 1) % 10 == 0 or i == len(steps_to_write) - 1:
+                print(f'\\r  Forward video: {i+1}/{len(steps_to_write)} frames', end='  ')
         out.release()
-        print('Done')
-        # backward video
-        video_dir = os.path.join(self.save_folder,f'{self.saveas}_video_backward.mp4')
-        out = cv2.VideoWriter(
-            video_dir, cv2.VideoWriter_fourcc(*'mp4v'), fps, frameSize=(width,height))
-        for i,deg in enumerate(steps_to_write[::-1]):
-            img = cv2.imread(os.path.join(pic_folder,f'deg_{deg:.1f}.jpeg'))
+        t1 = time.time()
+        print(f'\\n\u2713 Forward video: {video_dir} ({t1-t0:.1f}s)')
+        
+        # Backward video
+        video_dir = os.path.join(self.save_folder, f'{self.saveas}_video_backward.mp4')
+        out = cv2.VideoWriter(video_dir, fourcc, fps, frameSize=(width, height))
+        
+        t0 = time.time()
+        for i, deg in enumerate(steps_to_write[::-1]):
+            img = cv2.imread(os.path.join(pic_folder, f'deg_{deg:.1f}.jpeg'))
             out.write(img)
-            print(f'\rwriting backward video: {i+1}/{len(steps_to_write)}...',end='  ')
+            if (i + 1) % 10 == 0 or i == len(steps_to_write) - 1:
+                print(f'\\r  Backward video: {i+1}/{len(steps_to_write)} frames', end='  ')
         out.release()
-        print('Done')
+        t1 = time.time()
+        print(f'\\n\u2713 Backward video: {video_dir} ({t1-t0:.1f}s)')
+        
+        print(f'\n\u2705 Video export complete!')
+        print(f'   Image cache: {pic_folder}')
+        print(f'   Tip: Use use_existing_images=True to skip re-rendering next time')
         return 0

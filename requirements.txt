@@ -57,6 +57,9 @@ img2pdf>=0.4.0             # Convert images to PDF (required by statvis.py)
 # trimesh>=3.9.0           # 3D mesh processing
 # vispy>=0.11.0            # GPU-accelerated visualization
 # pygfx>=0.1.0             # Modern 3D rendering
+k3d>=2.15.0                # High-performance 3D visualization (WebGL)
+ipywidgets>=8.0.0          # Required for k3d HTML export
+open3d>=0.15.0             # 3D mesh processing and simplification
 
 # Development and Testing (Optional)
 # -----------------------------------------------------------------------------

@@ -96,11 +96,12 @@ if __name__ == '__main__':
     # path_file = 'my_paths.xlsx'  # Load Excel, auto-select sheet if not specified
     
     # path_file = '/Users/apple/Local/connection_data/aMe12_R_to_PPL103_R/allpaths_L3w10r0_01p0_20251027_213354/aMe12_R_to_PPL103_R_allpaths_info.xlsx'
-    path_file = '/Users/apple/Desktop/_kuntest/test.xlsx'
+    # path_file = '/Users/apple/Desktop/_kuntest/test.xlsx'
+    path_file = '/Users/apple/Local/connection_data/aMe5_etc_etc_to_aMe5_etc_etc/direct_L2w1r0_0p0_0_20251116_140724/custom_groups/custom_groups_data.xlsx'
     
     # Create visualizations with custom colors
     vp = VisualizePath(
-        path_file=path_file,
+        path_file=None,
         sheet_name=0,             # or 'path_bodyId' for bodyId-level paths (None = auto-select)
         output_folder=None,                 # None = auto-creates 'selected_paths' folder
         source_color=source_color,          # Custom source node color
@@ -112,8 +113,8 @@ if __name__ == '__main__':
         edge_width_scale='sqrt',            # Edge width scaling method
         showfig=True,                        # Open visualizations in browser
         max_edge_width=30,
-        generate_empty_network=False, # Set to True to generate empty network for manual editing, ignore path_file
-        # straight_reciprocal_edges=True,
+        generate_empty_network=True, # Set to True to generate empty network for manual editing, ignore path_file
+        straight_reciprocal_edges=False,
     )
     
     # Generate all visualizations
@@ -130,7 +131,7 @@ if __name__ == '__main__':
     # Uncomment below to filter high-quality paths
     """
     import pandas as pd
-    
+    s
     # Read all paths
     all_paths = pd.read_excel(path_file, sheet_name='path_type')
     print(f"Total paths: {len(all_paths)}")

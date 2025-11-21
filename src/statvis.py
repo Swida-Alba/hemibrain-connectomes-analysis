@@ -346,7 +346,7 @@ def getNeurons(requiredNeurons, dataset='hemibrain:v1.2.1', custom_group_names=N
     if not os.path.exists(dataset_path_body + '_neuron_df.csv') or not os.path.exists(dataset_path_body + '_roi_count_df.csv'):
         print(f'\033[33mcsv files of dataset "{dataset}" not found, downloading...\033[0m')
         pull_dataset(dataset, save_path=dataset_path_body)
-    ndf_alltypes = pd.read_csv(dataset_path_body + '_neuron_df.csv',header=0,index_col=0)
+    ndf_alltypes = pd.read_csv(dataset_path_body + '_neuron_df.csv',header=0,index_col=0, low_memory=False)
     rdf_alltypes = pd.read_csv(dataset_path_body + '_roi_count_df.csv',header=0,index_col=0)
     bodyId_alltypes = ndf_alltypes['bodyId'].tolist()
     

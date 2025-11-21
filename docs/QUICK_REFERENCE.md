@@ -221,6 +221,87 @@ vp.visualize()
   - Plotly.js loaded from CDN
   - Settings saved to browser localStorage
 
+## VisualizeSkeleton Quick Reference
+
+### 3D Neuron Visualization with Brain Meshes
+
+```python
+import statvis as sv
+from coana import VisualizeSkeleton
+
+# Login to NeuPrint
+sv.LogInHemibrain(token='your_token', dataset='hemibrain:v1.2.1')
+
+# Create 3D visualization
+vs = VisualizeSkeleton(
+    neuron_layers=['KC.*', 'MBON03'],     # Neuron types/layers
+    brain_mesh='template',                # 'none', 'template', or 'whole'
+    mesh_roi=['MB(R)', 'CA(R)'],         # ROI meshes to display
+    neuron_alpha=0.2,                     # Neuron transparency
+    synapse_size=3,                       # Synapse marker size
+    skeleton_mode='tube',                 # 'tube' or 'line'
+    show_fig=True
+)
+
+vs.plot_neurons()
+vs.export_video(fps=30, rotate_plane='xy')
+```
+
+### Brain Mesh Options (Multi-Dataset Support)
+
+**Supported Datasets:**
+- `hemibrain:v1.2.1` / `optic-lobe:v1.1` - Adult brain
+- `manc:v1.2.3` - Male VNC
+- `male-cns:v0.9` - Full CNS (brain + VNC)
+
+**Brain Mesh Parameter:**
+
+| Value | Description | Speed | Use Case |
+|-------|-------------|-------|----------|
+| `'none'` | No brain mesh | ⚡⚡⚡ Instant | Single neurons, clearest view |
+| `'template'` | Native EM mesh | ⚡⚡ 0.5-2s | Standard visualization, no downloads |
+| `'whole'` | Whole brain/VNC | ⚡ 3-5s | Publication figures, requires one-time download |
+
+**Template Mappings:**
+
+```python
+# Hemibrain/Optic-lobe (adult brain)
+vs = VisualizeSkeleton(
+    dataset='hemibrain:v1.2.1',
+    neuron_layers=['KC.*'],
+    brain_mesh='template'   # JRCFIB2018F (EM resolution)
+    # brain_mesh='whole'    # JRC2018F (confocal, ~500MB download)
+)
+
+# MANC (VNC)
+vs = VisualizeSkeleton(
+    dataset='manc:v1.2.3',
+    neuron_layers=['DN.*'],
+    brain_mesh='template'   # MANC (native VNC, no downloads)
+)
+
+# Male-CNS (full CNS)
+vs = VisualizeSkeleton(
+    dataset='male-cns:v0.9',
+    neuron_layers=['PS.*'],
+    brain_mesh='template'   # JRCFIB2022M (native, no downloads)
+)
+```
+
+**Transform Downloads:**
+
+When using `brain_mesh='whole'` for hemibrain/optic-lobe, transforms download to `~/flybrain-data` on first use:
+
+```
+⚠ Brain transforms not found
+  File needed: JRC2018F_JRCFIB2018F.h5 (~1.3 GB)
+  Total download: ~10GB (8 files bundled by flybrains)
+  Time: ~1-2 hours
+Download all? [y/N]: y
+```
+
+**Note:** Only 1 file (~1.3GB) is actually used for hemibrain/optic-lobe, but flybrains downloads all JRC transforms together (no selective download option). The other files enable cross-dataset functionality.
+
 ## Tips
 
 1. **Large Networks**: Use `intermediate_color` with low opacity (e.g., 0.2) for clarity
@@ -228,6 +309,9 @@ vp.visualize()
 3. **Colors**: Use contrasting colors for source/target (e.g., blue/red)
 4. **File Size**: For huge heatmaps (>500 nodes), expect larger HTML files
 5. **Browser**: Chrome/Firefox recommended for best interactive performance
+6. **Brain Meshes**: Start with `brain_mesh='template'` for fastest rendering
+7. **Transforms**: Download once (~10GB, ~1-2 hours) to ~/flybrain-data, shared across projects
+8. **Disk Space**: Reserve ~10GB for brain transforms (optional, one-time for whole-brain viz)
 
 ## Error Handling
 

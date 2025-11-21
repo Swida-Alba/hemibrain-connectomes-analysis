@@ -4,6 +4,8 @@ Welcome to the Hemibrain Connectomes Analysis documentation!
 
 ## 🆕 Recent Updates (November 2025)
 
+- **[Visualization Update Summary](./VISUALIZATION_UPDATE.md)** - Summary of all visualization-related updates and deprecations.
+- **[VisualizePath Updates Nov 2025](./visualizations/VisualizePath_Updates_Nov2025.md)** - Detailed guide on connection matrix support and new features.
 - **[VisualizePath Standalone Reorganization](./VISPATH_STANDALONE_REORGANIZATION.md)** - vispath now fully standalone, no statvis dependency
 - **[Import Strategy Update](./IMPORT_STRATEGY_UPDATE.md)** - Scripts/examples now use vispath-subproject
 - **[vispath-subproject README](../vispath-subproject/README.md)** - Corrected data format documentation

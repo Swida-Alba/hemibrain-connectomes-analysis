@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hemibrain-connectomes-analysis"
-version = "3.0.0"
+version = "3.2.0"
 description = "Hemibrain connectome analysis and visualization toolkit with reorganized modular structure"
 readme = {file = "README.md", content-type = "text/markdown"}
 requires-python = ">=3.8"
@@ -72,6 +72,9 @@ viz = [
     "trimesh>=3.9.0",
     "kaleido>=0.2.0",
     "vispy>=0.11.0",
+    "k3d>=2.15.0",
+    "ipywidgets>=8.0.0",
+    "open3d>=0.15.0",
 ]
 
 gui = [

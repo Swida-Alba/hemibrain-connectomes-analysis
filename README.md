@@ -1,4 +1,4 @@
-# NeuPrint Connectome Analysis v3.1
+# NeuPrint Connectome Analysis v3.2
 
 A comprehensive Python toolkit for analyzing and visualizing connectome data from **all NeuPrint databases**. Features type-based pathfinding algorithms, interactive network visualizations, 3D neuron morphology rendering with video export, and high-performance caching. Supports hemibrain, optic lobe, FIB, MANC, and other NeuPrint datasets.
 
@@ -10,6 +10,7 @@ A comprehensive Python toolkit for analyzing and visualizing connectome data fro
 - 🔍 **Type-Based Pathfinding**: Comprehensive multi-hop path discovery between neuron populations with forward-only validation
 - 🎬 **3D Visualization**: Interactive neuron skeleton rendering with rotating video export (navis-based)
 - 🌐 **Interactive Networks**: Cytoscape.js-powered network graphs with hierarchical and force-directed layouts
+- 🪞 **Contralateral Mirroring**: Automatically mirror neurons and ROIs to the contralateral hemisphere for full-brain visualization
 - 📊 **Rich Visualizations**: Sankey diagrams, heatmaps with clustering, and connection matrices
 - 🗄️ **Universal Dataset Support**: Works with all NeuPrint datasets (hemibrain, optic-lobe, FIB, MANC, etc.)
 - ⚡ **High Performance**: 10-100x speedup with local caching, 4-14x with parallel processing
@@ -44,6 +45,8 @@ Comprehensive guides in **[docs/visualizations/](docs/visualizations/)** includi
 - **[Network Guide](docs/visualizations/Network_Guide.md)** - Interactive Cytoscape.js networks
 - **[Sankey Guide](docs/visualizations/Sankey_Guide.md)** - Flow-based pathway diagrams
 - **[3D Skeleton Guide](docs/visualizations/3D_Skeleton_Guide.md)** - Neuron morphology rendering
+- **✨ NEW: [VisualizeSkeleton Multi-Dataset Support (Nov 2024)](docs/visualizations/VisualizeSkeleton_Updates_Nov2024.md)** - Dataset-specific ROI mesh caching, automatic ROI discovery, and brain transformation confirmation
+- **✨ NEW: [VisualizePath Updates (Nov 2024)](docs/visualizations/VisualizePath_Updates_Nov2025.md)** - Connection matrix input and individual visualization control
 - See **[Visualizations Overview](docs/visualizations/README.md)** for comparison table
 
 ### 🔧 Technical Documentation
@@ -399,6 +402,7 @@ vs = VisualizeSkeleton(
     synapse_size = 3,
     synapse_alpha = 0.6,
     mesh_roi = ['LH(R)','AL(R)','EB','gL(R)'],
+    brain_mesh = 'template',  # 'none', 'template' (EM resolution), or 'whole' (standard brain)
     skeleton_mode = 'tube',
     synapse_mode = 'scatter',
     legend_mode = 'merge',
@@ -415,6 +419,86 @@ vs.export_video(fps=30,rotate_plane='xy',synapse_size=2,scale=2,)
 ```
 
 parameters of the ```export_video()``` determines the properties of the video.
+
+### Multi-Dataset Brain Mesh Support
+
+**NEW in v3.1**: VisualizeSkeleton now supports all NeuPrint datasets with automatic brain/VNC mesh rendering:
+
+**Supported Datasets:**
+- **hemibrain:v1.2.1** / **optic-lobe:v1.1**: Adult brain (supports whole-brain visualization)
+- **manc:v1.2.3**: Male VNC (native VNC template)
+- **male-cns:v0.9**: Full CNS (brain + VNC combined)
+
+**Brain Mesh Options:**
+
+```python
+# Option 1: No brain mesh (fastest, clearest for single neurons)
+vs = VisualizeSkeleton(
+    dataset='hemibrain:v1.2.1',
+    neuron_layers=['KC.*'],
+    brain_mesh='none'  # No background mesh
+)
+
+# Option 2: Template mesh (native EM resolution, 0.5-2 seconds)
+vs = VisualizeSkeleton(
+    dataset='hemibrain:v1.2.1',
+    neuron_layers=['KC.*'],
+    brain_mesh='template'  # JRCFIB2018F for hemibrain, MANC for manc, JRCFIB2022M for male-cns
+)
+
+# Option 3: Whole brain/VNC mesh (standard resolution, requires one-time download)
+vs = VisualizeSkeleton(
+    dataset='hemibrain:v1.2.1',
+    neuron_layers=['KC.*'],
+    brain_mesh='whole'  # JRC2018F whole brain, automatically downloads transforms
+)
+```
+
+**Template Mappings:**
+- **hemibrain/optic-lobe**:
+  - Source: `JRCFIB2018Fraw` (NeuPrint raw coordinates)
+  - Template: `JRCFIB2018F` (calibrated EM mesh)
+  - Whole: `JRC2018F` (standard confocal brain)
+  
+- **manc**:
+  - Source: `MANCraw` (NeuPrint raw)
+  - Native: `MANC` (VNC template, no transforms needed)
+  
+- **male-cns**:
+  - Source: `JRCFIB2022Mraw` (NeuPrint raw)
+  - Native: `JRCFIB2022M` (full CNS template, no transforms needed)
+
+**Transform Downloads:**
+
+When using `brain_mesh='whole'` for hemibrain/optic-lobe datasets, the system will automatically prompt you to download brain transforms (~10GB total, one-time):
+
+```
+⚠ Brain transforms not found for hemibrain:v1.2.1
+  Transform path: JRCFIB2018Fraw → JRCFIB2018F → JRCFIB2018Fum → JRC2018F
+  File needed: JRC2018F_JRCFIB2018F.h5 (~1.3 GB)
+  Total download: ~10 GB (8 files bundled together)
+  Download time: ~1-2 hours
+  Storage location: ~/flybrain-data
+
+Download all transforms now? [y/N]:
+```
+
+**Why download 10GB when you only need 1.3GB?**
+
+The flybrains package bundles all JRC brain transforms together:
+- **JRC2018F_JRCFIB2018F.h5 (~1.29 GB)** - What you actually need for hemibrain/optic-lobe
+- 7 other transform files (~8.7 GB) - Enable other datasets and cross-registration
+
+Selective download is not supported by the flybrains library. However, downloading all transforms:
+- ✅ Enables cross-dataset functionality (e.g., FAFB, male-cns)
+- ✅ One-time setup shared across all projects
+- ✅ Future-proof for working with multiple datasets
+
+Transforms are stored in `~/flybrain-data` (managed by flybrains package) and shared across all NeuPrint projects.
+
+**Documentation:**
+- Full Guide: [docs/visualizations/VisualizeSkeleton_Updates_Nov2024.md](docs/visualizations/VisualizeSkeleton_Updates_Nov2024.md)
+- Brain Template Fix: [docs/bugfixes/Brain_Template_Fix_Nov2024.md](docs/bugfixes/Brain_Template_Fix_Nov2024.md)
 
 ## Performance Optimization
 
@@ -1044,9 +1128,16 @@ python FindDirect.py
 
 ---
 
-## 🆕 What’s New in V3.1 (November 2025)
+## 🆕 What’s New in V3.2 (November 2025)
 
-- **Reciprocal Edge Offset & Mode Toggle**: Network visualization now supports parallel reciprocal edges with a user-adjustable offset slider and a toggle for straight/curved edge modes. Curved mode disables the offset slider for clarity. See [Network Guide](docs/visualizations/Network_Guide.md#new-feature-reciprocal-edge-offset--mode-toggle-v31-nov-2025) for details.
-- Documentation and UI updated to reflect these features.
+- **Contralateral Mirroring**: `VisualizeSkeleton` now supports mirroring neurons and ROIs to the contralateral hemisphere.
+  - Set `mirror_on_contralateral=True` to enable.
+  - Automatically mirrors ROIs ending in `(R)` to `(L)`.
+  - Uses dataset-specific templates (`JRCFIB2018F` for hemibrain/optic-lobe, `JRCFIB2022M` for male-cns) for accurate mirroring.
+- **Connection Matrix Support**: `VisualizePath` now accepts connection matrices (square or rectangular DataFrames) as direct input. Auto-detects format and converts to edge-list internally.
+- **Individual Visualization Control**: New parameters in `visualize()` (`plot_heatmap`, `plot_Sankey`, `plot_network`) allow generating specific visualizations on demand.
+- **Enhanced Format Detection**: Clear console messages indicate recognized input formats (Matrix, Edge-list, Path-based).
+- **Reciprocal Edge Offset & Mode Toggle**: Network visualization now supports parallel reciprocal edges with a user-adjustable offset slider and a toggle for straight/curved edge modes.
+- **Documentation**: See [VisualizePath Updates Nov 2025](docs/visualizations/VisualizePath_Updates_Nov2025.md) for full details.
 
 ---

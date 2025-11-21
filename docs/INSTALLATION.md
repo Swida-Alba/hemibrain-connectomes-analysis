@@ -100,7 +100,7 @@ pip install wxPython
 ### For 3D Visualization
 
 ```bash
-pip install navis trimesh
+pip install navis trimesh k3d ipywidgets open3d
 ```
 
 ### For Development
@@ -164,6 +164,78 @@ Test GUI backend:
 ```bash
 python -c "from PyQt5.QtWidgets import QApplication; print('✓ PyQt5 is working')"
 ```
+
+## Brain Transform Downloads
+
+**For 3D visualization with whole-brain meshes** (`brain_mesh='whole'` in VisualizeSkeleton), the system may prompt you to download brain transforms (~10GB total, one-time).
+
+### Transform Storage Location
+
+Transforms are stored in `~/flybrain-data` (managed by the flybrains package):
+
+```bash
+# Check if transforms exist
+ls ~/flybrain-data/
+
+# Expected contents after download (8 files):
+# JRC2018F_FAFB.h5          (~580 MB)
+# JRC2018F_JFRC2013.h5      (~1.39 GB)
+# JRC2018F_FCWB.h5          (~1.29 GB)
+# JRC2018F_JRCFIB2018F.h5   (~1.29 GB) - For hemibrain/optic-lobe
+# JRC2018U_JRC2018F.h5      (~717 MB)
+# JRC2018U_JRC2018M.h5      (~1.10 GB)
+# JRC2018F_JFRC2010.h5      (~1.65 GB)
+# JRCFIB2022M_JRC2018M.h5   (~2.12 GB) - For male-cns
+```
+
+### Automatic Download Process
+
+When using `brain_mesh='whole'` for hemibrain or optic-lobe datasets, the system will automatically check for required transforms:
+
+```
+⚠ Brain transforms not found for hemibrain:v1.2.1
+  Target template: JRC2018F (whole brain)
+  Transform size: ~10GB total (8 files, one-time download)
+  Download time: ~1-2 hours
+  Storage location: ~/flybrain-data
+
+Download transforms? [y/N]:
+```
+
+**Important:** The flybrains package downloads ALL JRC transforms as a bundle (~10GB), even though hemibrain/optic-lobe only needs JRC2018F_JRCFIB2018F.h5 (~1.3GB). Selective download is not supported by the library.
+
+**Why download everything?**
+- The actual transform path is: `JRCFIB2018Fraw → JRCFIB2018F → JRCFIB2018Fum → JRC2018F`
+- Only 1 file (JRC2018F_JRCFIB2018F.h5) is used for your dataset
+- Other files enable cross-dataset registration and future flexibility
+- One-time setup benefits all projects and datasets
+
+Type `y` to proceed with the download. Transforms are shared across all NeuPrint projects.
+
+### Dataset-Specific Requirements
+
+| Dataset | Template Mesh | Whole Brain/VNC | Transform Required |
+|---------|--------------|-----------------|-------------------|
+| **hemibrain:v1.2.1** | JRCFIB2018F (EM) | JRC2018F (confocal) | ✅ Yes (~10GB download) |
+| **optic-lobe:v1.1** | JRCFIB2018F (EM) | JRC2018F (confocal) | ✅ Yes (~10GB download) |
+| **manc:v1.2.3** | MANC (native VNC) | — | ❌ No (native) |
+| **male-cns:v0.9** | JRCFIB2022M (native) | — | ❌ No (native) |
+
+### Manual Transform Verification
+
+Check if transforms are available:
+
+```bash
+python -c "from flybrains import JRCFIB2018Fraw; print('✓ Template available')"
+```
+
+### Disk Space Requirements
+
+- **Initial installation:** ~100MB (Python packages)
+- **Transform download:** ~10GB (one-time, optional, for whole-brain visualization)
+- **Cache storage:** Variable (depends on datasets used, typically 100MB-1GB)
+
+**Total recommended:** ~12GB free disk space (if using whole-brain transforms)
 
 ## Troubleshooting
 

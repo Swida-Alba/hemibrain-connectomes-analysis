@@ -11,6 +11,11 @@ __pycache__/
 # Data folders
 connection_data/
 datasets/
+empty_network/
+cache/
+
+# Deprecated folders (removed November 2025)
+navis_roi_meshes_json/
 
 # Neuprint cache (local only, do not commit)
 neuprint_cache/
@@ -32,7 +37,6 @@ Thumbs.db
 
 # Reorganization updates
 output/
-cache/
 test_output/
 *.pyc
 __pycache__/

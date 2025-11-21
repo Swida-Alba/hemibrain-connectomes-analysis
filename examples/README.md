@@ -132,6 +132,58 @@ python examples/Example_ExcludeIntraType.py
 
 ---
 
+### 7. ✨ NEW: VisualizeSkeleton Multi-Dataset Support
+**File:** `Example_VisualizeSkeleton_MultiDataset.py`
+
+Demonstrates the new multi-dataset support for VisualizeSkeleton, including dataset-specific ROI mesh caching, automatic ROI discovery, and brain transformation confirmation.
+
+```bash
+python examples/Example_VisualizeSkeleton_MultiDataset.py
+```
+
+**Features shown:**
+- Dataset-specific ROI mesh caching (hemibrain, optic-lobe, FIB, MANC)
+- Listing available ROIs for each dataset with `list_available_rois()`
+- Brain transformation confirmation dialog for large downloads
+- Backward compatibility with existing scripts
+- Error handling and fallback mechanisms
+
+**Use cases:**
+- Working with multiple NeuPrint datasets (hemibrain, optic-lobe, etc.)
+- Discovering available ROIs dynamically
+- Managing brain mesh transforms efficiently
+- Optimizing mesh storage per dataset
+
+**Related documentation:** [docs/visualizations/VisualizeSkeleton_Updates_Nov2024.md](../docs/visualizations/VisualizeSkeleton_Updates_Nov2024.md)
+
+---
+
+### 8. ✨ NEW: VisualizePath Connection Matrix Input
+**File:** `Example_AllInputFormats_Test.py`
+
+Comprehensive test suite for VisualizePath's new connection matrix input support and individual visualization control.
+
+```bash
+python examples/Example_AllInputFormats_Test.py
+```
+
+**Features shown:**
+- Square (NxN) and rectangular (NxM) connection matrices
+- Automatic neuron name generation for numeric indices
+- Individual visualization control (`plot_heatmap`, `plot_Sankey`, `plot_network`)
+- Enhanced format detection with console messages
+- Multiple edge-list formats (source/target, from/to, pre/post, bodyId_pre/post)
+
+**Use cases:**
+- Visualizing pre-computed connection matrices
+- Creating selective visualizations (e.g., only heatmap)
+- Testing different input formats
+- Batch processing with no-visualization mode
+
+**Related documentation:** [docs/visualizations/VisualizePath_Updates_Nov2025.md](../docs/visualizations/VisualizePath_Updates_Nov2025.md)
+
+---
+
 ## 🎯 Usage Pattern
 
 All example scripts follow the same pattern:
