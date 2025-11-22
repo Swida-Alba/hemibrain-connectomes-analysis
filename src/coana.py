@@ -309,6 +309,14 @@ class FindNeuronConnection:
     
     def __post_init__(self):
         print('Initializing...')
+        # Initialize neuprint client
+        from neuprint import Client, set_default_client, default_client
+        try:
+            _ = default_client()
+        except RuntimeError:
+            self.client_hemibrain = Client(self.server, self.dataset, self.token)
+            set_default_client(self.client_hemibrain)
+        
         # Validate filter_by parameter
         if self.filter_by not in ['bodyId', 'type']:
             raise ValueError(f"filter_by must be 'bodyId' or 'type', got '{self.filter_by}'")
