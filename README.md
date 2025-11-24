@@ -1,4 +1,4 @@
-# NeuPrint Connectome Analysis v3.2
+# NeuPrint Connectome Analysis v4.0
 
 A comprehensive Python toolkit for analyzing and visualizing connectome data from **all NeuPrint databases**. Features type-based pathfinding algorithms, interactive network visualizations, 3D neuron morphology rendering with video export, and high-performance caching. Supports hemibrain, optic lobe, FIB, MANC, and other NeuPrint datasets.
 
@@ -12,7 +12,7 @@ A comprehensive Python toolkit for analyzing and visualizing connectome data fro
 - 🌐 **Interactive Networks**: Cytoscape.js-powered network graphs with hierarchical and force-directed layouts
 - 🪞 **Contralateral Mirroring**: Automatically mirror neurons and ROIs to the contralateral hemisphere for full-brain visualization
 - 📊 **Rich Visualizations**: Sankey diagrams, heatmaps with clustering, and connection matrices
-- 🗄️ **Universal Dataset Support**: Works with all NeuPrint datasets (hemibrain, optic-lobe, FIB, MANC, etc.)
+- 🗄️ **Universal Dataset Support**: Works with all NeuPrint datasets (hemibrain, optic-lobe, FIB, MANC, etc.) and **FlyWire/FAFB/BANC** datasets.
 - ⚡ **High Performance**: 10-100x speedup with local caching, 4-14x with parallel processing
 - 🎯 **Flexible Filtering**: Multiple filtering modes (synapse count, connection ratio, traversal probability)
 - 💾 **Smart Caching**: Efficient local storage with automatic complete dataset handling
@@ -24,6 +24,9 @@ A comprehensive Python toolkit for analyzing and visualizing connectome data fro
 
 ### 🚀 Getting Started
 - **[Installation Guide](#installation-for-users-who-can-prepare-the-python-environments-by-themselves)** - Setup and dependencies
+- **[FlyWire/FAFB Integration](docs/FAFB_INTEGRATION.md)** - Guide for setting up and using local FAFB datasets (Data Prep & Download)
+- **[BANC Integration](docs/BANC_INTEGRATION.md)** - Guide for setting up and using local BANC datasets (Data Prep & Download)
+- **[FlyWire/BANC Usage](docs/FLYWIRE_USAGE.md)** - Guide for using FlyWire/FAFB/BANC datasets (Local File based)
 - **[Basic Usage](#basic-functions)** - FindDirect.py and FindPath.py tutorials
 - **[Quick Start After Reorganization](docs/QUICK_START_AFTER_REORGANIZATION.md)** - Get started with v3.0 structure
 - **[Performance Optimization](#performance-optimization)** - Caching and parallel processing
@@ -159,6 +162,29 @@ import pandas as pd
 neuron_list_1 = pd.read_excel('sourceNeurons.xlsx', header=None).iloc[:,0].tolist()
 neuron_list_2 = pd.read_csv('sourceNeurons.csv', header=None).iloc[:,0].tolist()
 # to read the first column of the file as a list of bodyIds, types, or instances, without the header.
+
+#### Handling Symmetric Datasets (Left/Right Separation)
+
+For datasets like `male-cns:v0.9` that contain symmetric structures but are NeuPrint-only (no separate left/right instances by default), you can use nested lists with regex patterns to explicitly separate left and right hemisphere neurons.
+
+```python
+# Example: Separating Left and Right neurons for symmetric analysis
+# Use nested lists to group neurons by hemisphere
+neurons_network = [
+    ['aMe12.*_R'],   # Right hemisphere aMe12
+    ['aMe12.*_L'],   # Left hemisphere aMe12
+    ['KCg-s1.*_R'],  # Right hemisphere KCg-s1
+    ['KCg-s1.*_L']   # Left hemisphere KCg-s1
+]
+
+fc = FindNeuronConnection(
+    ... # other parameters
+    dataset = 'male-cns:v0.9',
+    sourceNeurons = neurons_network,
+    targetNeurons = neurons_network,
+    ... # other parameters
+)
+```
 ```
 
 If your source or target neurons are too many items in a list, you can specify a custom name for them.
@@ -1077,6 +1103,7 @@ python FindDirect.py
 **Try different scripts:**
 - `scripts/FindDirect.py` - Find direct connections between neuron types
 - `scripts/FindPath.py` - Find multi-hop pathways (2-3 layers)
+- `scripts/FindPath_flywire.py` - Find paths in FlyWire/FAFB dataset (local file based)
 - `scripts/PlotPath.py` - Visualize pathways with custom colors
 - `scripts/plot3dSkeleton.py` - Render 3D neuron morphology
 
@@ -1128,7 +1155,7 @@ python FindDirect.py
 
 ---
 
-## 🆕 What’s New in V3.2 (November 2025)
+## 🆕 What’s New in V4.0 (November 2025)
 
 - **Contralateral Mirroring**: `VisualizeSkeleton` now supports mirroring neurons and ROIs to the contralateral hemisphere.
   - Set `mirror_on_contralateral=True` to enable.

@@ -4,6 +4,7 @@ Welcome to the Hemibrain Connectomes Analysis documentation!
 
 ## 🆕 Recent Updates (November 2025)
 
+- **[BANC Integration](./BANC_INTEGRATION.md)** - Added support for BANC dataset (FlyWire-based).
 - **[Visualization Update Summary](./VISUALIZATION_UPDATE.md)** - Summary of all visualization-related updates and deprecations.
 - **[VisualizePath Updates Nov 2025](./visualizations/VisualizePath_Updates_Nov2025.md)** - Detailed guide on connection matrix support and new features.
 - **[VisualizePath Standalone Reorganization](./VISPATH_STANDALONE_REORGANIZATION.md)** - vispath now fully standalone, no statvis dependency
@@ -64,6 +65,8 @@ Advanced technical documentation:
 - **[Installation](./INSTALLATION.md)**: Setup instructions and requirements
 - **[Quick Start](./QUICK_START_AFTER_REORGANIZATION.md)**: Get running in 5 minutes
 - **[Quickstart Simple Format](./QUICKSTART_SIMPLE_FORMAT.md)**: Using simple edge-list data
+- **[FlyWire-FAFB Integration](./FAFB_INTEGRATION.md)**: Setup guide for FAFB dataset
+- **[FlyWire-BANC Integration](./BANC_INTEGRATION.md)**: Setup guide for BANC dataset
 
 ### Visualization Guides
 - **[Heatmap Guide](./visualizations/Heatmap_Guide.md)**: Complete heatmap documentation
@@ -226,7 +229,7 @@ Historical documentation and fixes are in the [archive](./archive/) directory:
 - Test cleanup: 2025-11-05
 
 ### Version
-Documentation version 3.0 (matches software version)
+Documentation version 4.0 (matches software version)
 
 ### Feedback
 Documentation feedback welcome via GitHub Issues or pull requests.
