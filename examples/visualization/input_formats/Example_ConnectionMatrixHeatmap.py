@@ -3,7 +3,7 @@ from pathlib import Path
 import pandas as pd
 
 # Add vispath-subproject to Python path for local development
-dir_path = Path(__file__).parent.parent / 'vispath-subproject' / 'src'
+dir_path = Path(__file__).parent.parent.parent.parent / 'vispath-subproject' / 'src'
 if dir_path.exists():
     sys.path.insert(0, str(dir_path))
 

@@ -151,8 +151,9 @@ class CrossDatasetVerifier:
         comparator: Optional[ProfileComparator] = None,
         label_mapper: Optional[Any] = None,
         verbose: bool = True,
-        max_untyped_fraction: float = 0.5,
-        allow_2hop_expansion: bool = True
+        comparison_mode: str = 'loose',
+        min_common_partners: int = 3,
+        score_weights: Optional[Dict[str, float]] = None
     ):
         """
         Initialize CrossDatasetVerifier.
@@ -162,21 +163,25 @@ class CrossDatasetVerifier:
             comparator: ProfileComparator instance (created if not provided)
             label_mapper: Optional LabelMapper for cross-dataset name mapping
             verbose: Print progress messages
-            max_untyped_fraction: Warn and attempt 2-hop if untyped fraction exceeds this (default: 0.5)
-            allow_2hop_expansion: If True, expand to 2-hop when profile has too many untyped partners
+            comparison_mode: 'loose' (type-aggregated) or 'strict' (per-bodyId)
+            min_common_partners: (strict mode) Minimum shared partners required
+            score_weights: Custom weights for combined score {'jaccard': 0.3, 'cosine': 0.35, 'rank': 0.35}
+        
+        Note:
+            - use_ranks parameter removed: Ranks are always used for bodyId-level comparison
+            - max_untyped_fraction removed: Hybrid 1-hop/2-hop handles untyped automatically
+            - allow_2hop_expansion removed: Controlled via profiler.config.expand_untyped_2hop
         """
         self.profiler = profiler
         self.comparator = comparator or ProfileComparator()
         self.label_mapper = label_mapper
         self.verbose = verbose
-        self.max_untyped_fraction = max_untyped_fraction
-        self.allow_2hop_expansion = allow_2hop_expansion
+        self.comparison_mode = comparison_mode
+        self.min_common_partners = min_common_partners
+        self.score_weights = score_weights
         
         # Cache for profiles
         self._profile_cache: Dict[Tuple[str, str], ConnectivityProfile] = {}
-        
-        # Cache for 2-hop expanded profiles
-        self._2hop_profile_cache: Dict[Tuple[str, str], ConnectivityProfile] = {}
     
     def _log(self, message: str):
         """Print message if verbose mode enabled."""
@@ -195,168 +200,185 @@ class CrossDatasetVerifier:
         except Exception:
             return neuron_type
     
-    def _check_untyped_fraction(self, profile: ConnectivityProfile) -> Tuple[bool, float]:
-        """
-        Check if profile has high untyped partner fraction.
-        
-        Returns:
-            Tuple of (is_high_untyped, max_untyped_fraction)
-        """
-        up_frac = profile.untyped_upstream_weight_fraction
-        down_frac = profile.untyped_downstream_weight_fraction
-        max_frac = max(up_frac, down_frac)
-        is_high = max_frac > self.max_untyped_fraction
-        return is_high, max_frac
-    
-    def _expand_profile_2hop(
+    def _compare_profiles_strict(
         self,
-        neuron: Union[str, int],
-        dataset: str,
-        original_profile: ConnectivityProfile
-    ) -> Optional[ConnectivityProfile]:
+        profile_a: ConnectivityProfile,
+        profile_b: ConnectivityProfile,
+        direction: str = 'both',
+        score_weights: Optional[Dict[str, float]] = None
+    ) -> ComparisonResult:
         """
-        Expand profile to 2-hop by fetching profiles of 1-hop partners.
+        Compare profiles using strict mode (per-bodyId with rank correlation).
         
-        This enriches the profile by including the typed partners of untyped 1-hop partners.
+        Strict mode computes:
+        1. Rank correlation between matching partner types (always uses ranks)
+        2. Jaccard on typed partners only
+        3. Jaccard including 2-hop expanded partners (if available)
+        4. Combined score weighted by metrics
+        
+        This is more stringent than loose matching. Always uses ranks for
+        bodyId-level comparison (proportions are not used).
         
         Args:
-            neuron: Original neuron identifier
-            dataset: Dataset identifier
-            original_profile: The 1-hop profile with high untyped fraction
+            profile_a: First connectivity profile
+            profile_b: Second connectivity profile
+            direction: 'upstream', 'downstream', or 'both'
+            score_weights: Custom weights for combined score
         
         Returns:
-            Expanded ConnectivityProfile or None if expansion fails
+            ComparisonResult with strict mode metrics
         """
-        self._log(f"  Attempting 2-hop expansion for {neuron} in {dataset}...")
+        from scipy import stats
         
-        # Get typed partners from original profile (these are the 1-hop neighbors)
-        all_partners = set()
-        all_partners.update(original_profile.upstream_partners.keys())
-        all_partners.update(original_profile.downstream_partners.keys())
+        weights = score_weights or self.score_weights or DEFAULT_SCORE_WEIGHTS
+        min_common = self.min_common_partners
         
-        # Remove 'untyped' from the list
-        typed_partners = [p for p in all_partners if p != 'untyped' and p]
+        directions = []
+        if direction in ['both', 'upstream']:
+            directions.append('upstream')
+        if direction in ['both', 'downstream']:
+            directions.append('downstream')
         
-        if not typed_partners:
-            self._log(f"  No typed 1-hop partners to expand from")
-            return None
+        # Collect metrics for each direction
+        all_jaccard = []
+        all_rank_corr = []
+        all_cosine = []
+        all_overlap_a = []
+        all_overlap_b = []
         
-        # Fetch profiles for typed partners (these become 2-hop connections)
-        expanded_upstream = dict(original_profile.upstream_partners)
-        expanded_downstream = dict(original_profile.downstream_partners)
-        expanded_upstream_ranks = dict(original_profile.upstream_ranks)
-        expanded_downstream_ranks = dict(original_profile.downstream_ranks)
-        
-        partners_added = 0
-        for partner_type in typed_partners[:10]:  # Limit to top 10 partners for efficiency
-            try:
-                partner_profile = self.profiler.get_profile(partner_type, dataset)
-                if partner_profile is None:
-                    continue
+        for dir_name in directions:
+            # Get typed partner data
+            if dir_name == 'upstream':
+                partners_a = profile_a.upstream_partners or {}
+                partners_b = profile_b.upstream_partners or {}
+                ranks_a = profile_a.upstream_ranks or {}
+                ranks_b = profile_b.upstream_ranks or {}
+            else:
+                partners_a = profile_a.downstream_partners or {}
+                partners_b = profile_b.downstream_partners or {}
+                ranks_a = profile_a.downstream_ranks or {}
+                ranks_b = profile_b.downstream_ranks or {}
+            
+            # Compute Jaccard
+            set_a = set(partners_a.keys())
+            set_b = set(partners_b.keys())
+            
+            if set_a or set_b:
+                intersection = len(set_a & set_b)
+                union = len(set_a | set_b)
+                jaccard = intersection / union if union > 0 else 0.0
+                all_jaccard.append(jaccard)
                 
-                # Add partner's partners (2-hop) with reduced weight
-                # Weight is reduced because these are indirect connections
-                for p2, weight in partner_profile.upstream_partners.items():
-                    if p2 != 'untyped' and p2 not in expanded_upstream:
-                        # Use a fraction of the weight since it's 2-hop
-                        expanded_upstream[f"2hop:{p2}"] = weight * 0.3
-                        partners_added += 1
+                # Overlap fractions
+                overlap_a = intersection / len(set_a) if set_a else 0.0
+                overlap_b = intersection / len(set_b) if set_b else 0.0
+                all_overlap_a.append(overlap_a)
+                all_overlap_b.append(overlap_b)
+            
+            # Compute rank correlation on common partners (always uses ranks)
+            common = set_a & set_b
+            if len(common) >= min_common:
+                if ranks_a and ranks_b:
+                    # Always use ranks for bodyId-level comparison
+                    rank_list_a = [ranks_a.get(p, len(ranks_a) + 1) for p in common]
+                    rank_list_b = [ranks_b.get(p, len(ranks_b) + 1) for p in common]
+                else:
+                    # Fall back to weights if ranks not available
+                    rank_list_a = [partners_a.get(p, 0) for p in common]
+                    rank_list_b = [partners_b.get(p, 0) for p in common]
                 
-                for p2, weight in partner_profile.downstream_partners.items():
-                    if p2 != 'untyped' and p2 not in expanded_downstream:
-                        expanded_downstream[f"2hop:{p2}"] = weight * 0.3
-                        partners_added += 1
-                        
-            except Exception:
-                continue
+                # Check for constant arrays
+                if np.std(rank_list_a) > 0 and np.std(rank_list_b) > 0:
+                    with warnings.catch_warnings():
+                        warnings.filterwarnings('ignore', message='An input array is constant')
+                        corr, _ = stats.spearmanr(rank_list_a, rank_list_b)
+                    if not np.isnan(corr):
+                        all_rank_corr.append(corr)
+            
+            # Compute cosine similarity on weights
+            if common:
+                vec_a = np.array([partners_a.get(p, 0) for p in common])
+                vec_b = np.array([partners_b.get(p, 0) for p in common])
+                norm_a = np.linalg.norm(vec_a)
+                norm_b = np.linalg.norm(vec_b)
+                if norm_a > 0 and norm_b > 0:
+                    cosine = np.dot(vec_a, vec_b) / (norm_a * norm_b)
+                    all_cosine.append(cosine)
         
-        if partners_added == 0:
-            self._log(f"  2-hop expansion found no additional typed partners")
-            return None
+        # Aggregate metrics
+        jaccard = np.mean(all_jaccard) if all_jaccard else 0.0
+        rank_corr = np.mean(all_rank_corr) if all_rank_corr else np.nan
+        cosine = np.mean(all_cosine) if all_cosine else 0.0  # Computed but not used in combined
+        overlap_a_in_b = np.mean(all_overlap_a) if all_overlap_a else 0.0
+        overlap_b_in_a = np.mean(all_overlap_b) if all_overlap_b else 0.0
         
-        self._log(f"  2-hop expansion added {partners_added} partner types")
+        # Normalize rank correlation from [-1, 1] to [0, 1]
+        rank_norm = (rank_corr + 1) / 2 if not np.isnan(rank_corr) else 0.5  # Use 0.5 for missing
         
-        # Recompute ranks for expanded profile
-        from .connectivity_profiler import compute_ranks
-        expanded_upstream_ranks = compute_ranks(expanded_upstream)
-        expanded_downstream_ranks = compute_ranks(expanded_downstream)
-        
-        # Create expanded profile
-        expanded_profile = ConnectivityProfile(
-            neuron_id=f"{neuron}_2hop",
-            dataset=dataset,
-            upstream_partners=expanded_upstream,
-            downstream_partners=expanded_downstream,
-            upstream_ranks=expanded_upstream_ranks,
-            downstream_ranks=expanded_downstream_ranks,
-            upstream_top_k=original_profile.upstream_top_k,
-            downstream_top_k=original_profile.downstream_top_k,
-            total_upstream_weight=original_profile.total_upstream_weight,
-            total_downstream_weight=original_profile.total_downstream_weight,
-            num_neurons_aggregated=original_profile.num_neurons_aggregated,
-            untyped_upstream_count=original_profile.untyped_upstream_count,
-            untyped_downstream_count=original_profile.untyped_downstream_count,
-            untyped_upstream_weight_fraction=original_profile.untyped_upstream_weight_fraction * 0.5,  # Reduced after expansion
-            untyped_downstream_weight_fraction=original_profile.untyped_downstream_weight_fraction * 0.5,
-            actual_upstream_count=len(expanded_upstream),
-            actual_downstream_count=len(expanded_downstream),
-            unique_types_upstream=len([k for k in expanded_upstream if not k.startswith('2hop:')]),
-            unique_types_downstream=len([k for k in expanded_downstream if not k.startswith('2hop:')]),
+        # Compute combined score using only Jaccard + normalized rank correlation
+        combined = (
+            weights.get('jaccard', 0.50) * jaccard +
+            weights.get('rank', 0.50) * rank_norm
         )
         
-        return expanded_profile
-    
+        # Determine confidence
+        confidence = ComparisonResult.determine_confidence(combined)
+        
+        # Add note if rank correlation is NaN
+        notes = ""
+        if np.isnan(rank_corr):
+            notes = "Rank correlation undefined (insufficient common partners or constant input)"
+        
+        return ComparisonResult(
+            profile_a_id=str(profile_a.neuron_id),
+            profile_b_id=str(profile_b.neuron_id),
+            dataset_a=profile_a.dataset,
+            dataset_b=profile_b.dataset,
+            direction=direction,
+            jaccard=jaccard,
+            cosine=cosine,
+            rank_correlation=rank_corr,
+            overlap_a_in_b=overlap_a_in_b,
+            overlap_b_in_a=overlap_b_in_a,
+            combined=combined,
+            confidence=confidence,
+            weak_connectivity_a=profile_a.is_weak_connectivity,
+            weak_connectivity_b=profile_b.is_weak_connectivity,
+            notes=notes
+        )
+
     def _get_profile(
         self,
         neuron: Union[str, int],
         dataset: str,
-        force_refresh: bool = False,
-        allow_2hop: bool = True
+        force_refresh: bool = False
     ) -> ConnectivityProfile:
         """
-        Get profile with caching and optional 2-hop expansion.
+        Get profile with caching.
         
-        If the profile has >50% untyped partners and allow_2hop is True,
-        attempts to expand to 2-hop to enrich the profile.
+        The profiler handles 2-hop expansion automatically via config.expand_untyped_2hop.
+        If 2-hop expansion doesn't return any typed neuron in top_k, the untyped partner
+        is ignored by the profiler.
         
         Args:
             neuron: Neuron identifier
             dataset: Dataset identifier
             force_refresh: Bypass cache
-            allow_2hop: Allow 2-hop expansion for high-untyped profiles
         
         Returns:
-            ConnectivityProfile (possibly 2-hop expanded)
+            ConnectivityProfile (with 2-hop expansion handled by profiler if enabled)
         """
         cache_key = (str(neuron), dataset)
         
-        # Check 2-hop cache first
-        if not force_refresh and cache_key in self._2hop_profile_cache:
-            return self._2hop_profile_cache[cache_key]
-        
+        # Check cache first
         if not force_refresh and cache_key in self._profile_cache:
             return self._profile_cache[cache_key]
         
-        # Get 1-hop profile
+        # Get profile (profiler handles 2-hop expansion via config.expand_untyped_2hop)
         profile = self.profiler.get_profile(neuron, dataset, force_refresh)
         
         if profile is None:
             return None
-        
-        # Check untyped fraction
-        is_high_untyped, untyped_frac = self._check_untyped_fraction(profile)
-        
-        if is_high_untyped:
-            self._log(f"WARNING: {neuron} in {dataset} has {untyped_frac:.1%} untyped partners (>{self.max_untyped_fraction:.0%})")
-            
-            if allow_2hop and self.allow_2hop_expansion:
-                # Try 2-hop expansion
-                expanded = self._expand_profile_2hop(neuron, dataset, profile)
-                if expanded is not None:
-                    self._2hop_profile_cache[cache_key] = expanded
-                    return expanded
-                else:
-                    self._log(f"  2-hop expansion failed for {neuron} in {dataset}. Using 1-hop profile.")
         
         self._profile_cache[cache_key] = profile
         return profile
@@ -367,10 +389,15 @@ class CrossDatasetVerifier:
         datasets: List[str],
         direction: str = 'both',
         score_weights: Optional[Dict[str, float]] = None,
-        show_variance: bool = True
+        show_variance: bool = True,
+        comparison_mode: Optional[str] = None
     ) -> VerificationResult:
         """
         Verify that a neuron type has consistent connectivity across datasets.
+        
+        Supports two comparison modes:
+        - 'loose': Type-aggregated profiles (faster, default)
+        - 'strict': Per-bodyId profile comparison (more precise)
         
         Args:
             neuron_type: Type name to verify (uses label_mapper if provided)
@@ -378,6 +405,7 @@ class CrossDatasetVerifier:
             direction: 'upstream', 'downstream', or 'both'
             score_weights: Custom weights for combined score
             show_variance: Include within-type variance in results
+            comparison_mode: 'loose' or 'strict' (default: use self.comparison_mode)
         
         Returns:
             VerificationResult with all metrics and confidence level
@@ -389,9 +417,15 @@ class CrossDatasetVerifier:
             >>> print(result.confidence)
             'High'
         """
+        # Use instance-level comparison_mode if not specified
+        mode = comparison_mode or getattr(self, 'comparison_mode', 'loose')
+        
         # Only log if not in batch mode (to reduce noise)
         if not getattr(self, '_in_batch_mode', False):
-            self._log(f"Verifying type assignment: {neuron_type}")
+            self._log(f"Verifying type assignment: {neuron_type} (mode: {mode})")
+        
+        # Use score_weights from instance if not provided
+        weights = score_weights or self.score_weights
         
         # Extract profiles for each dataset
         profiles: Dict[str, ConnectivityProfile] = {}
@@ -441,9 +475,16 @@ class CrossDatasetVerifier:
                 ds_a, ds_b = dataset_keys[i], dataset_keys[j]
                 profile_a, profile_b = profiles[ds_a], profiles[ds_b]
                 
-                result = ProfileComparator.compare_profiles(
-                    profile_a, profile_b, direction, score_weights
-                )
+                if mode == 'strict':
+                    # Strict mode: Use per-bodyId comparison with rank correlation
+                    result = self._compare_profiles_strict(
+                        profile_a, profile_b, direction, weights
+                    )
+                else:
+                    # Loose mode (default): Type-aggregated comparison
+                    result = ProfileComparator.compare_profiles(
+                        profile_a, profile_b, direction, weights
+                    )
                 pairwise_scores.append(result)
         
         # Aggregate scores - EXCLUDE pairs where either profile is empty (type not found)
@@ -819,24 +860,32 @@ class CrossDatasetVerifier:
                     except Exception:
                         pass
                 
+                # Determine confidence from rank correlation (primary metric)
+                # Using thresholds aligned with interpretation guide
+                if np.isnan(avg_rank):
+                    confidence_level = 'Error'
+                elif avg_rank >= 0.85:
+                    confidence_level = 'Very High'
+                elif avg_rank >= 0.70:
+                    confidence_level = 'High'
+                elif avg_rank >= 0.50:
+                    confidence_level = 'Medium'
+                elif avg_rank >= 0.30:
+                    confidence_level = 'Low'
+                else:
+                    confidence_level = 'Very Low'
+                
                 result_row = {
                     'neuron_type': neuron_type,
                     'datasets_found': datasets_found,
                     'total_datasets': len(datasets),
-                    'avg_combined_score': verification.avg_combined_score,
-                    'min_score': verification.min_score,
-                    'max_score': verification.max_score,
                     'avg_jaccard': avg_jaccard,
-                    'avg_cosine': avg_cosine,
                     'avg_rank_corr': avg_rank,
                     'avg_overlap': avg_overlap,
-                    'confidence': verification.confidence,
-                    'verification_status': verification.verification_status,
+                    'confidence': confidence_level,
                     'datasets_compared': len(verification.datasets),
-                    'weak_connectivity_warning': len(verification.weak_connectivity_datasets) > 0,
                     # Round 5 additions
                     'total_unique_types': total_unique_types,
-                    'is_sparse': is_sparse,
                 }
                 
                 # Add directional scores (upstream/downstream separately)
@@ -878,20 +927,13 @@ class CrossDatasetVerifier:
                     'neuron_type': neuron_type,
                     'datasets_found': 0,
                     'total_datasets': len(datasets),
-                    'avg_combined_score': np.nan,
-                    'min_score': np.nan,
-                    'max_score': np.nan,
                     'avg_jaccard': np.nan,
-                    'avg_cosine': np.nan,
                     'avg_rank_corr': np.nan,
                     'avg_overlap': np.nan,
                     'confidence': 'Error',
-                    'verification_status': 'error',
                     'datasets_compared': 0,
-                    'weak_connectivity_warning': False,
                     # Round 5 additions
                     'total_unique_types': 0,
-                    'is_sparse': True,
                 }
                 if include_directional:
                     error_row['avg_rank_corr_upstream'] = np.nan

@@ -381,11 +381,18 @@ def _generate_summary_section(analyzer, dataset_names: List[str], thresholds: Li
             total_weight_data.append({'dataset': nick, 'threshold': t, 'weight': total_w})
             
             # Get traversal probability data if available
+            # Only average over paths that actually exist in this dataset (ignore 0s from other datasets' paths)
             try:
                 prob_data = analyzer._get_prob_data_for_threshold(t)
                 if not prob_data.empty and d in prob_data.columns:
-                    # Fill NaN with 0 before calculating mean
-                    avg_prob = float(prob_data[d].fillna(0).mean())
+                    # Only include paths where this dataset has non-zero probability
+                    # This ensures we don't dilute the average with 0s from paths in other datasets
+                    dataset_probs = prob_data[d]
+                    non_zero_probs = dataset_probs[dataset_probs > 0]
+                    if len(non_zero_probs) > 0:
+                        avg_prob = float(non_zero_probs.mean())
+                    else:
+                        avg_prob = 0.0
                     if pd.isna(avg_prob):
                         avg_prob = 0.0
                 else:
@@ -718,14 +725,21 @@ def _generate_similarity_section(analyzer, dataset_names: List[str], thresholds:
     
     for threshold in thresholds:
         aligned = analyzer.get_aligned_data(threshold)
-        if aligned.empty:
-            continue
         
-        available = [d for d in dataset_names if d in aligned.columns]
+        # Always include ALL datasets, even if they have no connections at this threshold
+        # This ensures consistent matrix dimensions across thresholds
+        available = dataset_names  # Use all datasets, not just those with data
+        
         if len(available) < 2:
             continue
         
         labels = [nickname_map[d] for d in available]
+        
+        # Ensure aligned data has columns for all datasets (fill missing with 0)
+        for d in dataset_names:
+            if d not in aligned.columns:
+                aligned[d] = 0
+        
         similarities = metrics.calculate_all_pairwise_similarities(aligned, dataset_names, threshold=1, include_advanced_metrics=True)
         
         # Save similarity data to CSV (inside comparison_results folder)
@@ -913,36 +927,42 @@ def _generate_networks_section(analyzer, dataset_names: List[str], thresholds: L
                         <span style="color: #9ca3af; margin-left: 12px;">● Dead-end (no path through)</span>
                     </p>
                 </div>
-                <div style="display: flex; justify-content: flex-end; gap: 10px; margin-bottom: 15px;">
-                    <button id="global_conserved_btn" onclick="toggleConservedOnly()" 
-                        style="padding: 8px 16px; border-radius: 6px; border: 1px solid var(--border-color); 
-                               background: var(--secondary-color); color: white; cursor: pointer; font-size: 13px; white-space: nowrap;">
-                        🌐 Show All
-                    </button>
-                    <button id="global_deadend_btn" onclick="toggleDeadEndNodes()" 
-                        style="padding: 8px 16px; border-radius: 6px; border: 1px solid var(--border-color); 
-                               background: var(--secondary-color); color: white; cursor: pointer; font-size: 13px; white-space: nowrap;">
-                        👁️ Show Dead-ends
-                    </button>
-                    <button id="global_physics_btn" onclick="toggleAllNetworks()" 
-                        style="padding: 8px 16px; border-radius: 6px; border: 1px solid var(--border-color); 
-                               background: var(--secondary-color); color: white; cursor: pointer; font-size: 13px; white-space: nowrap;">
-                        📌 Static Mode
-                    </button>
-                </div>
                 <script>
                     // Global network mode state (default: static)
-                    window.networkPhysicsEnabled = false;
-                    window.conservedOnlyMode = false;
-                    window.hideDeadEndNodes = false;
+                    // Filter mode: 0 = Show All, 1 = Conserved Only, 2 = No Unique
+                    window.networkFilterMode = {{}}; // Per-threshold filter mode
+                    window.networkPhysicsEnabled = {{}}; // Per-threshold physics state
+                    window.hideDeadEndNodes = {{}}; // Per-threshold dead-end state
                     window.allNetworks = {{}};
                     window.allThresholds = {thresholds_json};
                     
-                    function toggleDeadEndNodes() {{
-                        window.hideDeadEndNodes = !window.hideDeadEndNodes;
-                        const btn = document.getElementById('global_deadend_btn');
+                    // Initialize per-threshold states
+                    window.allThresholds.forEach(t => {{
+                        window.networkFilterMode[t] = 0;  // 0=All, 1=Conserved, 2=NoUnique
+                        window.networkPhysicsEnabled[t] = false;
+                        window.hideDeadEndNodes[t] = false;
+                    }});
+                    
+                    // Per-network toggle functions
+                    function toggleNetworkFilter(threshold) {{
+                        // Cycle through modes: 0 (All) -> 1 (Conserved) -> 2 (No Unique) -> 0
+                        window.networkFilterMode[threshold] = (window.networkFilterMode[threshold] + 1) % 3;
+                        const mode = window.networkFilterMode[threshold];
+                        const btn = document.getElementById('filter_btn_' + threshold);
                         
-                        if (window.hideDeadEndNodes) {{
+                        const modeLabels = ['🌐 Show All', '✅ Conserved Only', '🚫 No Unique'];
+                        const modeColors = ['var(--secondary-color)', '#22c55e', '#f59e0b'];
+                        btn.innerHTML = modeLabels[mode];
+                        btn.style.background = modeColors[mode];
+                        
+                        updateNetworkDisplay(threshold);
+                    }}
+                    
+                    function toggleDeadEndNodes(threshold) {{
+                        window.hideDeadEndNodes[threshold] = !window.hideDeadEndNodes[threshold];
+                        const btn = document.getElementById('deadend_btn_' + threshold);
+                        
+                        if (window.hideDeadEndNodes[threshold]) {{
                             btn.innerHTML = '🚫 Hide Dead-ends';
                             btn.style.background = '#f59e0b';
                         }} else {{
@@ -950,154 +970,14 @@ def _generate_networks_section(analyzer, dataset_names: List[str], thresholds: L
                             btn.style.background = 'var(--secondary-color)';
                         }}
                         
-                        // Update all networks
-                        window.allThresholds.forEach(t => {{
-                            if (window.allNetworks[t]) {{
-                                const netData = window.allNetworks[t];
-                                const net = netData.network;
-                                const edges = netData.edges;
-                                const nodes = netData.nodes;
-                                const allEdges = netData.allEdges;
-                                const allNodes = netData.allNodes;
-                                const deadEndNodeIds = netData.deadEndNodeIds || new Set();
-                                const conservedEdgeIds = netData.conservedEdgeIds;
-                                
-                                // Determine which edges to show based on both modes
-                                let filteredEdges = allEdges;
-                                if (window.conservedOnlyMode) {{
-                                    filteredEdges = allEdges.filter(e => conservedEdgeIds.has(e.id));
-                                }}
-                                
-                                // Get connected nodes from filtered edges
-                                let connectedNodeIds = new Set();
-                                filteredEdges.forEach(e => {{
-                                    connectedNodeIds.add(e.from);
-                                    connectedNodeIds.add(e.to);
-                                }});
-                                
-                                // Filter nodes
-                                let filteredNodes;
-                                if (window.conservedOnlyMode) {{
-                                    filteredNodes = allNodes.filter(n => connectedNodeIds.has(n.id));
-                                }} else {{
-                                    filteredNodes = allNodes;
-                                }}
-                                
-                                // Apply dead-end filter if enabled
-                                if (window.hideDeadEndNodes) {{
-                                    filteredNodes = filteredNodes.filter(n => !deadEndNodeIds.has(n.id));
-                                    // Also filter edges to/from dead-end nodes
-                                    filteredEdges = filteredEdges.filter(e => 
-                                        !deadEndNodeIds.has(e.from) && !deadEndNodeIds.has(e.to)
-                                    );
-                                }}
-                                
-                                // Apply to network
-                                edges.clear();
-                                edges.add(filteredEdges);
-                                nodes.clear();
-                                nodes.add(filteredNodes);
-                                
-                                // Reinitialize layout
-                                net.setOptions({{
-                                    nodes: {{ size: 18, font: {{ size: 11 }} }},
-                                    edges: {{ smooth: {{ type: 'curvedCW', roundness: 0.1 }} }},
-                                    layout: {{
-                                        hierarchical: {{
-                                            enabled: true,
-                                            direction: 'UD',
-                                            sortMethod: 'directed',
-                                            levelSeparation: 120,
-                                            nodeSpacing: 80,
-                                            treeSpacing: 100
-                                        }}
-                                    }},
-                                    physics: {{ enabled: false }}
-                                }});
-                                setTimeout(() => {{
-                                    net.setOptions({{ layout: {{ hierarchical: false }} }});
-                                    net.fit({{ animation: true }});
-                                }}, 200);
-                            }}
-                        }});
+                        updateNetworkDisplay(threshold);
                     }}
                     
-                    function toggleConservedOnly() {{
-                        window.conservedOnlyMode = !window.conservedOnlyMode;
-                        const btn = document.getElementById('global_conserved_btn');
+                    function toggleNetworkPhysics(threshold) {{
+                        window.networkPhysicsEnabled[threshold] = !window.networkPhysicsEnabled[threshold];
+                        const btn = document.getElementById('physics_btn_' + threshold);
                         
-                        if (window.conservedOnlyMode) {{
-                            btn.innerHTML = '✅ Conserved Only';
-                            btn.style.background = '#22c55e';
-                        }} else {{
-                            btn.innerHTML = '🌐 Show All';
-                            btn.style.background = 'var(--secondary-color)';
-                        }}
-                        
-                        // Update all networks
-                        window.allThresholds.forEach(t => {{
-                            if (window.allNetworks[t]) {{
-                                const netData = window.allNetworks[t];
-                                const net = netData.network;
-                                const edges = netData.edges;
-                                const nodes = netData.nodes;
-                                const allEdges = netData.allEdges;
-                                const allNodes = netData.allNodes;
-                                const conservedEdgeIds = netData.conservedEdgeIds;
-                                
-                                if (window.conservedOnlyMode) {{
-                                    // Filter to conserved edges only
-                                    const conservedEdges = allEdges.filter(e => conservedEdgeIds.has(e.id));
-                                    edges.clear();
-                                    edges.add(conservedEdges);
-                                    
-                                    // Filter nodes to only those connected by conserved edges
-                                    const connectedNodeIds = new Set();
-                                    conservedEdges.forEach(e => {{
-                                        connectedNodeIds.add(e.from);
-                                        connectedNodeIds.add(e.to);
-                                    }});
-                                    const connectedNodes = allNodes.filter(n => connectedNodeIds.has(n.id));
-                                    nodes.clear();
-                                    nodes.add(connectedNodes);
-                                }} else {{
-                                    // Restore all edges and nodes
-                                    edges.clear();
-                                    edges.add(allEdges);
-                                    nodes.clear();
-                                    nodes.add(allNodes);
-                                }}
-                                
-                                // Reinitialize layout with hierarchical then disable for free movement
-                                // Use 'UD' direction for top-to-bottom flow (consistent with initial layout)
-                                net.setOptions({{
-                                    nodes: {{ size: 18, font: {{ size: 11 }} }},
-                                    edges: {{ smooth: {{ type: 'curvedCW', roundness: 0.1 }} }},
-                                    layout: {{
-                                        hierarchical: {{
-                                            enabled: true,
-                                            direction: 'UD',
-                                            sortMethod: 'directed',
-                                            levelSeparation: 120,
-                                            nodeSpacing: 80,
-                                            treeSpacing: 100
-                                        }}
-                                    }},
-                                    physics: {{ enabled: false }}
-                                }});
-                                setTimeout(() => {{
-                                    net.setOptions({{ layout: {{ hierarchical: false }} }});
-                                    net.fit({{ animation: true }});
-                                }}, 200);
-                            }}
-                        }});
-                    }}
-                    
-                    function toggleAllNetworks() {{
-                        window.networkPhysicsEnabled = !window.networkPhysicsEnabled;
-                        const btn = document.getElementById('global_physics_btn');
-                        
-                        if (window.networkPhysicsEnabled) {{
+                        if (window.networkPhysicsEnabled[threshold]) {{
                             btn.innerHTML = '💥 Duang Mode';
                             btn.style.background = 'var(--primary-color)';
                         }} else {{
@@ -1105,76 +985,134 @@ def _generate_networks_section(analyzer, dataset_names: List[str], thresholds: L
                             btn.style.background = 'var(--secondary-color)';
                         }}
                         
-                        // Update all networks
-                        window.allThresholds.forEach(t => {{
-                            if (window.allNetworks[t]) {{
-                                const net = window.allNetworks[t].network;
-                                
-                                if (window.networkPhysicsEnabled) {{
-                                    // Duang mode - forceAtlas2Based physics with proper edge length and node sizing
-                                    net.setOptions({{
-                                        nodes: {{
-                                            size: 20,
-                                            font: {{ size: 12 }}
-                                        }},
-                                        edges: {{
-                                            smooth: {{ type: 'continuous', roundness: 0.2 }}
-                                        }},
-                                        layout: {{ hierarchical: false }},
-                                        physics: {{
-                                            enabled: true,
-                                            solver: 'forceAtlas2Based',
-                                            forceAtlas2Based: {{
-                                                gravitationalConstant: -80,
-                                                centralGravity: 0.005,
-                                                springLength: 120,
-                                                springConstant: 0.06,
-                                                damping: 0.5,
-                                                avoidOverlap: 0.8
-                                            }},
-                                            stabilization: {{
-                                                enabled: true,
-                                                iterations: 100,
-                                                updateInterval: 25
-                                            }},
-                                            minVelocity: 0.5
-                                        }}
-                                    }});
-                                    // Fit after stabilization
-                                    net.once('stabilized', () => {{
-                                        net.fit({{ animation: true }});
-                                    }});
-                                }} else {{
-                                    // Static mode - re-layout with hierarchical then disable physics for free drag
-                                    // Use 'UD' direction for top-to-bottom flow (consistent with initial layout)
-                                    net.setOptions({{
-                                        nodes: {{
-                                            size: 18,
-                                            font: {{ size: 11 }}
-                                        }},
-                                        edges: {{
-                                            smooth: {{ type: 'curvedCW', roundness: 0.1 }}
-                                        }},
-                                        layout: {{
-                                            hierarchical: {{
-                                                enabled: true,
-                                                direction: 'UD',
-                                                sortMethod: 'directed',
-                                                levelSeparation: 120,
-                                                nodeSpacing: 80,
-                                                treeSpacing: 100
-                                            }}
-                                        }},
-                                        physics: {{ enabled: false }}
-                                    }});
-                                    // After applying hierarchical, disable it for free movement
-                                    setTimeout(() => {{
-                                        net.setOptions({{ layout: {{ hierarchical: false }} }});
-                                        net.fit({{ animation: true }});
-                                    }}, 200);
-                                }}
-                            }}
+                        applyNetworkPhysics(threshold);
+                    }}
+                    
+                    function updateNetworkDisplay(threshold) {{
+                        if (!window.allNetworks[threshold]) return;
+                        
+                        const netData = window.allNetworks[threshold];
+                        const net = netData.network;
+                        const edges = netData.edges;
+                        const nodes = netData.nodes;
+                        const allEdges = netData.allEdges;
+                        const allNodes = netData.allNodes;
+                        const deadEndNodeIds = netData.deadEndNodeIds || new Set();
+                        const conservedEdgeIds = netData.conservedEdgeIds;
+                        const uniqueEdgeIds = netData.uniqueEdgeIds || new Set();
+                        
+                        const mode = window.networkFilterMode[threshold];
+                        
+                        // Filter edges based on mode
+                        let filteredEdges = allEdges;
+                        if (mode === 1) {{
+                            // Conserved Only
+                            filteredEdges = allEdges.filter(e => conservedEdgeIds.has(e.id));
+                        }} else if (mode === 2) {{
+                            // No Unique (show conserved + partial, hide unique)
+                            filteredEdges = allEdges.filter(e => !uniqueEdgeIds.has(e.id));
+                        }}
+                        
+                        // Get connected nodes from filtered edges
+                        let connectedNodeIds = new Set();
+                        filteredEdges.forEach(e => {{
+                            connectedNodeIds.add(e.from);
+                            connectedNodeIds.add(e.to);
                         }});
+                        
+                        // Filter nodes based on mode
+                        let filteredNodes;
+                        if (mode === 0) {{
+                            filteredNodes = allNodes;
+                        }} else {{
+                            filteredNodes = allNodes.filter(n => connectedNodeIds.has(n.id));
+                        }}
+                        
+                        // Apply dead-end filter if enabled
+                        if (window.hideDeadEndNodes[threshold]) {{
+                            filteredNodes = filteredNodes.filter(n => !deadEndNodeIds.has(n.id));
+                            filteredEdges = filteredEdges.filter(e => 
+                                !deadEndNodeIds.has(e.from) && !deadEndNodeIds.has(e.to)
+                            );
+                        }}
+                        
+                        // Apply to network
+                        edges.clear();
+                        edges.add(filteredEdges);
+                        nodes.clear();
+                        nodes.add(filteredNodes);
+                        
+                        // Reinitialize layout
+                        net.setOptions({{
+                            nodes: {{ size: 18, font: {{ size: 11 }} }},
+                            edges: {{ smooth: {{ type: 'curvedCW', roundness: 0.1 }} }},
+                            layout: {{
+                                hierarchical: {{
+                                    enabled: true,
+                                    direction: 'UD',
+                                    sortMethod: 'directed',
+                                    levelSeparation: 120,
+                                    nodeSpacing: 80,
+                                    treeSpacing: 100
+                                }}
+                            }},
+                            physics: {{ enabled: false }}
+                        }});
+                        setTimeout(() => {{
+                            net.setOptions({{ layout: {{ hierarchical: false }} }});
+                            net.fit({{ animation: true }});
+                        }}, 200);
+                    }}
+                    
+                    function applyNetworkPhysics(threshold) {{
+                        if (!window.allNetworks[threshold]) return;
+                        
+                        const net = window.allNetworks[threshold].network;
+                        
+                        if (window.networkPhysicsEnabled[threshold]) {{
+                            // Duang mode
+                            net.setOptions({{
+                                nodes: {{ size: 20, font: {{ size: 12 }} }},
+                                edges: {{ smooth: {{ type: 'continuous', roundness: 0.2 }} }},
+                                layout: {{ hierarchical: false }},
+                                physics: {{
+                                    enabled: true,
+                                    solver: 'forceAtlas2Based',
+                                    forceAtlas2Based: {{
+                                        gravitationalConstant: -80,
+                                        centralGravity: 0.005,
+                                        springLength: 120,
+                                        springConstant: 0.06,
+                                        damping: 0.5,
+                                        avoidOverlap: 0.8
+                                    }},
+                                    stabilization: {{ enabled: true, iterations: 100, updateInterval: 25 }},
+                                    minVelocity: 0.5
+                                }}
+                            }});
+                            net.once('stabilized', () => {{ net.fit({{ animation: true }}); }});
+                        }} else {{
+                            // Static mode
+                            net.setOptions({{
+                                nodes: {{ size: 18, font: {{ size: 11 }} }},
+                                edges: {{ smooth: {{ type: 'curvedCW', roundness: 0.1 }} }},
+                                layout: {{
+                                    hierarchical: {{
+                                        enabled: true,
+                                        direction: 'UD',
+                                        sortMethod: 'directed',
+                                        levelSeparation: 120,
+                                        nodeSpacing: 80,
+                                        treeSpacing: 100
+                                    }}
+                                }},
+                                physics: {{ enabled: false }}
+                            }});
+                            setTimeout(() => {{
+                                net.setOptions({{ layout: {{ hierarchical: false }} }});
+                                net.fit({{ animation: true }});
+                            }}, 200);
+                        }}
                     }}
                 </script>
 """)
@@ -1198,12 +1136,14 @@ def _generate_conservation_network(analyzer, dataset_names: List[str], threshold
     """Generate network with conservation-based edge coloring and role-based node coloring."""
     aligned = analyzer.get_aligned_data(threshold)
     
-    if aligned.empty:
-        return '<div class="card"><p>No network data at this threshold.</p></div>'
+    # Always include ALL datasets, even if they have no connections at this threshold
+    # This ensures consistent behavior and proper conservation coloring
+    available = dataset_names  # Use all datasets, not just those with data
     
-    available = [d for d in dataset_names if d in aligned.columns]
-    if not available:
-        return '<div class="card"><p>No datasets available.</p></div>'
+    # Ensure aligned data has columns for all datasets (fill missing with 0)
+    for d in dataset_names:
+        if d not in aligned.columns:
+            aligned[d] = 0
     
     num_datasets = len(available)
     nicknames = [nickname_map[d] for d in available]
@@ -1307,6 +1247,7 @@ def _generate_conservation_network(analyzer, dataset_names: List[str], threshold
     # Create nodes and edges
     edge_id = 0
     conserved_edge_ids = []  # Track IDs of conserved edges
+    unique_edge_ids = []  # Track IDs of unique edges (only in 1 dataset)
     conserved_node_ids = set()  # Track node IDs that are part of conserved edges
     
     for (source, target), weights in edge_data.items():
@@ -1349,6 +1290,7 @@ def _generate_conservation_network(analyzer, dataset_names: List[str], threshold
         # Determine conservation level
         present_count = len(weights)
         is_conserved = (present_count == num_datasets)
+        is_unique = (present_count == 1)
         if is_conserved:
             color = '#22c55e'  # Conserved - green
             conservation = 'Conserved'
@@ -1362,6 +1304,7 @@ def _generate_conservation_network(analyzer, dataset_names: List[str], threshold
         else:
             color = '#94a3b8'  # Unique - gray
             conservation = 'Unique'
+            unique_edge_ids.append(edge_id)
         
         # Build hover label with all weights
         hover_lines = [f"{source} → {target}", f"Conservation: {conservation} ({present_count}/{num_datasets})"]
@@ -1384,6 +1327,7 @@ def _generate_conservation_network(analyzer, dataset_names: List[str], threshold
     nodes_json = json.dumps(nodes)
     edges_json = json.dumps(edges)
     conserved_ids_json = json.dumps(conserved_edge_ids)
+    unique_ids_json = json.dumps(unique_edge_ids)
     conserved_node_ids_json = json.dumps(list(conserved_node_ids))
     dead_end_node_ids = [node_ids[label] for label in dead_end_nodes if label in node_ids]
     dead_end_node_ids_json = json.dumps(dead_end_node_ids)
@@ -1392,13 +1336,34 @@ def _generate_conservation_network(analyzer, dataset_names: List[str], threshold
     dead_end_count = len(dead_end_nodes)
     dead_end_info = f' | <span style="color: #9ca3af;"><strong>{dead_end_count}</strong> dead-end</span>' if dead_end_count > 0 else ''
     conserved_count = len(conserved_edge_ids)
+    unique_count = len(unique_edge_ids)
     conserved_info = f' | <span style="color: #22c55e;"><strong>{conserved_count}</strong> conserved</span>'
+    unique_info = f' | <span style="color: #94a3b8;"><strong>{unique_count}</strong> unique</span>' if unique_count > 0 else ''
     
     return f'''
         <div class="card">
             <h3>Network at Threshold = {threshold}</h3>
-            <div style="color: var(--secondary-color); margin-bottom: 10px;">
-                <strong>{len(nodes)}</strong> neurons | <strong>{len(edges)}</strong> unique edges{conserved_info}{dead_end_info}
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
+                <div style="color: var(--secondary-color);">
+                    <strong>{len(nodes)}</strong> neurons | <strong>{len(edges)}</strong> edges{conserved_info}{unique_info}{dead_end_info}
+                </div>
+                <div style="display: flex; gap: 8px;">
+                    <button id="filter_btn_{threshold}" onclick="toggleNetworkFilter({threshold})" 
+                        style="padding: 6px 12px; border-radius: 6px; border: 1px solid var(--border-color); 
+                               background: var(--secondary-color); color: white; cursor: pointer; font-size: 12px; white-space: nowrap;">
+                        🌐 Show All
+                    </button>
+                    <button id="deadend_btn_{threshold}" onclick="toggleDeadEndNodes({threshold})" 
+                        style="padding: 6px 12px; border-radius: 6px; border: 1px solid var(--border-color); 
+                               background: var(--secondary-color); color: white; cursor: pointer; font-size: 12px; white-space: nowrap;">
+                        👁️ Show Dead-ends
+                    </button>
+                    <button id="physics_btn_{threshold}" onclick="toggleNetworkPhysics({threshold})" 
+                        style="padding: 6px 12px; border-radius: 6px; border: 1px solid var(--border-color); 
+                               background: var(--secondary-color); color: white; cursor: pointer; font-size: 12px; white-space: nowrap;">
+                        📌 Static Mode
+                    </button>
+                </div>
             </div>
             <div id="{div_id}" style="height: 450px; border: 1px solid var(--border-color); border-radius: 8px;"></div>
         </div>
@@ -1407,6 +1372,7 @@ def _generate_conservation_network(analyzer, dataset_names: List[str], threshold
                 const allNodes = {nodes_json};
                 const allEdges = {edges_json};
                 const conservedEdgeIds = new Set({conserved_ids_json});
+                const uniqueEdgeIds = new Set({unique_ids_json});
                 const conservedNodeIds = new Set({conserved_node_ids_json});
                 const deadEndNodeIds = new Set({dead_end_node_ids_json});
                 
@@ -1465,6 +1431,7 @@ def _generate_conservation_network(analyzer, dataset_names: List[str], threshold
                     allNodes: allNodes,
                     allEdges: allEdges,
                     conservedEdgeIds: conservedEdgeIds,
+                    uniqueEdgeIds: uniqueEdgeIds,
                     conservedNodeIds: conservedNodeIds,
                     deadEndNodeIds: deadEndNodeIds
                 }};
@@ -2092,22 +2059,30 @@ def _generate_overlap_matrices_section(analyzer, dataset_names: List[str], thres
     
     for i, threshold in enumerate(thresholds):
         aligned = analyzer.get_aligned_data(threshold)
-        available = [d for d in dataset_names if d in aligned.columns]
+        
+        # Always include ALL datasets, even if they have no connections at this threshold
+        # This ensures consistent matrix dimensions across thresholds
+        available = dataset_names  # Use all datasets, not just those with data
         n = len(available)
         
-        if aligned.empty or n == 0:
+        # Ensure aligned data has columns for all datasets (fill missing with 0)
+        for d in dataset_names:
+            if d not in aligned.columns:
+                aligned[d] = 0
+        
+        if n == 0:
             active = 'active' if i == 0 else ''
-            html_parts.append(f'<div id="overlap_tab_{threshold}" class="tab-content {active}"><p>No data at this threshold.</p></div>')
+            html_parts.append(f'<div id="overlap_tab_{threshold}" class="tab-content {active}"><p>No datasets configured.</p></div>')
             continue
         
         # Compute edge overlap matrix (asymmetric)
         edge_overlap = [[0 for _ in range(n)] for _ in range(n)]
         for i1, d1 in enumerate(available):
-            edges_in_d1 = set(aligned.index[aligned[d1] > 0])
+            edges_in_d1 = set(aligned.index[aligned[d1] > 0]) if d1 in aligned.columns else set()
             edge_overlap[i1][i1] = len(edges_in_d1)  # Diagonal = total
             for i2, d2 in enumerate(available):
                 if i1 != i2:
-                    edges_in_d2 = set(aligned.index[aligned[d2] > 0])
+                    edges_in_d2 = set(aligned.index[aligned[d2] > 0]) if d2 in aligned.columns else set()
                     # Edges in d1 that are also in d2
                     edge_overlap[i1][i2] = len(edges_in_d1 & edges_in_d2)
         
@@ -2210,13 +2185,29 @@ def _generate_overlap_matrices_section(analyzer, dataset_names: List[str], thres
                         row.map((val, j) => (val * 100).toFixed(1) + '%')
                     );
                     
-                    // Square matrix layout with fixed aspect ratio
+                    // Square matrix layout with fixed aspect ratio and no grid
                     const baseLayout = {{
-                        xaxis: {{ tickangle: -45, side: 'bottom', tickfont: {{size: 11}}, constrain: 'domain' }},
-                        yaxis: {{ autorange: 'reversed', tickfont: {{size: 11}}, scaleanchor: 'x', scaleratio: 1 }},
+                        xaxis: {{ 
+                            tickangle: -45, 
+                            side: 'bottom', 
+                            tickfont: {{size: 11}}, 
+                            constrain: 'domain',
+                            showgrid: false,
+                            zeroline: false
+                        }},
+                        yaxis: {{ 
+                            autorange: 'reversed', 
+                            tickfont: {{size: 11}}, 
+                            scaleanchor: 'x', 
+                            scaleratio: 1,
+                            showgrid: false,
+                            zeroline: false
+                        }},
                         margin: {{ l: 100, r: 30, t: 30, b: 100 }},
                         width: {chart_size},
-                        height: {chart_size}
+                        height: {chart_size},
+                        paper_bgcolor: 'rgba(0,0,0,0)',
+                        plot_bgcolor: 'rgba(0,0,0,0)'
                     }};
                     
                     // Store current mode

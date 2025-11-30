@@ -33,8 +33,8 @@ import os
 import sys
 import logging
 
-# Add src to path
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(__file__)), 'src'))
+# Add src to path (tests/examples/ -> tests/ -> project root -> src)
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 'src'))
 
 from comparison import (
     ComparisonAnalyzer,
@@ -68,20 +68,20 @@ def run_comprehensive_comparison():
     
     params = ComparisonParameters(
         # Datasets to compare
-        datasets=['flywire_BANC_v626', 'male-cns:v0.9', 'flywire_FAFB_v783', 'hemibrain:v1.2.1'],
-        datasets_nickname=['BANC','male-CNS', 'FAFB','hemibrain'],
+        datasets=['flywire_FAFB_v783', 'hemibrain:v1.2.1'],
+        datasets_nickname=['FAFB','hemibrain'],
         
         # Source neurons - aMe12 medulla neurons
-        source_neurons=['aMe12','aMe26'],
+        source_neurons=['aMe12'],
         
         # Target neurons - PPL101 dopaminergic neurons
-        target_neurons=['PPL101','PPL103'],
+        target_neurons=['PPL101'],
         
         # Allow 1 intermediate layer (source → inter → target)
         max_interlayer=1,
         
         # Multiple thresholds to analyze sensitivity
-        thresholds=[1,3,5,10],
+        thresholds=[3,5,10],
         
         # Top edges to include in analysis
         top_edges=50,
@@ -89,7 +89,7 @@ def run_comprehensive_comparison():
         # Comparison mode: 'path' (path-based filtering) or 'edge' (edge-based filtering)
         # - 'path': Discovers edges through paths; may miss strong edges on weak paths
         # - 'edge': Evaluates each edge independently by weight
-        comparison_mode='path',  # Change to 'edge' to use edge-based comparison
+        comparison_mode='edge',  # Change to 'edge' to use edge-based comparison
         
         # Output settings
         output_folder=output_dir,

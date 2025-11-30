@@ -27,6 +27,8 @@ Example:
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Union
+import warnings
+
 import numpy as np
 import pandas as pd
 from scipy import stats
@@ -45,11 +47,13 @@ from .connectivity_profiler import ConnectivityProfile
 # Default Score Weights
 # ============================================================================
 
+# Simplified comparison metrics:
+# - Jaccard: Set-based overlap of partner types (0-1)
+# - Rank correlation: Spearman correlation normalized to 0-1 using (x+1)/2
+# These two metrics work well for both bodyId-level and type-level comparison
 DEFAULT_SCORE_WEIGHTS = {
-    'jaccard': 0.30,
-    'cosine': 0.35,
-    'rank': 0.35
-    # Note: overlap removed (highly correlated with Jaccard)
+    'jaccard': 0.50,
+    'rank': 0.50
 }
 
 
@@ -106,6 +110,7 @@ class ComparisonResult:
     # Flags
     weak_connectivity_a: bool = False
     weak_connectivity_b: bool = False
+    notes: str = ""  # Additional notes (e.g., "constant_array" when rank correlation is NaN)
     
     @property
     def rank_correlation_norm(self) -> float:
@@ -116,7 +121,7 @@ class ComparisonResult:
     
     def to_dict(self) -> dict:
         """Convert to dictionary for CSV/JSON export."""
-        return {
+        result = {
             'profile_a': self.profile_a_id,
             'profile_b': self.profile_b_id,
             'dataset_a': self.dataset_a,
@@ -124,7 +129,7 @@ class ComparisonResult:
             'direction': self.direction,
             'jaccard': round(self.jaccard, 4),
             'cosine': round(self.cosine, 4),
-            'rank_correlation': round(self.rank_correlation, 4),
+            'rank_correlation': round(self.rank_correlation, 4) if not np.isnan(self.rank_correlation) else np.nan,
             'rank_correlation_norm': round(self.rank_correlation_norm, 4) if not np.isnan(self.rank_correlation_norm) else np.nan,
             'overlap_a_in_b': round(self.overlap_a_in_b, 4),
             'overlap_b_in_a': round(self.overlap_b_in_a, 4),
@@ -132,18 +137,27 @@ class ComparisonResult:
             'confidence': self.confidence,
             'weak_connectivity_warning': self.weak_connectivity_a or self.weak_connectivity_b
         }
+        if self.notes:
+            result['notes'] = self.notes
+        return result
     
     def summary(self) -> str:
         """Generate a human-readable summary string."""
+        # Handle NaN in rank correlation display
+        rank_corr_str = f"{self.rank_correlation:.3f}" if not np.isnan(self.rank_correlation) else "NaN"
+        rank_norm_str = f"{self.rank_correlation_norm:.3f}" if not np.isnan(self.rank_correlation_norm) else "NaN"
+        
         lines = [
             f"Comparison: {self.profile_a_id} ({self.dataset_a}) vs {self.profile_b_id} ({self.dataset_b})",
             f"  Direction: {self.direction}",
             f"  Combined Score: {self.combined:.4f} ({self.confidence})",
-            f"  Metrics: Jaccard={self.jaccard:.3f}, Cosine={self.cosine:.3f}, RankCorr={self.rank_correlation:.3f} (norm={self.rank_correlation_norm:.3f})",
+            f"  Metrics: Jaccard={self.jaccard:.3f}, Cosine={self.cosine:.3f}, RankCorr={rank_corr_str} (norm={rank_norm_str})",
             f"  Overlap: A_in_B={self.overlap_a_in_b:.3f}, B_in_A={self.overlap_b_in_a:.3f}"
         ]
         if self.weak_connectivity_a or self.weak_connectivity_b:
             lines.append("  ⚠️ Weak connectivity warning")
+        if self.notes:
+            lines.append(f"  ℹ️ {self.notes}")
         return "\n".join(lines)
     
     @staticmethod
@@ -440,11 +454,21 @@ class ProfileComparator:
                 rank_array_a = [ranks_a.get(p, default_rank_a) for p in partner_list]
                 rank_array_b = [ranks_b.get(p, default_rank_b) for p in partner_list]
         
-        # Compute correlation
-        if method == 'kendall':
-            corr, _ = stats.kendalltau(rank_array_a, rank_array_b)
-        else:  # spearman
-            corr, _ = stats.spearmanr(rank_array_a, rank_array_b)
+        # Check for constant arrays before computing correlation
+        # (correlation is undefined when one array has no variance)
+        arr_a = np.array(rank_array_a)
+        arr_b = np.array(rank_array_b)
+        if np.std(arr_a) == 0 or np.std(arr_b) == 0:
+            # Return NaN and let caller handle it (marked as 'constant_array' in results)
+            return np.nan
+        
+        # Compute correlation (suppress ConstantInputWarning just in case of edge cases)
+        with warnings.catch_warnings():
+            warnings.filterwarnings('ignore', message='An input array is constant')
+            if method == 'kendall':
+                corr, _ = stats.kendalltau(rank_array_a, rank_array_b)
+            else:  # spearman
+                corr, _ = stats.spearmanr(rank_array_a, rank_array_b)
         
         # Handle NaN (can occur with constant arrays)
         if np.isnan(corr):
@@ -492,13 +516,14 @@ class ProfileComparator:
         direction: str = 'both'
     ) -> Dict[str, float]:
         """
-        Weighted combination of multiple metrics.
+        Combined similarity score using Jaccard and rank correlation.
         
-        Default weights:
-        - jaccard: 0.25
-        - cosine: 0.35
-        - rank: 0.25
-        - overlap: 0.15
+        Default weights (equal):
+        - jaccard: 0.50 (set-based overlap of partner types)
+        - rank: 0.50 (Spearman correlation normalized to 0-1)
+        
+        These metrics work well for both bodyId-level and type-level comparison.
+        Cosine similarity is computed but not included in combined score.
         
         Args:
             profile_a: First connectivity profile
@@ -507,9 +532,13 @@ class ProfileComparator:
             direction: 'upstream', 'downstream', or 'both'
         
         Returns:
-            Dict with 'combined', 'jaccard', 'cosine', 'rank', 'rank_norm', 'overlap' scores
-            - 'rank': Original rank correlation in [-1, 1] range
-            - 'rank_norm': Normalized rank correlation in [0, 1] range using (x+1)/2
+            Dict with scores:
+            - 'combined': Weighted combination of jaccard and rank_norm
+            - 'jaccard': Jaccard similarity (0-1)
+            - 'rank': Original rank correlation (-1 to 1)
+            - 'rank_norm': Normalized rank correlation (0-1)
+            - 'cosine': Cosine similarity (for reference, not in combined)
+            - 'overlap_a_in_b', 'overlap_b_in_a': Overlap fractions (for reference)
         """
         if weights is None:
             weights = DEFAULT_SCORE_WEIGHTS
@@ -520,19 +549,18 @@ class ProfileComparator:
         rank_corr = ProfileComparator.rank_correlation(profile_a, profile_b, direction)
         overlap_a, overlap_b = ProfileComparator.overlap_fraction(profile_a, profile_b, direction)
         
-        # Normalize rank_corr from [-1, 1] to [0, 1] for display
+        # Normalize rank_corr from [-1, 1] to [0, 1]
         rank_norm = (rank_corr + 1) / 2 if not np.isnan(rank_corr) else np.nan
         
-        # Compute weighted combined score
-        # Use normalized rank_corr for consistency (in [0, 1] range)
-        rank_for_combined = 0 if np.isnan(rank_norm) else rank_norm
+        # Compute weighted combined score (only Jaccard + normalized rank)
+        # Use 0.5 for missing rank (neutral)
+        rank_for_combined = 0.5 if np.isnan(rank_norm) else rank_norm
         combined = (
-            weights.get('jaccard', 0.30) * jaccard +
-            weights.get('cosine', 0.35) * cosine +
-            weights.get('rank', 0.35) * rank_for_combined
+            weights.get('jaccard', 0.50) * jaccard +
+            weights.get('rank', 0.50) * rank_for_combined
         )
         
-        # Keep overlap values for backward compatibility but don't use in combined
+        # Keep overlap values for backward compatibility
         overlap_avg = (overlap_a + overlap_b) / 2
         
         return {
@@ -571,6 +599,11 @@ class ProfileComparator:
         
         confidence = ComparisonResult.determine_confidence(scores['combined'])
         
+        # Add note if rank correlation is NaN (due to constant arrays)
+        notes = ""
+        if np.isnan(scores['rank']):
+            notes = "Rank correlation undefined (constant input array)"
+        
         return ComparisonResult(
             profile_a_id=str(profile_a.neuron_id),
             profile_b_id=str(profile_b.neuron_id),
@@ -585,7 +618,8 @@ class ProfileComparator:
             combined=scores['combined'],
             confidence=confidence,
             weak_connectivity_a=profile_a.is_weak_connectivity,
-            weak_connectivity_b=profile_b.is_weak_connectivity
+            weak_connectivity_b=profile_b.is_weak_connectivity,
+            notes=notes
         )
     
     @staticmethod
@@ -1372,14 +1406,12 @@ class HomologFinder:
         if not upstream_partners and not downstream_partners:
             return None
         
-        # Normalize weights to proportions
-        up_total = sum(upstream_partners.values()) if upstream_partners else 1.0
-        down_total = sum(downstream_partners.values()) if downstream_partners else 1.0
+        # Store actual synapse weights (not normalized to proportions)
+        # This enables easy aggregation of bodyId profiles to type profiles
+        up_total = sum(upstream_partners.values()) if upstream_partners else 0.0
+        down_total = sum(downstream_partners.values()) if downstream_partners else 0.0
         
-        upstream_norm = {k: v / up_total for k, v in upstream_partners.items()}
-        downstream_norm = {k: v / down_total for k, v in downstream_partners.items()}
-        
-        # Create ranks
+        # Create ranks from weights (higher weight = lower rank)
         upstream_ranked = sorted(upstream_partners.items(), key=lambda x: -x[1])
         downstream_ranked = sorted(downstream_partners.items(), key=lambda x: -x[1])
         
@@ -1392,8 +1424,8 @@ class HomologFinder:
         return ConnectivityProfile(
             neuron_id=neuron_type,
             dataset=dataset,
-            upstream_partners=upstream_norm,
-            downstream_partners=downstream_norm,
+            upstream_partners=upstream_partners,  # Actual weights, not normalized
+            downstream_partners=downstream_partners,  # Actual weights, not normalized
             upstream_ranks=upstream_ranks,
             downstream_ranks=downstream_ranks,
             upstream_top_k=len(upstream_partners),
@@ -1557,14 +1589,11 @@ class HomologFinder:
         if not upstream_partners and not downstream_partners:
             return None
         
-        # Normalize weights to proportions
-        up_total = sum(upstream_partners.values()) if upstream_partners else 1.0
-        down_total = sum(downstream_partners.values()) if downstream_partners else 1.0
+        # Store actual synapse weights (not normalized to proportions)
+        up_total = sum(upstream_partners.values()) if upstream_partners else 0.0
+        down_total = sum(downstream_partners.values()) if downstream_partners else 0.0
         
-        upstream_norm = {k: v / up_total for k, v in upstream_partners.items()}
-        downstream_norm = {k: v / down_total for k, v in downstream_partners.items()}
-        
-        # Create ranks
+        # Create ranks from weights (higher weight = lower rank)
         upstream_ranked = sorted(upstream_partners.items(), key=lambda x: -x[1])
         downstream_ranked = sorted(downstream_partners.items(), key=lambda x: -x[1])
         
@@ -1577,8 +1606,8 @@ class HomologFinder:
         return ConnectivityProfile(
             neuron_id=neuron,
             dataset=dataset,
-            upstream_partners=upstream_norm,
-            downstream_partners=downstream_norm,
+            upstream_partners=upstream_partners,  # Actual weights, not normalized
+            downstream_partners=downstream_partners,  # Actual weights, not normalized
             upstream_ranks=upstream_ranks,
             downstream_ranks=downstream_ranks,
             upstream_top_k=len(upstream_partners),

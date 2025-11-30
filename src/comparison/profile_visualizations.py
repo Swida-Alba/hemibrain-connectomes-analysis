@@ -1579,17 +1579,24 @@ class ProfileVisualizer:
 ''')
             
             # Dataset pair similarity summary - average scores across all types for each dataset pair
+            # Include both rank correlation and Jaccard
             if not matrix_filtered.empty:
+                # Get Jaccard matrix for avg Jaccard calculation
+                jaccard_matrix_for_summary = None
+                if metric_matrices and 'jaccard' in metric_matrices:
+                    jaccard_matrix_for_summary = metric_matrices['jaccard']
+                
                 html_parts.append('''
         <div class="section">
             <h2>📈 Dataset Pair Similarity Summary</h2>
-            <p>Average normalized rank correlation [0-1] across all neuron types for each dataset pair. 
+            <p>Average scores across all neuron types for each dataset pair. 
                Higher scores indicate better overall similarity between datasets.</p>
             <table>
                 <thead>
                     <tr>
                         <th>Dataset Pair</th>
                         <th>Avg Rank Corr</th>
+                        <th>Avg Jaccard</th>
                         <th>N Types</th>
                         <th>Very High (≥0.85)</th>
                         <th>High (0.7-0.85)</th>
@@ -1611,6 +1618,13 @@ class ProfileVisualizer:
                         n_low = ((col_values >= 0.3) & (col_values < 0.5)).sum()
                         n_very_low = (col_values < 0.3).sum()
                         
+                        # Get avg Jaccard for this dataset pair
+                        avg_jaccard = np.nan
+                        if jaccard_matrix_for_summary is not None and col in jaccard_matrix_for_summary.columns:
+                            jaccard_col_values = jaccard_matrix_for_summary[col].dropna()
+                            if len(jaccard_col_values) > 0:
+                                avg_jaccard = jaccard_col_values.mean()
+                        
                         # Color for avg score - normalized thresholds
                         if avg_score >= 0.85:
                             score_color = 'rgba(46, 125, 50, 0.7)'  # Dark Green - Very High
@@ -1623,9 +1637,30 @@ class ProfileVisualizer:
                         else:
                             score_color = 'rgba(244, 67, 54, 0.5)'  # Red - Very Low
                         
+                        # Color for Jaccard (different thresholds)
+                        if np.isnan(avg_jaccard):
+                            jaccard_color = '#f5f5f5'
+                            jaccard_display = '-'
+                        elif avg_jaccard > 0.5:
+                            jaccard_color = 'rgba(46, 125, 50, 0.7)'
+                            jaccard_display = f'{avg_jaccard:.3f}'
+                        elif avg_jaccard > 0.3:
+                            jaccard_color = 'rgba(76, 175, 80, 0.7)'
+                            jaccard_display = f'{avg_jaccard:.3f}'
+                        elif avg_jaccard > 0.2:
+                            jaccard_color = 'rgba(255, 193, 7, 0.7)'
+                            jaccard_display = f'{avg_jaccard:.3f}'
+                        elif avg_jaccard > 0.1:
+                            jaccard_color = 'rgba(255, 152, 0, 0.7)'
+                            jaccard_display = f'{avg_jaccard:.3f}'
+                        else:
+                            jaccard_color = 'rgba(244, 67, 54, 0.5)'
+                            jaccard_display = f'{avg_jaccard:.3f}'
+                        
                         html_parts.append(f'''                    <tr>
                         <td><strong>{col}</strong></td>
                         <td style="background: {score_color}; text-align: center;">{avg_score:.3f}</td>
+                        <td style="background: {jaccard_color}; text-align: center;">{jaccard_display}</td>
                         <td style="text-align: center;">{n_types}</td>
                         <td style="text-align: center; color: #2e7d32;">{n_very_high}</td>
                         <td style="text-align: center; color: #4CAF50;">{n_high}</td>
@@ -1667,11 +1702,10 @@ class ProfileVisualizer:
                 </tr>
             </table>
             
-            <h3>Score Metrics Explained</h3>
+            <h3>Score Metrics (Jaccard + Rank Correlation)</h3>
             <ul>
-                <li><strong>Rank Correlation (Primary):</strong> Average of upstream and downstream Spearman correlations, normalized to [0, 1] range. Measures if the same partners are ranked similarly in both datasets. 0.5 = no correlation, 1.0 = identical rankings. Most robust to annotation completeness differences.</li>
-                <li><strong>Jaccard:</strong> Set-based overlap of partner types: |A ∩ B| / |A ∪ B|. Range: 0 (no shared partners) to 1 (identical partner sets). Ignores connection weights.</li>
-                <li><strong>Cosine:</strong> Cosine similarity of weight vectors. Measures if connection weights are proportionally similar. Range: 0 to 1.</li>
+                <li><strong>Rank Correlation (Primary):</strong> Average of upstream and downstream Spearman correlations, normalized to [0, 1] range using (x+1)/2. Measures if the same partners are ranked similarly in both datasets. 0.5 = no correlation, 1.0 = identical rankings. Most robust to annotation completeness differences.</li>
+                <li><strong>Jaccard:</strong> Set-based overlap of partner types: |A ∩ B| / |A ∪ B|. Range: 0 (no shared partners) to 1 (identical partner sets). Average of upstream and downstream directions. Ignores connection weights.</li>
             </ul>
             
             <h3>Notes</h3>

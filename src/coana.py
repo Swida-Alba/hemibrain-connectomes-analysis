@@ -97,6 +97,29 @@ class FindNeuronConnection:
             if cols_to_drop:
                 self.source_df = self.source_df.drop(columns=cols_to_drop)
 
+    def _vprint(self, message: str, level: str = 'full', end: str = '\n', flush: bool = False):
+        '''Print message based on verbose_mode setting.
+        
+        Parameters:
+        -----------
+        message : str
+            Message to print
+        level : str
+            'full': Only print if verbose_mode is 'full'
+            'simple': Only print if verbose_mode is 'simple'
+            'both': Always print regardless of verbose_mode
+        end : str
+            End character for print (default: newline)
+        flush : bool
+            Whether to flush output immediately
+        '''
+        if level == 'both':
+            print(message, end=end, flush=flush)
+        elif level == 'full' and self.verbose_mode == 'full':
+            print(message, end=end, flush=flush)
+        elif level == 'simple' and self.verbose_mode == 'simple':
+            print(message, end=end, flush=flush)
+
     def _save_matrices_to_excel(self, df, writer, level='bodyId'):
         """Generate and save connection matrices to Excel"""
         if df.empty:
@@ -465,6 +488,19 @@ class FindNeuronConnection:
     applies to both FindPath and FindAllPath visualizations\n
     helps focus on most significant pathways in large networks\n
     Note: paths are already sorted by traversal_probability in the path_type/path_bodyId DataFrames
+    '''
+    
+    verbose_mode: str = 'full'
+    '''
+    Controls the verbosity of output during FindAllPath execution.\n
+    'full': Show all detailed output (default) - layer-by-layer info, statistics, etc.\n
+    'simple': Show simplified progress output with phase markers and progress bars only.\n
+    The simple mode shows:
+      - Phase 1: layer 0->1: processing...Done
+      - Phase 2: identifying targets...Done
+      - Phase 3: pathfinding[parallel/sequential]...Done
+      - Phase 4: creating visualizations...Done
+      - ¡COMPLETED! banner
     '''
     
     def __post_init__(self):
@@ -1953,6 +1989,188 @@ class FindNeuronConnection:
         
         return combined
     
+    # ============================================================================
+    # Cache Building Methods
+    # ============================================================================
+    
+    def build_connection_cache(
+        self,
+        neuron_types: list = None,
+        neuron_bodyIds: list = None,
+        batch_size: int = 100,
+        progress_callback: callable = None
+    ) -> dict:
+        """
+        Pre-build connection cache for specified neurons or all neurons in dataset.
+        
+        This method efficiently pre-fetches and caches connections for neurons,
+        enabling faster subsequent queries. Useful for building offline caches
+        or preparing for batch analysis.
+        
+        Parameters:
+        -----------
+        neuron_types : list, optional
+            List of neuron types to cache. If None and neuron_bodyIds is None,
+            caches all neurons in the dataset.
+        neuron_bodyIds : list, optional
+            List of specific bodyIds to cache. Takes precedence over neuron_types.
+        batch_size : int
+            Number of neurons to fetch per batch (default: 100)
+        progress_callback : callable, optional
+            Callback function(current, total, neuron_info) for progress updates
+        
+        Returns:
+        --------
+        dict : Summary with keys:
+            - 'total_neurons': Number of neurons processed
+            - 'total_connections': Total connections cached
+            - 'cached_neurons': List of successfully cached neuron bodyIds
+            - 'failed_neurons': List of neurons that failed to cache
+            - 'elapsed_time': Time taken in seconds
+        
+        Example:
+        --------
+        >>> fnc = FindNeuronConnection(dataset='hemibrain:v1.2.1', ...)
+        >>> result = fnc.build_connection_cache(neuron_types=['aMe12', 'Mi1'])
+        >>> print(f"Cached {result['total_connections']} connections")
+        """
+        import time
+        start_time = time.time()
+        
+        print("=" * 60)
+        print("Building Connection Cache")
+        print("=" * 60)
+        
+        if not self.use_cache:
+            print("⚠️  Cache is disabled. Enable with use_cache=True")
+            return {'total_neurons': 0, 'total_connections': 0, 
+                    'cached_neurons': [], 'failed_neurons': [], 'elapsed_time': 0}
+        
+        # Get bodyIds to cache
+        if neuron_bodyIds is not None:
+            bodyIds_to_cache = [str(x) for x in neuron_bodyIds]
+            print(f"Caching connections for {len(bodyIds_to_cache)} specified bodyIds...")
+        elif neuron_types is not None:
+            # Fetch bodyIds for the given types
+            print(f"Fetching bodyIds for {len(neuron_types)} neuron types...")
+            bodyIds_to_cache = []
+            for ntype in neuron_types:
+                try:
+                    neurons_df = self._fetch_neurons_local_or_api(
+                        [ntype], 
+                        columns=['bodyId', 'type'],
+                        search_by='type'
+                    )
+                    if not neurons_df.empty:
+                        bodyIds_to_cache.extend([str(x) for x in neurons_df['bodyId'].tolist()])
+                except Exception as e:
+                    print(f"  ⚠️ Failed to get bodyIds for type {ntype}: {e}")
+            bodyIds_to_cache = list(set(bodyIds_to_cache))
+            print(f"Found {len(bodyIds_to_cache)} unique bodyIds")
+        else:
+            # Cache all neurons in dataset
+            print("Caching all neurons in dataset...")
+            dataset_safe = self.dataset.replace(':', '_').replace('.', '_')
+            dataset_path = os.path.join(
+                self.script_path, 'datasets', dataset_safe,
+                f"{dataset_safe}_allneurons_neuron_df.csv"
+            )
+            
+            if os.path.exists(dataset_path):
+                is_fafb = 'fafb' in self.dataset.lower() or 'flywire' in self.dataset.lower()
+                if is_fafb:
+                    ndf = pd.read_csv(dataset_path, dtype={'bodyId': str}, low_memory=False)
+                else:
+                    ndf = pd.read_csv(dataset_path, index_col=0, low_memory=False)
+                    ndf['bodyId'] = ndf['bodyId'].astype(str)
+                bodyIds_to_cache = ndf['bodyId'].unique().tolist()
+                print(f"Found {len(bodyIds_to_cache)} neurons in dataset")
+            else:
+                print(f"⚠️ Dataset file not found: {dataset_path}")
+                return {'total_neurons': 0, 'total_connections': 0,
+                        'cached_neurons': [], 'failed_neurons': [], 'elapsed_time': 0}
+        
+        # Check which neurons are already cached
+        neuron_index = self._load_neuron_index()
+        if not neuron_index.empty:
+            already_cached = neuron_index[
+                neuron_index['downstream_complete'] == True
+            ]['bodyId'].astype(str).tolist()
+            uncached = [x for x in bodyIds_to_cache if x not in already_cached]
+            print(f"Already cached: {len(already_cached)}, need to cache: {len(uncached)}")
+        else:
+            uncached = bodyIds_to_cache
+            print(f"No existing cache, need to cache: {len(uncached)}")
+        
+        if not uncached:
+            elapsed = time.time() - start_time
+            print("✅ All neurons already cached!")
+            return {'total_neurons': len(bodyIds_to_cache), 'total_connections': 0,
+                    'cached_neurons': bodyIds_to_cache, 'failed_neurons': [], 
+                    'elapsed_time': elapsed}
+        
+        # Process in batches
+        total = len(uncached)
+        cached_neurons = []
+        failed_neurons = []
+        total_connections = 0
+        
+        for i in range(0, total, batch_size):
+            batch = uncached[i:i + batch_size]
+            batch_num = i // batch_size + 1
+            total_batches = (total + batch_size - 1) // batch_size
+            
+            # Progress callback
+            if progress_callback:
+                progress_callback(i, total, f"Batch {batch_num}/{total_batches}")
+            
+            print(f"\n📥 Batch {batch_num}/{total_batches}: Processing {len(batch)} neurons...")
+            
+            try:
+                # Fetch connections for this batch (this will cache them)
+                connections = self._fetch_connections_with_cache(
+                    upstream_bodyIds=batch,
+                    downstream_bodyIds=None,  # All downstream
+                    min_weight=1,  # Cache all connections
+                    min_traversal_prob=0,
+                    min_conn_ratio=0
+                )
+                
+                if not connections.empty:
+                    total_connections += len(connections)
+                    cached_neurons.extend(batch)
+                    print(f"  ✅ Cached {len(connections)} connections")
+                else:
+                    # Even 0 connections is valid
+                    cached_neurons.extend(batch)
+                    print(f"  ✅ Cached (0 connections)")
+                    
+            except Exception as e:
+                print(f"  ❌ Error caching batch: {e}")
+                failed_neurons.extend(batch)
+        
+        elapsed = time.time() - start_time
+        
+        # Summary
+        print("\n" + "=" * 60)
+        print("Cache Build Complete")
+        print("=" * 60)
+        print(f"Total neurons processed: {len(cached_neurons) + len(failed_neurons)}")
+        print(f"Successfully cached: {len(cached_neurons)}")
+        print(f"Failed: {len(failed_neurons)}")
+        print(f"Total connections cached: {total_connections:,}")
+        print(f"Time elapsed: {elapsed:.1f} seconds")
+        
+        if failed_neurons:
+            print(f"\nFailed neurons: {failed_neurons[:10]}{'...' if len(failed_neurons) > 10 else ''}")
+        
+        return {
+            'total_neurons': len(cached_neurons) + len(failed_neurons),
+            'total_connections': total_connections,
+            'cached_neurons': cached_neurons,
+            'failed_neurons': failed_neurons,
+            'elapsed_time': elapsed
+        }
 
     def InitializeNeuronInfo(self):
         # Ensure neuprint Client is set before any statvis/neuprint API call
@@ -3738,14 +3956,17 @@ class FindNeuronConnection:
         target_type = self.target_df['type'].unique()
         
         # PHASE 1: Fetch all connections in the network up to max_interlayer layers
-        print(f'\n=== PHASE 1: Fetching all network layers (0 to {self.max_interlayer + 1}) ===')
-        if forward_only:
-            print('Mode: Layer-by-layer querying (query each neuron once - RECOMMENDED)')
-            print('Note: Still fetches ALL connections including recurrent/reciprocal ones')
+        if self.verbose_mode == 'simple':
+            print(f'\nPhase 1:')
         else:
-            print('Mode: Comprehensive re-querying (re-query all neurons at each layer)')
-            print('Note: Slower but ensures no connections missed due to filtering')
-        print()
+            print(f'\n=== PHASE 1: Fetching all network layers (0 to {self.max_interlayer + 1}) ===')
+            if forward_only:
+                print('Mode: Layer-by-layer querying (query each neuron once - RECOMMENDED)')
+                print('Note: Still fetches ALL connections including recurrent/reciprocal ones')
+            else:
+                print('Mode: Comprehensive re-querying (re-query all neurons at each layer)')
+                print('Note: Slower but ensures no connections missed due to filtering')
+            print()
         
         all_neurons_in_network = set(source_ID)
         layer_neurons = [set(source_ID)]  # Layer 0: sources
@@ -3761,11 +3982,15 @@ class FindNeuronConnection:
                 neurons_to_fetch = list(all_neurons_in_network)
             
             if len(neurons_to_fetch) == 0:
-                print(f'Layer {layer_idx} is empty, stopping.')
+                if self.verbose_mode == 'full':
+                    print(f'Layer {layer_idx} is empty, stopping.')
                 break
             
             # Fetch connections (fetch with weight≥1, filter by all criteria together later)
-            print(f'Layer {layer_idx}->{layer_idx+1}:')
+            if self.verbose_mode == 'simple':
+                print(f'layer {layer_idx}->{layer_idx+1}: processing...', end='', flush=True)
+            else:
+                print(f'Layer {layer_idx}->{layer_idx+1}:')
             conn_df = self._fetch_connections_with_cache(
                 upstream_bodyIds=neurons_to_fetch,
                 downstream_bodyIds=None,
@@ -3794,16 +4019,23 @@ class FindNeuronConnection:
             # (even if we won't fetch from it in the next iteration)
             layer_neurons.append(next_layer)
             
-            if forward_only:
+            if self.verbose_mode == 'simple':
+                print('Done')
+            elif forward_only:
                 print(f'Layer {layer_idx}->{layer_idx+1}: {len(post_neurons)} downstream neurons, {len(next_layer)} new, {len(conn_df)} connections')
             else:
                 print(f'Layer {layer_idx}->{layer_idx+1}: {len(post_neurons)} total downstream, {len(next_layer)} new neurons, {len(conn_df)} connections')
         
-        print(f'\nTotal neurons in network: {len(all_neurons_in_network)}')
-        print(f'Total layers fetched: {len(layer_neurons)}')
+        if self.verbose_mode == 'full':
+            print(f'\nTotal neurons in network: {len(all_neurons_in_network)}')
+            print(f'Total layers fetched: {len(layer_neurons)}')
         
         # PHASE 2: Identify which targets exist in the searched network
-        print(f'\n=== PHASE 2: Identifying targets in the network ===')
+        if self.verbose_mode == 'simple':
+            print(f'Phase 2:')
+            print(f'identifying targets...', end='', flush=True)
+        else:
+            print(f'\n=== PHASE 2: Identifying targets in the network ===')
         
         self.target_df.insert(loc=0, column='Checked', value=False)
         self.target_df.insert(loc=1, column='Layer', value=-1)
@@ -3823,46 +4055,54 @@ class FindNeuronConnection:
         
         targetNum = len(self.target_df)
         targetNum_checked = len(targets_found)
-        print(f'Targets found in network: {targetNum_checked} / {targetNum}')
+        
+        if self.verbose_mode == 'simple':
+            print('Done')
+        else:
+            print(f'Targets found in network: {targetNum_checked} / {targetNum}')
         
         if targetNum_checked == 0:
             print('\033[33mNo target neurons found in the searched network. Cannot construct paths.\033[0m')
             return
         
         # Print target distribution by layer (same target can appear in multiple layers)
-        print('\nTarget distribution by layer:')
-        total_target_occurrences = 0
-        for layer_idx in sorted(self.target_df[self.target_df['Checked']]['Layer'].unique()):
-            targets_in_layer = self.target_df[
-                (self.target_df['Layer'] == layer_idx) & (self.target_df['Checked'])
-            ]
-            count = len(targets_in_layer)
-            total_target_occurrences += count
-            
-            # Show target identifiers (bodyId or type depending on filter_by)
-            if self.filter_by == 'bodyId':
-                target_list = targets_in_layer['bodyId'].tolist()
-            else:
-                # Check if type column exists and has valid values
-                if 'type' in targets_in_layer.columns and targets_in_layer['type'].notna().any():
-                    target_list = targets_in_layer['type'].tolist()
-                else:
+        if self.verbose_mode == 'full':
+            print('\nTarget distribution by layer:')
+            total_target_occurrences = 0
+            for layer_idx in sorted(self.target_df[self.target_df['Checked']]['Layer'].unique()):
+                targets_in_layer = self.target_df[
+                    (self.target_df['Layer'] == layer_idx) & (self.target_df['Checked'])
+                ]
+                count = len(targets_in_layer)
+                total_target_occurrences += count
+                
+                # Show target identifiers (bodyId or type depending on filter_by)
+                if self.filter_by == 'bodyId':
                     target_list = targets_in_layer['bodyId'].tolist()
+                else:
+                    # Check if type column exists and has valid values
+                    if 'type' in targets_in_layer.columns and targets_in_layer['type'].notna().any():
+                        target_list = targets_in_layer['type'].tolist()
+                    else:
+                        target_list = targets_in_layer['bodyId'].tolist()
+                
+                # Display targets (limit to first 10 per layer for readability)
+                if count <= 10:
+                    print(f'  Layer {layer_idx}: {count} targets - {target_list}')
+                else:
+                    print(f'  Layer {layer_idx}: {count} targets - {target_list[:10]} ... (+{count-10} more)')
             
-            # Display targets (limit to first 10 per layer for readability)
-            if count <= 10:
-                print(f'  Layer {layer_idx}: {count} targets - {target_list}')
-            else:
-                print(f'  Layer {layer_idx}: {count} targets - {target_list[:10]} ... (+{count-10} more)')
-        
-        # Show if targets appear in multiple layers
-        if total_target_occurrences > targetNum_checked:
-            print(f'\nNote: {total_target_occurrences} total target occurrences across layers ({targetNum_checked} unique targets)')
-            print(f'      Some targets appear in multiple layers')
+            # Show if targets appear in multiple layers
+            if total_target_occurrences > targetNum_checked:
+                print(f'\nNote: {total_target_occurrences} total target occurrences across layers ({targetNum_checked} unique targets)')
+                print(f'      Some targets appear in multiple layers')
         
         # PHASE 3: Extract all paths from sources to targets (path length ≤ max_interlayer)
-        print(f'\n=== PHASE 3: Finding all paths from sources to targets ===')
-        print('Using graph-based pathfinding to handle reciprocal connections...')
+        if self.verbose_mode == 'simple':
+            print(f'Phase 3:')
+        else:
+            print(f'\n=== PHASE 3: Finding all paths from sources to targets ===')
+            print('Using graph-based pathfinding to handle reciprocal connections...')
         
         # Create INITIAL real layer mapping (neuron ID -> discovery layer)
         # Targets will be updated later based on their actual appearance in paths
@@ -3889,11 +4129,13 @@ class FindNeuronConnection:
                     G[pre][post]['weight'] += weight
                 else:
                     G.add_edge(pre, post, weight=weight)
-        print(f'Done! ({G.number_of_nodes()} nodes, {G.number_of_edges()} edges)')
+        if self.verbose_mode == 'full':
+            print(f'Done! ({G.number_of_nodes()} nodes, {G.number_of_edges()} edges)')
         
         # Pruning: Remove nodes that cannot reach any target
         if G.number_of_nodes() > 0 and len(targets_found) > 0:
-            print('Pruning graph to remove dead ends...', end=' ')
+            if self.verbose_mode == 'full':
+                print('Pruning graph to remove dead ends...', end=' ')
             # Only start BFS from targets that are actually in the graph
             valid_targets = [t for t in targets_found if t in G]
             
@@ -3932,9 +4174,11 @@ class FindNeuronConnection:
                 
                 original_node_count = G.number_of_nodes()
                 G = G.subgraph(nodes_that_can_reach_targets).copy()
-                print(f'Done! ({original_node_count} -> {G.number_of_nodes()} nodes)')
+                if self.verbose_mode == 'full':
+                    print(f'Done! ({original_node_count} -> {G.number_of_nodes()} nodes)')
             else:
-                print('Warning: No targets found in graph (should have been caught earlier).')
+                if self.verbose_mode == 'full':
+                    print('Warning: No targets found in graph (should have been caught earlier).')
         
         # Find all neurons that are on ANY path from any source to any target
         # with path length ≤ max_interlayer
@@ -3942,9 +4186,10 @@ class FindNeuronConnection:
         edges_in_paths = set()  # Stores (pre, post) pairs
         edges_in_paths_with_layer = set()  # Stores (layer_idx, pre, post) to track layer-specific edges
         
-        print(f'\nSearching paths: {len(source_ID)} sources × {len(targets_found)} targets = {len(source_ID) * len(targets_found)} pairs')
-        print(f'Maximum path length: {self.max_interlayer + 1} edges')
-        print(f'Using optimized DFS algorithm (explores shared path segments only once)')
+        if self.verbose_mode == 'full':
+            print(f'\nSearching paths: {len(source_ID)} sources × {len(targets_found)} targets = {len(source_ID) * len(targets_found)} pairs')
+            print(f'Maximum path length: {self.max_interlayer + 1} edges')
+            print(f'Using optimized DFS algorithm (explores shared path segments only once)')
         
         # Decide whether to use parallel processing
         total_pairs = len(source_ID) * len(targets_found)
@@ -3964,7 +4209,10 @@ class FindNeuronConnection:
                 n_processes = min(self.n_jobs, mp.cpu_count())
             
             if use_parallel:
-                print(f'Using parallel processing with {n_processes} processes...')
+                if self.verbose_mode == 'simple':
+                    print(f'pathfinding[parallel]...', end='', flush=True)
+                else:
+                    print(f'Using parallel processing with {n_processes} processes...')
                 
                 # Prepare graph edges for pickling
                 G_edges = [(u, v, data['weight']) for u, v, data in G.edges(data=True)]
@@ -3989,8 +4237,9 @@ class FindNeuronConnection:
                 chunk_size = target_chunk_size
                 source_chunks = [sources_list[i:i + chunk_size] for i in range(0, len(sources_list), chunk_size)]
                 
-                print(f'Split into {len(source_chunks)} chunks (~{chunk_size} sources per chunk)')
-                print(f'Each chunk will explore paths to all {len(targets_set)} targets')
+                if self.verbose_mode == 'full':
+                    print(f'Split into {len(source_chunks)} chunks (~{chunk_size} sources per chunk)')
+                    print(f'Each chunk will explore paths to all {len(targets_set)} targets')
                 
                 # More realistic time estimate based on graph complexity
                 # With DFS optimization, each source is explored once (not once per target)
@@ -4055,8 +4304,9 @@ class FindNeuronConnection:
                 else:
                     time_str = f"~{estimated_time/60:.0f} minutes"
                 
-                print(f'Estimated time: {time_str} (graph: {G.number_of_nodes()} nodes, {G.number_of_edges()} edges, avg degree: {avg_degree:.1f})')
-                print(f'Processing...\n')
+                if self.verbose_mode == 'full':
+                    print(f'Estimated time: {time_str} (graph: {G.number_of_nodes()} nodes, {G.number_of_edges()} edges, avg degree: {avg_degree:.1f})')
+                    print(f'Processing...\n')
                 
                 # Prepare arguments for each process
                 args_list = [
@@ -4081,9 +4331,10 @@ class FindNeuronConnection:
                 first_chunk_time = None  # Track when first chunk completes (exclude startup overhead)
                 productive_start_time = None  # Start time for actual work (after first chunk)
                 
-                print(f'⏳ Starting {n_processes} worker processes...')
-                print(f'   (First update will appear when a chunk completes)')
-                print()
+                if self.verbose_mode == 'full':
+                    print(f'⏳ Starting {n_processes} worker processes...')
+                    print(f'   (First update will appear when a chunk completes)')
+                    print()
                 
                 with mp.Pool(processes=n_processes) as pool:
                     # Use imap_unordered for progress tracking (returns results as they complete)
@@ -4109,7 +4360,8 @@ class FindNeuronConnection:
                             startup_overhead = first_chunk_time - start_time
                             # Start productive time tracking AFTER first chunk
                             productive_start_time = first_chunk_time
-                            print(f'   ⚡ Workers initialized in {startup_overhead:.1f}s, starting main processing...\n')
+                            if self.verbose_mode == 'full':
+                                print(f'   ⚡ Workers initialized in {startup_overhead:.1f}s, starting main processing...\n')
                         
                         # Calculate current speed using ONLY productive time (excludes startup)
                         productive_elapsed = current_time - productive_start_time if productive_start_time else 0.1
@@ -4139,23 +4391,31 @@ class FindNeuronConnection:
                                        chunks_completed % 5 == 0 or  # Show every 5 chunks
                                        chunks_completed == len(source_chunks))  # Always show completion
                         
-                        if should_update:
+                        if should_update and self.verbose_mode == 'full':
                             # Use \033[K to clear to end of line (removes residual characters)
                             print(f'\r   Progress: {sources_processed}/{len(sources_list)} sources ({progress_pct:.1f}%) | ETA: {eta_str}\033[K', end='', flush=True)
                             last_update = current_time
                 
                 # Final newline
-                print()
+                if self.verbose_mode == 'full':
+                    print()
                 
                 elapsed = time.time() - start_time
-                print(f'\n✅ Parallel pathfinding complete in {elapsed:.1f}s!')
-                print(f'   Average: {len(sources_list)/elapsed:.1f} sources/s (explored {len(targets_set)} targets per source)')
-                print(f'   Processed by {n_processes} workers across {len(source_chunks)} chunks')
-                print(f'   📦 Collected {len(all_paths):,} paths in memory (~{len(all_paths) * 50 / 1024 / 1024:.1f} MB)')
+                if self.verbose_mode == 'simple':
+                    print('Done')
+                    print('building paths...', end='', flush=True)
+                else:
+                    print(f'\n✅ Parallel pathfinding complete in {elapsed:.1f}s!')
+                    print(f'   Average: {len(sources_list)/elapsed:.1f} sources/s (explored {len(targets_set)} targets per source)')
+                    print(f'   Processed by {n_processes} workers across {len(source_chunks)} chunks')
+                    print(f'   📦 Collected {len(all_paths):,} paths in memory (~{len(all_paths) * 50 / 1024 / 1024:.1f} MB)')
         
         if not use_parallel:
-            print('Using sequential processing (optimized DFS)...')
-            print('This may take a while for large datasets...\n')
+            if self.verbose_mode == 'simple':
+                print(f'pathfinding[sequential]...', end='', flush=True)
+            else:
+                print('Using sequential processing (optimized DFS)...')
+                print('This may take a while for large datasets...\n')
             
             path_count = 0
             sources_processed = 0
@@ -4253,22 +4513,28 @@ class FindNeuronConnection:
                     
                     pairs_with_paths = len(pairs_with_paths_dict)
                     
-                    # Use \033[K to clear to end of line
-                    print(f'\r   Progress: {sources_processed}/{len(source_ID)} sources ({progress_pct:.1f}%) | ETA: {eta_str}\033[K', end='', flush=True)
+                    if self.verbose_mode == 'full':
+                        # Use \033[K to clear to end of line
+                        print(f'\r   Progress: {sources_processed}/{len(source_ID)} sources ({progress_pct:.1f}%) | ETA: {eta_str}\033[K', end='', flush=True)
                     last_update = current_time
             
             pairs_with_paths = len(pairs_with_paths_dict)
             
             # Final update
             elapsed = time.time() - start_time
-            # Use \033[K to clear to end of line
-            print(f'\r   Progress: {sources_processed}/{len(source_ID)} sources (100.0%) | Completed in {elapsed:.1f}s\033[K')
+            if self.verbose_mode == 'simple':
+                print('Done')
+                print('building paths...', end='', flush=True)
+            else:
+                # Use \033[K to clear to end of line
+                print(f'\r   Progress: {sources_processed}/{len(source_ID)} sources (100.0%) | Completed in {elapsed:.1f}s\033[K')
         
-        print(f'\n✅ Pathfinding complete!')
-        print(f'   Total paths found: {path_count:,}')
-        print(f'   Neurons in valid paths: {len(neurons_in_paths):,}')
-        print(f'   Unique edges in valid paths: {len(edges_in_paths):,}')
-        print(f'   Layer-specific edges in valid paths: {len(edges_in_paths_with_layer):,}')
+        if self.verbose_mode == 'full':
+            print(f'\n✅ Pathfinding complete!')
+            print(f'   Total paths found: {path_count:,}')
+            print(f'   Neurons in valid paths: {len(neurons_in_paths):,}')
+            print(f'   Unique edges in valid paths: {len(edges_in_paths):,}')
+            print(f'   Layer-specific edges in valid paths: {len(edges_in_paths_with_layer):,}')
         
         # Now extract connections, keeping ALL layer-specific occurrences
         # This means if neuron A→B exists in both Layer 0→1 and Layer 2→3, both are kept
@@ -4307,7 +4573,7 @@ class FindNeuronConnection:
             
             # Enrich with traversal probability (use local dataset if available)
             conn_enriched, conn_type, conn_group = sv.EnrichConnectionTable(
-                conn_filtered_no_layer, 
+                conn_filtered_no_layer,
                 dataset=self.dataset, 
                 script_path=self.script_path,
                 target_neurons_df=neurons_in_layer_df
@@ -5090,11 +5356,16 @@ class FindNeuronConnection:
         print('Done\n')
         
         # ============================================================================
-        # VISUALIZATION: Using VisualizePath only
+        # VISUALIZATION: Using VisualizePath only (PHASE 4)
         # ============================================================================
         
         # VisualizePath network visualization
-        print('\nCreating interactive network visualizations...')
+        if self.verbose_mode == 'simple':
+            print('Done')  # End of "building paths..."
+            print(f'Phase 4:')
+            print('creating type-level visualizations...', end='', flush=True)
+        else:
+            print('\nCreating interactive network visualizations...')
         try:
             
             # Create network from path_type if it exists
@@ -5105,10 +5376,12 @@ class FindNeuronConnection:
                     # Paths are already sorted by traversal_probability in sv.getAllPath()
                     # Just take the first N paths
                     paths_to_visualize = path_df_type.head(self.pathN_to_show).copy()
-                    print(f'  Showing top {self.pathN_to_show} paths (by traversal_probability) out of {len(path_df_type)} total paths')
+                    if self.verbose_mode == 'full':
+                        print(f'  Showing top {self.pathN_to_show} paths (by traversal_probability) out of {len(path_df_type)} total paths')
                 else:
                     paths_to_visualize = path_df_type.copy()
-                    print(f'  Showing all {len(path_df_type)} paths')
+                    if self.verbose_mode == 'full':
+                        print(f'  Showing all {len(path_df_type)} paths')
                 
                 # Ensure path_block column exists (required by VisualizePath)
                 if 'path_block' not in paths_to_visualize.columns:
@@ -5140,20 +5413,29 @@ class FindNeuronConnection:
                     output_format=self.output_format
                 )
                 vp.visualize()
-                print('  Created network_selected_paths.html and sankey_selected_paths.html')
+                if self.verbose_mode == 'simple':
+                    print('Done')
+                else:
+                    print('  Created network_selected_paths.html and sankey_selected_paths.html')
             else:
-                print('  No paths found to visualize')
+                if self.verbose_mode == 'full':
+                    print('  No paths found to visualize')
             
             # Create network from path_bodyId if it exists and requested
             if find_bodyId_path and len(path_df_bodyId) > 0:
-                print('\nCreating bodyId-level network visualizations...')
+                if self.verbose_mode == 'simple':
+                    print('creating bodyId-level visualizations...', end='', flush=True)
+                else:
+                    print('\nCreating bodyId-level network visualizations...')
                 # Filter paths if pathN_to_show is specified
                 if self.pathN_to_show > 0 and len(path_df_bodyId) > self.pathN_to_show:
                     paths_to_visualize_bodyId = path_df_bodyId.head(self.pathN_to_show).copy()
-                    print(f'  Showing top {self.pathN_to_show} bodyId paths (by traversal_probability) out of {len(path_df_bodyId)} total paths')
+                    if self.verbose_mode == 'full':
+                        print(f'  Showing top {self.pathN_to_show} bodyId paths (by traversal_probability) out of {len(path_df_bodyId)} total paths')
                 else:
                     paths_to_visualize_bodyId = path_df_bodyId.copy()
-                    print(f'  Showing all {len(path_df_bodyId)} bodyId paths')
+                    if self.verbose_mode == 'full':
+                        print(f'  Showing all {len(path_df_bodyId)} bodyId paths')
                 
                 # Ensure path_block column exists and format with types if available
                 # We want format: bodyId_type -> bodyId_type -> ...
@@ -5205,18 +5487,23 @@ class FindNeuronConnection:
                     output_format=self.output_format
                 )
                 vp_bodyId.visualize()
-                print('  Created bodyId-level visualizations in bodyId_visualization subfolder')
+                if self.verbose_mode == 'simple':
+                    print('Done')
+                else:
+                    print('  Created bodyId-level visualizations in bodyId_visualization subfolder')
                 
             # Create custom group visualizations if available
             if len(path_df_group) > 0:
-                print('\nCreating custom group visualizations...')
+                if self.verbose_mode == 'full':
+                    print('\nCreating custom group visualizations...')
                 group_paths_to_viz = path_df_group.head(self.pathN_to_show) if self.pathN_to_show > 0 else path_df_group
                 vp_group = VisualizePath(path_file=group_paths_to_viz, output_folder=os.path.join(self.allpath_folder, 'custom_groups'),
                                         source_color=self.source_color if hasattr(self, 'source_color') else '#1f77b4', showfig=self.showfig,
                                         edgeN_limit=self.edgeN_limit,
                                         output_format=self.output_format)
                 vp_group.visualize()
-                print(f'  ✓ Custom group visualizations created ({len(group_paths_to_viz)} paths)')
+                if self.verbose_mode == 'full':
+                    print(f'  ✓ Custom group visualizations created ({len(group_paths_to_viz)} paths)')
                     
         except Exception as e:
             print(f'  Warning: VisualizePath visualization failed: {e}')
@@ -5225,7 +5512,12 @@ class FindNeuronConnection:
         
         # Heatmap generation removed - use VisualizePath.visualize() for heatmaps instead
         
-        print('Done\n')
+        if self.verbose_mode == 'simple':
+            print('\n===========')
+            print('¡COMPLETED!')
+            print('===========\n')
+        else:
+            print('Done\n')
     
     def _get_network_layout(self, G):
         '''Get network layout based on network_layout parameter'''
@@ -6879,17 +7171,18 @@ class VisualizeSkeleton:
     cache_neurons: bool = False
     '''
     Whether to cache fetched neuron skeletons to disk\n
-    True: Save fetched skeletons to cache/{dataset}/neurons/\n
+    True: Save fetched skeletons as individual {bodyId}.pkl files to cache/{dataset}/skeletons/\n
     False: Fetch from NeuPrint every time (default)\n
-    Cache location: cache/{dataset}/neurons/\n
+    Cache location: cache/{dataset}/skeletons/{bodyId}.pkl\n
+    Individual files allow better reuse across different neuron layer selections.\n
     '''
     
     cache_synapses: bool = False
     '''
     Whether to cache fetched synapse data to disk\n
-    True: Save fetched synapses to cache/{dataset}/synapses/\n
+    True: Use synapse table from datasets/{dataset}/*_synapse_table.parquet if available\n
     False: Fetch from NeuPrint every time (default)\n
-    Cache location: cache/{dataset}/synapses/\n
+    For FlyWire/FAFB: Always uses datasets/{dataset}/flywire_FAFB_v783_synapse_table.parquet\n
     '''
     
     brain_mesh: str = 'none'
@@ -7192,69 +7485,145 @@ class VisualizeSkeleton:
         """Get the cache directory for skeletons or synapses
         
         Uses project cache/ folder for organized storage:
-        cache/{dataset}/{cache_type}/
+        cache/{dataset}/skeletons/ - for individual skeleton .pkl files
+        cache/{dataset}/synapses/ - for synapse cache files
+        
+        For datasets folder resources:
+        datasets/{dataset}/*_synapse_table.parquet - synapse table
         
         Example:
-        - cache/hemibrain_v1_2_1/neurons/
-        - cache/optic-lobe_v1_1/synapses/
+        - cache/hemibrain_v1_2_1/skeletons/{bodyId}.pkl
+        - datasets/flywire_FAFB_v783/flywire_FAFB_v783_synapse_table.parquet
         """
         dataset_normalized = self.dataset.replace(':', '_').replace('.', '_')
         cache_dir = os.path.join(self.script_path, 'cache', dataset_normalized, cache_type)
         os.makedirs(cache_dir, exist_ok=True)
         return cache_dir
     
+    def _get_synapse_table_path(self):
+        """Get path to synapse table in datasets folder.
+        
+        Returns the path to the synapse table parquet file.
+        For FlyWire/FAFB: datasets/flywire_FAFB_v783/flywire_FAFB_v783_synapse_table.parquet
+        For NeuPrint: datasets/{dataset}/{dataset}_synapse_table.parquet
+        
+        Returns:
+            str: Path to synapse table, or None if not found
+        """
+        dataset_normalized = self.dataset.replace(':', '_').replace('.', '_')
+        datasets_dir = os.path.join(self.script_path, 'datasets', dataset_normalized)
+        
+        # Look for synapse table file
+        parquet_file = os.path.join(datasets_dir, f"{dataset_normalized}_synapse_table.parquet")
+        
+        if os.path.exists(parquet_file):
+            return parquet_file
+        
+        # Fallback: try FAFB naming if dataset includes flywire
+        if 'flywire' in self.dataset.lower() or 'fafb' in self.dataset.lower():
+            fafb_dir = os.path.join(self.script_path, 'datasets', 'flywire_FAFB_v783')
+            fafb_file = os.path.join(fafb_dir, 'flywire_FAFB_v783_synapse_table.parquet')
+            if os.path.exists(fafb_file):
+                return fafb_file
+        
+        return None
+    
     def _load_cached_neurons(self, neuron_df):
-        """Load cached neuron skeletons if available"""
+        """Load cached neuron skeletons if available.
+        
+        Loads individual {bodyId}.pkl files from cache/{dataset}/skeletons/
+        
+        Returns:
+            navis.NeuronList or None if no cached neurons found
+        """
         if not self.cache_neurons:
             return None
         
-        cache_dir = self._get_cache_path('neuron')
-        body_ids = sorted(neuron_df['bodyId'].tolist())
-        cache_key = '_'.join(map(str, body_ids[:5])) + f'_n{len(body_ids)}'  # Use first 5 IDs + count
-        cache_file = os.path.join(cache_dir, f'{cache_key}.pkl')
+        cache_dir = self._get_cache_path('skeletons')
+        body_ids = neuron_df['bodyId'].tolist()
         
-        if os.path.exists(cache_file):
-            try:
-                import pickle
-                with open(cache_file, 'rb') as f:
-                    neuron_vols = pickle.load(f)
-                print(f'  ✓ Loaded {len(neuron_vols)} neurons from cache')
-                return neuron_vols
-            except Exception as e:
-                print(f'  ⚠ Cache load failed: {e}, fetching from NeuPrint...')
-                return None
-        return None
+        import pickle
+        neurons = []
+        loaded_ids = []
+        missing_ids = []
+        
+        for bid in body_ids:
+            cache_file = os.path.join(cache_dir, f'{bid}.pkl')
+            if os.path.exists(cache_file):
+                try:
+                    with open(cache_file, 'rb') as f:
+                        neuron = pickle.load(f)
+                    neurons.append(neuron)
+                    loaded_ids.append(bid)
+                except Exception as e:
+                    print(f'  ⚠ Failed to load cached skeleton {bid}: {e}')
+                    missing_ids.append(bid)
+            else:
+                missing_ids.append(bid)
+        
+        if neurons:
+            print(f'  ✓ Loaded {len(neurons)} neurons from cache')
+            if missing_ids:
+                print(f'  ℹ  {len(missing_ids)} neurons not in cache, will fetch')
+            # Return loaded neurons plus info about missing ones
+            return navis.NeuronList(neurons), missing_ids
+        
+        return None, body_ids  # All missing
     
     def _save_cached_neurons(self, neuron_df, neuron_vols):
-        """Save neuron skeletons to cache"""
+        """Save neuron skeletons to cache as individual {bodyId}.pkl files.
+        
+        Saves each neuron as a separate file for better reusability.
+        """
         if not self.cache_neurons:
             return
-
-        # Do not cache for FlyWire/FAFB as requested (files are too large/numerous)
-        if 'flywire' in self.dataset.lower() or 'fafb' in self.dataset.lower():
-            return
         
-        cache_dir = self._get_cache_path('neuron')
-        body_ids = sorted(neuron_df['bodyId'].tolist())
-        cache_key = '_'.join(map(str, body_ids[:5])) + f'_n{len(body_ids)}'
-        cache_file = os.path.join(cache_dir, f'{cache_key}.pkl')
+        cache_dir = self._get_cache_path('skeletons')
         
-        try:
-            import pickle
-            with open(cache_file, 'wb') as f:
-                pickle.dump(neuron_vols, f)
-            print(f'  💾 Saved {len(neuron_vols)} neurons to cache')
-        except Exception as e:
-            print(f'  ⚠ Cache save failed: {e}')
+        import pickle
+        saved_count = 0
+        
+        # Handle both NeuronList and list of neurons
+        if hasattr(neuron_vols, '__iter__'):
+            for neuron in neuron_vols:
+                try:
+                    # Get bodyId from neuron
+                    bid = getattr(neuron, 'id', None) or getattr(neuron, 'bodyId', None)
+                    if bid is None:
+                        continue
+                    
+                    cache_file = os.path.join(cache_dir, f'{bid}.pkl')
+                    
+                    # Skip if already cached
+                    if os.path.exists(cache_file):
+                        continue
+                    
+                    with open(cache_file, 'wb') as f:
+                        pickle.dump(neuron, f)
+                    saved_count += 1
+                except Exception as e:
+                    print(f'  ⚠ Failed to save skeleton {bid}: {e}')
+        
+        if saved_count > 0:
+            print(f'  💾 Saved {saved_count} new neurons to cache')
     
     def plot_skeleton(self):
         for i in range(len(self.neuron_layers)):
             print(f'fetching skeletons of layer {i}...')
             
             # Try to load from cache first
-            neuron_vols = self._load_cached_neurons(self.neuron_dfs[i])
+            cache_result = self._load_cached_neurons(self.neuron_dfs[i])
             
-            if neuron_vols is None:
+            cached_neurons = None
+            missing_ids = self.neuron_dfs[i]['bodyId'].tolist()  # Default: all missing
+            
+            if cache_result is not None:
+                cached_neurons, missing_ids = cache_result
+            
+            neuron_vols = None
+            
+            # Fetch missing neurons
+            if missing_ids:
                 # Special handling for FAFB local data
                 if 'flywire' in self.dataset.lower() or 'fafb' in self.dataset.lower():
                     try:
@@ -7271,15 +7640,13 @@ class VisualizeSkeleton:
                         
                         if zip_path:
                             print(f"  Loading skeletons from Zip: {zip_path}...")
-                            # Get bodyIds for this layer
-                            layer_bodyIds = self.neuron_dfs[i]['bodyId'].tolist()
                             
                             import zipfile
                             import io
                             
                             neurons = []
                             with zipfile.ZipFile(zip_path, 'r') as z:
-                                for bid in layer_bodyIds:
+                                for bid in missing_ids:
                                     filename = f"{bid}.swc"
                                     try:
                                         # Check if file exists in zip
@@ -7307,18 +7674,31 @@ class VisualizeSkeleton:
                         print(f"  Warning: Error loading local FAFB skeletons: {e}")
 
                 # Fetch from API if not loaded locally
-                if neuron_vols is None:
+                if neuron_vols is None and missing_ids:
                     if self.client_type == 'flywire' and self.client_flywire:
+                        # Filter neuron_df to only missing IDs
+                        missing_df = self.neuron_dfs[i][self.neuron_dfs[i]['bodyId'].isin(missing_ids)]
                         neuron_vols = self.client_flywire.fetch_skeletons(self.layer_criteria[i], with_synapses=self.show_connectors)
                     else:
-                        # Fetch from NeuPrint
-                        neuron_vols = neu.fetch_skeletons(self.neuron_dfs[i],with_synapses=self.show_connectors)
+                        # Fetch from NeuPrint - filter to missing IDs only
+                        missing_df = self.neuron_dfs[i][self.neuron_dfs[i]['bodyId'].isin(missing_ids)]
+                        if not missing_df.empty:
+                            neuron_vols = neu.fetch_skeletons(missing_df, with_synapses=self.show_connectors)
                 
-                # Save to cache if enabled
+                # Save newly fetched neurons to cache
                 if neuron_vols is not None:
                     self._save_cached_neurons(self.neuron_dfs[i], neuron_vols)
             
-            if neuron_vols is None:
+            # Combine cached and newly fetched neurons
+            if cached_neurons is not None and neuron_vols is not None:
+                # Combine both lists
+                all_neurons = list(cached_neurons) + list(neuron_vols)
+                neuron_vols = navis.NeuronList(all_neurons)
+            elif cached_neurons is not None:
+                neuron_vols = cached_neurons
+            # else neuron_vols is already set from fetch
+            
+            if neuron_vols is None or len(neuron_vols) == 0:
                 print(f'⚠️  Failed to fetch skeletons for layer {i}')
                 continue
 
@@ -7605,46 +7985,148 @@ class VisualizeSkeleton:
             print('Done')
         return 0
     
-    def _load_cached_synapses(self, source_criteria, target_criteria, layer_idx):
-        """Load cached synapse connections if available"""
-        if not self.cache_synapses:
-            return None
+    def _get_synapse_cache_path(self, pre_id, post_id):
+        """Get cache file path for synapses between a specific pre/post neuron pair.
         
-        cache_dir = self._get_cache_path('synapse')
-        # Create a cache key from criteria
-        import hashlib
-        cache_key = hashlib.md5(f'{source_criteria}_{target_criteria}_{layer_idx}'.encode()).hexdigest()[:16]
-        cache_file = os.path.join(cache_dir, f'layer{layer_idx}_{cache_key}.parquet')
+        Cache structure: cache/{dataset}/synapses/{pre_id}_{post_id}.parquet
         
-        if os.path.exists(cache_file):
-            try:
-                conn_df = pd.read_parquet(cache_file)
-                print(f'  ✓ Loaded {len(conn_df)} synapses from cache')
-                return conn_df
-            except Exception as e:
-                print(f'  ⚠ Cache load failed: {e}, fetching from NeuPrint...')
-                return None
-        return None
+        This caches by neuron pair rather than by layer, because:
+        1. The same synapse data is reusable across different queries
+        2. Layer indices are arbitrary and session-specific
+        3. Avoids duplicate storage of the same synaptic connections
+        """
+        cache_dir = self._get_cache_path('synapses')  # Note: 'synapses' not 'synapse'
+        return os.path.join(cache_dir, f'{pre_id}_{post_id}.parquet')
     
-    def _save_cached_synapses(self, conn_df, source_criteria, target_criteria, layer_idx):
-        """Save synapse connections to cache"""
+    def _load_cached_synapses(self, source_ids, target_ids):
+        """Load cached synapse connections for given source/target neuron pairs.
+        
+        For FlyWire/FAFB datasets, loads from the master synapse table at:
+            datasets/{dataset}/{dataset}_synapse_table.parquet
+        and filters by source_ids and target_ids.
+        
+        For other datasets, loads individual cache files per neuron pair from:
+            cache/{dataset}/synapses/{pre_id}_{post_id}.parquet
+        
+        Args:
+            source_ids: Set/list of source (presynaptic) body IDs
+            target_ids: Set/list of target (postsynaptic) body IDs
+            
+        Returns:
+            Tuple of (cached_df, missing_pairs) where:
+            - cached_df: DataFrame of cached synapses (may be None if nothing cached)
+            - missing_pairs: List of (pre_id, post_id) tuples not found in cache
+        """
+        if not self.cache_synapses:
+            # Return all pairs as missing
+            all_pairs = [(s, t) for s in source_ids for t in target_ids]
+            return None, all_pairs
+        
+        source_ids = set(str(s) for s in source_ids)
+        target_ids = set(str(t) for t in target_ids)
+        
+        # For FlyWire/FAFB, use the master synapse table from datasets folder
+        if 'flywire' in self.dataset.lower() or 'fafb' in self.dataset.lower():
+            synapse_table_path = self._get_synapse_table_path()
+            if os.path.exists(synapse_table_path):
+                try:
+                    # Load master synapse table
+                    synapse_df = pd.read_parquet(synapse_table_path)
+                    print(f'  ✓ Loaded synapse table from {synapse_table_path}')
+                    
+                    # Determine column names (may vary by dataset)
+                    pre_col = 'pre_pt_root_id' if 'pre_pt_root_id' in synapse_df.columns else 'bodyId_pre'
+                    post_col = 'post_pt_root_id' if 'post_pt_root_id' in synapse_df.columns else 'bodyId_post'
+                    
+                    # Convert to string for matching
+                    synapse_df[pre_col] = synapse_df[pre_col].astype(str)
+                    synapse_df[post_col] = synapse_df[post_col].astype(str)
+                    
+                    filtered_df = synapse_df[
+                        (synapse_df[pre_col].isin(source_ids)) & 
+                        (synapse_df[post_col].isin(target_ids))
+                    ]
+                    print(f'  ✓ Filtered to {len(filtered_df)} synapses between {len(source_ids)} sources and {len(target_ids)} targets')
+                    # For FlyWire, master table has all data - no missing pairs
+                    return filtered_df, []
+                except Exception as e:
+                    print(f'  ⚠ Failed to load synapse table: {e}')
+                    all_pairs = [(s, t) for s in source_ids for t in target_ids]
+                    return None, all_pairs
+            else:
+                print(f'  ⚠ Synapse table not found at {synapse_table_path}')
+                all_pairs = [(s, t) for s in source_ids for t in target_ids]
+                return None, all_pairs
+        
+        # For other datasets, load from individual cache files per neuron pair
+        cached_dfs = []
+        missing_pairs = []
+        
+        for pre_id in source_ids:
+            for post_id in target_ids:
+                cache_file = self._get_synapse_cache_path(pre_id, post_id)
+                if os.path.exists(cache_file):
+                    try:
+                        df = pd.read_parquet(cache_file)
+                        if not df.empty:
+                            cached_dfs.append(df)
+                    except Exception as e:
+                        print(f'  ⚠ Cache load failed for {pre_id}→{post_id}: {e}')
+                        missing_pairs.append((pre_id, post_id))
+                else:
+                    missing_pairs.append((pre_id, post_id))
+        
+        if cached_dfs:
+            cached_df = pd.concat(cached_dfs, ignore_index=True)
+            print(f'  ✓ Loaded {len(cached_df)} synapses from cache ({len(cached_dfs)} pairs cached, {len(missing_pairs)} pairs missing)')
+        else:
+            cached_df = None
+            
+        return cached_df, missing_pairs
+    
+    def _save_cached_synapses(self, conn_df):
+        """Save synapse connections to cache, organized by pre/post neuron pairs.
+        
+        Each unique (pre_id, post_id) pair gets its own cache file at:
+            cache/{dataset}/synapses/{pre_id}_{post_id}.parquet
+            
+        This approach ensures:
+        1. Synapses are cached by their actual content (neuron pairs + positions)
+        2. Same synapse data is reusable across different queries/layers
+        3. Incremental caching - only fetch what's not already cached
+        """
         if not self.cache_synapses:
             return
             
-        # Do not cache for FlyWire/FAFB as requested (files are too large/numerous)
+        # Do not cache for FlyWire/FAFB - they use the master synapse table
         if 'flywire' in self.dataset.lower() or 'fafb' in self.dataset.lower():
             return
         
-        cache_dir = self._get_cache_path('synapse')
-        import hashlib
-        cache_key = hashlib.md5(f'{source_criteria}_{target_criteria}_{layer_idx}'.encode()).hexdigest()[:16]
-        cache_file = os.path.join(cache_dir, f'layer{layer_idx}_{cache_key}.parquet')
+        if conn_df is None or conn_df.empty:
+            return
+            
+        # Determine column names for pre/post body IDs
+        pre_col = 'bodyId_pre' if 'bodyId_pre' in conn_df.columns else 'pre_pt_root_id'
+        post_col = 'bodyId_post' if 'bodyId_post' in conn_df.columns else 'post_pt_root_id'
         
-        try:
-            conn_df.to_parquet(cache_file, index=False)
-            print(f'  💾 Saved {len(conn_df)} synapses to cache')
-        except Exception as e:
-            print(f'  ⚠ Cache save failed: {e}')
+        if pre_col not in conn_df.columns or post_col not in conn_df.columns:
+            print(f'  ⚠ Cannot cache synapses: missing {pre_col} or {post_col} columns')
+            return
+        
+        # Group by pre/post pairs and save each group
+        saved_count = 0
+        for (pre_id, post_id), group_df in conn_df.groupby([pre_col, post_col]):
+            pre_id_str = str(pre_id)
+            post_id_str = str(post_id)
+            cache_file = self._get_synapse_cache_path(pre_id_str, post_id_str)
+            
+            try:
+                group_df.to_parquet(cache_file, index=False)
+                saved_count += 1
+            except Exception as e:
+                print(f'  ⚠ Cache save failed for {pre_id}→{post_id}: {e}')
+        
+        print(f'  💾 Saved synapses to cache ({saved_count} neuron pairs)')
     
     def plot_synapses(self):
         if self.skip_synapse:
@@ -7777,16 +8259,42 @@ class VisualizeSkeleton:
                     print("  Skipping synapse plotting for this layer.")
                     continue
             else:
-                # Fetch from NeuPrint
-                conn_df = fetch_synapse_connections(
-                    source_criteria=source_criteria,
-                    target_criteria=target_criteria,
-                    min_total_weight=self.min_synapse_num,
-                    synapse_criteria=self.synapse_criteria,
-                )
-            # Save to cache if enabled
-            if conn_df is not None and not conn_df.empty:
-                self._save_cached_synapses(conn_df, source_criteria, target_criteria, i)
+                # Fetch from NeuPrint - use new caching strategy
+                source_ids = set(self.neuron_dfs[i]['bodyId'].astype(str))
+                target_ids = set(self.neuron_dfs[i+1]['bodyId'].astype(str))
+                
+                # Try to load from cache first
+                cached_df, missing_pairs = self._load_cached_synapses(source_ids, target_ids)
+                
+                if not missing_pairs:
+                    # All data cached
+                    conn_df = cached_df
+                elif cached_df is not None and len(missing_pairs) < len(source_ids) * len(target_ids):
+                    # Partial cache - fetch missing and combine
+                    print(f'  Fetching {len(missing_pairs)} missing neuron pairs from NeuPrint...')
+                    fetched_df = fetch_synapse_connections(
+                        source_criteria=source_criteria,
+                        target_criteria=target_criteria,
+                        min_total_weight=self.min_synapse_num,
+                        synapse_criteria=self.synapse_criteria,
+                    )
+                    if fetched_df is not None and not fetched_df.empty:
+                        conn_df = pd.concat([cached_df, fetched_df], ignore_index=True)
+                        # Save newly fetched data to cache
+                        self._save_cached_synapses(fetched_df)
+                    else:
+                        conn_df = cached_df
+                else:
+                    # No cache - fetch all
+                    conn_df = fetch_synapse_connections(
+                        source_criteria=source_criteria,
+                        target_criteria=target_criteria,
+                        min_total_weight=self.min_synapse_num,
+                        synapse_criteria=self.synapse_criteria,
+                    )
+                    # Save to cache
+                    if conn_df is not None and not conn_df.empty:
+                        self._save_cached_synapses(conn_df)
         
             if conn_df is None or conn_df.empty:
                 print('  No synapses found.')

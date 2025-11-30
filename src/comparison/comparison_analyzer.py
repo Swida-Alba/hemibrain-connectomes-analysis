@@ -195,7 +195,7 @@ class ComparisonAnalyzer:
         # Use absolute import since src is on sys.path
         from coana import FindNeuronConnection
         
-        self._log(f"Running analysis: {dataset_name} @ threshold={threshold}")
+        self._log(f"Running analysis: \033[94m{dataset_name} @ threshold={threshold}\033[0m")
         
         # Get dataset config
         config = self._get_dataset_config(dataset_name)
@@ -293,7 +293,7 @@ class ComparisonAnalyzer:
         Returns:
             DataFrame with edge analysis results
         """
-        self._log(f"Running edge analysis: {dataset_name} @ threshold={threshold}")
+        self._log(f"Running edge analysis: \033[94m{dataset_name} @ threshold={threshold}\033[0m")
         
         # Get source/target neurons
         source_neurons = self.parameters.get_source_neurons_for_dataset(dataset_name)
@@ -527,7 +527,7 @@ class ComparisonAnalyzer:
             for threshold in self.parameters.thresholds:
                 # Check if already computed
                 if skip_existing and threshold in self.raw_results[dataset_name]:
-                    self._log(f"Skipping {dataset_name} @ {threshold} (already computed)")
+                    self._log(f"Skipping \033[94m{dataset_name} @ {threshold}\033[0m (already computed)")
                     continue
                 
                 # Check if cached on disk
@@ -579,12 +579,12 @@ class ComparisonAnalyzer:
                 cached = self._try_load_cached(dataset_name, lowest_threshold)
                 if cached is not None:
                     base_result = cached
-                    self._log(f"Loaded base results from cache for {dataset_name} at lowest threshold={lowest_threshold}")
+                    self._log(f"Loaded base results from cache for \033[94m{dataset_name} at lowest threshold={lowest_threshold}\033[0m")
             
             # Run path analysis if not cached
             if base_result is None:
                 base_result = self.run_path_analysis(dataset_name, lowest_threshold)
-                self._log(f"Built base graph for {dataset_name} at threshold={lowest_threshold}: {len(base_result)} connections")
+                self._log(f"Built base graph for \033[94m{dataset_name} at threshold={lowest_threshold}\033[0m: {len(base_result)} connections")
             
             base_results_cache[dataset_name] = base_result
             self.raw_results[dataset_name][lowest_threshold] = base_result
@@ -600,7 +600,7 @@ class ComparisonAnalyzer:
                 
                 # Check if already computed
                 if skip_existing and threshold in self.raw_results[dataset_name]:
-                    self._log(f"Skipping {dataset_name} @ {threshold} (already computed)")
+                    self._log(f"Skipping \033[94m{dataset_name} @ {threshold}\033[0m (already computed)")
                     continue
                 
                 # Check if cached on disk
@@ -641,7 +641,7 @@ class ComparisonAnalyzer:
                     
                     filtered_edges['threshold'] = threshold
                     result_df = filtered_edges
-                    self._log(f"Edge mode: {len(result_df)} edges at threshold={threshold} for {dataset_name} "
+                    self._log(f"Edge mode: {len(result_df)} edges at \033[94mthreshold={threshold}\033[0m for \033[94m{dataset_name}\033[0m "
                              f"({result_df['has_valid_path'].sum() if 'has_valid_path' in result_df.columns else 0} with valid paths)")
                 else:
                     result_df = pd.DataFrame()
@@ -1420,13 +1420,49 @@ class ComparisonAnalyzer:
         
         # Run connectivity profile verification BEFORE HTML report generation
         # This ensures profile similarity matrix is available for the report
+        # Default verification parameters
+        verification_params = {
+            'direction': 'both',
+            'comparison_mode': 'loose',
+            'include_partner_details': True,
+            'include_visualizations': True,
+            'top_k': 5,
+            'top_m': 0,
+            'min_synapse_threshold': 3,
+            'include_untyped_partners': True,
+            'min_common_partners': 3,
+            'score_weights': {'jaccard': 0.50, 'rank': 0.50}
+        }
+        
         try:
             self.run_connectivity_profile_verification(
-                direction='both',
-                include_partner_details=True,
-                include_visualizations=True,
+                direction=verification_params['direction'],
+                comparison_mode=verification_params['comparison_mode'],
+                include_partner_details=verification_params['include_partner_details'],
+                include_visualizations=verification_params['include_visualizations'],
+                top_k=verification_params['top_k'],
+                top_m=verification_params['top_m'],
+                min_synapse_threshold=verification_params['min_synapse_threshold'],
+                include_untyped_partners=verification_params['include_untyped_partners'],
+                min_common_partners=verification_params['min_common_partners'],
                 _skip_html_regeneration=True  # Don't regenerate HTML here, we'll do it below
             )
+            
+            # Save verification parameters to file
+            verification_params_path = os.path.join(out_dir, "connectivity_profile_verification", "verification_parameters.txt")
+            os.makedirs(os.path.dirname(verification_params_path), exist_ok=True)
+            with open(verification_params_path, 'w') as f:
+                f.write("Connectivity Profile Verification Parameters\\n")
+                f.write("=" * 50 + "\\n\\n")
+                for key, value in verification_params.items():
+                    f.write(f"{key}: {value}\\n")
+                f.write("\\n")
+                f.write("Note: Confidence is evaluated based on avg_rank_corr only:\\n")
+                f.write("  Very High: >= 0.85\\n")
+                f.write("  High: 0.70 - 0.85\\n")
+                f.write("  Medium: 0.50 - 0.70\\n")
+                f.write("  Low: 0.30 - 0.50\\n")
+                f.write("  Very Low: < 0.30\\n")
         except Exception as e:
             self._log(f"Warning: Connectivity profile verification skipped: {e}")
         
@@ -3774,14 +3810,17 @@ class ComparisonAnalyzer:
         self,
         output_dir: Optional[str] = None,
         direction: str = 'both',
+        comparison_mode: str = 'loose',
         include_partner_details: bool = True,
         include_visualizations: bool = True,
-        top_k: int = 20,
-        top_m: int = 5,
+        top_k: int = 5,
+        top_m: int = 0,
         min_synapse_threshold: int = 3,
         include_untyped_partners: bool = True,
-        max_untyped_fraction: float = 0.5,
-        allow_2hop_expansion: bool = True,
+        # Strict mode parameters
+        min_common_partners: int = 3,
+        # Score weights for combined score
+        score_weights: Optional[Dict[str, float]] = None,
         _skip_html_regeneration: bool = False
     ) -> Dict[str, pd.DataFrame]:
         """
@@ -3791,24 +3830,40 @@ class ComparisonAnalyzer:
         results, verifying that neurons with the same type labels have similar
         connectivity patterns across datasets.
         
-        The verification:
+        Two comparison modes are supported:
+        
+        **Loose Mode** (default): Type-level aggregated comparison
+        - Aggregates all neurons of the same type into one profile
+        - Computes Jaccard similarity, cosine similarity, rank correlation
+        - Faster and good for initial screening
+        - Best when: You want to compare overall type connectivity patterns
+        
+        **Strict Mode**: Per-bodyId individual comparison  
+        - Compares individual neuron profiles within each type
+        - Uses rank correlation on matching partner types (always uses ranks)
+        - Includes 2-hop profile matching via profiler config
+        - More computationally intensive but more precise
+        - Best when: You want to verify individual neuron assignments
+        
+        The verification workflow:
         1. Extracts source, target, and intermediate types from comparison results
         2. Computes connectivity profiles for each type in each dataset
-        3. Compares profiles using multiple similarity metrics
+        3. Compares profiles using the selected mode's similarity metrics
         4. Generates verification report with confidence scores
-        5. If >50% of partners are untyped, attempts 2-hop profile expansion
+        5. 2-hop expansion handled by profiler if config.expand_untyped_2hop is True
         
         Args:
             output_dir: Directory to save verification results (default: comparison output folder)
             direction: 'upstream', 'downstream', or 'both' for profile comparison
+            comparison_mode: 'loose' (type-aggregated) or 'strict' (per-bodyId)
             include_partner_details: Include per-type partner overlap CSVs
             include_visualizations: Generate visualization plots/heatmaps
-            top_k: Number of top partners (upstream + downstream) to include
-            top_m: Minimum unique partner types to ensure in profile
+            top_k: Number of top partners per direction (default: 5)
+            top_m: Minimum unique partner types (default: 0 = no expansion)
             min_synapse_threshold: Minimum synapse count for connections
             include_untyped_partners: Include partners without type annotations
-            max_untyped_fraction: Warn and attempt 2-hop if untyped fraction exceeds this (default: 0.5)
-            allow_2hop_expansion: If True, expand to 2-hop when profile has too many untyped partners
+            min_common_partners: (strict mode) Minimum shared partners required for comparison
+            score_weights: Custom weights for combined score {'jaccard': 0.3, 'cosine': 0.35, 'rank': 0.35}
             _skip_html_regeneration: Internal flag - skip HTML regeneration (used when called from export_results)
         
         Returns:
@@ -3818,12 +3873,27 @@ class ComparisonAnalyzer:
             - 'intermediate': DataFrame with intermediate type verification
             - 'summary': Overall summary DataFrame
             - 'similarity_matrix': Cross-dataset similarity matrix
+            - 'comparison_mode': The mode used ('loose' or 'strict')
+        
+        Note:
+            - Ranks are always used for bodyId-level comparison (proportions not used)
+            - 2-hop expansion is controlled via profiler config.expand_untyped_2hop
+            - If 2-hop doesn't return typed neurons in top_k, untyped partners are ignored
         
         Example:
             >>> analyzer = ComparisonAnalyzer(params)
             >>> results = analyzer.run_comparison()
+            >>> 
+            >>> # Loose mode (default) - type-aggregated comparison
             >>> verification = analyzer.run_connectivity_profile_verification(
-            ...     top_k=15, top_m=5, allow_2hop_expansion=True
+            ...     comparison_mode='loose',
+            ...     top_k=5, top_m=0  # Focus on top 5 partners, no expansion
+            ... )
+            >>> 
+            >>> # Strict mode - per-bodyId comparison
+            >>> verification = analyzer.run_connectivity_profile_verification(
+            ...     comparison_mode='strict',
+            ...     min_common_partners=3
             ... )
             >>> print(verification['summary'])
         """
@@ -3835,7 +3905,12 @@ class ComparisonAnalyzer:
             self._log(f"Warning: Connectivity profile modules not available: {e}")
             return {}
         
-        self._log("Running connectivity profile verification...")
+        # Validate comparison_mode
+        if comparison_mode not in ['loose', 'strict']:
+            self._log(f"Warning: Invalid comparison_mode '{comparison_mode}', using 'loose'")
+            comparison_mode = 'loose'
+        
+        self._log(f"Running connectivity profile verification (mode: {comparison_mode})...")
         
         # Setup output directory
         if output_dir is None:
@@ -3884,13 +3959,36 @@ class ComparisonAnalyzer:
             verbose=self.verbose
         )
         
-        # Create verifier with untyped fraction threshold and 2-hop option
+        # Pre-load profiles from parquet cache for efficiency
+        # This leverages the build_connectivity_profile_cache / read_connectivity_profile_cache system
+        self._log("Pre-loading connectivity profiles from cache...")
+        preloaded_count = 0
+        for dataset in dataset_names:
+            try:
+                # Read all cached profiles for this dataset
+                cached_profiles = profiler.read_connectivity_profile_cache(
+                    dataset=dataset,
+                    neuron_types=all_types_ordered  # Only load types we need
+                )
+                if cached_profiles:
+                    self._log(f"  Loaded {len(cached_profiles)} cached profiles for {dataset}")
+                    preloaded_count += len(cached_profiles)
+            except Exception as e:
+                self._log(f"  Cache read failed for {dataset}: {e}")
+        
+        if preloaded_count > 0:
+            self._log(f"Pre-loaded {preloaded_count} profiles from cache")
+        else:
+            self._log("No cached profiles found - will extract on demand")
+        
+        # Create verifier with comparison mode and score weights
         verifier = CrossDatasetVerifier(
             profiler=profiler,
             label_mapper=self.label_mapper,
             verbose=self.verbose,
-            max_untyped_fraction=max_untyped_fraction,
-            allow_2hop_expansion=allow_2hop_expansion
+            comparison_mode=comparison_mode,
+            min_common_partners=min_common_partners,
+            score_weights=score_weights
         )
         
         # Run verification for all types
@@ -3901,6 +3999,9 @@ class ComparisonAnalyzer:
             datasets=dataset_names,
             direction=direction
         )
+        
+        # Store the comparison mode used
+        results['comparison_mode'] = comparison_mode
         
         # Build cross-dataset similarity matrix (use rank_corr as primary metric)
         # Use all_types_ordered to ensure source/target types are always included

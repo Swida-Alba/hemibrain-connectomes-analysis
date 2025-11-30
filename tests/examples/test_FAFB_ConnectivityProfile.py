@@ -14,8 +14,8 @@ The profiler should use 'type' (specific) not 'cell_type' (generic).
 import sys
 import os
 
-# Add project root to path
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# Add project root to path (tests/examples/ -> tests/ -> project root)
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from src.comparison import ConnectivityProfiler, ProfilerConfig
 

@@ -23,7 +23,7 @@ import sys
 from pathlib import Path
 
 # Add vispath-subproject to Python path for local development
-vispath_pkg_path = Path(__file__).parent.parent / 'vispath-subproject' / 'src'
+vispath_pkg_path = Path(__file__).parent.parent.parent.parent / 'vispath-subproject' / 'src'
 if vispath_pkg_path.exists():
     sys.path.insert(0, str(vispath_pkg_path))
 

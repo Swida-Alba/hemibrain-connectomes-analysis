@@ -13,7 +13,7 @@ Date: November 20, 2024
 
 import sys
 from pathlib import Path
-sys.path.insert(0, str(Path(__file__).parent.parent / 'src'))
+sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent / 'src'))
 
 import os
 import statvis as sv
@@ -260,7 +260,7 @@ print('='*80)
 
 try:
     # Check if dataset-specific directories exist
-    script_path = Path(__file__).parent.parent
+    script_path = Path(__file__).parent.parent.parent.parent
     mesh_base_dir = script_path / 'navis_roi_meshes_json'
     
     print('\n--- Checking cache directory structure ---')

@@ -8,6 +8,13 @@ Tests:
 4. Individual visualization control (plot_heatmap, plot_Sankey, plot_network)
 """
 
+import sys
+from pathlib import Path
+
+# Add vispath-subproject to path (visualization/input_formats/ -> visualization/ -> examples/ -> project root)
+vispath_path = Path(__file__).parent.parent.parent.parent / 'vispath-subproject' / 'src'
+sys.path.insert(0, str(vispath_path))
+
 import numpy as np
 import pandas as pd
 from vispath_pkg.vispath import VisualizePath

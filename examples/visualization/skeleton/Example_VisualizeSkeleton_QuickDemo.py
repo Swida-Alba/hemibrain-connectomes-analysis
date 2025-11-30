@@ -11,7 +11,7 @@ For full tests with online features, see Example_VisualizeSkeleton_Comprehensive
 
 import sys
 from pathlib import Path
-sys.path.insert(0, str(Path(__file__).parent.parent / 'src'))
+sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent / 'src'))
 
 import os
 import json
@@ -27,7 +27,7 @@ print('\n' + '='*80)
 print('TEST 1: Cache Directory Structure Verification')
 print('='*80)
 
-script_path = Path(__file__).parent.parent
+script_path = Path(__file__).parent.parent.parent.parent
 mesh_base_dir = script_path / 'navis_roi_meshes_json'
 
 print(f'\nBase directory: {mesh_base_dir}')

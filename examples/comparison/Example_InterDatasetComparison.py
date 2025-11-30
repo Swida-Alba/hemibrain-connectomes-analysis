@@ -27,6 +27,11 @@ Connectivity Profile Verification:
     patterns across datasets
   - Uses multiple similarity metrics (Jaccard, Cosine, Rank correlation)
   - Generates confidence scores for type assignments
+  - Supports two comparison modes:
+    * 'loose' (default): Type-aggregated profiles - faster, compares overall
+      connectivity patterns by aggregating all neurons of the same type
+    * 'strict': Per-bodyId profiles - more precise, computes rank correlation
+      on individual neuron pairs with optional 2-hop expansion
 """
 
 import os
@@ -34,7 +39,7 @@ import sys
 import logging
 
 # Add src to path
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(__file__)), 'src'))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 'src'))
 
 from comparison import (
     ComparisonAnalyzer,
@@ -68,20 +73,22 @@ def run_comprehensive_comparison():
     
     params = ComparisonParameters(
         # Datasets to compare
-        datasets=['flywire_FAFB_v783', 'hemibrain:v1.2.1'],
-        datasets_nickname=['FAFB','hemibrain'],
+        datasets=['flywire_BANC_v626', 'male-cns:v0.9', 'flywire_FAFB_v783', 'hemibrain:v1.2.1'],
+        datasets_nickname=['BANC','male-CNS', 'FAFB','hemibrain'],
         
         # Source neurons - aMe12 medulla neurons
-        source_neurons=['aMe12'],
+        source_neurons=['aMe12','aMe26'],
+        # source_neurons=neurons_network,
         
         # Target neurons - PPL101 dopaminergic neurons
-        target_neurons=['PPL101'],
+        target_neurons=['PPL101','PPL103'],
+        # target_neurons=neurons_network,
         
         # Allow 1 intermediate layer (source → inter → target)
         max_interlayer=1,
         
         # Multiple thresholds to analyze sensitivity
-        thresholds=[3,5,10],
+        thresholds=[1,3,5,10],
         
         # Top edges to include in analysis
         top_edges=50,
@@ -142,10 +149,20 @@ def run_comprehensive_comparison():
         # Run connectivity profile verification
         # This verifies that neurons with the same type label have similar
         # connectivity patterns across all compared datasets
+        #
+        # Two comparison modes are available:
+        # - 'loose' (default): Type-aggregated comparison (faster)
+        # - 'strict': Per-bodyId comparison with rank correlation (more precise)
         verification_results = analyzer.run_connectivity_profile_verification(
             direction='both',  # Compare both upstream and downstream partners
-            include_partner_details=True,  # Include per-type partner overlap
-            include_visualizations=True  # Generate heatmaps and profile charts
+            comparison_mode='loose',  # 'loose' (type-aggregated) or 'strict' (per-bodyId)
+            # Profile extraction parameters
+            top_k=10,   # Number of top partners per direction (default: 5)
+            top_m=3,   # Minimum unique partner types (default: 0 = no expansion)
+            # Strict mode parameters (only used when comparison_mode='strict')
+            min_common_partners=3,  # Minimum shared partners for comparison
+            # Note: Ranks are always used for bodyId-level comparison
+            # 2-hop expansion is controlled via profiler config.expand_untyped_2hop
         )
         
         # Print summary if available

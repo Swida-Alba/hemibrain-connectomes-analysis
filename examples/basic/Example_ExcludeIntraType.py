@@ -18,7 +18,7 @@ from pathlib import Path
 import warnings
 
 # Add src directory to Python path
-sys.path.insert(0, str(Path(__file__).parent.parent / 'src'))
+sys.path.insert(0, str(Path(__file__).parent.parent.parent / 'src'))
 
 warnings.filterwarnings("ignore")
 from coana import FindNeuronConnection

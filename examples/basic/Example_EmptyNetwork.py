@@ -27,7 +27,7 @@ from pathlib import Path
 import time
 
 # Add parent directory to path to import vispath_pkg
-parent_dir = Path(__file__).parent.parent
+parent_dir = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(parent_dir / 'vispath-subproject' / 'src'))
 
 from vispath_pkg import VisualizePath

@@ -1,4 +1,4 @@
-# NeuPrint Connectome Analysis v4.0
+# NeuPrint Connectome Analysis v4.1
 
 A comprehensive Python toolkit for analyzing and visualizing connectome data from **all NeuPrint databases**. Features type-based pathfinding algorithms, interactive network visualizations, 3D neuron morphology rendering with video export, and high-performance caching. Supports hemibrain, optic lobe, FIB, MANC, and other NeuPrint datasets.
 
