@@ -61,7 +61,7 @@ if __name__ == '__main__':
     
     # Initialize and find direct connections
     fc_mbon.InitializeNeuronInfo()
-    fc_mbon.FindDirectConnections(full_data=True)
+    fc_mbon.FindDirectConnections()
     
     print("\nResults saved! Check the output folder for:")
     print("  - Connection matrix showing only inter-type connections")

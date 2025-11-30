@@ -7,6 +7,7 @@ Main components:
 - coana: Connectome analysis (FindNeuronConnection)
 - statvis: Statistical visualization and analysis
 - vispath_pkg: Pathway visualization (imported from vispath-subproject)
+- comparison: Cross-dataset comparison tools
 """
 
 import sys
@@ -23,3 +24,28 @@ try:
     __all__ = ['VisualizePath', 'visualize_paths', 'parse_color_to_hex_opacity', 'VisConnMatInteractive']
 except ImportError:
     __all__ = []
+
+# Import comparison module components
+try:
+    from .comparison import (
+        ComparisonAnalyzer,
+        DatasetConfig,
+        ComparisonParameters,
+        LabelMapper,
+        DataLoader,
+        ComparisonMetrics,
+        ComparisonVisualizer,
+        quick_compare
+    )
+    __all__.extend([
+        'ComparisonAnalyzer',
+        'DatasetConfig', 
+        'ComparisonParameters',
+        'LabelMapper',
+        'DataLoader',
+        'ComparisonMetrics',
+        'ComparisonVisualizer',
+        'quick_compare'
+    ])
+except ImportError:
+    pass

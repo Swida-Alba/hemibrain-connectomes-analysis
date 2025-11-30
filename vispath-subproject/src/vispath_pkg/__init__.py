@@ -8,10 +8,26 @@ functions including heatmaps, Sankey diagrams, and network graphs.
 """
 
 # Import the main VisualizePath class and visualization functions
-from .vispath import VisualizePath, parse_color_to_hex_opacity, VisConnMatInteractive, visualize_paths
+from .vispath import (
+    VisualizePath,
+    parse_color_to_hex_opacity,
+    VisConnMatInteractive,
+    visualize_paths,
+    visualize_heatmap,
+    visualize_sankey,
+    visualize_network
+)
 
 __version__ = "1.0.0"
 __author__ = "Kun-Da Wu"
 
-__all__ = ['VisualizePath', 'parse_color_to_hex_opacity', 'VisConnMatInteractive', 'visualize_paths']
+__all__ = [
+    'VisualizePath',
+    'parse_color_to_hex_opacity',
+    'VisConnMatInteractive',
+    'visualize_paths',
+    'visualize_heatmap',
+    'visualize_sankey',
+    'visualize_network'
+]
 

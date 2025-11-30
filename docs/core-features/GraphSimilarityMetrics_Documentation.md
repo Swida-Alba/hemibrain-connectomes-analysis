@@ -1,0 +1,476 @@
+# Graph Similarity Metrics Documentation
+
+This document provides comprehensive documentation for all graph similarity metrics used in the inter-dataset comparison module.
+
+## Overview
+
+The comparison module provides **6 complementary similarity metrics** organized into two categories:
+
+### Active Metrics (Used in Current Implementation)
+
+| Category | Metric | Weight-Sensitive | Scale-Sensitive | Description |
+|----------|--------|------------------|-----------------|-------------|
+| **Topology** | Jaccard | ❌ No | N/A | Binary edge overlap |
+| **Topology** | GED | ⚠️ Partial | ⚠️ Partial | Graph edit distance |
+| **Topology** | WL Kernel | ⚠️ Partial | N/A | Local neighborhood patterns |
+| **Matrix** | Ruzicka | ✅ Yes | ❌ No (inherently invariant) | Weight-aware edge overlap |
+| **Matrix** | Spearman Rank | ✅ Yes | ❌ No (rank-based) | Rank correlation of shared edges |
+| **Matrix** | RV Coefficient | ✅ Yes | ❌ No (normalized) | Multivariate matrix similarity |
+
+### Deprecated Metrics (Not Used)
+
+| Metric | Reason for Deprecation |
+|--------|----------------------|
+| **Frobenius** | Too sensitive to absolute scale differences between datasets |
+| **Pearson Correlation** | Diluted by zeros in sparse adjacency matrices (union approach) |
+
+---
+
+## Category 1: Topology-Based Metrics
+
+These metrics compare **graph structure only**, treating edges as present or absent regardless of weight magnitude.
+
+### 1.1 Jaccard Similarity (Binary)
+
+#### Formula
+
+$$J(A, B) = \frac{|E_A \cap E_B|}{|E_A \cup E_B|}$$
+
+Where:
+- $E_A$ = set of edges in graph A (above threshold)
+- $E_B$ = set of edges in graph B (above threshold)
+
+#### Properties
+
+| Property | Value |
+|----------|-------|
+| **Range** | [0, 1] |
+| **Interpretation** | 1.0 = identical edge sets, 0.0 = no overlap |
+| **Weight-sensitive** | ❌ No - treats all edges equally once above threshold |
+| **Scale-sensitive** | N/A (binary) |
+| **Speed** | ⚡ Fast |
+
+#### Pros & Cons
+
+| ✅ Pros | ❌ Cons |
+|---------|---------|
+| Simple and interpretable | Ignores weight information |
+| Fast computation | Threshold-dependent |
+| Good for structural comparison | Strong/weak edges treated equally |
+
+#### When to Use
+
+- Quick structural comparison
+- When edge weights are unreliable
+- With appropriate threshold to filter noise
+
+---
+
+### 1.2 Graph Edit Distance (GED) Similarity
+
+#### Formula
+
+$$S_{GED} = 1 - \frac{GED(G_A, G_B)}{|V_A| + |V_B| + |E_A| + |E_B|}$$
+
+Where:
+- $GED(G_A, G_B)$ = minimum edit operations to transform $G_A$ into $G_B$
+- Edit operations: insert/delete node, insert/delete edge
+
+#### Properties
+
+| Property | Value |
+|----------|-------|
+| **Range** | [0, 1] |
+| **Interpretation** | 1.0 = identical graphs, lower = more edits needed |
+| **Weight-sensitive** | ⚠️ Partial - edge matching uses 10% weight tolerance |
+| **Scale-sensitive** | ⚠️ Partial - tolerance is relative |
+| **Speed** | 🐢 Slow (NP-hard, may timeout) |
+
+#### Pros & Cons
+
+| ✅ Pros | ❌ Cons |
+|---------|---------|
+| Intuitive "distance" interpretation | Computationally expensive |
+| Captures node+edge structure | May timeout for large graphs |
+| Partial weight awareness | Approximation for >20 nodes |
+
+#### When to Use
+
+- Small graphs (<20 nodes)
+- When you need intuitive "how different?" measure
+- Detailed structural comparison
+
+---
+
+### 1.3 Weisfeiler-Lehman (WL) Kernel Similarity
+
+#### Background
+
+The WL kernel compares graphs by iteratively aggregating neighborhood information. Each node's label is updated based on its neighbors' labels, creating a "fingerprint" of local structure.
+
+Edge weights are **discretized into 5 bins** (percentile-based) and included in neighbor aggregation, making the kernel partially weight-aware.
+
+#### Properties
+
+| Property | Value |
+|----------|-------|
+| **Range** | [0, 1] |
+| **Interpretation** | 1.0 = identical neighborhood patterns |
+| **Weight-sensitive** | ⚠️ Partial - via edge weight bins (5 levels) |
+| **Scale-sensitive** | ❌ No (percentile-based bins) |
+| **Speed** | 🟡 Medium |
+
+#### Baseline Value (~0.25)
+
+When graphs share node vocabulary but have different edges, WL kernel shows ~0.25 similarity because:
+- Iteration 0 features (node labels) are shared
+- Later iteration features differ due to different neighborhoods
+
+#### Pros & Cons
+
+| ✅ Pros | ❌ Cons |
+|---------|---------|
+| Captures multi-hop patterns | Coarse weight discretization |
+| Scale-invariant | Baseline ~0.25 for different graphs |
+| Fast for large graphs | Less interpretable than Jaccard |
+
+#### When to Use
+
+- Comparing local neighborhood structure
+- When multi-hop patterns matter
+- Large graphs where GED would timeout
+
+---
+
+## Category 2: Matrix-Based Metrics
+
+These metrics compare **edge weight magnitudes** using the full weight information. They use normalized weights to handle different scales across datasets.
+
+### 2.1 Ruzicka Similarity (Weighted Jaccard)
+
+#### Formula
+
+$$R(A, B) = \frac{\sum_{e \in E_{union}} \min(W_A(e), W_B(e))}{\sum_{e \in E_{union}} \max(W_A(e), W_B(e))}$$
+
+Where:
+- $E_{union}$ = union of all edges from both graphs
+- $W_A(e)$ = weight of edge $e$ in graph A (0 if missing)
+
+#### Properties
+
+| Property | Value |
+|----------|-------|
+| **Range** | [0, 1] |
+| **Interpretation** | 1.0 = identical weights, 0.0 = no overlap |
+| **Weight-sensitive** | ✅ Yes - weak edges contribute proportionally |
+| **Scale-sensitive** | ✅ Yes, but inherently scale-invariant by formula |
+| **Speed** | ⚡ Fast |
+
+#### Why Scale-Invariant?
+
+Ruzicka is **inherently scale-invariant** because of its min/max ratio formula:
+```
+R(A, kB) = Σmin(a, kb) / Σmax(a, kb) 
+         ≈ R(A, B) for consistent patterns
+```
+
+If all weights in B are scaled by the same factor k, the relative min/max ratios remain similar.
+
+#### Pros & Cons
+
+| ✅ Pros | ❌ Cons |
+|---------|---------|
+| Weight-aware | Sensitive to unique edges (penalizes them) |
+| Strong edges dominate | Less intuitive than Jaccard |
+| Natural scale handling | |
+
+#### When to Use
+
+- When edge weights are biologically meaningful (synapse counts)
+- When strong connections should dominate similarity
+- As alternative to Jaccard + threshold
+
+---
+
+### 2.2 Spearman Rank Correlation
+
+#### Formula
+
+$$\rho = \frac{\text{cov}(R_A, R_B)}{\sigma_{R_A} \sigma_{R_B}}$$
+
+Mapped to [0, 1]: $S = \frac{\rho + 1}{2}$
+
+Where $R_A, R_B$ are the ranks of weights for **shared edges only**.
+
+#### Key Design Choice: Shared Edges Only
+
+The implementation uses **SHARED edges only** (not union) to avoid the problem where many (0, weight) comparisons dilute the correlation coefficient:
+
+```python
+# Union approach (DEPRECATED - causes low values):
+# Many edges: (0, 50), (0, 30), (0, 25), (100, 80), (50, 40)
+# Correlation dominated by zeros → ~0.2
+
+# Shared approach (CURRENT):
+# Only compare edges present in BOTH graphs
+# (100, 80), (50, 40), (30, 35) → meaningful rank comparison
+```
+
+#### Properties
+
+| Property | Value |
+|----------|-------|
+| **Range** | [0, 1] (mapped from [-1, 1]) |
+| **Interpretation** | 1.0 = identical ranking of shared edges |
+| **Weight-sensitive** | ✅ Yes - uses weight ranks |
+| **Scale-sensitive** | ❌ No (rank-based, inherently scale-invariant) |
+| **Speed** | ⚡ Fast |
+
+#### Pros & Cons
+
+| ✅ Pros | ❌ Cons |
+|---------|---------|
+| Scale-invariant | Ignores unique edges |
+| Robust to outliers | Only compares shared edges |
+| Captures relative importance | Returns 0.5 if <3 shared edges |
+
+#### When to Use
+
+- When you want to compare "relative importance" of edges
+- When datasets have different annotation depths
+- When absolute synapse counts shouldn't matter
+
+---
+
+### 2.3 RV Coefficient
+
+#### Formula
+
+$$RV = \frac{\langle A, B \rangle_F^2}{||A||_F^2 \cdot ||B||_F^2}$$
+
+Where:
+- $\langle A, B \rangle_F = \sum_{ij} A_{ij} B_{ij}$ (Frobenius inner product)
+- $||A||_F = \sqrt{\sum_{ij} A_{ij}^2}$ (Frobenius norm)
+
+The RV coefficient (Robert & Escoufier, 1976) is a multivariate generalization of the squared Pearson correlation.
+
+#### Properties
+
+| Property | Value |
+|----------|-------|
+| **Range** | [0, 1] |
+| **Interpretation** | 1.0 = proportional matrices, 0.0 = orthogonal |
+| **Weight-sensitive** | ✅ Yes - uses full weight information |
+| **Scale-sensitive** | ❌ No (uses normalized weights) |
+| **Speed** | ⚡ Fast |
+
+#### Normalization
+
+The implementation normalizes weights to proportions before computing RV:
+```python
+norm_a = weights_a / weights_a.sum()
+norm_b = weights_b / weights_b.sum()
+```
+
+This makes the metric invariant to different total synapse counts.
+
+#### Pros & Cons
+
+| ✅ Pros | ❌ Cons |
+|---------|---------|
+| Multivariate (considers all edges) | More complex interpretation |
+| Scale-invariant via normalization | Requires aligned matrices |
+| Captures overall pattern similarity | Sensitive to sparse matrices |
+
+#### When to Use
+
+- Overall matrix-level pattern comparison
+- When comparing full weight distributions
+- As complement to edge-specific metrics
+
+---
+
+## Deprecated Metrics
+
+### Frobenius Similarity (Not Used)
+
+#### Why Deprecated
+
+**Too sensitive to absolute scale differences.** Datasets often have different total synapse counts due to:
+- Different annotation completeness
+- Different reconstruction quality
+- Biological variation
+
+#### Formula
+
+$$S_{Frobenius} = 1 - \frac{||A - B||_F}{||A||_F + ||B||_F}$$
+
+#### Problem Demonstration
+
+| Scenario | Frobenius | Problem |
+|----------|-----------|---------|
+| Identical | 1.00 | ✅ Correct |
+| Same pattern, 2x scale | 0.67 | ⚠️ Penalizes scale difference |
+| Same pattern, 10x scale | 0.18 | ❌ Very low despite identical pattern |
+| Same pattern, 100x scale | 0.02 | ❌ Near-zero for same pattern! |
+
+**Conclusion**: Frobenius is inappropriate for comparing datasets with different scales.
+
+---
+
+### Pearson Correlation on Full Matrix (Not Used)
+
+#### Why Deprecated
+
+**Diluted by zeros in sparse adjacency matrices.** When using the union of all edges, many cells are (0, weight) comparisons:
+
+```
+Graph A edges: {A→B: 100, B→C: 50}
+Graph B edges: {A→B: 80, C→D: 60, D→E: 40}
+
+Union matrix positions: A→B, B→C, C→D, D→E
+Values A: [100, 50, 0, 0]
+Values B: [80, 0, 60, 40]
+
+Correlation is dominated by the (50, 0), (0, 60), (0, 40) pairs!
+```
+
+#### Problem Demonstration
+
+| Scenario | Pearson (union) | Problem |
+|----------|-----------------|---------|
+| Identical | 1.00 | ✅ Correct |
+| 50% edge overlap, similar weights | 0.55 | ⚠️ Low due to zeros |
+| 30% edge overlap, similar weights | 0.35 | ❌ Very low |
+| Different edges, both strong | 0.10 | ❌ Near-zero |
+
+**Conclusion**: Pearson on union is dominated by zero-weight comparisons. The Spearman Rank approach on **shared edges only** avoids this problem.
+
+---
+
+## Comprehensive Comparison Table
+
+### All 8 Metrics (6 Active + 2 Deprecated)
+
+| Metric | Category | Weight | Scale | Speed | Status | Best For |
+|--------|----------|--------|-------|-------|--------|----------|
+| **Jaccard** | Topology | ❌ | N/A | ⚡ | ✅ Active | Quick structure check |
+| **GED** | Topology | ⚠️ | ⚠️ | 🐢 | ✅ Active | Detailed small graph |
+| **WL Kernel** | Topology | ⚠️ | ❌ | 🟡 | ✅ Active | Neighborhood patterns |
+| **Ruzicka** | Matrix | ✅ | ❌* | ⚡ | ✅ Active | Weight-aware overlap |
+| **Spearman** | Matrix | ✅ | ❌ | ⚡ | ✅ Active | Rank comparison |
+| **RV Coef** | Matrix | ✅ | ❌ | ⚡ | ✅ Active | Overall pattern |
+| *Frobenius* | Matrix | ✅ | ✅ | ⚡ | ❌ Deprecated | Scale-sensitive |
+| *Pearson* | Matrix | ✅ | ❌ | ⚡ | ❌ Deprecated | Diluted by zeros |
+
+\* Ruzicka is inherently scale-invariant by its min/max formula
+
+### Test Results with Current 6 Metrics
+
+| Test Case | Jaccard | GED | WL | Ruzicka | Spearman | RV |
+|-----------|---------|-----|-----|---------|----------|-----|
+| Identical graphs | 1.00 | 1.00 | 1.00 | 1.00 | 1.00 | 1.00 |
+| Same pattern, 2x scale | 1.00 | 0.79 | 0.25 | 0.67 | 1.00 | 1.00 |
+| Same pattern, 10x scale | 1.00 | 0.79 | 0.25 | 0.18 | 1.00 | 1.00 |
+| No node overlap | 0.00 | 0.71 | 0.25 | 0.00 | 0.50 | 0.00 |
+| 50% edge overlap | 0.50 | 0.73 | 0.38 | 0.60 | 0.85 | 0.78 |
+| Different patterns | 0.50 | 0.75 | 0.30 | 0.45 | 0.45 | 0.55 |
+
+### Recommended Metric Selection
+
+| Scenario | Primary Metric | Secondary |
+|----------|----------------|-----------|
+| Quick structural check | Jaccard | - |
+| Compare edge presence | Jaccard | GED |
+| Compare weight importance | Spearman Rank | Ruzicka |
+| Overall pattern similarity | RV Coefficient | Ruzicka |
+| Local neighborhood patterns | WL Kernel | GED |
+| Small detailed graphs | GED | Jaccard |
+| Robust multi-metric | All 6 | - |
+
+---
+
+## Usage Example
+
+```python
+from src.comparison.metrics import ComparisonMetrics
+import pandas as pd
+
+metrics = ComparisonMetrics()
+
+# Edge data as Series indexed by "source -> target" or tuples
+edges_a = pd.Series({
+    ("TypeA", "TypeB"): 100,
+    ("TypeB", "TypeC"): 80,
+    ("TypeC", "TypeD"): 60,
+})
+
+edges_b = pd.Series({
+    ("TypeA", "TypeB"): 100,
+    ("TypeB", "TypeC"): 80,
+    ("TypeX", "TypeY"): 50,  # Different edge
+})
+
+# Calculate all 6 active metrics
+jaccard = metrics.calculate_jaccard_similarity(
+    set(edges_a.index), set(edges_b.index)
+)
+ruzicka = metrics.calculate_ruzicka_similarity(edges_a, edges_b)
+spearman = metrics.calculate_spearman_rank_correlation(edges_a, edges_b)
+rv = metrics.calculate_rv_coefficient(edges_a, edges_b)
+ged = metrics.calculate_graph_edit_distance_similarity(edges_a, edges_b)
+wl = metrics.calculate_graph_kernel_similarity(edges_a, edges_b)
+
+print(f"Topology Metrics:")
+print(f"  Jaccard: {jaccard:.3f}")
+print(f"  GED: {ged:.3f}")
+print(f"  WL Kernel: {wl:.3f}")
+print(f"Matrix Metrics:")
+print(f"  Ruzicka: {ruzicka:.3f}")
+print(f"  Spearman Rank: {spearman:.3f}")
+print(f"  RV Coefficient: {rv:.3f}")
+```
+
+---
+
+## Batch Comparison
+
+For comparing multiple datasets, use `calculate_all_pairwise_similarities()`:
+
+```python
+import pandas as pd
+from src.comparison.metrics import ComparisonMetrics
+
+metrics = ComparisonMetrics()
+
+# Aligned data: DataFrame with datasets as columns, edges as rows
+aligned = pd.DataFrame({
+    "hemibrain": {("A", "B"): 100, ("B", "C"): 80, ("C", "D"): 60, ("X", "Y"): 0},
+    "male-cns": {("A", "B"): 90, ("B", "C"): 70, ("C", "D"): 0, ("X", "Y"): 50},
+})
+
+# Calculate all pairwise similarities (6 metrics)
+similarities = metrics.calculate_all_pairwise_similarities(
+    aligned,
+    datasets=["hemibrain", "male-cns"],
+    threshold=1,
+    include_advanced_metrics=True
+)
+
+print(similarities)
+# Output columns:
+# - dataset_1, dataset_2
+# - jaccard_similarity, ged_similarity, kernel_similarity (Topology)
+# - ruzicka_similarity, spearman_rank_correlation, rv_coefficient (Matrix)
+```
+
+---
+
+## Related Documentation
+
+- [CrossDatasetComparison_Guide.md](CrossDatasetComparison_Guide.md) - Overall comparison workflow
+- [ConnectivityProfile_Documentation.md](ConnectivityProfile_Documentation.md) - Profile-based comparison
+
+---
+
+*Last updated: November 29, 2025*

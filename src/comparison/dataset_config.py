@@ -1,0 +1,145 @@
+"""
+DatasetConfig - Per-dataset configuration for cross-dataset comparison.
+
+This module defines the DatasetConfig dataclass that encapsulates dataset-specific
+settings. In the optimized workflow, DatasetConfig is typically auto-generated
+from dataset strings - users rarely need to create it manually.
+
+Dataset Detection:
+- If name starts with 'flywire' -> local dataset (FindNeuronConnection handles path)
+- Otherwise -> NeuPrint dataset (requires client for authentication)
+
+Note: Source/target neurons and max_interlayer are now defined in ComparisonParameters
+(shared across all datasets), not in DatasetConfig.
+"""
+
+from dataclasses import dataclass
+from typing import Optional, Any
+
+
+@dataclass
+class DatasetConfig:
+    """
+    Encapsulates per-dataset configuration for cross-dataset comparison.
+    
+    This class holds dataset-specific parameters like connection info.
+    Source/target neurons and max_interlayer are defined in ComparisonParameters
+    (shared across all datasets).
+    
+    Dataset Detection:
+    - If dataset name starts with 'flywire' -> local dataset
+    - Otherwise -> NeuPrint dataset (all use neuprint.janelia.org)
+    
+    Attributes:
+        dataset: Dataset identifier (e.g., 'hemibrain:v1.2.1', 'flywire_FAFB_v783')
+        client: NeuPrint client instance (shared across NeuPrint datasets to avoid repeated login)
+        name: Human-readable name for the dataset (auto-generated from dataset)
+        
+    Example:
+        >>> # Auto-create from string (recommended)
+        >>> config = DatasetConfig.from_string('hemibrain:v1.2.1', client=neuprint_client)
+        >>>
+        >>> # Manual creation
+        >>> config = DatasetConfig(dataset='hemibrain:v1.2.1', client=my_client)
+    """
+    
+    dataset: str
+    """Dataset identifier (e.g., 'hemibrain:v1.2.1', 'flywire_FAFB_v783')"""
+    
+    client: Optional[Any] = None
+    """NeuPrint client instance (shared to avoid repeated login)"""
+    
+    name: str = ''
+    """Human-readable name for the dataset"""
+    
+    def __post_init__(self):
+        """Initialize derived attributes after dataclass initialization."""
+        # Auto-generate name from dataset if not provided
+        if not self.name:
+            self.name = self._sanitize_dataset_name(self.dataset)
+    
+    def _sanitize_dataset_name(self, dataset: str) -> str:
+        """
+        Convert dataset identifier to a filesystem-safe name.
+        
+        Args:
+            dataset: Dataset identifier (e.g., 'hemibrain:v1.2.1')
+            
+        Returns:
+            Sanitized name (e.g., 'hemibrain_v1_2_1')
+        """
+        return dataset.replace(':', '_').replace('.', '_').replace('-', '_')
+    
+    @property
+    def safe_name(self) -> str:
+        """Get filesystem-safe version of dataset name."""
+        return self._sanitize_dataset_name(self.dataset)
+    
+    @property
+    def is_flywire(self) -> bool:
+        """Check if this is a FlyWire local dataset (starts with 'flywire')."""
+        return self.dataset.lower().startswith('flywire')
+    
+    @property
+    def is_neuprint(self) -> bool:
+        """Check if this is a NeuPrint-based dataset."""
+        return not self.is_flywire
+    
+    @classmethod
+    def from_string(cls, dataset_str: str, client: Optional[Any] = None) -> 'DatasetConfig':
+        """
+        Create DatasetConfig from a dataset identifier string.
+        
+        Args:
+            dataset_str: Dataset identifier (e.g., 'hemibrain:v1.2.1', 'flywire_FAFB_v783')
+            client: NeuPrint client instance (required for NeuPrint datasets, 
+                    shared to avoid repeated login)
+            
+        Returns:
+            DatasetConfig instance
+            
+        Example:
+            >>> config = DatasetConfig.from_string('hemibrain:v1.2.1', client=neuprint_client)
+            >>> config = DatasetConfig.from_string('flywire_FAFB_v783')  # No client needed
+        """
+        return cls(
+            dataset=dataset_str,
+            client=client,
+        )
+    
+    def to_dict(self) -> dict:
+        """
+        Convert to dictionary for JSON serialization.
+        
+        Returns:
+            Dictionary representation (excluding client object)
+        """
+        return {
+            'dataset': self.dataset,
+            'name': self.name,
+            'is_flywire': self.is_flywire,
+            # Note: client is intentionally excluded
+        }
+    
+    @classmethod
+    def from_dict(cls, data: dict, client: Optional[Any] = None) -> 'DatasetConfig':
+        """
+        Create DatasetConfig from dictionary.
+        
+        Args:
+            data: Dictionary with configuration data
+            client: Optional NeuPrint client
+            
+        Returns:
+            DatasetConfig instance
+        """
+        return cls(
+            dataset=data['dataset'],
+            name=data.get('name', ''),
+            client=client,
+        )
+    
+    def __repr__(self) -> str:
+        if self.is_flywire:
+            return f"DatasetConfig(dataset='{self.dataset}', type='local')"
+        return f"DatasetConfig(dataset='{self.dataset}', type='neuprint')"

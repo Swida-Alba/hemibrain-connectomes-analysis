@@ -12,7 +12,7 @@ A comprehensive Python toolkit for analyzing and visualizing connectome data fro
 - 🌐 **Interactive Networks**: Cytoscape.js-powered network graphs with hierarchical and force-directed layouts
 - 🪞 **Contralateral Mirroring**: Automatically mirror neurons and ROIs to the contralateral hemisphere for full-brain visualization
 - 📊 **Rich Visualizations**: Sankey diagrams, heatmaps with clustering, and connection matrices
-- 🗄️ **Universal Dataset Support**: Works with all NeuPrint datasets (hemibrain, optic-lobe, FIB, MANC, etc.) and **FlyWire/FAFB/BANC** datasets.
+- 🗄️ **Universal Dataset Support**: Works with all NeuPrint datasets (hemibrain, optic-lobe, FIB, MANC, etc.) and **FlyWire FAFB/BANC** datasets.
 - ⚡ **High Performance**: 10-100x speedup with local caching, 4-14x with parallel processing
 - 🎯 **Flexible Filtering**: Multiple filtering modes (synapse count, connection ratio, traversal probability)
 - 💾 **Smart Caching**: Efficient local storage with automatic complete dataset handling
@@ -24,9 +24,9 @@ A comprehensive Python toolkit for analyzing and visualizing connectome data fro
 
 ### 🚀 Getting Started
 - **[Installation Guide](#installation-for-users-who-can-prepare-the-python-environments-by-themselves)** - Setup and dependencies
-- **[FlyWire/FAFB Integration](docs/FAFB_INTEGRATION.md)** - Guide for setting up and using local FAFB datasets (Data Prep & Download)
-- **[BANC Integration](docs/BANC_INTEGRATION.md)** - Guide for setting up and using local BANC datasets (Data Prep & Download)
-- **[FlyWire/BANC Usage](docs/FLYWIRE_USAGE.md)** - Guide for using FlyWire/FAFB/BANC datasets (Local File based)
+- **[FlyWire FAFB Integration](docs/FAFB_INTEGRATION.md)** - Guide for setting up and using local FAFB datasets (Data Prep & Download)
+- **[FlyWire BANC Integration](docs/BANC_INTEGRATION.md)** - Guide for setting up and using local BANC datasets (Data Prep & Download)
+- **[FlyWire Usage](docs/FLYWIRE_USAGE.md)** - Guide for using FlyWire/FAFB/BANC datasets (Local File based)
 - **[Basic Usage](#basic-functions)** - FindDirect.py and FindPath.py tutorials
 - **[Quick Start After Reorganization](docs/QUICK_START_AFTER_REORGANIZATION.md)** - Get started with v3.0 structure
 - **[Performance Optimization](#performance-optimization)** - Caching and parallel processing
@@ -36,6 +36,7 @@ For comprehensive documentation, see **[docs/README.md](docs/README.md)** - your
 
 ### 🔑 Core Features
 Detailed documentation in **[docs/core-features/](docs/core-features/)** including:
+- **✨ NEW: [Cross-Dataset Comparison Guide](docs/core-features/CrossDatasetComparison_Guide.md)** - Compare connectivity across hemibrain, male-cns, FlyWire, and more
 - **Cache System** - 10-100x faster queries with intelligent local storage
 - **Path Finding** - Graph-based algorithms for multi-hop connections
 - **Parallel Processing** - 4-14x speedup with multi-core execution
@@ -318,6 +319,38 @@ fc = FindNeuronConnection(
     ... # other parameters
 )
 ```
+
+### Special Mode: FetchNeuronsOnly (max_interlayer=-1)
+
+Setting `max_interlayer=-1` activates **FetchNeuronsOnly mode** - this fetches only the source and target neurons without computing any connections. This is useful for:
+
+- Getting neuron metadata for cross-dataset comparison preparation
+- Extracting neuron lists for downstream processing
+- Pre-fetching neuron data for visualization or skeleton rendering
+
+```python
+# FetchNeuronsOnly mode - no connection computation
+fc = FindNeuronConnection(
+    token='your_token',
+    dataset='hemibrain:v1.2.1',
+    sourceNeurons=['aMe12'],
+    targetNeurons=['PPL101'],
+    max_interlayer=-1,  # Fetch neurons only, no connections
+)
+
+# Access fetched neurons
+source_df = fc.sourceNeurons_df  # DataFrame with source neuron metadata
+target_df = fc.targetNeurons_df  # DataFrame with target neuron metadata
+
+# Save neuron info to files
+fc.SaveNeuronInfo(
+    output_dir='/path/to/output',
+    format='both'  # 'csv', 'parquet', or 'both'
+)
+# Creates: source_neurons.csv, source_neurons.parquet, target_neurons.csv, target_neurons.parquet
+```
+
+This is particularly useful for cross-dataset comparison workflows where you need to identify neurons first before running comprehensive path analysis.
 
 Optionally, there are more parameters you can specify in the ```FindNeuronConnection``` call.
 
@@ -822,6 +855,175 @@ For complete sub-project documentation, see:
 
 ---
 
+## Cross-Dataset Comparison
+
+**NEW in v4.0**: Compare connectivity patterns across multiple connectome datasets to identify conserved circuits, dataset-specific connections, and validate findings across independent reconstructions.
+
+### Supported Datasets
+
+- **NeuPrint datasets**: `hemibrain:v1.2.1`, `male-cns:v0.9`, `optic-lobe:v1.1`, etc.
+- **FlyWire datasets**: `flywire_FAFB_v783`, `flywire_BANC_v626` (local parquet files)
+
+### Quick Start Example
+
+```python
+from comparison import ComparisonParameters, ComparisonAnalyzer
+
+# Define comparison parameters
+params = ComparisonParameters(
+    datasets=['hemibrain:v1.2.1', 'male-cns:v0.9', 'flywire_FAFB_v783'],
+    datasets_nickname=['hemi', 'mcns', 'fafb'],  # Short names for displays
+    source_neurons=['aMe12'],
+    target_neurons=['PPL101'],
+    max_interlayer=1,
+    thresholds=[1, 5, 10],
+    comparison_mode='edge',  # or 'path'
+    output_folder='/path/to/output',
+)
+
+# Run comparison
+analyzer = ComparisonAnalyzer(params, verbose=True)
+results = analyzer.run_comparison()
+```
+
+### Comparison Modes
+
+| Mode | Description | Use Case |
+|------|-------------|----------|
+| `path` | Analyzes edges on complete paths only | Functional circuit analysis |
+| `edge` | Direct edge weight comparison | Identifying all possible connections |
+
+### Output Files
+
+The comparison generates a comprehensive output folder:
+
+```
+comparison_results_YYYYMMDD_HHMMSS/
+├── comparison_report.html      # Interactive HTML report
+├── comparison_results/         # CSV data files
+│   ├── edge_presence_matrix.csv
+│   ├── path_presence_matrix.csv
+│   └── neuron_counts_by_type.csv
+├── comparison_visualizations/  # PNG charts
+│   ├── similarity_heatmap_jaccard.png
+│   └── threshold_comparison.png
+└── comparison_networks/        # Interactive network HTML
+```
+
+### Key Metrics
+
+- **Conservation Count**: Number of datasets where an edge/path is present
+- **Jaccard Similarity**: Set-based overlap of connections between dataset pairs
+- **Cosine Similarity**: Weight vector similarity accounting for magnitudes
+- **Rank Correlation**: Spearman correlation of partner rankings
+
+### Intra-Dataset Analysis (Internal Network)
+
+Analyze internal connectivity within a neuron group by setting source = target:
+
+```python
+# Analyze connections within aMe-type neurons
+neuron_group = ['aMe.*']
+
+params = ComparisonParameters(
+    datasets=['male-cns:v0.9', 'hemibrain:v1.2.1'],
+    source_neurons=neuron_group,
+    target_neurons=neuron_group,  # Same as source
+    max_interlayer=0,  # Direct connections only
+    thresholds=[5, 10, 20],
+    comparison_mode='edge',
+    output_folder='/path/to/output',
+)
+```
+
+**Documentation:** [Cross-Dataset Comparison Guide](docs/core-features/CrossDatasetComparison_Guide.md)
+
+---
+
+## Connectivity Profile Verification
+
+**NEW in v4.0**: Verify neuron type assignments across datasets by comparing connectivity profiles (fingerprints). This system extracts the top upstream and downstream partners of neurons and computes similarity metrics.
+
+### What is a Connectivity Profile?
+
+A connectivity profile captures a neuron's **connectivity fingerprint**:
+- Top K upstream partners (neurons providing input)
+- Top K downstream partners (neurons receiving output)
+- Normalized weights for each partner
+
+### Quick Start Example
+
+```python
+from comparison import ConnectivityProfiler, CrossDatasetVerifier, ProfilerConfig
+
+# Configure profiler
+config = ProfilerConfig(
+    top_k_bodyid=20,        # Top 20 connections per direction
+    top_m_type=5,           # Ensure at least 5 unique partner types
+    min_synapse_threshold=3 # Filter weak connections
+)
+
+# Create profiler and verifier
+profiler = ConnectivityProfiler(
+    datasets=['hemibrain:v1.2.1', 'male-cns:v0.9'],
+    config=config
+)
+verifier = CrossDatasetVerifier(profiler)
+
+# Verify a neuron type across datasets
+results = verifier.verify_type_assignment(
+    'aMe12', 
+    datasets=['hemibrain:v1.2.1', 'male-cns:v0.9']
+)
+print(results.summary())
+```
+
+### Similarity Metrics
+
+| Metric | Description | Confidence Thresholds |
+|--------|-------------|----------------------|
+| **Jaccard** | Set overlap of partner types | >0.5 Very High, >0.3 High, >0.2 Medium |
+| **Rank Correlation** | Spearman correlation of partner rankings | ≥0.85 Very High, 0.7-0.85 High, 0.5-0.7 Medium |
+| **Cosine** | Weight vector similarity | Used for combined scoring |
+
+### Verification Status
+
+Based on the combined similarity score:
+- **verified**: High confidence (score ≥ 0.7)
+- **needs_review**: Medium confidence (score 0.5-0.7)
+- **questionable**: Low confidence (score 0.3-0.5)
+- **failed**: Very low confidence (score < 0.3)
+
+### Batch Verification
+
+Verify multiple neuron types at once:
+
+```python
+# Verify all types found in comparison results
+batch_results = verifier.batch_verify(
+    neuron_types=['aMe12', 'PPL101', 'KCg-d', 'MBON01'],
+    datasets=['hemibrain:v1.2.1', 'male-cns:v0.9']
+)
+
+# Generate HTML report with similarity matrices
+verifier.generate_html_report(
+    batch_results,
+    output_path='/path/to/verification_report.html'
+)
+```
+
+### HTML Report Features
+
+The verification report includes:
+- **Verification Summary Table**: All types with scores and confidence badges
+- **Jaccard Similarity Matrix**: Pairwise dataset comparison for each direction
+- **Upstream/Downstream Breakdown**: Separate Jaccard scores for input vs output connectivity
+- **Confidence Indicators**: Color-coded badges (Very High, High, Medium, Low, Very Low)
+
+**Documentation:** See `src/comparison/` module and [Connectivity Profile Verification Guide](docs/core-features/ConnectivityProfileVerification_Guide.md).
+
+---
+
 ## Installation: For users who can prepare the python environments by themselves
 
 ### Recommended: Using Conda Environment
@@ -1161,10 +1363,32 @@ python FindDirect.py
   - Set `mirror_on_contralateral=True` to enable.
   - Automatically mirrors ROIs ending in `(R)` to `(L)`.
   - Uses dataset-specific templates (`JRCFIB2018F` for hemibrain/optic-lobe, `JRCFIB2022M` for male-cns) for accurate mirroring.
+
+### Cross-Dataset Comparison & Profile Verification
+- **Cross-Dataset Comparison**: Compare connectivity patterns across multiple connectome datasets (hemibrain, male-cns, FlyWire FAFB/BANC).
+  - Path-based and edge-based comparison modes
+  - Conservation analysis with Jaccard, cosine, and rank correlation metrics
+  - Interactive HTML reports with similarity matrices and network visualizations
+  - See [Cross-Dataset Comparison Guide](docs/core-features/CrossDatasetComparison_Guide.md)
+
+- **Connectivity Profile Verification**: Verify neuron type assignments using connectivity fingerprints.
+  - Extract top upstream/downstream partners as profiles
+  - Compute similarity scores (Jaccard, rank correlation, cosine)
+  - Batch verification with confidence levels (Very High, High, Medium, Low)
+  - Upstream/downstream breakdown for directional analysis
+
+### Visualization Enhancements
 - **Connection Matrix Support**: `VisualizePath` now accepts connection matrices (square or rectangular DataFrames) as direct input. Auto-detects format and converts to edge-list internally.
 - **Individual Visualization Control**: New parameters in `visualize()` (`plot_heatmap`, `plot_Sankey`, `plot_network`) allow generating specific visualizations on demand.
-- **Enhanced Format Detection**: Clear console messages indicate recognized input formats (Matrix, Edge-list, Path-based).
 - **Reciprocal Edge Offset & Mode Toggle**: Network visualization now supports parallel reciprocal edges with a user-adjustable offset slider and a toggle for straight/curved edge modes.
-- **Documentation**: See [VisualizePath Updates Nov 2025](docs/visualizations/VisualizePath_Updates_Nov2025.md) for full details.
+
+### HTML Report Improvements
+- **Overlap Matrix**: Larger, square overlap matrices with count/proportion toggle
+- **Jaccard Similarity Matrix**: Added to connectivity profile HTML reports
+- **Updated Confidence Thresholds**:
+  - Jaccard: >0.5 Very High, >0.3 High, >0.2 Medium, >0.1 Low
+  - Rank Correlation: ≥0.85 Very High, 0.7-0.85 High, 0.5-0.7 Medium, 0.3-0.5 Low
+
+**Documentation**: See [VisualizePath Updates Nov 2025](docs/visualizations/VisualizePath_Updates_Nov2025.md) for visualization details.
 
 ---

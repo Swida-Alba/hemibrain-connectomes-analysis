@@ -1,0 +1,672 @@
+# Cross-Dataset Comparison Guide
+
+**Version:** 4.0  
+**Last Updated:** November 2025
+
+## Overview
+
+The Cross-Dataset Comparison module enables systematic analysis of neural connectivity patterns across multiple connectome datasets. This is essential for understanding evolutionary conservation, identifying dataset-specific circuits, and validating findings across independently reconstructed neural maps.
+
+## Table of Contents
+
+1. [Quick Start](#quick-start)
+2. [Core Concepts](#core-concepts)
+3. [Comparison Modes](#comparison-modes)
+4. [Usage Examples](#usage-examples)
+5. [Output Files Reference](#output-files-reference)
+6. [Calculated Parameters](#calculated-parameters)
+7. [HTML Report Features](#html-report-features)
+8. [Best Practices](#best-practices)
+9. [Troubleshooting](#troubleshooting)
+
+---
+
+## Quick Start
+
+### Minimal Example
+
+```python
+from comparison import ComparisonParameters, ComparisonAnalyzer
+
+# Define comparison parameters
+params = ComparisonParameters(
+    datasets=['hemibrain:v1.2.1', 'male-cns:v0.9'],
+    source_neurons=['aMe12'],
+    target_neurons=['PPL101'],
+    max_interlayer=1,
+    thresholds=[1, 5, 10],
+    output_folder='/path/to/output',
+)
+
+# Run comparison
+analyzer = ComparisonAnalyzer(params, verbose=True)
+results = analyzer.run_comparison()
+```
+
+This produces:
+- Interactive HTML report with network visualizations
+- CSV files with edge/path presence matrices
+- PNG heatmaps and charts
+- PDF summary
+
+---
+
+## Core Concepts
+
+### What is Cross-Dataset Comparison?
+
+Cross-dataset comparison analyzes the same neural circuit query across multiple connectome reconstructions to answer:
+
+1. **Conservation**: Which connections are present in all datasets?
+2. **Divergence**: Which connections are unique to specific datasets?
+3. **Strength Variation**: How do connection weights vary across datasets?
+4. **Circuit Structure**: Are multi-hop paths conserved or divergent?
+
+### Key Terminology
+
+| Term | Definition |
+|------|------------|
+| **Edge** | A direct connection between two neuron types (e.g., `aMe12 → KCg-d`) |
+| **Path** | A multi-hop route from source to target (e.g., `aMe12 → KCg-d → PPL101`) |
+| **Threshold** | Minimum synapse count required for an edge to be included |
+| **Conservation** | Presence of an edge/path across multiple datasets |
+| **Dead-end** | An edge that doesn't contribute to any complete source→target path |
+
+### Datasets Supported
+
+- **NeuPrint datasets**: `hemibrain:v1.2.1`, `male-cns:v0.9`, `optic-lobe:v1.0`, etc.
+- **FlyWire datasets**: `flywire_FAFB_v783`, `flywire_BANC_v626` (local parquet files)
+
+---
+
+## Comparison Modes
+
+### Path-Based Mode (`comparison_mode='path'`)
+
+**How it works:**
+1. Finds all paths from source to target neurons
+2. Extracts edges from discovered paths
+3. Aggregates by neuron type
+
+**Pros:**
+- Only includes edges on functional paths
+- Better represents circuit-level connectivity
+- No dead-end connections
+
+**Cons:**
+- Strong edges may appear absent if they're only on paths with weak intermediate connections
+- Path filtering can mask true connectivity
+
+**Warning displayed:**
+> ⚠️ Path-Based Filtering Caveat: Strong edges may appear absent if they only exist on paths with weaker intermediate edges that fall below the threshold.
+
+### Edge-Based Mode (`comparison_mode='edge'`)
+
+**How it works:**
+1. Finds all paths at the **lowest** threshold first
+2. Extracts unique edges from paths
+3. Re-queries edge weights directly from the database
+4. Filters edges independently by their own weight
+
+**Pros:**
+- Direct edge weight comparison
+- No path-filtering artifacts
+- Strong edges always appear if they meet threshold
+
+**Cons:**
+- May include dead-end connections not on complete paths
+- Loses path-level circuit structure
+
+**Warnings displayed:**
+> ⚠️ Edge-Based Comparison Mode:
+> - **Caveat 1 - Dead-ends**: May include dead-end connections that don't contribute to complete source→target paths.
+> - **Caveat 2 - Weight Mismatch**: Edge weights in the Edge Presence Matrix represent total synapses between all neuron pairs of the types, while Path Presence Matrix hop weights represent only synapses from neurons actually participating in paths.
+
+### Choosing a Mode
+
+| Use Case | Recommended Mode |
+|----------|------------------|
+| Functional circuit analysis | `path` |
+| Direct connectivity comparison | `edge` |
+| Identifying all possible connections | `edge` |
+| Studying specific pathways | `path` |
+| Large-scale conservation analysis | `edge` |
+
+---
+
+## Usage Examples
+
+### Example 1: Basic Two-Dataset Comparison
+
+```python
+from comparison import ComparisonParameters, ComparisonAnalyzer
+
+params = ComparisonParameters(
+    # Datasets to compare
+    datasets=['hemibrain:v1.2.1', 'male-cns:v0.9'],
+    datasets_nickname=['hemi', 'mcns'],  # Short names for displays
+    
+    # Query parameters
+    source_neurons=['aMe12'],
+    target_neurons=['PPL101'],
+    max_interlayer=1,  # Allow 1 intermediate layer
+    
+    # Analysis settings
+    thresholds=[1, 3, 5, 10],
+    top_edges=50,
+    comparison_mode='path',
+    
+    # Output
+    output_folder='/path/to/output',
+)
+
+analyzer = ComparisonAnalyzer(params, verbose=True)
+results = analyzer.run_comparison()
+```
+
+### Example 2: Three-Dataset with FlyWire
+
+```python
+params = ComparisonParameters(
+    datasets=[
+        'hemibrain:v1.2.1',
+        'male-cns:v0.9', 
+        'flywire_FAFB_v783'  # Local FlyWire data
+    ],
+    datasets_nickname=['hemi', 'mcns', 'fafb'],
+    
+    source_neurons=['aMe12'],
+    target_neurons=['PPL101'],
+    max_interlayer=1,
+    thresholds=[1, 5, 10],
+    
+    comparison_mode='edge',  # Edge-based for direct comparison
+    output_folder='/path/to/output',
+)
+
+analyzer = ComparisonAnalyzer(params)
+results = analyzer.run_comparison()
+```
+
+### Example 3: Custom Source/Target per Dataset
+
+```python
+params = ComparisonParameters(
+    datasets=['hemibrain:v1.2.1', 'male-cns:v0.9'],
+    
+    # Different neuron names per dataset (if naming differs)
+    source_neurons={
+        'hemibrain:v1.2.1': ['aMe12'],
+        'male-cns:v0.9': ['aMe12'],  # Same name
+    },
+    target_neurons={
+        'hemibrain:v1.2.1': ['PPL101'],
+        'male-cns:v0.9': ['PPL101'],
+    },
+    
+    max_interlayer=1,
+    thresholds=[1, 5, 10],
+    output_folder='/path/to/output',
+)
+```
+
+### Example 4: Accessing Results Programmatically
+
+```python
+analyzer = ComparisonAnalyzer(params)
+results = analyzer.run_comparison()
+
+# Access aligned edge data at threshold 5
+aligned_data = analyzer.get_aligned_data(threshold=5)
+print(aligned_data.head())
+# Output: DataFrame with edges as rows, datasets as columns
+
+# Get key findings
+print(results['key_findings'])
+
+# Generate text report
+report = analyzer.generate_report()
+print(report)
+```
+
+### Example 5: Internal Network (Source = Target)
+
+When you want to analyze **internal connectivity within a neuron group**, you can set `source_neurons` and `target_neurons` to the **same neurons**. This is useful for:
+
+- Studying recurrent/reciprocal connections within a neuron type family
+- Analyzing intra-group connectivity patterns
+- Comparing internal circuit structure across datasets
+
+```python
+from comparison import ComparisonParameters, ComparisonAnalyzer
+
+# Define the neuron group to analyze
+neuron_group = ['aMe.*']  # All aMe-type neurons (medulla intrinsic)
+
+params = ComparisonParameters(
+    datasets=['male-cns:v0.9', 'hemibrain:v1.2.1', 'flywire_FAFB_v783'],
+    datasets_nickname=['male-CNS', 'hemibrain', 'FAFB'],
+    
+    # Same neurons for both source and target
+    source_neurons=neuron_group,
+    target_neurons=neuron_group,
+    
+    # Direct connections only (no intermediate layers)
+    max_interlayer=0,
+    
+    # Analysis settings
+    thresholds=[5, 10, 20],
+    comparison_mode='edge',  # Edge-based to capture all connections
+    
+    output_folder='/path/to/output',
+)
+
+analyzer = ComparisonAnalyzer(params, verbose=True)
+results = analyzer.run_comparison()
+```
+
+**Key Points for Internal Network Analysis:**
+
+1. **`max_interlayer=0`**: For direct connections only, set to 0. Set to 1+ if you want to include paths through intermediate neurons.
+
+2. **Self-connections**: The analysis will include both:
+   - Connections between different neurons of the same type (e.g., aMe12_A → aMe12_B)
+   - Connections between different types (e.g., aMe12 → aMe17)
+
+3. **Neuron Counts Comparison**: The HTML report will show how many neurons of each type exist in each dataset (useful for understanding why some connections may be missing).
+
+4. **Recommended Settings**:
+   - Use `comparison_mode='edge'` to capture all potential connections
+   - Use moderate thresholds (5+) to filter weak/spurious connections
+   - Consider using wildcards (`aMe.*`) to include all subtypes
+
+---
+
+## Output Files Reference
+
+All outputs are saved to a timestamped folder: `comparison_results_YYYYMMDD_HHMMSS/`
+
+### Directory Structure
+
+```
+comparison_results_20251127_155513/
+├── comparison_report.html          # Interactive HTML report
+├── vis_summary.pdf                 # PDF summary of visualizations
+│
+├── comparison_results/             # CSV data files
+│   ├── edge_presence_matrix.csv    # Unified edge presence (all thresholds)
+│   ├── edge_presence_matrix_minsyn_1.csv
+│   ├── edge_presence_matrix_minsyn_3.csv
+│   ├── edge_presence_matrix_minsyn_5.csv
+│   ├── edge_presence_matrix_minsyn_10.csv
+│   ├── path_presence_matrix.csv    # Unified path presence (all thresholds)
+│   ├── path_presence_matrix_minsyn_1.csv
+│   ├── path_presence_matrix_minsyn_3.csv
+│   ├── path_presence_matrix_minsyn_5.csv
+│   ├── path_presence_matrix_minsyn_10.csv
+│   ├── unified_edge_comparison.csv # Full comparison table
+│   ├── conserved_strong_connections_minsyn_*.csv
+│   └── ...
+│
+├── comparison_visualizations/      # PNG visualizations
+│   ├── path_heatmap_1.png
+│   ├── path_heatmap_all_thresholds.png
+│   ├── edge_heatmap_1.png
+│   ├── edge_heatmap_all_thresholds.png
+│   ├── threshold_comparison.png
+│   ├── similarity_heatmap_jaccard.png
+│   ├── similarity_heatmap_cosine.png
+│   ├── by_ratio/
+│   │   └── ratio_heatmap_*.png
+│   ├── by_probability/
+│   │   └── traversal_prob_heatmap_*.png
+│   └── visualization_data/
+│       └── *.json                  # Raw data for recreating plots
+│
+├── comparison_results/             # Comparison analysis outputs
+│   ├── neuron_counts_summary.csv   # Total neuron counts per dataset
+│   ├── neuron_counts_by_type.csv   # Neuron counts by type per dataset
+│   ├── neuron_counts_by_group.csv  # Counts by custom group (if used)
+│   └── ...
+│
+├── dataset_data/                   # Per-dataset raw results
+│   ├── hemibrain_v1_2_1/
+│   │   ├── minsyn_1/
+│   │   ├── minsyn_3/
+│   │   └── ...
+│   ├── male_cns_v0_9/
+│   └── flywire_FAFB_v783/
+│
+└── comparison_networks/            # Interactive network HTML files
+    ├── network_threshold_1.html
+    ├── network_threshold_3.html
+    └── ...
+```
+
+### CSV File Descriptions
+
+#### `neuron_counts_summary.csv`
+
+Shows total neuron counts per dataset for both source and target neurons.
+
+| Column | Description |
+|--------|-------------|
+| `dataset` | Dataset name |
+| `source_count` | Number of source neurons found |
+| `target_count` | Number of target neurons found |
+| `total_neurons` | Total unique neurons |
+| `source_types` | Number of unique source neuron types |
+| `target_types` | Number of unique target neuron types |
+
+#### `neuron_counts_by_type.csv`
+
+Shows neuron count per type in each dataset. Useful for understanding which neuron types exist in which datasets.
+
+| Column | Description |
+|--------|-------------|
+| `type` | Neuron type name |
+| `role` | Whether this type is used as source or target |
+| `{dataset}_source` | Count of this type as source in dataset |
+| `{dataset}_target` | Count of this type as target in dataset |
+
+#### `edge_presence_matrix_minsyn_{threshold}.csv`
+
+Shows edge presence and weight across all datasets at a specific threshold.
+
+| Column | Description |
+|--------|-------------|
+| `edge_key` | Edge identifier (`source → target`) |
+| `source_type` | Source neuron type |
+| `target_type` | Target neuron type |
+| `conservation_count` | Number of datasets where edge is present |
+| `{dataset}` | `True` if present, `0` if absent |
+| `weight_{dataset}` | Synapse count in that dataset |
+| `max_weight` | Maximum weight across datasets |
+| `avg_weight` | Average weight across present datasets |
+| `weight_cv` | Coefficient of variation (std/mean) |
+
+#### `path_presence_matrix_minsyn_{threshold}.csv`
+
+Shows multi-hop path presence across all datasets.
+
+| Column | Description |
+|--------|-------------|
+| `path_key` | Full path (`source → inter → target`) |
+| `source` | Starting neuron type |
+| `target` | Ending neuron type |
+| `hops` | Number of edges in path |
+| `intermediates` | Intermediate neuron types |
+| `conservation_count` | Number of datasets where path exists |
+| `{dataset}` | `True` if present, `0` if absent |
+| `weight_{dataset}` | Minimum edge weight along path |
+| `hop_weights_{dataset}` | Individual hop weights (`-w1-w2-`) |
+| `max_weight`, `avg_weight`, `weight_cv` | Statistics |
+
+#### `unified_edge_comparison.csv`
+
+Comprehensive edge table with all thresholds in a single file.
+
+---
+
+## Calculated Parameters
+
+### Conservation Metrics
+
+#### Conservation Count
+Number of datasets where an edge/path is present.
+```
+conservation_count = Σ (1 if edge present in dataset else 0)
+```
+
+#### Conservation Rate
+Percentage of edges/paths present in all datasets.
+```
+conservation_rate = (edges in ALL datasets) / (total unique edges) × 100%
+```
+
+### Similarity Metrics
+
+#### Jaccard Similarity
+Measures overlap of edge sets between two datasets.
+```
+Jaccard(A, B) = |A ∩ B| / |A ∪ B|
+```
+- Range: 0 (no overlap) to 1 (identical)
+- Ignores edge weights, only considers presence
+
+#### Cosine Similarity
+Measures similarity of edge weight vectors.
+```
+Cosine(A, B) = (A · B) / (||A|| × ||B||)
+```
+- Range: 0 to 1
+- Accounts for weight magnitudes
+- Higher values indicate similar weight distributions
+
+### Weight Statistics
+
+#### Coefficient of Variation (CV)
+Measures relative variability of edge weights across datasets.
+```
+CV = σ / μ
+```
+where σ is standard deviation, μ is mean of weights across datasets.
+
+- CV < 0.3: Low variability (highly conserved weight)
+- CV 0.3-0.7: Moderate variability
+- CV > 0.7: High variability
+
+#### Minimum Path Weight (min_weight)
+For a path A → B → C, the minimum weight is:
+```
+min_weight = min(weight(A→B), weight(B→C))
+```
+This represents the "bottleneck" of signal transmission along the path.
+
+### Traversal Probability
+
+Probability of a signal traversing from source to target along a path.
+```
+path_prob = Π (edge_weight / total_output_of_source)
+```
+For a 2-hop path A → B → C:
+```
+path_prob = (weight_AB / out_A) × (weight_BC / out_B)
+```
+
+### Connection Ratio
+
+Ratio of edge weight to total output of the source neuron type.
+```
+ratio = edge_weight / total_output_weight
+```
+
+---
+
+## HTML Report Features
+
+The interactive HTML report includes:
+
+### 1. Summary Section
+- Key metrics by threshold
+- Edge count bar charts
+- Total weight comparison
+
+### 2. Neuron Counts Comparison
+- **Summary Table**: Total source/target neuron counts per dataset
+- **Bar Chart**: Visual comparison of neuron counts
+- **By Type**: Detailed breakdown showing how many neurons of each type exist in each dataset
+- **By Custom Group**: If custom grouping was used, shows counts per group
+
+This section is especially useful for internal network analysis (source=target) to understand why some connections may be missing.
+
+### 3. Similarity Matrices
+- Interactive Jaccard heatmaps
+- Cosine similarity heatmaps
+- Tabbed by threshold
+
+### 4. Network Visualizations
+- **Node colors by role:**
+  - 🔴 Red: Source neurons
+  - 🔵 Blue: Intermediate neurons
+  - 🟣 Purple: Target neurons
+  - ⚪ Gray: Dead-end nodes (no complete path through)
+  
+- **Edge colors by conservation:**
+  - 🟢 Green: Conserved (all datasets)
+  - 🟠 Orange: Partial (some datasets)
+  - ⚪ Gray: Unique (one dataset)
+
+- **Interactive features:**
+  - Drag nodes to rearrange
+  - Hover for connection details
+  - Toggle between Static and "Duang" physics modes
+
+### 5. Edge Presence Matrices
+- **View by Threshold**: Compare datasets at each threshold
+- **View by Dataset**: Compare thresholds for each dataset
+- Toggle between views with buttons
+
+### 6. Path Presence Matrices
+- Same dual-view toggle as edge matrices
+- Shows hop weights as `-w1-w2-` with **minimum bolded**
+- Conservation badges (3/3, 2/3, 1/3)
+
+### 7. Conservation Analysis
+- Pie charts showing conserved vs non-conserved edges/paths
+- Per-threshold breakdown
+
+### 8. Statistics Tables
+- Per-dataset metrics (edge count, total weight, mean, max)
+- Pairwise similarity scores
+
+---
+
+## Best Practices
+
+### 1. Choose Appropriate Thresholds
+
+```python
+# Start with a wide range
+thresholds=[1, 3, 5, 10, 20]
+
+# Then narrow based on results
+thresholds=[3, 5, 8, 12]  # More granular around interesting region
+```
+
+### 2. Use Nicknames for Readability
+
+```python
+params = ComparisonParameters(
+    datasets=['hemibrain:v1.2.1', 'male-cns:v0.9', 'flywire_FAFB_v783'],
+    datasets_nickname=['hemi', 'mcns', 'fafb'],  # Used in visualizations
+    ...
+)
+```
+
+### 3. Compare Modes When Unsure
+
+```python
+# Run both modes to understand differences
+for mode in ['path', 'edge']:
+    params = ComparisonParameters(
+        comparison_mode=mode,
+        output_folder=f'/output/{mode}_comparison',
+        ...
+    )
+    analyzer = ComparisonAnalyzer(params)
+    analyzer.run_comparison()
+```
+
+### 4. Check for Dead-Ends in Edge Mode
+
+When using edge mode, check the network visualization:
+- Gray nodes are dead-ends
+- These edges are real but may not be functionally relevant
+
+### 5. Validate Across Thresholds
+
+If an edge appears at t=3 but disappears at t=5:
+- In **path mode**: May be path-filtering artifact
+- In **edge mode**: Edge truly doesn't meet threshold
+
+---
+
+## Troubleshooting
+
+### No Paths Found
+
+**Symptoms:** Empty results, "No path data available"
+
+**Solutions:**
+1. Increase `max_interlayer` (e.g., from 1 to 2)
+2. Lower the minimum threshold
+3. Check neuron type names match dataset conventions
+4. Verify source/target neurons exist in all datasets
+
+### Weight Mismatch Between Edge and Path Tables
+
+**This is expected behavior** in edge mode:
+- Edge weights = total type-to-type synapses
+- Path weights = synapses from neurons actually on paths
+
+### Slow Performance
+
+**Solutions:**
+1. Enable caching (automatic if cache exists)
+2. Reduce number of thresholds
+3. Reduce `top_edges` parameter
+4. Use smaller `max_interlayer`
+
+### FlyWire Dataset Not Found
+
+**Solutions:**
+1. Ensure parquet files are in the correct location
+2. Check `datasets/flywire_FAFB_v783/` exists with proper structure
+3. See [FAFB Integration Guide](../FAFB_INTEGRATION.md)
+
+---
+
+## API Reference
+
+### ComparisonParameters
+
+```python
+ComparisonParameters(
+    datasets: List[str],              # Dataset identifiers
+    datasets_nickname: List[str],     # Short display names
+    source_neurons: Union[List, Dict],# Source neuron patterns
+    target_neurons: Union[List, Dict],# Target neuron patterns
+    max_interlayer: int,              # Max intermediate layers
+    thresholds: List[int],            # Synapse count thresholds
+    top_edges: int = 50,              # Max edges to analyze
+    comparison_mode: str = 'path',    # 'path' or 'edge'
+    output_folder: str,               # Base output directory
+    saveas: str = None,               # Custom folder name (auto if None)
+    token: str = '',                  # NeuPrint API token
+)
+```
+
+### ComparisonAnalyzer
+
+```python
+analyzer = ComparisonAnalyzer(params, verbose=True)
+
+# Run full comparison
+results = analyzer.run_comparison()
+
+# Access aligned data
+df = analyzer.get_aligned_data(threshold=5)
+
+# Generate reports
+text_report = analyzer.generate_report()
+```
+
+---
+
+## See Also
+
+- [Cache System Guide](CacheSystem_Guide.md) - Improve query performance
+- [Path Finding Documentation](FindAllPath_Documentation.md) - Understand path algorithms
+- [FlyWire Integration](../FAFB_INTEGRATION.md) - Set up FlyWire datasets
+- [Example Script](../../examples/Example_InterDatasetComparison.py) - Full working example

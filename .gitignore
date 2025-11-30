@@ -13,6 +13,7 @@ connection_data/
 datasets/
 empty_network/
 cache/
+comparison_output/
 
 # Deprecated folders (removed November 2025)
 navis_roi_meshes_json/
@@ -34,6 +35,10 @@ Thumbs.db
 *.tmp
 *.bak
 *~
+TODO_*.md
+
+# tokens
+cave_token.txt
 
 # Reorganization updates
 output/

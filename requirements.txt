@@ -32,6 +32,7 @@ networkx>=2.6.0            # Graph algorithms and network analysis
 # Data Processing
 # -----------------------------------------------------------------------------
 openpyxl>=3.0.0            # Excel file support (.xlsx)
+tqdm>=4.60.0               # Progress bar for long-running operations
 
 # GUI Backends (for file picker and sheet selection dialogs)
 # -----------------------------------------------------------------------------
@@ -43,6 +44,7 @@ PyQt5>=5.15.0              # Recommended - Fastest, most responsive dialogs
 # Neuroscience Data
 # -----------------------------------------------------------------------------
 neuprint-python>=0.4.0     # NeuPrint database access for hemibrain data
+cloud-volume>=8.0.0        # CloudVolume for accessing mesh/skeleton data
 navis>=1.0.0               # Neuron visualization and analysis toolkit (required by coana.py, statvis.py)
 flybrains>=0.2.0           # Drosophila brain templates and meshes (required by coana.py)
 

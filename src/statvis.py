@@ -16,7 +16,9 @@ import plotly.graph_objects as go
 import plotly
 import seaborn as sns
 from neuprint import *
+from tqdm import tqdm
 
+# FlyWire client support removed
 
 class CreateHeatmap:
     """
@@ -291,11 +293,22 @@ def getCriteriaAndName(requiredNeurons):
         fname += '_etc'
     return criteria, fname
 
-def pull_dataset(dataset, save_path=None, omitNoneType=True):
+def pull_dataset(dataset, save_path=None, omitNoneType=False):
     # requires login to hemibrain dataset
     if save_path is None:
         # Go up from src/ to project root, then into datasets/
-        save_path = os.path.join(os.path.dirname(os.path.dirname(__file__)),"datasets",f"{dataset.replace(':','_').replace('.','_')}_alltypes.xlsx")
+        dataset_normalized = dataset.replace(':','_').replace('.','_')
+        project_root = os.path.dirname(os.path.dirname(__file__))
+        dataset_dir = os.path.join(project_root, "datasets", dataset_normalized)
+        
+        # Use new structure if directory exists, otherwise fallback (or create new structure)
+        if os.path.exists(dataset_dir):
+            save_path = os.path.join(dataset_dir, f"{dataset_normalized}_allneurons")
+        else:
+            # Create new structure by default
+            os.makedirs(dataset_dir, exist_ok=True)
+            save_path = os.path.join(dataset_dir, f"{dataset_normalized}_allneurons")
+            
     neuron_df, roi_count_df = fetch_neurons(None)
     if omitNoneType:
         # delete rows with type is empty
@@ -307,7 +320,7 @@ def pull_dataset(dataset, save_path=None, omitNoneType=True):
     roi_count_df.to_csv(save_path + '_roi_count_df.csv',index=True)
     print('Done!')
 
-def getNeurons(requiredNeurons, dataset='hemibrain:v1.2.1', custom_group_names=None):
+def getNeurons(requiredNeurons, dataset='hemibrain:v1.2.1', custom_group_names=None, client=None):
     '''get neurons locally from a given dataset
     
     Parameters
@@ -320,6 +333,8 @@ def getNeurons(requiredNeurons, dataset='hemibrain:v1.2.1', custom_group_names=N
         Dataset name
     custom_group_names : list, optional
         Custom names for groups when using nested lists
+    client : object, optional
+        Client object (NeuPrint or FlyWire) for direct fetching if local dataset missing
         
     Returns
     -------
@@ -333,6 +348,118 @@ def getNeurons(requiredNeurons, dataset='hemibrain:v1.2.1', custom_group_names=N
         Neuprint criteria object
     '''
     from neuprint import NeuronCriteria as NC
+    
+    # Special handling for FlyWire/FAFB
+    if 'flywire' in dataset.lower() or 'fafb' in dataset.lower():
+        # Try to use local FAFB data first
+        try:
+            import fafb_utils
+            # Go up from src/ to project root, then into datasets/
+            project_root = os.path.dirname(os.path.dirname(__file__))
+            
+            # Try to find dataset directory by name
+            data_dir = os.path.join(project_root, "datasets", dataset)
+            if not os.path.exists(data_dir):
+                # Fallback to default FAFB directory
+                data_dir = os.path.join(project_root, "datasets", "flywire_FAFB_v783")
+            
+            if os.path.exists(data_dir):
+                print(f"Checking local FAFB data in {data_dir}...")
+                neuron_file, _ = fafb_utils.prepare_fafb_data(data_dir)
+                
+                # Load the full neuron DataFrame
+                print(f"Loading neurons from {neuron_file}...")
+                full_neuron_df = pd.read_csv(neuron_file, dtype={'bodyId': str})
+                
+                if requiredNeurons is None:
+                    return full_neuron_df, pd.DataFrame(), 'ALL_FAFB', None
+                
+                # Filter based on requiredNeurons
+                selected_dfs = []
+                
+                # Handle nested lists (custom groups)
+                # Structure: [item1, item2, [group_item1, group_item2]]
+                
+                # Flatten for simple filtering first
+                flat_list = []
+                custom_groups = {} # Map bodyId/type -> group_name
+                
+                group_idx = 0
+                for i, item in enumerate(requiredNeurons):
+                    if isinstance(item, list):
+                        # It's a custom group
+                        group_name = custom_group_names[group_idx] if custom_group_names and group_idx < len(custom_group_names) else f"Group_{group_idx+1}"
+                        group_idx += 1
+                        for subitem in item:
+                            flat_list.append(subitem)
+                            custom_groups[str(subitem)] = group_name
+                    else:
+                        flat_list.append(item)
+                
+                # Filter logic
+                # Check if items are bodyIds (digits) or types (strings)
+                bodyIds = [str(x) for x in flat_list if str(x).isdigit()]
+                types = [str(x) for x in flat_list if not str(x).isdigit()]
+                
+                filtered_df = pd.DataFrame()
+                
+                if bodyIds:
+                    df_by_id = full_neuron_df[full_neuron_df['bodyId'].isin(bodyIds)].copy()
+                    selected_dfs.append(df_by_id)
+                    
+                if types:
+                    # Regex matching for types
+                    for t in types:
+                        # Escape regex special characters if it's a literal type
+                        # But allow regex if intended (e.g. "MBON.*")
+                        # For now, assume simple contains or exact match if no regex chars
+                        if any(c in t for c in ['.', '*', '+', '?', '^', '$', '(', ')', '[', ']', '{', '}', '|', '\\']):
+                             df_by_type = full_neuron_df[full_neuron_df['type'].str.match(t, na=False)].copy()
+                        else:
+                             df_by_type = full_neuron_df[full_neuron_df['type'] == t].copy()
+                        selected_dfs.append(df_by_type)
+                
+                if selected_dfs:
+                    filtered_df = pd.concat(selected_dfs).drop_duplicates(subset=['bodyId'])
+                    
+                    # Apply custom groups
+                    if custom_groups:
+                        filtered_df['custom_group'] = filtered_df.apply(
+                            lambda row: custom_groups.get(str(row['bodyId'])) or custom_groups.get(str(row['type'])), axis=1
+                        )
+                    
+                    # Generate auto_name based on requiredNeurons
+                    if len(requiredNeurons) == 1:
+                        if isinstance(requiredNeurons[0], list):
+                             # Single group
+                             items_str = [str(x).replace('.*', '') for x in requiredNeurons[0]]
+                             auto_name = items_str[0] + '_etc' if len(items_str) > 1 else items_str[0]
+                        else:
+                             auto_name = str(requiredNeurons[0]).replace('.*', '')
+                    elif len(requiredNeurons) > 1:
+                        first_item = requiredNeurons[0]
+                        if isinstance(first_item, list):
+                             items_str = [str(x).replace('.*', '') for x in first_item]
+                             first_name = items_str[0] + '_etc' if len(items_str) > 1 else items_str[0]
+                        else:
+                             first_name = str(first_item).replace('.*', '')
+                        auto_name = first_name + '_etc'
+                    else:
+                        auto_name = "fafb_selection"
+
+                    return filtered_df, pd.DataFrame(), auto_name, None
+                else:
+                    print("Warning: No neurons found matching criteria in local FAFB data.")
+                    return pd.DataFrame(), pd.DataFrame(), "empty", None
+                    
+        except ImportError:
+            print("Warning: fafb_utils not found.")
+        except Exception as e:
+            print(f"Warning: Error loading local FAFB data: {e}.")
+
+        print("Warning: FlyWire API fetching has been removed. Please ensure local data is available.")
+        return pd.DataFrame(), pd.DataFrame(), "error", None
+
     if requiredNeurons == None:
         criteria = None
         auto_name = 'ALL'
@@ -342,18 +469,37 @@ def getNeurons(requiredNeurons, dataset='hemibrain:v1.2.1', custom_group_names=N
         requiredNeurons = [requiredNeurons]
     
     # Go up from src/ to project root, then into datasets/
-    dataset_path_body = os.path.join(os.path.dirname(os.path.dirname(__file__)),"datasets",f"{dataset.replace(':','_').replace('.','_')}_alltypes")
+    dataset_normalized = dataset.replace(':','_').replace('.','_')
+    project_root = os.path.dirname(os.path.dirname(__file__))
+    
+    # Check if dataset is in a subdirectory (new structure)
+    dataset_dir = os.path.join(project_root, "datasets", dataset_normalized)
+    if os.path.exists(dataset_dir):
+        dataset_path_body = os.path.join(dataset_dir, f"{dataset_normalized}_allneurons")
+    else:
+        # Fallback to old structure (flat in datasets/)
+        dataset_path_body = os.path.join(project_root, "datasets", f"{dataset_normalized}_allneurons")
+
     if not os.path.exists(dataset_path_body + '_neuron_df.csv') or not os.path.exists(dataset_path_body + '_roi_count_df.csv'):
         print(f'\033[33mcsv files of dataset "{dataset}" not found, downloading...\033[0m')
-        pull_dataset(dataset, save_path=dataset_path_body)
-    ndf_alltypes = pd.read_csv(dataset_path_body + '_neuron_df.csv',header=0,index_col=0, low_memory=False)
-    rdf_alltypes = pd.read_csv(dataset_path_body + '_roi_count_df.csv',header=0,index_col=0)
+        # If using new structure, ensure directory exists before downloading
+        if os.path.exists(dataset_dir):
+             pull_dataset(dataset, save_path=dataset_path_body, omitNoneType=False)
+        else:
+             # If directory doesn't exist, pull_dataset might create files in root or fail if it expects dir
+             # Let's assume pull_dataset handles path creation or we should create it
+             os.makedirs(dataset_dir, exist_ok=True)
+             dataset_path_body = os.path.join(dataset_dir, f"{dataset_normalized}_allneurons")
+             pull_dataset(dataset, save_path=dataset_path_body, omitNoneType=False)
+
+    ndf_alltypes = pd.read_csv(dataset_path_body + '_neuron_df.csv', header=0, index_col=0, low_memory=False)
+    rdf_alltypes = pd.read_csv(dataset_path_body + '_roi_count_df.csv', header=0, index_col=0, low_memory=False)
     bodyId_alltypes = ndf_alltypes['bodyId'].tolist()
     
     if len(requiredNeurons) == 0:
         neuron_df = ndf_alltypes
         roi_count_df = rdf_alltypes
-        auto_name = 'alltypes'
+        auto_name = 'allneurons'
         bodyId_list = neuron_df['bodyId'].tolist()
     else:
         # Check if we have nested lists for custom grouping
@@ -462,7 +608,7 @@ def _process_single_neuron(requiredNeuron, ndf_alltypes, bodyId_alltypes):
             print(f'\033[33mbodyId {requiredNeuron} not found, please check your input (skipped)\033[0m')
     elif isinstance(requiredNeuron, str) and requiredNeuron.find('.*') != -1:
         # regex of instance
-        find_df = ndf_alltypes[ndf_alltypes['instance'].str.match(requiredNeuron)]
+        find_df = ndf_alltypes[ndf_alltypes['instance'].str.match(requiredNeuron, na=False)]
         if len(find_df) > 0:
             bodyId_list = find_df['bodyId'].tolist()
             print(f'Found {len(find_df)} neurons of instance "{requiredNeuron}"')
@@ -479,17 +625,33 @@ def _process_single_neuron(requiredNeuron, ndf_alltypes, bodyId_alltypes):
     
     return bodyId_list
 
-def removeSearchedNeurons(conn_df,searchedNeurons):
-    '''remove neurons on searched layers'''
+def removeSearchedNeurons(conn_df,searchedNeurons,exempt_neurons=None):
+    '''remove neurons on searched layers, except those in exempt_neurons'''
     neurons_post = conn_df['bodyId_post'].unique()
-    common_neurons = np.intersect1d(neurons_post,searchedNeurons,assume_unique=True)
-    df = conn_df[~conn_df['bodyId_post'].isin(common_neurons)]
+    
+    # Identify neurons to remove: those in searchedNeurons
+    to_remove = np.intersect1d(neurons_post, searchedNeurons, assume_unique=True)
+    
+    # If exempt_neurons provided, keep them even if they are in searchedNeurons
+    if exempt_neurons is not None and len(exempt_neurons) > 0:
+        # Remove exempt neurons from the to_remove list
+        to_remove = np.setdiff1d(to_remove, exempt_neurons, assume_unique=True)
+        
+    df = conn_df[~conn_df['bodyId_post'].isin(to_remove)]
     return df
 
 def Conn2FullMat(source_df,target_df,conn_df,conn_type,weight_col='weight'): 
     '''convert connection table (conn_df) to a full connection matrix (keep zero connections)'''
-    sbodyId = source_df.bodyId.tolist()
-    tbodyId = target_df.bodyId.tolist()
+    # Append type to bodyId for row/column names if available
+    if 'type' in source_df.columns:
+        sbodyId = [f"{row.bodyId}_{row.type}" for _, row in source_df.iterrows()]
+    else:
+        sbodyId = source_df.bodyId.tolist()
+        
+    if 'type' in target_df.columns:
+        tbodyId = [f"{row.bodyId}_{row.type}" for _, row in target_df.iterrows()]
+    else:
+        tbodyId = target_df.bodyId.tolist()
     stype = source_df.type.unique().tolist()
     ttype = target_df.type.unique().tolist()
     sbodyId.sort()
@@ -501,11 +663,33 @@ def Conn2FullMat(source_df,target_df,conn_df,conn_type,weight_col='weight'):
     tbodyId = [str(x) for x in tbodyId]
     cmat_bodyId = pd.DataFrame(data=np.zeros([len(sbodyId),len(tbodyId)],dtype=int),index=sbodyId,columns=tbodyId)
     cmat_type = pd.DataFrame(data=np.zeros([len(stype),len(ttype)],dtype=int),index=stype,columns=ttype)
+    # Create mappings for bodyId lookup
+    source_map = {}
+    if 'type' in source_df.columns:
+        for _, row in source_df.iterrows():
+            source_map[str(row.bodyId)] = f"{row.bodyId}_{row.type}"
+    else:
+        for _, row in source_df.iterrows():
+            source_map[str(row.bodyId)] = str(row.bodyId)
+            
+    target_map = {}
+    if 'type' in target_df.columns:
+        for _, row in target_df.iterrows():
+            target_map[str(row.bodyId)] = f"{row.bodyId}_{row.type}"
+    else:
+        for _, row in target_df.iterrows():
+            target_map[str(row.bodyId)] = str(row.bodyId)
+
     for i in conn_df.index:
-        bpre  = str(conn_df.at[i,'bodyId_pre'])
-        bpost = str(conn_df.at[i,'bodyId_post'])
-        bweight = conn_df.at[i,weight_col]
-        cmat_bodyId.at[bpre,bpost] = bweight
+        raw_pre = str(conn_df.at[i,'bodyId_pre'])
+        raw_post = str(conn_df.at[i,'bodyId_post'])
+        
+        bpre = source_map.get(raw_pre, raw_pre)
+        bpost = target_map.get(raw_post, raw_post)
+        
+        if bpre in cmat_bodyId.index and bpost in cmat_bodyId.columns:
+            bweight = conn_df.at[i,weight_col]
+            cmat_bodyId.at[bpre,bpost] = bweight
     for i in conn_type.index:
         tpre  = conn_type.at[i,'type_pre']
         tpost = conn_type.at[i,'type_post']
@@ -1005,6 +1189,7 @@ def VisConnMatInteractive(cmat, filename, title='', color_scale=[[0, 'rgb(255,25
         col_order_clustered = np.array(range(data_linear.shape[1]))
         clustering_successful = False
         clustering_results = {}
+
     
     # Store both original and clustered orders
     row_order_original = list(range(data_linear.shape[0]))
@@ -1079,7 +1264,6 @@ def VisConnMatInteractive(cmat, filename, title='', color_scale=[[0, 'rgb(255,25
             'pre': {str(k): v for k, v in conn_df.set_index('bodyId_pre')['type_pre'].to_dict().items()},
             'post': {str(k): v for k, v in conn_df.set_index('bodyId_post')['type_post'].to_dict().items()}
         }
-    
     # Generate hover text with actual labels for all matrix sizes
     # No longer use compact mode - always show full information with proper labels
     hover_text = []
@@ -1096,8 +1280,8 @@ def VisConnMatInteractive(cmat, filename, title='', color_scale=[[0, 'rgb(255,25
             if type_lookup:
                 try:
                     # Labels are already strings, use them directly for type lookup
-                    row_id = str(row_label)
-                    col_id = str(col_label)
+                    row_id = str(row_label);
+                    col_id = str(col_label);
                     row_type = type_lookup['pre'].get(row_id, 'Unknown')
                     col_type = type_lookup['post'].get(col_id, 'Unknown')
                     hover_row.append(f'<b>Source:</b> {row_label} ({row_type})<br><b>Target:</b> {col_label} ({col_type})<br><b>{metric_type.capitalize()}:</b> {value_str}')
@@ -1112,12 +1296,12 @@ def VisConnMatInteractive(cmat, filename, title='', color_scale=[[0, 'rgb(255,25
     # Determine axis labels - ALWAYS use actual names, not numeric indices
     # Even for large matrices, show proper labels (optimization only affects hover text)
     x_labels = cmat.columns.astype(str).tolist()
-    y_labels = cmat.index.astype(str).tolist()
+    y_labels = cmat.index.astype(str).tolist();
     
     # Generate unique storage key for this heatmap
     from datetime import datetime
     output_name = os.path.splitext(os.path.basename(filename))[0]
-    timestamp_hash = datetime.now().strftime('%Y%m%d%H%M%S')
+    timestamp_hash = datetime.now().strftime('%Y%m%d%H%M%S');
     storage_key = f"heatmap_settings_{output_name}#{timestamp_hash}"
     
     # Determine default colorscale name
@@ -1570,7 +1754,8 @@ def VisConnMatInteractive(cmat, filename, title='', color_scale=[[0, 'rgb(255,25
                             <input type="range" id="widthSlider" min="400" max="2400" value="800" step="20" oninput="updatePlotSize()" style="flex: 1;">
                             <input type="number" id="widthInput" value="800" min="100" step="20" style="width: 70px; padding: 2px 4px; font-size: 10px; border: 1px solid #dee2e6; border-radius: 3px;" oninput="updatePlotSizeFromInput()">
                         </div>
-                    </div>
+                   
+                                      
                     <div class="slider-control">
                         <label>
                             <span>Height:</span>
@@ -2160,79 +2345,30 @@ def VisConnMatInteractive(cmat, filename, title='', color_scale=[[0, 'rgb(255,25
                 margin: {{l: 120, r: 40, b: 120, t: 100, pad: 4}}
             }};
             
-            const config = {{
-                displayModeBar: true,
-                displaylogo: false,
-                modeBarButtonsToRemove: ['lasso2d', 'select2d'],
-                toImageButtonOptions: {{
-                    format: 'png',
-                    filename: 'heatmap_' + currentScale,
-                    height: currentHeight,
-                    width: currentWidth,
-                    scale: exportScale
-                }}
-            }};
-            
-            // Add cell value annotations if enabled
-            if (showCellValues) {{
-                const annotations = [];
-                
-                // Get the actual zmin/zmax for color mapping
-                const actualZmin = trace.zmin !== undefined ? trace.zmin : range.min;
-                const actualZmax = trace.zmax !== undefined ? trace.zmax : range.max;
-                
-                for (let i = 0; i < data.length; i++) {{
-                    for (let j = 0; j < data[i].length; j++) {{
-                        const scaledValue = data[i][j];  // Scaled value for color
-                        const originalValue = dataOriginal[i][j];  // Original value for display
-                        
-                        // Skip this value if it matches ignore criteria (exact value or expression)
-                        if (shouldIgnoreValue(originalValue)) {{
-                            continue;
-                        }}
-                        
-                        // Calculate the background color for this cell using scaled value
-                        const normalized = (scaledValue - actualZmin) / (actualZmax - actualZmin);
-                        
-                        // Get color from the colorscale
-                        let bgColor = 'rgb(128, 128, 128)';  // default gray
-                        if (Array.isArray(colorscaleToUse)) {{
-                            // For custom colorscales - interpolate between color stops
-                            bgColor = interpolateColorscale(colorscaleToUse, normalized);
-                        }} else {{
-                            // For named colorscales, get color from Plotly's colorscale
-                            bgColor = getColorFromPlotlyScale(colorscaleToUse, normalized);
-                        }}
-                        
-                        // Convert color to RGB and determine contrast color
-                        const rgb = hexToRgb(bgColor);
-                        const textColor = getContrastColor(rgb);
-                        
-                        // Debug logging for first few cells
-                        if (i === 0 && j < 3) {{
-                            const luminance = 0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2];
-                            console.log(`Cell [${{i}},${{j}}] original=${{originalValue}}, scaled=${{scaledValue}}, normalized=${{normalized.toFixed(3)}}, bgColor=${{bgColor}}, rgb=[${{rgb}}], luminance=${{luminance.toFixed(1)}}, threshold=${{(contrastThreshold * 255).toFixed(1)}}, textColor=${{textColor}}`);
-                        }}
-                        
-                        annotations.push({{
-                            x: j,  // Use index for positioning
-                            y: i,  // Use index for positioning
-                            text: String(originalValue),  // Display original value
-                            showarrow: false,
-                            font: {{
-                                size: cellValueFontSize,
-                                color: textColor
-                            }},
-                            xref: 'x',
-                            yref: 'y'
-                        }});
-                    }}
-                }}
-                layout.annotations = annotations;
-                console.log('Added', annotations.length, 'annotations for cell values with adaptive colors');
+            // Add compression hint in title for user awareness
+            if (is_sparse && !use_scatter_mode) {{
+                const sparsity_pct = Math.round(sparsity * 100);
+                layout.title.text += `<br><sub style='color:#666;'>Matrix ${{
+                    sparsity_pct
+                }}% sparse - optimized for file size</sub>`;
             }}
             
-            Plotly.newPlot('heatmap', [trace], layout, config);
+            // For scatter mode, lock aspect ratio and adjust margins
+            if (use_scatter_mode) {{
+                layout.xaxis.constrain = 'domain';
+                layout.yaxis.scaleanchor = 'x';
+                layout.plot_bgcolor = 'white';
+                layout.xaxis.showgrid = true;
+                layout.yaxis.showgrid = true;
+                layout.xaxis.gridcolor = 'rgba(0,0,0,0.1)';
+                layout.yaxis.gridcolor = 'rgba(0,0,0,0.1)';
+                layout.margin.t = 100;
+                layout.margin.b = 120;
+            }}
+            
+            // Update trace and layout
+            Plotly.restyle('heatmap', trace);
+            Plotly.relayout('heatmap', layout);
         }}
         
         function toggleClustering(mode) {{
@@ -2572,9 +2708,30 @@ def VisConnMatInteractive(cmat, filename, title='', color_scale=[[0, 'rgb(255,25
                 'height': currentHeight
             }};
             
-            // Update both trace and layout
-            Plotly.restyle(gd, traceUpdate, 0);
-            Plotly.relayout(gd, layoutUpdate);
+            // Add compression hint in title for user awareness
+            if (is_sparse && !use_scatter_mode) {{
+                const sparsity_pct = Math.round(sparsity * 100);
+                layout.title.text += `<br><sub style='color:#666;'>Matrix ${{
+                    sparsity_pct
+                }}% sparse - optimized for file size</sub>`;
+            }}
+            
+            // For scatter mode, lock aspect ratio and adjust margins
+            if (use_scatter_mode) {{
+                layout.xaxis.constrain = 'domain';
+                layout.yaxis.scaleanchor = 'x';
+                layout.plot_bgcolor = 'white';
+                layout.xaxis.showgrid = true;
+                layout.yaxis.showgrid = true;
+                layout.xaxis.gridcolor = 'rgba(0,0,0,0.1)';
+                layout.yaxis.gridcolor = 'rgba(0,0,0,0.1)';
+                layout.margin.t = 100;
+                layout.margin.b = 120;
+            }}
+            
+            // Update trace and layout
+            Plotly.restyle('heatmap', trace);
+            Plotly.relayout('heatmap', layout);
         }}
         
         function toggleCellValues() {{
@@ -3117,39 +3274,6 @@ def VisConnMatInteractive(cmat, filename, title='', color_scale=[[0, 'rgb(255,25
                 ]
             }};
             
-            // Get the colorscale array
-            const scale = colorscales[scaleName];
-            if (!scale) {{
-                // Fallback to grayscale
-                const gray = Math.round(normalized * 255);
-                return `rgb(${{gray}},${{gray}},${{gray}})`;
-            }}
-            
-            // Find the two color stops to interpolate between
-            let lower = scale[0];
-            let upper = scale[scale.length - 1];
-            
-            for (let i = 0; i < scale.length - 1; i++) {{
-                if (normalized >= scale[i][0] && normalized <= scale[i + 1][0]) {{
-                    lower = scale[i];
-                    upper = scale[i + 1];
-                    break;
-                }}
-            }}
-            
-            // Interpolate between the two colors
-            const t = (normalized - lower[0]) / (upper[0] - lower[0]);
-            const lowerRgb = hexToRgb(lower[1]);
-            const upperRgb = hexToRgb(upper[1]);
-            
-            const r = Math.round(lowerRgb[0] + t * (upperRgb[0] - lowerRgb[0]));
-            const g = Math.round(lowerRgb[1] + t * (upperRgb[1] - lowerRgb[1]));
-            const b = Math.round(lowerRgb[2] + t * (upperRgb[2] - lowerRgb[2]));
-            
-            return `rgb(${{r}},${{g}},${{b}})`;
-        }}
-        
-        function interpolateColorscale(colorscale, normalized) {{
             // Interpolate color from a custom colorscale array
             // colorscale format: [[0, 'color1'], [0.5, 'color2'], [1, 'color3'], ...]
             
@@ -3160,8 +3284,7 @@ def VisConnMatInteractive(cmat, filename, title='', color_scale=[[0, 'rgb(255,25
             // Handle edge cases
             if (normalized <= 0 || normalized <= colorscale[0][0]) {{
                 return Array.isArray(colorscale[0]) && colorscale[0].length > 1 ? colorscale[0][1] : 'rgb(128, 128, 128)';
-            }}
-            if (normalized >= 1 || normalized >= colorscale[colorscale.length - 1][0]) {{
+            }} else if (normalized >= 1 || normalized >= colorscale[colorscale.length - 1][0]) {{
                 const last = colorscale[colorscale.length - 1];
                 return Array.isArray(last) && last.length > 1 ? last[1] : 'rgb(128, 128, 128)';
             }}
@@ -3427,7 +3550,7 @@ def VisConnMatInteractive(cmat, filename, title='', color_scale=[[0, 'rgb(255,25
                 
                 // Apply clustering if enabled
                 if (useClusteredOrder && clusteringAvailable) {{
-                    const effectiveRowOrder = isTransposed ? colOrderClustered : rowOrderClustered;
+                    const effectiveRowOrder = isTransposed ? colOrderClustered : rowOrderClusterled;
                     labels = reorderLabels(labels, effectiveRowOrder);
                 }}
                 label.textContent = 'Reorder Rows (Y-axis)';
@@ -3437,7 +3560,7 @@ def VisConnMatInteractive(cmat, filename, title='', color_scale=[[0, 'rgb(255,25
                 
                 // Apply clustering if enabled
                 if (useClusteredOrder && clusteringAvailable) {{
-                    const effectiveColOrder = isTransposed ? rowOrderClustered : colOrderClustered;
+                    const effectiveColOrder = isTransposed ? rowOrderClustered : colOrderClusterled;
                     labels = reorderLabels(labels, effectiveColOrder);
                 }}
                 label.textContent = 'Reorder Columns (X-axis)';
@@ -3583,289 +3706,6 @@ def VisConnMatInteractive(cmat, filename, title='', color_scale=[[0, 'rgb(255,25
             currentHeight = 800;
             document.getElementById('widthSlider').value = 800;
             document.getElementById('heightSlider').value = 800;
-            document.getElementById('widthInput').value = 800;
-            document.getElementById('heightInput').value = 800;
-            document.getElementById('widthValue').textContent = '800px';
-            document.getElementById('heightValue').textContent = '800px';
-            updatePlotSize();
-        }}
-        
-        function updateExportScale(value) {{
-            exportScale = parseFloat(value);
-            document.getElementById('exportScaleValue').textContent = value + 'x';
-        }}
-        
-        function exportSVG() {{
-            const filename = 'heatmap_' + currentScale + '_' + new Date().getTime() + '.svg';
-            
-            // Get the plotly graph element
-            const gd = document.getElementById('heatmap');
-            
-            // Use current layout dimensions with scale parameter
-            // This preserves fonts and colors correctly
-            Plotly.toImage(gd, {{
-                format: 'svg',
-                width: currentWidth,
-                height: currentHeight,
-                scale: exportScale
-            }}).then(function(dataUrl) {{
-                const link = document.createElement('a');
-                link.download = filename;
-                link.href = dataUrl;
-                link.click();
-                const actualWidth = currentWidth * exportScale;
-                const actualHeight = currentHeight * exportScale;
-                showStatus(`✅ SVG exported: ${{actualWidth}}x${{actualHeight}}px`, 'success');
-                console.log('SVG exported:', actualWidth, 'x', actualHeight);
-            }}).catch(function(error) {{
-                console.error('SVG export failed:', error);
-                showStatus('⚠️ SVG export failed. See console.', 'error');
-            }});
-        }}
-        
-        function saveSettings() {{
-            try {{
-                const settings = {{
-                    // Scale and colorscale
-                    scale: currentScale,
-                    colorscale: currentColorscale,
-                    fontSize: currentFontSize,
-                    useAutoRange: useAutoRange,
-                    zminSlider: document.getElementById('zminSlider')?.value,
-                    zmaxSlider: document.getElementById('zmaxSlider')?.value,
-                    // Custom colorscale settings
-                    customColorScale: customColorScale,
-                    use3PointScale: use3PointScale,
-                    colorMin: document.getElementById('colorMin')?.value,
-                    colorMax: document.getElementById('colorMax')?.value,
-                    colorMin3: document.getElementById('colorMin3')?.value,
-                    colorMid3: document.getElementById('colorMid3')?.value,
-                    colorMax3: document.getElementById('colorMax3')?.value,
-                    valueMin3: document.getElementById('valueMin3')?.value,
-                    valueMid3: document.getElementById('valueMid3')?.value,
-                    valueMax3: document.getElementById('valueMax3')?.value,
-                    // Layout
-                    width: currentWidth,
-                    height: currentHeight,
-                    exportScale: exportScale,
-                    showLabels: showLabels,
-                    // Data state
-                    currentMetric: currentMetric,
-                    useClusteredOrder: useClusteredOrder,
-                    clusteringMethod: currentClusteringMethod,
-                    isTransposed: isTransposed,
-                    // Cell values
-                    showCellValues: showCellValues,
-                    cellValueFontSize: cellValueFontSize,
-                    ignoredValuesInput: document.getElementById('ignoreValuesInput')?.value,
-                    contrastThreshold: contrastThreshold,
-                    reverseContrast: reverseContrast,
-                    // UI state
-                    squareCellsLocked: squareCellsLocked,
-                    // Row/column order after reordering
-                    currentXLabels: currentXLabels,
-                    currentYLabels: currentYLabels
-                }};
-                localStorage.setItem(storageKey, JSON.stringify(settings));
-                console.log('Settings saved successfully:', settings);
-                showStatus('✅ Settings saved!', 'success');
-            }} catch (error) {{
-                console.error('Error saving settings:', error);
-                showStatus('⚠️ Error saving settings', 'error');
-            }}
-        }}
-        
-        function loadSettings(showStatusMsg = true) {{
-            const saved = localStorage.getItem(storageKey);
-            if (saved) {{
-                try {{
-                    const settings = JSON.parse(saved);
-                currentScale = settings.scale || 'linear';
-                currentColorscale = settings.colorscale || '{default_colorscale}';
-                currentFontSize = settings.fontSize || {fontsize};
-                useAutoRange = settings.useAutoRange !== undefined ? settings.useAutoRange : true;
-                customColorScale = settings.customColorScale || null;
-                use3PointScale = settings.use3PointScale || false;
-                
-                // Update UI
-                document.querySelectorAll('[id^="btn-"]').forEach(btn => btn.classList.remove('active'));
-                document.getElementById('btn-' + currentScale).classList.add('active');
-                document.getElementById('colorscaleSelect').value = currentColorscale;
-                document.getElementById('fontSizeSlider').value = currentFontSize;
-                document.getElementById('fontSizeValue').textContent = currentFontSize + 'px';
-                
-                // Restore custom colors
-                if (settings.colorMin) document.getElementById('colorMin').value = settings.colorMin;
-                if (settings.colorMax) document.getElementById('colorMax').value = settings.colorMax;
-                if (settings.colorMin3) document.getElementById('colorMin3').value = settings.colorMin3;
-                if (settings.colorMid3) document.getElementById('colorMid3').value = settings.colorMid3;
-                if (settings.colorMax3) document.getElementById('colorMax3').value = settings.colorMax3;
-                if (settings.valueMin3) document.getElementById('valueMin3').value = settings.valueMin3;
-                if (settings.valueMid3) document.getElementById('valueMid3').value = settings.valueMid3;
-                if (settings.valueMax3) document.getElementById('valueMax3').value = settings.valueMax3;
-                document.getElementById('use3PointScale').checked = use3PointScale;
-                toggle3PointScale();
-                
-                // Restore plot size (clamp to valid range)
-                if (settings.width) {{
-                    currentWidth = Math.min(3000, Math.max(400, settings.width));
-                    document.getElementById('widthSlider').value = Math.min(2400, Math.max(400, currentWidth));
-                    document.getElementById('widthInput').value = currentWidth;
-                    document.getElementById('widthValue').textContent = currentWidth + 'px';
-                }}
-                if (settings.height) {{
-                    currentHeight = Math.min(3000, Math.max(400, settings.height));
-                    document.getElementById('heightSlider').value = Math.min(2400, Math.max(400, currentHeight));
-                    document.getElementById('heightInput').value = currentHeight;
-                    document.getElementById('heightValue').textContent = currentHeight + 'px';
-                }}
-                if (settings.exportScale) {{
-                    exportScale = Math.min(5, Math.max(1, settings.exportScale || 2));
-                    document.getElementById('exportScaleSlider').value = exportScale;
-                    document.getElementById('exportScaleValue').textContent = exportScale + 'x';
-                }}
-                
-                // Restore label visibility
-                if (settings.showLabels !== undefined) {{
-                    showLabels = settings.showLabels;
-                    document.getElementById('toggleLabelsBtn').textContent = showLabels ? '🏷️ Hide Text' : '🏷️ Show Text';
-                }}
-                
-                // Restore additional state
-                if (settings.currentMetric !== undefined && hasMultipleMetrics) {{
-                    currentMetric = settings.currentMetric;
-                    document.querySelectorAll('.metric-btn').forEach(btn => btn.classList.remove('active'));
-                    const metricBtn = document.getElementById('metric-' + currentMetric);
-                    if (metricBtn) {{
-                        metricBtn.classList.add('active');
-                    }}
-                }}
-                
-                if (settings.useClusteredOrder !== undefined && clusteringAvailable) {{
-                    useClusteredOrder = settings.useClusteredOrder;
-                    const orderBtn = document.getElementById('orderBtn');
-                    if (orderBtn) {{
-                        orderBtn.textContent = useClusteredOrder ? '📊 Original Order' : '🔀 Clustered Order';
-                    }}
-                }}
-                
-                if (settings.clusteringMethod !== undefined && clusteringAvailable) {{
-                    currentClusteringMethod = settings.clusteringMethod;
-                    const methodSelect = document.getElementById('clusteringMethodSelect');
-                    if (methodSelect) {{
-                        methodSelect.value = currentClusteringMethod;
-                    }}
-                    // Update the method selector visibility based on clustering state
-                    const methodSection = document.getElementById('clusteringMethodSection');
-                    if (methodSection) {{
-                        methodSection.style.display = useClusteredOrder ? 'block' : 'none';
-                    }}
-                }}
-                
-                if (settings.isTransposed !== undefined) {{
-                    isTransposed = settings.isTransposed;
-                    const transposeBtn = document.getElementById('transposeBtn');
-                    if (transposeBtn) {{
-                        transposeBtn.textContent = isTransposed ? '🔄 Un-Transpose' : '🔄 Transpose';
-                    }}
-                }}
-                
-                if (settings.showCellValues !== undefined) {{
-                    showCellValues = settings.showCellValues;
-                    const cellValuesBtn = document.getElementById('toggleCellValuesBtn');
-                    if (cellValuesBtn) {{
-                        cellValuesBtn.textContent = showCellValues ? '🔢 Hide Values' : '🔢 Show Values';
-                    }}
-                }}
-                
-                if (settings.cellValueFontSize !== undefined) {{
-                    cellValueFontSize = settings.cellValueFontSize;
-                    const sizeSlider = document.getElementById('cellValueSizeSlider');
-                    const sizeValue = document.getElementById('cellValueSizeValue');
-                    if (sizeSlider) sizeSlider.value = cellValueFontSize;
-                    if (sizeValue) sizeValue.textContent = cellValueFontSize + 'px';
-                }}
-                
-                if (settings.ignoredValuesInput !== undefined) {{
-                    const ignoreInput = document.getElementById('ignoreValuesInput');
-                    if (ignoreInput) {{
-                        ignoreInput.value = settings.ignoredValuesInput;
-                        updateIgnoredValues();
-                    }}
-                }}
-                
-                if (settings.contrastThreshold !== undefined) {{
-                    contrastThreshold = settings.contrastThreshold;
-                    const thresholdSlider = document.getElementById('contrastThresholdSlider');
-                    const thresholdValue = document.getElementById('contrastThresholdValue');
-                    if (thresholdSlider) thresholdSlider.value = contrastThreshold;
-                    if (thresholdValue) thresholdValue.textContent = contrastThreshold.toFixed(4);
-                }}
-                
-                if (settings.reverseContrast !== undefined) {{
-                    reverseContrast = settings.reverseContrast;
-                }}
-                
-                if (settings.squareCellsLocked !== undefined) {{
-                    squareCellsLocked = settings.squareCellsLocked;
-                    const lockBtn = document.getElementById('lockSquareCellsBtn');
-                    if (lockBtn) {{
-                        lockBtn.textContent = squareCellsLocked ? '🔓 Unlock Square Cells' : '🔒 Lock Square Cells';
-                    }}
-                }}
-                
-                // Restore row/column order after custom reordering
-                if (settings.currentXLabels && Array.isArray(settings.currentXLabels)) {{
-                    currentXLabels = settings.currentXLabels.slice();
-                }}
-                if (settings.currentYLabels && Array.isArray(settings.currentYLabels)) {{
-                    currentYLabels = settings.currentYLabels.slice();
-                }}
-                
-                if (!useAutoRange && settings.zminSlider && settings.zmaxSlider) {{
-                    document.getElementById('zminSlider').value = settings.zminSlider;
-                    document.getElementById('zmaxSlider').value = settings.zmaxSlider;
-                    updateColorbarRange();
-                }}
-                
-                    createHeatmap();
-                    if (showStatusMsg) {{
-                        showStatus('✅ Settings loaded!', 'success');
-                    }}
-                }} catch (error) {{
-                    console.error('Error loading settings:', error);
-                    if (showStatusMsg) {{
-                        showStatus('⚠️ Error loading settings, using defaults', 'error');
-                    }}
-                    createHeatmap();
-                }}
-            }} else {{
-                if (showStatusMsg) {{
-                    showStatus('ℹ️ No saved settings found', 'info');
-                }}
-            }}
-        }}
-        
-        function resetSettings() {{
-            currentScale = 'linear';
-            currentColorscale = '{default_colorscale}';
-            currentFontSize = {fontsize};
-            customColorScale = null;
-            use3PointScale = false;
-            currentWidth = 800;
-            currentHeight = 800;
-            exportScale = 2;
-            showLabels = !isLarge;
-            
-            document.querySelectorAll('[id^="btn-"]').forEach(btn => btn.classList.remove('active'));
-            document.getElementById('btn-linear').classList.add('active');
-            document.getElementById('colorscaleSelect').value = currentColorscale;
-            document.getElementById('fontSizeSlider').value = currentFontSize;
-            document.getElementById('fontSizeValue').textContent = currentFontSize + 'px';
-            
-            // Reset plot size
-            document.getElementById('widthSlider').value = 800;
-            document.getElementById('heightSlider').value = 800;
             document.getElementById('widthValue').textContent = '800px';
             document.getElementById('heightValue').textContent = '800px';
             document.getElementById('exportScaleSlider').value = 2;
@@ -3922,694 +3762,179 @@ def VisConnMatInteractive(cmat, filename, title='', color_scale=[[0, 'rgb(255,25
         webbrowser.open('file://' + os.path.abspath(filename))
 
 
-def ClusterMap(cmat:pd.DataFrame,filename,cmap='plasma',scale_ratio=3,reshape_factor=3,zs=None,method='median',showfig=False):
-    '''clustermap of connection matrix'''
-    
-    (rowN,colN) = cmat.shape
-    fig = sns.clustermap(cmat,
-                    method=method,
-                    figsize=(min(colN/scale_ratio+reshape_factor,900),min(rowN/scale_ratio+reshape_factor,900)),
-                    dendrogram_ratio=(.2,.3),
-                    z_score=zs,
-                    cmap=cmap) # 'plasma','Blues','RdBu'
-    fig.savefig(filename)
-    if not showfig: plt.close()
-    new_index = fig.dendrogram_row.reordered_ind
-    new_columns = fig.dendrogram_col.reordered_ind
-    newmat:pd.DataFrame = cmat.copy()
-    newmat = cmat.iloc[new_index,new_columns]
-    return fig, newmat
-
-def RN2plot(dataR,dataN):
-    '''convert max ratio matrix and connection number matrix to plot data'''
-    c_mr = pd.DataFrame(dataR)
-    c_mr = c_mr.reset_index()
-    c_mr.columns = ['type','max_ratio']
-    c_N = pd.DataFrame(dataN)
-    c_N = c_N.reset_index()
-    c_N.columns = ['type','N']
-    c_plot = c_mr.merge(c_N,how='inner')
-    c_plot = c_plot.sort_values(by=['N','max_ratio'],ascending=[True,False])
-    return c_plot
-
-def ConnHist(dataMat,cat,suffix): 
-    '''histogram of connection distribution'''
-    import matplotlib.pyplot as plt
-    if cat.find('MR') != -1:
-        binN = 10
-    else:
-        binN = max(int(dataMat.max()),5)
-    fig,ax = plt.subplots(1,2,tight_layout=True)
-    # pdf by counts
-    ax[0].hist(dataMat,bins=binN,lw=0)
-    ax[0].set_title('Distribution of '+cat)
-    ax[0].set_xlabel(cat+' '+suffix)
-    ax[0].set_ylabel('count')
-    ax[0].grid(False)
-    # cdf
-    ax[1].hist(dataMat,cumulative=True,bins=binN,lw=0)
-    ax[1].set_title('CDF of '+cat)
-    ax[1].set_xlabel(cat+' '+suffix)
-    ax[1].set_ylabel('count')
-    ax[1].grid(False)
-    return fig,ax
-
-def VisConnDist(cmat,save_path,suffix='',showfig=True,save_format='.svg'): 
-    '''visualize connection (source and target) distributions'''
-    # distribution of max ratio of source neurons
-    cmat_statR = stMat(cmat)
-    dataR = cmat_statR.max()
-    fig,_ = ConnHist(dataR,cat='MR_source',suffix=suffix) # max ratio of source neurons
-    fig.savefig(os.path.join(save_path,'dist_MR_source_'+suffix+save_format),dpi=300)
-    if not showfig: plt.close(fig)
-    # distribution of source number
-    cmat_statN = calRC(cmat)
-    dataN = cmat_statN.iloc[-2,:-2] # row: sourceN
-    fig,_ = ConnHist(dataN,cat='source N',suffix=suffix)
-    fig.savefig(os.path.join(save_path,'dist_sourceN_'+suffix+save_format),dpi=300)
-    if not showfig: plt.close(fig)
-    # plot Max Ratio of source against sourceN
-    c_plot = RN2plot(dataR,dataN)
-    c_plot.columns = ['type_post','max_ratio','sourceN']
-    c_plot.to_csv(os.path.join(save_path,'dataDist_source_'+suffix+'.csv'))
-    fig,ax = plt.subplots(1,1,tight_layout=True,dpi=300)
-    for i in c_plot.index:
-        ax.scatter(c_plot.at[i,'sourceN'],c_plot.at[i,'max_ratio'],c='b',alpha=0.1,edgecolors='none')
-    ax.grid(False)
-    ax.set_xlabel('# of source '+suffix)
-    ax.set_ylabel('max ratio of source '+suffix)
-    fig.savefig(os.path.join(save_path,'MR_against_sourceN_'+suffix+save_format))
-    if not showfig: plt.close(fig)
-    # distribution of max ratio of target neurons
-    cmat_statR = stMat(cmat,axis=1)
-    dataR = cmat_statR.max(axis=1)
-    fig,_ = ConnHist(dataR,cat='MR_target',suffix=suffix)
-    fig.savefig(os.path.join(save_path,'dist_MR_target_'+suffix+save_format),dpi=300)
-    if not showfig: plt.close(fig)
-    # distribution of target number
-    dataN = cmat_statN.iloc[:-2,-2] # row: targetN
-    fig,_ = ConnHist(dataN,cat='target N',suffix=suffix)
-    fig.savefig(os.path.join(save_path,'dist_targetN_'+suffix+save_format),dpi=300)
-    if not showfig: plt.close(fig)
-    # plot Max Ratio of source against targetN
-    c_plot = RN2plot(dataR,dataN)
-    c_plot.columns = ['type_pre','max_ratio','targetN']
-    c_plot.to_csv(os.path.join(save_path,'dataDist_target_'+suffix+'.csv'))
-    fig,ax = plt.subplots(1,1,tight_layout=True,dpi=300)
-    for i in c_plot.index:
-        ax.scatter(c_plot.at[i,'targetN'],c_plot.at[i,'max_ratio'],c='b',alpha=0.1,edgecolors='none')
-    ax.grid(False)
-    ax.set_xlabel('# of target '+suffix)
-    ax.set_ylabel('max ratio of target '+suffix)
-    fig.savefig(os.path.join(save_path,'MR_against_targetN_'+suffix+save_format))
-    if not showfig: plt.close(fig)
-
-def sortMatByMax(cmat,save_path,suffix,title='',by='sourceMR',filt_range=[0.5,1],clusterFlag=False,showfig=False): 
-    '''sort connection matrix by max value of source/target neurons or number of source/target neurons'''
-    # reorder columns(target neurons) by max{synapse number or percentage from source neurons or target neurons} —— N or Max Ratio (MR)
-    # interval taken by filt_range is left open and right closed if by=='sourceMR' or 'targetMR'
-    # interval taken by filt_range is left closed and right closed if by=='sourceN' or targetN
-    suffix = suffix + '_' + by + '_'
-    if by.find('source') != -1:
-        axis = 0
-    elif by.find('target') != -1:
-        axis = 1
-    if by.find('MR') != -1:
-        suffix_new = suffix+str(int(filt_range[0]*100))+'to'+str(int(filt_range[1]*100))
-        cmat_t = filtMat(stMat(cmat,axis=axis),axis=axis,filt_range=filt_range,by='MR')
-    elif by.find('N') != -1:
-        suffix_new = suffix+str(filt_range[0])+'to'+str(filt_range[1])
-        cmat_t = filtMat(cmat,axis=axis,filt_range=filt_range,by='N')
-    
-    cmat_filt = cmat_t.copy()
-    ind_max = cmat_filt.idxmax(axis=axis) # return the maximum value in each columns (axis=0) or rows (axis=1)
-    if axis == 0:
-        for j in cmat_filt.columns:
-            ind_max_row = ind_max.at[j]
-            for i in cmat_filt.index:
-                if i != ind_max_row:
-                    cmat_filt.at[i,j] = 0
-        cmat_filt = calRC(cmat_filt)
-        cmat_filt = cmat_filt.iloc[:-2,:]
-        cmat_filt = cmat_filt.sort_values(by=['targetN','sum_row'],axis=0,ascending=[0,0])
-        e_rowN,e_colN = cmat_filt.shape
-        sorted_col = []
-        for r in range(e_rowN):
-            r_name = cmat_filt.index[r]
-            curr_data = cmat_filt.iloc[r,:-2]
-            curr_data = cmat_filt.iloc[r,:-2].to_numpy()
-            asorted_col = np.argsort(-curr_data) # descending, returning the index
-            sorted_col = np.append(sorted_col, asorted_col[:int(cmat_filt.at[r_name,'targetN'])]) # keep indexes of non-zero values
-        cmat_re = cmat_t.copy() # rebuilt cmat
-        cmat_filt = cmat_filt.iloc[:,:-2]
-        cmat_re = cmat_re.loc[cmat_filt.index,cmat_filt.columns]
-        emat = cmat_re.iloc[:,sorted_col]
-    elif axis == 1:
-        for i in cmat_filt.index:
-            ind_max_col = ind_max.at[i]
-            for j in cmat_filt.columns:
-                if j != ind_max_col:
-                    cmat_filt.at[i,j] = 0
-        cmat_filt = calRC(cmat_filt)
-        cmat_filt = cmat_filt.iloc[:,:-2]
-        cmat_filt = cmat_filt.sort_values(by=['sourceN','sum_col'],axis=1,ascending=[0,0])
-        e_rowN,e_colN = cmat_filt.shape
-        sorted_row = []
-        for r in range(e_colN):
-            col_name = cmat_filt.columns[r]
-            curr_data = cmat_filt.iloc[:-2,r]
-            curr_data = cmat_filt.iloc[:-2,r].to_numpy()
-            asorted_row = np.argsort(-curr_data) # descending, returning the index
-            sorted_row = np.append(sorted_row, asorted_row[:int(cmat_filt.at['sourceN',col_name])]) # keep indexes of non-zero values
-        cmat_re = cmat_t.copy() # rebuilt cmat
-        cmat_filt = cmat_filt.iloc[:-2,:]
-        cmat_re = cmat_re.loc[cmat_filt.index,cmat_filt.columns]
-        emat = cmat_re.iloc[sorted_row,:]
-    if not os.path.exists(os.path.join(save_path,'csv')): os.mkdir(os.path.join(save_path,'csv'))
-    emat.to_csv(os.path.join(save_path,'csv','EorC_'+suffix_new+'.csv'))
-    VisConnMat(emat.iloc[::-1],title=title,filename=os.path.join(save_path,'EorC_'+suffix_new+'.html'),showfig=showfig)
-    if clusterFlag == True:
-        _,emat_clusterd = ClusterMap(emat,filename=os.path.join(save_path,'EorC_'+suffix_new+'_clustered.png'))
-        emat_clusterd.to_csv(os.path.join(save_path,'csv','EorC_'+suffix_new+'_clustered.csv'))
-        
-def DrawGraph(G,pos,edge_width,node_size=300,font_size=5,font_color='silver'):
-    nodeN = nx.number_of_nodes(G)
-    fig, ax = plt.subplots(figsize=(min(3*nodeN**0.5+3,50),min(3*nodeN**0.5+3,50)),dpi=150)
-    nx.draw_networkx_nodes(G, pos=pos, ax=ax, node_size=node_size)
-    nx.draw_networkx_edges(G, pos=pos, width=edge_width)
-    nx.draw_networkx_labels(G, pos=pos, font_size=font_size, font_color=font_color)
-    ax.set_axis_off()
-    ax.grid(False)
-    return fig
-
-def NetworkVis(source_df,target_df,conn_df,save_path='',by='bodyId',node_size=300,showfig=False,save_format='.svg'):
-    G = nx.DiGraph()
-    for i in source_df[by]:
-        G.add_node(str(i),layer=0)
-    for i in target_df[by]:
-        G.add_node(str(i),layer=1)
-    for i in conn_df.index:
-        G.add_edge(str(conn_df.loc[i,by+'_pre']),str(conn_df.loc[i,by+'_post']),weight=conn_df.loc[i,'weight'])
-    
-    if set(source_df[by].tolist()) == set(target_df[by].tolist()):
-        if nx.number_weakly_connected_components(G) > 1: # plot subgraphs but not show
-            pos = nx.spring_layout(G,seed=410)
-            # pos = nx.shell_layout(G)
-            fig = DrawGraph(G,pos=pos,edge_width=np.log(conn_df.weight),node_size=node_size)
-            fig.savefig(os.path.join(save_path,'Network_'+by+save_format))
-            if not showfig: plt.close(fig)
-            G_subs = list(nx.weakly_connected_components(G))
-            for i in range(len(G_subs)):
-                Gsub = G.subgraph(G_subs[i])
-                if Gsub.number_of_nodes() > 1: # subgraphs with only one node will not be drawn
-                    pos_i = nx.kamada_kawai_layout(Gsub)
-                    fig = DrawGraph(Gsub,pos=pos_i,edge_width=np.log(conn_df.weight))
-                    fig.savefig(os.path.join(save_path,'Network_'+by+'_subgraph_'+str(i)+save_format))
-                    plt.close(fig)
-        else:
-            pos = nx.kamada_kawai_layout(G)
-            fig = DrawGraph(G,pos=pos,edge_width=np.log(conn_df.weight))
-            fig.savefig(os.path.join(save_path,'Network_'+by+save_format))
-            if not showfig: plt.close(fig)
-    else: # layered structure
-        pos = nx.multipartite_layout(G, subset_key='layer')
-        fig = DrawGraph(G,pos=pos,edge_width=np.log(conn_df.weight))
-        fig.savefig(os.path.join(save_path,'Network_'+by+save_format))
-        if not showfig: plt.close(fig)
-
-def build_path_dataframe_from_paths(paths, conn_data, targets, real_layer_map=None, level='bodyId'):
+def split_path(path_df):
     """
-    Build path DataFrame directly from pre-computed paths (bypasses pathfinding).
-    
-    This function takes paths found during parallel DFS and converts them to a DataFrame
-    with connection metrics. This avoids re-running pathfinding via getAllPath().
-    
-    Parameters:
-    -----------
-    paths : list of lists
-        Pre-computed paths, where each path is a list of neuron IDs
-    conn_data : DataFrame
-        DataFrame with connection metrics (conn_layer, pre, post, weight, ratio, prob)
-    targets : list
-        List of target neuron IDs/types
-    real_layer_map : dict, optional
-        Mapping of neuron ID/type -> real layer for validation
-    level : str
-        'bodyId' or 'type' - determines column names and conversion
-    
-    Returns:
-    --------
-    DataFrame with columns: path_block, path_length, weights, ratios, travPs, etc.
+    Convert path list to string representation.
     """
-    import pandas as pd
-    import networkx as nx
+    if path_df.empty:
+        return path_df
     
-    # Convert paths to type-level if needed (BEFORE building graph)
-    if level == 'type':
-        # Check if paths are already type-level (strings) or bodyId-level (integers)
-        # If first path's first element is a string, assume already type-level
-        needs_conversion = False
-        if len(paths) > 0 and len(paths[0]) > 0:
-            first_node = paths[0][0]
-            # If it's an integer or can be converted to int, it's a bodyId
-            try:
-                int(first_node)
-                needs_conversion = True
-            except (ValueError, TypeError):
-                needs_conversion = False
+    if 'path' in path_df.columns:
+        # If path_str already exists, preserve it (it might contain the original list)
+        if 'path_str' in path_df.columns:
+            # Ensure path is string if it's still a list
+            if not path_df.empty and isinstance(path_df['path'].iloc[0], list):
+                path_df['path'] = path_df['path'].apply(lambda x: '->'.join(map(str, x)))
+            return path_df
+
+        # Generate string representation
+        path_strings = path_df['path'].apply(lambda x: '->'.join(map(str, x)) if isinstance(x, list) else str(x))
         
-        if needs_conversion:
-            # Get bodyId to type mapping from conn_data
-            bodyid_to_type = {}
-            if 'bodyId_pre' in conn_data.columns and 'type_pre' in conn_data.columns:
-                for i in range(len(conn_data)):
-                    bodyid_to_type[conn_data.iat[i, conn_data.columns.get_loc('bodyId_pre')]] = conn_data.iat[i, conn_data.columns.get_loc('type_pre')]
-                    bodyid_to_type[conn_data.iat[i, conn_data.columns.get_loc('bodyId_post')]] = conn_data.iat[i, conn_data.columns.get_loc('type_post')]
-            
-            # Convert bodyId paths to type paths
-            type_paths = []
-            for path in paths:
-                type_path = [str(bodyid_to_type.get(node, node)) for node in path]
-                # Remove consecutive duplicates (same type appearing multiple times)
-                deduplicated = [type_path[0]]
-                for i in range(1, len(type_path)):
-                    if type_path[i] != type_path[i-1]:
-                        deduplicated.append(type_path[i])
-                type_paths.append(deduplicated)
-            paths = type_paths
+        # Save original list to path_str
+        path_df['path_str'] = path_df['path']
+        # Overwrite path with string
+        path_df['path'] = path_strings
         
-        # Aggregate conn_data to type level for graph building if needed
-        if 'bodyId_pre' in conn_data.columns and 'type_pre' in conn_data.columns:
-            # conn_data has bodyId columns, aggregate to type level
-            conn_type_agg = conn_data.groupby(['conn_layer', 'type_pre', 'type_post']).agg({
-                'weight': 'sum',
-                'connection_ratio': 'mean',
-                'traversal_probability': 'mean'
-            }).reset_index()
-            conn_data = conn_type_agg
-    
-    # Build graph with connection metrics
-    G = nx.DiGraph()
-    for i in range(len(conn_data)):
-        layer = conn_data.iat[i,0]
-        node_pre = str(conn_data.iat[i,1])
-        node_post = str(conn_data.iat[i,2])
-        weight_i = conn_data.iat[i,3]
-        ratio_i = conn_data.iat[i, conn_data.columns.get_loc('connection_ratio')] if 'connection_ratio' in conn_data.columns else 0.0
-        travP_i = conn_data.iat[i, conn_data.columns.get_loc('traversal_probability')] if 'traversal_probability' in conn_data.columns else 0.0
-        
-        if G.has_edge(node_pre, node_post):
-            if 'layers' not in G[node_pre][node_post]:
-                existing = G[node_pre][node_post]
-                G[node_pre][node_post]['layers'] = {
-                    existing['layer']: {'weight': existing['weight'], 'probability': existing['probability'], 'ratio': existing['ratio']}
-                }
-            G[node_pre][node_post]['layers'][layer] = {'weight': weight_i, 'probability': travP_i, 'ratio': ratio_i}
-        else:
-            G.add_edge(node_pre, node_post, layer=layer, weight=weight_i, probability=travP_i, ratio=ratio_i)
-    
-    # Filter paths with real_layer_map
-    if real_layer_map is not None:
-        filtered_paths = []
-        rejected_count = 0
-        for path in paths:
-            path_str = [str(node) for node in path]
-            valid = True
-            for i in range(len(path_str) - 1):
-                curr_layer = real_layer_map.get(path_str[i], -1)
-                next_layer = real_layer_map.get(path_str[i+1], -1)
-                if next_layer < curr_layer:  # Backward connection
-                    valid = False
-                    rejected_count += 1
-                    break
-            if valid:
-                filtered_paths.append(path)
-        
-        if rejected_count > 0:
-            print(f'  ℹ️  Filtered out {rejected_count} paths with backward connections (forward_only mode)')
-        paths = filtered_paths
-    
-    # Build DataFrame
-    path_blocks = []
-    weights = []
-    travPs = []
-    travP = []
-    ratios = []
-    ratio = []
-    weights_min = []
-    inter_layer_num = []
-    
-    # Track unique paths to avoid duplicates (use dict to keep best metrics for each path)
-    unique_paths = {}  # path_block -> {weights, travPs, travP, etc.}
-    
-    print(f'Building path data for {len(paths):,} found paths...', end='', flush=True)
-    
-    paths_processed = 0
-    for path_idx, p in enumerate(paths, 1):
-        if path_idx % 50000 == 0 or path_idx == len(paths):
-            print(f'\rBuilding path data for {len(paths):,} found paths... {path_idx:,}/{len(paths):,} ({path_idx/len(paths):.1%})\033[K', end='', flush=True)
-        
-        block = ''
-        w_p = []
-        travP_p = []
-        ratio_p = []
-        
-        for ind in range(len(p)):
-            block += (str(p[ind])+' -> ')
-            if ind + 1 < len(p):
-                # All edges should exist since paths were found from the same filtered graph
-                edge_data = G[str(p[ind])][str(p[ind+1])]
-                if 'layers' in edge_data:
-                    layer_idx = ind
-                    layer_key = f'{layer_idx}->{layer_idx+1}'
-                    if layer_key in edge_data['layers']:
-                        w_p.append(edge_data['layers'][layer_key]['weight'])
-                        travP_p.append(edge_data['layers'][layer_key]['probability'])
-                        ratio_p.append(edge_data['layers'][layer_key]['ratio'])
-                    else:
-                        w_p.append(edge_data['weight'])
-                        travP_p.append(edge_data['probability'])
-                        ratio_p.append(edge_data['ratio'])
-                else:
-                    w_p.append(edge_data['weight'])
-                    travP_p.append(edge_data['probability'])
-                    ratio_p.append(edge_data['ratio'])
-        
-        block = block[:-4]
-        curr_travP = np.prod(travP_p) if len(travP_p) > 0 else 0.0
-        
-        # Only keep this path if it's new or has better traversal probability than existing
-        if block not in unique_paths or curr_travP > unique_paths[block]['traversal_probability']:
-            unique_paths[block] = {
-                'weights': w_p,
-                'traversal_probabilities': travP_p,
-                'traversal_probability': curr_travP,
-                'connection_ratios': ratio_p,
-                'connection_ratio': min(ratio_p) if len(ratio_p) > 0 else 0.0,
-                'weight_min': min(w_p) if len(w_p) > 0 else 0,
-                'inter_layer_num': len(p) - 1
-            }
-        
-        paths_processed += 1
-    
-    # Final progress update to ensure 100% is shown
-    print(f'\rBuilding path data for {len(paths):,} found paths... {len(paths):,}/{len(paths):,} (100.0%)\033[K')
-    
-    # Convert unique_paths dict to lists for DataFrame
-    for block, metrics in unique_paths.items():
-        path_blocks.append(block)
-        weights.append(metrics['weights'])
-        travPs.append(metrics['traversal_probabilities'])
-        travP.append(metrics['traversal_probability'])
-        ratios.append(metrics['connection_ratios'])
-        ratio.append(metrics['connection_ratio'])
-        weights_min.append(metrics['weight_min'])
-        inter_layer_num.append(metrics['inter_layer_num'])
-    
-    if len(paths) > 0:
-        print(f'  → {len(unique_paths):,} unique paths ({len(unique_paths)/len(paths):.1%} of total)')
-    else:
-        print(f'  → {len(unique_paths):,} unique paths (no paths to process)')
-    print()
-    
-    # Create DataFrame
-    path_df = pd.DataFrame({
-        'path_block': path_blocks,
-        'inter_layer_num': inter_layer_num,  # Use inter_layer_num for compatibility with split_path()
-        'weights': weights,
-        'traversal_probabilities': travPs,
-        'traversal_probability': travP,
-        'connection_ratios': ratios,
-        'connection_ratio': ratio,
-        'weight_min': weights_min
-    })
-    
-    # Sort by traversal probability
-    path_df = path_df.sort_values(by='traversal_probability', ascending=False).reset_index(drop=True)
-    
     return path_df
 
+def path_filter(path_df, keyword_in_path_to_remove=None):
+    """
+    Filter paths containing specific keywords.
+    """
+    if path_df.empty or not keyword_in_path_to_remove:
+        return path_df, pd.DataFrame()
+        
+    if isinstance(keyword_in_path_to_remove, str):
+        keywords = [keyword_in_path_to_remove]
+    else:
+        keywords = keyword_in_path_to_remove
+        
+    mask = pd.Series(False, index=path_df.index)
+    if 'path_str' in path_df.columns:
+        for kw in keywords:
+            mask |= path_df['path_str'].str.contains(kw, na=False)
+    
+    excluded = path_df[mask].copy()
+    kept = path_df[~mask].copy()
+    
+    return kept, excluded
 
-def getAllPath(conn_data,targets,traversal_probability_threshold=0, max_path_length=None, real_layer_map=None):
+def build_path_dataframe_from_paths(paths, conn_data, targets, real_layer_map=None, level='type', type_lookup=None):
     """
-    Find all paths from sources to targets through a connection network.
-    
-    Parameters:
-    -----------
-    conn_data : DataFrame
-        DataFrame with columns [conn_layer, type_pre/bodyId_pre, type_post/bodyId_post, 
-        weight, connection_ratio, traversal_probability, ...]
-        Each row is already aggregated by (conn_layer, type_pre, type_post)
-    targets : list
-        List of target neuron IDs or types
-    traversal_probability_threshold : float, default=0
-        Minimum traversal probability for including paths
-    max_path_length : int, optional
-        Maximum path length (number of edges)
-    real_layer_map : dict, optional
-        Mapping of neuron ID/type -> real layer (discovery order).
-        If provided, paths will be validated to ensure:
-        1. No backward connections (next_real_layer >= current_real_layer)
-        2. No recurrent paths (same neuron appearing twice)
-        This allows lateral connections (same layer) but excludes backward and recurrent paths.
+    Build a DataFrame from a list of paths, calculating weights and probabilities.
     """
-    # Build NetworkX graph for pathfinding with edge attributes stored directly
-    G = nx.DiGraph()
-    for i in reversed(range(len(conn_data))):
-        layer = conn_data.iat[i,0]
-        layer_pre = int(layer[0])
-        layer_post = int(layer[-1])
-        node_pre = str(conn_data.iat[i,1])
-        node_post = str(conn_data.iat[i,2])
-        weight_i = conn_data.iat[i,3]
+    if not paths:
+        return pd.DataFrame()
         
-        # Get connection_ratio and traversal_probability
-        if 'connection_ratio' in conn_data.columns:
-            ratio_i = conn_data.iat[i, conn_data.columns.get_loc('connection_ratio')]
-        else:
-            ratio_i = 0.0
+    rows = []
+    
+    # Use tqdm for progress bar
+    path_iterator = tqdm(paths, desc=f"Building {level}-level paths", unit="path", 
+                         disable=len(paths) < 100)  # Only show for >= 100 paths
+    
+    for path in path_iterator:
+        # Calculate path metrics
+        weights = []
+        probs = []
+        ratios = []
         
-        if 'traversal_probability' in conn_data.columns:
-            travP_i = conn_data.iat[i, conn_data.columns.get_loc('traversal_probability')]
-        else:
-            travP_i = 0.0
+        # Determine source and target columns based on level
+        src_col = f'{level}_pre' if f'{level}_pre' in conn_data.columns else 'bodyId_pre'
+        tgt_col = f'{level}_post' if f'{level}_post' in conn_data.columns else 'bodyId_post'
         
-        G.add_node(node_post, layer=layer_post)
-        G.add_node(node_pre, layer=layer_pre)
-        
-        # Store edge with all metrics as attributes
-        # If duplicate edge exists (same pair in multiple layers), this will update/overwrite
-        # For pathfinding we just need connectivity, metrics are retrieved during path building
-        if G.has_edge(node_pre, node_post):
-            # Edge already exists - keep track of multiple layer instances
-            if 'layers' not in G[node_pre][node_post]:
-                # First duplicate - convert single layer to list
-                existing = G[node_pre][node_post]
-                G[node_pre][node_post]['layers'] = {
-                    existing['layer']: {
-                        'weight': existing['weight'],
-                        'probability': existing['probability'],
-                        'ratio': existing['ratio']
-                    }
-                }
-            # Add this layer's data
-            G[node_pre][node_post]['layers'][layer] = {
-                'weight': weight_i,
-                'probability': max(0.0, min(1.0, travP_i)),
-                'ratio': max(0.0, min(1.0, ratio_i))
-            }
-        else:
-            # First time seeing this edge
-            G.add_edge(node_pre, node_post,
-                      layer=layer,
-                      weight=weight_i,
-                      probability=max(0.0, min(1.0, travP_i)),
-                      ratio=max(0.0, min(1.0, ratio_i)))
-    
-    nodes_info = dict(G.nodes(data='layer'))
-    connN = max(conn_data.conn_layer)
-    layerN = int(connN[-1]) + 1
-    
-    # Use max_path_length if provided, otherwise use layerN
-    if max_path_length is None:
-        max_path_length = layerN
-    
-    sources = conn_data.loc[conn_data.conn_layer=='0->1']
-    sources = sources.iloc[:,1].unique().tolist()
-    paths = []
-    pairN = len(sources) * len(targets)
-    count = 0
-    
-    # Use optimized DFS instead of nx.all_simple_paths for better performance
-    target_set = set(str(t) for t in targets)
-    
-    def dfs_find_paths(G, source, targets_set, cutoff, real_layer_map=None):
-        """
-        Find all paths from source to targets using DFS with backtracking.
-        Much faster than nx.all_simple_paths for large graphs.
-        """
-        found_paths = []
-        
-        def dfs(current, path, visited):
-            # Check if we reached a target
-            if current in targets_set:
-                # Validate path with real_layer_map if provided
-                if real_layer_map is not None:
-                    valid = True
-                    for i in range(len(path) - 1):
-                        curr_layer = real_layer_map.get(path[i], -1)
-                        next_layer = real_layer_map.get(path[i+1], -1)
-                        if next_layer < curr_layer:  # Backward connection
-                            valid = False
-                            break
-                    if valid:
-                        found_paths.append(list(path))
-                else:
-                    found_paths.append(list(path))
+        valid_path = True
+        for i in range(len(path) - 1):
+            u, v = path[i], path[i+1]
+            # Find connection
+            conn = conn_data[(conn_data[src_col] == u) & (conn_data[tgt_col] == v)]
+            if conn.empty:
+                # Try checking if u or v are in the columns directly (sometimes types are strings)
+                conn = conn_data[(conn_data[src_col].astype(str) == str(u)) & (conn_data[tgt_col].astype(str) == str(v))]
             
-            # Stop if reached max depth
-            if len(path) - 1 >= cutoff:
-                return
+            if conn.empty:
+                # Debug print for first failure
+                if len(rows) == 0 and i == 0:
+                    print(f"Debug: Failed to find connection {u} -> {v} in conn_data")
+                    print(f"  src_col: {src_col}, tgt_col: {tgt_col}")
+                    print(f"  u type: {type(u)}, v type: {type(v)}")
+                    print(f"  conn_data columns: {conn_data.columns}")
+                    if not conn_data.empty:
+                        print(f"  Sample conn_data {src_col}: {conn_data[src_col].iloc[0]} ({type(conn_data[src_col].iloc[0])})")
+                valid_path = False
+                break
+                
+            # Get weight and probability
+            w = conn['weight'].sum()
+            p = conn['traversal_probability'].mean() if 'traversal_probability' in conn.columns else 0
+            r = conn['connection_ratio'].mean() if 'connection_ratio' in conn.columns else 0
             
-            # Explore neighbors
-            if current in G:
-                for neighbor in G.neighbors(current):
-                    if neighbor not in visited:
-                        path.append(neighbor)
-                        visited.add(neighbor)
-                        dfs(neighbor, path, visited)
-                        path.pop()
-                        visited.remove(neighbor)
-        
-        if source in G:
-            dfs(source, [source], {source})
-        return found_paths
-    
-    for source_i in sources:
-        for target_j in targets:
-            count += 1
-            print(f'\rsource-target pairs processed: {count}/{pairN} ({count/pairN:.1%})\033[K', end='', flush=True)
-            if nx.has_path(G,str(source_i),str(target_j)):
-                # Use optimized DFS instead of nx.all_simple_paths
-                curr_paths = dfs_find_paths(G, str(source_i), target_set, max_path_length, real_layer_map)
-                
-                # Apply original layer validation if real_layer_map not used
-                if real_layer_map is None:
-                    for p in reversed(range(len(curr_paths))):
-                        pp = curr_paths[p]
-                        if len(pp) > layerN: # exclude paths whose layers are not monotonically increasing
-                            curr_paths.pop(p)
-                        else: # exclude paths not following the layer order
-                            for i in range(1,len(pp)-1):
-                                node_layer = nodes_info[pp[i]]
-                                if node_layer != i:
-                                    curr_paths.pop(p)
-                                    break
-                
-                paths += curr_paths
-    print()
-    
-    # Building path data structures (extracting metrics from graph edges - NO lookups needed!)
-    total_paths = len(paths)
-    print(f'Building path data for {total_paths} found paths...', end='', flush=True)
-    path_blocks = []
-    weights = []
-    travPs = [] # traversal probability between nodes of each path
-    travP = [] # traversal probability of the path, equal to prod(travPs[i])
-    ratios = [] # connection ratio between nodes of each path
-    ratio = [] # minimum connection ratio of the path
-    weights_min = []
-    inter_layer_num = []
-    for path_idx, p in enumerate(paths, 1):
-        block = ''
-        w_p = []
-        travP_p = []
-        ratio_p = []
-        for ind in range(len(p)):
-            block += (p[ind]+' -> ')
-            if ind + 1 < len(p):
-                # Get edge data directly from graph - instant O(1) access!
-                edge_data = G[p[ind]][p[ind+1]]
-                
-                # Check if edge has multiple layer instances
-                if 'layers' in edge_data:
-                    # Edge exists in multiple layers - try to get the right layer
-                    layer_label = f"{ind}->{ind+1}"
-                    if layer_label in edge_data['layers']:
-                        metrics = edge_data['layers'][layer_label]
-                        weight_edge = metrics['weight']
-                        travP_edge = metrics['probability']
-                        ratio_edge = metrics['ratio']
+            weights.append(w)
+            probs.append(p)
+            ratios.append(r)
+            
+        if valid_path:
+            # Extract nt_types if available
+            nt_types = []
+            if 'nt_type' in conn_data.columns:
+                for i in range(len(path) - 1):
+                    u, v = path[i], path[i+1]
+                    conn = conn_data[(conn_data[src_col] == u) & (conn_data[tgt_col] == v)]
+                    if conn.empty:
+                        conn = conn_data[(conn_data[src_col].astype(str) == str(u)) & (conn_data[tgt_col].astype(str) == str(v))]
+                    
+                    if not conn.empty:
+                        # Get unique nt_types
+                        types = conn['nt_type'].dropna().unique().tolist()
+                        # Filter valid types
+                        valid_types = sorted([str(t) for t in types if t and str(t).lower() != 'none' and str(t).lower() != 'nan'])
+                        if valid_types:
+                            nt_types.append('|'.join(valid_types))
+                        else:
+                            nt_types.append('Unknown')
                     else:
-                        # Layer mismatch - use first available layer
-                        first_layer = next(iter(edge_data['layers'].values()))
-                        weight_edge = first_layer['weight']
-                        travP_edge = first_layer['probability']
-                        ratio_edge = first_layer['ratio']
-                else:
-                    # Single layer edge - use directly
-                    weight_edge = edge_data.get('weight', 0)
-                    travP_edge = edge_data.get('probability', 0)
-                    ratio_edge = edge_data.get('ratio', 0)
-                
-                w_p.append(weight_edge)
-                travP_p.append(travP_edge)
-                ratio_p.append(ratio_edge)
-        block = block[:-4]
-        path_blocks.append(block)
-        weights.append(w_p)
-        weights_min.append(min(w_p) if len(w_p) > 0 else 0)
-        travPs.append(travP_p)
-        travP.append(np.prod(travP_p) if len(travP_p) > 0 else 0)
-        ratios.append(ratio_p)
-        ratio.append(min(ratio_p) if len(ratio_p) > 0 else 0)
-        inter_layer_num.append(len(p)-2)
-        
-        # Show progress every 1000 paths or at completion (update on same line)
-        if path_idx % 1000 == 0 or path_idx == total_paths:
-            print(f'\rBuilding path data for {total_paths} found paths... {path_idx}/{total_paths} ({path_idx/total_paths:.1%})\033[K', end='', flush=True)
-    print()  # New line after completion
-    
-    print('Creating DataFrame and sorting paths...', end='', flush=True)
-    source_nodes = [p[0] for p in paths]
-    target_nodes = [p[-1] for p in paths]
-    path_dict = {
-        'path_block': path_blocks,
-        'inter_layer_num': inter_layer_num,
-        'traversal_probability': travP,
-        'min_connection_ratio': ratio,
-        'min_weight': weights_min,
-        'traversal_probabilities': travPs,
-        'connection_ratios': ratios,
-        'weights': weights,
-        'source': source_nodes,
-        'target': target_nodes
-    }
-    path_df = pd.DataFrame.from_dict(path_dict)
-    path_df = path_df.sort_values(by=['traversal_probability','inter_layer_num','min_weight'],ascending=[False,True,False])
-    path_df = path_df.reset_index(drop=True)
-    path_df = path_df.loc[path_df.traversal_probability >= traversal_probability_threshold]
-    print(' ✓')
-    
-    return path_df,paths
+                        nt_types.append('Unknown')
+            
+            # Format path string with types
+            if type_lookup:
+                path_formatted_parts = []
+                for node in path:
+                    node_type = 'Unknown'
+                    # Handle potential string/int mismatch in lookup keys
+                    t = type_lookup.get(node)
+                    if t is None:
+                        t = type_lookup.get(str(node))
+                    if t is None and isinstance(node, str) and node.isdigit():
+                         t = type_lookup.get(int(node))
+                    if t is not None:
+                        node_type = str(t)
+                    path_formatted_parts.append(f"{node}_{node_type}")
+                path_formatted = "->".join(path_formatted_parts)
+            else:
+                # No type lookup provided (e.g. level='type'), just join nodes
+                path_formatted = "->".join(map(str, path))
 
-def merge_conn_roi(neuron_df, roi_conn_df):
-    '''
-    used for merging the roi_conn_df and neuron_df fetched by neuprint.fetch_adjacencies() \n
-    return a merged dataframe with columns: bodyId_pre, bodyId_post, weight, type_pre, type_post \n
-    same as output of neuprint.fetch_simple_connections()
-    '''
-    conn_df:pd.DataFrame = roi_conn_df.groupby(['bodyId_pre','bodyId_post'],as_index=False)['weight'].sum()
-    # add the neuron type information to conn_df from ndf, as type_pre and type_post, according to bodyId_pre and bodyId_post
-    conn_df = conn_df.merge(neuron_df[['bodyId','type']],left_on='bodyId_pre',right_on='bodyId',how='left').drop(columns=['bodyId'])
-    # change the column name from type to type_pre
-    conn_df = conn_df.rename(columns={'type':'type_pre'})
-    # add type_post
-    conn_df = conn_df.merge(neuron_df[['bodyId','type']],left_on='bodyId_post',right_on='bodyId',how='left').drop(columns=['bodyId'])
-    conn_df = conn_df.rename(columns={'type':'type_post'})
-    # sort by weight and reset index
-    conn_df = conn_df.sort_values(by=['weight','bodyId_pre','bodyId_post'],ascending=[False,True,True]).reset_index(drop=True)
-    return conn_df
+            row = {
+                'path_str': path,
+                'path': path_formatted,
+                'weights': weights,
+                'probabilities': probs,
+                'ratios': ratios,
+                'min_weight': min(weights) if weights else 0,
+                'path_prob': np.prod(probs) if probs else 0,
+                'min_ratio': min(ratios) if ratios else 0,
+                'length': len(path) - 1
+            }
+            
+            if nt_types:
+                row['nt_types'] = nt_types
+            
+            # Add path types if lookup is provided
+            if type_lookup:
+                path_types = []
+                for node in path:
+                    # Handle potential string/int mismatch in lookup keys
+                    node_type = type_lookup.get(node)
+                    if node_type is None:
+                        node_type = type_lookup.get(str(node))
+                    if node_type is None and isinstance(node, str) and node.isdigit():
+                         node_type = type_lookup.get(int(node))
+                    
+                    path_types.append(str(node_type) if node_type is not None else 'Unknown')
+                row['path_types'] = path_types
+                
+            rows.append(row)
+            
+    return pd.DataFrame(rows)
 
 def EnrichConnectionTable(conn_table, traversal_probability_threshold=0, dataset=None, script_path=None, target_neurons_df=None, aggregate_method='product'):
     '''Add traversal probability, connection ratio, and layer information to the connection table
@@ -4650,42 +3975,136 @@ def EnrichConnectionTable(conn_table, traversal_probability_threshold=0, dataset
     
     # Try to use local dataset first
     use_local = False
+    ndf_complete = None
     if dataset and script_path:
+        dataset_clean = dataset.replace(':', '_').replace('.', '_')
+        # Prioritize subdirectory structure
         dataset_path = os.path.join(
             script_path,
             'datasets',
-            f"{dataset.replace(':', '_').replace('.', '_')}_allneurons_neuron_df.csv"
+            dataset_clean,
+            f"{dataset_clean}_allneurons_neuron_df.csv"
         )
+        
+        # Enhanced dataset discovery logic
+        if not os.path.exists(dataset_path):
+            # Fallback: Try root datasets folder (legacy)
+            legacy_path = os.path.join(
+                script_path,
+                'datasets',
+                f"{dataset_clean}_allneurons_neuron_df.csv"
+            )
+            if os.path.exists(legacy_path):
+                dataset_path = legacy_path
+            else:
+                # Try globbing for any *_allneurons_neuron_df.csv in subdir
+                subdir_path = os.path.join(script_path, 'datasets', dataset_clean)
+                if os.path.exists(subdir_path):
+                    import glob
+                    candidates = glob.glob(os.path.join(subdir_path, "*_allneurons_neuron_df.csv"))
+                    if candidates:
+                        dataset_path = candidates[0]
+
         if os.path.exists(dataset_path):
             use_local = True
-            ndf_complete = pd.read_csv(dataset_path, header=0, index_col=0)
-            bodyIds_needed = conn_df.bodyId_post.unique().tolist()
+            # Handle FlyWire/FAFB which might use string bodyIds
+            if 'flywire' in dataset.lower() or 'fafb' in dataset.lower():
+                ndf_complete = pd.read_csv(dataset_path, header=0, index_col=None, dtype={'bodyId': str}, low_memory=False)
+            else:
+                ndf_complete = pd.read_csv(dataset_path, header=0, index_col=0, low_memory=False)
+            
+            # Ensure bodyId column is string for comparison
+            if 'bodyId' in ndf_complete.columns:
+                ndf_complete['bodyId'] = ndf_complete['bodyId'].astype(str)
+                
+            bodyIds_needed = conn_df.bodyId_post.astype(str).unique().tolist()
             df_post = ndf_complete[ndf_complete['bodyId'].isin(bodyIds_needed)][['bodyId', 'post']].copy()
     
     if not use_local:
         # Fallback to API call
-        df_post, _ = fetch_neurons(conn_df.bodyId_post.tolist())
-        df_post = df_post[['bodyId', 'post']]
+        # Note: fetch_neurons is not available in this context, so we rely on target_neurons_df or existing data
+        if target_neurons_df is not None:
+            # Ensure consistent types for filtering (convert to string to handle int64 vs str mismatch)
+            target_bodyIds = target_neurons_df['bodyId'].astype(str);
+            conn_bodyIds = conn_df.bodyId_post.astype(str).unique();
+            
+            df_post = target_neurons_df[target_bodyIds.isin(conn_bodyIds)][['bodyId', 'post']].copy();
+        else:
+            # Last resort: assume post info might be in conn_df or we can't get it
+            # If we can't get it, we can't calculate connection_ratio accurately
+            print("Warning: Could not fetch neuron info for connection ratio calculation.");
+            df_post = pd.DataFrame(columns=['bodyId', 'post']);
     
-    post_info = df_post.copy()
-    post_info.columns = ['bodyId_post','post']
+    post_info = df_post.copy();
+    post_info.columns = ['bodyId_post','post'];
     
     # Handle case where type_pre/type_post columns already exist (from cache enrichment)
     if 'type_pre' in conn_df.columns:
-        conn_df.loc[conn_df.type_pre.isnull(),'type_pre'] = 'None'
+        conn_df.loc[conn_df.type_pre.isnull(),'type_pre'] = 'Unknown';
+    else:
+        conn_df['type_pre'] = 'Unknown';
+        
     if 'type_post' in conn_df.columns:
-        conn_df.loc[conn_df.type_post.isnull(),'type_post'] = 'None'
+        conn_df.loc[conn_df.type_post.isnull(),'type_post'] = 'Unknown';
+    else:
+        conn_df['type_post'] = 'Unknown';
+
+    # Update types from local dataset if available
+    if use_local and ndf_complete is not None and 'type' in ndf_complete.columns:
+        # Ensure bodyIds are strings
+        conn_df['bodyId_pre'] = conn_df['bodyId_pre'].astype(str);
+        conn_df['bodyId_post'] = conn_df['bodyId_post'].astype(str);
+        
+        # Map types if missing or empty
+        type_map = ndf_complete.set_index('bodyId')['type'].to_dict();
+        
+        # Update type_pre
+        mask_pre = (conn_df['type_pre'].isnull()) | (conn_df['type_pre'] == '') | (conn_df['type_pre'] == 'Unknown')
+        if mask_pre.any():
+            conn_df.loc[mask_pre, 'type_pre'] = conn_df.loc[mask_pre, 'bodyId_pre'].map(type_map).fillna('Unknown')
+            
+        # Update type_post
+        mask_post = (conn_df['type_post'].isnull()) | (conn_df['type_post'] == '') | (conn_df['type_post'] == 'Unknown')
+        if mask_post.any():
+            conn_df.loc[mask_post, 'type_post'] = conn_df.loc[mask_post, 'bodyId_post'].map(type_map).fillna('Unknown')
+
     # Fill custom_group columns if they exist
     if 'custom_group_pre' in conn_df.columns:
         conn_df.loc[conn_df.custom_group_pre.isnull(),'custom_group_pre'] = conn_df.loc[conn_df.custom_group_pre.isnull(),'type_pre']
     if 'custom_group_post' in conn_df.columns:
         conn_df.loc[conn_df.custom_group_post.isnull(),'custom_group_post'] = conn_df.loc[conn_df.custom_group_post.isnull(),'type_post']
     
+    # Ensure bodyId columns are strings for merging to avoid warnings
+    conn_df['bodyId_post'] = conn_df['bodyId_post'].astype(str)
+    post_info['bodyId_post'] = post_info['bodyId_post'].astype(str)
+
     conn_df = conn_df.merge(post_info,how='left',on='bodyId_post')
-    conn_df.insert(loc=len(conn_df.columns),column='connection_ratio',value=conn_df.weight/conn_df.post)
-    conn_df.insert(loc=3,column='traversal_probability',value=conn_df.connection_ratio/0.3)
+    
+    # Handle potential column collision if 'post' already existed (creates post_x, post_y)
+    if 'post_x' in conn_df.columns and 'post_y' in conn_df.columns:
+        # Prefer the new info (post_y) if available, otherwise keep old (post_x)
+        conn_df['post'] = conn_df['post_y'].fillna(conn_df['post_x'])
+        conn_df = conn_df.drop(columns=['post_x', 'post_y'])
+        
+    # Calculate connection_ratio (handle if already exists)
+    if 'connection_ratio' in conn_df.columns:
+        conn_df['connection_ratio'] = conn_df.weight / conn_df.post
+    else:
+        conn_df.insert(loc=len(conn_df.columns),column='connection_ratio',value=conn_df.weight/conn_df.post)
+        
+    # Calculate traversal_probability (handle if already exists)
+    if 'traversal_probability' in conn_df.columns:
+        conn_df['traversal_probability'] = conn_df.connection_ratio / 0.3
+    else:
+        conn_df.insert(loc=3,column='traversal_probability',value=conn_df.connection_ratio/0.3)
+    
     conn_df.loc[conn_df.traversal_probability > 1,'traversal_probability'] = 1
-    conn_df.insert(loc=len(conn_df.columns),column='block_probability',value= 1 - conn_df.traversal_probability)
+    
+    # Calculate block_probability (handle if already exists)
+    if 'block_probability' in conn_df.columns:
+        conn_df['block_probability'] = 1 - conn_df.traversal_probability
+    else:
+        conn_df.insert(loc=len(conn_df.columns),column='block_probability',value= 1 - conn_df.traversal_probability)
     
     conn_df = conn_df.loc[conn_df.traversal_probability >= traversal_probability_threshold]
     
@@ -4693,14 +4112,29 @@ def EnrichConnectionTable(conn_table, traversal_probability_threshold=0, dataset
     # Use custom_group if available, otherwise fall back to type
     # Calculate from bodyId level to ensure accuracy (neurons in connections, not types in connections)
     # First deduplicate by bodyId pairs to avoid counting same connection multiple times
-    bodyid_pairs = conn_df[['bodyId_pre', 'bodyId_post', group_pre, group_post, 'weight']].drop_duplicates(subset=['bodyId_pre', 'bodyId_post'])
-    weight_sum = bodyid_pairs.groupby([group_pre, group_post])['weight'].sum().reset_index(name='weight')
+    cols_to_keep = ['bodyId_pre', 'bodyId_post', group_pre, group_post, 'weight']
+    has_nt = 'nt_type' in conn_df.columns
+    if has_nt:
+        cols_to_keep.append('nt_type')
+        
+    bodyid_pairs = conn_df[cols_to_keep].drop_duplicates(subset=['bodyId_pre', 'bodyId_post'])
+    
+    if has_nt:
+        # For nt_type, take the most frequent one (mode)
+        weight_sum = bodyid_pairs.groupby([group_pre, group_post]).agg({
+            'weight': 'sum',
+            'nt_type': lambda x: x.mode().iloc[0] if not x.mode().empty else None
+        }).reset_index()
+    else:
+        weight_sum = bodyid_pairs.groupby([group_pre, group_post])['weight'].sum().reset_index(name='weight')
     
     # Calculate total incoming weights per group_post (sum across all group_pre sources)
     total_incoming_per_type = weight_sum.groupby(group_post)['weight'].sum().reset_index(name='total_incoming_weight')
 
     # Calculate total post-synaptic sites for ALL neurons of each group_post
-    if target_neurons_df is not None:
+    # Only use target_neurons_df if we don't have a local dataset, or if we specifically need it for custom groups
+    # If use_local is True and we are using standard types, we prefer the full dataset to ensure we get counts for all intermediate types
+    if target_neurons_df is not None and (not use_local or group_post != 'type_post'):
         # Determine which column to use for grouping in target_neurons_df
         target_group_col = 'custom_group' if 'custom_group' in target_neurons_df.columns else 'type'
         if target_group_col in target_neurons_df.columns and 'post' in target_neurons_df.columns:
@@ -4759,12 +4193,10 @@ def EnrichConnectionTable(conn_table, traversal_probability_threshold=0, dataset
                             neurons_in_group = ndf_complete[ndf_complete['type'].isin(types)][['bodyId', 'post']].copy()
                             total_post = neurons_in_group['post'].sum()
                             group_post_totals.append({'custom_group_post': grp, 'total_post': total_post})
-                        
                         type_post_totals = pd.DataFrame(group_post_totals)
                     else:
                         # Last resort: use only neurons appearing in connections
-                        all_post_neurons = conn_df[['custom_group_post', 'bodyId_post', 'post']].drop_duplicates(subset=['bodyId_post'])
-                        type_post_totals = all_post_neurons.groupby('custom_group_post')['post'].sum().reset_index(name='total_post')
+                        type_post_totals = conn_df[['custom_group_post', 'bodyId_post', 'post']].drop_duplicates(subset=['bodyId_post']).groupby('custom_group_post')['post'].sum().reset_index(name='total_post')
             else:
                 # Standard type-based grouping
                 all_post_neurons = ndf_complete[ndf_complete['type'].isin(groups_in_conn)][['type', 'post']].copy()
@@ -4868,7 +4300,80 @@ def EnrichConnectionTable(conn_table, traversal_probability_threshold=0, dataset
         # No custom groups - return original type aggregation only
         conn_type = conn_aggregated.rename(columns={group_pre: 'type_pre', group_post: 'type_post'})
         return conn_df, conn_type, None
+
+
+def SankeyDirect(cmat, file_path, showfig=True, node_color='rgba(31, 119, 180, 0.8)', link_color='rgba(0, 0, 0, 0.2)'):
+    """
+    Create a Sankey diagram from a connection matrix.
     
+    Parameters
+    ----------
+    cmat : pd.DataFrame
+        Connection matrix (rows=source, cols=target)
+    file_path : str
+        Path to save the HTML file
+    showfig : bool
+        Whether to show the figure
+    node_color : str
+        Color for nodes
+    link_color : str
+        Color for links
+    """
+    import plotly.graph_objects as go
+    
+    # Get sources and targets
+    sources = cmat.index.tolist()
+    targets = cmat.columns.tolist()
+    
+    # Create node list (sources + targets)
+    # Treat them as bipartite for "Direct" connection
+    # Source nodes indices: 0 to len(sources)-1
+    # Target nodes indices: len(sources) to len(sources)+len(targets)-1
+    
+    labels = sources + targets
+    
+    # Create links
+    source_indices = []
+    target_indices = []
+    values = []
+    
+    for i, src in enumerate(sources):
+        for j, tgt in enumerate(targets):
+            val = cmat.at[src, tgt]
+            if val > 0:
+                source_indices.append(i)
+                target_indices.append(len(sources) + j)
+                values.append(val)
+
+    if not values:
+        print("No connections to plot in Sankey diagram.")
+        return
+
+    # Create figure
+    fig = go.Figure(data=[go.Sankey(
+        node = dict(
+          pad = 15,
+          thickness = 20,
+          line = dict(color = "black", width = 0.5),
+          label = labels,
+          color = node_color
+        ),
+        link = dict(
+          source = source_indices,
+          target = target_indices,
+          value = values,
+          color = link_color
+      ))])
+
+    fig.update_layout(title_text="Direct Connections Sankey Diagram", font_size=10)
+    
+    # Save
+    fig.write_html(file_path)
+    print(f"Sankey diagram saved to {file_path}")
+    
+    if showfig:
+        fig.show()
+
 def ConcatenateIMG2PDF(folder_path,file_format=['png','jpg'],filename='PDF_sum',include_subfolder=False):
     ''' Concatenate all images in a folder to a single PDF file.'''
     if 'jpg' in file_format:
@@ -4919,6 +4424,8 @@ def Vis3S(data_df,**kwargs):
         "synapseRadius" : 100,
         "synpase_file_path" : None,
         "save_format": '.png',
+        "dataset": 'hemibrain',
+        "data_folder": None
     }
     options.update(kwargs)
     if options['snp_rois'] != None and options['mesh_roi'] == None: 
@@ -4926,46 +4433,73 @@ def Vis3S(data_df,**kwargs):
     elif options['snp_rois'] == None and options['mesh_roi'] == None:
         options['mesh_roi'] = ['LH(R)', 'AL(R)', 'EB']
     op = SimpleNamespace(**options)
-    print(op.mesh_roi)
     
+    # Mesh loading
+    roimesh = None
     if op.show_mesh:
         roiunits = []
-        for roi in op.mesh_roi:
-            mesh_file = os.path.join('navis_roi_meshes_json',op.roi_range,roi+'.json')
-            if os.path.exists(mesh_file):
-                mesh = navis.Volume.from_json(os.path.join('navis_roi_meshes_json',op.roi_range,roi+'.json'))
-                roiunits.append(mesh)
-            else:
-                print('mesh file %s.json not found!'%(roi))
-        roimesh = navis.Volume.combine(roiunits)
+        # Only load meshes for hemibrain for now, or if we have FAFB meshes
+        # FAFB meshes are not standard in this repo yet
+        if 'hemibrain' in str(op.dataset).lower():
+            for roi in op.mesh_roi:
+                mesh_file = os.path.join('navis_roi_meshes_json',op.roi_range,roi+'.json')
+                if os.path.exists(mesh_file):
+                    mesh = navis.Volume.from_json(mesh_file)
+                    roiunits.append(mesh)
+                else:
+                    print('mesh file %s.json not found!'%(roi))
+            if roiunits:
+                roimesh = navis.Volume.combine(roiunits)
+    
     if op.toPlot == 'synapse':
-        snp_file = pd.ExcelFile(op.synapse_file_path)
+        if op.synapse_file_path:
+            snp_file = pd.ExcelFile(op.synapse_file_path)
+        else:
+            print("Warning: synapse_file_path not provided for synapse plot")
+            return
+
     summary_df = data_df.copy()
     if op.toPlot == 'soma':
-        print('not found soma of %d neurons'%(summary_df['somaLocation'].isnull().sum()))
-        summary_df = summary_df[summary_df['somaLocation'].notnull()]
+        if 'somaLocation' in summary_df.columns:
+            print('not found soma of %d neurons'%(summary_df['somaLocation'].isnull().sum()))
+            summary_df = summary_df[summary_df['somaLocation'].notnull()]
+        else:
+            print("Warning: somaLocation column missing")
     elif op.toPlot == 'synapse_distribution':
-        print('drop %d neurons having no more than 1 synapses in the ROI'%((summary_df['snpN_roi']<=1).sum()))
-        summary_df = summary_df[summary_df['snpN_roi'] > 1]
-    print('drop %d unclassified neurons'%(summary_df[op.classby].isnull().sum()))
-    summary_df = summary_df[summary_df[op.classby].notnull()]
+        if 'snpN_roi' in summary_df.columns:
+            print('drop %d neurons having no more than 1 synapses in the ROI'%((summary_df['snpN_roi']<=1).sum()))
+            summary_df = summary_df[summary_df['snpN_roi'] > 1]
+            
+    if op.classby in summary_df.columns:
+        print('drop %d unclassified neurons'%(summary_df[op.classby].isnull().sum()))
+        summary_df = summary_df[summary_df[op.classby].notnull()]
     summary_df = summary_df.reset_index(drop=True)
     
-    classes = sorted(summary_df[op.classby].unique().tolist())
+    classes = sorted(summary_df[op.classby].unique().tolist()) if op.classby in summary_df.columns else ['All']
     classN = len(classes)
     print('categorized by %s:'%(op.classby), classes)
-    multi_factor = int(np.ceil(classN / len(op.facecolor)))
-    if multi_factor > 1: 
-        print('Repeated colors were used in plot.')
-        op.facecolor *= multi_factor
-    op.facecolor = op.facecolor[:classN]
-    legend_handles = [mp.Patch(color=op.facecolor[i],label=classes[i]) for i in range(len(classes))]
+    
+    # Color handling
+    colors = op.facecolor
+    if isinstance(colors, list):
+        multi_factor = int(np.ceil(classN / len(colors)))
+        if multi_factor > 1: 
+            print('Repeated colors were used in plot.')
+            colors *= multi_factor
+        colors = colors[:classN]
+    
+    legend_handles = [mp.Patch(color=colors[i],label=classes[i]) for i in range(len(classes))]
+    
+    # Subplot layout
     lower = int(np.sqrt(classN))
     upper = int(np.ceil(np.sqrt(classN)))
     if lower**2 <= classN <= lower*upper:
         rowN = lower
         colN = upper
     elif lower*upper < classN < upper**2:
+        rowN = upper
+        colN = upper
+    else:
         rowN = upper
         colN = upper
     rowN = max(rowN,2)
@@ -4976,454 +4510,344 @@ def Vis3S(data_df,**kwargs):
     fig_sup, axes = plt.subplots(nrows=rowN,ncols=colN,sharex=True,sharey=True,dpi=op.dpi,subplot_kw={'aspect': 'equal'})
     np.vectorize(lambda axes:axes.axis('off'))(axes)
     fig_sup.suptitle(op.title+'_subplots')
+    
     ellipses = []
     skeletons = []
+    
+    # Load skeletons if needed
+    if op.toPlot == 'skeleton':
+        if 'fafb' in str(op.dataset).lower() or 'flywire' in str(op.dataset).lower():
+            import fafb_utils
+            import zipfile
+            import io
+            
+            if op.data_folder is None:
+                 project_root = os.path.dirname(os.path.dirname(__file__))
+                 op.data_folder = os.path.join(project_root, "datasets", "flywire_FAFB_v783")
+            
+            zip_path = fafb_utils.get_fafb_skeleton_zip(op.data_folder)
+            if zip_path:
+                print(f"Loading skeletons from {zip_path}...")
+                try:
+                    with zipfile.ZipFile(zip_path, 'r') as z:
+                        all_files = set(z.namelist())
+                        for ind in summary_df.index:
+                            bodyid = str(summary_df.at[ind,'bodyId'])
+                            filename = f"{bodyid}.swc"
+                            if filename in all_files:
+                                with z.open(filename) as f:
+                                    content = f.read()
+                                    try:
+                                        n = navis.read_swc(io.BytesIO(content))
+                                        n.name = bodyid
+                                        # Assign color based on class
+                                        cls = summary_df.at[ind, op.classby]
+                                        cls_idx = classes.index(cls)
+                                        n.color = colors[cls_idx]
+                                        skeletons.append(n)
+                                    except Exception as e:
+                                        print(f"Error reading SWC for {bodyid}: {e}")
+                            else:
+                                # print(f"Skeleton for {bodyid} not found in zip.")
+                                pass
+                except Exception as e:
+                    print(f"Error opening zip file: {e}")
+        else:
+            # Hemibrain fetch
+            try:
+                from neuprint import fetch_skeletons
+                # Batch fetch might be better but let's do simple for now
+                # Or use navis.fetch_skeletons
+                # Assuming fetch_skeletons returns NeuronList
+                # We need to map colors
+                pass 
+            except ImportError:
+                pass
+
     for i,cla in enumerate(classes):
         df = summary_df[summary_df[op.classby] == cla]
         ax_x = i % rowN
         ax_y = int(i / rowN)
-        # print("subplot pos: row = %d,col = %d"%(ax_x,ax_y))
-        navis.plot2d(roimesh,method='2d',ax=axes[ax_x,ax_y],view=(op.plane[0],op.plane[1]),color=op.mesh_color,alpha=op.mesh_alpha)
-        if op.toPlot != 'skeleton':
-            ellipse_class = []
+        
+        # Plot mesh
+        if roimesh:
+            navis.plot2d(roimesh,method='2d',ax=axes[ax_x,ax_y],view=(op.plane[0],op.plane[1]),color=op.mesh_color,alpha=op.mesh_alpha)
+        
+        if op.toPlot == 'skeleton':
+            # Filter skeletons for this class
+            class_skels = [s for s in skeletons if getattr(s, 'name', '') in df['bodyId'].astype(str).values]
+            if class_skels:
+                navis.plot2d(class_skels, method='2d', ax=axes[ax_x,ax_y], view=(op.plane[0],op.plane[1]), color=colors[i], alpha=op.alpha)
+                
+        elif op.toPlot == 'soma':
             for ind in df.index:
-                if op.toPlot == 'soma':
+                if 'somaLocation' in df.columns and isinstance(df.at[ind,'somaLocation'], str):
                     somaLoc_str = df.at[ind,'somaLocation'][1:-1].split(', ')
                     name_str = 'xyz'
-                    somaLoc = {name_str[i]: int(somaLoc_str[i]) for i in range(3)}
+                    somaLoc = {name_str[k]: int(somaLoc_str[k]) for k in range(3)}
                     e = mp.Circle(xy = (somaLoc[op.plane[0]], somaLoc[op.plane[1]]),
-                            radius = df.at[ind,'somaRadius'],
+                            radius = df.at[ind,'somaRadius'] if 'somaRadius' in df.columns else 100,
                             alpha = op.alpha,
-                            facecolor = op.facecolor[i],
+                            facecolor = colors[i],
                     )
-                    ellipse_class.append(e)
                     ellipses.append(copy(e))
-                elif op.toPlot == 'synapse_distribution':
-                    e = mp.Ellipse(xy = (df.at[ind,'centroid_'+op.plane[0]], df.at[ind,'centroid_'+op.plane[1]]),
-                                width = df.at[ind,'error_'+op.plane[0]] * 2,
-                                height = df.at[ind,'error_'+op.plane[1]] * 2,
-                                angle = 0,
-                                alpha = op.alpha,
-                                facecolor = op.facecolor[i],
-                    )
-                    ellipse_class.append(e)
-                    ellipses.append(copy(e))
-                elif op.toPlot == 'synapse':
-                    bodyid = int(df.at[ind,'bodyId'])
-                    snp_info = snp_file.parse(str(bodyid))
-                    if op.site != None:
-                        snp_info = snp_info[snp_info.type == op.site]
-                    if op.snp_rois != None:
-                        snp_info = snp_info[snp_info.roi.isin(op.snp_rois)]
-                    if op.confidence != None:
-                        snp_info = snp_info[snp_info.confidence >= op.confidence]
-                    for ind in snp_info.index:
-                        x = snp_info.at[ind,op.plane[0]]
-                        y = snp_info.at[ind,op.plane[1]]
-                        e = mp.Circle(xy=(x,y),
-                                        radius=op.synapseRadius,
-                                        alpha=op.alpha,
-                                        facecolor=op.facecolor[i])
-                        ellipse_class.append(e)
-                        ellipses.append(copy(e))     
-            for e in ellipse_class:
-                axes[ax_x,ax_y].add_artist(e)
-        elif op.toPlot == 'skeleton':
-            skeletons_cla = neu.fetch_skeletons(df.bodyId.tolist())
-            skeletons += skeletons_cla
-            navis.plot2d(skeletons_cla,method='2d',ax=axes[ax_x,ax_y],view=(op.plane[0],op.plane[1]),color=op.facecolor[i],alpha=op.alpha)
-            navis.plot2d(skeletons_cla,method='2d',ax=ax,view=(op.plane[0],op.plane[1]),color=op.facecolor[i],alpha=op.alpha)
-        axes[ax_x,ax_y].set_ylim(*op.ylim)
-        axes[ax_x,ax_y].set_xlim(*op.xlim)
-        axes[ax_x,ax_y].legend(handles=[legend_handles[i]],fancybox=True,framealpha=0)
-        axes[ax_x,ax_y].set_alpha(0)
-    fig_sup.savefig(op.save_path+'_sup'+op.save_format,transparent=True)
-    if not op.showfig: plt.close(fig_sup)
-
-    fig.suptitle(op.title)
-    if op.toPlot != 'skeleton':
-        for i,e in enumerate(ellipses):
-            ax.add_artist(e)
-    navis.plot2d(roimesh,method='2d',ax=ax,view=(op.plane[0],op.plane[1]),color=op.mesh_color,alpha=op.mesh_alpha) #########################################
-    ax.set_ylim(*op.ylim)
-    ax.set_xlim(*op.xlim)
-    ax.legend(handles=legend_handles,fancybox=True,framealpha=0)
-    ax.set_alpha(0)
-    ax.set_axis_off()
-    fig.savefig(op.save_path+op.save_format,transparent=True)
-    if not op.showfig: plt.close(fig)
-    
-def fetchSynapseData(file,noi_df,start_point=0,mode='w'):
-    index_to_process = noi_df.index[start_point:]
-    for ind in index_to_process:
-        bodyid = noi_df.at[ind,'bodyId']
-        # snp_info_raw = fetch_synapses(bodyid)
-        snp_info_raw = fetch_synapses(bodyid)
-        with pd.ExcelWriter(file,mode=mode,engine='openpyxl') as snp_writer:
-            snp_info_raw.to_excel(snp_writer,sheet_name=str(bodyid))
-        if mode == 'w': mode = 'a'
-        print('\rfetched synapses: ','{:.2%}'.format((ind+1)/len(noi_df)),end='  ')
-    print()
-
-def getSynapses(snp_file_path,noi_df):
-    isDataComplete = False
-    isDataExist = False
-    if os.path.isfile(snp_file_path):
-        snp_excel = pd.ExcelFile(snp_file_path)
-        isDataExist = True
-        if len(snp_excel.sheet_names) == len(noi_df.index):
-            isDataComplete = True
-            print('Data were completed')
-    if not isDataComplete:
-        if isDataExist:
-            p = len(snp_excel.sheet_names)
-            print('Incomplete data existed: %d / %d'%(p,len(noi_df.index)))
-            fetchSynapseData(snp_file_path,noi_df,start_point=p,mode='a')
-        else:
-            print('No data existed')
-            fetchSynapseData(snp_file_path,noi_df)
-    return 0 # data were saved to local directly
-
-def sumSnpInfo(noi_df,info_df,para_df,summary_path,synapse_file_path,**kwargs):
-    '''summarize synapse info'''
-    options = {
-        "snp_rois": None,
-        "site": None,
-        "confidence": None,
-    }
-    options.update(kwargs)
-    
-    if not os.path.isfile(summary_path):
-        snp_excel = pd.ExcelFile(synapse_file_path)
-        neuinfo_df = noi_df[['bodyId','instance','type','pre','post','somaLocation','somaRadius']]
-        col_add = ['soma_x','soma_y','soma_z','centroid_x','centroid_y','centroid_z','error_x','error_y','error_z','snpN_roi','ratio']
-        neuinfo_df = pd.concat([neuinfo_df,pd.DataFrame(columns=col_add)])
-        for ind in neuinfo_df.index:
-            bodyid = int(neuinfo_df.at[ind,'bodyId'])
-            snp_info_raw = snp_excel.parse(str(bodyid))
-            snp_info = snp_info_raw.copy()
-            if options['snp_rois'] != None:
-                if type(options['snp_rois']) == str:
-                    options['snp_rois'] = [options['snp_rois']]
-                snp_info = snp_info[snp_info.roi.isin(options['snp_rois'])]
-            if options['site'] != None:
-                snp_info = snp_info[snp_info.type == options['site']]
-            if options['confidence'] != None:
-                snp_info = snp_info[snp_info.confidence >= options['confidence']]
-            centroid = snp_info[['x','y','z']].mean().tolist()
-            errors = snp_info[['x','y','z']].std().tolist()
-            
-            if pd.notnull(neuinfo_df.at[ind,'somaLocation']):
-                somaLoc_str = neuinfo_df.at[ind,'somaLocation'][1:-1].split(', ')
-                somaLoc = [int(i) for i in somaLoc_str]
-                neuinfo_df.loc[ind,['soma_x','soma_y','soma_z']] = somaLoc
-            neuinfo_df.loc[ind,['centroid_x','centroid_y','centroid_z']] = centroid
-            neuinfo_df.loc[ind,['error_x','error_y','error_z']] = errors
-            neuinfo_df.at[ind,'snpN_roi'] = len(snp_info) # synapse number in the rois
-            neuinfo_df.at[ind,'ratio'] = len(snp_info) / neuinfo_df.at[ind,options['site']] # proportion of synapses in the roi
-            print('\rprocessing synapse info...','{:.2%}'.format((ind+1)/len(neuinfo_df)),end='  ')
-        print()
-        snp_summary_df = neuinfo_df.merge(info_df)
-        with pd.ExcelWriter(summary_path) as w:
-            para_df.to_excel(w,sheet_name='parameters')
-            snp_summary_df.to_excel(w,sheet_name='snp_df')
-    else:
-        print('Processed synapse summary existed, please check the ROIs!')
-        snp_summary_df = pd.read_excel(summary_path,sheet_name='snp_df',index_col=0,header=0)
-    return snp_summary_df
-
-def SankeyDirect(conn_matrix_type,**kwargs):
-    options = {
-        'file_path': None,
-        "node_color": 'rgba(60,100,200,0.5)',
-        "link_color": 'rgba(100,150,240,0.2)',
-        "pad": 5,
-        "thickness": 5,
-        "font_size": 12,
-        'title': 'Sankey diagram of connection map',
-        "showfig": True,
-    }
-    options.update(kwargs)
-    
-    source_names = conn_matrix_type.index.to_list()
-    target_names = conn_matrix_type.columns.to_list()
-    source_names = [str(i) for i in source_names]
-    target_names = [str(i) for i in target_names]
-    label_names = source_names + target_names # all nodes
-    source_list = []
-    target_list = []
-    value_list = []
-    original_value_list = []  # Store original values for hover
-    hover_labels = []  # Store custom hover labels
-    color_list = []
-    has_negative = False
-    
-    for source_i in range(len(source_names)):
-        for target_j in range(len(target_names)):
-            value = conn_matrix_type.iloc[source_i,target_j]
-            is_negative = value < 0
-            if is_negative:
-                has_negative = True
-            abs_value = abs(value)
-            
-            source_list.append(source_i)
-            target_list.append(target_j+len(source_names))
-            value_list.append(abs_value)
-            original_value_list.append(value)  # Keep original for hover
-            
-            # Create custom hover label with source, target, and weight
-            hover_text = f"{source_names[source_i]} → {target_names[target_j]}<br>"
-            hover_text += f"Weight: {value:,}"
-            hover_labels.append(hover_text)
-            
-            # Light blue color for negative edges, default color for positive
-            color_list.append('rgba(74, 144, 226, 0.4)' if is_negative else options['link_color'])
-    
-    if has_negative:
-        print(f"  ℹ️  Found negative values - using absolute values for link width, light blue color for negative links")
-
-    # Add legend annotations if there are negative values
-    annotations = []
-    if has_negative:
-        annotations = [
-            dict(
-                x=0.02, y=0.98,
-                xref='paper', yref='paper',
-                text='<b>Legend:</b>',
-                showarrow=False,
-                font=dict(size=12, color='black'),
-                align='left',
-                xanchor='left',
-                yanchor='top'
-            ),
-            dict(
-                x=0.02, y=0.94,
-                xref='paper', yref='paper',
-                text='<span style="color: rgba(100,100,100,0.6);">■</span> Positive weight',
-                showarrow=False,
-                font=dict(size=11, color='black'),
-                align='left',
-                xanchor='left',
-                yanchor='top'
-            ),
-            dict(
-                x=0.02, y=0.90,
-                xref='paper', yref='paper',
-                text='<span style="color: rgba(74,144,226,0.4);">■</span> Negative weight',
-                showarrow=False,
-                font=dict(size=11, color='black'),
-                align='left',
-                xanchor='left',
-                yanchor='top'
-            )
-        ]
-
-    fig = go.Figure(data=[go.Sankey(
-        node = dict(
-            pad = options['pad'],
-            thickness = options['thickness'],
-            line = dict(color = "black", width = 0),
-            label = label_names,
-            color = options['node_color'],
-        ),
-        link = dict(
-            source = source_list,
-            target = target_list,
-            value = value_list,
-            color = color_list,  # Use per-edge colors (light blue for negative)
-            customdata = hover_labels,  # Store custom hover text
-            hovertemplate = '%{customdata}<extra></extra>'  # Show custom hover with source/target
-        )
-    )])
-    fig.update_layout(
-        title_text=options['title'],
-        font_size=options['font_size'],
-        annotations=annotations  # Add legend
-    )
-    if options['file_path'] is None:
-        options['file_path'] = options['title'] + '.html'
-    fig.write_html(options['file_path'], auto_open=options['showfig'], include_plotlyjs='cdn')
-
-def PlotSkeletonSynapse(neuron_layers,min_synapse_num=10,**kwargs):
-    options = {
-        'saveas': None,
-        'neuron_colors': bokeh.palettes.Paired10[0::2],
-        'neuron_alpha': 0.5, # only works when show_skeleton_radius is True
-        'synapse_colors': bokeh.palettes.Paired10[1::2],
-        'synapse_size': 3,
-        'synapse_criteria': None,
-        'mesh_roi': ['LH(R)','AL(R)','EB'],
-        'mesh_color': (100, 100, 100, 0.1),
-        'show_soma': True,
-        'show_fig': True,
-        'show_skeleton_radius': True,
-        'show_connectors': False,
-        'use_size_sliders': True,
-    }
-    options.update(kwargs)
-    
-    fig_3d = go.Figure()
-    # fetching neuron skeletons
-    neuron_dfs = []
-    layer_criteria = []
-    layer_names = []
-    for i in range(len(neuron_layers)):
-        print('fetching skeletons of layer',i,'...')
-        neuron_criteria, auto_name = getCriteriaAndName([neuron_layers[i]])
-        neuron_df,_ = fetch_neurons(neuron_criteria)
-        neuron_dfs.append(neuron_df)
-        layer_criteria.append(neuron_criteria)
-        layer_names.append(auto_name)
-        neuron_vols = neu.fetch_skeletons(neuron_df,with_synapses=options['show_connectors'])
-        print('Done')
-        print('plotting skeletons of layer',i,'...')
-        navis.plot3d(
-            neuron_vols,
-            backend='plotly',
-            color=options['neuron_colors'][i],
-            alpha=options['neuron_alpha'],
-            soma=options['show_soma'],
-            fig=fig_3d,
-            radius=options['show_skeleton_radius'],
-            connectors=options['show_connectors'],
-        )
-        print('Done')
-    if options['saveas'] is None:
-        options['saveas'] = os.path.join('connection_data', '_'.join(layer_names)+'.html')
-    
-    # fetching synapses
-    for i in range(len(neuron_layers)-1):
-        source_criteria = layer_criteria[i]
-        target_criteria = layer_criteria[i+1]
-        print('fetching synapses of layer',i,'->',i+1,'...')
-        conn_df = fetch_synapse_connections(
-            source_criteria=source_criteria,
-            target_criteria=target_criteria,
-            min_total_weight=min_synapse_num,
-            synapse_criteria=options['synapse_criteria'],
-        )
-        print('Done')
-        print('plotting synapses of layer',i,'->',i+1,'...', end='')
-        fig_3d.add_trace(
-            go.Scatter3d(
-                x = (conn_df['x_pre']+conn_df['x_post'])/2,
-                y = (conn_df['y_pre']+conn_df['y_post'])/2,
-                z = (conn_df['z_pre']+conn_df['z_post'])/2,
-                mode = 'markers',
-                name = f'synapses {i} -> {i+1} ({len(conn_df)})',
-                marker = dict(
-                    size = options['synapse_size'],
-                    color = options['synapse_colors'][i],
-                    symbol = 'circle',
-                ),
-            )
-        )
-        print('Done')
-    
-    # plot meshes of ROIs
-    if options['mesh_roi'] != None:
-        roiunits = []
-        for roi in options['mesh_roi']:
-            mesh_file = os.path.join('navis_roi_meshes_json','primary_rois',roi+'.json')
-            if os.path.exists(mesh_file):
-                mesh = navis.Volume.from_json(mesh_file)
-                roiunits.append(mesh)
-            else:
-                print('mesh file %s.json not found!'%(roi))
-        # roimesh = navis.Volume.combine(roiunits)
-        # roimesh.color = options['mesh_color']
-        if type(options['mesh_color']) == list:
-            for roi_i in range(len(roiunits)):
-                roiunits[roi_i].color = options['mesh_color'][roi_i]
-        else:
-            for roi_i in range(len(roiunits)):
-                roiunits[roi_i].color = options['mesh_color']
-        print('plotting mesh of ROIs...')
-        navis.plot3d(roiunits,backend='plotly',fig=fig_3d)
-        print('Done')
-    
-    # add sliders
-    if options['use_size_sliders']:
-        sliders = [
-            dict(
-                active=0,
-                currentvalue={"prefix": "Synapse Size: "},
-                pad={"t": 50},
-                steps=[
-                    dict(
-                        label=str(size),
-                        method="update",
-                        args=[{"marker": {"size": size}}]
-                    )
-                    for size in list(range(1,11))
-                ],
-            ),
-        ]
-    else:
-        sliders = []
-    # set layout
-    fig_3d.update_layout(
-        sliders=sliders,
-        scene=dict(
-            dragmode='orbit',
-            xaxis={'visible':False}, 
-            yaxis={'visible':False},
-            zaxis={'visible':False},
-        ),
-        scene_camera=dict(
-            up=dict(x=0, y=0.1, z=-1),
-            eye=dict(x=0, y=1.5, z=0),
-        ),
-    )
-
-    # save figure
-    print('saving figure to',options['saveas'],'...')
-    fig_3d.write_html(options['saveas'],auto_open=options['show_fig'], include_plotlyjs='cdn')
-    print('Done')
+                    axes[ax_x,ax_y].add_patch(copy(e))
+                    
+    # Save
+    if op.save_path:
+        plt.savefig(op.save_path + op.save_format)
+        print(f"Saved figure to {op.save_path + op.save_format}")
         
-def build_sphere(x, y, z, r, color_scale=['green', 'green'], opacity=0.2):
-    u = np.linspace(0, 2 * np.pi, 12)
-    v = np.linspace(0, np.pi, 6)
-    x_s = x + r * np.outer(np.cos(u), np.sin(v))
-    y_s = y + r * np.outer(np.sin(u), np.sin(v))
-    z_s = z + r * np.outer(np.ones(np.size(u)), np.cos(v))
-    sphere = go.Surface(
-        x=x_s,
-        y=y_s,
-        z=z_s,
-        opacity=opacity,
-        colorscale=color_scale,
-        showscale=False,
-    )
-    return sphere
+    if op.showfig:
+        plt.show()
 
-def path_filter(path_df_raw, keyword_to_exclude: str | list[str] = 'None'):
-    '''
-    To exclude paths that contain certain keywords.
-    path_info_df: dataframe of path information,
-        a dataframe generated by statvis.getAllPath()
-    keyword_to_exclude: keyword to exclude, 
-        can be a list of keywords or a single keyword
-    '''
-    path_df = path_df_raw.copy()
-    path_df_excluded = pd.DataFrame()
-    if type(keyword_to_exclude) == str:
-        keyword_to_exclude = [keyword_to_exclude]
-    for keyword in keyword_to_exclude:
-        path_df = path_df[~path_df['path_block'].str.contains(keyword)]
-    path_df_excluded = path_df_raw[~path_df_raw.index.isin(path_df.index)]
-    path_df.reset_index(drop=True, inplace=True)
-    path_df_excluded.reset_index(drop=True, inplace=True)
-    return path_df, path_df_excluded
+def build_synapse_mesh(pre_coords, post_coords, mode='sphere', size=100, color='red', opacity=1.0, name='synapses'):
+    """
+    Build a single mesh containing all synapses with specified geometry.
     
-def split_path(path_df_raw):
-    '''split path block generated by statvis.getALLPath() into multiple columns, for sorting and filtering'''
-    path_df = path_df_raw.copy()
-    max_interlayer = path_df['inter_layer_num'].max()
-    path_df = pd.concat([path_df, pd.DataFrame(columns=['inter_layer_%d'%(i) for i in range(1,max_interlayer-1)])], axis=1)
-    for ind in path_df.index:
-        path_block = path_df.loc[ind, 'path_block']
-        path_block_split = path_block.replace(' ','').split('->')
-        for i in range(1,len(path_block_split)-1):
-            path_df.loc[ind, 'inter_layer_%d'%(i)] = path_block_split[i]
-    return path_df
+    Parameters
+    ----------
+    pre_coords : pd.DataFrame or np.ndarray
+        (N, 3) array of pre-synaptic coordinates (x, y, z)
+    post_coords : pd.DataFrame or np.ndarray
+        (N, 3) array of post-synaptic coordinates (x, y, z)
+    mode : str
+        'sphere', 'cone', or 'tetrahedron'
+    size : float or np.ndarray
+        Size of the glyphs (radius or scale). Can be a single float or an array of shape (N,).
+    color : str or list
+        Color of the mesh
+    opacity : float
+        Opacity of the mesh
+    name : str
+        Name for the trace
+        
+    Returns
+    -------
+    go.Mesh3d
+        Plotly Mesh3d trace
+    """
+    import numpy as np
+    import plotly.graph_objects as go
+    
+    # Convert to numpy arrays
+    if hasattr(pre_coords, 'values'):
+        pre_coords = pre_coords.values
+    if hasattr(post_coords, 'values'):
+        post_coords = post_coords.values
+        
+    n_synapses = len(pre_coords)
+    if n_synapses == 0:
+        return go.Mesh3d()
+        
+    # Calculate midpoints and direction vectors
+    midpoints = (pre_coords + post_coords) / 2
+    vectors = post_coords - pre_coords
+    
+    # Normalize vectors
+    norms = np.linalg.norm(vectors, axis=1)
+    # Handle zero length vectors (shouldn't happen but good to be safe)
+    norms[norms == 0] = 1
+    directions = vectors / norms[:, np.newaxis]
+    
+    # Define template geometry (centered at origin, aligned with Z axis)
+    # Use unit size for template, scale later
+    template_size = 1.0
+    
+    if mode == 'sphere':
+        # UV Sphere with 48 faces (8 segments, 4 rings)
+        # This provides a smoother approximation than the icosahedron (20 faces)
+        N = 8 # segments
+        M = 4 # rings (stacks)
+        verts = []
+        
+        # North Pole
+        verts.append([0, 0, template_size])
+        
+        # Rings
+        for i in range(1, M):
+            phi = np.pi * i / M
+            z = template_size * np.cos(phi)
+            r_ring = template_size * np.sin(phi)
+            for j in range(N):
+                theta = 2 * np.pi * j / N
+                x = r_ring * np.cos(theta)
+                y = r_ring * np.sin(theta)
+                verts.append([x, y, z])
+        
+        # South Pole
+        verts.append([0, 0, -template_size])
+        
+        verts_template = np.array(verts)
+        
+        faces = []
+        # Top cap: North Pole (0) to Ring 1 (1..N)
+        for j in range(N):
+            idx1 = 1 + j
+            idx2 = 1 + (j + 1) % N
+            faces.append([0, idx1, idx2])
+            
+        # Middle rings
+        for i in range(M - 2):
+            start_curr = 1 + i * N
+            start_next = 1 + (i + 1) * N
+            for j in range(N):
+                curr1 = start_curr + j
+                curr2 = start_curr + (j + 1) % N
+                next1 = start_next + j
+                next2 = start_next + (j + 1) % N
+                
+                faces.append([curr1, next1, curr2])
+                faces.append([next1, next2, curr2])
+                
+        # Bottom cap: Ring M-1 to South Pole (last index)
+        last_idx = len(verts) - 1
+        start_last_ring = 1 + (M - 2) * N
+        for j in range(N):
+            idx1 = start_last_ring + j
+            idx2 = start_last_ring + (j + 1) % N
+            faces.append([last_idx, idx2, idx1])
+            
+        faces_template = np.array(faces)
+        
+    elif mode == 'cone':
+        # Cone with 48 faces (24 segments)
+        # Pointing along Z.
+        s = template_size
+        N = 24 # segments
+        
+        verts = []
+        # Tip
+        verts.append([0, 0, s]) # Index 0
+        # Base Center
+        verts.append([0, 0, -s]) # Index 1
+        
+        # Base Ring
+        for i in range(N):
+            theta = 2 * np.pi * i / N
+            x = s * np.cos(theta)
+            y = s * np.sin(theta)
+            verts.append([x, y, -s])
+            
+        verts_template = np.array(verts)
+        
+        faces = []
+        # Sides: Tip (0) to Ring (2..N+1)
+        for i in range(N):
+            idx1 = 2 + i
+            idx2 = 2 + (i + 1) % N
+            faces.append([0, idx1, idx2])
+            
+        # Base: Base Center (1) to Ring (2..N+1)
+        # Note: Order reversed for correct normal
+        for i in range(N):
+            idx1 = 2 + i
+            idx2 = 2 + (i + 1) % N
+            faces.append([1, idx2, idx1])
+            
+        faces_template = np.array(faces)
+        
+    elif mode == 'tetrahedron':
+        # Tetrahedron (4 vertices, 4 faces)
+        # "pre-post direction length ... 50% longer"
+        # Standard tetrahedron inscribed in cube
+        s = template_size
+        z_scale = 1.5
+        verts_template = np.array([
+            [s, s, s*z_scale],
+            [s, -s, -s*z_scale],
+            [-s, s, -s*z_scale],
+            [-s, -s, s*z_scale]
+        ])
+        faces_template = np.array([
+            [0, 1, 2], [0, 2, 3], [0, 3, 1], [1, 3, 2]
+        ])
+    else:
+        raise ValueError(f"Unknown mode: {mode}")
+        
+    n_verts_template = len(verts_template)
+    n_faces_template = len(faces_template)
+    
+    # Construct rotation matrices to align Z axis (0,0,1) to 'directions'
+    # R = [X_new, Y_new, Z_new]
+    # Z_new = direction
+    # X_new = cross(up, Z_new). If Z_new ~ up, use another up.
+    
+    z_axis = directions
+    
+    # Arbitrary up vector (0, 1, 0)
+    up = np.array([0, 1, 0])
+    
+    # Check for parallel vectors
+    cross_prod = np.cross(up, z_axis)
+    cross_norms = np.linalg.norm(cross_prod, axis=1)
+    
+    # If parallel to Y, use X as up
+    mask_parallel = cross_norms < 1e-6
+    if np.any(mask_parallel):
+        # Create a copy of up vectors
+        up_vectors = np.tile(up, (n_synapses, 1))
+        up_vectors[mask_parallel] = np.array([1, 0, 0])
+        x_axis = np.cross(up_vectors, z_axis)
+    else:
+        x_axis = np.cross(up, z_axis)
+        
+    # Normalize X
+    x_norms = np.linalg.norm(x_axis, axis=1)
+    x_axis = x_axis / x_norms[:, np.newaxis]
+    
+    # Y = Z x X
+    y_axis = np.cross(z_axis, x_axis)
+    
+    # Construct Rotation Matrices (N, 3, 3)
+    # R[i] = [x_axis[i], y_axis[i], z_axis[i]] (columns)
+    # So R[i] @ v_template should align v_template to world
+    # v_world = R @ v_local
+    
+    # Stack axes to form R: shape (N, 3, 3)
+    # Transpose to get columns: stack along last axis
+    R = np.stack([x_axis, y_axis, z_axis], axis=2)
+    
+    # Apply rotation
+    rotated_verts = np.einsum('nij,vj->nvi', R, verts_template)
+    
+    # Apply scaling
+    if np.isscalar(size):
+        rotated_verts *= size
+    else:
+        size_arr = np.array(size)
+        if size_arr.ndim == 1 and len(size_arr) == n_synapses:
+             rotated_verts *= size_arr[:, np.newaxis, np.newaxis]
+        else:
+             # Fallback if size is not compatible
+             rotated_verts *= size
+    
+    # Add midpoints
+    # (N, V, 3) + (N, 1, 3)
+    final_verts = rotated_verts + midpoints[:, np.newaxis, :]
+    
+    # Flatten vertices
+    all_verts = final_verts.reshape(-1, 3)
+    
+    # Construct faces
+    # Faces indices need to be offset
+    # (N, F, 3)
+    offsets = np.arange(n_synapses) * n_verts_template
+    all_faces = faces_template[np.newaxis, :, :] + offsets[:, np.newaxis, np.newaxis]
+    all_faces = all_faces.reshape(-1, 3)
+    
+    # Create Mesh3d
+    return go.Mesh3d(
+        x=all_verts[:, 0],
+        y=all_verts[:, 1],
+        z=all_verts[:, 2],
+        i=all_faces[:, 0],
+        j=all_faces[:, 1],
+        k=all_faces[:, 2],
+        color=color,
+        opacity=opacity,
+        name=name,
+        lighting=dict(ambient=0.5, diffuse=0.8, roughness=0.1, specular=0.1),
+        lightposition=dict(x=1000, y=1000, z=2000)
+    )
+

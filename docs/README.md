@@ -4,6 +4,8 @@ Welcome to the Hemibrain Connectomes Analysis documentation!
 
 ## 🆕 Recent Updates (November 2025)
 
+- **✨ NEW: [Cross-Dataset Comparison Guide](./core-features/CrossDatasetComparison_Guide.md)** - Compare connectivity across hemibrain, male-cns, FlyWire, and more
+- **✨ NEW: [Connectivity Profile Verification](./core-features/ConnectivityProfileVerification_Guide.md)** - Verify neuron types using connectivity fingerprints
 - **[BANC Integration](./BANC_INTEGRATION.md)** - Added support for BANC dataset (FlyWire-based).
 - **[Visualization Update Summary](./VISUALIZATION_UPDATE.md)** - Summary of all visualization-related updates and deprecations.
 - **[VisualizePath Updates Nov 2025](./visualizations/VisualizePath_Updates_Nov2025.md)** - Detailed guide on connection matrix support and new features.
@@ -25,8 +27,10 @@ Comprehensive guides for all visualization types:
 
 ### 🔧 [Core Features](./core-features/)
 Essential functionality documentation:
+- **✨ Cross-Dataset Comparison**: Compare connectivity across multiple datasets (NEW)
+- **✨ Connectivity Profile Verification**: Verify neuron types using connectivity fingerprints (NEW)
 - **Path Finding**: Multi-hop connection discovery
-- **Custom Groups**: Flexible neuron grouping for custom analysis (NEW)
+- **Custom Groups**: Flexible neuron grouping for custom analysis
 - **Cache System**: High-performance local storage (10-100x speedup)
 - **Parallel Processing**: Multi-core acceleration (4-14x speedup)
 - **Filtering**: Connection and neuron filtering options
@@ -48,6 +52,8 @@ Advanced technical documentation:
 3. Explore [Visualization Overview](./visualizations/README.md)
 
 ### For Researchers
+- **[Cross-Dataset Comparison](./core-features/CrossDatasetComparison_Guide.md)** - Compare connectivity patterns
+- **[Connectivity Profile Verification](./core-features/ConnectivityProfileVerification_Guide.md)** - Verify neuron types
 - [Heatmap Guide](./visualizations/Heatmap_Guide.md) - Quantitative analysis
 - [Network Guide](./visualizations/Network_Guide.md) - Topology exploration
 - [Path Finding](./core-features/README.md#path-finding) - Multi-hop connections
@@ -75,6 +81,8 @@ Advanced technical documentation:
 - **[3D Skeleton Guide](./visualizations/3D_Skeleton_Guide.md)**: 3D rendering guide
 
 ### Core Functionality
+- **✨ [Cross-Dataset Comparison](./core-features/CrossDatasetComparison_Guide.md)**: Multi-dataset analysis
+- **✨ [Connectivity Profile Verification](./core-features/ConnectivityProfileVerification_Guide.md)**: Verify neuron types across datasets
 - **[Cache System Guide](./core-features/CacheSystem_Guide.md)**: Caching for 10-100x speedup
 - **[Path Finding](./core-features/FindAllPath_Documentation.md)**: Multi-hop path discovery
 - **[Custom Groups](./core-features/CustomGroups_Feature.md)**: Flexible neuron grouping
@@ -89,6 +97,8 @@ Advanced technical documentation:
 |------|--------------|
 | Direct connections | [Main README](../README.md#finddirectpy) |
 | Multi-hop paths | [FindAllPath](./core-features/FindAllPath_Documentation.md) |
+| **Compare across datasets** | **[Cross-Dataset Comparison](./core-features/CrossDatasetComparison_Guide.md)** |
+| **Verify neuron types** | **[Profile Verification](./core-features/ConnectivityProfileVerification_Guide.md)** |
 | Custom neuron groups | [Custom Groups](./core-features/CustomGroups_Feature.md) |
 | Forward-only paths | [Forward-Only Guide](./core-features/ForwardOnly_Guide.md) |
 | Filter connections | [Connection Filters](./core-features/README.md#filtering) |

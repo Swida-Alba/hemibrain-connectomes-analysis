@@ -5,11 +5,92 @@ Documentation for the fundamental features of the Hemibrain Connectomes Analysis
 ## Overview
 
 This directory contains documentation for the core analytical capabilities:
+- **✨ Cross-Dataset Comparison**: Compare connectivity across multiple datasets
+- **✨ Connectivity Profile Verification**: Verify neuron types using connectivity fingerprints
 - **Path Finding**: Finding direct and multi-hop connections
 - **Custom Groups**: Flexible neuron grouping for custom analysis
 - **Cache System**: High-performance local data storage
 - **Parallel Processing**: Multi-core acceleration
 - **Filtering**: Connection and neuron filtering options
+
+---
+
+## ✨ Cross-Dataset Comparison (NEW)
+
+### [Cross-Dataset Comparison Guide](./CrossDatasetComparison_Guide.md)
+Complete guide to comparing neural connectivity across multiple connectome datasets.
+
+**Key Topics**:
+- Comparing hemibrain, male-cns, and FlyWire datasets
+- Path-based vs edge-based comparison modes
+- Conservation analysis and similarity metrics
+- Interactive HTML reports with network visualizations
+- Understanding output files and calculated parameters
+
+**Quick Start**:
+```python
+from comparison import ComparisonParameters, ComparisonAnalyzer
+
+params = ComparisonParameters(
+    datasets=['hemibrain:v1.2.1', 'male-cns:v0.9', 'flywire_FAFB_v783'],
+    datasets_nickname=['hemi', 'mcns', 'fafb'],
+    source_neurons=['aMe12'],
+    target_neurons=['PPL101'],
+    max_interlayer=1,
+    thresholds=[1, 5, 10],
+    comparison_mode='edge',  # or 'path'
+    output_folder='/path/to/output',
+)
+
+analyzer = ComparisonAnalyzer(params, verbose=True)
+results = analyzer.run_comparison()
+```
+
+**Example Script**: [`examples/Example_InterDatasetComparison.py`](../../examples/Example_InterDatasetComparison.py)
+
+---
+
+## ✨ Connectivity Profile Verification (NEW)
+
+### [Connectivity Profile Verification Guide](./ConnectivityProfileVerification_Guide.md)
+Complete guide to verifying neuron type assignments using connectivity fingerprints.
+
+**Key Topics**:
+- Extracting connectivity profiles (upstream/downstream partners)
+- Similarity metrics: Jaccard, rank correlation, cosine
+- Batch verification with confidence levels
+- HTML reports with similarity matrices
+- Directional analysis (upstream vs downstream)
+
+**Quick Start**:
+```python
+from comparison import ConnectivityProfiler, CrossDatasetVerifier, ProfilerConfig
+
+# Configure profiler
+config = ProfilerConfig(
+    top_k_bodyid=20,        # Top 20 connections per direction
+    top_m_type=5,           # Ensure at least 5 unique partner types
+    min_synapse_threshold=3 # Filter weak connections
+)
+
+# Create profiler and verifier
+profiler = ConnectivityProfiler(
+    datasets=['hemibrain:v1.2.1', 'male-cns:v0.9'],
+    config=config
+)
+verifier = CrossDatasetVerifier(profiler)
+
+# Verify a neuron type across datasets
+results = verifier.verify_type_assignment(
+    'aMe12', 
+    datasets=['hemibrain:v1.2.1', 'male-cns:v0.9']
+)
+print(results.summary())
+```
+
+**Confidence Thresholds**:
+- **Jaccard**: >0.5 Very High, >0.3 High, >0.2 Medium, >0.1 Low
+- **Rank Correlation**: ≥0.85 Very High, 0.7-0.85 High, 0.5-0.7 Medium, 0.3-0.5 Low
 
 ---
 
