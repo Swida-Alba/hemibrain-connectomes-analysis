@@ -106,19 +106,38 @@ class FindNeuronConnection:
             Message to print
         level : str
             'full': Only print if verbose_mode is 'full'
-            'simple': Only print if verbose_mode is 'simple'
-            'both': Always print regardless of verbose_mode
+            'simple': Only print if verbose_mode is 'simple' or 'progress'
+            'progress': Only print if verbose_mode is 'progress' (inline progress)
+            'both': Print for 'full' and 'simple' but not 'silent'
+            'always': Always print regardless of verbose_mode (even in silent)
         end : str
             End character for print (default: newline)
         flush : bool
             Whether to flush output immediately
+            
+        verbose_mode values:
+            'full': Show all output (default)
+            'simple': Show phase indicators and completion messages
+            'progress': Show inline progress (overwriting single line)
+            'silent': Suppress all output
         '''
-        if level == 'both':
+        if self.verbose_mode == 'silent':
+            if level == 'always':
+                print(message, end=end, flush=flush)
+            return
+            
+        if level == 'always':
             print(message, end=end, flush=flush)
+        elif level == 'both':
+            if self.verbose_mode in ('full', 'simple', 'progress'):
+                print(message, end=end, flush=flush)
         elif level == 'full' and self.verbose_mode == 'full':
             print(message, end=end, flush=flush)
-        elif level == 'simple' and self.verbose_mode == 'simple':
+        elif level == 'simple' and self.verbose_mode in ('simple', 'progress'):
             print(message, end=end, flush=flush)
+        elif level == 'progress' and self.verbose_mode == 'progress':
+            # For progress mode, print with carriage return to overwrite
+            print(f'\r{message}', end='', flush=True)
 
     def _save_matrices_to_excel(self, df, writer, level='bodyId'):
         """Generate and save connection matrices to Excel"""
@@ -3203,7 +3222,7 @@ class FindNeuronConnection:
             else:
                 G_type.add_edge(type_pre, type_post, weight=weight)
         
-        print(f'  Type-level graph: {G_type.number_of_nodes()} types, {G_type.number_of_edges()} edges')
+        self._vprint(f'  Type-level graph: {G_type.number_of_nodes()} types, {G_type.number_of_edges()} edges', level='full')
         
         # Get source and target types (filter out NaN/None values)
         source_types = [t for t in self.source_df['type'].unique().tolist() 
@@ -3224,7 +3243,7 @@ class FindNeuronConnection:
                     for path in nx.all_simple_paths(G_type, source_type, target_type, cutoff=self.max_interlayer + 1):
                         type_paths.append(path)
         
-        print(f'  Found {len(type_paths):,} type-level paths')
+        self._vprint(f'  Found {len(type_paths):,} type-level paths', level='full')
         
         # Build DataFrame from type paths (no real_layer_map needed - layer-by-layer ensures forward-only)
         path_df_type = sv.build_path_dataframe_from_paths(
@@ -3244,13 +3263,13 @@ class FindNeuronConnection:
             ]
             after_filter = len(path_df_type)
             if before_filter > after_filter:
-                print(f'  Removed {before_filter - after_filter} paths with zero-weight hops at type level')
+                self._vprint(f'  Removed {before_filter - after_filter} paths with zero-weight hops at type level', level='full')
         
         path_df_type = sv.split_path(path_df_type)
         path_df_type, path_df_type_excluded = sv.path_filter(path_df_type,self.keyword_in_path_to_remove)
         
         # Save configuration files to path folder
-        print('\nSaving configuration files...')
+        self._vprint('\nSaving configuration files...', level='full')
         all_attributes_dict = {
             'source_fname': self.source_fname,
             'target_fname': self.target_fname,
@@ -3460,21 +3479,21 @@ class FindNeuronConnection:
                     candidates = glob.glob(os.path.join(subdir_path, "*_allneurons_neuron_df.csv"))
                     if candidates:
                         dataset_path = candidates[0]
-                        print(f"   Found dataset file via glob: {os.path.basename(dataset_path)}")
+                        self._vprint(f"   Found dataset file via glob: {os.path.basename(dataset_path)}", level='full')
 
         use_local_dataset = os.path.exists(dataset_path)
         if use_local_dataset:
-            print(f'   Using local dataset: {os.path.basename(dataset_path)}')
+            self._vprint(f'   Using local dataset: {os.path.basename(dataset_path)}', level='full')
             if 'flywire' in self.dataset.lower() or 'fafb' in self.dataset.lower():
                 ndf_complete = pd.read_csv(dataset_path, header=0, index_col=None, dtype={'bodyId': str}, low_memory=False)
             else:
                 ndf_complete = pd.read_csv(dataset_path, header=0, index_col=0, low_memory=False)
         else:
             if 'flywire' in self.dataset.lower() or 'fafb' in self.dataset.lower():
-                print(f'   ⚠️  Local dataset not found for FlyWire/FAFB. Skipping interlayer info fetch (NeuPrint API not supported for this dataset).')
+                self._vprint(f'   ⚠️  Local dataset not found for FlyWire/FAFB. Skipping interlayer info fetch (NeuPrint API not supported for this dataset).', level='full')
                 ndf_complete = pd.DataFrame()
             else:
-                print(f'   Local dataset not found, will use API calls')
+                self._vprint(f'   Local dataset not found, will use API calls', level='full')
                 # Ensure client is logged in before API calls
                 if self.client_hemibrain is None:
                     from neuprint import Client, set_default_client
@@ -3657,7 +3676,7 @@ class FindNeuronConnection:
         '''Create interactive network visualizations for FindPath method'''
         
         # Network by type
-        print('Building interactive network by type...')
+        self._vprint('Building interactive network by type...', level='full')
         G_type = nx.DiGraph()
         
         # Add nodes with layer information
@@ -3896,17 +3915,17 @@ class FindNeuronConnection:
         
         # Check if source or target dataframes are empty
         if self.source_df.empty:
-            print("Error: Source neuron DataFrame is empty. Cannot find paths.")
+            self._vprint("Error: Source neuron DataFrame is empty. Cannot find paths.", level='always')
             return
         if self.target_df.empty:
-            print("Error: Target neuron DataFrame is empty. Cannot find paths.")
+            self._vprint("Error: Target neuron DataFrame is empty. Cannot find paths.", level='always')
             return
         
         # Handle deprecated parameter
         if exclude_searched_neurons is not None:
             forward_only = exclude_searched_neurons
-            print('⚠️  Warning: exclude_searched_neurons is deprecated. Use forward_only instead.')
-            print(f'   Setting forward_only={forward_only}')
+            self._vprint('⚠️  Warning: exclude_searched_neurons is deprecated. Use forward_only instead.', level='always')
+            self._vprint(f'   Setting forward_only={forward_only}', level='always')
         
         # Helper function to format decimal numbers for folder names
         def format_decimal(val):
@@ -3934,7 +3953,7 @@ class FindNeuronConnection:
             
         if not os.path.exists(self.allpath_folder): 
             os.makedirs(self.allpath_folder, exist_ok=True)
-            print(f'  📁 Created output folder: {self.allpath_folder}')
+            self._vprint(f'  📁 Created output folder: {self.allpath_folder}', level='full')
         
         # Save all attributes and parameters to the allpaths folder
         with open(os.path.join(self.allpath_folder, 'all_attributes.json'), 'w') as f:
@@ -3957,16 +3976,16 @@ class FindNeuronConnection:
         
         # PHASE 1: Fetch all connections in the network up to max_interlayer layers
         if self.verbose_mode == 'simple':
-            print(f'\nPhase 1:')
-        else:
-            print(f'\n=== PHASE 1: Fetching all network layers (0 to {self.max_interlayer + 1}) ===')
+            self._vprint(f'\nPhase 1:', level='simple')
+        elif self.verbose_mode == 'full':
+            self._vprint(f'\n=== PHASE 1: Fetching all network layers (0 to {self.max_interlayer + 1}) ===', level='full')
             if forward_only:
-                print('Mode: Layer-by-layer querying (query each neuron once - RECOMMENDED)')
-                print('Note: Still fetches ALL connections including recurrent/reciprocal ones')
+                self._vprint('Mode: Layer-by-layer querying (query each neuron once - RECOMMENDED)', level='full')
+                self._vprint('Note: Still fetches ALL connections including recurrent/reciprocal ones', level='full')
             else:
-                print('Mode: Comprehensive re-querying (re-query all neurons at each layer)')
-                print('Note: Slower but ensures no connections missed due to filtering')
-            print()
+                self._vprint('Mode: Comprehensive re-querying (re-query all neurons at each layer)', level='full')
+                self._vprint('Note: Slower but ensures no connections missed due to filtering', level='full')
+            self._vprint('', level='full')
         
         all_neurons_in_network = set(source_ID)
         layer_neurons = [set(source_ID)]  # Layer 0: sources
@@ -3982,15 +4001,14 @@ class FindNeuronConnection:
                 neurons_to_fetch = list(all_neurons_in_network)
             
             if len(neurons_to_fetch) == 0:
-                if self.verbose_mode == 'full':
-                    print(f'Layer {layer_idx} is empty, stopping.')
+                self._vprint(f'Layer {layer_idx} is empty, stopping.', level='full')
                 break
             
             # Fetch connections (fetch with weight≥1, filter by all criteria together later)
             if self.verbose_mode == 'simple':
-                print(f'layer {layer_idx}->{layer_idx+1}: processing...', end='', flush=True)
-            else:
-                print(f'Layer {layer_idx}->{layer_idx+1}:')
+                self._vprint(f'layer {layer_idx}->{layer_idx+1}: processing...', level='simple', end='', flush=True)
+            elif self.verbose_mode == 'full':
+                self._vprint(f'Layer {layer_idx}->{layer_idx+1}:', level='full')
             conn_df = self._fetch_connections_with_cache(
                 upstream_bodyIds=neurons_to_fetch,
                 downstream_bodyIds=None,
@@ -4020,22 +4038,22 @@ class FindNeuronConnection:
             layer_neurons.append(next_layer)
             
             if self.verbose_mode == 'simple':
-                print('Done')
-            elif forward_only:
-                print(f'Layer {layer_idx}->{layer_idx+1}: {len(post_neurons)} downstream neurons, {len(next_layer)} new, {len(conn_df)} connections')
-            else:
-                print(f'Layer {layer_idx}->{layer_idx+1}: {len(post_neurons)} total downstream, {len(next_layer)} new neurons, {len(conn_df)} connections')
+                self._vprint('Done', level='simple')
+            elif self.verbose_mode == 'full':
+                if forward_only:
+                    self._vprint(f'Layer {layer_idx}->{layer_idx+1}: {len(post_neurons)} downstream neurons, {len(next_layer)} new, {len(conn_df)} connections', level='full')
+                else:
+                    self._vprint(f'Layer {layer_idx}->{layer_idx+1}: {len(post_neurons)} total downstream, {len(next_layer)} new neurons, {len(conn_df)} connections', level='full')
         
-        if self.verbose_mode == 'full':
-            print(f'\nTotal neurons in network: {len(all_neurons_in_network)}')
-            print(f'Total layers fetched: {len(layer_neurons)}')
+        self._vprint(f'\nTotal neurons in network: {len(all_neurons_in_network)}', level='full')
+        self._vprint(f'Total layers fetched: {len(layer_neurons)}', level='full')
         
         # PHASE 2: Identify which targets exist in the searched network
         if self.verbose_mode == 'simple':
-            print(f'Phase 2:')
-            print(f'identifying targets...', end='', flush=True)
-        else:
-            print(f'\n=== PHASE 2: Identifying targets in the network ===')
+            self._vprint(f'Phase 2:', level='simple')
+            self._vprint(f'identifying targets...', level='simple', end='', flush=True)
+        elif self.verbose_mode == 'full':
+            self._vprint(f'\n=== PHASE 2: Identifying targets in the network ===', level='full')
         
         self.target_df.insert(loc=0, column='Checked', value=False)
         self.target_df.insert(loc=1, column='Layer', value=-1)
@@ -4057,12 +4075,12 @@ class FindNeuronConnection:
         targetNum_checked = len(targets_found)
         
         if self.verbose_mode == 'simple':
-            print('Done')
-        else:
-            print(f'Targets found in network: {targetNum_checked} / {targetNum}')
+            self._vprint('Done', level='simple')
+        elif self.verbose_mode == 'full':
+            self._vprint(f'Targets found in network: {targetNum_checked} / {targetNum}', level='full')
         
         if targetNum_checked == 0:
-            print('\033[33mNo target neurons found in the searched network. Cannot construct paths.\033[0m')
+            self._vprint('\033[33mNo target neurons found in the searched network. Cannot construct paths.\033[0m', level='always')
             return
         
         # Print target distribution by layer (same target can appear in multiple layers)
@@ -4099,10 +4117,10 @@ class FindNeuronConnection:
         
         # PHASE 3: Extract all paths from sources to targets (path length ≤ max_interlayer)
         if self.verbose_mode == 'simple':
-            print(f'Phase 3:')
-        else:
-            print(f'\n=== PHASE 3: Finding all paths from sources to targets ===')
-            print('Using graph-based pathfinding to handle reciprocal connections...')
+            self._vprint(f'Phase 3:', level='simple')
+        elif self.verbose_mode == 'full':
+            self._vprint(f'\n=== PHASE 3: Finding all paths from sources to targets ===', level='full')
+            self._vprint('Using graph-based pathfinding to handle reciprocal connections...', level='full')
         
         # Create INITIAL real layer mapping (neuron ID -> discovery layer)
         # Targets will be updated later based on their actual appearance in paths
@@ -4113,11 +4131,11 @@ class FindNeuronConnection:
                 if neuron_id not in real_layer_map_bodyId:
                     real_layer_map_bodyId[neuron_id] = layer_idx
         
-        print(f'Created initial real layer map for {len(real_layer_map_bodyId)} neurons')
-        print(f'  Note: Target real layers will be updated after pathfinding completes')
+        self._vprint(f'Created initial real layer map for {len(real_layer_map_bodyId)} neurons', level='full')
+        self._vprint(f'  Note: Target real layers will be updated after pathfinding completes', level='full')
         
         # Build a directed graph from all connections
-        print('Building connection graph...', end=' ')
+        self._vprint('Building connection graph...', level='full', end=' ')
         G = nx.DiGraph()
         for conn_df in all_connections:
             for idx in conn_df.index:
@@ -4129,13 +4147,11 @@ class FindNeuronConnection:
                     G[pre][post]['weight'] += weight
                 else:
                     G.add_edge(pre, post, weight=weight)
-        if self.verbose_mode == 'full':
-            print(f'Done! ({G.number_of_nodes()} nodes, {G.number_of_edges()} edges)')
+        self._vprint(f'Done! ({G.number_of_nodes()} nodes, {G.number_of_edges()} edges)', level='full')
         
         # Pruning: Remove nodes that cannot reach any target
         if G.number_of_nodes() > 0 and len(targets_found) > 0:
-            if self.verbose_mode == 'full':
-                print('Pruning graph to remove dead ends...', end=' ')
+            self._vprint('Pruning graph to remove dead ends...', level='full', end=' ')
             # Only start BFS from targets that are actually in the graph
             valid_targets = [t for t in targets_found if t in G]
             
@@ -4174,11 +4190,9 @@ class FindNeuronConnection:
                 
                 original_node_count = G.number_of_nodes()
                 G = G.subgraph(nodes_that_can_reach_targets).copy()
-                if self.verbose_mode == 'full':
-                    print(f'Done! ({original_node_count} -> {G.number_of_nodes()} nodes)')
+                self._vprint(f'Done! ({original_node_count} -> {G.number_of_nodes()} nodes)', level='full')
             else:
-                if self.verbose_mode == 'full':
-                    print('Warning: No targets found in graph (should have been caught earlier).')
+                self._vprint('Warning: No targets found in graph (should have been caught earlier).', level='full')
         
         # Find all neurons that are on ANY path from any source to any target
         # with path length ≤ max_interlayer
@@ -4186,10 +4200,9 @@ class FindNeuronConnection:
         edges_in_paths = set()  # Stores (pre, post) pairs
         edges_in_paths_with_layer = set()  # Stores (layer_idx, pre, post) to track layer-specific edges
         
-        if self.verbose_mode == 'full':
-            print(f'\nSearching paths: {len(source_ID)} sources × {len(targets_found)} targets = {len(source_ID) * len(targets_found)} pairs')
-            print(f'Maximum path length: {self.max_interlayer + 1} edges')
-            print(f'Using optimized DFS algorithm (explores shared path segments only once)')
+        self._vprint(f'\nSearching paths: {len(source_ID)} sources × {len(targets_found)} targets = {len(source_ID) * len(targets_found)} pairs', level='full')
+        self._vprint(f'Maximum path length: {self.max_interlayer + 1} edges', level='full')
+        self._vprint(f'Using optimized DFS algorithm (explores shared path segments only once)', level='full')
         
         # Decide whether to use parallel processing
         total_pairs = len(source_ID) * len(targets_found)
@@ -4210,9 +4223,9 @@ class FindNeuronConnection:
             
             if use_parallel:
                 if self.verbose_mode == 'simple':
-                    print(f'pathfinding[parallel]...', end='', flush=True)
-                else:
-                    print(f'Using parallel processing with {n_processes} processes...')
+                    self._vprint(f'pathfinding[parallel]...', level='simple', end='', flush=True)
+                elif self.verbose_mode == 'full':
+                    self._vprint(f'Using parallel processing with {n_processes} processes...', level='full')
                 
                 # Prepare graph edges for pickling
                 G_edges = [(u, v, data['weight']) for u, v, data in G.edges(data=True)]
@@ -4237,9 +4250,8 @@ class FindNeuronConnection:
                 chunk_size = target_chunk_size
                 source_chunks = [sources_list[i:i + chunk_size] for i in range(0, len(sources_list), chunk_size)]
                 
-                if self.verbose_mode == 'full':
-                    print(f'Split into {len(source_chunks)} chunks (~{chunk_size} sources per chunk)')
-                    print(f'Each chunk will explore paths to all {len(targets_set)} targets')
+                self._vprint(f'Split into {len(source_chunks)} chunks (~{chunk_size} sources per chunk)', level='full')
+                self._vprint(f'Each chunk will explore paths to all {len(targets_set)} targets', level='full')
                 
                 # More realistic time estimate based on graph complexity
                 # With DFS optimization, each source is explored once (not once per target)
@@ -4304,9 +4316,8 @@ class FindNeuronConnection:
                 else:
                     time_str = f"~{estimated_time/60:.0f} minutes"
                 
-                if self.verbose_mode == 'full':
-                    print(f'Estimated time: {time_str} (graph: {G.number_of_nodes()} nodes, {G.number_of_edges()} edges, avg degree: {avg_degree:.1f})')
-                    print(f'Processing...\n')
+                self._vprint(f'Estimated time: {time_str} (graph: {G.number_of_nodes()} nodes, {G.number_of_edges()} edges, avg degree: {avg_degree:.1f})', level='full')
+                self._vprint(f'Processing...\n', level='full')
                 
                 # Prepare arguments for each process
                 args_list = [
@@ -4331,10 +4342,9 @@ class FindNeuronConnection:
                 first_chunk_time = None  # Track when first chunk completes (exclude startup overhead)
                 productive_start_time = None  # Start time for actual work (after first chunk)
                 
-                if self.verbose_mode == 'full':
-                    print(f'⏳ Starting {n_processes} worker processes...')
-                    print(f'   (First update will appear when a chunk completes)')
-                    print()
+                self._vprint(f'⏳ Starting {n_processes} worker processes...', level='full')
+                self._vprint(f'   (First update will appear when a chunk completes)', level='full')
+                self._vprint('', level='full')
                 
                 with mp.Pool(processes=n_processes) as pool:
                     # Use imap_unordered for progress tracking (returns results as they complete)
@@ -4360,8 +4370,7 @@ class FindNeuronConnection:
                             startup_overhead = first_chunk_time - start_time
                             # Start productive time tracking AFTER first chunk
                             productive_start_time = first_chunk_time
-                            if self.verbose_mode == 'full':
-                                print(f'   ⚡ Workers initialized in {startup_overhead:.1f}s, starting main processing...\n')
+                            self._vprint(f'   ⚡ Workers initialized in {startup_overhead:.1f}s, starting main processing...\n', level='full')
                         
                         # Calculate current speed using ONLY productive time (excludes startup)
                         productive_elapsed = current_time - productive_start_time if productive_start_time else 0.1
@@ -4393,29 +4402,29 @@ class FindNeuronConnection:
                         
                         if should_update and self.verbose_mode == 'full':
                             # Use \033[K to clear to end of line (removes residual characters)
-                            print(f'\r   Progress: {sources_processed}/{len(sources_list)} sources ({progress_pct:.1f}%) | ETA: {eta_str}\033[K', end='', flush=True)
+                            self._vprint(f'\r   Progress: {sources_processed}/{len(sources_list)} sources ({progress_pct:.1f}%) | ETA: {eta_str}\033[K', level='full', end='', flush=True)
                             last_update = current_time
                 
                 # Final newline
                 if self.verbose_mode == 'full':
-                    print()
+                    self._vprint('', level='full')
                 
                 elapsed = time.time() - start_time
                 if self.verbose_mode == 'simple':
-                    print('Done')
-                    print('building paths...', end='', flush=True)
-                else:
-                    print(f'\n✅ Parallel pathfinding complete in {elapsed:.1f}s!')
-                    print(f'   Average: {len(sources_list)/elapsed:.1f} sources/s (explored {len(targets_set)} targets per source)')
-                    print(f'   Processed by {n_processes} workers across {len(source_chunks)} chunks')
-                    print(f'   📦 Collected {len(all_paths):,} paths in memory (~{len(all_paths) * 50 / 1024 / 1024:.1f} MB)')
+                    self._vprint('Done', level='simple')
+                    self._vprint('building paths...', level='simple', end='', flush=True)
+                elif self.verbose_mode == 'full':
+                    self._vprint(f'\n✅ Parallel pathfinding complete in {elapsed:.1f}s!', level='full')
+                    self._vprint(f'   Average: {len(sources_list)/elapsed:.1f} sources/s (explored {len(targets_set)} targets per source)', level='full')
+                    self._vprint(f'   Processed by {n_processes} workers across {len(source_chunks)} chunks', level='full')
+                    self._vprint(f'   📦 Collected {len(all_paths):,} paths in memory (~{len(all_paths) * 50 / 1024 / 1024:.1f} MB)', level='full')
         
         if not use_parallel:
             if self.verbose_mode == 'simple':
-                print(f'pathfinding[sequential]...', end='', flush=True)
-            else:
-                print('Using sequential processing (optimized DFS)...')
-                print('This may take a while for large datasets...\n')
+                self._vprint(f'pathfinding[sequential]...', level='simple', end='', flush=True)
+            elif self.verbose_mode == 'full':
+                self._vprint('Using sequential processing (optimized DFS)...', level='full')
+                self._vprint('This may take a while for large datasets...\n', level='full')
             
             path_count = 0
             sources_processed = 0
@@ -4515,7 +4524,7 @@ class FindNeuronConnection:
                     
                     if self.verbose_mode == 'full':
                         # Use \033[K to clear to end of line
-                        print(f'\r   Progress: {sources_processed}/{len(source_ID)} sources ({progress_pct:.1f}%) | ETA: {eta_str}\033[K', end='', flush=True)
+                        self._vprint(f'\r   Progress: {sources_processed}/{len(source_ID)} sources ({progress_pct:.1f}%) | ETA: {eta_str}\033[K', level='full', end='', flush=True)
                     last_update = current_time
             
             pairs_with_paths = len(pairs_with_paths_dict)
@@ -4523,18 +4532,17 @@ class FindNeuronConnection:
             # Final update
             elapsed = time.time() - start_time
             if self.verbose_mode == 'simple':
-                print('Done')
-                print('building paths...', end='', flush=True)
-            else:
+                self._vprint('Done', level='simple')
+                self._vprint('building paths...', level='simple', end='', flush=True)
+            elif self.verbose_mode == 'full':
                 # Use \033[K to clear to end of line
-                print(f'\r   Progress: {sources_processed}/{len(source_ID)} sources (100.0%) | Completed in {elapsed:.1f}s\033[K')
+                self._vprint(f'\r   Progress: {sources_processed}/{len(source_ID)} sources (100.0%) | Completed in {elapsed:.1f}s\033[K', level='full')
         
-        if self.verbose_mode == 'full':
-            print(f'\n✅ Pathfinding complete!')
-            print(f'   Total paths found: {path_count:,}')
-            print(f'   Neurons in valid paths: {len(neurons_in_paths):,}')
-            print(f'   Unique edges in valid paths: {len(edges_in_paths):,}')
-            print(f'   Layer-specific edges in valid paths: {len(edges_in_paths_with_layer):,}')
+        self._vprint(f'\n✅ Pathfinding complete!', level='full')
+        self._vprint(f'   Total paths found: {path_count:,}', level='full')
+        self._vprint(f'   Neurons in valid paths: {len(neurons_in_paths):,}', level='full')
+        self._vprint(f'   Unique edges in valid paths: {len(edges_in_paths):,}', level='full')
+        self._vprint(f'   Layer-specific edges in valid paths: {len(edges_in_paths_with_layer):,}', level='full')
         
         # Now extract connections, keeping ALL layer-specific occurrences
         # This means if neuron A→B exists in both Layer 0→1 and Layer 2→3, both are kept
@@ -4592,7 +4600,7 @@ class FindNeuronConnection:
             
             weight_layers[layer_label] = conn_enriched['weight'].sum()
             
-            print(f'Layer {layer_label}: {len(conn_filtered)} connections kept')
+            self._vprint(f'Layer {layer_label}: {len(conn_filtered)} connections kept', level='full')
         
         # Build neuron_layers structure for visualization (based on actual path data)
         # Group neurons by their earliest appearance layer in valid paths
@@ -4625,7 +4633,7 @@ class FindNeuronConnection:
         # Update target real layers based on their actual appearance in paths
         # Targets should have real_layer = their earliest appearance layer
         # This is assigned AFTER pathfinding completes to avoid interfering with the search
-        print('\n=== Updating target real layers based on path appearances ===')
+        self._vprint('\n=== Updating target real layers based on path appearances ===', level='full')
         target_appearance_layers = {}  # Track all layers each target appears in
         
         # Iterate over all neurons with a progress indicator to aid long runs
@@ -4655,9 +4663,9 @@ class FindNeuronConnection:
         
         # Print summary only
         if len(target_appearance_layers) > 0:
-            print(f'  ✓ Updated real_layer for {len(target_appearance_layers)} target neurons')
+            self._vprint(f'  ✓ Updated real_layer for {len(target_appearance_layers)} target neurons', level='full')
         else:
-            print('  ⚠ No targets found in paths')
+            self._vprint('  ⚠ No targets found in paths', level='full')
         
         # Sort the combined connection data (only if non-empty)
         if not conn_inpath.empty:
@@ -4713,11 +4721,11 @@ class FindNeuronConnection:
                                 target_type_appearances[type_post] = set()
                             target_type_appearances[type_post].update(target_appearance_layers[bodyId_post])
         
-        print(f'\nCreated type-level real layer map for {len(real_layer_map_type)} types')
+        self._vprint(f'\nCreated type-level real layer map for {len(real_layer_map_type)} types', level='full')
         
         # Print target type appearance summary
         if target_type_appearances:
-            print(f'  ✓ Updated real_layer for {len(target_type_appearances)} target types')
+            self._vprint(f'  ✓ Updated real_layer for {len(target_type_appearances)} target types', level='full')
         
         # Create group-level real layer map if custom groups exist
         real_layer_map_group = {}
@@ -4790,16 +4798,16 @@ class FindNeuronConnection:
             self.source_df.loc[self.source_df.bodyId.isin(source_inpath),'isInPath'] = True
         
         # Print statistics about paths
-        print(f'\nPath Network Statistics (source to target):')
-        print(f'Total connections in paths: {len(conn_inpath)}')
-        print(f'Total connection types in paths: {len(conn_types)}')
+        self._vprint(f'\nPath Network Statistics (source to target):', level='full')
+        self._vprint(f'Total connections in paths: {len(conn_inpath)}', level='full')
+        self._vprint(f'Total connection types in paths: {len(conn_types)}', level='full')
         total_neurons = sum(len(layer) for layer in neuron_layers)
-        print(f'Total neurons in paths: {total_neurons}')
+        self._vprint(f'Total neurons in paths: {total_neurons}', level='full')
         for i, layer in enumerate(neuron_layers):
-            print(f'  Layer {i}: {len(layer)} neurons')
+            self._vprint(f'  Layer {i}: {len(layer)} neurons', level='full')
         
         # Print target distribution and which targets were found in each layer
-        print('\nTarget neurons by layer:')
+        self._vprint('\nTarget neurons by layer:', level='full')
         all_found_targets = set()
         total_checked_targets = len(self.target_df[self.target_df['Checked']])
         
@@ -4814,31 +4822,31 @@ class FindNeuronConnection:
                     targets_in_layer['bodyId'].isin(conn_inpath['bodyId_post'].unique())
                 ]
                 all_found_targets.update(found_in_layer['bodyId'].tolist())
-                print(f'  Layer {layer_idx}: {len(found_in_layer)}/{len(targets_in_layer)} targets found')
+                self._vprint(f'  Layer {layer_idx}: {len(found_in_layer)}/{len(targets_in_layer)} targets found', level='full')
                 if len(found_in_layer) > 0 and len(found_in_layer) <= 20:
-                    print(f'    Found: {found_in_layer["bodyId"].tolist()}')
+                    self._vprint(f'    Found: {found_in_layer["bodyId"].tolist()}', level='full')
             else:  # filter_by == 'type'
                 if 'type' in targets_in_layer.columns and 'type_post' in conn_types.columns:
                     found_in_layer = targets_in_layer[
                         targets_in_layer['type'].isin(conn_types['type_post'].unique())
                     ]
                     all_found_targets.update(found_in_layer['type'].tolist())
-                    print(f'  Layer {layer_idx}: {len(found_in_layer)}/{len(targets_in_layer)} targets found')
+                    self._vprint(f'  Layer {layer_idx}: {len(found_in_layer)}/{len(targets_in_layer)} targets found', level='full')
                     if len(found_in_layer) > 0 and len(found_in_layer) <= 20:
-                        print(f'    Found: {found_in_layer["type"].tolist()}')
+                        self._vprint(f'    Found: {found_in_layer["type"].tolist()}', level='full')
                 else:
-                    print(f'  Layer {layer_idx}: (Type info missing) targets found')
+                    self._vprint(f'  Layer {layer_idx}: (Type info missing) targets found', level='full')
         
-        print(f'\nTotal found targets: {len(all_found_targets)}/{total_checked_targets}')
+        self._vprint(f'\nTotal found targets: {len(all_found_targets)}/{total_checked_targets}', level='full')
         
         # Ensure output directory exists before saving
         if not os.path.exists(self.allpath_folder):
             os.makedirs(self.allpath_folder, exist_ok=True)
-            print(f'  📁 Recreated output folder: {self.allpath_folder}')
+            self._vprint(f'  📁 Recreated output folder: {self.allpath_folder}', level='full')
         
         # Handle the case where no paths were found
         if conn_inpath.empty:
-            print('\n⚠️  No paths found - saving minimal output data')
+            self._vprint('\n⚠️  No paths found - saving minimal output data', level='full')
             
             # Create data_details folder
             csv_folder = os.path.join(self.allpath_folder, 'data_details')
@@ -4854,8 +4862,8 @@ class FindNeuronConnection:
             empty_conn.to_csv(os.path.join(csv_folder, 'connection_info_bodyId.csv'), index=False)
             empty_conn.to_csv(os.path.join(csv_folder, 'connection_type.csv'), index=False)
             
-            print(f'  ✓ Saved to: {csv_folder}/')
-            print('  ✓ Saved connection data')
+            self._vprint(f'  ✓ Saved to: {csv_folder}/', level='full')
+            self._vprint('  ✓ Saved connection data', level='full')
             return
         
         # Update types for source and target neurons in conn_inpath using self.source_df and self.target_df
@@ -4874,7 +4882,7 @@ class FindNeuronConnection:
         # Apply mapping to conn_inpath
         # conn_inpath has bodyId_pre, bodyId_post, type_pre, type_post
         if body_to_type:
-            print(f'  Updating types for {len(body_to_type)} source/target neurons in connection table...')
+            self._vprint(f'  Updating types for {len(body_to_type)} source/target neurons in connection table...', level='full')
             # Update type_pre
             conn_inpath['type_pre'] = conn_inpath.apply(
                 lambda row: body_to_type.get(str(row['bodyId_pre']), row['type_pre']), axis=1
@@ -4889,7 +4897,7 @@ class FindNeuronConnection:
             # Instead, we will generate a global type aggregation for the matrix below.
 
         # Generate global type-level aggregation for matrix generation (avoids duplicates from layers)
-        print('  Generating global type-level matrix...')
+        self._vprint('  Generating global type-level matrix...', level='full')
         # Use conn_inpath (which has all edges). Deduplicate by bodyId pair to avoid double counting physical edges.
         conn_inpath_global = conn_inpath.drop_duplicates(subset=['bodyId_pre', 'bodyId_post'])
         
@@ -4907,7 +4915,7 @@ class FindNeuronConnection:
         )
 
         # Save main data (type-level aggregations)
-        print('\nSaving connection data...')
+        self._vprint('\nSaving connection data...', level='full')
         
         # Determine if using CSV or Excel based on output_format or data size
         EXCEL_ROW_LIMIT = 1_048_576
@@ -4915,14 +4923,14 @@ class FindNeuronConnection:
         
         if use_csv:
             if self.output_format == 'csv':
-                print(f'  💾 Saving data as CSV files (output_format="csv")')
+                self._vprint(f'  💾 Saving data as CSV files (output_format="csv")', level='full')
             else:
-                print(f'  ⚠️  Data too large for Excel ({len(conn_types):,} rows), saving as CSV')
+                self._vprint(f'  ⚠️  Data too large for Excel ({len(conn_types):,} rows), saving as CSV', level='full')
             
             # Create data_details folder
             csv_folder = os.path.join(self.allpath_folder, 'data_details')
             os.makedirs(csv_folder, exist_ok=True)
-            print(f'  💾 Saving data as CSV files to: {csv_folder}')
+            self._vprint(f'  💾 Saving data as CSV files to: {csv_folder}', level='full')
             self.parameter_df.to_csv(os.path.join(csv_folder, 'parameters.csv'), index=False)
             self.source_df.to_csv(os.path.join(csv_folder, 'source_neurons.csv'))
             self.target_df.to_csv(os.path.join(csv_folder, 'target_neurons.csv'))
@@ -4935,7 +4943,7 @@ class FindNeuronConnection:
             self._save_matrices_to_csv(conn_types_global, csv_folder, level='type')
         else:
             output_excel_name = os.path.join(self.allpath_folder, self.source_fname + '_to_' + self.target_fname + '_allpaths_info.xlsx')
-            print(f'  💾 Saving type-level data to: {output_excel_name}')
+            self._vprint(f'  💾 Saving type-level data to: {output_excel_name}', level='full')
             with pd.ExcelWriter(output_excel_name, mode='w', engine='xlsxwriter') as writer:
                 self.parameter_df.to_excel(writer,sheet_name='parameters',index=False)
                 worksheet = writer.sheets['parameters']
@@ -4955,16 +4963,16 @@ class FindNeuronConnection:
                 self._save_matrices_to_excel(conn_types_global, writer, level='type')
         
         # Save bodyId-level data
-        print(f'Saving bodyId-level allpaths data (rows: {len(conn_inpath):,})...')
+        self._vprint(f'Saving bodyId-level allpaths data (rows: {len(conn_inpath):,})...', level='full')
         
         # Recalculate use_csv for bodyId data
         use_csv = (self.output_format == 'csv') or (len(conn_inpath) >= EXCEL_ROW_LIMIT * 0.9)
         
         if use_csv:
             if self.output_format == 'csv':
-                print(f'  💾 Saving bodyId data as CSV (output_format="csv")')
+                self._vprint(f'  💾 Saving bodyId data as CSV (output_format="csv")', level='full')
             else:
-                print(f'  ⚠️  Data too large for Excel ({len(conn_inpath):,} rows), saving as CSV')
+                self._vprint(f'  ⚠️  Data too large for Excel ({len(conn_inpath):,} rows), saving as CSV', level='full')
             
             # Use data_details folder (same as type-level data)
             bodyid_folder = os.path.join(self.allpath_folder, 'data_details')
@@ -4974,7 +4982,7 @@ class FindNeuronConnection:
             output_bodyid_csv = os.path.join(bodyid_folder, 'connection_info_bodyId.csv')
             conn_inpath.to_csv(output_bodyid_csv, index=False)
             self._save_matrices_to_csv(conn_inpath_global, bodyid_folder, level='bodyId')
-            print(f'  ✓ Saved to: {bodyid_folder}/')
+            self._vprint(f'  ✓ Saved to: {bodyid_folder}/', level='full')
         else:
             # Data fits in Excel
             output_bodyid_excel = os.path.join(self.allpath_folder, self.source_fname + '_to_' + self.target_fname + '_allpaths_bodyId_data.xlsx')
@@ -4987,21 +4995,21 @@ class FindNeuronConnection:
                 # Save bodyId-level connection info
                 conn_inpath.to_excel(writer,sheet_name='connection_info_bodyId')
                 self._save_matrices_to_excel(conn_inpath_global, writer, level='bodyId')
-            print(f'  ✓ Saved to: {output_bodyid_excel}')
+            self._vprint(f'  ✓ Saved to: {output_bodyid_excel}', level='full')
         
-        print(f'  ✓ Saved connection data')
+        self._vprint(f'  ✓ Saved connection data', level='full')
         
         # Build path DataFrames directly from collected paths (OPTIMIZED - no re-pathfinding!)
-        print('\n=== Building path DataFrames from collected paths ===')
+        self._vprint('\n=== Building path DataFrames from collected paths ===', level='full')
         if use_parallel:
-            print(f'Processing {len(all_paths):,} paths found during parallel DFS...')
-            print('Note: Path structure already found by DFS, now extracting connection metrics (weights, probabilities, ratios)...')
+            self._vprint(f'Processing {len(all_paths):,} paths found during parallel DFS...', level='full')
+            self._vprint('Note: Path structure already found by DFS, now extracting connection metrics (weights, probabilities, ratios)...', level='full')
         else:
-            print(f'Found {path_count:,} paths during sequential DFS')
-            print('Note: Now building type/group level summaries...')
+            self._vprint(f'Found {path_count:,} paths during sequential DFS', level='full')
+            self._vprint('Note: Now building type/group level summaries...', level='full')
         
         # Type-level paths - Use separate DFS on type-level graph (much faster!)
-        print('\nFinding type-level paths using type-level graph...')
+        self._vprint('\nFinding type-level paths using type-level graph...', level='full')
         
         # Build type-level graph from conn_types
         G_type = nx.DiGraph()
@@ -5014,7 +5022,7 @@ class FindNeuronConnection:
             else:
                 G_type.add_edge(type_pre, type_post, weight=weight)
         
-        print(f'  Type-level graph: {G_type.number_of_nodes()} types, {G_type.number_of_edges()} edges')
+        self._vprint(f'  Type-level graph: {G_type.number_of_nodes()} types, {G_type.number_of_edges()} edges', level='full')
         
         # Get source and target types (filter out NaN/None values)
         source_types = [t for t in self.source_df['type'].unique().tolist() 
@@ -5035,7 +5043,7 @@ class FindNeuronConnection:
                     for path in nx.all_simple_paths(G_type, source_type, target_type, cutoff=self.max_interlayer + 1):
                         type_paths.append(path)
         
-        print(f'  Found {len(type_paths):,} type-level paths')
+        self._vprint(f'  Found {len(type_paths):,} type-level paths', level='full')
         
         # Build DataFrame from type paths
         path_df_type = sv.build_path_dataframe_from_paths(
@@ -5051,7 +5059,7 @@ class FindNeuronConnection:
         path_df_group_excluded = pd.DataFrame()
         
         if conn_groups is not None and not conn_groups.empty and 'custom_group' in self.source_df.columns:
-            print('\nFinding group-level paths using group-level graph...')
+            self._vprint('\nFinding group-level paths using group-level graph...', level='full')
             
             # Build group-level graph from conn_groups
             G_group = nx.DiGraph()
@@ -5073,7 +5081,7 @@ class FindNeuronConnection:
                 else:
                     G_group.add_edge(group_pre, group_post, weight=weight)
             
-            print(f'  Group-level graph: {G_group.number_of_nodes()} groups, {G_group.number_of_edges()} edges')
+            self._vprint(f'  Group-level graph: {G_group.number_of_nodes()} groups, {G_group.number_of_edges()} edges', level='full')
             
             # Get source and target groups
             source_groups = self.source_df['custom_group'].unique().tolist()
@@ -5092,7 +5100,7 @@ class FindNeuronConnection:
                         for path in nx.all_simple_paths(G_group, source_group, target_group, cutoff=self.max_interlayer + 1):
                             group_paths.append(path)
             
-            print(f'  Found {len(group_paths):,} group-level paths')
+            self._vprint(f'  Found {len(group_paths):,} group-level paths', level='full')
             
             # Debug: Check if all groups in paths have layer assignments
             if forward_only and len(group_paths) > 0:
@@ -5101,8 +5109,8 @@ class FindNeuronConnection:
                     all_groups_in_paths.update(path)
                 missing_groups = [g for g in all_groups_in_paths if g not in real_layer_map_group]
                 if missing_groups:
-                    print(f'  ⚠ Warning: {len(missing_groups)} groups in paths missing from real_layer_map_group')
-                    print(f'    First few missing: {missing_groups[:5]}')
+                    self._vprint(f'  ⚠ Warning: {len(missing_groups)} groups in paths missing from real_layer_map_group', level='full')
+                    self._vprint(f'    First few missing: {missing_groups[:5]}', level='full')
             
             # Build DataFrame from group paths
             # Rename columns to match expected format (type_pre/type_post)
@@ -5124,7 +5132,7 @@ class FindNeuronConnection:
                 ]
                 after_filter = len(path_df_group)
                 if before_filter > after_filter:
-                    print(f'  Removed {before_filter - after_filter} paths with zero-weight hops at group level')
+                    self._vprint(f'  Removed {before_filter - after_filter} paths with zero-weight hops at group level', level='full')
             
             path_df_group = sv.split_path(path_df_group)
             path_df_group, path_df_group_excluded = sv.path_filter(path_df_group, self.keyword_in_path_to_remove)
@@ -5138,7 +5146,7 @@ class FindNeuronConnection:
             ]
             after_filter = len(path_df_type)
             if before_filter > after_filter:
-                print(f'  Removed {before_filter - after_filter} paths with zero-weight hops at type level')
+                self._vprint(f'  Removed {before_filter - after_filter} paths with zero-weight hops at type level', level='full')
         
         path_df_type = sv.split_path(path_df_type)
         path_df_type, path_df_type_excluded = sv.path_filter(path_df_type,self.keyword_in_path_to_remove)
@@ -5148,7 +5156,7 @@ class FindNeuronConnection:
         # Save group-level paths if they exist
         if len(path_df_group) > 0:
             # Create custom group visualizations if available
-            print('\nCreating custom group visualizations...')
+            self._vprint('\nCreating custom group visualizations...', level='full')
             group_paths_to_viz = path_df_group.head(self.pathN_to_show) if self.pathN_to_show > 0 else path_df_group.copy()
             
             # Ensure column names match what VisualizePath expects
@@ -5158,14 +5166,14 @@ class FindNeuronConnection:
                 group_paths_to_viz['traversal_probabilities'] = group_paths_to_viz['probabilities']
             
             vp_group = VisualizePath(path_file=group_paths_to_viz, output_folder=os.path.join(self.allpath_folder, 'custom_groups'))
-            print(f'💾 Saving path_group data (rows: {len(path_df_group):,})...')
+            self._vprint(f'💾 Saving path_group data (rows: {len(path_df_group):,})...', level='full')
             # Check if we should save as CSV (matches type-level data format OR group data too large)
             save_group_as_csv = use_csv or (len(path_df_group) >= EXCEL_ROW_LIMIT * 0.9)
             
             if save_group_as_csv:
                 # Save as CSV
                 if len(path_df_group) >= EXCEL_ROW_LIMIT * 0.9:
-                    print(f'   ⚠️  Group path data too large for Excel ({len(path_df_group):,} rows), saving as CSV')
+                    self._vprint(f'   ⚠️  Group path data too large for Excel ({len(path_df_group):,} rows), saving as CSV', level='full')
                 output_path_group_csv = os.path.join(self.allpath_folder, self.source_fname+'_to_'+self.target_fname+'_allpaths_group.csv')
                 path_df_group.to_csv(output_path_group_csv, index=False)
                 if len(path_df_group_excluded) > 0:
@@ -5173,7 +5181,7 @@ class FindNeuronConnection:
                     details_folder = os.path.join(self.allpath_folder, 'data_details')
                     output_path_group_excluded_csv = os.path.join(details_folder, self.source_fname+'_to_'+self.target_fname+'_allpaths_group_excluded.csv')
                     path_df_group_excluded.to_csv(output_path_group_excluded_csv, index=False)
-                print(f'   ✓ Saved to: {self.allpath_folder}/')
+                self._vprint(f'   ✓ Saved to: {self.allpath_folder}/', level='full')
             else:
                 # Add to Excel file (type-level was saved to Excel, so output_excel_name exists)
                 output_excel_name = os.path.join(self.allpath_folder, self.source_fname + '_to_' + self.target_fname + '_allpaths_info.xlsx')
@@ -5181,16 +5189,16 @@ class FindNeuronConnection:
                     path_df_group.to_excel(writer,sheet_name='path_group')
                     if len(path_df_group_excluded) > 0:
                         path_df_group_excluded.to_excel(writer,sheet_name='path_group_excluded')
-                print('   ✓ path_group sheets saved')
+                self._vprint('   ✓ path_group sheets saved', level='full')
         
-        print(f'💾 Saving path_type data (rows: {len(path_df_type):,})...')
+        self._vprint(f'💾 Saving path_type data (rows: {len(path_df_type):,})...', level='full')
         # Check if we should save as CSV (matches type-level data format OR path data too large)
         save_type_as_csv = use_csv or (len(path_df_type) >= EXCEL_ROW_LIMIT * 0.9)
         
         if save_type_as_csv:
             # Save as CSV
             if len(path_df_type) >= EXCEL_ROW_LIMIT * 0.9:
-                print(f'   ⚠️  Path data too large for Excel ({len(path_df_type):,} rows), saving as CSV')
+                self._vprint(f'   ⚠️  Path data too large for Excel ({len(path_df_type):,} rows), saving as CSV', level='full')
             output_path_type_csv = os.path.join(self.allpath_folder, self.source_fname+'_to_'+self.target_fname+'_allpaths_type.csv')
             path_df_type.to_csv(output_path_type_csv, index=False)
             if len(path_df_type_excluded) > 0:
@@ -5198,18 +5206,18 @@ class FindNeuronConnection:
                 details_folder = os.path.join(self.allpath_folder, 'data_details')
                 output_path_type_excluded_csv = os.path.join(details_folder, self.source_fname+'_to_'+self.target_fname+'_allpaths_type_excluded.csv')
                 path_df_type_excluded.to_csv(output_path_type_excluded_csv, index=False)
-            print(f'   ✓ Saved to: {self.allpath_folder}/')
+            self._vprint(f'   ✓ Saved to: {self.allpath_folder}/', level='full')
         else:
             # Add to Excel file (type-level was saved to Excel, so output_excel_name exists)
             output_excel_name = os.path.join(self.allpath_folder, self.source_fname + '_to_' + self.target_fname + '_allpaths_info.xlsx')
             with pd.ExcelWriter(output_excel_name, mode='a', engine='openpyxl') as writer:
                 path_df_type.to_excel(writer,sheet_name='path_type')
                 path_df_type_excluded.to_excel(writer,sheet_name='path_type_excluded')
-            print('   ✓ path_type sheets saved')
+            self._vprint('   ✓ path_type sheets saved', level='full')
         
         # BodyId-level paths
         if find_bodyId_path:
-            print('\nBuilding bodyId-level paths with real_layer validation...')
+            self._vprint('\nBuilding bodyId-level paths with real_layer validation...', level='full')
             
             # Create type lookup from connection data
             type_lookup = {}
@@ -5236,26 +5244,26 @@ class FindNeuronConnection:
             )
             
             # Save path_bodyId to the bodyId data file
-            print(f'💾 Saving path_bodyId data (rows: {len(path_df_bodyId):,})...')
+            self._vprint(f'💾 Saving path_bodyId data (rows: {len(path_df_bodyId):,})...', level='full')
             if use_csv:
                 # Save as CSV if connection data was saved as CSV
                 output_path_csv = os.path.join(self.allpath_folder,self.source_fname+'_to_'+self.target_fname+'_allpaths_bodyId_paths.csv')
                 path_df_bodyId.to_csv(output_path_csv, index=False)
-                print(f'   ✓ Saved to: {output_path_csv}')
+                self._vprint(f'   ✓ Saved to: {output_path_csv}', level='full')
             else:
                 # Add to the bodyId Excel file if it was created
                 if len(path_df_bodyId) < EXCEL_ROW_LIMIT:
                     with pd.ExcelWriter(output_bodyid_excel, mode='a', engine='openpyxl') as writer:
                         path_df_bodyId.to_excel(writer,sheet_name='path_bodyId')
-                    print(f'   ✓ Added path_bodyId sheet to: {output_bodyid_excel}')
+                    self._vprint(f'   ✓ Added path_bodyId sheet to: {output_bodyid_excel}', level='full')
                 else:
-                    print(f'   ⚠️  path_bodyId too large ({len(path_df_bodyId):,} rows), saving as separate CSV')
+                    self._vprint(f'   ⚠️  path_bodyId too large ({len(path_df_bodyId):,} rows), saving as separate CSV', level='full')
                     output_path_csv = os.path.join(self.allpath_folder,self.source_fname+'_to_'+self.target_fname+'_allpaths_bodyId_paths.csv')
                     path_df_bodyId.to_csv(output_path_csv, index=False)
-                    print(f'   ✓ Saved to: {output_path_csv}')
+                    self._vprint(f'   ✓ Saved to: {output_path_csv}', level='full')
         
         # save interlayer info to excel
-        print('💾 Saving interlayer neuron info to Excel...')
+        self._vprint('💾 Saving interlayer neuron info to Excel...', level='full')
         
         interlayers = []
         
@@ -5292,17 +5300,17 @@ class FindNeuronConnection:
         ndf_complete = None
         
         if use_local_dataset:
-            print(f'   Using local dataset: {os.path.basename(dataset_path)}')
+            self._vprint(f'   Using local dataset: {os.path.basename(dataset_path)}', level='full')
             if 'flywire' in self.dataset.lower() or 'fafb' in self.dataset.lower():
                 ndf_complete = pd.read_csv(dataset_path, header=0, index_col=None, dtype={'bodyId': str}, low_memory=False)
             else:
                 ndf_complete = pd.read_csv(dataset_path, header=0, index_col=0, low_memory=False)
         else:
             if 'flywire' in self.dataset.lower() or 'fafb' in self.dataset.lower():
-                print(f'   ⚠️  Local dataset not found for FlyWire/FAFB. Skipping interlayer info fetch.')
+                self._vprint(f'   ⚠️  Local dataset not found for FlyWire/FAFB. Skipping interlayer info fetch.', level='full')
                 ndf_complete = pd.DataFrame()
             else:
-                print(f'   Local dataset not found, will use API calls')
+                self._vprint(f'   Local dataset not found, will use API calls', level='full')
                 # Ensure client is logged in before API calls
                 if self.client_type == 'neuprint':
                     if self.client_hemibrain is None:
@@ -5338,9 +5346,9 @@ class FindNeuronConnection:
             
             interlayers.append(n_df)
             
-        print(' ✓')
+        self._vprint(' ✓', level='full')
         
-        print('   Writing interlayer sheets to bodyId file...', end='', flush=True)
+        self._vprint('   Writing interlayer sheets to bodyId file...', level='full', end='', flush=True)
         if use_csv:
             # Save each layer as CSV in bodyId subfolder
             for i in range(len(interlayers)):
@@ -5351,9 +5359,9 @@ class FindNeuronConnection:
             with pd.ExcelWriter(output_bodyid_excel, mode='a', engine='openpyxl') as writer:
                 for i in range(len(interlayers)):
                     interlayers[i].to_excel(writer, sheet_name='layer_'+str(i+1), index=False)
-        print(' ✓')
-        print('   ✓ Interlayer sheets saved to bodyId file')
-        print('Done\n')
+        self._vprint(' ✓', level='full')
+        self._vprint('   ✓ Interlayer sheets saved to bodyId file', level='full')
+        self._vprint('Done\n', level='full')
         
         # ============================================================================
         # VISUALIZATION: Using VisualizePath only (PHASE 4)
@@ -5361,11 +5369,11 @@ class FindNeuronConnection:
         
         # VisualizePath network visualization
         if self.verbose_mode == 'simple':
-            print('Done')  # End of "building paths..."
-            print(f'Phase 4:')
-            print('creating type-level visualizations...', end='', flush=True)
+            self._vprint('Done', level='simple')  # End of "building paths..."
+            self._vprint(f'Phase 4:', level='simple')
+            self._vprint('creating type-level visualizations...', level='simple', end='', flush=True)
         else:
-            print('\nCreating interactive network visualizations...')
+            self._vprint('\nCreating interactive network visualizations...', level='full')
         try:
             
             # Create network from path_type if it exists
@@ -5414,28 +5422,28 @@ class FindNeuronConnection:
                 )
                 vp.visualize()
                 if self.verbose_mode == 'simple':
-                    print('Done')
+                    self._vprint('Done', level='simple')
                 else:
-                    print('  Created network_selected_paths.html and sankey_selected_paths.html')
+                    self._vprint('  Created network_selected_paths.html and sankey_selected_paths.html', level='full')
             else:
                 if self.verbose_mode == 'full':
-                    print('  No paths found to visualize')
+                    self._vprint('  No paths found to visualize', level='full')
             
             # Create network from path_bodyId if it exists and requested
             if find_bodyId_path and len(path_df_bodyId) > 0:
                 if self.verbose_mode == 'simple':
-                    print('creating bodyId-level visualizations...', end='', flush=True)
+                    self._vprint('creating bodyId-level visualizations...', level='simple', end='', flush=True)
                 else:
-                    print('\nCreating bodyId-level network visualizations...')
+                    self._vprint('\nCreating bodyId-level network visualizations...', level='full')
                 # Filter paths if pathN_to_show is specified
                 if self.pathN_to_show > 0 and len(path_df_bodyId) > self.pathN_to_show:
                     paths_to_visualize_bodyId = path_df_bodyId.head(self.pathN_to_show).copy()
                     if self.verbose_mode == 'full':
-                        print(f'  Showing top {self.pathN_to_show} bodyId paths (by traversal_probability) out of {len(path_df_bodyId)} total paths')
+                        self._vprint(f'  Showing top {self.pathN_to_show} bodyId paths (by traversal_probability) out of {len(path_df_bodyId)} total paths', level='full')
                 else:
                     paths_to_visualize_bodyId = path_df_bodyId.copy()
                     if self.verbose_mode == 'full':
-                        print(f'  Showing all {len(path_df_bodyId)} bodyId paths')
+                        self._vprint(f'  Showing all {len(path_df_bodyId)} bodyId paths', level='full')
                 
                 # Ensure path_block column exists and format with types if available
                 # We want format: bodyId_type -> bodyId_type -> ...
@@ -5488,14 +5496,14 @@ class FindNeuronConnection:
                 )
                 vp_bodyId.visualize()
                 if self.verbose_mode == 'simple':
-                    print('Done')
+                    self._vprint('Done', level='simple')
                 else:
-                    print('  Created bodyId-level visualizations in bodyId_visualization subfolder')
+                    self._vprint('  Created bodyId-level visualizations in bodyId_visualization subfolder', level='full')
                 
             # Create custom group visualizations if available
             if len(path_df_group) > 0:
                 if self.verbose_mode == 'full':
-                    print('\nCreating custom group visualizations...')
+                    self._vprint('\nCreating custom group visualizations...', level='full')
                 group_paths_to_viz = path_df_group.head(self.pathN_to_show) if self.pathN_to_show > 0 else path_df_group
                 vp_group = VisualizePath(path_file=group_paths_to_viz, output_folder=os.path.join(self.allpath_folder, 'custom_groups'),
                                         source_color=self.source_color if hasattr(self, 'source_color') else '#1f77b4', showfig=self.showfig,
@@ -5503,21 +5511,21 @@ class FindNeuronConnection:
                                         output_format=self.output_format)
                 vp_group.visualize()
                 if self.verbose_mode == 'full':
-                    print(f'  ✓ Custom group visualizations created ({len(group_paths_to_viz)} paths)')
+                    self._vprint(f'  ✓ Custom group visualizations created ({len(group_paths_to_viz)} paths)', level='full')
                     
         except Exception as e:
-            print(f'  Warning: VisualizePath visualization failed: {e}')
+            self._vprint(f'  Warning: VisualizePath visualization failed: {e}', level='full')
             import traceback
             traceback.print_exc()
         
         # Heatmap generation removed - use VisualizePath.visualize() for heatmaps instead
         
         if self.verbose_mode == 'simple':
-            print('\n===========')
-            print('¡COMPLETED!')
-            print('===========\n')
+            self._vprint('\n===========', level='simple')
+            self._vprint('¡COMPLETED!', level='simple')
+            self._vprint('===========\n', level='simple')
         else:
-            print('Done\n')
+            self._vprint('Done\n', level='full')
     
     def _get_network_layout(self, G):
         '''Get network layout based on network_layout parameter'''
@@ -5555,7 +5563,7 @@ class FindNeuronConnection:
             edges_in_path_bodyId = set()
         
         # Network by type
-        print('Building interactive network by type...')
+        self._vprint('Building interactive network by type...', level='full')
         G_type = nx.DiGraph()
         
         # Build a mapping from bodyId to type for layer assignment
