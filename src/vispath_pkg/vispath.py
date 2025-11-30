@@ -145,8 +145,172 @@ class VisualizePath:
         heatmap_row_order=None,  # NEW: Custom row order for heatmap
         heatmap_col_order=None,  # NEW: Custom column order for heatmap
         straight_reciprocal_edges=False,  # NEW: Use straight lines for reciprocal edges
-        generate_empty_network=False  # NEW: Generate empty network HTML template
+        generate_empty_network=False,  # NEW: Generate empty network HTML template
+        edgeN_limit=500,        # NEW: Limit number of edges to show (default 1000)
+        output_format='xlsx',   # NEW: Output format for data files ('xlsx' or 'csv')
     ):
+        """
+        Initialize VisualizePath with pathway data and visualization settings.
+        
+        Parameters
+        ----------
+        path_file : str or pd.DataFrame
+            Path to CSV/Excel file or DataFrame containing pathway data.
+            Required columns: 'path_block', 'weights'
+            Optional columns: 'connection_ratios', 'traversal_probabilities'
+            
+        sheet_name : str, optional
+            Excel sheet name to read. If None, auto-detects 'path_type' or 'path_bodyId'.
+            Ignored for CSV files and DataFrames.
+            
+        output_folder : str, optional
+            Directory to save visualization files. If None, creates '[filename]_figure'
+            relative to the input file location (for files) or './selected_paths' (for DataFrames).
+            Example: 'L3_to_MeVPMe_allpaths_info.xlsx' → 'L3_to_MeVPMe_allpaths_info_figure/'
+            
+        source_color : str, optional
+            Color for source nodes.
+            Default: '#1f77b4' (blue)
+            Format: Any valid CSS color (hex, rgb, rgba, named)
+            
+        intermediate_color : str, optional
+            Color for intermediate nodes.
+            Default: '#2ca02c' (green)
+            Format: Any valid CSS color (hex, rgb, rgba, named)
+            
+        target_color : str, optional
+            Color for target nodes.
+            Default: '#d62728' (red)
+            
+        link_color : str, optional
+            Color for connections in Sankey diagram and network edges.
+            Default: 'rgba(100,100,100,0.3)' (semi-transparent gray)
+            
+        highlight_color : str, optional
+            Color for highlighted/selected nodes and edges in network visualization.
+            Used when clicking on nodes or edges to highlight them.
+            Default: '#FFFFE0' (light yellow)
+            Format: Any valid CSS color (hex, rgb, rgba, named)
+            
+        node_color : list of str, optional
+            [DEPRECATED] Colors for [source_nodes, intermediate_nodes].
+            Use source_color and intermediate_color instead.
+            Kept for backward compatibility.
+            
+        node_colors : str or pd.DataFrame, optional
+            Custom colors for specific nodes. Can be:
+            - Sheet name (str): Name of sheet in Excel file with 'node' and 'color' columns
+            - File path (str): Path to CSV/Excel file with 'node' and 'color' columns
+            - DataFrame: DataFrame with 'node' and 'color' columns
+            Color column supports hex (#RRGGBB) and rgba (rgba(r,g,b,a)) formats.
+            Nodes not specified will use default source/intermediate/target colors.
+            
+        network_layout : str, optional
+            Layout algorithm for network graph.
+            Options: 'hierarchical', 'spring', 'circular', 'distributed'
+            Default: 'hierarchical'
+            
+        showfig : bool, optional
+            Whether to automatically open visualizations in web browser.
+            Default: False
+            
+        edge_width_scale : str, optional
+            Edge width scaling method for network graph visualization.
+            Options: 'linear', 'log', 'sqrt', 'none'
+            - 'linear': Direct proportional scaling (width ∝ weight)
+            - 'log': Logarithmic scaling (width ∝ log(weight)) - DEFAULT
+            - 'sqrt': Square root scaling (width ∝ √weight)
+            - 'none': No scaling (constant width)
+            Default: 'log'
+            Note: For Sankey diagrams, Plotly auto-scales link widths proportionally.
+            
+        edge_width_factor : float, optional
+            Multiplier for edge widths in network graph (applies after scaling).
+            Larger values make edges thicker. Default: 1.0
+            
+        edge_width_log_base : float, optional
+            Base for logarithmic scaling when edge_width_scale='log'.
+            - None: Natural logarithm (base e ≈ 2.718) - DEFAULT
+            - 2: Binary logarithm (log₂)
+            - 10: Common logarithm (log₁₀)
+            - Any positive number > 1: Custom base
+            Only used when edge_width_scale='log'. Ignored for other scaling methods.
+            Default: None (natural log)
+            
+        min_edge_width : float, optional
+            Minimum edge width in pixels for network visualization.
+            This is a fixed lower bound - the slider controls max width.
+            Default: 0.5
+            
+        max_edge_width : float, optional
+            Maximum edge width in pixels for network visualization.
+            This value is controlled by the "Edge Width" slider in the UI.
+            Default: 30
+            
+        min_font_size : int, optional
+            Minimum font size in pixels for node labels.
+            This is the minimum value for the "Font Size" slider.
+            Default: 6
+            
+        max_font_size : int, optional
+            Maximum font size in pixels for node labels.
+            This is the maximum value for the "Font Size" slider.
+            Default: 48
+            
+        min_node_size : int, optional
+            Minimum node size in pixels.
+            This is the minimum value for the "Node Size" slider.
+            Default: 20
+            
+        max_node_size : int, optional
+            Maximum node size in pixels.
+            This is the maximum value for the "Node Size" slider.
+            Default: 80
+            
+        heatmap_row_order : list of str, optional
+            Custom row order for heatmap row nodes (sources).
+            If None, uses default sorted order.
+            Nodes not in the list will be appended at the end (sorted).
+            Example: ['PN_A', 'PN_B', 'LHN_X', 'LHN_Y']
+            Default: None
+            
+        heatmap_col_order : list of str, optional
+            Custom order for heatmap column nodes (targets).
+            If None, uses default sorted order.
+            Nodes not in the list will be appended at the end (sorted).
+            Example: ['LHN_X', 'MBON_1', 'MBON_2']
+            Default: None
+            
+        straight_reciprocal_edges : bool, optional
+            If True, reciprocal (bidirectional) edges in network visualization will be 
+            displayed as straight lines instead of curved lines.
+            This makes it easier to see both directions clearly without visual overlap.
+            Cytoscape.js supports this via 'curve-style' and 'control-point-distances'.
+            Default: False (uses curved lines for reciprocal edges)
+            
+        generate_empty_network : bool, optional
+            If True, generates an empty network HTML template without requiring
+            path_file data. Useful for creating blank network visualizations that
+            can be populated later or used as templates.
+            When enabled, path_file can be None.
+            Default: False
+            
+        edgeN_limit : int, optional
+            Limit number of edges to show in visualizations.
+            Default: 1000
+            
+        Raises
+        ------
+        FileNotFoundError
+            If path_file is a string and the file doesn't exist
+        ValueError
+            If required columns are missing from the data
+        """
+        self.path_file = path_file
+        self.sheet_name = sheet_name
+        self.output_folder = output_folder
+        
+        self.edgeN_limit = edgeN_limit
         """
         Initialize VisualizePath with pathway data and visualization settings.
         
@@ -293,6 +457,13 @@ class VisualizePath:
             When enabled, path_file can be None.
             Default: False
             
+        edgeN_limit : int, optional
+            Limit number of edges to show in visualizations.
+            Default: 1000
+            
+        pathN_to_show : int, optional
+            [DEPRECATED] Use edgeN_limit instead.
+            
         Raises
         ------
         FileNotFoundError
@@ -303,6 +474,9 @@ class VisualizePath:
         self.path_file = path_file
         self.sheet_name = sheet_name
         self.output_folder = output_folder
+        
+        self.edgeN_limit = edgeN_limit
+        self.output_format = output_format
         
         # Edge width scaling parameters
         self.edge_width_scale = edge_width_scale
@@ -416,6 +590,44 @@ class VisualizePath:
         if self.node_colors_input is not None:
             self._load_custom_colors()
         
+    def _normalize_column_names(self):
+        """
+        Normalize column names to standard internal names.
+        
+        Handles aliases for:
+        - connection_ratios: ratio, ratios, connection_ratio, conn_ratio
+        - traversal_probabilities: probability, probabilities, prob, traversal_probability, trav_prob
+        """
+        if self.path_df is None:
+            return
+            
+        # Define aliases mapping
+        aliases = {
+            'connection_ratios': ['ratio', 'ratios', 'connection_ratio', 'conn_ratio'],
+            'traversal_probabilities': ['probability', 'probabilities', 'prob', 'traversal_probability', 'trav_prob']
+        }
+        
+        # Create rename dictionary
+        rename_dict = {}
+        columns_lower = {str(col).lower(): str(col) for col in self.path_df.columns}
+        
+        for standard_name, alias_list in aliases.items():
+            # If standard name already exists, skip
+            if standard_name in self.path_df.columns:
+                continue
+                
+            # Check for aliases (case-insensitive)
+            for alias in alias_list:
+                if alias.lower() in columns_lower:
+                    original_col = columns_lower[alias.lower()]
+                    rename_dict[original_col] = standard_name
+                    print(f"  Renaming column '{original_col}' to '{standard_name}'")
+                    break  # Use the first matching alias found
+        
+        # Apply renaming
+        if rename_dict:
+            self.path_df = self.path_df.rename(columns=rename_dict)
+
     def _load_data(self):
         """Load pathway data from file or DataFrame. Supports 1. connection matrix input, 2. [source, target, weight, ratio(optional), probability(optional)] 3-column edge list, and 3. path blocks."""
         if isinstance(self.path_file, pd.DataFrame):
@@ -520,6 +732,64 @@ class VisualizePath:
             else:
                 raise ValueError(f"Unsupported file format: {file_ext}. Use .csv, .xlsx, or .xls")
             
+            # Check if loaded data is a connection matrix
+            # Detect connection matrix: 2D numeric DataFrame, not edge-list
+            # Edge list usually has 'source', 'target', 'weight' or similar columns
+            edge_list_colsets = [
+                {"source", "target", "weight"},
+                {"from", "to", "weight"},
+                {"pre", "post", "weight"},
+            ]
+            def has_prefixed_cols(cols):
+                str_cols = [str(c) for c in cols]
+                has_pre = any(c.endswith('_pre') for c in str_cols)
+                has_post = any(c.endswith('_post') for c in str_cols)
+                has_weight = 'weight' in str_cols
+                return has_pre and has_post and has_weight
+                
+            is_edge_list = any(set(self.path_df.columns) == s for s in edge_list_colsets) or has_prefixed_cols(self.path_df.columns)
+            
+            # Check for path format
+            path_cols = ['path_block', 'weights']
+            has_path_format = all(col in self.path_df.columns for col in path_cols)
+            
+            is_numeric_matrix = (
+                not is_edge_list and
+                not has_path_format and
+                self.path_df.ndim == 2 and
+                self.path_df.shape[0] > 1 and self.path_df.shape[1] > 1 and
+                all(np.issubdtype(dtype, np.number) for dtype in self.path_df.dtypes)
+            )
+            
+            if is_numeric_matrix:
+                print("✓ Recognized input format: connection matrix ({}x{} DataFrame)".format(self.path_df.shape[0], self.path_df.shape[1]))
+                df = self.path_df
+                # If index/columns are not all strings, auto-generate node names
+                if not (all(isinstance(x, str) for x in df.index) and all(isinstance(x, str) for x in df.columns)):
+                    # If loaded from CSV without index_col, the first column might be the index
+                    # Heuristic: if first column is object/string and others are numeric, set it as index
+                    if df.shape[1] > 1 and df.iloc[:, 0].dtype == object:
+                        print("  Using first column as index")
+                        df = df.set_index(df.columns[0])
+                        self.path_df = df
+                    else:
+                        n, m = df.shape
+                        row_names = [f"N{i}" for i in range(n)]
+                        col_names = [f"N{j}" for j in range(m)]
+                        df.index = row_names
+                        df.columns = col_names
+                        self.path_df = df
+                
+                # Convert matrix to edge list
+                edge_list = []
+                for src in df.index:
+                    for tgt in df.columns:
+                        val = df.at[src, tgt]
+                        if pd.notna(val) and val != 0:
+                            edge_list.append({"source": src, "target": tgt, "weight": val})
+                self.path_df = pd.DataFrame(edge_list)
+                print(f"  Converted matrix to {len(self.path_df)} edges")
+
             # Set default output folder relative to input file
             if self.output_folder is None:
                 input_dir = os.path.dirname(os.path.abspath(self.path_file))
@@ -529,6 +799,9 @@ class VisualizePath:
             else:
                 # If custom output_folder provided, extract folder name as base
                 self.base_filename = os.path.basename(self.output_folder.rstrip(os.sep))
+        
+        # Normalize column names (handle aliases)
+        self._normalize_column_names()
         
         # Create output folder
         os.makedirs(self.output_folder, exist_ok=True)
@@ -1383,7 +1656,8 @@ class VisualizePath:
             f"Invalid data format. Could not find required columns.\n\n"
             f"Supported formats:\n"
             f"1. Path-based: 'path_block' + 'weights'\n"
-            f"2. Edge-list: (source/from/pre/*_pre) + (target/to/post/*_post) + (weight/weights)\n\n"
+            f"2. Edge-list: (source/from/pre/*_pre) + (target/to/post/*_post) + (weight/weights)\n"
+            f"3. Connection matrix: Row as pre, Col as post (numeric values)\n\n"
             f"Available columns: {available_cols}\n\n"
             f"Examples:\n"
             f"  Path format:    path_block='A -> B -> C', weights='[10, 5]'\n"
@@ -1544,6 +1818,10 @@ class VisualizePath:
         # Find all numeric columns that could be additional metrics
         numeric_cols = []
         additional_metric_names = []
+        
+        # Also look for nt_type column (categorical)
+        nt_type_col = None
+        
         for col in self.path_df.columns:
             if col not in exclude_cols:
                 # Check if column is numeric
@@ -1552,11 +1830,17 @@ class VisualizePath:
                         numeric_cols.append(col)
                         # Store original column name for later use
                         additional_metric_names.append(col)
+                # Check for nt_type column
+                elif col.lower() in ['nt_type', 'nt', 'neurotransmitter']:
+                    nt_type_col = col
         
         # Initialize storage for additional metrics
         additional_metrics = {col: [] for col in numeric_cols}
+        nt_types_list = []
         
         print(f"  Detected numeric columns: {[weight_col] + numeric_cols}")
+        if nt_type_col:
+            print(f"  Detected neurotransmitter column: {nt_type_col}")
         
         for idx, row in self.path_df.iterrows():
             source = str(row[source_col])
@@ -1575,6 +1859,11 @@ class VisualizePath:
                 value = row[col] if pd.notna(row[col]) else 0
                 additional_metrics[col].append([value])
             
+            # Store nt_type if available
+            if nt_type_col:
+                nt_val = row[nt_type_col] if pd.notna(row[nt_type_col]) else None
+                nt_types_list.append([nt_val])
+            
             # Store edge color if provided
             if color_col and color_col in row and pd.notna(row[color_col]):
                 edge_key = (source, target)
@@ -1586,6 +1875,9 @@ class VisualizePath:
         # Add new columns
         self.path_df['path_block'] = paths
         self.path_df['weights'] = weights
+        
+        if nt_type_col:
+            self.path_df['nt_types'] = nt_types_list
         
         # Add additional metric columns
         # Map common metric names to standard column names
@@ -1738,6 +2030,7 @@ class VisualizePath:
         # Check which optional columns are available
         has_ratios = 'connection_ratios' in self.path_df.columns
         has_probs = 'traversal_probabilities' in self.path_df.columns
+        has_nt = 'nt_types' in self.path_df.columns
         
         for idx, row in self.path_df.iterrows():
             path_block = row['path_block']
@@ -1746,6 +2039,7 @@ class VisualizePath:
             # Optional columns - only if they exist
             ratios = self._safe_eval_list(row.get('connection_ratios', [])) if has_ratios else []
             probs = self._safe_eval_list(row.get('traversal_probabilities', [])) if has_probs else []
+            nt_types = self._safe_eval_list(row.get('nt_types', [])) if has_nt else []
             
             # Parse path
             nodes = self._parse_path_block(path_block)
@@ -1757,6 +2051,7 @@ class VisualizePath:
                 weight = weights[i] if i < len(weights) else 0
                 ratio = ratios[i] if i < len(ratios) else np.nan
                 prob = probs[i] if i < len(probs) else np.nan
+                nt = nt_types[i] if i < len(nt_types) else None
                 
                 conn_data = {
                     'source': source,
@@ -1769,6 +2064,8 @@ class VisualizePath:
                     conn_data['ratio'] = ratio
                 if has_probs:
                     conn_data['probability'] = prob
+                if has_nt:
+                    conn_data['nt_type'] = nt
                     
                 connections.append(conn_data)
         
@@ -1784,6 +2081,8 @@ class VisualizePath:
                 cols.append('ratio')
             if has_probs:
                 cols.append('probability')
+            if has_nt:
+                cols.append('nt_type')
             conn_df = pd.DataFrame(columns=cols)
         else:
             # Aggregate duplicate connections - only aggregate columns that exist
@@ -1793,6 +2092,9 @@ class VisualizePath:
                 agg_dict['ratio'] = 'mean'
             if has_probs:
                 agg_dict['probability'] = 'mean'
+            if has_nt:
+                # Use mode (most frequent) for categorical data like nt_type
+                agg_dict['nt_type'] = lambda x: x.mode().iloc[0] if not x.mode().empty else None
 
             conn_df = conn_df.groupby(['source', 'target'], as_index=False).agg(agg_dict)
 
@@ -1949,13 +2251,13 @@ class VisualizePath:
             # include orphan nodes) if no non-zero links are present.
             print('\033[33mWarning: No non-zero connections found for Sankey diagram. Building node-only Sankey (no links).\033[0m')
         
-        # Simplify Sankey if too many edges (> 100)
-        MAX_EDGES = 100
+        # Simplify Sankey if too many edges (> edgeN_limit)
+        MAX_EDGES = self.edgeN_limit
         simplification_applied = False
         original_edge_count = len(edge_data)
         
         if len(edge_data) > MAX_EDGES:
-            print(f'\033[33mℹ️  Too many edges ({original_edge_count}) - simplifying to top {MAX_EDGES} by weight\033[0m')
+            print(f'\033[33m⚠️ Too many edges ({original_edge_count}) - simplifying to top {MAX_EDGES} by weight\033[0m')
             # Sort edges by absolute weight (descending) and keep top MAX_EDGES
             sorted_edges = sorted(edge_data.items(), key=lambda x: abs(x[1]['weight']), reverse=True)
             edge_data = dict(sorted_edges[:MAX_EDGES])
@@ -1971,11 +2273,14 @@ class VisualizePath:
         # Include nodes that appear in paths (node_layers) even if they had only
         # zero-weight edges and thus were removed from edge_data. Place them in
         # their earliest observed layer to preserve ordering in the Sankey.
-        for node, layers in node_layers.items():
-            if not layers:
-                continue
-            earliest = min(layers)
-            nodes_by_layer.setdefault(earliest, set()).add(node)
+        # NOTE: If simplification was applied (edgeN_limit exceeded), we skip this
+        # to avoid re-introducing orphan nodes that were filtered out.
+        if not simplification_applied:
+            for node, layers in node_layers.items():
+                if not layers:
+                    continue
+                earliest = min(layers)
+                nodes_by_layer.setdefault(earliest, set()).add(node)
         
         # Build network if not already done (to get node types)
         if self.G_network is None:
@@ -3054,10 +3359,33 @@ class VisualizePath:
         
         print("\nCreating interactive network visualization...")
         
+        # Simplify network if too many edges (> edgeN_limit)
+        G_to_plot = self.G_network
+        if self.edgeN_limit > 0 and self.G_network.number_of_edges() > self.edgeN_limit:
+             print(f'\033[33m⚠️ Too many edges ({self.G_network.number_of_edges()}) - simplifying to top {self.edgeN_limit} by weight\033[0m')
+             # Sort edges by weight
+             edges = sorted(self.G_network.edges(data=True), key=lambda x: abs(x[2].get('weight', 0)), reverse=True)
+             top_edges = edges[:self.edgeN_limit]
+             
+             # Create new graph with top edges
+             G_sub = nx.DiGraph()
+             
+             # Add edges and their nodes
+             for u, v, data in top_edges:
+                 G_sub.add_edge(u, v, **data)
+                 # Copy node attributes
+                 if u in self.G_network.nodes:
+                     G_sub.nodes[u].update(self.G_network.nodes[u])
+                 if v in self.G_network.nodes:
+                     G_sub.nodes[v].update(self.G_network.nodes[v])
+             
+             G_to_plot = G_sub
+             print(f'  Kept {G_to_plot.number_of_edges()} edges')
+        
         output_path = os.path.join(self.output_folder, self.base_filename + '_network.html')
         
         self._plot_cytoscape_network(
-            self.G_network,
+            G_to_plot,
             output_path=output_path,
             layout=self.network_layout
         )
@@ -6330,31 +6658,170 @@ class VisualizePath:
     
     def save_data(self):
         """
-        Save connection data and original paths to Excel file.
+        Save connection data and original paths to Excel or CSV files.
         
-        Creates an Excel file with two sheets:
-        1. 'connections': Aggregated connection data
-        2. 'original_paths': Original pathway data
+        If output_format is 'xlsx':
+            Creates an Excel file with multiple sheets:
+            1. 'connections': Aggregated connection data
+            2. 'original_paths': Original pathway data
+            3. 'connMatrix_weight': Connection matrix (weights)
+            4. 'connMatrix_ratio': Connection matrix (ratios) - if available
+            5. 'connMatrix_prob': Connection matrix (probabilities) - if available
+            6. 'connMatrix_nt_type': Connection matrix (neurotransmitters) - if available
+            
+        If output_format is 'csv':
+            Creates multiple CSV files in the output folder:
+            - [filename]_data_connections.csv
+            - [filename]_data_original_paths.csv
+            - [filename]_data_connMatrix_weight.csv
+            - ...
         
         Returns
         -------
-        str
-            Path to the generated Excel file
+        str or list
+            Path to the generated Excel file, or list of paths to CSV files
         """
         if self.conn_df is None:
             self.build_network()
         
-        print("\nSaving data to Excel...")
-        
-        output_path = os.path.join(self.output_folder, self.base_filename + '_data.xlsx')
-        
-        with pd.ExcelWriter(output_path, engine='openpyxl') as writer:
-            self.conn_df.to_excel(writer, sheet_name='connections', index=False)
-            self.path_df.to_excel(writer, sheet_name='original_paths', index=False)
-        
-        print(f"Data saved: {output_path}")
-        
-        return output_path
+        if self.output_format == 'csv':
+            print("\nSaving data to CSV files...")
+            created_files = []
+            
+            # Save connections
+            conn_path = os.path.join(self.output_folder, self.base_filename + '_data_connections.csv')
+            self.conn_df.to_csv(conn_path, index=False)
+            created_files.append(conn_path)
+            
+            # Save original paths
+            paths_path = os.path.join(self.output_folder, self.base_filename + '_data_original_paths.csv')
+            self.path_df.to_csv(paths_path, index=False)
+            created_files.append(paths_path)
+            
+            # Create matrices
+            all_nodes = sorted(list(set(self.conn_df['source']).union(set(self.conn_df['target']))))
+            
+            # Weight matrix
+            weight_matrix = self.conn_df.pivot_table(
+                index='source', 
+                columns='target', 
+                values='weight', 
+                fill_value=0
+            ).reindex(index=all_nodes, columns=all_nodes, fill_value=0)
+            
+            weight_path = os.path.join(self.output_folder, self.base_filename + '_data_connMatrix_weight.csv')
+            weight_matrix.to_csv(weight_path)
+            created_files.append(weight_path)
+            
+            # Ratio matrix
+            if 'ratio' in self.conn_df.columns:
+                ratio_matrix = self.conn_df.pivot_table(
+                    index='source', 
+                    columns='target', 
+                    values='ratio', 
+                    fill_value=0
+                ).reindex(index=all_nodes, columns=all_nodes, fill_value=0)
+                
+                ratio_path = os.path.join(self.output_folder, self.base_filename + '_data_connMatrix_ratio.csv')
+                ratio_matrix.to_csv(ratio_path)
+                created_files.append(ratio_path)
+                
+            # Probability matrix
+            if 'probability' in self.conn_df.columns:
+                prob_matrix = self.conn_df.pivot_table(
+                    index='source', 
+                    columns='target', 
+                    values='probability', 
+                    fill_value=0
+                ).reindex(index=all_nodes, columns=all_nodes, fill_value=0)
+                
+                prob_path = os.path.join(self.output_folder, self.base_filename + '_data_connMatrix_prob.csv')
+                prob_matrix.to_csv(prob_path)
+                created_files.append(prob_path)
+                
+            # NT Type matrix
+            if 'nt_type' in self.conn_df.columns:
+                nt_matrix = self.conn_df.pivot_table(
+                    index='source', 
+                    columns='target', 
+                    values='nt_type', 
+                    aggfunc='first',
+                    fill_value=''
+                ).reindex(index=all_nodes, columns=all_nodes, fill_value='')
+                
+                nt_path = os.path.join(self.output_folder, self.base_filename + '_data_connMatrix_nt_type.csv')
+                nt_matrix.to_csv(nt_path)
+                created_files.append(nt_path)
+            
+            print(f"Data saved to {len(created_files)} CSV files in: {self.output_folder}")
+            return created_files
+            
+        else:
+            print("\nSaving data to Excel...")
+            
+            output_path = os.path.join(self.output_folder, self.base_filename + '_data.xlsx')
+            
+            # Create matrices
+            # Get all unique nodes to ensure square matrices or at least consistent axes
+            all_nodes = sorted(list(set(self.conn_df['source']).union(set(self.conn_df['target']))))
+            
+            # Weight matrix
+            weight_matrix = self.conn_df.pivot_table(
+                index='source', 
+                columns='target', 
+                values='weight', 
+                fill_value=0
+            ).reindex(index=all_nodes, columns=all_nodes, fill_value=0)
+            
+            # Ratio matrix
+            ratio_matrix = None
+            if 'ratio' in self.conn_df.columns:
+                ratio_matrix = self.conn_df.pivot_table(
+                    index='source', 
+                    columns='target', 
+                    values='ratio', 
+                    fill_value=0
+                ).reindex(index=all_nodes, columns=all_nodes, fill_value=0)
+                
+            # Probability matrix
+            prob_matrix = None
+            if 'probability' in self.conn_df.columns:
+                prob_matrix = self.conn_df.pivot_table(
+                    index='source', 
+                    columns='target', 
+                    values='probability', 
+                    fill_value=0
+                ).reindex(index=all_nodes, columns=all_nodes, fill_value=0)
+                
+            # NT Type matrix
+            nt_matrix = None
+            if 'nt_type' in self.conn_df.columns:
+                # For categorical data, fill_value needs to be handled carefully
+                # pivot_table with aggfunc='first' (or lambda x: x.mode()[0]) works for strings
+                # But we already aggregated in build_network, so 'first' is fine
+                nt_matrix = self.conn_df.pivot_table(
+                    index='source', 
+                    columns='target', 
+                    values='nt_type', 
+                    aggfunc='first',
+                    fill_value=''
+                ).reindex(index=all_nodes, columns=all_nodes, fill_value='')
+
+            with pd.ExcelWriter(output_path, engine='openpyxl') as writer:
+                self.conn_df.to_excel(writer, sheet_name='connections', index=False)
+                self.path_df.to_excel(writer, sheet_name='original_paths', index=False)
+                
+                weight_matrix.to_excel(writer, sheet_name='connMatrix_weight')
+                if ratio_matrix is not None:
+                    ratio_matrix.to_excel(writer, sheet_name='connMatrix_ratio')
+                if prob_matrix is not None:
+                    prob_matrix.to_excel(writer, sheet_name='connMatrix_prob')
+                if nt_matrix is not None:
+                    nt_matrix.to_excel(writer, sheet_name='connMatrix_nt_type')
+            
+            print(f"Data saved: {output_path}")
+            
+            return output_path
     
     def create_heatmaps(self, conn_matrices, titles=None, color_scales=None):
         """
@@ -6495,10 +6962,16 @@ class VisualizePath:
             print("Warning: No connection data available for heatmap.")
             return None
         
+        # Filter edges if limit is set
+        conn_df_to_use = self.conn_df
+        if self.edgeN_limit and len(self.conn_df) > self.edgeN_limit:
+            print(f"  Filtering top {self.edgeN_limit} edges by weight (out of {len(self.conn_df)})")
+            conn_df_to_use = self.conn_df.sort_values('weight', ascending=False).head(self.edgeN_limit)
+        
         print("\nCreating interactive heatmap...")
         
         # Create weight matrix from connections
-        weight_matrix = self.conn_df.pivot_table(
+        weight_matrix = conn_df_to_use.pivot_table(
             index='source',
             columns='target',
             values='weight',
@@ -6507,8 +6980,8 @@ class VisualizePath:
         
         # Determine nodes that actually appear as sources or targets in the connection data
         # This handles cases where a node can be BOTH a source and a target
-        actual_sources = set(self.conn_df['source'].unique())
-        actual_targets = set(self.conn_df['target'].unique())
+        actual_sources = set(conn_df_to_use['source'].unique())
+        actual_targets = set(conn_df_to_use['target'].unique())
         all_nodes = actual_sources | actual_targets
         
         # Nodes that are ONLY sources (appear as source but never as target)
@@ -6545,9 +7018,9 @@ class VisualizePath:
         # Create ratio and probability matrices if those columns exist
         matrices_dict = {'weight': weight_matrix}
         
-        if 'ratio' in self.conn_df.columns:
+        if 'ratio' in conn_df_to_use.columns:
             print("  Creating ratio matrix...")
-            ratio_matrix = self.conn_df.pivot_table(
+            ratio_matrix = conn_df_to_use.pivot_table(
                 index='source',
                 columns='target',
                 values='ratio',
@@ -6556,9 +7029,9 @@ class VisualizePath:
             ratio_matrix = ratio_matrix.reindex(index=row_nodes, columns=col_nodes, fill_value=0)
             matrices_dict['ratio'] = ratio_matrix
         
-        if 'probability' in self.conn_df.columns:
+        if 'probability' in conn_df_to_use.columns:
             print("  Creating probability matrix...")
-            prob_matrix = self.conn_df.pivot_table(
+            prob_matrix = conn_df_to_use.pivot_table(
                 index='source',
                 columns='target',
                 values='probability',
@@ -6756,6 +7229,139 @@ class VisualizePath:
         
         return self.conn_df, self.G_network
 
+    def visualize_heatmap(self, custom_row_order=None, custom_col_order=None):
+        """
+        Prepare data and create only the heatmap visualization.
+        
+        This is a convenience method that builds the network (if not already built)
+        and creates just the heatmap visualization.
+        
+        Parameters
+        ----------
+        custom_row_order : list, optional
+            Custom ordering for rows (sources)
+        custom_col_order : list, optional
+            Custom ordering for columns (targets)
+            
+        Returns
+        -------
+        str
+            Path to the generated heatmap HTML file
+            
+        Example
+        -------
+        >>> vp = VisualizePath('path_type.xlsx', showfig=True)
+        >>> heatmap_path = vp.visualize_heatmap()
+        >>> print(f"Heatmap saved to: {heatmap_path}")
+        """
+        print("=" * 80)
+        print("VisualizePath - Creating heatmap visualization")
+        print("=" * 80)
+        
+        # Build network if not already built
+        if self.conn_df is None or self.G_network is None:
+            self.build_network()
+        
+        # Create heatmap
+        heatmap_path = self.create_heatmap(
+            custom_row_order=custom_row_order,
+            custom_col_order=custom_col_order
+        )
+        
+        # Show if requested
+        if self.showfig:
+            import webbrowser
+            webbrowser.open('file://' + os.path.abspath(heatmap_path))
+        
+        print("\n" + "=" * 80)
+        print("✓ Heatmap visualization complete!")
+        print("=" * 80)
+        print(f"\nOutput file: {heatmap_path}")
+        
+        return heatmap_path
+
+    def visualize_sankey(self):
+        """
+        Prepare data and create only the Sankey diagram visualization.
+        
+        This is a convenience method that builds the network (if not already built)
+        and creates just the Sankey diagram.
+        
+        Returns
+        -------
+        str
+            Path to the generated Sankey HTML file
+            
+        Example
+        -------
+        >>> vp = VisualizePath('path_type.xlsx', showfig=True)
+        >>> sankey_path = vp.visualize_sankey()
+        >>> print(f"Sankey saved to: {sankey_path}")
+        """
+        print("=" * 80)
+        print("VisualizePath - Creating Sankey diagram")
+        print("=" * 80)
+        
+        # Build network if not already built
+        if self.conn_df is None or self.G_network is None:
+            self.build_network()
+        
+        # Create Sankey
+        sankey_path = self.create_sankey()
+        
+        # Show if requested
+        if self.showfig:
+            import webbrowser
+            webbrowser.open('file://' + os.path.abspath(sankey_path))
+        
+        print("\n" + "=" * 80)
+        print("✓ Sankey visualization complete!")
+        print("=" * 80)
+        print(f"\nOutput file: {sankey_path}")
+        
+        return sankey_path
+
+    def visualize_network(self):
+        """
+        Prepare data and create only the network graph visualization.
+        
+        This is a convenience method that builds the network (if not already built)
+        and creates just the interactive network graph.
+        
+        Returns
+        -------
+        str
+            Path to the generated network HTML file
+            
+        Example
+        -------
+        >>> vp = VisualizePath('path_type.xlsx', showfig=True)
+        >>> network_path = vp.visualize_network()
+        >>> print(f"Network saved to: {network_path}")
+        """
+        print("=" * 80)
+        print("VisualizePath - Creating network visualization")
+        print("=" * 80)
+        
+        # Build network if not already built
+        if self.conn_df is None or self.G_network is None:
+            self.build_network()
+        
+        # Create network
+        network_path = self.create_network()
+        
+        # Show if requested
+        if self.showfig:
+            import webbrowser
+            webbrowser.open('file://' + os.path.abspath(network_path))
+        
+        print("\n" + "=" * 80)
+        print("✓ Network visualization complete!")
+        print("=" * 80)
+        print(f"\nOutput file: {network_path}")
+        
+        return network_path
+
 
 # Convenience function for quick usage
 def visualize_paths(
@@ -6832,6 +7438,180 @@ def visualize_paths(
     )
     
     return vp.visualize()
+
+
+def visualize_heatmap(
+    path_file,
+    sheet_name=None,
+    output_folder=None,
+    source_color=None,
+    intermediate_color=None,
+    target_color=None,
+    custom_row_order=None,
+    custom_col_order=None,
+    showfig=False
+):
+    """
+    Convenience function to quickly create a heatmap visualization.
+    
+    Parameters
+    ----------
+    path_file : str or pd.DataFrame
+        Path to CSV/Excel file or DataFrame with pathway data
+    sheet_name : str, optional
+        Excel sheet name (default: auto-detect)
+    output_folder : str, optional
+        Output directory
+    source_color : str, optional
+        Color for source nodes
+    intermediate_color : str, optional
+        Color for intermediate nodes
+    target_color : str, optional
+        Color for target nodes
+    custom_row_order : list, optional
+        Custom ordering for rows (sources)
+    custom_col_order : list, optional
+        Custom ordering for columns (targets)
+    showfig : bool, optional
+        Auto-open in browser (default: False)
+        
+    Returns
+    -------
+    str
+        Path to the generated heatmap HTML file
+        
+    Example
+    -------
+    >>> from vispath import visualize_heatmap
+    >>> heatmap_path = visualize_heatmap('path_type.xlsx', showfig=True)
+    """
+    vp = VisualizePath(
+        path_file=path_file,
+        sheet_name=sheet_name,
+        output_folder=output_folder,
+        source_color=source_color,
+        intermediate_color=intermediate_color,
+        target_color=target_color,
+        showfig=showfig
+    )
+    
+    return vp.visualize_heatmap(
+        custom_row_order=custom_row_order,
+        custom_col_order=custom_col_order
+    )
+
+
+def visualize_sankey(
+    path_file,
+    sheet_name=None,
+    output_folder=None,
+    source_color=None,
+    intermediate_color=None,
+    target_color=None,
+    link_color=None,
+    showfig=False
+):
+    """
+    Convenience function to quickly create a Sankey diagram visualization.
+    
+    Parameters
+    ----------
+    path_file : str or pd.DataFrame
+        Path to CSV/Excel file or DataFrame with pathway data
+    sheet_name : str, optional
+        Excel sheet name (default: auto-detect)
+    output_folder : str, optional
+        Output directory
+    source_color : str, optional
+        Color for source nodes
+    intermediate_color : str, optional
+        Color for intermediate nodes
+    target_color : str, optional
+        Color for target nodes
+    link_color : str, optional
+        Color for Sankey connections
+    showfig : bool, optional
+        Auto-open in browser (default: False)
+        
+    Returns
+    -------
+    str
+        Path to the generated Sankey HTML file
+        
+    Example
+    -------
+    >>> from vispath import visualize_sankey
+    >>> sankey_path = visualize_sankey('path_type.xlsx', showfig=True)
+    """
+    vp = VisualizePath(
+        path_file=path_file,
+        sheet_name=sheet_name,
+        output_folder=output_folder,
+        source_color=source_color,
+        intermediate_color=intermediate_color,
+        target_color=target_color,
+        link_color=link_color,
+        showfig=showfig
+    )
+    
+    return vp.visualize_sankey()
+
+
+def visualize_network(
+    path_file,
+    sheet_name=None,
+    output_folder=None,
+    source_color=None,
+    intermediate_color=None,
+    target_color=None,
+    network_layout='hierarchical',
+    showfig=False
+):
+    """
+    Convenience function to quickly create a network graph visualization.
+    
+    Parameters
+    ----------
+    path_file : str or pd.DataFrame
+        Path to CSV/Excel file or DataFrame with pathway data
+    sheet_name : str, optional
+        Excel sheet name (default: auto-detect)
+    output_folder : str, optional
+        Output directory
+    source_color : str, optional
+        Color for source nodes
+    intermediate_color : str, optional
+        Color for intermediate nodes
+    target_color : str, optional
+        Color for target nodes
+    network_layout : str, optional
+        Layout algorithm: 'hierarchical', 'spring', 'circular', 'distributed'
+    showfig : bool, optional
+        Auto-open in browser (default: False)
+        
+    Returns
+    -------
+    str
+        Path to the generated network HTML file
+        
+    Example
+    -------
+    >>> from vispath import visualize_network
+    >>> network_path = visualize_network('path_type.xlsx', showfig=True)
+    """
+    vp = VisualizePath(
+        path_file=path_file,
+        sheet_name=sheet_name,
+        output_folder=output_folder,
+        source_color=source_color,
+        intermediate_color=intermediate_color,
+        target_color=target_color,
+        network_layout=network_layout,
+        showfig=showfig
+    )
+    
+    return vp.visualize_network()
+
 
 def VisConnMatInteractive(cmat, filename, title='', color_scale=[[0, 'rgb(255,255,255)'], [1, 'rgb(104,55,164)']], showfig=True, fontsize=12, conn_df=None, matrices_dict=None):
     '''Create interactive heatmap with comprehensive controls similar to network visualization
@@ -7009,15 +7789,21 @@ def VisConnMatInteractive(cmat, filename, title='', color_scale=[[0, 'rgb(255,25
     else:
         # Pre-compute for small matrices (faster initial display)
         # Handle negative values: sign(v) * transform(|v|)
-        data_log2 = np.where(data_linear >= 0, 
-                             np.log2(data_linear + 1), 
-                             -np.log2(-data_linear + 1))
-        data_log10 = np.where(data_linear >= 0, 
-                              np.log10(data_linear + 1), 
-                              -np.log10(-data_linear + 1))
-        data_sqrt = np.where(data_linear >= 0, 
-                            np.sqrt(data_linear), 
-                            -np.sqrt(-data_linear))
+        # Suppress warnings for edge cases (zeros, negatives handled by np.where)
+        with np.errstate(divide='ignore', invalid='ignore'):
+            data_log2 = np.where(data_linear >= 0, 
+                                 np.log2(data_linear + 1), 
+                                 -np.log2(-data_linear + 1))
+            data_log10 = np.where(data_linear >= 0, 
+                                  np.log10(data_linear + 1), 
+                                  -np.log10(-data_linear + 1))
+            data_sqrt = np.where(data_linear >= 0, 
+                                np.sqrt(data_linear), 
+                                -np.sqrt(-data_linear))
+            # Replace any NaN/inf values that may have occurred
+            data_log2 = np.nan_to_num(data_log2, nan=0.0, posinf=0.0, neginf=0.0)
+            data_log10 = np.nan_to_num(data_log10, nan=0.0, posinf=0.0, neginf=0.0)
+            data_sqrt = np.nan_to_num(data_sqrt, nan=0.0, posinf=0.0, neginf=0.0)
         
         if is_large:
             if metric_type in ['ratio', 'probability']:
