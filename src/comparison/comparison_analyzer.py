@@ -226,6 +226,7 @@ class ComparisonAnalyzer:
             dataset=dataset_name,
             # Redirect output to comparison folder structure
             saveas=fnc_output_path,  # Absolute path - overrides data_folder
+            verbose_mode='simple',  # Use simplified progress output for comparison runs
         )
         
         # Initialize and run analysis
