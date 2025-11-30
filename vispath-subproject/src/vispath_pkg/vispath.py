@@ -148,6 +148,7 @@ class VisualizePath:
         generate_empty_network=False,  # NEW: Generate empty network HTML template
         edgeN_limit=500,        # NEW: Limit number of edges to show (default 1000)
         output_format='xlsx',   # NEW: Output format for data files ('xlsx' or 'csv')
+        verbose=True,           # NEW: Control print output (True=show prints, False=silent)
     ):
         """
         Initialize VisualizePath with pathway data and visualization settings.
@@ -299,6 +300,12 @@ class VisualizePath:
             Limit number of edges to show in visualizations.
             Default: 1000
             
+        verbose : bool, optional
+            Control print output during visualization.
+            If True, shows progress messages and file save notifications.
+            If False, runs silently (no print output).
+            Default: True
+            
         Raises
         ------
         FileNotFoundError
@@ -309,6 +316,7 @@ class VisualizePath:
         self.path_file = path_file
         self.sheet_name = sheet_name
         self.output_folder = output_folder
+        self.verbose = verbose  # Store verbose flag for controlling print output
         
         self.edgeN_limit = edgeN_limit
         """
@@ -461,6 +469,12 @@ class VisualizePath:
             Limit number of edges to show in visualizations.
             Default: 1000
             
+        verbose : bool, optional
+            Control print output during visualization.
+            If True, shows progress messages and file save notifications.
+            If False, runs silently (no print output).
+            Default: True
+            
         pathN_to_show : int, optional
             [DEPRECATED] Use edgeN_limit instead.
             
@@ -589,6 +603,21 @@ class VisualizePath:
         # Load custom colors if provided
         if self.node_colors_input is not None:
             self._load_custom_colors()
+    
+    def _vprint(self, *args, **kwargs):
+        """
+        Print helper that respects verbose setting.
+        Only prints if self.verbose is True.
+        
+        Parameters
+        ----------
+        *args : positional arguments
+            Arguments to pass to print()
+        **kwargs : keyword arguments
+            Keyword arguments to pass to print()
+        """
+        if self.verbose:
+            print(*args, **kwargs)
         
     def _normalize_column_names(self):
         """
@@ -621,7 +650,7 @@ class VisualizePath:
                 if alias.lower() in columns_lower:
                     original_col = columns_lower[alias.lower()]
                     rename_dict[original_col] = standard_name
-                    print(f"  Renaming column '{original_col}' to '{standard_name}'")
+                    self._vprint(f"  Renaming column '{original_col}' to '{standard_name}'")
                     break  # Use the first matching alias found
         
         # Apply renaming
@@ -653,7 +682,7 @@ class VisualizePath:
                 all(np.issubdtype(dtype, np.number) for dtype in df.dtypes)
             )
             if is_numeric_matrix:
-                print("✓ Recognized input format: connection matrix ({}x{} DataFrame)".format(df.shape[0], df.shape[1]))
+                self._vprint("✓ Recognized input format: connection matrix ({}x{} DataFrame)".format(df.shape[0], df.shape[1]))
                 # If index/columns are not all strings, auto-generate node names
                 if not (all(isinstance(x, str) for x in df.index) and all(isinstance(x, str) for x in df.columns)):
                     n, m = df.shape
@@ -676,9 +705,9 @@ class VisualizePath:
                     self.base_filename = os.path.basename(self.output_folder.rstrip(os.sep))
             else:
                 if is_edge_list:
-                    print("✓ Recognized input format: edge-list DataFrame (columns: {} )".format(list(df.columns)))
+                    self._vprint("✓ Recognized input format: edge-list DataFrame (columns: {} )".format(list(df.columns)))
                 else:
-                    print("✓ Recognized input format: generic DataFrame (columns: {} )".format(list(df.columns)))
+                    self._vprint("✓ Recognized input format: generic DataFrame (columns: {} )".format(list(df.columns)))
                 self.path_df = df
                 if self.output_folder is None:
                     self.output_folder = './selected_paths'
@@ -692,8 +721,8 @@ class VisualizePath:
             # Check if file exists, if not or if path_file is None/empty, prompt user to select
             if self.path_file is None or self.path_file == '' or not os.path.exists(self.path_file):
                 if self.path_file and not os.path.exists(self.path_file):
-                    print(f"⚠️ Path file not found: {self.path_file}")
-                print("Please select a path file...")
+                    self._vprint(f"⚠️ Path file not found: {self.path_file}")
+                self._vprint("Please select a path file...")
                 self.path_file = self._select_file()
                 if self.path_file is None:
                     raise ValueError("No file selected. Cannot proceed without pathway data.")
@@ -702,14 +731,14 @@ class VisualizePath:
             file_ext = Path(self.path_file).suffix.lower()
             
             if file_ext == '.csv':
-                print(f"Loading CSV file: {self.path_file}")
+                self._vprint(f"Loading CSV file: {self.path_file}")
                 self.path_df = pd.read_csv(self.path_file)
                 # For CSV files, ignore sheet_name parameter
                 if self.sheet_name:
-                    print(f"  Note: sheet_name '{self.sheet_name}' ignored for CSV files")
+                    self._vprint(f"  Note: sheet_name '{self.sheet_name}' ignored for CSV files")
                     
             elif file_ext in ['.xlsx', '.xls']:
-                print(f"Loading Excel file: {self.path_file}")
+                self._vprint(f"Loading Excel file: {self.path_file}")
                 excel_file = pd.ExcelFile(self.path_file)
                 
                 # If file picker was used, always ask user to confirm/select sheet
@@ -727,7 +756,7 @@ class VisualizePath:
                 # else: sheet_name was explicitly provided, use it
                 
                 self.path_df = pd.read_excel(self.path_file, sheet_name=self.sheet_name)
-                print(f"  Loaded sheet: '{self.sheet_name}'")
+                self._vprint(f"  Loaded sheet: '{self.sheet_name}'")
                 
             else:
                 raise ValueError(f"Unsupported file format: {file_ext}. Use .csv, .xlsx, or .xls")
@@ -762,14 +791,14 @@ class VisualizePath:
             )
             
             if is_numeric_matrix:
-                print("✓ Recognized input format: connection matrix ({}x{} DataFrame)".format(self.path_df.shape[0], self.path_df.shape[1]))
+                self._vprint("✓ Recognized input format: connection matrix ({}x{} DataFrame)".format(self.path_df.shape[0], self.path_df.shape[1]))
                 df = self.path_df
                 # If index/columns are not all strings, auto-generate node names
                 if not (all(isinstance(x, str) for x in df.index) and all(isinstance(x, str) for x in df.columns)):
                     # If loaded from CSV without index_col, the first column might be the index
                     # Heuristic: if first column is object/string and others are numeric, set it as index
                     if df.shape[1] > 1 and df.iloc[:, 0].dtype == object:
-                        print("  Using first column as index")
+                        self._vprint("  Using first column as index")
                         df = df.set_index(df.columns[0])
                         self.path_df = df
                     else:
@@ -788,7 +817,7 @@ class VisualizePath:
                         if pd.notna(val) and val != 0:
                             edge_list.append({"source": src, "target": tgt, "weight": val})
                 self.path_df = pd.DataFrame(edge_list)
-                print(f"  Converted matrix to {len(self.path_df)} edges")
+                self._vprint(f"  Converted matrix to {len(self.path_df)} edges")
 
             # Set default output folder relative to input file
             if self.output_folder is None:
@@ -832,7 +861,7 @@ class VisualizePath:
             if app is None:
                 app = QApplication(sys.argv)
             
-            print("Please select a path file...")
+            self._vprint("Please select a path file...")
             
             file_path, _ = QFileDialog.getOpenFileName(
                 None,
@@ -846,10 +875,10 @@ class VisualizePath:
             
             if file_path:
                 file_path = os.path.normpath(file_path)
-                print(f"✓ Selected file: {file_path}")
+                self._vprint(f"✓ Selected file: {file_path}")
                 return file_path
             else:
-                print("✗ No file selected")
+                self._vprint("✗ No file selected")
                 return None
                 
         except ImportError:
@@ -864,7 +893,7 @@ class VisualizePath:
             if app is None:
                 app = QApplication(sys.argv)
             
-            print("Please select a path file...")
+            self._vprint("Please select a path file...")
             
             file_path, _ = QFileDialog.getOpenFileName(
                 None,
@@ -877,10 +906,10 @@ class VisualizePath:
             
             if file_path:
                 file_path = os.path.normpath(file_path)
-                print(f"✓ Selected file: {file_path}")
+                self._vprint(f"✓ Selected file: {file_path}")
                 return file_path
             else:
-                print("✗ No file selected")
+                self._vprint("✗ No file selected")
                 return None
                 
         except ImportError:
@@ -894,7 +923,7 @@ class VisualizePath:
             
             wildcard = "Excel files (*.xlsx;*.xls)|*.xlsx;*.xls|CSV files (*.csv)|*.csv|All files (*.*)|*.*"
             
-            print("Please select a path file...")
+            self._vprint("Please select a path file...")
             
             dialog = wx.FileDialog(
                 None,
@@ -910,12 +939,12 @@ class VisualizePath:
                 app.Destroy()
                 
                 file_path = os.path.normpath(file_path)
-                print(f"✓ Selected file: {file_path}")
+                self._vprint(f"✓ Selected file: {file_path}")
                 return file_path
             else:
                 dialog.Destroy()
                 app.Destroy()
-                print("✗ No file selected")
+                self._vprint("✗ No file selected")
                 return None
                 
         except ImportError:
@@ -941,7 +970,7 @@ class VisualizePath:
             
             initial_dir = os.getcwd()
             
-            print("Please select a path file...")
+            self._vprint("Please select a path file...")
             
             file_path = filedialog.askopenfilename(
                 parent=root,
@@ -960,22 +989,22 @@ class VisualizePath:
             
             if file_path:
                 file_path = os.path.normpath(file_path)
-                print(f"✓ Selected file: {file_path}")
+                self._vprint(f"✓ Selected file: {file_path}")
                 return file_path
             else:
-                print("✗ No file selected")
+                self._vprint("✗ No file selected")
                 return None
                 
         except ImportError:
-            print("⚠️ No GUI library available (tried PyQt5, PyQt6, wxPython, tkinter)")
-            print("   Install one of:")
-            print("   - pip install PyQt5  (recommended - fastest)")
-            print("   - pip install PyQt6")
-            print("   - pip install wxPython")
-            print("   - python3-tk (tkinter)")
+            self._vprint("⚠️ No GUI library available (tried PyQt5, PyQt6, wxPython, tkinter)")
+            self._vprint("   Install one of:")
+            self._vprint("   - pip install PyQt5  (recommended - fastest)")
+            self._vprint("   - pip install PyQt6")
+            self._vprint("   - pip install wxPython")
+            self._vprint("   - python3-tk (tkinter)")
             return None
         except Exception as e:
-            print(f"⚠️ Error opening file dialog: {e}")
+            self._vprint(f"⚠️ Error opening file dialog: {e}")
             return None
     
     def _select_sheet(self, excel_file, auto_confirm=False):
@@ -1011,11 +1040,11 @@ class VisualizePath:
         if len(sheet_names) == 1:
             sheet_name = sheet_names[0]
             if auto_confirm:
-                print(f"  Only one sheet found: '{sheet_name}'")
+                self._vprint(f"  Only one sheet found: '{sheet_name}'")
                 confirm = self._confirm_sheet_selection(sheet_name, sheet_names, excel_file)
                 return confirm if confirm else sheet_name
             else:
-                print(f"  Only one sheet found: '{sheet_name}'")
+                self._vprint(f"  Only one sheet found: '{sheet_name}'")
                 return sheet_name
         
         # Try to auto-detect common sheet names
@@ -1028,13 +1057,13 @@ class VisualizePath:
         
         # If auto-detected and confirmation requested, ask user
         if auto_detected and auto_confirm:
-            print(f"  Auto-detected sheet: '{auto_detected}'")
+            self._vprint(f"  Auto-detected sheet: '{auto_detected}'")
             confirmed = self._confirm_sheet_selection(auto_detected, sheet_names, excel_file)
             return confirmed if confirmed else auto_detected
         
         # If auto-detected and no confirmation needed, use it
         elif auto_detected:
-            print(f"  Auto-selected sheet: '{auto_detected}'")
+            self._vprint(f"  Auto-selected sheet: '{auto_detected}'")
             return auto_detected
         
         # No auto-detection possible - always ask user
@@ -1190,21 +1219,21 @@ class VisualizePath:
                 selected_sheet = sheet_names[selected_idx]
                 
                 if default_sheet and selected_sheet == default_sheet:
-                    print(f"✓ Using auto-detected sheet: '{selected_sheet}'")
+                    self._vprint(f"✓ Using auto-detected sheet: '{selected_sheet}'")
                 else:
-                    print(f"✓ Selected sheet: '{selected_sheet}'")
+                    self._vprint(f"✓ Selected sheet: '{selected_sheet}'")
                 
                 app.processEvents()
                 return selected_sheet
             else:
-                print("✗ Sheet selection cancelled")
+                self._vprint("✗ Sheet selection cancelled")
                 app.processEvents()
                 return None
                 
         except ImportError:
             return False  # Not available, try next backend
         except Exception as e:
-            print(f"⚠️ PyQt5 error: {e}")
+            self._vprint(f"⚠️ PyQt5 error: {e}")
             return False
     
     def _prompt_sheet_pyqt6(self, sheet_names, excel_file, default_sheet=None):
@@ -1294,21 +1323,21 @@ class VisualizePath:
                 selected_sheet = sheet_names[selected_idx]
                 
                 if default_sheet and selected_sheet == default_sheet:
-                    print(f"✓ Using auto-detected sheet: '{selected_sheet}'")
+                    self._vprint(f"✓ Using auto-detected sheet: '{selected_sheet}'")
                 else:
-                    print(f"✓ Selected sheet: '{selected_sheet}'")
+                    self._vprint(f"✓ Selected sheet: '{selected_sheet}'")
                 
                 app.processEvents()
                 return selected_sheet
             else:
-                print("✗ Sheet selection cancelled")
+                self._vprint("✗ Sheet selection cancelled")
                 app.processEvents()
                 return None
                 
         except ImportError:
             return False  # Not available, try next backend
         except Exception as e:
-            print(f"⚠️ PyQt6 error: {e}")
+            self._vprint(f"⚠️ PyQt6 error: {e}")
             return False
     
     def _prompt_sheet_wx(self, sheet_names, excel_file, default_sheet=None):
@@ -1363,21 +1392,21 @@ class VisualizePath:
                 app.Destroy()
                 
                 if default_sheet and selected_sheet == default_sheet:
-                    print(f"✓ Using auto-detected sheet: '{selected_sheet}'")
+                    self._vprint(f"✓ Using auto-detected sheet: '{selected_sheet}'")
                 else:
-                    print(f"✓ Selected sheet: '{selected_sheet}'")
+                    self._vprint(f"✓ Selected sheet: '{selected_sheet}'")
                 
                 return selected_sheet
             else:
                 dialog.Destroy()
                 app.Destroy()
-                print("✗ Sheet selection cancelled")
+                self._vprint("✗ Sheet selection cancelled")
                 return None
                 
         except ImportError:
             return False  # Not available, try next backend
         except Exception as e:
-            print(f"⚠️ wxPython error: {e}")
+            self._vprint(f"⚠️ wxPython error: {e}")
             return False
     
     def _prompt_sheet_tkinter(self, sheet_names, excel_file, default_sheet=None):
@@ -1496,16 +1525,16 @@ class VisualizePath:
             
             if selected_sheet:
                 if default_sheet and selected_sheet == default_sheet:
-                    print(f"✓ Using auto-detected sheet: '{selected_sheet}'")
+                    self._vprint(f"✓ Using auto-detected sheet: '{selected_sheet}'")
                 else:
-                    print(f"✓ Selected sheet: '{selected_sheet}'")
+                    self._vprint(f"✓ Selected sheet: '{selected_sheet}'")
                 return selected_sheet
             else:
-                print("✗ Sheet selection cancelled")
+                self._vprint("✗ Sheet selection cancelled")
                 return None
                 
         except Exception as e:
-            print(f"⚠️ Tkinter error: {e}")
+            self._vprint(f"⚠️ Tkinter error: {e}")
             return False
     
     def _prompt_sheet_selection_terminal(self, sheet_names, excel_file, default_sheet=None):
@@ -1526,13 +1555,13 @@ class VisualizePath:
         str or None
             Selected sheet name, or None if cancelled
         """
-        print("\n" + "="*60)
+        self._vprint("\n" + "="*60)
         if default_sheet:
-            print(f"Auto-detected sheet: '{default_sheet}'")
-            print("Select a sheet (or press Enter to use auto-detected):")
+            self._vprint(f"Auto-detected sheet: '{default_sheet}'")
+            self._vprint("Select a sheet (or press Enter to use auto-detected):")
         else:
-            print("Multiple sheets found. Please select one:")
-        print("="*60)
+            self._vprint("Multiple sheets found. Please select one:")
+        self._vprint("="*60)
         
         for idx, sheet in enumerate(sheet_names, 1):
             # Try to get row count for each sheet
@@ -1541,11 +1570,11 @@ class VisualizePath:
                 row_count = len(pd.read_excel(excel_file, sheet_name=sheet))
                 col_count = len(df.columns)
                 marker = " ✓ [Auto-detected]" if sheet == default_sheet else ""
-                print(f"  [{idx}] {sheet:30s} ({row_count} rows, {col_count} cols){marker}")
+                self._vprint(f"  [{idx}] {sheet:30s} ({row_count} rows, {col_count} cols){marker}")
             except:
                 marker = " ✓ [Auto-detected]" if sheet == default_sheet else ""
-                print(f"  [{idx}] {sheet}{marker}")
-        print("="*60)
+                self._vprint(f"  [{idx}] {sheet}{marker}")
+        self._vprint("="*60)
         
         # Get user input
         while True:
@@ -1559,7 +1588,7 @@ class VisualizePath:
                 
                 # Enter key - use default if available
                 if choice == '' and default_sheet:
-                    print(f"✓ Using auto-detected sheet: '{default_sheet}'")
+                    self._vprint(f"✓ Using auto-detected sheet: '{default_sheet}'")
                     return default_sheet
                 
                 # Try as number first
@@ -1567,29 +1596,29 @@ class VisualizePath:
                     idx = int(choice)
                     if 1 <= idx <= len(sheet_names):
                         selected = sheet_names[idx - 1]
-                        print(f"✓ Selected: '{selected}'")
+                        self._vprint(f"✓ Selected: '{selected}'")
                         return selected
                     else:
-                        print(f"⚠️ Invalid number. Please enter 1-{len(sheet_names)}")
+                        self._vprint(f"⚠️ Invalid number. Please enter 1-{len(sheet_names)}")
                         
                 # Try as sheet name
                 elif choice in sheet_names:
-                    print(f"✓ Selected: '{choice}'")
+                    self._vprint(f"✓ Selected: '{choice}'")
                     return choice
                     
                 # Allow cancel
                 elif choice.lower() in ['q', 'quit', 'cancel', 'exit']:
-                    print("✗ Selection cancelled")
+                    self._vprint("✗ Selection cancelled")
                     return None
                     
                 else:
-                    print(f"⚠️ Invalid input. Enter a number, sheet name, or 'q' to cancel")
+                    self._vprint(f"⚠️ Invalid input. Enter a number, sheet name, or 'q' to cancel")
                     
             except KeyboardInterrupt:
-                print("\n✗ Selection cancelled")
+                self._vprint("\n✗ Selection cancelled")
                 return None
             except EOFError:
-                print("\n✗ No input available")
+                self._vprint("\n✗ No input available")
                 return None
         
     def _validate_data(self):
@@ -1618,13 +1647,13 @@ class VisualizePath:
         has_path_format = all(col in self.path_df.columns for col in path_cols)
         
         if has_path_format:
-            print(f"✓ Detected path-based format")
-            print(f"  Loaded {len(self.path_df)} pathways from data")
-            print(f"  Output folder: {self.output_folder}")
+            self._vprint(f"✓ Detected path-based format")
+            self._vprint(f"  Loaded {len(self.path_df)} pathways from data")
+            self._vprint(f"  Output folder: {self.output_folder}")
             return
         
         # Check for edge-list format
-        print("Path-based format not detected, checking for edge-list format...")
+        self._vprint("Path-based format not detected, checking for edge-list format...")
         
         # Try to find source/target/weight columns
         source_col = self._find_column(['source', 'from', 'pre'], suffix='_pre')
@@ -1635,19 +1664,19 @@ class VisualizePath:
         color_col = self._find_column(['color', 'edge_color', 'link_color'])
         
         if source_col and target_col and weight_col:
-            print(f"✓ Detected edge-list format")
-            print(f"  Source column: '{source_col}'")
-            print(f"  Target column: '{target_col}'")
-            print(f"  Weight column: '{weight_col}'")
+            self._vprint(f"✓ Detected edge-list format")
+            self._vprint(f"  Source column: '{source_col}'")
+            self._vprint(f"  Target column: '{target_col}'")
+            self._vprint(f"  Weight column: '{weight_col}'")
             if color_col:
-                print(f"  Color column: '{color_col}'")
-            print(f"  Converting {len(self.path_df)} edges to path format...")
+                self._vprint(f"  Color column: '{color_col}'")
+            self._vprint(f"  Converting {len(self.path_df)} edges to path format...")
             
             # Convert edge-list to path format
             self._convert_edgelist_to_paths(source_col, target_col, weight_col, color_col)
             
-            print(f"✓ Converted to {len(self.path_df)} paths")
-            print(f"  Output folder: {self.output_folder}")
+            self._vprint(f"✓ Converted to {len(self.path_df)} paths")
+            self._vprint(f"  Output folder: {self.output_folder}")
             return
         
         # Neither format found - raise error
@@ -1678,13 +1707,13 @@ class VisualizePath:
         if isinstance(self.node_colors_input, pd.DataFrame):
             # Direct DataFrame input
             node_colors_df = self.node_colors_input.copy()
-            print("Loading custom node colors from DataFrame...")
+            self._vprint("Loading custom node colors from DataFrame...")
             
         elif isinstance(self.node_colors_input, str):
             # Could be sheet name or file path
             if os.path.exists(self.node_colors_input):
                 # File path
-                print(f"Loading custom node colors from file: {self.node_colors_input}")
+                self._vprint(f"Loading custom node colors from file: {self.node_colors_input}")
                 file_ext = Path(self.node_colors_input).suffix.lower()
                 if file_ext == '.csv':
                     node_colors_df = pd.read_csv(self.node_colors_input)
@@ -1695,7 +1724,7 @@ class VisualizePath:
             else:
                 # Assume it's a sheet name in the main Excel file
                 if isinstance(self.path_file, str) and Path(self.path_file).suffix.lower() in ['.xlsx', '.xls']:
-                    print(f"Loading custom node colors from sheet '{self.node_colors_input}'...")
+                    self._vprint(f"Loading custom node colors from sheet '{self.node_colors_input}'...")
                     try:
                         node_colors_df = pd.read_excel(self.path_file, sheet_name=self.node_colors_input)
                     except Exception as e:
@@ -1743,10 +1772,10 @@ class VisualizePath:
                 else:
                     self.custom_node_colors[node_name] = hex_color
             else:
-                print(f"⚠️ Warning: Invalid color format for node '{node_name}': {color_value}. Skipping.")
+                self._vprint(f"⚠️ Warning: Invalid color format for node '{node_name}': {color_value}. Skipping.")
                 continue
         
-        print(f"✓ Loaded custom colors for {len(self.custom_node_colors)} nodes")
+        self._vprint(f"✓ Loaded custom colors for {len(self.custom_node_colors)} nodes")
     
     def _find_column(self, candidates, suffix=None):
         """
@@ -1838,9 +1867,9 @@ class VisualizePath:
         additional_metrics = {col: [] for col in numeric_cols}
         nt_types_list = []
         
-        print(f"  Detected numeric columns: {[weight_col] + numeric_cols}")
+        self._vprint(f"  Detected numeric columns: {[weight_col] + numeric_cols}")
         if nt_type_col:
-            print(f"  Detected neurotransmitter column: {nt_type_col}")
+            self._vprint(f"  Detected neurotransmitter column: {nt_type_col}")
         
         for idx, row in self.path_df.iterrows():
             source = str(row[source_col])
@@ -1897,18 +1926,18 @@ class VisualizePath:
             if col_lower in metric_mapping:
                 standard_col = metric_mapping[col_lower]
                 self.path_df[standard_col] = additional_metrics[col]
-                print(f"  ✓ Mapped '{col}' → '{standard_col}' for toggle support")
+                self._vprint(f"  ✓ Mapped '{col}' → '{standard_col}' for toggle support")
             else:
                 # Keep original column name for custom metrics
                 # These will be available in conn_df but not in toggle
                 # (could be extended to support dynamic toggles in future)
                 self.path_df[col] = additional_metrics[col]
-                print(f"  ✓ Added metric column '{col}' (custom metric)")
+                self._vprint(f"  ✓ Added metric column '{col}' (custom metric)")
         
         # Store custom edge colors for later use
         if custom_edge_colors:
             self.custom_edge_colors = custom_edge_colors
-            print(f"  ✓ Loaded custom colors for {len(custom_edge_colors)} edges")
+            self._vprint(f"  ✓ Loaded custom colors for {len(custom_edge_colors)} edges")
         else:
             self.custom_edge_colors = None
         
@@ -2022,7 +2051,7 @@ class VisualizePath:
         - Ratios and probabilities are averaged across aggregated connections
         - Graph nodes are labeled with 'node_type' (source/intermediate/target)
         """
-        print("\nBuilding network from pathways...")
+        self._vprint("\nBuilding network from pathways...")
         
         # Store connections
         connections = []
@@ -2108,9 +2137,9 @@ class VisualizePath:
         after_count = len(conn_df)
 
         if before_count != after_count:
-            print(f"Dropped {before_count - after_count} zero-weight aggregated connections")
+            self._vprint(f"Dropped {before_count - after_count} zero-weight aggregated connections")
 
-        print(f"Created {len(conn_df)} unique connections from pathways")
+        self._vprint(f"Created {len(conn_df)} unique connections from pathways")
         
         # Build NetworkX graph
         G = nx.DiGraph()
@@ -2166,7 +2195,7 @@ class VisualizePath:
         for node in target_nodes:
             G.nodes[node]['node_type'] = 'target'
         
-        print(f"Network: {len(source_nodes)} source, {len(intermediate_nodes)} intermediate, {len(target_nodes)} target nodes")
+        self._vprint(f"Network: {len(source_nodes)} source, {len(intermediate_nodes)} intermediate, {len(target_nodes)} target nodes")
         
         self.conn_df = conn_df
         self.G_network = G
@@ -2197,10 +2226,10 @@ class VisualizePath:
         - Builds layers from path_block data to ensure proper ordering
         """
         if self.path_df is None:
-            print("Error: No pathway data available.")
+            self._vprint("Error: No pathway data available.")
             return None
         
-        print("\nCreating layered Sankey diagram...")
+        self._vprint("\nCreating layered Sankey diagram...")
         
         # Extract layer information from paths
         # edge_data: {(layer_idx, source, target): {'weight': ..., 'ratio': ..., 'prob': ..., 'count': ...}}
@@ -2249,7 +2278,7 @@ class VisualizePath:
         if len(edge_data) == 0:
             # Warn but continue: we still want to build a node-only Sankey (or at least
             # include orphan nodes) if no non-zero links are present.
-            print('\033[33mWarning: No non-zero connections found for Sankey diagram. Building node-only Sankey (no links).\033[0m')
+            self._vprint('\033[33mWarning: No non-zero connections found for Sankey diagram. Building node-only Sankey (no links).\033[0m')
         
         # Simplify Sankey if too many edges (> edgeN_limit)
         MAX_EDGES = self.edgeN_limit
@@ -2257,12 +2286,12 @@ class VisualizePath:
         original_edge_count = len(edge_data)
         
         if len(edge_data) > MAX_EDGES:
-            print(f'\033[33m⚠️ Too many edges ({original_edge_count}) - simplifying to top {MAX_EDGES} by weight\033[0m')
+            self._vprint(f'\033[33m⚠️ Too many edges ({original_edge_count}) - simplifying to top {MAX_EDGES} by weight\033[0m')
             # Sort edges by absolute weight (descending) and keep top MAX_EDGES
             sorted_edges = sorted(edge_data.items(), key=lambda x: abs(x[1]['weight']), reverse=True)
             edge_data = dict(sorted_edges[:MAX_EDGES])
             simplification_applied = True
-            print(f'  Kept {len(edge_data)} edges (top {MAX_EDGES} by weight)')
+            self._vprint(f'  Kept {len(edge_data)} edges (top {MAX_EDGES} by weight)')
         
         # Build node list ordered by layers (key to proper layering)
         nodes_by_layer = {}
@@ -2366,7 +2395,7 @@ class VisualizePath:
                 edge_colors.append(self.link_color)
         
         if has_negative:
-            print(f"  ℹ️  Found negative edge weights - using absolute values for link width, light blue for negative edges")
+            self._vprint(f"  ℹ️  Found negative edge weights - using absolute values for link width, light blue for negative edges")
         
         # Create custom hover labels that show source, target, and original weights
         hover_labels = []
@@ -2493,8 +2522,8 @@ class VisualizePath:
         #     import webbrowser
         #     webbrowser.open('file://' + os.path.abspath(output_path))
         
-        print(f"  Sankey diagram saved with {len(node_list)} nodes and {len(weights)} edges")
-        print(f"  Output: {output_path}")
+        self._vprint(f"  Sankey diagram saved with {len(node_list)} nodes and {len(weights)} edges")
+        self._vprint(f"  Output: {output_path}")
         
         return output_path
     
@@ -3357,12 +3386,12 @@ class VisualizePath:
         if self.G_network is None:
             self.build_network()
         
-        print("\nCreating interactive network visualization...")
+        self._vprint("\nCreating interactive network visualization...")
         
         # Simplify network if too many edges (> edgeN_limit)
         G_to_plot = self.G_network
         if self.edgeN_limit > 0 and self.G_network.number_of_edges() > self.edgeN_limit:
-             print(f'\033[33m⚠️ Too many edges ({self.G_network.number_of_edges()}) - simplifying to top {self.edgeN_limit} by weight\033[0m')
+             self._vprint(f'\033[33m⚠️ Too many edges ({self.G_network.number_of_edges()}) - simplifying to top {self.edgeN_limit} by weight\033[0m')
              # Sort edges by weight
              edges = sorted(self.G_network.edges(data=True), key=lambda x: abs(x[2].get('weight', 0)), reverse=True)
              top_edges = edges[:self.edgeN_limit]
@@ -3380,7 +3409,7 @@ class VisualizePath:
                      G_sub.nodes[v].update(self.G_network.nodes[v])
              
              G_to_plot = G_sub
-             print(f'  Kept {G_to_plot.number_of_edges()} edges')
+             self._vprint(f'  Kept {G_to_plot.number_of_edges()} edges')
         
         output_path = os.path.join(self.output_folder, self.base_filename + '_network.html')
         
@@ -3390,7 +3419,7 @@ class VisualizePath:
             layout=self.network_layout
         )
         
-        print(f"Network graph saved: {output_path}")
+        self._vprint(f"Network graph saved: {output_path}")
         
         return output_path
     
@@ -3419,8 +3448,8 @@ class VisualizePath:
         >>> vp.generate_empty_network_html()
         'empty_network/empty_network_20251109_143052_network.html'
         """
-        print("\nGenerating empty network HTML template...")
-        print(f"  Filename: {self.base_filename}_network.html")
+        self._vprint("\nGenerating empty network HTML template...")
+        self._vprint(f"  Filename: {self.base_filename}_network.html")
         
         # Create an empty NetworkX graph
         G = nx.DiGraph()
@@ -3434,10 +3463,10 @@ class VisualizePath:
             layout=self.network_layout
         )
         
-        print(f"✓ Empty network HTML generated: {output_path}")
-        print(f"  Timestamp ensures unique filename for each generation")
-        print(f"  This template includes all interactive controls")
-        print(f"  You can populate it with custom nodes/edges via JavaScript")
+        self._vprint(f"✓ Empty network HTML generated: {output_path}")
+        self._vprint(f"  Timestamp ensures unique filename for each generation")
+        self._vprint(f"  This template includes all interactive controls")
+        self._vprint(f"  You can populate it with custom nodes/edges via JavaScript")
         
         if self.showfig:
             webbrowser.open('file://' + os.path.abspath(output_path))
@@ -3475,7 +3504,7 @@ class VisualizePath:
                 # Custom base: log_b(x) = ln(x) / ln(b)
                 log_base = float(self.edge_width_log_base)
                 if log_base <= 1:
-                    print(f"Warning: Invalid log base {log_base}, using natural log (e)")
+                    self._vprint(f"Warning: Invalid log base {log_base}, using natural log (e)")
                     scaled = np.log(weights + 1)
                 else:
                     scaled = np.log(weights + 1) / np.log(log_base)
@@ -3487,7 +3516,7 @@ class VisualizePath:
             scaled = np.ones_like(weights)
         else:
             # Default to log if unknown method
-            print(f"Warning: Unknown edge_width_scale '{self.edge_width_scale}', using 'log'")
+            self._vprint(f"Warning: Unknown edge_width_scale '{self.edge_width_scale}', using 'log'")
             scaled = np.log(weights + 1)
         
         # Apply multiplier factor
@@ -3571,7 +3600,7 @@ class VisualizePath:
             })
         
         if has_negative:
-            print(f"  ℹ️  Found negative edge weights - using absolute values for width, light blue color for negative edges")
+            self._vprint(f"  ℹ️  Found negative edge weights - using absolute values for width, light blue color for negative edges")
         
         # Calculate scaled edge widths
         scaled_widths = self._calculate_edge_widths(edge_weights)
@@ -6685,7 +6714,7 @@ class VisualizePath:
             self.build_network()
         
         if self.output_format == 'csv':
-            print("\nSaving data to CSV files...")
+            self._vprint("\nSaving data to CSV files...")
             created_files = []
             
             # Save connections
@@ -6753,11 +6782,11 @@ class VisualizePath:
                 nt_matrix.to_csv(nt_path)
                 created_files.append(nt_path)
             
-            print(f"Data saved to {len(created_files)} CSV files in: {self.output_folder}")
+            self._vprint(f"Data saved to {len(created_files)} CSV files in: {self.output_folder}")
             return created_files
             
         else:
-            print("\nSaving data to Excel...")
+            self._vprint("\nSaving data to Excel...")
             
             output_path = os.path.join(self.output_folder, self.base_filename + '_data.xlsx')
             
@@ -6819,7 +6848,7 @@ class VisualizePath:
                 if nt_matrix is not None:
                     nt_matrix.to_excel(writer, sheet_name='connMatrix_nt_type')
             
-            print(f"Data saved: {output_path}")
+            self._vprint(f"Data saved: {output_path}")
             
             return output_path
     
@@ -6873,7 +6902,7 @@ class VisualizePath:
         
         created_files = []
         
-        print('\nCreating heatmap visualizations...')
+        self._vprint('\nCreating heatmap visualizations...')
         for matrix_name, matrix_df in conn_matrices.items():
             if matrix_df is None or matrix_df.empty:
                 continue
@@ -6909,9 +6938,9 @@ class VisualizePath:
             )
             
             created_files.append(filename)
-            print(f'  Created: heatmap_{matrix_name}.html')
+            self._vprint(f'  Created: heatmap_{matrix_name}.html')
         
-        print('Done\n')
+        self._vprint('Done\n')
         return created_files
 
     def create_heatmap(self, custom_row_order=None, custom_col_order=None):
@@ -6959,16 +6988,16 @@ class VisualizePath:
         ... )
         """
         if self.conn_df is None or len(self.conn_df) == 0:
-            print("Warning: No connection data available for heatmap.")
+            self._vprint("Warning: No connection data available for heatmap.")
             return None
         
         # Filter edges if limit is set
         conn_df_to_use = self.conn_df
         if self.edgeN_limit and len(self.conn_df) > self.edgeN_limit:
-            print(f"  Filtering top {self.edgeN_limit} edges by weight (out of {len(self.conn_df)})")
+            self._vprint(f"  Filtering top {self.edgeN_limit} edges by weight (out of {len(self.conn_df)})")
             conn_df_to_use = self.conn_df.sort_values('weight', ascending=False).head(self.edgeN_limit)
         
-        print("\nCreating interactive heatmap...")
+        self._vprint("\nCreating interactive heatmap...")
         
         # Create weight matrix from connections
         weight_matrix = conn_df_to_use.pivot_table(
@@ -7019,7 +7048,7 @@ class VisualizePath:
         matrices_dict = {'weight': weight_matrix}
         
         if 'ratio' in conn_df_to_use.columns:
-            print("  Creating ratio matrix...")
+            self._vprint("  Creating ratio matrix...")
             ratio_matrix = conn_df_to_use.pivot_table(
                 index='source',
                 columns='target',
@@ -7030,7 +7059,7 @@ class VisualizePath:
             matrices_dict['ratio'] = ratio_matrix
         
         if 'probability' in conn_df_to_use.columns:
-            print("  Creating probability matrix...")
+            self._vprint("  Creating probability matrix...")
             prob_matrix = conn_df_to_use.pivot_table(
                 index='source',
                 columns='target',
@@ -7053,7 +7082,7 @@ class VisualizePath:
             matrices_dict=matrices_dict  # Pass all matrices for metric toggle
         )
         
-        print(f"  Heatmap saved: {heatmap_file}")
+        self._vprint(f"  Heatmap saved: {heatmap_file}")
         
         return heatmap_file
 
@@ -7120,19 +7149,19 @@ class VisualizePath:
         """
         info = self.get_heatmap_node_info()
         
-        print("\n" + "=" * 80)
-        print("HEATMAP NODE INFORMATION")
-        print("=" * 80)
-        print(f"\nRow nodes (sources): {len(info['row_nodes'])} total")
-        print(f"  {', '.join(info['row_nodes'])}")
-        print(f"\nColumn nodes (targets): {len(info['col_nodes'])} total")
-        print(f"  {', '.join(info['col_nodes'])}")
-        print(f"\nNode roles:")
-        print(f"  Source-only:  {len(info['source_only'])} nodes - {', '.join(info['source_only'])}")
-        print(f"  Target-only:  {len(info['target_only'])} nodes - {', '.join(info['target_only'])}")
-        print(f"  Both (intermediate): {len(info['intermediate'])} nodes - {', '.join(info['intermediate'])}")
-        print("\nNote: Nodes in 'Both' category appear in BOTH rows AND columns")
-        print("=" * 80 + "\n")
+        self._vprint("\n" + "=" * 80)
+        self._vprint("HEATMAP NODE INFORMATION")
+        self._vprint("=" * 80)
+        self._vprint(f"\nRow nodes (sources): {len(info['row_nodes'])} total")
+        self._vprint(f"  {', '.join(info['row_nodes'])}")
+        self._vprint(f"\nColumn nodes (targets): {len(info['col_nodes'])} total")
+        self._vprint(f"  {', '.join(info['col_nodes'])}")
+        self._vprint(f"\nNode roles:")
+        self._vprint(f"  Source-only:  {len(info['source_only'])} nodes - {', '.join(info['source_only'])}")
+        self._vprint(f"  Target-only:  {len(info['target_only'])} nodes - {', '.join(info['target_only'])}")
+        self._vprint(f"  Both (intermediate): {len(info['intermediate'])} nodes - {', '.join(info['intermediate'])}")
+        self._vprint("\nNote: Nodes in 'Both' category appear in BOTH rows AND columns")
+        self._vprint("=" * 80 + "\n")
     
     def visualize(self, plot_heatmap=True, plot_Sankey=True, plot_network=True):
         """
@@ -7169,18 +7198,18 @@ class VisualizePath:
         """
         # Handle empty network generation
         if self.generate_empty_network:
-            print("=" * 80)
-            print("VisualizePath - Generating empty network template")
-            print("=" * 80)
+            self._vprint("=" * 80)
+            self._vprint("VisualizePath - Generating empty network template")
+            self._vprint("=" * 80)
             self.generate_empty_network_html()
-            print("=" * 80)
-            print("✓ Empty network generation complete!")
-            print("=" * 80)
+            self._vprint("=" * 80)
+            self._vprint("✓ Empty network generation complete!")
+            self._vprint("=" * 80)
             return None, None
         
-        print("=" * 80)
-        print("VisualizePath - Creating pathway visualizations")
-        print("=" * 80)
+        self._vprint("=" * 80)
+        self._vprint("VisualizePath - Creating pathway visualizations")
+        self._vprint("=" * 80)
         
         # Build network
         self.build_network()
@@ -7215,17 +7244,17 @@ class VisualizePath:
         # Save data
         self.save_data()
         
-        print("\n" + "=" * 80)
-        print("✓ Visualization complete!")
-        print("=" * 80)
-        print(f"\nOutput files in: {self.output_folder}")
+        self._vprint("\n" + "=" * 80)
+        self._vprint("✓ Visualization complete!")
+        self._vprint("=" * 80)
+        self._vprint(f"\nOutput files in: {self.output_folder}")
         if plot_heatmap:
-            print(f"  • {self.base_filename}_heatmap.html - Connection matrix")
+            self._vprint(f"  • {self.base_filename}_heatmap.html - Connection matrix")
         if plot_Sankey:
-            print(f"  • {self.base_filename}_Sankey.html - Flow-based diagram")
+            self._vprint(f"  • {self.base_filename}_Sankey.html - Flow-based diagram")
         if plot_network:
-            print(f"  • {self.base_filename}_network.html - Interactive network")
-        print(f"  • {self.base_filename}_data.xlsx - Connection data")
+            self._vprint(f"  • {self.base_filename}_network.html - Interactive network")
+        self._vprint(f"  • {self.base_filename}_data.xlsx - Connection data")
         
         return self.conn_df, self.G_network
 
@@ -7254,9 +7283,9 @@ class VisualizePath:
         >>> heatmap_path = vp.visualize_heatmap()
         >>> print(f"Heatmap saved to: {heatmap_path}")
         """
-        print("=" * 80)
-        print("VisualizePath - Creating heatmap visualization")
-        print("=" * 80)
+        self._vprint("=" * 80)
+        self._vprint("VisualizePath - Creating heatmap visualization")
+        self._vprint("=" * 80)
         
         # Build network if not already built
         if self.conn_df is None or self.G_network is None:
@@ -7273,10 +7302,10 @@ class VisualizePath:
             import webbrowser
             webbrowser.open('file://' + os.path.abspath(heatmap_path))
         
-        print("\n" + "=" * 80)
-        print("✓ Heatmap visualization complete!")
-        print("=" * 80)
-        print(f"\nOutput file: {heatmap_path}")
+        self._vprint("\n" + "=" * 80)
+        self._vprint("✓ Heatmap visualization complete!")
+        self._vprint("=" * 80)
+        self._vprint(f"\nOutput file: {heatmap_path}")
         
         return heatmap_path
 
@@ -7298,9 +7327,9 @@ class VisualizePath:
         >>> sankey_path = vp.visualize_sankey()
         >>> print(f"Sankey saved to: {sankey_path}")
         """
-        print("=" * 80)
-        print("VisualizePath - Creating Sankey diagram")
-        print("=" * 80)
+        self._vprint("=" * 80)
+        self._vprint("VisualizePath - Creating Sankey diagram")
+        self._vprint("=" * 80)
         
         # Build network if not already built
         if self.conn_df is None or self.G_network is None:
@@ -7314,10 +7343,10 @@ class VisualizePath:
             import webbrowser
             webbrowser.open('file://' + os.path.abspath(sankey_path))
         
-        print("\n" + "=" * 80)
-        print("✓ Sankey visualization complete!")
-        print("=" * 80)
-        print(f"\nOutput file: {sankey_path}")
+        self._vprint("\n" + "=" * 80)
+        self._vprint("✓ Sankey visualization complete!")
+        self._vprint("=" * 80)
+        self._vprint(f"\nOutput file: {sankey_path}")
         
         return sankey_path
 
@@ -7339,9 +7368,9 @@ class VisualizePath:
         >>> network_path = vp.visualize_network()
         >>> print(f"Network saved to: {network_path}")
         """
-        print("=" * 80)
-        print("VisualizePath - Creating network visualization")
-        print("=" * 80)
+        self._vprint("=" * 80)
+        self._vprint("VisualizePath - Creating network visualization")
+        self._vprint("=" * 80)
         
         # Build network if not already built
         if self.conn_df is None or self.G_network is None:
@@ -7355,10 +7384,10 @@ class VisualizePath:
             import webbrowser
             webbrowser.open('file://' + os.path.abspath(network_path))
         
-        print("\n" + "=" * 80)
-        print("✓ Network visualization complete!")
-        print("=" * 80)
-        print(f"\nOutput file: {network_path}")
+        self._vprint("\n" + "=" * 80)
+        self._vprint("✓ Network visualization complete!")
+        self._vprint("=" * 80)
+        self._vprint(f"\nOutput file: {network_path}")
         
         return network_path
 
@@ -7613,7 +7642,7 @@ def visualize_network(
     return vp.visualize_network()
 
 
-def VisConnMatInteractive(cmat, filename, title='', color_scale=[[0, 'rgb(255,255,255)'], [1, 'rgb(104,55,164)']], showfig=True, fontsize=12, conn_df=None, matrices_dict=None):
+def VisConnMatInteractive(cmat, filename, title='', color_scale=[[0, 'rgb(255,255,255)'], [1, 'rgb(104,55,164)']], showfig=True, fontsize=12, conn_df=None, matrices_dict=None, verbose=True):
     '''Create interactive heatmap with comprehensive controls similar to network visualization
     
     Features:
@@ -7645,7 +7674,14 @@ def VisConnMatInteractive(cmat, filename, title='', color_scale=[[0, 'rgb(255,25
     matrices_dict : dict, optional
         Dictionary with keys 'weight', 'ratio', 'probability' containing different metric matrices
         If provided, enables metric toggle. Otherwise uses cmat as weight matrix only.
+    verbose : bool, optional
+        Control print output. Default True.
     '''
+    
+    # Helper function for verbose printing
+    def _vprint(*args, **kwargs):
+        if verbose:
+            print(*args, **kwargs)
     
     # Handle multiple matrices for metric toggle
     has_multiple_metrics = matrices_dict is not None and isinstance(matrices_dict, dict)
@@ -7695,7 +7731,7 @@ def VisConnMatInteractive(cmat, filename, title='', color_scale=[[0, 'rgb(255,25
     is_sparse = sparsity_ratio > 0.5  # More than 50% zeros
     
     # Compute hierarchical clustering with multiple methods for row/column ordering
-    print("  Computing hierarchical clustering...")
+    _vprint("  Computing hierarchical clustering...")
     from scipy.cluster.hierarchy import linkage, leaves_list
     from scipy.spatial.distance import pdist
     
@@ -7737,11 +7773,11 @@ def VisConnMatInteractive(cmat, filename, title='', color_scale=[[0, 'rgb(255,25
         col_order_clustered = np.array(clustering_results['ward']['col_order'])
         
         clustering_successful = True
-        print(f"  ✓ Clustering complete: {len(row_order_clustered)} rows, {len(col_order_clustered)} cols")
-        print(f"  Available methods: Ward (default), Average, Complete, Single")
+        _vprint(f"  ✓ Clustering complete: {len(row_order_clustered)} rows, {len(col_order_clustered)} cols")
+        _vprint(f"  Available methods: Ward (default), Average, Complete, Single")
     except Exception as e:
-        print(f"  ⚠ Clustering failed: {e}")
-        print(f"  Using original order")
+        _vprint(f"  ⚠ Clustering failed: {e}")
+        _vprint(f"  Using original order")
         row_order_clustered = np.array(range(data_linear.shape[0]))
         col_order_clustered = np.array(range(data_linear.shape[1]))
         clustering_successful = False
@@ -7779,7 +7815,7 @@ def VisConnMatInteractive(cmat, filename, title='', color_scale=[[0, 'rgb(255,25
             'values': values.tolist(),
             'shape': list(data_linear.shape)
         }
-        print(f"  Using sparse format: {sparsity_ratio*100:.1f}% zeros, storing {len(values)} values instead of {data_linear.size}")
+        _vprint(f"  Using sparse format: {sparsity_ratio*100:.1f}% zeros, storing {len(values)} values instead of {data_linear.size}")
     
     if use_lazy_transforms:
         # Store only linear data; transforms computed client-side

@@ -2890,20 +2890,21 @@ class FindNeuronConnection:
                     link_color=self.link_color if hasattr(self, 'link_color') else 'rgba(100,100,100,0.3)',
                     network_layout=self.network_layout if hasattr(self, 'network_layout') else 'hierarchical',
                     showfig=self.showfig,
-                    edgeN_limit=self.edgeN_limit
+                    edgeN_limit=self.edgeN_limit,
+                    verbose=(self.verbose_mode == 'full')
                 )
                 vp.visualize()
-                print('  ✓ Created complete VisualizePath visualization:')
-                print('    - Interactive heatmap (type-level connections)')
-                print('    - Sankey diagram (flow visualization)')
-                print('    - Network graph (interactive topology)')
+                self._vprint('  ✓ Created complete VisualizePath visualization:')
+                self._vprint('    - Interactive heatmap (type-level connections)')
+                self._vprint('    - Sankey diagram (flow visualization)')
+                self._vprint('    - Network graph (interactive topology)')
                 
             else:
-                print('  No connections to visualize')
+                self._vprint('  No connections to visualize')
             
             # Create VisualizePath visualization for bodyId-level connections
             if len(self.conn_df) > 0:
-                print('\nCreating VisualizePath visualization for bodyId-level connections...')
+                self._vprint('\nCreating VisualizePath visualization for bodyId-level connections...')
                 bodyId_path_data = []
                 for idx in self.conn_df.index:
                     # Add type suffix to bodyIds
@@ -2938,17 +2939,18 @@ class FindNeuronConnection:
                     network_layout=self.network_layout if hasattr(self, 'network_layout') else 'hierarchical',
                     showfig=self.showfig,
                     edgeN_limit=self.edgeN_limit,
-                    output_format=self.output_format
+                    output_format=self.output_format,
+                    verbose=(self.verbose_mode == 'full')
                 )
                 vp_bodyId.visualize()
-                print('  ✓ Created VisualizePath visualization for bodyId-level connections:')
-                print('    - Interactive heatmap (bodyId-level connections)')
-                print('    - Sankey diagram (bodyId flow visualization)')
-                print('    - Network graph (bodyId topology)')
+                self._vprint('  ✓ Created VisualizePath visualization for bodyId-level connections:')
+                self._vprint('    - Interactive heatmap (bodyId-level connections)')
+                self._vprint('    - Sankey diagram (bodyId flow visualization)')
+                self._vprint('    - Network graph (bodyId topology)')
                 
             # Create visualization for custom groups if available
             if self.conn_group is not None and len(self.conn_group) > 0:
-                print('\nCreating VisualizePath visualization for custom groups...')
+                self._vprint('\nCreating VisualizePath visualization for custom groups...')
                 group_path_data = []
                 for idx in self.conn_group.index:
                     source = self.conn_group.at[idx, 'group_pre']
@@ -2978,19 +2980,20 @@ class FindNeuronConnection:
                     link_color=self.link_color if hasattr(self, 'link_color') else 'rgba(100,100,100,0.3)',
                     network_layout=self.network_layout if hasattr(self, 'network_layout') else 'hierarchical',
                     showfig=self.showfig,
-                    edgeN_limit=self.edgeN_limit
+                    edgeN_limit=self.edgeN_limit,
+                    verbose=(self.verbose_mode == 'full')
                 )
                 vp_group.visualize()
-                print('  ✓ Created VisualizePath visualization for custom groups:')
-                print('    - Interactive heatmap (custom group connections)')
-                print('    - Sankey diagram (group flow visualization)')
-                print('    - Network graph (group topology)')
+                self._vprint('  ✓ Created VisualizePath visualization for custom groups:')
+                self._vprint('    - Interactive heatmap (custom group connections)')
+                self._vprint('    - Sankey diagram (group flow visualization)')
+                self._vprint('    - Network graph (group topology)')
                 
         except Exception as e:
             import traceback
-            print(f'  Warning: VisualizePath visualization failed: {e}')
-            print(traceback.format_exc())
-        print('Done\n')
+            self._vprint(f'  Warning: VisualizePath visualization failed: {e}')
+            self._vprint(traceback.format_exc())
+        self._vprint('Done\n')
     
     def FindPath(self, find_bodyId_path=True):
         '''Find path between source and target neurons, adapted from FindInterClusterConnection.ipynb'''
@@ -3599,23 +3602,24 @@ class FindNeuronConnection:
                     network_layout=self.network_layout if hasattr(self, 'network_layout') else 'hierarchical',
                     showfig=self.showfig,
                     edgeN_limit=self.edgeN_limit,
-                    output_format=self.output_format
+                    output_format=self.output_format,
+                    verbose=(self.verbose_mode == 'full')
                 )
                 vp.visualize()
-                print('  Created network_selected_paths.html and sankey_selected_paths.html')
+                self._vprint('  Created network_selected_paths.html and sankey_selected_paths.html')
             else:
-                print('  No paths found to visualize')
+                self._vprint('  No paths found to visualize')
             
             # Create network from path_bodyId if it exists and requested
             if find_bodyId_path and len(path_df_bodyId) > 0:
-                print('\nCreating bodyId-level network visualizations...')
+                self._vprint('\nCreating bodyId-level network visualizations...')
                 # Filter paths if pathN_to_show is specified
                 if self.pathN_to_show > 0 and len(path_df_bodyId) > self.pathN_to_show:
                     paths_to_visualize_bodyId = path_df_bodyId.head(self.pathN_to_show).copy()
-                    print(f'  Showing top {self.pathN_to_show} bodyId paths (by traversal_probability) out of {len(path_df_bodyId)} total paths')
+                    self._vprint(f'  Showing top {self.pathN_to_show} bodyId paths (by traversal_probability) out of {len(path_df_bodyId)} total paths')
                 else:
                     paths_to_visualize_bodyId = path_df_bodyId.copy()
-                    print(f'  Showing all {len(path_df_bodyId)} bodyId paths')
+                    self._vprint(f'  Showing all {len(path_df_bodyId)} bodyId paths')
                 
                 # Ensure path_block column exists
                 if 'path_block' not in paths_to_visualize_bodyId.columns:
@@ -3658,19 +3662,20 @@ class FindNeuronConnection:
                     network_layout=self.network_layout if hasattr(self, 'network_layout') else 'hierarchical',
                     showfig=self.showfig,
                     edgeN_limit=self.edgeN_limit,
-                    output_format=self.output_format
+                    output_format=self.output_format,
+                    verbose=(self.verbose_mode == 'full')
                 )
                 vp_bodyId.visualize()
-                print('  Created bodyId-level visualizations in bodyId_visualization subfolder')
+                self._vprint('  Created bodyId-level visualizations in bodyId_visualization subfolder')
 
         except Exception as e:
-            print(f'  Warning: VisualizePath visualization failed: {e}')
+            self._vprint(f'  Warning: VisualizePath visualization failed: {e}')
             import traceback
             traceback.print_exc()
         
 
         
-        print('Done\n')
+        self._vprint('Done\n')
     
     def _create_interactive_network_for_path(self, conn_types, conn_inpath, neuron_layers, target_type, target_ID, output_folder):
         '''Create interactive network visualizations for FindPath method'''
@@ -5165,7 +5170,7 @@ class FindNeuronConnection:
             if 'probabilities' in group_paths_to_viz.columns and 'traversal_probabilities' not in group_paths_to_viz.columns:
                 group_paths_to_viz['traversal_probabilities'] = group_paths_to_viz['probabilities']
             
-            vp_group = VisualizePath(path_file=group_paths_to_viz, output_folder=os.path.join(self.allpath_folder, 'custom_groups'))
+            vp_group = VisualizePath(path_file=group_paths_to_viz, output_folder=os.path.join(self.allpath_folder, 'custom_groups'), verbose=(self.verbose_mode != 'silent'))
             self._vprint(f'💾 Saving path_group data (rows: {len(path_df_group):,})...', level='full')
             # Check if we should save as CSV (matches type-level data format OR group data too large)
             save_group_as_csv = use_csv or (len(path_df_group) >= EXCEL_ROW_LIMIT * 0.9)
@@ -5418,7 +5423,8 @@ class FindNeuronConnection:
                     network_layout=self.network_layout if hasattr(self, 'network_layout') else 'hierarchical',
                     showfig=self.showfig,
                     edgeN_limit=self.edgeN_limit,
-                    output_format=self.output_format
+                    output_format=self.output_format,
+                    verbose=(self.verbose_mode != 'silent')
                 )
                 vp.visualize()
                 if self.verbose_mode == 'simple':
@@ -5492,7 +5498,8 @@ class FindNeuronConnection:
                     network_layout=self.network_layout if hasattr(self, 'network_layout') else 'hierarchical',
                     showfig=self.showfig,
                     edgeN_limit=self.edgeN_limit,
-                    output_format=self.output_format
+                    output_format=self.output_format,
+                    verbose=(self.verbose_mode != 'silent')
                 )
                 vp_bodyId.visualize()
                 if self.verbose_mode == 'simple':
@@ -5508,7 +5515,8 @@ class FindNeuronConnection:
                 vp_group = VisualizePath(path_file=group_paths_to_viz, output_folder=os.path.join(self.allpath_folder, 'custom_groups'),
                                         source_color=self.source_color if hasattr(self, 'source_color') else '#1f77b4', showfig=self.showfig,
                                         edgeN_limit=self.edgeN_limit,
-                                        output_format=self.output_format)
+                                        output_format=self.output_format,
+                                        verbose=(self.verbose_mode != 'silent'))
                 vp_group.visualize()
                 if self.verbose_mode == 'full':
                     self._vprint(f'  ✓ Custom group visualizations created ({len(group_paths_to_viz)} paths)', level='full')
@@ -6909,7 +6917,8 @@ class FindNeuronConnection:
             node_color=node_color,  # Pass for backward compatibility
             network_layout=network_layout,
             showfig=showfig,
-            edgeN_limit=self.edgeN_limit if hasattr(self, 'edgeN_limit') else 500
+            edgeN_limit=self.edgeN_limit if hasattr(self, 'edgeN_limit') else 500,
+            verbose=(self.verbose_mode != 'silent') if hasattr(self, 'verbose_mode') else True
         )
         
         return vp.visualize()
