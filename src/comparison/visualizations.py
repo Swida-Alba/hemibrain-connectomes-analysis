@@ -42,12 +42,13 @@ class ComparisonVisualizer:
         >>> plt.savefig("path_counts.png")
     """
     
-    def __init__(self, style: str = 'whitegrid'):
+    def __init__(self, style: str = 'whitegrid', verbose: bool = True):
         """
         Initialize ComparisonVisualizer.
         
         Args:
             style: Seaborn style to use (default: 'whitegrid')
+            verbose: Whether to print progress messages (default: True)
         """
         if not HAS_MATPLOTLIB:
             raise ImportError("matplotlib is required for visualization. Install with: pip install matplotlib")
@@ -57,6 +58,12 @@ class ComparisonVisualizer:
         
         self.default_figsize = (10, 6)
         self.default_colors = plt.cm.Set2.colors
+        self.verbose = verbose
+    
+    def _vprint(self, *args, **kwargs):
+        """Print only if verbose is True."""
+        if self.verbose:
+            print(*args, **kwargs)
     
     # =========================================================================
     # Path Count Visualizations
@@ -898,7 +905,7 @@ class ComparisonVisualizer:
             dpi: Resolution (default 450 for high quality)
         """
         fig.savefig(path, dpi=dpi, bbox_inches='tight')
-        print(f"Saved figure: {path}")
+        self._vprint(f"Saved figure: {path}")
     
     def plot_threshold_comparison_subplots(
         self,
@@ -1155,7 +1162,7 @@ class ComparisonVisualizer:
                     ax.tick_params(axis='both', labelsize=7)
                     
             except Exception as e:
-                print(f"Warning: Could not create similarity matrix for threshold {threshold}: {e}")
+                self._vprint(f"Warning: Could not create similarity matrix for threshold {threshold}: {e}")
         
         # Add row labels on the right side
         fig.text(0.02, 0.88, 'Topology', fontsize=11, fontweight='bold', color='#166534', 
@@ -1749,7 +1756,7 @@ class ComparisonVisualizer:
                         os.path.join(vis_data_dir, "similarity_per_threshold.csv"), index=False
                     )
             except Exception as e:
-                print(f"Warning: Could not create per-threshold similarity plot: {e}")
+                self._vprint(f"Warning: Could not create per-threshold similarity plot: {e}")
         
         # Edge overlap data export (visualization removed - redundant with threshold_comparison)
         if not aligned_data.empty:
@@ -1820,7 +1827,7 @@ class ComparisonVisualizer:
                         os.path.join(vis_data_dir, "overlap_matrices_per_threshold.csv"), index=False
                     )
             except Exception as e:
-                print(f"Warning: Could not save overlap matrices data: {e}")
+                self._vprint(f"Warning: Could not save overlap matrices data: {e}")
         
         # Pairwise scatter plots
         if len(datasets) == 2:
@@ -1904,7 +1911,7 @@ class ComparisonVisualizer:
                     
                     key_findings_data.append(row_data)
                 except Exception as e:
-                    print(f"Warning: Could not compute key findings for threshold {threshold}: {e}")
+                    self._vprint(f"Warning: Could not compute key findings for threshold {threshold}: {e}")
             
             if key_findings_data:
                 pd.DataFrame(key_findings_data).to_csv(
@@ -1942,7 +1949,7 @@ class ComparisonVisualizer:
                     self.save_figure(fig, os.path.join(output_dir, "path_heatmap_all_thresholds.png"))
                     plt.close(fig)
             except Exception as e:
-                print(f"Warning: Could not create path heatmaps: {e}")
+                self._vprint(f"Warning: Could not create path heatmaps: {e}")
         
         # Generate edge heatmaps per threshold
         if align_func:
@@ -1968,7 +1975,7 @@ class ComparisonVisualizer:
                     self.save_figure(fig, os.path.join(output_dir, "edge_heatmap_all_thresholds.png"))
                     plt.close(fig)
             except Exception as e:
-                print(f"Warning: Could not create edge heatmaps: {e}")
+                self._vprint(f"Warning: Could not create edge heatmaps: {e}")
         
         # Generate ratio heatmaps from original dataset data (in by_ratio subfolder)
         if ratio_data_func:
@@ -2000,7 +2007,7 @@ class ComparisonVisualizer:
                     self.save_figure(fig, os.path.join(ratio_dir, "ratio_heatmap_all_thresholds.png"))
                     plt.close(fig)
             except Exception as e:
-                print(f"Warning: Could not create ratio heatmaps: {e}")
+                self._vprint(f"Warning: Could not create ratio heatmaps: {e}")
         
         # Generate traversal probability heatmaps from original dataset data (in by_probability subfolder)
         if prob_data_func:
@@ -2032,12 +2039,12 @@ class ComparisonVisualizer:
                     self.save_figure(fig, os.path.join(prob_dir, "traversal_prob_heatmap_all_thresholds.png"))
                     plt.close(fig)
             except Exception as e:
-                print(f"Warning: Could not create traversal probability heatmaps: {e}")
+                self._vprint(f"Warning: Could not create traversal probability heatmaps: {e}")
         
         # Note: vis_summary.pdf generation removed - use HTML report instead
         
-        print(f"All plots saved to: {output_dir}")
-        print(f"Visualization data saved to: {vis_data_dir}")
+        self._vprint(f"All plots saved to: {output_dir}")
+        self._vprint(f"Visualization data saved to: {vis_data_dir}")
 
     def _generate_vis_summary_pdf(self, output_dir: str):
         """
@@ -2116,7 +2123,7 @@ class ComparisonVisualizer:
             png_files.extend(sorted(other_folders[folder]))
         
         if not png_files:
-            print("No PNG files found for PDF generation")
+            self._vprint("No PNG files found for PDF generation")
             return
         
         # Convert PNGs to A4 pages with padding
@@ -2161,10 +2168,10 @@ class ComparisonVisualizer:
                 
                 pages.append(page)
             except Exception as e:
-                print(f"Warning: Could not process {png_path}: {e}")
+                self._vprint(f"Warning: Could not process {png_path}: {e}")
         
         if not pages:
-            print("No images could be processed for PDF generation")
+            self._vprint("No images could be processed for PDF generation")
             return
         
         # Save as multi-page PDF without compression - to parent directory (outside visualizations folder)
@@ -2178,4 +2185,4 @@ class ComparisonVisualizer:
             resolution=PDF_DPI,
             quality=100  # No compression
         )
-        print(f"Generated PDF summary: {pdf_path}")
+        self._vprint(f"Generated PDF summary: {pdf_path}")

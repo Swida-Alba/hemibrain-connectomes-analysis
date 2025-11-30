@@ -1419,55 +1419,14 @@ class ComparisonAnalyzer:
         except Exception as e:
             self._log(f"Warning: Failed to generate visualizations: {e}")
         
-        # Run connectivity profile verification BEFORE HTML report generation
-        # This ensures profile similarity matrix is available for the report
-        # Default verification parameters
-        verification_params = {
-            'direction': 'both',
-            'comparison_mode': 'loose',
-            'include_partner_details': True,
-            'include_visualizations': True,
-            'top_k': 5,
-            'top_m': 0,
-            'min_synapse_threshold': 3,
-            'include_untyped_partners': True,
-            'min_common_partners': 3,
-            'score_weights': {'jaccard': 0.50, 'rank': 0.50}
-        }
+        # NOTE: Connectivity profile verification is NOT run here automatically.
+        # Call run_connectivity_profile_verification() separately after export_results()
+        # if needed. Parameters can be set in ComparisonParameters:
+        #   - verification_direction, verification_mode, verification_top_k, etc.
+        # Example:
+        #   analyzer.run_connectivity_profile_verification()  # Uses params from ComparisonParameters
         
-        try:
-            self.run_connectivity_profile_verification(
-                direction=verification_params['direction'],
-                comparison_mode=verification_params['comparison_mode'],
-                include_partner_details=verification_params['include_partner_details'],
-                include_visualizations=verification_params['include_visualizations'],
-                top_k=verification_params['top_k'],
-                top_m=verification_params['top_m'],
-                min_synapse_threshold=verification_params['min_synapse_threshold'],
-                include_untyped_partners=verification_params['include_untyped_partners'],
-                min_common_partners=verification_params['min_common_partners'],
-                _skip_html_regeneration=True  # Don't regenerate HTML here, we'll do it below
-            )
-            
-            # Save verification parameters to file
-            verification_params_path = os.path.join(out_dir, "connectivity_profile_verification", "verification_parameters.txt")
-            os.makedirs(os.path.dirname(verification_params_path), exist_ok=True)
-            with open(verification_params_path, 'w') as f:
-                f.write("Connectivity Profile Verification Parameters\\n")
-                f.write("=" * 50 + "\\n\\n")
-                for key, value in verification_params.items():
-                    f.write(f"{key}: {value}\\n")
-                f.write("\\n")
-                f.write("Note: Confidence is evaluated based on avg_rank_corr only:\\n")
-                f.write("  Very High: >= 0.85\\n")
-                f.write("  High: 0.70 - 0.85\\n")
-                f.write("  Medium: 0.50 - 0.70\\n")
-                f.write("  Low: 0.30 - 0.50\\n")
-                f.write("  Very Low: < 0.30\\n")
-        except Exception as e:
-            self._log(f"Warning: Connectivity profile verification skipped: {e}")
-        
-        # Generate interactive HTML report at base level (after profile verification)
+        # Generate interactive HTML report at base level
         try:
             html_report_path = os.path.join(out_dir, "comparison_report.html")
             self.generate_html_report(html_report_path)
@@ -1475,6 +1434,7 @@ class ComparisonAnalyzer:
             self._log(f"Warning: Failed to generate HTML report: {e}")
         
         self._log(f"All results exported to: {out_dir}")
+        self._log(f"Note: Run run_connectivity_profile_verification() separately for profile verification.")
     
     def _export_cross_dataset_comparisons(self, comparison_results_dir: str):
         """
@@ -3147,7 +3107,7 @@ class ComparisonAnalyzer:
                 pairwise_sim = pd.DataFrame()
         
         try:
-            visualizer = ComparisonVisualizer()
+            visualizer = ComparisonVisualizer(verbose=self.verbose)
             
             # Build nickname map from parameters
             dataset_names = self.parameters.get_dataset_names()
@@ -3810,16 +3770,16 @@ class ComparisonAnalyzer:
     def run_connectivity_profile_verification(
         self,
         output_dir: Optional[str] = None,
-        direction: str = 'both',
-        comparison_mode: str = 'loose',
-        include_partner_details: bool = True,
-        include_visualizations: bool = True,
-        top_k: int = 5,
-        top_m: int = 0,
-        min_synapse_threshold: int = 3,
-        include_untyped_partners: bool = True,
+        direction: Optional[str] = None,
+        comparison_mode: Optional[str] = None,
+        include_partner_details: Optional[bool] = None,
+        include_visualizations: Optional[bool] = None,
+        top_k: Optional[int] = None,
+        top_m: Optional[int] = None,
+        min_synapse_threshold: Optional[int] = None,
+        include_untyped_partners: Optional[bool] = None,
         # Strict mode parameters
-        min_common_partners: int = 3,
+        min_common_partners: Optional[int] = None,
         # Score weights for combined score
         score_weights: Optional[Dict[str, float]] = None,
         _skip_html_regeneration: bool = False
@@ -3853,18 +3813,30 @@ class ComparisonAnalyzer:
         4. Generates verification report with confidence scores
         5. 2-hop expansion handled by profiler if config.expand_untyped_2hop is True
         
+        All parameters default to values from ComparisonParameters if not provided.
+        
         Args:
             output_dir: Directory to save verification results (default: comparison output folder)
             direction: 'upstream', 'downstream', or 'both' for profile comparison
+                      (default: params.verification_direction)
             comparison_mode: 'loose' (type-aggregated) or 'strict' (per-bodyId)
+                           (default: params.verification_mode)
             include_partner_details: Include per-type partner overlap CSVs
+                                    (default: params.verification_include_partner_details)
             include_visualizations: Generate visualization plots/heatmaps
-            top_k: Number of top partners per direction (default: 5)
-            top_m: Minimum unique partner types (default: 0 = no expansion)
+                                   (default: params.verification_include_visualizations)
+            top_k: Number of top partners per direction 
+                  (default: params.verification_top_k)
+            top_m: Minimum unique partner types 
+                  (default: params.verification_top_m)
             min_synapse_threshold: Minimum synapse count for connections
+                                  (default: params.verification_min_synapse_threshold)
             include_untyped_partners: Include partners without type annotations
+                                     (default: params.verification_include_untyped)
             min_common_partners: (strict mode) Minimum shared partners required for comparison
-            score_weights: Custom weights for combined score {'jaccard': 0.3, 'cosine': 0.35, 'rank': 0.35}
+                                (default: params.verification_min_common_partners)
+            score_weights: Custom weights for combined score {'jaccard': 0.5, 'rank': 0.5}
+                          (default: params.verification_score_weights)
             _skip_html_regeneration: Internal flag - skip HTML regeneration (used when called from export_results)
         
         Returns:
@@ -3885,19 +3857,29 @@ class ComparisonAnalyzer:
             >>> analyzer = ComparisonAnalyzer(params)
             >>> results = analyzer.run_comparison()
             >>> 
-            >>> # Loose mode (default) - type-aggregated comparison
-            >>> verification = analyzer.run_connectivity_profile_verification(
-            ...     comparison_mode='loose',
-            ...     top_k=5, top_m=0  # Focus on top 5 partners, no expansion
-            ... )
+            >>> # Use defaults from ComparisonParameters
+            >>> verification = analyzer.run_connectivity_profile_verification()
             >>> 
-            >>> # Strict mode - per-bodyId comparison
+            >>> # Override specific parameters
             >>> verification = analyzer.run_connectivity_profile_verification(
             ...     comparison_mode='strict',
-            ...     min_common_partners=3
+            ...     top_k=10
             ... )
             >>> print(verification['summary'])
         """
+        # Apply defaults from ComparisonParameters
+        p = self.parameters
+        direction = direction if direction is not None else p.verification_direction
+        comparison_mode = comparison_mode if comparison_mode is not None else p.verification_mode
+        include_partner_details = include_partner_details if include_partner_details is not None else p.verification_include_partner_details
+        include_visualizations = include_visualizations if include_visualizations is not None else p.verification_include_visualizations
+        top_k = top_k if top_k is not None else p.verification_top_k
+        top_m = top_m if top_m is not None else p.verification_top_m
+        min_synapse_threshold = min_synapse_threshold if min_synapse_threshold is not None else p.verification_min_synapse_threshold
+        include_untyped_partners = include_untyped_partners if include_untyped_partners is not None else p.verification_include_untyped
+        min_common_partners = min_common_partners if min_common_partners is not None else p.verification_min_common_partners
+        score_weights = score_weights if score_weights is not None else p.verification_score_weights
+        
         try:
             from .connectivity_profiler import ConnectivityProfiler, ProfilerConfig
             from .cross_dataset_verifier import CrossDatasetVerifier

@@ -12,7 +12,7 @@ Workflow:
 """
 
 from dataclasses import dataclass, field
-from typing import List, Union, Optional, Any, TYPE_CHECKING
+from typing import List, Union, Optional, Any, Dict, TYPE_CHECKING
 from datetime import datetime
 import os
 
@@ -136,6 +136,40 @@ class ComparisonParameters:
     
     top_edges: int = 50
     """Number of top edges for visualization focus"""
+    
+    # Connectivity Profile Verification Settings
+    # These are used by run_connectivity_profile_verification() when called separately
+    verification_direction: str = 'both'
+    """Direction for profile verification: 'upstream', 'downstream', or 'both'"""
+    
+    verification_mode: str = 'loose'
+    """Verification comparison mode: 'strict' or 'loose'.
+    - 'strict': Only compare explicitly typed partners
+    - 'loose': Include untyped partners in comparison"""
+    
+    verification_top_k: int = 5
+    """Number of top partners to include per type for profile comparison"""
+    
+    verification_top_m: int = 0
+    """Minimum synapse count for top partners (0 = no filter)"""
+    
+    verification_min_synapse_threshold: int = 3
+    """Minimum synapse count for edges to include in verification"""
+    
+    verification_include_untyped: bool = True
+    """Include untyped partners in profile comparison"""
+    
+    verification_min_common_partners: int = 3
+    """Minimum common partners required for valid comparison"""
+    
+    verification_score_weights: Dict[str, float] = field(default_factory=lambda: {'jaccard': 0.50, 'rank': 0.50})
+    """Weights for combining Jaccard and rank correlation scores"""
+    
+    verification_include_partner_details: bool = True
+    """Include detailed partner information in verification output"""
+    
+    verification_include_visualizations: bool = True
+    """Generate visualization files for verification results"""
     
     # Comparison mode
     comparison_mode: str = 'path'

@@ -13,7 +13,7 @@ Features demonstrated:
 - Automatic matplotlib visualizations
 - PDF export capability
 - Comparison modes: 'path' (path-based) vs 'edge' (edge-based)
-- **NEW**: Connectivity profile verification for neuron type consistency
+- **NEW**: Connectivity profile verification as SEPARATE step (not in export_results)
 
 
 Comparison Modes:
@@ -32,6 +32,9 @@ Connectivity Profile Verification:
       connectivity patterns by aggregating all neurons of the same type
     * 'strict': Per-bodyId profiles - more precise, computes rank correlation
       on individual neuron pairs with optional 2-hop expansion
+  
+  **IMPORTANT**: Verification is now run SEPARATELY from export_results().
+  Parameters can be configured in ComparisonParameters or passed directly.
 """
 
 import os
@@ -59,6 +62,7 @@ def run_comprehensive_comparison():
     4. Exports all comparison results
     5. Generates interactive HTML report with Cytoscape.js network
     6. Generates matplotlib visualizations
+    7. Runs connectivity profile verification (optional, separate step)
     """
     # Output directory
     output_dir = '/Users/apple/Local/connection_data'
@@ -104,6 +108,19 @@ def run_comprehensive_comparison():
         
         # Token - empty means load from NEUPRINT_APPLICATION_TOKEN env var
         token='',
+        
+        # -----------------------------------------------------------------
+        # Connectivity Profile Verification Settings (used by Step 6)
+        # These defaults can be overridden when calling run_connectivity_profile_verification()
+        # -----------------------------------------------------------------
+        verification_direction='both',       # 'upstream', 'downstream', or 'both'
+        verification_mode='loose',           # 'loose' (type-level) or 'strict' (bodyId-level)
+        verification_top_k=5,                # Number of top partners to compare
+        verification_top_m=0,                # Minimum unique partners (0 = no expansion)
+        verification_min_synapse_threshold=3,# Min synapses for inclusion
+        verification_include_untyped=True,   # Include untyped partners
+        verification_min_common_partners=3,  # (strict mode) Min shared partners
+        verification_score_weights={'jaccard': 0.50, 'rank': 0.50},  # Score weights
     )
     
     # =========================================================================
@@ -126,6 +143,8 @@ def run_comprehensive_comparison():
     # =========================================================================
     print("\n💾 Step 4: Exporting all results...")
     
+    # NOTE: export_results() no longer runs connectivity profile verification.
+    # Call run_connectivity_profile_verification() separately in Step 6 if needed.
     analyzer.export_results()
     
     # =========================================================================
@@ -134,34 +153,34 @@ def run_comprehensive_comparison():
     print("\n📈 Step 5: Additional visualization analysis...")
     
     try:
-        viz = ComparisonVisualizer()
-        print('Done')
+        viz = ComparisonVisualizer(verbose=True)
+        print('   ComparisonVisualizer ready for custom analysis')
         
     except Exception as e:
         print(f"   Visualization analysis skipped: {e}")
     
     # =========================================================================
-    # Note: Connectivity Profile Verification
+    # Step 6: Connectivity Profile Verification (OPTIONAL - now separate)
     # =========================================================================
-    # Connectivity profile verification is automatically run by export_results()
-    # with default parameters (top_k=5, comparison_mode='loose').
-    #
-    # If you need custom verification parameters (e.g., top_k=10, strict mode),
-    # call run_connectivity_profile_verification() BEFORE export_results() to 
-    # ensure the profile cache is populated with your desired settings.
-    #
-    # Example for custom verification:
-    #     analyzer.run_connectivity_profile_verification(
-    #         direction='both',
-    #         comparison_mode='strict',  # Per-bodyId comparison
-    #         top_k=10,  # More partners (must match or exceed export_results' top_k)
-    #         top_m=3,   # Expand profiles with few unique partner types
-    #     )
-    #     analyzer.export_results()  # Will reuse cached profiles
-    #
-    # IMPORTANT: The top_k value used in verification must be >= the top_k used
-    # in export_results (default 5), otherwise the cache will be invalidated
-    # and profiles will be re-fetched, causing slowdown.
+    print("\n🔍 Step 6: Running connectivity profile verification...")
+    
+    # This step is computationally expensive and now separate from export_results().
+    # Parameters are read from ComparisonParameters by default, or can be overridden:
+    try:
+        verification_results = analyzer.run_connectivity_profile_verification()
+        # Or with custom parameters:
+        # verification_results = analyzer.run_connectivity_profile_verification(
+        #     comparison_mode='strict',  # Per-bodyId comparison  
+        #     top_k=10,                  # More partners
+        # )
+        
+        if verification_results and 'summary' in verification_results:
+            summary = verification_results['summary']
+            if not summary.empty:
+                print(f"   Verified {len(summary)} neuron types")
+                print(f"   Average confidence: {summary['avg_rank_corr'].mean():.2f}")
+    except Exception as e:
+        print(f"   Verification skipped: {e}")
     
     return analyzer
 
