@@ -5170,7 +5170,7 @@ class FindNeuronConnection:
             if 'probabilities' in group_paths_to_viz.columns and 'traversal_probabilities' not in group_paths_to_viz.columns:
                 group_paths_to_viz['traversal_probabilities'] = group_paths_to_viz['probabilities']
             
-            vp_group = VisualizePath(path_file=group_paths_to_viz, output_folder=os.path.join(self.allpath_folder, 'custom_groups'), verbose=(self.verbose_mode != 'silent'))
+            vp_group = VisualizePath(path_file=group_paths_to_viz, output_folder=os.path.join(self.allpath_folder, 'custom_groups'), verbose=(self.verbose_mode == 'full'))
             self._vprint(f'💾 Saving path_group data (rows: {len(path_df_group):,})...', level='full')
             # Check if we should save as CSV (matches type-level data format OR group data too large)
             save_group_as_csv = use_csv or (len(path_df_group) >= EXCEL_ROW_LIMIT * 0.9)
@@ -5424,7 +5424,7 @@ class FindNeuronConnection:
                     showfig=self.showfig,
                     edgeN_limit=self.edgeN_limit,
                     output_format=self.output_format,
-                    verbose=(self.verbose_mode != 'silent')
+                    verbose=(self.verbose_mode == 'full')
                 )
                 vp.visualize()
                 if self.verbose_mode == 'simple':
@@ -5499,7 +5499,7 @@ class FindNeuronConnection:
                     showfig=self.showfig,
                     edgeN_limit=self.edgeN_limit,
                     output_format=self.output_format,
-                    verbose=(self.verbose_mode != 'silent')
+                    verbose=(self.verbose_mode == 'full')
                 )
                 vp_bodyId.visualize()
                 if self.verbose_mode == 'simple':
@@ -5516,7 +5516,7 @@ class FindNeuronConnection:
                                         source_color=self.source_color if hasattr(self, 'source_color') else '#1f77b4', showfig=self.showfig,
                                         edgeN_limit=self.edgeN_limit,
                                         output_format=self.output_format,
-                                        verbose=(self.verbose_mode != 'silent'))
+                                        verbose=(self.verbose_mode == 'full'))
                 vp_group.visualize()
                 if self.verbose_mode == 'full':
                     self._vprint(f'  ✓ Custom group visualizations created ({len(group_paths_to_viz)} paths)', level='full')
@@ -6918,7 +6918,7 @@ class FindNeuronConnection:
             network_layout=network_layout,
             showfig=showfig,
             edgeN_limit=self.edgeN_limit if hasattr(self, 'edgeN_limit') else 500,
-            verbose=(self.verbose_mode != 'silent') if hasattr(self, 'verbose_mode') else True
+            verbose=(self.verbose_mode == 'full') if hasattr(self, 'verbose_mode') else True
         )
         
         return vp.visualize()

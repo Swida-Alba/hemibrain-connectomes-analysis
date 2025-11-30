@@ -889,32 +889,51 @@ class CrossDatasetVerifier:
                 }
                 
                 # Add directional scores (upstream/downstream separately)
+                # Optimization: Instead of calling verify_type_assignment 2 more times,
+                # compute directional scores directly from profiles we already have
                 if include_directional:
+                    # Collect profiles for this neuron type
+                    profiles_cache: Dict[str, ConnectivityProfile] = {}
+                    for dataset in datasets:
+                        try:
+                            profiles_cache[dataset] = self._get_profile(neuron_type, dataset)
+                        except Exception:
+                            pass
+                    
                     for dir_name in ['upstream', 'downstream']:
                         try:
-                            dir_verification = self.verify_type_assignment(
-                                neuron_type, datasets, dir_name, score_weights
-                            )
-                            dir_pairwise = dir_verification.pairwise_scores
-                            if dir_pairwise:
-                                # Filter valid pairs (not NaN) and use normalized values
-                                rank_values = [p.rank_correlation_norm for p in dir_pairwise 
-                                             if not np.isnan(p.rank_correlation)]
-                                if rank_values:
-                                    result_row[f'avg_rank_corr_{dir_name}'] = np.mean(rank_values)
-                                else:
-                                    result_row[f'avg_rank_corr_{dir_name}'] = np.nan
-                                
-                                # Also add directional Jaccard scores
-                                jaccard_values = [p.jaccard for p in dir_pairwise 
-                                                 if not np.isnan(p.jaccard)]
-                                if jaccard_values:
-                                    result_row[f'avg_jaccard_{dir_name}'] = np.mean(jaccard_values)
-                                else:
-                                    result_row[f'avg_jaccard_{dir_name}'] = np.nan
-                            else:
-                                result_row[f'avg_rank_corr_{dir_name}'] = np.nan
-                                result_row[f'avg_jaccard_{dir_name}'] = np.nan
+                            # Compute pairwise directional scores directly
+                            dir_rank_values = []
+                            dir_jaccard_values = []
+                            
+                            dataset_keys = list(profiles_cache.keys())
+                            for i in range(len(dataset_keys)):
+                                for j in range(i + 1, len(dataset_keys)):
+                                    ds_a, ds_b = dataset_keys[i], dataset_keys[j]
+                                    profile_a, profile_b = profiles_cache[ds_a], profiles_cache[ds_b]
+                                    
+                                    # Skip if either profile is empty
+                                    a_has_data = bool(profile_a.upstream_partners or profile_a.downstream_partners)
+                                    b_has_data = bool(profile_b.upstream_partners or profile_b.downstream_partners)
+                                    if not (a_has_data and b_has_data):
+                                        continue
+                                    
+                                    # Use ProfileComparator to get directional scores
+                                    scores = ProfileComparator.combined_score(
+                                        profile_a, profile_b, 
+                                        weights=score_weights or self.score_weights,
+                                        direction=dir_name
+                                    )
+                                    
+                                    if not np.isnan(scores['rank']):
+                                        # Normalize rank correlation to [0, 1]
+                                        dir_rank_values.append((scores['rank'] + 1) / 2)
+                                    if not np.isnan(scores['jaccard']):
+                                        dir_jaccard_values.append(scores['jaccard'])
+                            
+                            result_row[f'avg_rank_corr_{dir_name}'] = np.mean(dir_rank_values) if dir_rank_values else np.nan
+                            result_row[f'avg_jaccard_{dir_name}'] = np.mean(dir_jaccard_values) if dir_jaccard_values else np.nan
+                            
                         except Exception:
                             result_row[f'avg_rank_corr_{dir_name}'] = np.nan
                             result_row[f'avg_jaccard_{dir_name}'] = np.nan

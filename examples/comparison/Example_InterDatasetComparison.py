@@ -141,61 +141,27 @@ def run_comprehensive_comparison():
         print(f"   Visualization analysis skipped: {e}")
     
     # =========================================================================
-    # Step 6: Connectivity Profile Verification (NEW)
+    # Note: Connectivity Profile Verification
     # =========================================================================
-    print("\n🔬 Step 6: Running connectivity profile verification...")
-    
-    try:
-        # Run connectivity profile verification
-        # This verifies that neurons with the same type label have similar
-        # connectivity patterns across all compared datasets
-        #
-        # Two comparison modes are available:
-        # - 'loose' (default): Type-aggregated comparison (faster)
-        # - 'strict': Per-bodyId comparison with rank correlation (more precise)
-        verification_results = analyzer.run_connectivity_profile_verification(
-            direction='both',  # Compare both upstream and downstream partners
-            comparison_mode='loose',  # 'loose' (type-aggregated) or 'strict' (per-bodyId)
-            # Profile extraction parameters
-            top_k=10,   # Number of top partners per direction (default: 5)
-            top_m=3,   # Minimum unique partner types (default: 0 = no expansion)
-            # Strict mode parameters (only used when comparison_mode='strict')
-            min_common_partners=3,  # Minimum shared partners for comparison
-            # Note: Ranks are always used for bodyId-level comparison
-            # 2-hop expansion is controlled via profiler config.expand_untyped_2hop
-        )
-        
-        # Print summary if available
-        if 'summary' in verification_results and not verification_results['summary'].empty:
-            print("\n   📊 Verification Summary:")
-            summary = verification_results['summary']
-            
-            # Count by verification status
-            status_counts = summary['verification_status'].value_counts()
-            for status, count in status_counts.items():
-                print(f"      • {status}: {count} types")
-            
-            # Show top verified types
-            verified = summary[summary['verification_status'] == 'verified']
-            if not verified.empty:
-                print(f"\n   ✅ Top verified types (high confidence):")
-                for _, row in verified.head(5).iterrows():
-                    print(f"      • {row['neuron_type']}: score={row['avg_combined_score']:.3f}")
-            
-            # Show types needing review
-            needs_review = summary[summary['verification_status'].isin(['needs_review', 'questionable'])]
-            if not needs_review.empty:
-                print(f"\n   ⚠️ Types needing review:")
-                for _, row in needs_review.head(5).iterrows():
-                    print(f"      • {row['neuron_type']}: score={row['avg_combined_score']:.3f} ({row['confidence']})")
-        
-        print("\n   ✅ Connectivity profile verification complete!")
-        print(f"   📁 Results saved to: {analyzer.parameters.full_output_path}/connectivity_profile_verification/")
-        
-    except Exception as e:
-        print(f"   ⚠️ Connectivity profile verification skipped: {e}")
-        import traceback
-        traceback.print_exc()
+    # Connectivity profile verification is automatically run by export_results()
+    # with default parameters (top_k=5, comparison_mode='loose').
+    #
+    # If you need custom verification parameters (e.g., top_k=10, strict mode),
+    # call run_connectivity_profile_verification() BEFORE export_results() to 
+    # ensure the profile cache is populated with your desired settings.
+    #
+    # Example for custom verification:
+    #     analyzer.run_connectivity_profile_verification(
+    #         direction='both',
+    #         comparison_mode='strict',  # Per-bodyId comparison
+    #         top_k=10,  # More partners (must match or exceed export_results' top_k)
+    #         top_m=3,   # Expand profiles with few unique partner types
+    #     )
+    #     analyzer.export_results()  # Will reuse cached profiles
+    #
+    # IMPORTANT: The top_k value used in verification must be >= the top_k used
+    # in export_results (default 5), otherwise the cache will be invalidated
+    # and profiles will be re-fetched, causing slowdown.
     
     return analyzer
 
