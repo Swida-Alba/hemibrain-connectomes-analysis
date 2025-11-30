@@ -504,12 +504,12 @@ class FindNeuronConnection:
     '''
     
     def __post_init__(self):
-        print('Initializing...')
+        self._vprint('Initializing...', level='full')
         
         # Auto-detect client_type from dataset if not explicitly set to flywire
         if self.client_type == 'neuprint' and ('flywire' in self.dataset.lower() or 'fafb' in self.dataset.lower()):
             self.client_type = 'flywire'
-            print(f"Auto-detected client_type='flywire' from dataset '{self.dataset}'")
+            self._vprint(f"Auto-detected client_type='flywire' from dataset '{self.dataset}'", level='full')
 
         # Auto-detect version from dataset if not provided
         if self.client_type == 'flywire' and self.version is None:
@@ -518,7 +518,7 @@ class FindNeuronConnection:
             match = re.search(r'v(\d+)', self.dataset)
             if match:
                 self.version = int(match.group(1))
-                print(f"Auto-detected version={self.version} from dataset '{self.dataset}'")
+                self._vprint(f"Auto-detected version={self.version} from dataset '{self.dataset}'", level='full')
         
         # Prepare FlyWire data if needed
         if self.client_type == 'flywire':
@@ -534,7 +534,7 @@ class FindNeuronConnection:
                 client = None
             
             if client is None:
-                print(f"Initializing NeuPrint client for dataset: {self.dataset}")
+                self._vprint(f"Initializing NeuPrint client for dataset: {self.dataset}", level='full')
                 self.client_hemibrain = Client(self.server, self.dataset, self.token)
                 set_default_client(self.client_hemibrain)
             else:
@@ -548,13 +548,13 @@ class FindNeuronConnection:
             dataset_safe = self.dataset.replace(':', '_').replace('.', '_')
             self.cache_folder = os.path.join(self.script_path, 'cache', dataset_safe)
             os.makedirs(self.cache_folder, exist_ok=True)
-            print(f'Cache enabled: {self.cache_folder}')
+            self._vprint(f'Cache enabled: {self.cache_folder}', level='full')
             # Ensure complete dataset with ALL neurons exists (including type=None)
             self._ensure_complete_dataset()
         if self.exclude_intra_type_connections:
-            print('⚠️  Intra-type connections will be excluded (type_pre == type_post)')
+            self._vprint('⚠️  Intra-type connections will be excluded (type_pre == type_post)', level='full')
         if self.sourceNeurons is None or self.targetNeurons is None:
-            print('\033[33mIt is not recommended to search for all neurons in the dataset.\n Using [] or list() to search for all neurons having a given type, instead.\033[0m')
+            self._vprint('\033[33mIt is not recommended to search for all neurons in the dataset.\n Using [] or list() to search for all neurons having a given type, instead.\033[0m', level='full')
         elif self.targetNeurons is None:
             self.largeTargetSet = True
     
@@ -565,20 +565,20 @@ class FindNeuronConnection:
         neurons without types.
         '''
         if self.client_type == 'flywire':
-            print("   Skipping complete dataset download for FlyWire (too large). Cache enrichment will rely on on-demand fetching.")
+            self._vprint("   Skipping complete dataset download for FlyWire (too large). Cache enrichment will rely on on-demand fetching.", level='full')
             return
 
         # Create datasets folder if it doesn't exist
         datasets_folder = os.path.join(self.script_path, 'datasets')
         if not os.path.exists(datasets_folder):
             os.makedirs(datasets_folder)
-            print(f'Created datasets folder: {datasets_folder}')
+            self._vprint(f'Created datasets folder: {datasets_folder}', level='full')
         
         dataset_safe = self.dataset.replace(':', '_').replace('.', '_')
         dataset_dir = os.path.join(datasets_folder, dataset_safe)
         if not os.path.exists(dataset_dir):
             os.makedirs(dataset_dir)
-            print(f'Created dataset folder: {dataset_dir}')
+            self._vprint(f'Created dataset folder: {dataset_dir}', level='full')
 
         dataset_path = os.path.join(
             dataset_dir, 
@@ -589,8 +589,8 @@ class FindNeuronConnection:
         roi_csv = dataset_path + '_roi_count_df.csv'
         
         if not os.path.exists(neuron_csv) or not os.path.exists(roi_csv):
-            print(f'\n📥 Complete dataset not found, downloading ALL neurons (including type=None)...')
-            print(f'   This is a one-time download for cache enrichment.')
+            self._vprint(f'\n📥 Complete dataset not found, downloading ALL neurons (including type=None)...', level='full')
+            self._vprint(f'   This is a one-time download for cache enrichment.', level='full')
             # Login to neuprint only if needed
             from neuprint import Client, set_default_client, default_client
             # Only login if not already done (default_client() returns None if not set)
@@ -600,10 +600,10 @@ class FindNeuronConnection:
             try:
                 # Pull complete dataset with omitNoneType=False
                 sv.pull_dataset(self.dataset, save_path=dataset_path, omitNoneType=False)
-                print(f'✅ Complete dataset saved to: {dataset_path}_*.csv')
+                self._vprint(f'✅ Complete dataset saved to: {dataset_path}_*.csv', level='full')
             except Exception as e:
-                print(f'⚠️ Warning: Failed to download complete dataset: {e}')
-                print(f'   Cache enrichment may fail for neurons without types.')
+                self._vprint(f'⚠️ Warning: Failed to download complete dataset: {e}', level='full')
+                self._vprint(f'   Cache enrichment may fail for neurons without types.', level='full')
     
     # ============================================================================
     # Core Database Access
@@ -626,7 +626,7 @@ class FindNeuronConnection:
         
         # Special handling for FlyWire: Import from CSV if cache missing
         if not os.path.exists(db_path) and self.client_type == 'flywire':
-            print(f'  ⏳ FlyWire cache missing. Importing from local CSV...')
+            self._vprint(f'  ⏳ FlyWire cache missing. Importing from local CSV...', level='full')
             
             # Try to find the CSV
             # Priority 1: Merged connections file in dataset root (e.g., flywire_v783_merged_connections.csv)
@@ -644,7 +644,7 @@ class FindNeuronConnection:
             
             if csv_path and os.path.exists(csv_path):
                 try:
-                    print(f'  ⏳ Reading {csv_path} (this may take a while)...')
+                    self._vprint(f'  ⏳ Reading {csv_path} (this may take a while)...', level='full')
                     # CSV columns: bodyId_pre, bodyId_post, weight (or similar)
                     # User file header: bodyId_pre, bodyId_post, weight (I need to verify header)
                     # Let's assume standard columns or map them
@@ -684,19 +684,19 @@ class FindNeuronConnection:
                     df['bodyId_pre'] = df['bodyId_pre'].astype(str)
                     df['bodyId_post'] = df['bodyId_post'].astype(str)
                     
-                    print(f'  ✓ Imported {len(df):,} connections from CSV')
+                    self._vprint(f'  ✓ Imported {len(df):,} connections from CSV', level='full')
                     
                     # Save to parquet for future speed
-                    print(f'  💾 Saving to cache for faster future access...')
+                    self._vprint(f'  💾 Saving to cache for faster future access...', level='full')
                     df.to_parquet(db_path, index=False, compression='gzip')
                     return df
                 except Exception as e:
-                    print(f'  ⚠️ Error importing FlyWire CSV: {e}')
+                    self._vprint(f'  ⚠️ Error importing FlyWire CSV: {e}', level='full')
         
         if os.path.exists(db_path):
             try:
                 file_size_mb = os.path.getsize(db_path) / (1024 * 1024)
-                print(f'  ⏳ Loading connection database ({file_size_mb:.1f} MB)...')
+                self._vprint(f'  ⏳ Loading connection database ({file_size_mb:.1f} MB)...', level='full')
                 df = pd.read_parquet(db_path)
                 
                 # Ensure bodyIds are strings
@@ -705,10 +705,10 @@ class FindNeuronConnection:
                 if 'bodyId_post' in df.columns:
                     df['bodyId_post'] = df['bodyId_post'].astype(str)
                     
-                print(f'  ✓ Loaded {len(df):,} cached connections')
+                self._vprint(f'  ✓ Loaded {len(df):,} cached connections', level='full')
                 return df
             except Exception as e:
-                print(f'  ⚠️ Warning: Failed to load connection database: {e}')
+                self._vprint(f'  ⚠️ Warning: Failed to load connection database: {e}', level='full')
                 return pd.DataFrame(columns=['bodyId_pre', 'bodyId_post', 'weight', 'roi', 'cached_date'])
         return pd.DataFrame(columns=['bodyId_pre', 'bodyId_post', 'weight', 'roi', 'cached_date'])
     
@@ -718,9 +718,9 @@ class FindNeuronConnection:
         try:
             # Progress is already shown by caller, just add completion message
             conn_db.to_parquet(db_path, index=False, compression='gzip')
-            print(f'  ✓ Database saved successfully')
+            self._vprint(f'  ✓ Database saved successfully', level='full')
         except Exception as e:
-            print(f'  ⚠️ Warning: Failed to save connection database: {e}')
+            self._vprint(f'  ⚠️ Warning: Failed to save connection database: {e}', level='full')
     
     def _load_neuron_index(self):
         '''
@@ -731,14 +731,14 @@ class FindNeuronConnection:
         
         # Special handling for FlyWire: Import from enriched CSV if cache missing
         if not os.path.exists(index_path) and self.client_type == 'flywire':
-            print(f'  ⏳ FlyWire index missing. Importing from enriched CSV...')
+            self._vprint(f'  ⏳ FlyWire index missing. Importing from enriched CSV...', level='full')
             # Assuming dataset name like "flywire_FAFB_v783"
             dataset_safe = self.dataset.replace(':', '_').replace('.', '_')
             csv_path = os.path.join(self.script_path, 'datasets', dataset_safe, f"{dataset_safe}_allneurons_neuron_df.csv")
             
             if os.path.exists(csv_path):
                 try:
-                    print(f'  ⏳ Reading {csv_path}...')
+                    self._vprint(f'  ⏳ Reading {csv_path}...', level='full')
                     df = pd.read_csv(csv_path, dtype={'bodyId': str})
                     
                     # Map/Create columns
@@ -762,20 +762,20 @@ class FindNeuronConnection:
                     cols_to_keep = [c for c in cols_to_keep if c in df.columns]
                     df = df[cols_to_keep]
                     
-                    print(f'  ✓ Imported {len(df):,} neurons from CSV')
+                    self._vprint(f'  ✓ Imported {len(df):,} neurons from CSV', level='full')
                     
                     # Save to parquet
-                    print(f'  💾 Saving to cache...')
+                    self._vprint(f'  💾 Saving to cache...', level='full')
                     df.to_parquet(index_path, index=False, compression='gzip')
                     return df
                 except Exception as e:
-                    print(f'  ⚠️ Error importing FlyWire Index: {e}')
+                    self._vprint(f'  ⚠️ Error importing FlyWire Index: {e}', level='full')
 
         if os.path.exists(index_path):
             try:
                 file_size_mb = os.path.getsize(index_path) / (1024 * 1024)
                 if file_size_mb > 1:  # Only show for larger files
-                    print(f'  ⏳ Loading neuron index ({file_size_mb:.1f} MB)...')
+                    self._vprint(f'  ⏳ Loading neuron index ({file_size_mb:.1f} MB)...', level='full')
                 df = pd.read_parquet(index_path)
                 
                 # Ensure bodyId is string
@@ -783,10 +783,10 @@ class FindNeuronConnection:
                     df['bodyId'] = df['bodyId'].astype(str)
                     
                 if file_size_mb > 1:
-                    print(f'  ✓ Loaded index for {len(df):,} neurons')
+                    self._vprint(f'  ✓ Loaded index for {len(df):,} neurons', level='full')
                 return df
             except Exception as e:
-                print(f'  ⚠️ Warning: Failed to load neuron index: {e}')
+                self._vprint(f'  ⚠️ Warning: Failed to load neuron index: {e}', level='full')
                 return pd.DataFrame(columns=[
                     'bodyId', 'type', 'instance', 'post', 'downstream_complete', 
                     'last_fetched', 'connection_count'
@@ -802,9 +802,9 @@ class FindNeuronConnection:
         try:
             # Progress message already shown by caller
             index_df.to_parquet(index_path, index=False, compression='gzip')
-            print(f'  ✓ Neuron index saved successfully')
+            self._vprint(f'  ✓ Neuron index saved successfully', level='full')
         except Exception as e:
-            print(f'  ⚠️ Warning: Failed to save neuron index: {e}')
+            self._vprint(f'  ⚠️ Warning: Failed to save neuron index: {e}', level='full')
     
     # ============================================================================
     # Query Resolution Logic
@@ -829,7 +829,7 @@ class FindNeuronConnection:
         if not self.use_cache:
             return pd.DataFrame(), upstream_bodyIds, []
         
-        print(f'  ⏳ Querying cache for {len(upstream_bodyIds):,} neurons...')
+        self._vprint(f'  ⏳ Querying cache for {len(upstream_bodyIds):,} neurons...', level='full')
         conn_db = self._load_connection_db()
         neuron_index = self._load_neuron_index()
         
@@ -871,7 +871,7 @@ class FindNeuronConnection:
         # Retrieve cached connections
         all_cached = cached_upstream + partially_cached  # partially_cached will be empty (no recovery)
         if len(all_cached) > 0:
-            print(f'  ⏳ Retrieving {len(all_cached):,} neurons from cache...')
+            self._vprint(f'  ⏳ Retrieving {len(all_cached):,} neurons from cache...', level='full')
             cached_conn = conn_db[conn_db['bodyId_pre'].isin(all_cached)].copy()
             
             # Filter by downstream if specified
@@ -996,7 +996,7 @@ class FindNeuronConnection:
         
         # Merge with existing, removing duplicates (keep existing entries)
         if not conn_db.empty:
-            print(f'  ⏳ Merging {len(new_conn):,} connections with existing database...')
+            self._vprint(f'  ⏳ Merging {len(new_conn):,} connections with existing database...', level='full')
             # Remove any new connections that already exist (based on bodyId_pre, bodyId_post, roi)
             merge_cols = ['bodyId_pre', 'bodyId_post', 'roi']
             combined = pd.concat([conn_db, new_conn])
@@ -1005,14 +1005,14 @@ class FindNeuronConnection:
             combined = new_conn
         
         # Save updated database
-        print(f'  ⏳ Saving connection database ({len(combined):,} connections)...')
+        self._vprint(f'  ⏳ Saving connection database ({len(combined):,} connections)...', level='full')
         self._save_connection_db(combined)
         
         new_count = len(combined) - len(conn_db)
         if new_count > 0:
-            print(f'  💾 Added {new_count} new connections to database (total: {len(combined):,})')
+            self._vprint(f'  💾 Added {new_count} new connections to database (total: {len(combined):,})', level='full')
         else:
-            print(f'  📂 All connections already in database ({len(conn_db):,} total)')
+            self._vprint(f'  📂 All connections already in database ({len(conn_db):,} total)', level='full')
         
         # Update neuron index
         self._update_neuron_index_after_fetch(new_conn, upstream_bodyIds, downstream_bodyIds)
@@ -1030,7 +1030,7 @@ class FindNeuronConnection:
             List of upstream neurons that were queried (not marked as cached yet)
         '''
         if new_connections.empty:
-            print(f'  📂 No connections found for {len(upstream_bodyIds)} neurons')
+            self._vprint(f'  📂 No connections found for {len(upstream_bodyIds)} neurons', level='full')
             return
         
         # Load existing database
@@ -1052,7 +1052,7 @@ class FindNeuronConnection:
         
         # Merge with existing, removing duplicates (keep existing entries)
         if not conn_db.empty:
-            print(f'  ⏳ Merging {len(new_conn):,} connections with existing database...')
+            self._vprint(f'  ⏳ Merging {len(new_conn):,} connections with existing database...', level='full')
             merge_cols = ['bodyId_pre', 'bodyId_post', 'roi']
             combined = pd.concat([conn_db, new_conn])
             combined = combined.drop_duplicates(subset=merge_cols, keep='first')
@@ -1060,14 +1060,14 @@ class FindNeuronConnection:
             combined = new_conn
         
         # Save updated database
-        print(f'  ⏳ Saving connection database ({len(combined):,} connections)...')
+        self._vprint(f'  ⏳ Saving connection database ({len(combined):,} connections)...', level='full')
         self._save_connection_db(combined)
         
         new_count = len(combined) - len(conn_db)
         if new_count > 0:
-            print(f'  💾 Added {new_count} new connections to database (total: {len(combined):,})')
+            self._vprint(f'  💾 Added {new_count} new connections to database (total: {len(combined):,})', level='full')
         else:
-            print(f'  📂 All connections already in database ({len(conn_db):,} total)')
+            self._vprint(f'  📂 All connections already in database ({len(conn_db):,} total)', level='full')
     
     def _mark_neurons_as_cached(self, upstream_bodyIds, connections, downstream_bodyIds=None):
         '''
@@ -1094,7 +1094,7 @@ class FindNeuronConnection:
         required_cols = ['bodyId_pre', 'bodyId_post', 'weight', 'type_pre', 'instance_pre']
         missing_cols = [col for col in required_cols if col not in connections.columns]
         if missing_cols:
-            print(f'  ⚠️  Warning: Connections missing required columns {missing_cols}, skipping cache update')
+            self._vprint(f'  ⚠️  Warning: Connections missing required columns {missing_cols}, skipping cache update', level='full')
             return
         
         # Note: Neurons with None or empty type/instance are VALID
@@ -1120,7 +1120,7 @@ class FindNeuronConnection:
             f"{dataset_safe}_allneurons_neuron_df.csv"
         )
         
-        print(f'  ⏳ Loading neuron metadata for {len(upstream_bodyIds):,} neurons...')
+        self._vprint(f'  ⏳ Loading neuron metadata for {len(upstream_bodyIds):,} neurons...', level='full')
         if os.path.exists(dataset_path):
             # Check if it's FAFB to decide on index_col (FAFB utils saves without index)
             is_fafb = 'fafb' in self.dataset.lower() or 'flywire' in self.dataset.lower()
@@ -1144,7 +1144,7 @@ class FindNeuronConnection:
                 neuron_info = pd.DataFrame(columns=['bodyId', 'type', 'instance', 'post'])
         
         # Count connections per neuron
-        print(f'  ⏳ Counting connections per neuron...')
+        self._vprint(f'  ⏳ Counting connections per neuron...', level='full')
         if not connections.empty:
             conn_counts = connections.groupby('bodyId_pre').size().reset_index(name='connection_count')
         else:
@@ -1193,12 +1193,12 @@ class FindNeuronConnection:
                 }])
                 neuron_index = pd.concat([neuron_index, new_entry], ignore_index=True)
         
-        print(f'  ⏳ Saving neuron index ({len(neuron_index):,} total neurons)...')
+        self._vprint(f'  ⏳ Saving neuron index ({len(neuron_index):,} total neurons)...', level='full')
         self._save_neuron_index(neuron_index)
         
         if mark_complete:
             completed_count = len([b for b in upstream_bodyIds if b in neuron_index[neuron_index['downstream_complete'] == True]['bodyId'].values])
-            print(f'  📝 Updated neuron index: {completed_count} neurons marked as complete')
+            self._vprint(f'  📝 Updated neuron index: {completed_count} neurons marked as complete', level='full')
     
     # ============================================================================
     # Enrichment with Type/Instance
@@ -1212,7 +1212,7 @@ class FindNeuronConnection:
         if conn_df.empty:
             return conn_df
         
-        print(f'  ⏳ Enriching {len(conn_df):,} connections with neuron info...')
+        self._vprint(f'  ⏳ Enriching {len(conn_df):,} connections with neuron info...', level='full')
         # Get unique bodyIds that need enrichment
         all_bodyids = list(set(conn_df['bodyId_pre'].tolist() + conn_df['bodyId_post'].tolist()))
         
@@ -1239,7 +1239,7 @@ class FindNeuronConnection:
         
         if not os.path.exists(dataset_path):
             # Fallback: fetch from API
-            print(f'  ⚠️ Warning: Complete dataset not found, fetching from API...')
+            self._vprint(f'  ⚠️ Warning: Complete dataset not found, fetching from API...', level='full')
             neuron_df = self._fetch_neurons_local_or_api(all_bodyids, columns=['bodyId', 'type', 'instance'])
         else:
             # Load complete dataset from CSV
@@ -1263,7 +1263,7 @@ class FindNeuronConnection:
             missing_bodyids = set(all_bodyids) - found_bodyids
             
             if missing_bodyids:
-                print(f'  ℹ️  {len(missing_bodyids)} neurons not in local dataset, fetching from API...')
+                self._vprint(f'  ℹ️  {len(missing_bodyids)} neurons not in local dataset, fetching from API...', level='full')
                 missing_neuron_df = self._fetch_neurons_local_or_api(
                     list(missing_bodyids), 
                     columns=['bodyId', 'type', 'instance']
@@ -1342,7 +1342,7 @@ class FindNeuronConnection:
             how='left'
         ).drop(columns=['bodyId'])
         
-        print(f'  ✓ Enrichment complete')
+        self._vprint(f'  ✓ Enrichment complete', level='full')
         return conn_df
     
     def _fetch_neurons_local_or_api(self, bodyIds, columns=None):
@@ -1460,10 +1460,10 @@ class FindNeuronConnection:
         else:
             # Check if we should enforce local-only for FAFB/FlyWire
             if 'fafb' in self.dataset.lower() or 'flywire' in self.dataset.lower():
-                 print(f"\n  ⚠️  Local neuron data not found for dataset '{self.dataset}'.")
-                 print("  Please download the neuron table from: https://codex.flywire.ai/api/download?dataset=fafb")
-                 print(f"  Save the file to: {dataset_path}") 
-                 print("  Skipping API fetch to avoid timeouts/limits.")
+                 self._vprint(f"\n  ⚠️  Local neuron data not found for dataset '{self.dataset}'.", level='full')
+                 self._vprint("  Please download the neuron table from: https://codex.flywire.ai/api/download?dataset=fafb", level='full')
+                 self._vprint(f"  Save the file to: {dataset_path}", level='full') 
+                 self._vprint("  Skipping API fetch to avoid timeouts/limits.", level='full')
                  return pd.DataFrame(columns=columns if columns else [])
 
             # Slow: API call
@@ -1554,10 +1554,10 @@ class FindNeuronConnection:
         else:
             # Check if we should enforce local-only for FAFB/FlyWire
             if 'fafb' in self.dataset.lower() or 'flywire' in self.dataset.lower():
-                 print(f"\n  ⚠️  Local neuron data not found for dataset '{self.dataset}'.")
-                 print("  Please download the neuron table from: https://codex.flywire.ai/api/download?dataset=fafb")
-                 print(f"  Save the file to: {dataset_path}") 
-                 print("  Skipping API fetch to avoid timeouts/limits.")
+                 self._vprint(f"\n  ⚠️  Local neuron data not found for dataset '{self.dataset}'.", level='full')
+                 self._vprint("  Please download the neuron table from: https://codex.flywire.ai/api/download?dataset=fafb", level='full')
+                 self._vprint(f"  Save the file to: {dataset_path}", level='full') 
+                 self._vprint("  Skipping API fetch to avoid timeouts/limits.", level='full')
                  return pd.DataFrame(columns=columns if columns else [])
 
             # Slow: API call (ensure client is logged in)
@@ -1638,13 +1638,13 @@ class FindNeuronConnection:
         cached_conn, uncached_upstream, partially_cached = self._query_connection_db(upstream_bodyIds, downstream_bodyIds)
         
         if not cached_conn.empty:
-            print(f'  📂 Found {len(set(upstream_bodyIds) - set(uncached_upstream))}/{len(upstream_bodyIds)} neurons in cache')
-            print(f'     Retrieved {len(cached_conn):,} connections from database')
+            self._vprint(f'  📂 Found {len(set(upstream_bodyIds) - set(uncached_upstream))}/{len(upstream_bodyIds)} neurons in cache', level='full')
+            self._vprint(f'     Retrieved {len(cached_conn):,} connections from database', level='full')
         
         # Step 2: Fetch uncached neurons from API if needed
         api_conn = pd.DataFrame()
         if len(uncached_upstream) > 0:
-            print(f'  🌐 Fetching {len(uncached_upstream)} uncached neurons from API (weight ≥ 1)...')
+            self._vprint(f'  🌐 Fetching {len(uncached_upstream)} uncached neurons from API (weight ≥ 1)...', level='full')
             
             fetched_locally = False
             # Special handling for FAFB/FlyWire local data
@@ -1687,19 +1687,19 @@ class FindNeuronConnection:
                             api_conn['roi'] = 'WholeBrain'
                             
                         fetched_locally = True
-                        print(f"  ✓ Loaded {len(api_conn)} connections from local FAFB data")
+                        self._vprint(f"  ✓ Loaded {len(api_conn)} connections from local FAFB data", level='full')
                 except ImportError:
                     pass
                 except Exception as e:
-                    print(f"  ⚠️ Error loading local FAFB data: {e}")
+                    self._vprint(f"  ⚠️ Error loading local FAFB data: {e}", level='full')
 
             if not fetched_locally:
                 # Check if we should enforce local-only for FAFB/FlyWire
                 if 'fafb' in self.dataset.lower() or 'flywire' in self.dataset.lower():
-                     print(f"\n  ⚠️  Local connection data not found for dataset '{self.dataset}'.")
-                     print("  Please download the synapse table from: https://codex.flywire.ai/api/download?dataset=fafb")
-                     print(f"  Save the file to: datasets/{self.dataset.replace(':', '_')}") 
-                     print("  Skipping API fetch to avoid timeouts/limits.")
+                     self._vprint(f"\n  ⚠️  Local connection data not found for dataset '{self.dataset}'.", level='full')
+                     self._vprint("  Please download the synapse table from: https://codex.flywire.ai/api/download?dataset=fafb", level='full')
+                     self._vprint(f"  Save the file to: datasets/{self.dataset.replace(':', '_')}", level='full') 
+                     self._vprint("  Skipping API fetch to avoid timeouts/limits.", level='full')
                      return pd.DataFrame()
 
                 if self.client_type == 'flywire':
@@ -1712,7 +1712,7 @@ class FindNeuronConnection:
                         )
                         # api_conn should have bodyId_pre, bodyId_post, weight, roi
                     else:
-                        print("Error: FlyWire client not initialized")
+                        self._vprint("Error: FlyWire client not initialized", level='full')
                 else:
                     # Login to neuprint only if needed
                     from neuprint import Client, set_default_client, default_client, NeuronCriteria
@@ -1751,7 +1751,7 @@ class FindNeuronConnection:
                     batches = [uncached_upstream[i:i + batch_size] for i in range(0, len(uncached_upstream), batch_size)]
                     
                     if len(batches) > 1:
-                        print(f'     Processing {len(batches)} batches (size={batch_size})...')
+                        self._vprint(f'     Processing {len(batches)} batches (size={batch_size})...', level='full')
                     
                     # Use tqdm only if multiple batches or large single batch
                     iterator = tqdm(batches, desc="Fetching batches", unit="batch") if len(batches) > 1 else batches
@@ -1783,7 +1783,7 @@ class FindNeuronConnection:
                                 if not batch_conn.empty:
                                     all_api_conn.append(batch_conn)
                         except Exception as e:
-                            print(f"     ⚠️ Error fetching batch: {e}")
+                            self._vprint(f"     ⚠️ Error fetching batch: {e}", level='full')
                             
                     if all_api_conn:
                         api_conn = pd.concat(all_api_conn, ignore_index=True)
@@ -1811,7 +1811,7 @@ class FindNeuronConnection:
         # Mark newly fetched neurons (partially_cached will be empty)
         neurons_to_mark = list(set(uncached_upstream + partially_cached))
         if len(neurons_to_mark) > 0:
-            print(f'  ⏳ Preparing to mark {len(neurons_to_mark):,} neurons as cached...')
+            self._vprint(f'  ⏳ Preparing to mark {len(neurons_to_mark):,} neurons as cached...', level='full')
             # Get the connections for these neurons from the combined dataframe
             neurons_conn = combined[combined['bodyId_pre'].isin(neurons_to_mark)]
             
@@ -1819,10 +1819,10 @@ class FindNeuronConnection:
             neurons_with_conns = set(neurons_conn['bodyId_pre'].unique())
             neurons_without_conns = set(neurons_to_mark) - neurons_with_conns
             if neurons_without_conns:
-                print(f'  ℹ️  Note: {len(neurons_without_conns)} neurons have 0 connections (will still be marked as complete)')
+                self._vprint(f'  ℹ️  Note: {len(neurons_without_conns)} neurons have 0 connections (will still be marked as complete)', level='full')
             
             self._mark_neurons_as_cached(neurons_to_mark, neurons_conn, downstream_bodyIds)
-            print(f'  ✓ Cache update complete - {len(neurons_to_mark)} neurons marked as fetched')
+            self._vprint(f'  ✓ Cache update complete - {len(neurons_to_mark)} neurons marked as fetched', level='full')
         
         # Exclude intra-type connections if requested (before applying other filters)
         if self.exclude_intra_type_connections and len(combined) > 0:
@@ -1831,10 +1831,10 @@ class FindNeuronConnection:
             combined = combined[combined['type_pre'] != combined['type_post']].copy()
             after_count = len(combined)
             if before_count > after_count:
-                print(f'  ⚠️  Excluded {before_count - after_count:,} intra-type connections (type_pre == type_post)')
+                self._vprint(f'  ⚠️  Excluded {before_count - after_count:,} intra-type connections (type_pre == type_post)', level='full')
         
         # Apply filters at the specified level
-        print(f'  ⏳ Applying filters to {len(combined):,} connections...')
+        self._vprint(f'  ⏳ Applying filters to {len(combined):,} connections...', level='full')
         if self.filter_by == 'type':
             # Type-level filtering: aggregate first, then filter
             # Weight filter applied at type level (sum of all weights per type pair)
@@ -1850,8 +1850,8 @@ class FindNeuronConnection:
             else:
                 # No ratio filters, just print weight filter summary
                 if min_weight > 1:
-                    print(f'     Filtered: {total_before_filter} → {len(combined)} connections (weight ≥ {min_weight})')
-                print(f'     Enriched with neuron info from complete local dataset')
+                    self._vprint(f'     Filtered: {total_before_filter} → {len(combined)} connections (weight ≥ {min_weight})', level='full')
+                self._vprint(f'     Enriched with neuron info from complete local dataset', level='full')
         
         return combined
     
@@ -1889,8 +1889,8 @@ class FindNeuronConnection:
         if min_traversal_prob > 0:
             filter_msg.append(f'prob ≥ {min_traversal_prob}')
         
-        print(f'     Filtered (bodyId level): {total_before_filter} → {len(combined)} connections ({", ".join(filter_msg)})')
-        print(f'     Enriched with neuron info from complete local dataset')
+        self._vprint(f'     Filtered (bodyId level): {total_before_filter} → {len(combined)} connections ({", ".join(filter_msg)})', level='full')
+        self._vprint(f'     Enriched with neuron info from complete local dataset', level='full')
         
         return combined
     
@@ -1981,11 +1981,11 @@ class FindNeuronConnection:
         
         type_pairs_after = len(filtered_type_pairs)
         null_conn_count = len(connections_with_null_types)
-        print(f'     Filtered (type level): {type_grouped_before_weight} → {type_pairs_after} type pairs, {total_before_filter} → {len(combined)} connections ({", ".join(filter_msg)})')
+        self._vprint(f'     Filtered (type level): {type_grouped_before_weight} → {type_pairs_after} type pairs, {total_before_filter} → {len(combined)} connections ({", ".join(filter_msg)})', level='full')
         if null_conn_count > 0:
-            print(f'     Note: {null_conn_count} connections with null types preserved (not filtered)')
-        print(f'     Note: All 3 filters applied at type level (weight=sum, ratio=sum(weight)/sum(post))')
-        print(f'     Enriched with neuron info from complete local dataset')
+            self._vprint(f'     Note: {null_conn_count} connections with null types preserved (not filtered)', level='full')
+        self._vprint(f'     Note: All 3 filters applied at type level (weight=sum, ratio=sum(weight)/sum(post))', level='full')
+        self._vprint(f'     Enriched with neuron info from complete local dataset', level='full')
         
         return combined
     
