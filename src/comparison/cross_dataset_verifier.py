@@ -27,6 +27,7 @@ Example:
 """
 
 import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -775,19 +776,178 @@ class CrossDatasetVerifier:
         
         return combined
     
+    def _verify_single_type(
+        self,
+        neuron_type: str,
+        datasets: List[str],
+        direction: str,
+        score_weights: Optional[Dict[str, float]],
+        include_directional: bool
+    ) -> Dict[str, Any]:
+        """
+        Verify a single neuron type (helper for parallel execution).
+        
+        This method is thread-safe as it only reads from shared caches.
+        
+        Args:
+            neuron_type: Type to verify
+            datasets: List of datasets to compare
+            direction: 'upstream', 'downstream', or 'both'
+            score_weights: Custom weights for combined score
+            include_directional: Include directional scores
+            
+        Returns:
+            Dict with verification results for this type
+        """
+        try:
+            verification = self.verify_type_assignment(
+                neuron_type, datasets, direction, score_weights
+            )
+            
+            # Count datasets where type was found (has profile data)
+            datasets_found = 0
+            for dataset in datasets:
+                try:
+                    profile = self._get_profile(neuron_type, dataset)
+                    if profile.upstream_partners or profile.downstream_partners:
+                        datasets_found += 1
+                except Exception:
+                    pass
+            
+            # Calculate average individual metrics from pairwise scores
+            pairwise = verification.pairwise_scores
+            if pairwise:
+                valid_pairs = [p for p in pairwise if not (np.isnan(p.jaccard) and np.isnan(p.cosine))]
+                if valid_pairs:
+                    avg_jaccard = np.nanmean([p.jaccard for p in valid_pairs])
+                    avg_cosine = np.nanmean([p.cosine for p in valid_pairs])
+                    rank_values = [p.rank_correlation_norm for p in valid_pairs if not np.isnan(p.rank_correlation)]
+                    avg_rank = np.mean(rank_values) if rank_values else np.nan
+                    avg_overlap_a_in_b = np.nanmean([p.overlap_a_in_b for p in valid_pairs])
+                    avg_overlap_b_in_a = np.nanmean([p.overlap_b_in_a for p in valid_pairs])
+                    avg_overlap = np.nanmean([avg_overlap_a_in_b, avg_overlap_b_in_a])
+                else:
+                    avg_jaccard = avg_cosine = avg_rank = avg_overlap_a_in_b = avg_overlap_b_in_a = avg_overlap = np.nan
+            else:
+                avg_jaccard = avg_cosine = avg_rank = avg_overlap_a_in_b = avg_overlap_b_in_a = avg_overlap = np.nan
+            
+            # Get unique_types from profiles
+            total_unique_types = 0
+            for dataset in datasets:
+                try:
+                    profile = self._get_profile(neuron_type, dataset)
+                    total_unique_types += profile.unique_types_upstream + profile.unique_types_downstream
+                except Exception:
+                    pass
+            
+            # Determine confidence
+            if np.isnan(avg_rank):
+                confidence_level = 'Error'
+            elif avg_rank >= 0.85:
+                confidence_level = 'Very High'
+            elif avg_rank >= 0.70:
+                confidence_level = 'High'
+            elif avg_rank >= 0.50:
+                confidence_level = 'Medium'
+            elif avg_rank >= 0.30:
+                confidence_level = 'Low'
+            else:
+                confidence_level = 'Very Low'
+            
+            result_row = {
+                'neuron_type': neuron_type,
+                'datasets_found': datasets_found,
+                'total_datasets': len(datasets),
+                'avg_jaccard': avg_jaccard,
+                'avg_rank_corr': avg_rank,
+                'avg_overlap': avg_overlap,
+                'confidence': confidence_level,
+                'datasets_compared': len(verification.datasets),
+                'total_unique_types': total_unique_types,
+            }
+            
+            # Directional scores
+            if include_directional:
+                profiles_cache: Dict[str, ConnectivityProfile] = {}
+                for dataset in datasets:
+                    try:
+                        profiles_cache[dataset] = self._get_profile(neuron_type, dataset)
+                    except Exception:
+                        pass
+                
+                for dir_name in ['upstream', 'downstream', 'both']:
+                    try:
+                        dir_rank_values = []
+                        dir_jaccard_values = []
+                        
+                        dataset_keys = list(profiles_cache.keys())
+                        for i in range(len(dataset_keys)):
+                            for j in range(i + 1, len(dataset_keys)):
+                                ds_a, ds_b = dataset_keys[i], dataset_keys[j]
+                                profile_a, profile_b = profiles_cache[ds_a], profiles_cache[ds_b]
+                                
+                                a_has_data = bool(profile_a.upstream_partners or profile_a.downstream_partners)
+                                b_has_data = bool(profile_b.upstream_partners or profile_b.downstream_partners)
+                                if not (a_has_data and b_has_data):
+                                    continue
+                                
+                                scores = ProfileComparator.combined_score(
+                                    profile_a, profile_b, 
+                                    weights=score_weights or self.score_weights,
+                                    direction=dir_name
+                                )
+                                
+                                if not np.isnan(scores['rank']):
+                                    dir_rank_values.append((scores['rank'] + 1) / 2)
+                                if not np.isnan(scores['jaccard']):
+                                    dir_jaccard_values.append(scores['jaccard'])
+                        
+                        result_row[f'avg_rank_corr_{dir_name}'] = np.mean(dir_rank_values) if dir_rank_values else np.nan
+                        result_row[f'avg_jaccard_{dir_name}'] = np.mean(dir_jaccard_values) if dir_jaccard_values else np.nan
+                        
+                    except Exception:
+                        result_row[f'avg_rank_corr_{dir_name}'] = np.nan
+                        result_row[f'avg_jaccard_{dir_name}'] = np.nan
+            
+            return result_row
+            
+        except Exception as e:
+            error_row = {
+                'neuron_type': neuron_type,
+                'datasets_found': 0,
+                'total_datasets': len(datasets),
+                'avg_jaccard': np.nan,
+                'avg_rank_corr': np.nan,
+                'avg_overlap': np.nan,
+                'confidence': 'Error',
+                'datasets_compared': 0,
+                'total_unique_types': 0,
+            }
+            if include_directional:
+                error_row['avg_rank_corr_upstream'] = np.nan
+                error_row['avg_rank_corr_downstream'] = np.nan
+                error_row['avg_rank_corr_both'] = np.nan
+                error_row['avg_jaccard_upstream'] = np.nan
+                error_row['avg_jaccard_downstream'] = np.nan
+                error_row['avg_jaccard_both'] = np.nan
+            return error_row
+    
     def batch_verify_types(
         self,
         neuron_types: List[str],
         datasets: List[str],
         direction: str = 'both',
         score_weights: Optional[Dict[str, float]] = None,
-        include_directional: bool = True
+        include_directional: bool = True,
+        parallel: bool = True,
+        max_workers: Optional[int] = None
     ) -> pd.DataFrame:
         """
         Batch verification for multiple neuron types.
         
-        Round 5: Added unique_types tracking and is_sparse flag.
-        Sorting now uses rank_corr as primary, unique_types as secondary.
+        Supports parallel execution for faster processing when verifying
+        many types. The parallel mode is thread-safe as all operations
+        read from shared in-memory caches (profile cache, connection cache).
         
         Args:
             neuron_types: List of types to verify
@@ -795,174 +955,84 @@ class CrossDatasetVerifier:
             direction: 'upstream', 'downstream', or 'both'
             score_weights: Custom weights for combined score
             include_directional: If True, also compute separate upstream/downstream scores
+            parallel: If True, use parallel threads (default: True)
+            max_workers: Max parallel workers (default: min(32, cpu_count + 4))
         
         Returns:
             Summary DataFrame with verification results for each type
         """
         self._log(f"Batch verifying {len(neuron_types)} types across {len(datasets)} datasets")
         
-        results = []
-        
         # Set batch mode flag to suppress per-type logging
         self._in_batch_mode = True
         
+        results = []
+        
         # Use tqdm for progress
         from tqdm import tqdm
-        iterator = tqdm(neuron_types, desc="Verifying types", disable=not self.verbose, leave=True)
         
-        for neuron_type in iterator:
-            iterator.set_postfix_str(neuron_type[:20])
-            try:
-                verification = self.verify_type_assignment(
-                    neuron_type, datasets, direction, score_weights
+        if parallel and len(neuron_types) > 1:
+            # Parallel execution using ThreadPoolExecutor
+            # Thread-safe: all operations read from shared caches
+            import os
+            if max_workers is None:
+                max_workers = min(32, (os.cpu_count() or 1) + 4)
+            
+            self._log(f"Using parallel execution with {max_workers} workers")
+            
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                # Submit all verification tasks
+                future_to_type = {
+                    executor.submit(
+                        self._verify_single_type,
+                        neuron_type, datasets, direction, score_weights, include_directional
+                    ): neuron_type
+                    for neuron_type in neuron_types
+                }
+                
+                # Collect results with progress bar
+                for future in tqdm(
+                    as_completed(future_to_type), 
+                    total=len(neuron_types),
+                    desc="Verifying types (parallel)",
+                    disable=not self.verbose,
+                    leave=True
+                ):
+                    neuron_type = future_to_type[future]
+                    try:
+                        result_row = future.result()
+                        results.append(result_row)
+                    except Exception as e:
+                        self._log(f"Warning: Failed to verify {neuron_type}: {e}")
+                        error_row = {
+                            'neuron_type': neuron_type,
+                            'datasets_found': 0,
+                            'total_datasets': len(datasets),
+                            'avg_jaccard': np.nan,
+                            'avg_rank_corr': np.nan,
+                            'avg_overlap': np.nan,
+                            'confidence': 'Error',
+                            'datasets_compared': 0,
+                            'total_unique_types': 0,
+                        }
+                        if include_directional:
+                            error_row['avg_rank_corr_upstream'] = np.nan
+                            error_row['avg_rank_corr_downstream'] = np.nan
+                            error_row['avg_rank_corr_both'] = np.nan
+                            error_row['avg_jaccard_upstream'] = np.nan
+                            error_row['avg_jaccard_downstream'] = np.nan
+                            error_row['avg_jaccard_both'] = np.nan
+                        results.append(error_row)
+        else:
+            # Sequential execution (original behavior)
+            iterator = tqdm(neuron_types, desc="Verifying types", disable=not self.verbose, leave=True)
+            
+            for neuron_type in iterator:
+                iterator.set_postfix_str(neuron_type[:20])
+                result_row = self._verify_single_type(
+                    neuron_type, datasets, direction, score_weights, include_directional
                 )
-                
-                # Count datasets where type was found (has profile data)
-                datasets_found = 0
-                for dataset in datasets:
-                    try:
-                        profile = self._get_profile(neuron_type, dataset)
-                        if profile.upstream_partners or profile.downstream_partners:
-                            datasets_found += 1
-                    except Exception:
-                        pass
-                
-                # Calculate average individual metrics from pairwise scores
-                pairwise = verification.pairwise_scores
-                if pairwise:
-                    # Filter valid (non-NaN) pairwise scores for averaging
-                    # Note: 0 is valid (type found but no overlap), only NaN is invalid (type not found)
-                    valid_pairs = [p for p in pairwise if not (np.isnan(p.jaccard) and np.isnan(p.cosine))]
-                    if valid_pairs:
-                        avg_jaccard = np.nanmean([p.jaccard for p in valid_pairs])
-                        avg_cosine = np.nanmean([p.cosine for p in valid_pairs])
-                        # For rank_corr, use normalized values [0, 1] for consistency
-                        rank_values = [p.rank_correlation_norm for p in valid_pairs if not np.isnan(p.rank_correlation)]
-                        avg_rank = np.mean(rank_values) if rank_values else np.nan
-                        avg_overlap_a_in_b = np.nanmean([p.overlap_a_in_b for p in valid_pairs])
-                        avg_overlap_b_in_a = np.nanmean([p.overlap_b_in_a for p in valid_pairs])
-                        # Merged overlap score (average of both directions)
-                        avg_overlap = np.nanmean([avg_overlap_a_in_b, avg_overlap_b_in_a])
-                    else:
-                        avg_jaccard = avg_cosine = avg_rank = avg_overlap_a_in_b = avg_overlap_b_in_a = avg_overlap = np.nan
-                else:
-                    avg_jaccard = avg_cosine = avg_rank = avg_overlap_a_in_b = avg_overlap_b_in_a = avg_overlap = np.nan
-                
-                # Round 5: Get unique_types from profiles
-                total_unique_types = 0
-                is_sparse = False
-                for dataset in datasets:
-                    try:
-                        profile = self._get_profile(neuron_type, dataset)
-                        total_unique_types += profile.unique_types_upstream + profile.unique_types_downstream
-                        if profile.is_sparse:
-                            is_sparse = True
-                    except Exception:
-                        pass
-                
-                # Determine confidence from rank correlation (primary metric)
-                # Using thresholds aligned with interpretation guide
-                if np.isnan(avg_rank):
-                    confidence_level = 'Error'
-                elif avg_rank >= 0.85:
-                    confidence_level = 'Very High'
-                elif avg_rank >= 0.70:
-                    confidence_level = 'High'
-                elif avg_rank >= 0.50:
-                    confidence_level = 'Medium'
-                elif avg_rank >= 0.30:
-                    confidence_level = 'Low'
-                else:
-                    confidence_level = 'Very Low'
-                
-                result_row = {
-                    'neuron_type': neuron_type,
-                    'datasets_found': datasets_found,
-                    'total_datasets': len(datasets),
-                    'avg_jaccard': avg_jaccard,
-                    'avg_rank_corr': avg_rank,
-                    'avg_overlap': avg_overlap,
-                    'confidence': confidence_level,
-                    'datasets_compared': len(verification.datasets),
-                    # Round 5 additions
-                    'total_unique_types': total_unique_types,
-                }
-                
-                # Add directional scores (upstream/downstream separately)
-                # Optimization: Instead of calling verify_type_assignment 2 more times,
-                # compute directional scores directly from profiles we already have
-                if include_directional:
-                    # Collect profiles for this neuron type
-                    profiles_cache: Dict[str, ConnectivityProfile] = {}
-                    for dataset in datasets:
-                        try:
-                            profiles_cache[dataset] = self._get_profile(neuron_type, dataset)
-                        except Exception:
-                            pass
-                    
-                    # Compute for all three directions: upstream, downstream, and both
-                    for dir_name in ['upstream', 'downstream', 'both']:
-                        try:
-                            # Compute pairwise directional scores directly
-                            dir_rank_values = []
-                            dir_jaccard_values = []
-                            
-                            dataset_keys = list(profiles_cache.keys())
-                            for i in range(len(dataset_keys)):
-                                for j in range(i + 1, len(dataset_keys)):
-                                    ds_a, ds_b = dataset_keys[i], dataset_keys[j]
-                                    profile_a, profile_b = profiles_cache[ds_a], profiles_cache[ds_b]
-                                    
-                                    # Skip if either profile is empty
-                                    a_has_data = bool(profile_a.upstream_partners or profile_a.downstream_partners)
-                                    b_has_data = bool(profile_b.upstream_partners or profile_b.downstream_partners)
-                                    if not (a_has_data and b_has_data):
-                                        continue
-                                    
-                                    # Use ProfileComparator to get directional scores
-                                    scores = ProfileComparator.combined_score(
-                                        profile_a, profile_b, 
-                                        weights=score_weights or self.score_weights,
-                                        direction=dir_name
-                                    )
-                                    
-                                    if not np.isnan(scores['rank']):
-                                        # Normalize rank correlation to [0, 1]
-                                        dir_rank_values.append((scores['rank'] + 1) / 2)
-                                    if not np.isnan(scores['jaccard']):
-                                        dir_jaccard_values.append(scores['jaccard'])
-                            
-                            result_row[f'avg_rank_corr_{dir_name}'] = np.mean(dir_rank_values) if dir_rank_values else np.nan
-                            result_row[f'avg_jaccard_{dir_name}'] = np.mean(dir_jaccard_values) if dir_jaccard_values else np.nan
-                            
-                        except Exception:
-                            result_row[f'avg_rank_corr_{dir_name}'] = np.nan
-                            result_row[f'avg_jaccard_{dir_name}'] = np.nan
-                
                 results.append(result_row)
-                
-            except Exception as e:
-                self._log(f"Warning: Failed to verify {neuron_type}: {e}")
-                error_row = {
-                    'neuron_type': neuron_type,
-                    'datasets_found': 0,
-                    'total_datasets': len(datasets),
-                    'avg_jaccard': np.nan,
-                    'avg_rank_corr': np.nan,
-                    'avg_overlap': np.nan,
-                    'confidence': 'Error',
-                    'datasets_compared': 0,
-                    # Round 5 additions
-                    'total_unique_types': 0,
-                }
-                if include_directional:
-                    error_row['avg_rank_corr_upstream'] = np.nan
-                    error_row['avg_rank_corr_downstream'] = np.nan
-                    error_row['avg_rank_corr_both'] = np.nan
-                    error_row['avg_jaccard_upstream'] = np.nan
-                    error_row['avg_jaccard_downstream'] = np.nan
-                    error_row['avg_jaccard_both'] = np.nan
-                results.append(error_row)
         
         # Reset batch mode flag
         self._in_batch_mode = False
@@ -1097,13 +1167,17 @@ class CrossDatasetVerifier:
         datasets: List[str],
         metric: str = 'combined',
         direction: str = 'both',
-        dataset_nicknames: Optional[Dict[str, str]] = None
+        dataset_nicknames: Optional[Dict[str, str]] = None,
+        parallel: bool = True,
+        max_workers: Optional[int] = None
     ) -> pd.DataFrame:
         """
         Build similarity matrix showing profile agreement for types across dataset pairs.
         
         This produces the visualization shown in TODO_connprofile.md:
         Rows = neuron types, Columns = dataset pairs, Values = similarity scores
+        
+        Supports parallel execution for faster processing.
         
         Args:
             neuron_types: Types to include in matrix
@@ -1112,6 +1186,8 @@ class CrossDatasetVerifier:
             direction: 'upstream', 'downstream', or 'both'
             dataset_nicknames: Optional dict mapping dataset names to short nicknames
                               e.g., {'hemibrain:v1.2.1': 'HB', 'male-cns:v0.9': 'MCNS'}
+            parallel: If True, use parallel threads (default: True)
+            max_workers: Max parallel workers (default: min(32, cpu_count + 4))
         
         Returns:
             DataFrame with neuron types as index and dataset pairs as columns.
@@ -1133,54 +1209,54 @@ class CrossDatasetVerifier:
                 pair_name = f"{name_a} vs {name_b}"
                 dataset_pairs.append((datasets[i], datasets[j], pair_name))
         
-        # Build matrix
-        matrix_data = {}
-        
-        for neuron_type in neuron_types:
+        def compute_row_for_type(neuron_type: str) -> Tuple[str, Dict[str, float]]:
+            """Compute similarity row for a single neuron type."""
             row = {}
-            
             for ds_a, ds_b, pair_name in dataset_pairs:
                 try:
                     profile_a = self._get_profile(neuron_type, ds_a)
                     profile_b = self._get_profile(neuron_type, ds_b)
                     
-                    # Only use NaN if profile fetch completely failed
-                    # If type exists but has few/no partners, still compute similarity (may be 0)
-                    # This ensures types like aMe12/aMe26 that exist get a score
                     profile_a_empty = (not profile_a.upstream_partners and not profile_a.downstream_partners)
                     profile_b_empty = (not profile_b.upstream_partners and not profile_b.downstream_partners)
                     
-                    # If BOTH profiles are empty, the type likely doesn't exist in either dataset
                     if profile_a_empty and profile_b_empty:
-                        row[pair_name] = np.nan  # Use NaN only when both are empty
+                        row[pair_name] = np.nan
                         continue
                     
                     if metric == 'jaccard':
-                        score = ProfileComparator.jaccard_similarity(
-                            profile_a, profile_b, direction
-                        )
+                        score = ProfileComparator.jaccard_similarity(profile_a, profile_b, direction)
                     elif metric == 'cosine':
-                        score = ProfileComparator.weighted_cosine_similarity(
-                            profile_a, profile_b, direction
-                        )
+                        score = ProfileComparator.weighted_cosine_similarity(profile_a, profile_b, direction)
                     elif metric == 'rank':
-                        # Use normalized rank correlation [0, 1] for consistency
-                        raw_score = ProfileComparator.rank_correlation(
-                            profile_a, profile_b, direction
-                        )
+                        raw_score = ProfileComparator.rank_correlation(profile_a, profile_b, direction)
                         score = (raw_score + 1) / 2 if not np.isnan(raw_score) else np.nan
                     else:  # combined
-                        scores = ProfileComparator.combined_score(
-                            profile_a, profile_b, direction=direction
-                        )
+                        scores = ProfileComparator.combined_score(profile_a, profile_b, direction=direction)
                         score = scores['combined']
                     
                     row[pair_name] = score
-                    
-                except Exception as e:
-                    row[pair_name] = np.nan  # Use NaN for errors
+                except Exception:
+                    row[pair_name] = np.nan
+            return neuron_type, row
+        
+        # Build matrix
+        matrix_data = {}
+        
+        if parallel and len(neuron_types) > 1:
+            import os
+            if max_workers is None:
+                max_workers = min(32, (os.cpu_count() or 1) + 4)
             
-            matrix_data[neuron_type] = row
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures = {executor.submit(compute_row_for_type, nt): nt for nt in neuron_types}
+                for future in as_completed(futures):
+                    neuron_type, row = future.result()
+                    matrix_data[neuron_type] = row
+        else:
+            for neuron_type in neuron_types:
+                _, row = compute_row_for_type(neuron_type)
+                matrix_data[neuron_type] = row
         
         df = pd.DataFrame(matrix_data).T
         df.index.name = 'neuron_type'

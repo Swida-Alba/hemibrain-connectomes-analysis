@@ -115,8 +115,8 @@ def run_comprehensive_comparison():
         # -----------------------------------------------------------------
         verification_direction='both',       # 'upstream', 'downstream', or 'both'
         verification_mode='loose',           # 'loose' (type-level) or 'strict' (bodyId-level)
-        verification_top_k=10,                # Number of top partners to compare
-        verification_top_m=3,                # Minimum unique partners (0 = no expansion)
+        verification_top_k=20,                # Number of top partners to compare
+        verification_top_m=10,                # Minimum unique partners (0 = no expansion)
         verification_min_synapse_threshold=3,# Min synapses for inclusion
         verification_include_untyped=True,   # Include untyped partners
         verification_min_common_partners=3,  # (strict mode) Min shared partners
