@@ -1260,7 +1260,7 @@ class ProfileVisualizer:
                 Only showing neuron types found in at least 2 datasets. 
                 <strong>Rank Correlation</strong> is used as the primary similarity metric (average of upstream and downstream).
                 <br>Sorted by: Role → Datasets Found → Rank Corr.
-                <br><strong>Jaccard</strong> = partner set overlap. <strong>Cosine</strong> = weight vector similarity.
+                <br><strong>Jaccard</strong> = partner set overlap (|A ∩ B| / |A ∪ B|).
             </p>
             <div style="overflow-x: auto;">
             <table>
@@ -1271,8 +1271,7 @@ class ProfileVisualizer:
                         <th>Found In</th>
                         <th>Rank Corr (Both)</th>
                         {"<th>Up↑</th><th>Down↓</th>" if has_directional else ""}
-                        {"<th>Jaccard (Up)</th><th>Jaccard (Down)</th>" if has_directional_jaccard else "<th>Jaccard</th>"}
-                        <th>Cosine</th>
+                        {"<th>Jaccard (Both)</th><th>Jaccard (Up)</th><th>Jaccard (Down)</th>" if has_directional_jaccard else "<th>Jaccard</th>"}
                         <th>Confidence</th>
                     </tr>
                 </thead>
@@ -1378,11 +1377,11 @@ class ProfileVisualizer:
                 # Use normalized values for colored cells
                 directional_cols = f"{score_cell_colored(upstream)}{score_cell_colored(downstream)}" if has_directional else ""
                 
-                # Jaccard columns - directional or combined
+                # Jaccard columns - directional and combined
                 jaccard_up = row.get('avg_jaccard_upstream', np.nan)
                 jaccard_down = row.get('avg_jaccard_downstream', np.nan)
                 if has_directional_jaccard:
-                    jaccard_cols = f"{jaccard_cell_colored(jaccard_up)}{jaccard_cell_colored(jaccard_down)}"
+                    jaccard_cols = f"{jaccard_cell_colored(jaccard)}{jaccard_cell_colored(jaccard_up)}{jaccard_cell_colored(jaccard_down)}"
                 else:
                     jaccard_cols = jaccard_cell_colored(jaccard)
                 
@@ -1399,7 +1398,6 @@ class ProfileVisualizer:
                         </td>
                         {directional_cols}
                         {jaccard_cols}
-                        {score_cell_colored(cosine)}
                         <td><span class="confidence-badge {conf_class}">{conf if conf else 'N/A'}</span></td>
                     </tr>
 ''')
