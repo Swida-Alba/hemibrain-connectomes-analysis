@@ -3850,6 +3850,9 @@ class ComparisonAnalyzer:
         min_common_partners: Optional[int] = None,
         # Score weights for combined score
         score_weights: Optional[Dict[str, float]] = None,
+        # Parallel processing parameters
+        parallel: Optional[bool] = None,
+        max_workers: Optional[int] = None,
         _skip_html_regeneration: bool = False
     ) -> Dict[str, pd.DataFrame]:
         """
@@ -3905,6 +3908,9 @@ class ComparisonAnalyzer:
                                 (default: params.verification_min_common_partners)
             score_weights: Custom weights for combined score {'jaccard': 0.5, 'rank': 0.5}
                           (default: params.verification_score_weights)
+            parallel: Enable parallel processing for batch operations
+                     (default: params.parallel)
+            max_workers: Maximum parallel workers (default: params.max_workers)
             _skip_html_regeneration: Internal flag - skip HTML regeneration (used when called from export_results)
         
         Returns:
@@ -3947,6 +3953,8 @@ class ComparisonAnalyzer:
         include_untyped_partners = include_untyped_partners if include_untyped_partners is not None else p.verification_include_untyped
         min_common_partners = min_common_partners if min_common_partners is not None else p.verification_min_common_partners
         score_weights = score_weights if score_weights is not None else p.verification_score_weights
+        parallel = parallel if parallel is not None else p.parallel
+        max_workers = max_workers if max_workers is not None else p.max_workers
         
         try:
             from .connectivity_profiler import ConnectivityProfiler, ProfilerConfig
@@ -4048,7 +4056,9 @@ class ComparisonAnalyzer:
             target_types=target_types,
             intermediate_types=intermediate_types,
             datasets=dataset_names,
-            direction=direction
+            direction=direction,
+            parallel=parallel,
+            max_workers=max_workers
         )
         
         # Store the comparison mode used
@@ -4062,7 +4072,9 @@ class ComparisonAnalyzer:
                 neuron_types=all_types_ordered[:50],  # Limit for performance, but source/target types are first
                 datasets=dataset_names,
                 metric='rank',  # Use rank correlation as primary metric
-                direction=direction
+                direction=direction,
+                parallel=parallel,
+                max_workers=max_workers
             )
             results['similarity_matrix'] = similarity_matrix
             
@@ -4074,7 +4086,9 @@ class ComparisonAnalyzer:
             metric_matrices = verifier.build_multi_metric_matrices(
                 neuron_types=all_types_ordered[:50],
                 datasets=dataset_names,
-                direction=direction
+                direction=direction,
+                parallel=parallel,
+                max_workers=max_workers
             )
             results['metric_matrices'] = metric_matrices
             

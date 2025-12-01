@@ -121,6 +121,14 @@ def run_comprehensive_comparison():
         verification_include_untyped=True,   # Include untyped partners
         verification_min_common_partners=3,  # (strict mode) Min shared partners
         verification_score_weights={'jaccard': 0.0, 'rank': 1.0},  # Score weights
+        verification_include_partner_details=True,
+        verification_include_visualizations=True,
+        
+        # -----------------------------------------------------------------
+        # Performance Settings (for parallel processing)
+        # -----------------------------------------------------------------
+        parallel=True,                # Enable parallel processing
+        max_workers=None,             # Auto-detect optimal worker count
     )
     
     # =========================================================================

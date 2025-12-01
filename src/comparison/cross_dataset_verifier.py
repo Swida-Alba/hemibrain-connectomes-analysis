@@ -1059,7 +1059,9 @@ class CrossDatasetVerifier:
         target_types: List[str],
         intermediate_types: List[str],
         datasets: List[str],
-        direction: str = 'both'
+        direction: str = 'both',
+        parallel: bool = True,
+        max_workers: Optional[int] = None
     ) -> Dict[str, pd.DataFrame]:
         """
         Verify all neuron types from a comparison analysis.
@@ -1077,6 +1079,8 @@ class CrossDatasetVerifier:
             intermediate_types: Intermediate neuron types from path analysis
             datasets: Datasets being compared
             direction: 'upstream', 'downstream', or 'both'
+            parallel: If True, use parallel threads (default: True)
+            max_workers: Max parallel workers (default: min(32, cpu_count + 4))
         
         Returns:
             Dict with keys:
@@ -1119,7 +1123,10 @@ class CrossDatasetVerifier:
         # Verify all types in one batch
         if all_unique_types:
             self._log(f"Verifying {len(all_unique_types)} unique types across {len(datasets)} datasets")
-            all_verified = self.batch_verify_types(all_unique_types, datasets, direction)
+            all_verified = self.batch_verify_types(
+                all_unique_types, datasets, direction,
+                parallel=parallel, max_workers=max_workers
+            )
             all_verified['role'] = all_verified['neuron_type'].map(role_map)
         else:
             all_verified = pd.DataFrame()
@@ -1268,7 +1275,9 @@ class CrossDatasetVerifier:
         neuron_types: List[str],
         datasets: List[str],
         metric: str = 'combined',
-        dataset_nicknames: Optional[Dict[str, str]] = None
+        dataset_nicknames: Optional[Dict[str, str]] = None,
+        parallel: bool = True,
+        max_workers: Optional[int] = None
     ) -> Dict[str, pd.DataFrame]:
         """
         Build separate similarity matrices for upstream and downstream directions.
@@ -1280,6 +1289,8 @@ class CrossDatasetVerifier:
             datasets: Datasets to compare
             metric: 'combined', 'jaccard', 'cosine', or 'rank'
             dataset_nicknames: Optional dict mapping dataset names to short nicknames
+            parallel: If True, use parallel threads (default: True)
+            max_workers: Max parallel workers (default: min(32, cpu_count + 4))
         
         Returns:
             Dict with keys 'upstream', 'downstream', 'both' containing DataFrames.
@@ -1296,7 +1307,9 @@ class CrossDatasetVerifier:
                 datasets=datasets,
                 metric=metric,
                 direction=direction,
-                dataset_nicknames=dataset_nicknames
+                dataset_nicknames=dataset_nicknames,
+                parallel=parallel,
+                max_workers=max_workers
             )
         
         return result
@@ -1306,7 +1319,9 @@ class CrossDatasetVerifier:
         neuron_types: List[str],
         datasets: List[str],
         direction: str = 'both',
-        dataset_nicknames: Optional[Dict[str, str]] = None
+        dataset_nicknames: Optional[Dict[str, str]] = None,
+        parallel: bool = True,
+        max_workers: Optional[int] = None
     ) -> Dict[str, pd.DataFrame]:
         """
         Build similarity matrices for each individual metric.
@@ -1318,6 +1333,8 @@ class CrossDatasetVerifier:
             datasets: Datasets to compare
             direction: 'upstream', 'downstream', or 'both'
             dataset_nicknames: Optional dict mapping dataset names to short nicknames
+            parallel: If True, use parallel threads (default: True)
+            max_workers: Max parallel workers (default: min(32, cpu_count + 4))
         
         Returns:
             Dict with keys 'combined', 'jaccard', 'cosine', 'rank' containing DataFrames.
@@ -1333,7 +1350,9 @@ class CrossDatasetVerifier:
                 datasets=datasets,
                 metric=metric,
                 direction=direction,
-                dataset_nicknames=dataset_nicknames
+                dataset_nicknames=dataset_nicknames,
+                parallel=parallel,
+                max_workers=max_workers
             )
         
         return result
@@ -1347,7 +1366,9 @@ class CrossDatasetVerifier:
         include_partner_details: bool = True,
         dataset_nicknames: Optional[Dict[str, str]] = None,
         save_directional_matrices: bool = True,
-        save_metric_matrices: bool = True
+        save_metric_matrices: bool = True,
+        parallel: bool = True,
+        max_workers: Optional[int] = None
     ) -> None:
         """
         Generate comprehensive verification report.
@@ -1368,6 +1389,7 @@ class CrossDatasetVerifier:
         - Individual score matrices for each metric
         - Dataset nicknames for shorter labels
         - Separate upstream/downstream matrices
+        - Parallel processing support for faster execution
         
         Args:
             neuron_types: Types to verify
@@ -1378,6 +1400,8 @@ class CrossDatasetVerifier:
             dataset_nicknames: Optional dict for shorter dataset labels
             save_directional_matrices: Save separate upstream/downstream matrices
             save_metric_matrices: Save individual metric matrices (jaccard, cosine, rank)
+            parallel: If True, use parallel threads (default: True)
+            max_workers: Max parallel workers (default: min(32, cpu_count + 4))
         """
         output_dir = Path(output_path)
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -1385,7 +1409,10 @@ class CrossDatasetVerifier:
         self._log(f"Generating verification report to {output_dir}")
         
         # 1. Summary CSV
-        summary = self.batch_verify_types(neuron_types, datasets, direction)
+        summary = self.batch_verify_types(
+            neuron_types, datasets, direction,
+            parallel=parallel, max_workers=max_workers
+        )
         summary.to_csv(output_dir / 'verification_summary.csv', index=False)
         self._log("Saved: verification_summary.csv")
         
@@ -1409,7 +1436,8 @@ class CrossDatasetVerifier:
         # 3. Combined similarity matrix (main)
         similarity_matrix = self.build_cross_dataset_similarity_matrix(
             neuron_types, datasets, metric='combined', direction=direction,
-            dataset_nicknames=dataset_nicknames
+            dataset_nicknames=dataset_nicknames,
+            parallel=parallel, max_workers=max_workers
         )
         similarity_matrix.to_csv(output_dir / 'similarity_matrix_combined.csv')
         self._log("Saved: similarity_matrix_combined.csv")
@@ -1421,7 +1449,8 @@ class CrossDatasetVerifier:
             
             directional = self.build_directional_similarity_matrices(
                 neuron_types, datasets, metric='combined',
-                dataset_nicknames=dataset_nicknames
+                dataset_nicknames=dataset_nicknames,
+                parallel=parallel, max_workers=max_workers
             )
             for dir_name, matrix in directional.items():
                 matrix.to_csv(matrices_dir / f'similarity_matrix_{dir_name}.csv')
@@ -1434,7 +1463,8 @@ class CrossDatasetVerifier:
             
             metric_matrices = self.build_multi_metric_matrices(
                 neuron_types, datasets, direction=direction,
-                dataset_nicknames=dataset_nicknames
+                dataset_nicknames=dataset_nicknames,
+                parallel=parallel, max_workers=max_workers
             )
             for metric_name, matrix in metric_matrices.items():
                 matrix.to_csv(metrics_dir / f'similarity_matrix_{metric_name}.csv')

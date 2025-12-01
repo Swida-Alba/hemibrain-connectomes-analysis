@@ -171,6 +171,13 @@ class ComparisonParameters:
     verification_include_visualizations: bool = True
     """Generate visualization files for verification results"""
     
+    # Parallel processing settings
+    parallel: bool = True
+    """Enable parallel processing for batch operations (verification, similarity matrix)"""
+    
+    max_workers: Optional[int] = None
+    """Maximum number of parallel workers. None = auto (min(32, cpu_count + 4))"""
+    
     # Comparison mode
     comparison_mode: str = 'path'
     """Comparison mode: 'path' (default) or 'edge'.
@@ -509,24 +516,59 @@ class ComparisonParameters:
         return {
             'metadata': {
                 'created_at': datetime.now().isoformat(),
-                'version': '2.0'
+                'version': '2.1',
+                'run_timestamp': self.run_timestamp
             },
+            # Dataset configuration
             'datasets': self.get_dataset_names(),
+            'datasets_nickname': self.get_dataset_nicknames(),
+            
+            # Neuron configuration
+            'source_neurons': self._ensure_flat_list(self.source_neurons),
+            'target_neurons': self._ensure_flat_list(self.target_neurons),
             'source_groups': source_groups,
             'target_groups': target_groups,
             'source_labels': self.source_labels,
             'target_labels': self.target_labels,
+            
+            # Analysis parameters
             'thresholds': self.thresholds,
             'max_interlayer': self.max_interlayer,
             'top_edges': self.top_edges,
+            'comparison_mode': self.comparison_mode,
+            
+            # Verification settings
+            'verification_settings': {
+                'direction': self.verification_direction,
+                'mode': self.verification_mode,
+                'top_k': self.verification_top_k,
+                'top_m': self.verification_top_m,
+                'min_synapse_threshold': self.verification_min_synapse_threshold,
+                'include_untyped': self.verification_include_untyped,
+                'min_common_partners': self.verification_min_common_partners,
+                'score_weights': self.verification_score_weights,
+                'include_partner_details': self.verification_include_partner_details,
+                'include_visualizations': self.verification_include_visualizations
+            },
+            
+            # Performance settings
+            'performance_settings': {
+                'parallel': self.parallel,
+                'max_workers': self.max_workers,
+                'use_cache': self._use_cache
+            },
+            
+            # Internal analysis settings
             'analysis_settings': {
                 'min_ratio': self._min_ratio,
                 'min_prob': self._min_prob,
-                'use_cache': self._use_cache,
                 'output_format': self._output_format
             },
+            
+            # Output configuration
             'output_folder': self.output_folder,
             'saveas': self.saveas,
+            'full_output_path': self.full_output_path
         }
     
     @classmethod
@@ -540,15 +582,44 @@ class ComparisonParameters:
         Returns:
             ComparisonParameters instance
         """
+        # Extract nested settings with defaults
+        verification = data.get('verification_settings', {})
+        performance = data.get('performance_settings', {})
+        
         return cls(
+            # Dataset configuration
             datasets=data.get('datasets', []),
+            datasets_nickname=data.get('datasets_nickname'),
+            
+            # Neuron configuration
             source_neurons=data.get('source_neurons', []),
             target_neurons=data.get('target_neurons', []),
-            max_interlayer=data.get('max_interlayer', 2),
             source_labels=data.get('source_labels', []),
             target_labels=data.get('target_labels', []),
+            
+            # Analysis parameters
+            max_interlayer=data.get('max_interlayer', 2),
             thresholds=data.get('thresholds', [1, 3, 5, 10, 20]),
             top_edges=data.get('top_edges', 50),
+            comparison_mode=data.get('comparison_mode', 'path'),
+            
+            # Verification settings
+            verification_direction=verification.get('direction', 'both'),
+            verification_mode=verification.get('mode', 'loose'),
+            verification_top_k=verification.get('top_k', 5),
+            verification_top_m=verification.get('top_m', 0),
+            verification_min_synapse_threshold=verification.get('min_synapse_threshold', 3),
+            verification_include_untyped=verification.get('include_untyped', True),
+            verification_min_common_partners=verification.get('min_common_partners', 3),
+            verification_score_weights=verification.get('score_weights', {'jaccard': 0.50, 'rank': 0.50}),
+            verification_include_partner_details=verification.get('include_partner_details', True),
+            verification_include_visualizations=verification.get('include_visualizations', True),
+            
+            # Performance settings
+            parallel=performance.get('parallel', True),
+            max_workers=performance.get('max_workers'),
+            
+            # Output configuration
             output_folder=data.get('output_folder', '.'),
             saveas=data.get('saveas'),
             token=data.get('token', ''),
