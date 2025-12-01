@@ -1171,7 +1171,12 @@ class ConnectivityProfiler:
                 self._build_disk_cache_index(dataset)
                 return df
             except Exception as e:
-                self._log(f"Warning: Could not load cache parquet: {e}")
+                # Corrupt parquet file - delete it so it can be regenerated
+                self._log(f"Warning: Corrupt cache parquet for {dataset}, removing: {e}")
+                try:
+                    cache_path.unlink()
+                except:
+                    pass
         return None
     
     def _build_disk_cache_index(self, dataset: str):

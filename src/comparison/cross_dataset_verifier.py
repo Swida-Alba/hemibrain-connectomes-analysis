@@ -980,6 +980,16 @@ class CrossDatasetVerifier:
             
             self._log(f"Using parallel execution with {max_workers} workers")
             
+            # Pre-warm the connection data cache BEFORE starting parallel execution
+            # This ensures cache loading messages appear before the progress bar
+            self._log("Pre-loading connection data...")
+            for dataset in datasets:
+                try:
+                    # Trigger cache loading in the main thread
+                    self.profiler._get_cached_conn_df(dataset)
+                except Exception:
+                    pass  # Will be handled during verification
+            
             with ThreadPoolExecutor(max_workers=max_workers) as executor:
                 # Submit all verification tasks
                 future_to_type = {
