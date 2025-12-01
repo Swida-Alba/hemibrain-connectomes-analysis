@@ -120,7 +120,7 @@ def run_comprehensive_comparison():
         verification_min_synapse_threshold=3,# Min synapses for inclusion
         verification_include_untyped=True,   # Include untyped partners
         verification_min_common_partners=3,  # (strict mode) Min shared partners
-        verification_score_weights={'jaccard': 1.0, 'rank': 0.0},  # Score weights
+        verification_score_weights={'jaccard': 0.0, 'rank': 1.0},  # Score weights
     )
     
     # =========================================================================

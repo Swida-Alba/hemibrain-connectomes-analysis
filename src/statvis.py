@@ -32,12 +32,14 @@ def _get_cached_neuron_df(dataset: str, dataset_path_body: str):
     """
     Load neuron DataFrame from cache or disk.
     
-    First call loads from CSV and caches in memory.
+    First call loads from disk and caches in memory.
     Subsequent calls return the cached DataFrame instantly.
+    
+    Prefers parquet format if available (faster ~10x), falls back to CSV.
     
     Args:
         dataset: Dataset identifier (normalized, e.g., 'hemibrain_v1_2_1')
-        dataset_path_body: Path prefix for CSV files (without _neuron_df.csv suffix)
+        dataset_path_body: Path prefix for data files (without suffix)
     
     Returns:
         Tuple of (neuron_df, roi_count_df)
@@ -49,9 +51,23 @@ def _get_cached_neuron_df(dataset: str, dataset_path_body: str):
         cached = _NEURON_DF_CACHE[dataset]
         return cached['neuron_df'].copy(), cached['roi_df'].copy()
     
-    # Load from disk
-    ndf = pd.read_csv(dataset_path_body + '_neuron_df.csv', header=0, index_col=0, low_memory=False)
-    rdf = pd.read_csv(dataset_path_body + '_roi_count_df.csv', header=0, index_col=0, low_memory=False)
+    # Load from disk - prefer parquet over CSV (faster ~10x)
+    neuron_parquet = dataset_path_body + '_neuron_df.parquet'
+    roi_parquet = dataset_path_body + '_roi_count_df.parquet'
+    neuron_csv = dataset_path_body + '_neuron_df.csv'
+    roi_csv = dataset_path_body + '_roi_count_df.csv'
+    
+    # Load neuron_df (prefer parquet)
+    if os.path.exists(neuron_parquet):
+        ndf = pd.read_parquet(neuron_parquet)
+    else:
+        ndf = pd.read_csv(neuron_csv, header=0, index_col=0, low_memory=False)
+    
+    # Load roi_count_df (prefer parquet)
+    if os.path.exists(roi_parquet):
+        rdf = pd.read_parquet(roi_parquet)
+    else:
+        rdf = pd.read_csv(roi_csv, header=0, index_col=0, low_memory=False)
     
     # Cache in memory
     _NEURON_DF_CACHE[dataset] = {

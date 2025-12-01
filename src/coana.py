@@ -3638,6 +3638,13 @@ class FindNeuronConnection:
                 # Slow: API call to neuprint (client already logged in above)
                 n_df,_ = fetch_neurons(NeuronCriteria(bodyId=neurons_to_fetch))
             
+            # Slim down to essential columns only: bodyId, type, instance
+            # This significantly reduces file size for large datasets
+            essential_cols = ['bodyId', 'type', 'instance']
+            available_cols = [c for c in essential_cols if c in n_df.columns]
+            if available_cols and len(n_df) > 0:
+                n_df = n_df[available_cols].copy()
+            
             interlayers.append(n_df)
             print(' ✓')
         
@@ -5451,6 +5458,13 @@ class FindNeuronConnection:
                         n_df = pd.DataFrame()
                 else:
                     n_df = pd.DataFrame()
+            
+            # Slim down to essential columns only: bodyId, type, instance
+            # This significantly reduces file size for large datasets
+            essential_cols = ['bodyId', 'type', 'instance']
+            available_cols = [c for c in essential_cols if c in n_df.columns]
+            if available_cols and len(n_df) > 0:
+                n_df = n_df[available_cols].copy()
             
             interlayers.append(n_df)
             

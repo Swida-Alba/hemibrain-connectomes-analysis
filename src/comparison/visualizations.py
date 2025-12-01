@@ -9,6 +9,7 @@ import os
 from typing import Dict, List, Optional, Any, Tuple
 import pandas as pd
 import numpy as np
+from tqdm import tqdm
 
 # Check for optional dependencies
 try:
@@ -1074,7 +1075,8 @@ class ComparisonVisualizer:
         thresholds: List[int],
         align_func,
         figsize: Optional[Tuple[int, int]] = None,
-        title: str = "Dataset Similarity at Each Threshold"
+        title: str = "Dataset Similarity at Each Threshold",
+        show_progress: bool = True
     ) -> plt.Figure:
         """
         Plot similarity matrices for each threshold in a combined subplot figure.
@@ -1089,6 +1091,7 @@ class ComparisonVisualizer:
             align_func: Function to get aligned data at a threshold
             figsize: Figure size tuple
             title: Overall figure title
+            show_progress: Whether to show progress bar (default True)
             
         Returns:
             matplotlib Figure with subplots
@@ -1120,7 +1123,19 @@ class ComparisonVisualizer:
             ('rv_coefficient', 'RV Coefficient', 'Oranges'),
         ]
         
-        for col_idx, threshold in enumerate(thresholds):
+        # Use progress bar for threshold iteration
+        threshold_iter = enumerate(thresholds)
+        if show_progress and len(thresholds) > 1:
+            threshold_iter = tqdm(
+                list(enumerate(thresholds)),
+                desc="Building similarity matrices",
+                unit="threshold"
+            )
+        
+        for col_idx, threshold in threshold_iter:
+            if show_progress and len(thresholds) > 1:
+                threshold_iter.set_postfix({"threshold": threshold, "metrics": "Jaccard/GED/Spearman/RV"})
+            
             try:
                 aligned = align_func(threshold)
                 if aligned.empty:

@@ -10,6 +10,7 @@ import pandas as pd
 from typing import Dict, List, Tuple, Optional, Any, Set
 from itertools import combinations
 from collections import defaultdict
+from tqdm import tqdm
 
 
 class ComparisonMetrics:
@@ -343,7 +344,8 @@ class ComparisonMetrics:
         results: Dict[str, Dict[int, pd.DataFrame]],
         datasets: List[str],
         thresholds: List[int],
-        label_mapper: Optional[Any] = None
+        label_mapper: Optional[Any] = None,
+        show_progress: bool = True
     ) -> pd.DataFrame:
         """
         Calculate similarity metrics across all thresholds.
@@ -353,13 +355,25 @@ class ComparisonMetrics:
             datasets: List of dataset identifiers
             thresholds: List of thresholds to analyze
             label_mapper: Optional LabelMapper for standardizing labels
+            show_progress: Whether to show progress bar (default True)
             
         Returns:
             DataFrame with similarity metrics per threshold per dataset pair
         """
         all_rows = []
         
-        for threshold in thresholds:
+        threshold_iter = thresholds
+        if show_progress and len(thresholds) > 1:
+            threshold_iter = tqdm(
+                thresholds, 
+                desc="Building similarity matrix",
+                unit="threshold"
+            )
+        
+        for threshold in threshold_iter:
+            if show_progress and len(thresholds) > 1:
+                threshold_iter.set_postfix({"threshold": threshold})
+            
             # Align data at this threshold
             aligned = self._align_results_at_threshold(results, datasets, threshold, label_mapper)
             
