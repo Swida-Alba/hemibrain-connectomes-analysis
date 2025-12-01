@@ -562,7 +562,13 @@ class FindNeuronConnection:
         # Validate filter_by parameter
         if self.filter_by not in ['bodyId', 'type']:
             raise ValueError(f"filter_by must be 'bodyId' or 'type', got '{self.filter_by}'")
-        # Initialize cache folder
+        # Initialize cache folder and in-memory cache structures
+        # In-memory caches for fast O(1) lookups (populated on first load)
+        self._conn_df_cache = None  # DataFrame cache for connections
+        self._conn_index = None  # Dict: bodyId_pre → list of row indices
+        self._neuron_index_cache = None  # DataFrame cache for neuron index
+        self._neuron_index_dict = None  # Dict: bodyId → row data dict
+        
         if self.use_cache:
             dataset_safe = self.dataset.replace(':', '_').replace('.', '_')
             self.cache_folder = os.path.join(self.script_path, 'cache', dataset_safe)
@@ -636,26 +642,38 @@ class FindNeuronConnection:
         '''Get path to neuron index (tracks cached neurons)'''
         return os.path.join(self.cache_folder, 'neuron_index.parquet')
     
-    def _load_connection_db(self):
+    def _load_connection_db(self, force_reload=False):
         '''
-        Load unified connection database.
+        Load unified connection database with in-memory caching and O(1) index.
+        
+        On first load, reads parquet from disk and builds a dict index for fast lookups.
+        Subsequent calls return the cached DataFrame without disk I/O.
+        
         Schema: bodyId_pre, bodyId_post, weight, roi (optional), cached_date
+        
+        Parameters:
+        -----------
+        force_reload : bool
+            If True, reload from disk even if cached in memory
+        
+        Returns:
+        --------
+        pd.DataFrame : Connection database
         '''
+        # Return cached DataFrame if available
+        if self._conn_df_cache is not None and not force_reload:
+            return self._conn_df_cache
+        
         db_path = self._get_connection_db_path()
         
         # Special handling for FlyWire: Import from CSV if cache missing
         if not os.path.exists(db_path) and self.client_type == 'flywire':
             self._vprint(f'  ⏳ FlyWire cache missing. Importing from local CSV...', level='full')
             
-            # Try to find the CSV
-            # Priority 1: Merged connections file in dataset root (e.g., flywire_v783_merged_connections.csv)
-            # Priority 2: Extracted file (legacy)
-            
             csv_path = None
             dataset_safe = self.dataset.replace(':', '_').replace('.', '_')
             dataset_dir = os.path.join(self.script_path, 'datasets', dataset_safe)
             
-            # Check for merged connections file
             import glob
             merged_candidates = glob.glob(os.path.join(dataset_dir, "*_merged_connections.csv"))
             if merged_candidates:
@@ -664,50 +682,41 @@ class FindNeuronConnection:
             if csv_path and os.path.exists(csv_path):
                 try:
                     self._vprint(f'  ⏳ Reading {csv_path} (this may take a while)...', level='full')
-                    # CSV columns: bodyId_pre, bodyId_post, weight (or similar)
-                    # User file header: bodyId_pre, bodyId_post, weight (I need to verify header)
-                    # Let's assume standard columns or map them
                     df = pd.read_csv(csv_path, dtype={'pre_root_id': str, 'post_root_id': str, 'bodyId_pre': str, 'bodyId_post': str})
-                    
-                    # Map columns if needed. 
-                    # Expected: bodyId_pre, bodyId_post, weight, roi, cached_date
-                    # Found: pre_root_id,post_root_id,neuropil,syn_count,nt_type
                     
                     column_map = {
                         'pre_root_id': 'bodyId_pre',
                         'post_root_id': 'bodyId_post',
                         'syn_count': 'weight',
                         'neuropil': 'roi',
-                        'pre': 'bodyId_pre', # Fallback
-                        'post': 'bodyId_post', # Fallback
-                        'synapses': 'weight' # Fallback
+                        'pre': 'bodyId_pre',
+                        'post': 'bodyId_post',
+                        'synapses': 'weight'
                     }
                     df = df.rename(columns=column_map)
                     
-                    # Add missing columns
                     if 'weight' not in df.columns:
-                        df['weight'] = 1 # Default weight if missing
+                        df['weight'] = 1
                     if 'roi' not in df.columns:
                         df['roi'] = 'None'
                     if 'cached_date' not in df.columns:
-                        from datetime import datetime
                         df['cached_date'] = datetime.now().strftime("%Y-%m-%d")
                         
-                    # Keep only necessary columns
                     cols_to_keep = ['bodyId_pre', 'bodyId_post', 'weight', 'roi', 'nt_type', 'cached_date']
-                    # Filter columns that exist
                     cols_to_keep = [c for c in cols_to_keep if c in df.columns]
                     df = df[cols_to_keep]
                     
-                    # Ensure strings
                     df['bodyId_pre'] = df['bodyId_pre'].astype(str)
                     df['bodyId_post'] = df['bodyId_post'].astype(str)
                     
                     self._vprint(f'  ✓ Imported {len(df):,} connections from CSV', level='full')
                     
-                    # Save to parquet for future speed
                     self._vprint(f'  💾 Saving to cache for faster future access...', level='full')
                     df.to_parquet(db_path, index=False, compression='gzip')
+                    
+                    # Cache in memory and build index
+                    self._conn_df_cache = df
+                    self._build_conn_index()
                     return df
                 except Exception as e:
                     self._vprint(f'  ⚠️ Error importing FlyWire CSV: {e}', level='full')
@@ -718,40 +727,90 @@ class FindNeuronConnection:
                 self._vprint(f'  ⏳ Loading connection database ({file_size_mb:.1f} MB)...', level='full')
                 df = pd.read_parquet(db_path)
                 
-                # Ensure bodyIds are strings
                 if 'bodyId_pre' in df.columns:
                     df['bodyId_pre'] = df['bodyId_pre'].astype(str)
                 if 'bodyId_post' in df.columns:
                     df['bodyId_post'] = df['bodyId_post'].astype(str)
                     
                 self._vprint(f'  ✓ Loaded {len(df):,} cached connections', level='full')
+                
+                # Cache in memory and build index
+                self._conn_df_cache = df
+                self._build_conn_index()
                 return df
             except Exception as e:
                 self._vprint(f'  ⚠️ Warning: Failed to load connection database: {e}', level='full')
-                return pd.DataFrame(columns=['bodyId_pre', 'bodyId_post', 'weight', 'roi', 'cached_date'])
-        return pd.DataFrame(columns=['bodyId_pre', 'bodyId_post', 'weight', 'roi', 'cached_date'])
+                self._conn_df_cache = pd.DataFrame(columns=['bodyId_pre', 'bodyId_post', 'weight', 'roi', 'cached_date'])
+                self._conn_index = {}
+                return self._conn_df_cache
+        
+        self._conn_df_cache = pd.DataFrame(columns=['bodyId_pre', 'bodyId_post', 'weight', 'roi', 'cached_date'])
+        self._conn_index = {}
+        return self._conn_df_cache
+    
+    def _build_conn_index(self):
+        '''
+        Build dict index for O(1) connection lookups by bodyId_pre.
+        Called after loading connection database from disk.
+        '''
+        if self._conn_df_cache is None or self._conn_df_cache.empty:
+            self._conn_index = {}
+            return
+        
+        self._vprint(f'  ⏳ Building connection index for fast lookups...', level='full')
+        self._conn_index = {}
+        
+        # Group by bodyId_pre and store row indices
+        for idx, bodyId_pre in enumerate(self._conn_df_cache['bodyId_pre'].values):
+            if bodyId_pre not in self._conn_index:
+                self._conn_index[bodyId_pre] = []
+            self._conn_index[bodyId_pre].append(idx)
+        
+        self._vprint(f'  ✓ Index built: {len(self._conn_index):,} unique upstream neurons', level='full')
     
     def _save_connection_db(self, conn_db):
-        '''Save unified connection database with compression'''
+        '''
+        Save unified connection database with compression.
+        Also updates the in-memory cache and rebuilds the index.
+        '''
         db_path = self._get_connection_db_path()
         try:
-            # Progress is already shown by caller, just add completion message
             conn_db.to_parquet(db_path, index=False, compression='gzip')
             self._vprint(f'  ✓ Database saved successfully', level='full')
+            
+            # Update in-memory cache
+            self._conn_df_cache = conn_db
+            self._build_conn_index()
         except Exception as e:
             self._vprint(f'  ⚠️ Warning: Failed to save connection database: {e}', level='full')
     
-    def _load_neuron_index(self):
+    def _load_neuron_index(self, force_reload=False):
         '''
-        Load neuron index - tracks which neurons are fully cached.
+        Load neuron index with in-memory caching and O(1) dict lookup.
+        
+        On first load, reads parquet from disk and builds a dict for fast lookups.
+        Subsequent calls return the cached DataFrame without disk I/O.
+        
         Schema: bodyId, type, instance, post, downstream_complete, last_fetched, connection_count
+        
+        Parameters:
+        -----------
+        force_reload : bool
+            If True, reload from disk even if cached in memory
+        
+        Returns:
+        --------
+        pd.DataFrame : Neuron index
         '''
+        # Return cached DataFrame if available
+        if self._neuron_index_cache is not None and not force_reload:
+            return self._neuron_index_cache
+        
         index_path = self._get_neuron_index_path()
         
         # Special handling for FlyWire: Import from enriched CSV if cache missing
         if not os.path.exists(index_path) and self.client_type == 'flywire':
             self._vprint(f'  ⏳ FlyWire index missing. Importing from enriched CSV...', level='full')
-            # Assuming dataset name like "flywire_FAFB_v783"
             dataset_safe = self.dataset.replace(':', '_').replace('.', '_')
             csv_path = os.path.join(self.script_path, 'datasets', dataset_safe, f"{dataset_safe}_allneurons_neuron_df.csv")
             
@@ -760,32 +819,27 @@ class FindNeuronConnection:
                     self._vprint(f'  ⏳ Reading {csv_path}...', level='full')
                     df = pd.read_csv(csv_path, dtype={'bodyId': str})
                     
-                    # Map/Create columns
-                    # CSV has: bodyId, type, pre, post, instance, etc.
-                    
-                    # Ensure required columns
                     if 'instance' not in df.columns:
                         df['instance'] = df['name'] if 'name' in df.columns else ''
                     if 'post' not in df.columns:
                         df['post'] = 0
                     
-                    # Add index tracking columns
-                    df['downstream_complete'] = True # Assume complete if we have the full connection DB
-                    from datetime import datetime
+                    df['downstream_complete'] = True
                     df['last_fetched'] = datetime.now().strftime("%Y-%m-%d")
-                    df['connection_count'] = df['post'] # Approximation
+                    df['connection_count'] = df['post']
                     
-                    # Keep only necessary columns
                     cols_to_keep = ['bodyId', 'type', 'instance', 'post', 'downstream_complete', 'last_fetched', 'connection_count']
-                    # Filter columns that exist
                     cols_to_keep = [c for c in cols_to_keep if c in df.columns]
                     df = df[cols_to_keep]
                     
                     self._vprint(f'  ✓ Imported {len(df):,} neurons from CSV', level='full')
                     
-                    # Save to parquet
                     self._vprint(f'  💾 Saving to cache...', level='full')
                     df.to_parquet(index_path, index=False, compression='gzip')
+                    
+                    # Cache in memory and build dict
+                    self._neuron_index_cache = df
+                    self._build_neuron_index_dict()
                     return df
                 except Exception as e:
                     self._vprint(f'  ⚠️ Error importing FlyWire Index: {e}', level='full')
@@ -793,35 +847,76 @@ class FindNeuronConnection:
         if os.path.exists(index_path):
             try:
                 file_size_mb = os.path.getsize(index_path) / (1024 * 1024)
-                if file_size_mb > 1:  # Only show for larger files
+                if file_size_mb > 1:
                     self._vprint(f'  ⏳ Loading neuron index ({file_size_mb:.1f} MB)...', level='full')
                 df = pd.read_parquet(index_path)
                 
-                # Ensure bodyId is string
                 if 'bodyId' in df.columns:
                     df['bodyId'] = df['bodyId'].astype(str)
                     
                 if file_size_mb > 1:
                     self._vprint(f'  ✓ Loaded index for {len(df):,} neurons', level='full')
+                
+                # Cache in memory and build dict
+                self._neuron_index_cache = df
+                self._build_neuron_index_dict()
                 return df
             except Exception as e:
                 self._vprint(f'  ⚠️ Warning: Failed to load neuron index: {e}', level='full')
-                return pd.DataFrame(columns=[
+                self._neuron_index_cache = pd.DataFrame(columns=[
                     'bodyId', 'type', 'instance', 'post', 'downstream_complete', 
                     'last_fetched', 'connection_count'
                 ])
-        return pd.DataFrame(columns=[
+                self._neuron_index_dict = {}
+                return self._neuron_index_cache
+        
+        self._neuron_index_cache = pd.DataFrame(columns=[
             'bodyId', 'type', 'instance', 'post', 'downstream_complete',
             'last_fetched', 'connection_count'
         ])
+        self._neuron_index_dict = {}
+        return self._neuron_index_cache
+    
+    def _build_neuron_index_dict(self):
+        '''
+        Build dict for O(1) neuron index lookups by bodyId.
+        Called after loading neuron index from disk.
+        '''
+        if self._neuron_index_cache is None or self._neuron_index_cache.empty:
+            self._neuron_index_dict = {}
+            return
+        
+        self._vprint(f'  ⏳ Building neuron index dict for fast lookups...', level='full')
+        self._neuron_index_dict = {}
+        
+        # Build dict: bodyId → {downstream_complete: bool, ...}
+        for idx, row in self._neuron_index_cache.iterrows():
+            bodyId = str(row['bodyId'])
+            self._neuron_index_dict[bodyId] = {
+                'downstream_complete': row.get('downstream_complete', False),
+                'type': row.get('type', ''),
+                'instance': row.get('instance', ''),
+                'post': row.get('post', 0),
+                'last_fetched': row.get('last_fetched', ''),
+                'connection_count': row.get('connection_count', 0),
+                'row_idx': idx  # Store row index for DataFrame updates
+            }
+        
+        self._vprint(f'  ✓ Neuron index dict built: {len(self._neuron_index_dict):,} neurons', level='full')
     
     def _save_neuron_index(self, index_df):
-        '''Save neuron index with compression'''
+        '''
+        Save neuron index with compression.
+        Also updates the in-memory cache and rebuilds the dict.
+        '''
         index_path = self._get_neuron_index_path()
         try:
-            # Progress message already shown by caller
             index_df.to_parquet(index_path, index=False, compression='gzip')
             self._vprint(f'  ✓ Neuron index saved successfully', level='full')
+            
+            # Update in-memory cache
+            self._neuron_index_cache = index_df
+            self._build_neuron_index_dict()
         except Exception as e:
             self._vprint(f'  ⚠️ Warning: Failed to save neuron index: {e}', level='full')
     
@@ -831,7 +926,7 @@ class FindNeuronConnection:
     
     def _query_connection_db(self, upstream_bodyIds, downstream_bodyIds=None):
         '''
-        Query unified connection database for specific connections.
+        Query unified connection database for specific connections using O(1) dict lookups.
         Returns (cached_df, uncached_upstream_ids)
         
         Parameters:
@@ -849,53 +944,61 @@ class FindNeuronConnection:
             return pd.DataFrame(), upstream_bodyIds, []
         
         self._vprint(f'  ⏳ Querying cache for {len(upstream_bodyIds):,} neurons...', level='full')
+        
+        # Load caches (uses in-memory if already loaded)
         conn_db = self._load_connection_db()
         neuron_index = self._load_neuron_index()
         
         if conn_db.empty:
-            # No cache yet
             return pd.DataFrame(), upstream_bodyIds, []
         
-        # Separate cached vs uncached neurons
+        # Separate cached vs uncached neurons using O(1) dict lookups
         cached_upstream = []
         uncached_upstream = []
-        partially_cached = []  # Neurons with connections but not marked complete
+        partially_cached = []
         
         for bodyId in upstream_bodyIds:
-            # Ensure bodyId is string for comparison
             bodyId = str(bodyId)
             
-            if bodyId in neuron_index['bodyId'].values:
-                # Handle potential duplicates - check if ANY entry for this bodyId is complete
-                rows = neuron_index[neuron_index['bodyId'] == bodyId]
-                is_complete = rows['downstream_complete'].any()
+            # O(1) dict lookup instead of O(n) DataFrame scan
+            neuron_data = self._neuron_index_dict.get(bodyId)
+            
+            if neuron_data is not None:
+                is_complete = neuron_data.get('downstream_complete', False)
                 
                 if downstream_bodyIds is None:
-                    # Need all downstream - check if fully cached
                     if is_complete:
                         cached_upstream.append(bodyId)
                     else:
                         uncached_upstream.append(bodyId)
                 else:
-                    # Specific targets - for now, treat as uncached if not fully complete
-                    # TODO: Could optimize by checking if specific pairs exist
                     if is_complete:
                         cached_upstream.append(bodyId)
                     else:
                         uncached_upstream.append(bodyId)
             else:
-                # Not in index - treat as uncached to refetch (skip recovery)
                 uncached_upstream.append(bodyId)
         
-        # Retrieve cached connections
+        # Retrieve cached connections using O(1) dict index
         all_cached = cached_upstream + partially_cached  # partially_cached will be empty (no recovery)
         if len(all_cached) > 0:
             self._vprint(f'  ⏳ Retrieving {len(all_cached):,} neurons from cache...', level='full')
-            cached_conn = conn_db[conn_db['bodyId_pre'].isin(all_cached)].copy()
+            
+            # Use dict index for O(1) lookups instead of DataFrame filter
+            row_indices = []
+            for bodyId in all_cached:
+                if bodyId in self._conn_index:
+                    row_indices.extend(self._conn_index[bodyId])
+            
+            if row_indices:
+                cached_conn = conn_db.iloc[row_indices].copy()
+            else:
+                cached_conn = pd.DataFrame()
             
             # Filter by downstream if specified
-            if downstream_bodyIds is not None:
-                cached_conn = cached_conn[cached_conn['bodyId_post'].isin(downstream_bodyIds)].copy()
+            if downstream_bodyIds is not None and not cached_conn.empty:
+                downstream_set = set(str(b) for b in downstream_bodyIds)
+                cached_conn = cached_conn[cached_conn['bodyId_post'].isin(downstream_set)].copy()
             
             # Note: Neurons with 0 connections are valid! Don't refetch them.
             # The neuron_index already tracks which neurons are complete via downstream_complete flag.
