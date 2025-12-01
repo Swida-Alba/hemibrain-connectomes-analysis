@@ -74,6 +74,28 @@ import BANC_file_converter
 # Ignore the navis warning
 logging.getLogger('navis').setLevel(logging.WARNING)
 
+# ============================================================================
+# Module-level cache for sharing connection data across FindNeuronConnection instances
+# This avoids repeated disk reads when comparison module creates multiple instances
+# Structure: {dataset: {'conn_df': DataFrame, 'conn_index': dict, 'neuron_index': DataFrame, 'neuron_dict': dict}}
+# ============================================================================
+_FNC_CACHE = {}
+
+
+def clear_fnc_cache(dataset: str = None):
+    """
+    Clear the module-level FindNeuronConnection cache.
+    
+    Args:
+        dataset: Specific dataset to clear (e.g., 'hemibrain_v1_2_1'). If None, clears all.
+    """
+    global _FNC_CACHE
+    if dataset is None:
+        _FNC_CACHE.clear()
+    elif dataset in _FNC_CACHE:
+        del _FNC_CACHE[dataset]
+
+
 @dataclass
 class FindNeuronConnection:
     '''
@@ -562,15 +584,29 @@ class FindNeuronConnection:
         # Validate filter_by parameter
         if self.filter_by not in ['bodyId', 'type']:
             raise ValueError(f"filter_by must be 'bodyId' or 'type', got '{self.filter_by}'")
+        
         # Initialize cache folder and in-memory cache structures
-        # In-memory caches for fast O(1) lookups (populated on first load)
-        self._conn_df_cache = None  # DataFrame cache for connections
-        self._conn_index = None  # Dict: bodyId_pre → list of row indices
-        self._neuron_index_cache = None  # DataFrame cache for neuron index
-        self._neuron_index_dict = None  # Dict: bodyId → row data dict
+        # Try to use module-level shared cache first (avoids repeated disk reads)
+        dataset_safe = self.dataset.replace(':', '_').replace('.', '_')
+        self._dataset_safe = dataset_safe
+        
+        # Check module-level cache first
+        global _FNC_CACHE
+        if dataset_safe in _FNC_CACHE:
+            cache = _FNC_CACHE[dataset_safe]
+            self._conn_df_cache = cache.get('conn_df')
+            self._conn_index = cache.get('conn_index')
+            self._neuron_index_cache = cache.get('neuron_index')
+            self._neuron_index_dict = cache.get('neuron_dict')
+            self._vprint(f'Using shared module cache for {dataset_safe}', level='full')
+        else:
+            # Initialize empty caches (will be populated on first load)
+            self._conn_df_cache = None  # DataFrame cache for connections
+            self._conn_index = None  # Dict: bodyId_pre → list of row indices
+            self._neuron_index_cache = None  # DataFrame cache for neuron index
+            self._neuron_index_dict = None  # Dict: bodyId → row data dict
         
         if self.use_cache:
-            dataset_safe = self.dataset.replace(':', '_').replace('.', '_')
             self.cache_folder = os.path.join(self.script_path, 'cache', dataset_safe)
             os.makedirs(self.cache_folder, exist_ok=True)
             self._vprint(f'Cache enabled: {self.cache_folder}', level='full')
@@ -752,6 +788,7 @@ class FindNeuronConnection:
         '''
         Build dict index for O(1) connection lookups by bodyId_pre.
         Called after loading connection database from disk.
+        Also updates the module-level shared cache.
         '''
         if self._conn_df_cache is None or self._conn_df_cache.empty:
             self._conn_index = {}
@@ -767,6 +804,14 @@ class FindNeuronConnection:
             self._conn_index[bodyId_pre].append(idx)
         
         self._vprint(f'  ✓ Index built: {len(self._conn_index):,} unique upstream neurons', level='full')
+        
+        # Update module-level shared cache for other instances
+        global _FNC_CACHE
+        if hasattr(self, '_dataset_safe'):
+            if self._dataset_safe not in _FNC_CACHE:
+                _FNC_CACHE[self._dataset_safe] = {}
+            _FNC_CACHE[self._dataset_safe]['conn_df'] = self._conn_df_cache
+            _FNC_CACHE[self._dataset_safe]['conn_index'] = self._conn_index
     
     def _save_connection_db(self, conn_db):
         '''
@@ -881,6 +926,7 @@ class FindNeuronConnection:
         '''
         Build dict for O(1) neuron index lookups by bodyId.
         Called after loading neuron index from disk.
+        Also updates the module-level shared cache.
         '''
         if self._neuron_index_cache is None or self._neuron_index_cache.empty:
             self._neuron_index_dict = {}
@@ -903,6 +949,14 @@ class FindNeuronConnection:
             }
         
         self._vprint(f'  ✓ Neuron index dict built: {len(self._neuron_index_dict):,} neurons', level='full')
+        
+        # Update module-level shared cache for other instances
+        global _FNC_CACHE
+        if hasattr(self, '_dataset_safe'):
+            if self._dataset_safe not in _FNC_CACHE:
+                _FNC_CACHE[self._dataset_safe] = {}
+            _FNC_CACHE[self._dataset_safe]['neuron_index'] = self._neuron_index_cache
+            _FNC_CACHE[self._dataset_safe]['neuron_dict'] = self._neuron_index_dict
     
     def _save_neuron_index(self, index_df):
         '''
