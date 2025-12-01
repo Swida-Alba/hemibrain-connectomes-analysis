@@ -1062,8 +1062,15 @@ class ConnectivityProfiler:
         if self.config.use_cache:
             self.cache_dir.mkdir(parents=True, exist_ok=True)
         
-        # In-memory cache
+        # In-memory cache for profiles (neuron_id, dataset) -> ConnectivityProfile
         self._memory_cache: Dict[Tuple[str, str], ConnectivityProfile] = {}
+        
+        # In-memory cache for disk parquet DataFrames: dataset -> DataFrame
+        # Avoids repeated disk reads when looking up multiple profiles
+        self._disk_cache_df: Dict[str, pd.DataFrame] = {}
+        
+        # Index for O(1) lookups: dataset -> {neuron_id -> row_index}
+        self._disk_cache_index: Dict[str, Dict[str, int]] = {}
         
         # Client cache per dataset
         self._clients: Dict[str, Any] = {}
@@ -1102,22 +1109,67 @@ class ConnectivityProfiler:
         safe_dataset = dataset.replace(':', '_').replace('.', '_')
         return self.cache_dir / safe_dataset / 'connectivity_profiles.parquet'
     
-    def _load_cache_dataframe(self, dataset: str) -> Optional[pd.DataFrame]:
-        """Load the cache dataframe for a dataset."""
+    def _load_cache_dataframe(self, dataset: str, force_reload: bool = False) -> Optional[pd.DataFrame]:
+        """
+        Load the cache dataframe for a dataset with in-memory caching.
+        
+        First load reads from disk and caches in memory.
+        Subsequent loads return the cached DataFrame instantly.
+        
+        Args:
+            dataset: Dataset name
+            force_reload: If True, reload from disk even if cached
+            
+        Returns:
+            Cached DataFrame or None if not found
+        """
+        # Check in-memory cache first
+        if not force_reload and dataset in self._disk_cache_df:
+            return self._disk_cache_df[dataset]
+        
+        # Load from disk
         cache_path = self._get_cache_parquet_path(dataset)
         if cache_path.exists():
             try:
-                return pd.read_parquet(cache_path)
+                df = pd.read_parquet(cache_path)
+                # Cache in memory
+                self._disk_cache_df[dataset] = df
+                # Build index for O(1) lookups
+                self._build_disk_cache_index(dataset)
+                return df
             except Exception as e:
                 self._log(f"Warning: Could not load cache parquet: {e}")
         return None
     
+    def _build_disk_cache_index(self, dataset: str):
+        """Build O(1) lookup index for disk cache DataFrame."""
+        if dataset not in self._disk_cache_df:
+            self._disk_cache_index[dataset] = {}
+            return
+        
+        df = self._disk_cache_df[dataset]
+        if 'neuron_id' not in df.columns:
+            self._disk_cache_index[dataset] = {}
+            return
+        
+        # Build index: neuron_id -> row_index
+        self._disk_cache_index[dataset] = {
+            str(row['neuron_id']): idx 
+            for idx, row in df.iterrows()
+        }
+    
     def _save_cache_dataframe(self, df: pd.DataFrame, dataset: str):
-        """Save the cache dataframe for a dataset."""
+        """
+        Save the cache dataframe for a dataset.
+        Also updates the in-memory cache.
+        """
         cache_path = self._get_cache_parquet_path(dataset)
         cache_path.parent.mkdir(parents=True, exist_ok=True)
         try:
             df.to_parquet(cache_path, index=False)
+            # Update in-memory cache
+            self._disk_cache_df[dataset] = df
+            self._build_disk_cache_index(dataset)
         except Exception as e:
             self._log(f"Warning: Could not save cache parquet: {e}")
     
@@ -1129,6 +1181,11 @@ class ConnectivityProfiler:
     ) -> Optional[ConnectivityProfile]:
         """
         Load profile from cache if exists and meets requirements.
+        
+        Uses a 3-tier cache strategy:
+        1. Memory cache (instant): Check _memory_cache dict first
+        2. Disk cache index (O(1)): Use _disk_cache_index for fast row lookup
+        3. Disk cache load: Only loads parquet once, cached in _disk_cache_df
         
         Option A Cache Strategy:
         - If cached_k >= requested_k: Use cache (slice if needed)
@@ -1145,7 +1202,7 @@ class ConnectivityProfiler:
         required_k = required_top_k or self.config.top_k_bodyid
         neuron_id_str = str(neuron_id)
         
-        # Check memory cache first
+        # Tier 1: Check memory cache first (instant O(1))
         cache_key = (neuron_id_str, dataset)
         if cache_key in self._memory_cache:
             cached = self._memory_cache[cache_key]
@@ -1155,18 +1212,22 @@ class ConnectivityProfiler:
             # Cached profile has lower k than required - need re-fetch
             return None
         
-        # Check disk cache (parquet)
+        # Tier 2 & 3: Check disk cache with in-memory DataFrame
         if not self.config.use_cache:
             return None
         
+        # This loads from disk only once, then uses cached DataFrame
         cache_df = self._load_cache_dataframe(dataset)
-        if cache_df is not None and 'neuron_id' in cache_df.columns:
-            # Find matching row
-            row = cache_df[cache_df['neuron_id'] == neuron_id_str]
-            if not row.empty:
+        if cache_df is None or 'neuron_id' not in cache_df.columns:
+            return None
+        
+        # Use index for O(1) row lookup instead of DataFrame filter
+        if dataset in self._disk_cache_index:
+            row_idx = self._disk_cache_index[dataset].get(neuron_id_str)
+            if row_idx is not None:
                 try:
-                    # Reconstruct profile from row
-                    row_data = row.iloc[0]
+                    # Direct row access by index (O(1))
+                    row_data = cache_df.iloc[row_idx]
                     profile = self._row_to_profile(row_data)
                     
                     # Check if cached profile has sufficient top_k
