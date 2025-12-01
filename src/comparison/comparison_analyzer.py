@@ -1219,17 +1219,19 @@ class ComparisonAnalyzer:
     # Report Generation
     # =========================================================================
     
-    def generate_report(self, output_path: Optional[str] = None) -> str:
+    def generate_report(self, output_path: Optional[str] = None, _skip_log: bool = False) -> str:
         """
         Generate human-readable comparison report.
         
         Args:
             output_path: Optional path to save report
+            _skip_log: Internal flag to skip logging (used when called from export_results)
             
         Returns:
             Report text
         """
-        self._log("Generating comparison report text...")
+        if not _skip_log:
+            self._log("Generating comparison report text...")
         
         # Ensure comparison has been run
         if self.comparison_report is None:
@@ -1461,9 +1463,9 @@ class ComparisonAnalyzer:
             import json
             json.dump(self.parameters.to_dict(), f, indent=2, default=str)
         
-        # Save report
+        # Save report (skip logging since we already logged "Saving parameters and report")
         report_path = os.path.join(out_dir, "comparison_report.txt")
-        self.generate_report(report_path)
+        self.generate_report(report_path, _skip_log=True)
         
         self._log("  Step 2: Exporting cross-dataset comparisons...")
         
