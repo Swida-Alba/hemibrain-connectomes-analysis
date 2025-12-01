@@ -1,91 +1,75 @@
 # =============================================================================
 # Hemibrain Connectomes Analysis - Requirements
-# Project Structure: Reorganized with src/ layout (v3.0.0)
+# Project Structure: Reorganized with src/ layout (v4.1)
+# Versions pinned to tested working versions from conda env 'hemibrain'
 # =============================================================================
 
 # Core Dependencies
 # -----------------------------------------------------------------------------
-numpy>=1.20.0,<2.0.0       # Keep <2.0.0 for binary compatibility with pandas 1.x
-pandas>=1.3.0,<2.0.0      # Note: Keep <2.0.0 for compatibility
-scipy>=1.7.0               # Used for clustering (scipy.cluster.hierarchy)
+numpy==1.26.4              # NumPy <2.0 for binary compatibility with pandas 1.x
+pandas==1.5.3              # Pandas 1.x for compatibility
+scipy==1.13.1              # Scientific computing (clustering, etc.)
+pyarrow==17.0.0            # Parquet file support for fast caching
 
 # Visualization
 # -----------------------------------------------------------------------------
-plotly>=5.0.0              # Interactive plots, Sankey diagrams (plotly.graph_objects, plotly.io)
-matplotlib>=3.4.0          # Static plots (matplotlib.pyplot, matplotlib.patches)
-seaborn>=0.11.0            # Statistical visualizations
-opencv-python>=4.5.0       # Computer vision library (cv2 - video generation, image processing)
-bokeh>=2.4.0               # Additional visualization library (bokeh.palettes)
+plotly==6.4.0              # Interactive plots, Sankey diagrams
+matplotlib==3.10.0         # Static plots
+seaborn==0.13.2            # Statistical visualizations
+opencv-python==4.10.0.84   # Computer vision (video generation, image processing)
+bokeh==3.6.0               # Additional visualization (palettes)
+kaleido==0.2.1             # Plotly static image export
 
 # Network Analysis
 # -----------------------------------------------------------------------------
-networkx>=2.6.0            # Graph algorithms and network analysis
-
-# Advanced Graph Layout (Optional - for better crossing minimization)
-# -----------------------------------------------------------------------------
-# Uncomment for advanced Python-based layouts (not needed for web visualizations)
-# pygraphviz>=1.11         # Graphviz integration - best for hierarchical layouts
-# grandalf>=0.8            # Modern Sugiyama layout implementation
-# networkit>=10.0          # High-performance layouts for large graphs (10k+ nodes)
-# graph-tool               # Research-grade layouts (install via conda: conda install -c conda-forge graph-tool)
+networkx==3.3              # Graph algorithms and network analysis
 
 # Data Processing
 # -----------------------------------------------------------------------------
-openpyxl>=3.0.0            # Excel file support (.xlsx)
-tqdm>=4.60.0               # Progress bar for long-running operations
+openpyxl==3.1.5            # Excel file support (.xlsx)
+tqdm==4.66.5               # Progress bars
+requests==2.32.3           # HTTP requests
+Jinja2==3.1.4              # HTML templating
+pillow==11.0.0             # Image processing
 
 # GUI Backends (for file picker and sheet selection dialogs)
 # -----------------------------------------------------------------------------
-# Install at least one for optimal performance (10-50x faster than tkinter)
-PyQt5>=5.15.0              # Recommended - Fastest, most responsive dialogs
-# PyQt6>=6.0.0             # Alternative to PyQt5 (uncomment if preferred)
-# wxPython>=4.2.0          # Alternative GUI backend (uncomment if preferred)
+PyQt5==5.15.10             # Recommended - Fastest, most responsive dialogs
 
 # Neuroscience Data
 # -----------------------------------------------------------------------------
-neuprint-python>=0.4.0     # NeuPrint database access for hemibrain data
-cloud-volume>=8.0.0        # CloudVolume for accessing mesh/skeleton data
-navis>=1.0.0               # Neuron visualization and analysis toolkit (required by coana.py, statvis.py)
-flybrains>=0.2.0           # Drosophila brain templates and meshes (required by coana.py)
+neuprint-python==0.4.26    # NeuPrint database access
+navis==1.5.0               # Neuron visualization and analysis toolkit
+flybrains==0.2.11          # Drosophila brain templates and meshes
 
 # Document Processing
 # -----------------------------------------------------------------------------
-img2pdf>=0.4.0             # Convert images to PDF (required by statvis.py)
+img2pdf==0.5.1             # Convert images to PDF
 
-# Interactive 3D Visualization (Optional - for skeleton plots)
+# Interactive 3D Visualization
 # -----------------------------------------------------------------------------
-# Uncomment if you need additional 3D neuron skeleton visualization
-# Note: navis is already included above as a core requirement
-# trimesh>=3.9.0           # 3D mesh processing
-# vispy>=0.11.0            # GPU-accelerated visualization
-# pygfx>=0.1.0             # Modern 3D rendering
-k3d>=2.15.0                # High-performance 3D visualization (WebGL)
-ipywidgets>=8.0.0          # Required for k3d HTML export
-open3d>=0.15.0             # 3D mesh processing and simplification
+k3d==2.17.0                # High-performance 3D visualization (WebGL)
+ipywidgets==8.1.5          # Required for k3d HTML export
+open3d==0.19.0             # 3D mesh processing and simplification
+
+# Optional Dependencies (uncomment as needed)
+# -----------------------------------------------------------------------------
+# cloud-volume             # CloudVolume for mesh/skeleton data (large dependency)
+# PyQt6                    # Alternative to PyQt5
+# wxPython                 # Alternative GUI backend
 
 # Development and Testing (Optional)
 # -----------------------------------------------------------------------------
-# Uncomment for development
-# pytest>=7.0.0            # Testing framework
-# pytest-cov>=3.0.0        # Coverage reporting
-# black>=22.0.0            # Code formatter
-# flake8>=4.0.0            # Linter
-# mypy>=0.950              # Type checker
+# pytest==7.0.0            # Testing framework
+# pytest-cov==3.0.0        # Coverage reporting
+# black==22.0.0            # Code formatter
+# flake8==4.0.0            # Linter
 
 # Jupyter Notebook Support (Optional)
 # -----------------------------------------------------------------------------
-# Uncomment if you use notebooks
-# jupyter>=1.0.0
-# ipykernel>=6.0.0
-# ipywidgets>=8.0.0
-# notebook>=6.4.0
-
-# System Notes
-# -----------------------------------------------------------------------------
-# - tkinter is included with Python by default (no pip install needed)
-# - On Linux, if tkinter is missing: sudo apt-get install python3-tk
-# - For optimal performance, PyQt5 is recommended for GUI dialogs
-# - All scripts in scripts/ directory import from src/ automatically
+# jupyter==1.0.0
+# ipykernel==6.0.0
+# notebook==6.4.0
 
 # Installation
 # -----------------------------------------------------------------------------
@@ -94,6 +78,3 @@ open3d>=0.15.0             # 3D mesh processing and simplification
 #
 # Development installation:
 #   pip install -e .
-#
-# With optional dependencies:
-#   pip install -e ".[dev,viz,all]"
