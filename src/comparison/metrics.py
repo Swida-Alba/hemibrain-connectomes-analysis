@@ -362,12 +362,17 @@ class ComparisonMetrics:
         """
         all_rows = []
         
+        # Show immediate feedback before the loop
+        if show_progress:
+            print(f"  Calculating similarities for {len(thresholds)} thresholds across {len(datasets)} datasets...")
+        
         threshold_iter = thresholds
         if show_progress and len(thresholds) > 1:
             threshold_iter = tqdm(
                 thresholds, 
                 desc="Computing similarity metrics",
-                unit="threshold"
+                unit="threshold",
+                leave=True
             )
         
         for threshold in threshold_iter:

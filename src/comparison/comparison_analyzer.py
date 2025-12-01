@@ -1081,6 +1081,7 @@ class ComparisonAnalyzer:
             self.run_all_analyses()
         
         self._log("Computing comparison metrics")
+        self._log("  Step 1/2: Generating comparison summary...")
         
         dataset_names = self.parameters.get_dataset_names()
         
@@ -1091,6 +1092,8 @@ class ComparisonAnalyzer:
             thresholds=self.parameters.thresholds,
             label_mapper=self.label_mapper
         )
+        
+        self._log("  Step 2/2: Calculating cross-threshold similarities...")
         
         # Calculate cross-threshold similarities and cache them
         similarities = self.metrics.calculate_similarity_across_thresholds(
