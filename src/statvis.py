@@ -349,9 +349,9 @@ def getNeurons(requiredNeurons, dataset='hemibrain:v1.2.1', custom_group_names=N
     '''
     from neuprint import NeuronCriteria as NC
     
-    # Special handling for FlyWire/FAFB
-    if 'flywire' in dataset.lower() or 'fafb' in dataset.lower():
-        # Try to use local FAFB data first
+    # Special handling for FlyWire/FAFB/BANC
+    if 'flywire' in dataset.lower() or 'fafb' in dataset.lower() or 'banc' in dataset.lower():
+        # Try to use local data first
         try:
             import fafb_utils
             # Go up from src/ to project root, then into datasets/
@@ -364,7 +364,9 @@ def getNeurons(requiredNeurons, dataset='hemibrain:v1.2.1', custom_group_names=N
                 data_dir = os.path.join(project_root, "datasets", "flywire_FAFB_v783")
             
             if os.path.exists(data_dir):
-                print(f"Checking local FAFB data in {data_dir}...")
+                # Use dataset name in message instead of hardcoded "FAFB"
+                dataset_short = dataset.split('_')[1] if '_' in dataset else dataset
+                print(f"Checking local {dataset_short} data in {data_dir}...")
                 neuron_file, _ = fafb_utils.prepare_fafb_data(data_dir)
                 
                 # Load the full neuron DataFrame
