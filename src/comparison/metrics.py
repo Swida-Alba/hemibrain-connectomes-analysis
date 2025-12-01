@@ -385,8 +385,10 @@ class ComparisonMetrics:
             if aligned.empty:
                 continue
             
-            # Calculate pairwise similarities
-            similarities = self.calculate_all_pairwise_similarities(aligned, datasets, threshold=1)
+            # Calculate pairwise similarities (include advanced metrics for visualization)
+            similarities = self.calculate_all_pairwise_similarities(
+                aligned, datasets, threshold=1, include_advanced_metrics=True
+            )
             similarities['threshold'] = threshold
             all_rows.append(similarities)
         

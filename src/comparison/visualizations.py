@@ -1132,8 +1132,9 @@ class ComparisonVisualizer:
         if show_progress and len(thresholds) > 1:
             threshold_iter = tqdm(
                 list(enumerate(thresholds)),
-                desc="Computing similarity metrics",
-                unit="threshold"
+                desc="Generating similarity heatmaps",
+                unit="threshold",
+                leave=False
             )
         
         for col_idx, threshold in threshold_iter:

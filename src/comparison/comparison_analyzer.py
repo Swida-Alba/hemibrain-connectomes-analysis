@@ -1229,6 +1229,8 @@ class ComparisonAnalyzer:
         Returns:
             Report text
         """
+        self._log("Generating comparison report text...")
+        
         # Ensure comparison has been run
         if self.comparison_report is None:
             self.run_comparison_analysis()
@@ -1441,6 +1443,9 @@ class ComparisonAnalyzer:
         if not out_dir:
             raise ValueError("No output directory specified")
         
+        self._log("Exporting results...")
+        self._log("  Step 1: Saving parameters and report...")
+        
         # Ensure data loader is initialized
         if self.data_loader is None:
             self.data_loader = DataLoader(out_dir)
@@ -1459,6 +1464,8 @@ class ComparisonAnalyzer:
         # Save report
         report_path = os.path.join(out_dir, "comparison_report.txt")
         self.generate_report(report_path)
+        
+        self._log("  Step 2: Exporting cross-dataset comparisons...")
         
         # === Cross-dataset comparison results ===
         self._export_cross_dataset_comparisons(comparison_results_dir)
@@ -1482,6 +1489,8 @@ class ComparisonAnalyzer:
             with open(summary_path, 'w') as f:
                 json.dump(summary_export, f, indent=2, default=str)
 
+        self._log("  Step 3: Generating visualizations...")
+        
         # Generate matplotlib visualizations to comparison_visualizations/ at base level
         try:
             self._generate_visualizations(out_dir)
@@ -1494,6 +1503,8 @@ class ComparisonAnalyzer:
         #   - verification_direction, verification_mode, verification_top_k, etc.
         # Example:
         #   analyzer.run_connectivity_profile_verification()  # Uses params from ComparisonParameters
+        
+        self._log("  Step 4: Generating HTML report...")
         
         # Generate interactive HTML report at base level
         try:
