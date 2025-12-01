@@ -20,6 +20,63 @@ from tqdm import tqdm
 
 # FlyWire client support removed
 
+# ============================================================================
+# In-Memory Cache for Neuron DataFrames
+# ============================================================================
+# Avoids repeated CSV reads when getNeurons() is called multiple times
+# Structure: {dataset: {'neuron_df': DataFrame, 'roi_df': DataFrame}}
+_NEURON_DF_CACHE = {}
+
+
+def _get_cached_neuron_df(dataset: str, dataset_path_body: str):
+    """
+    Load neuron DataFrame from cache or disk.
+    
+    First call loads from CSV and caches in memory.
+    Subsequent calls return the cached DataFrame instantly.
+    
+    Args:
+        dataset: Dataset identifier (normalized, e.g., 'hemibrain_v1_2_1')
+        dataset_path_body: Path prefix for CSV files (without _neuron_df.csv suffix)
+    
+    Returns:
+        Tuple of (neuron_df, roi_count_df)
+    """
+    global _NEURON_DF_CACHE
+    
+    if dataset in _NEURON_DF_CACHE:
+        # Return cached DataFrames
+        cached = _NEURON_DF_CACHE[dataset]
+        return cached['neuron_df'].copy(), cached['roi_df'].copy()
+    
+    # Load from disk
+    ndf = pd.read_csv(dataset_path_body + '_neuron_df.csv', header=0, index_col=0, low_memory=False)
+    rdf = pd.read_csv(dataset_path_body + '_roi_count_df.csv', header=0, index_col=0, low_memory=False)
+    
+    # Cache in memory
+    _NEURON_DF_CACHE[dataset] = {
+        'neuron_df': ndf,
+        'roi_df': rdf
+    }
+    
+    return ndf.copy(), rdf.copy()
+
+
+def clear_neuron_cache(dataset: str = None):
+    """
+    Clear the neuron DataFrame cache.
+    
+    Args:
+        dataset: Specific dataset to clear. If None, clears all.
+    """
+    global _NEURON_DF_CACHE
+    
+    if dataset is None:
+        _NEURON_DF_CACHE.clear()
+    elif dataset in _NEURON_DF_CACHE:
+        del _NEURON_DF_CACHE[dataset]
+
+
 class CreateHeatmap:
     """
     A class for creating and managing heatmap visualizations of connection matrices.
@@ -493,9 +550,11 @@ def getNeurons(requiredNeurons, dataset='hemibrain:v1.2.1', custom_group_names=N
              os.makedirs(dataset_dir, exist_ok=True)
              dataset_path_body = os.path.join(dataset_dir, f"{dataset_normalized}_allneurons")
              pull_dataset(dataset, save_path=dataset_path_body, omitNoneType=False)
+        # After download, clear any stale cache for this dataset
+        clear_neuron_cache(dataset_normalized)
 
-    ndf_alltypes = pd.read_csv(dataset_path_body + '_neuron_df.csv', header=0, index_col=0, low_memory=False)
-    rdf_alltypes = pd.read_csv(dataset_path_body + '_roi_count_df.csv', header=0, index_col=0, low_memory=False)
+    # Use in-memory cache for neuron DataFrames (avoids repeated CSV reads)
+    ndf_alltypes, rdf_alltypes = _get_cached_neuron_df(dataset_normalized, dataset_path_body)
     bodyId_alltypes = ndf_alltypes['bodyId'].tolist()
     
     if len(requiredNeurons) == 0:

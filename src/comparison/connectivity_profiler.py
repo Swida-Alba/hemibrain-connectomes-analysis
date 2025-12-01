@@ -1391,8 +1391,7 @@ class ConnectivityProfiler:
         Read pre-built connectivity profiles from cache (parquet format).
         
         This method loads cached profiles from disk for efficient batch access.
-        Useful after running build_connectivity_profile_cache() to load all
-        profiles for analysis without re-computing.
+        Uses the 3-tier cache system for O(1) lookups when neuron_types are specified.
         
         Args:
             dataset: Dataset identifier (e.g., 'hemibrain_v1_2_1', 'flywire_FAFB_v783')
@@ -1401,20 +1400,10 @@ class ConnectivityProfiler:
         
         Returns:
             Dict mapping neuron_type/id to ConnectivityProfile
-        
-        Example:
-            >>> profiler = ConnectivityProfiler()
-            >>> profiles = profiler.read_connectivity_profile_cache('hemibrain_v1_2_1')
-            >>> print(f"Loaded {len(profiles)} profiles from cache")
-            >>> 
-            >>> # Load specific types
-            >>> profiles = profiler.read_connectivity_profile_cache(
-            ...     'hemibrain_v1_2_1',
-            ...     neuron_types=['aMe12', 'Mi1', 'T4a']
-            ... )
         """
         self._log(f"Reading connectivity profile cache for {dataset}...")
         
+        # Load cache DataFrame (uses in-memory cache if available)
         cache_df = self._load_cache_dataframe(dataset)
         
         if cache_df is None or cache_df.empty:
@@ -1429,33 +1418,60 @@ class ConnectivityProfiler:
         
         self._log(f"Found {len(cache_df)} profiles in cache")
         
-        for idx, row in cache_df.iterrows():
-            try:
-                neuron_id = row['neuron_id']
+        # Use index for O(1) lookups if specific neuron_types requested
+        if neuron_types is not None and dataset in self._disk_cache_index:
+            # Fast path: Use index for specific types
+            for neuron_id in neuron_types:
+                neuron_id_str = str(neuron_id)
+                row_idx = self._disk_cache_index[dataset].get(neuron_id_str)
                 
-                # Filter by neuron_types if specified
-                if neuron_types is not None and neuron_id not in neuron_types:
+                if row_idx is None:
                     continue
                 
-                # Convert row to profile
-                profile = self._row_to_profile(row)
-                
-                # Check min_top_k requirement
-                if min_top_k is not None:
-                    if profile.top_k_bodyid_used < min_top_k:
+                try:
+                    row = cache_df.iloc[row_idx]
+                    profile = self._row_to_profile(row)
+                    
+                    # Check min_top_k requirement
+                    if min_top_k is not None and profile.top_k_bodyid_used < min_top_k:
                         skipped_k += 1
                         continue
-                
-                profiles[neuron_id] = profile
-                loaded += 1
-                
-                # Also add to memory cache
-                cache_key = (str(neuron_id), dataset)
-                self._memory_cache[cache_key] = profile
-                
-            except Exception as e:
-                self._log(f"Warning: Failed to load profile from row {idx}: {e}")
-                failed += 1
+                    
+                    profiles[neuron_id_str] = profile
+                    loaded += 1
+                    
+                    # Add to memory cache
+                    cache_key = (neuron_id_str, dataset)
+                    self._memory_cache[cache_key] = profile
+                    
+                except Exception as e:
+                    self._log(f"Warning: Failed to load profile for {neuron_id}: {e}")
+                    failed += 1
+        else:
+            # Slow path: Iterate all rows (only when loading ALL profiles)
+            for idx, row in cache_df.iterrows():
+                try:
+                    neuron_id = row['neuron_id']
+                    
+                    # Convert row to profile
+                    profile = self._row_to_profile(row)
+                    
+                    # Check min_top_k requirement
+                    if min_top_k is not None:
+                        if profile.top_k_bodyid_used < min_top_k:
+                            skipped_k += 1
+                            continue
+                    
+                    profiles[neuron_id] = profile
+                    loaded += 1
+                    
+                    # Also add to memory cache
+                    cache_key = (str(neuron_id), dataset)
+                    self._memory_cache[cache_key] = profile
+                    
+                except Exception as e:
+                    self._log(f"Warning: Failed to load profile from row {idx}: {e}")
+                    failed += 1
         
         self._log(f"Loaded {loaded} profiles from cache "
                   f"(skipped {skipped_k} with insufficient top_k, {failed} failed)")

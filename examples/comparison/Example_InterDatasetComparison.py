@@ -115,12 +115,12 @@ def run_comprehensive_comparison():
         # -----------------------------------------------------------------
         verification_direction='both',       # 'upstream', 'downstream', or 'both'
         verification_mode='loose',           # 'loose' (type-level) or 'strict' (bodyId-level)
-        verification_top_k=5,                # Number of top partners to compare
-        verification_top_m=0,                # Minimum unique partners (0 = no expansion)
+        verification_top_k=10,                # Number of top partners to compare
+        verification_top_m=3,                # Minimum unique partners (0 = no expansion)
         verification_min_synapse_threshold=3,# Min synapses for inclusion
         verification_include_untyped=True,   # Include untyped partners
         verification_min_common_partners=3,  # (strict mode) Min shared partners
-        verification_score_weights={'jaccard': 0.50, 'rank': 0.50},  # Score weights
+        verification_score_weights={'jaccard': 1.0, 'rank': 0.0},  # Score weights
     )
     
     # =========================================================================
