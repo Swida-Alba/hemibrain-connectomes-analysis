@@ -87,6 +87,10 @@ class ComparisonAnalyzer:
         self.aligned_results: Dict[int, pd.DataFrame] = {}
         self.comparison_report: Optional[Dict] = None
         
+        # Cache for expensive calculations (reused across export/visualizations)
+        self._similarity_cache: Dict[int, pd.DataFrame] = {}  # threshold -> similarities
+        self._output_base_printed: bool = False  # Track if base dir was printed
+        
         # Resolve dataset configurations from strings
         self._dataset_configs: Dict[str, DatasetConfig] = {}
         self._resolve_dataset_configs()
@@ -137,6 +141,30 @@ class ComparisonAnalyzer:
             return
         prefix = "⚠️ " if level == 'warn' else ""
         print(f"[Comparison] {prefix}{message}")
+    
+    def _log_file(self, filepath: str, description: str = "Saved"):
+        """Log file save with relative path (prints base dir only once).
+        
+        Args:
+            filepath: Full file path
+            description: Action description (default: "Saved")
+        """
+        if not self.verbose:
+            return
+        
+        base_dir = self.parameters.full_output_path if self.parameters else None
+        
+        # Print base directory once at the start
+        if base_dir and not self._output_base_printed:
+            print(f"[Comparison] Output directory: {base_dir}")
+            self._output_base_printed = True
+        
+        # Show only relative path from base dir
+        if base_dir and filepath.startswith(base_dir):
+            rel_path = os.path.relpath(filepath, base_dir)
+            print(f"[Comparison] {description}: {rel_path}")
+        else:
+            print(f"[Comparison] {description}: {filepath}")
     
     def _generate_mode_specific_note(self) -> str:
         """Generate HTML note specific to the comparison mode used."""
@@ -1017,7 +1045,7 @@ class ComparisonAnalyzer:
         # Save to connections.csv as our own cached version
         filepath = os.path.join(dirpath, "connections.csv")
         df.to_csv(filepath, index=False)
-        self._log(f"Saved: {filepath}")
+        self._log_file(filepath)
     
     # =========================================================================
     # Comparison Analysis
@@ -1064,7 +1092,7 @@ class ComparisonAnalyzer:
             label_mapper=self.label_mapper
         )
         
-        # Calculate cross-threshold similarities
+        # Calculate cross-threshold similarities and cache them
         similarities = self.metrics.calculate_similarity_across_thresholds(
             results=self.raw_results,
             datasets=dataset_names,
@@ -1073,10 +1101,48 @@ class ComparisonAnalyzer:
         )
         summary['threshold_similarities'] = similarities
         
+        # Cache per-threshold similarities for reuse in visualizations
+        if not similarities.empty and 'threshold' in similarities.columns:
+            for threshold in self.parameters.thresholds:
+                thresh_sims = similarities[similarities['threshold'] == threshold]
+                if not thresh_sims.empty:
+                    self._similarity_cache[threshold] = thresh_sims.copy()
+        
         # Store for later use
         self.comparison_report = summary
         
         return summary
+    
+    def get_cached_similarities(self, threshold: int) -> pd.DataFrame:
+        """
+        Get cached pairwise similarities at a threshold.
+        
+        Uses cached values if available, otherwise computes and caches.
+        
+        Args:
+            threshold: Weight threshold
+            
+        Returns:
+            DataFrame with pairwise similarities
+        """
+        if threshold in self._similarity_cache:
+            return self._similarity_cache[threshold].copy()
+        
+        # Compute if not cached
+        aligned = self.get_aligned_data(threshold)
+        if aligned.empty:
+            return pd.DataFrame()
+        
+        dataset_names = self.parameters.get_dataset_names()
+        similarities = self.metrics.calculate_all_pairwise_similarities(
+            aligned, dataset_names, threshold=1, include_advanced_metrics=True
+        )
+        
+        # Cache for future use
+        if not similarities.empty:
+            self._similarity_cache[threshold] = similarities.copy()
+        
+        return similarities
     
     def get_aligned_data(self, threshold: int) -> pd.DataFrame:
         """
@@ -3081,6 +3147,7 @@ class ComparisonAnalyzer:
         
         Creates visualization PNG files in the comparison_visualizations/ subfolder at base level.
         Also generates interactive HTML heatmaps using VisualizePath.
+        Uses cached similarities to avoid redundant calculations.
         
         Args:
             output_dir: Base output directory
@@ -3114,7 +3181,7 @@ class ComparisonAnalyzer:
             nicknames = self.parameters.get_dataset_nicknames()
             nickname_map = dict(zip(dataset_names, nicknames))
             
-            # Generate all standard plots, passing align function for multi-threshold plots
+            # Generate all standard plots, passing cached similarity function
             visualizer.save_all_plots(
                 results=self.raw_results,
                 aligned_data=aligned,
@@ -3122,6 +3189,7 @@ class ComparisonAnalyzer:
                 output_dir=vis_dir,
                 thresholds=self.parameters.thresholds,
                 align_func=self.get_aligned_data,  # Pass function to get aligned data at any threshold
+                similarity_func=self.get_cached_similarities,  # Pass cached similarity function
                 current_threshold=mid_threshold,
                 path_data_func=self._get_path_data_for_threshold,
                 ratio_data_func=self._get_ratio_data_for_threshold,
@@ -3130,7 +3198,7 @@ class ComparisonAnalyzer:
                 nickname_map=nickname_map
             )
             
-            self._log(f"Saved visualizations to: {vis_dir}")
+            self._log_file(vis_dir, "Saved visualizations")
         except Exception as e:
             self._log(f"Warning: Failed to generate some visualizations: {e}")
         

@@ -906,7 +906,9 @@ class ComparisonVisualizer:
             dpi: Resolution (default 450 for high quality)
         """
         fig.savefig(path, dpi=dpi, bbox_inches='tight')
-        self._vprint(f"Saved figure: {path}")
+        # Print only the filename, not the full path
+        filename = os.path.basename(path)
+        self._vprint(f"Saved: {filename}")
     
     def plot_threshold_comparison_subplots(
         self,
@@ -1074,6 +1076,7 @@ class ComparisonVisualizer:
         results: Dict[str, Dict[int, pd.DataFrame]],
         thresholds: List[int],
         align_func,
+        similarity_func=None,
         figsize: Optional[Tuple[int, int]] = None,
         title: str = "Dataset Similarity at Each Threshold",
         show_progress: bool = True
@@ -1089,6 +1092,7 @@ class ComparisonVisualizer:
             results: Nested dict {dataset: {threshold: DataFrame}}
             thresholds: List of thresholds to include
             align_func: Function to get aligned data at a threshold
+            similarity_func: Optional function to get cached similarities (avoids recalculation)
             figsize: Figure size tuple
             title: Overall figure title
             show_progress: Whether to show progress bar (default True)
@@ -1115,7 +1119,7 @@ class ComparisonVisualizer:
         
         datasets = list(results.keys())
         
-        # Metric definitions
+        # Metric definitions with progress info
         metric_configs = [
             ('jaccard_similarity', 'Jaccard', 'Greens'),
             ('ged_similarity', 'GED', 'Greens'),
@@ -1128,13 +1132,14 @@ class ComparisonVisualizer:
         if show_progress and len(thresholds) > 1:
             threshold_iter = tqdm(
                 list(enumerate(thresholds)),
-                desc="Building similarity matrices",
+                desc="Computing similarity metrics",
                 unit="threshold"
             )
         
         for col_idx, threshold in threshold_iter:
+            # Update progress with current threshold and metric
             if show_progress and len(thresholds) > 1:
-                threshold_iter.set_postfix({"threshold": threshold, "metrics": "Jaccard/GED/Spearman/RV"})
+                threshold_iter.set_postfix({"t": threshold})
             
             try:
                 aligned = align_func(threshold)
@@ -1142,7 +1147,19 @@ class ComparisonVisualizer:
                     continue
                 
                 available = [d for d in datasets if d in aligned.columns]
-                similarities = metrics.calculate_all_pairwise_similarities(aligned, datasets, threshold=1, include_advanced_metrics=True)
+                
+                # Use cached similarities if available, otherwise calculate
+                if similarity_func:
+                    similarities = similarity_func(threshold)
+                    # Add advanced metrics if not present
+                    if similarities.empty or 'ged_similarity' not in similarities.columns:
+                        similarities = metrics.calculate_all_pairwise_similarities(
+                            aligned, datasets, threshold=1, include_advanced_metrics=True
+                        )
+                else:
+                    similarities = metrics.calculate_all_pairwise_similarities(
+                        aligned, datasets, threshold=1, include_advanced_metrics=True
+                    )
                 
                 if similarities.empty:
                     continue
@@ -1682,6 +1699,7 @@ class ComparisonVisualizer:
         output_dir: str,
         thresholds: List[int],
         align_func=None,
+        similarity_func=None,
         current_threshold: int = None,
         path_data_func=None,
         ratio_data_func=None,
@@ -1699,6 +1717,7 @@ class ComparisonVisualizer:
             output_dir: Directory to save plots
             thresholds: List of thresholds
             align_func: Function to get aligned data at any threshold (for multi-threshold plots)
+            similarity_func: Function to get cached similarities at a threshold (avoids recalculation)
             current_threshold: Current threshold used for aligned_data (for labeling)
             path_data_func: Function to get path min_weight data at a given threshold
             ratio_data_func: Function to get ratio data at a given threshold
@@ -1743,27 +1762,33 @@ class ComparisonVisualizer:
             similarities.to_csv(os.path.join(vis_data_dir, "similarity_matrix.csv"), index=False)
         
         # Similarity matrices per threshold (combined subplot figure)
+        # Use cached similarities if available to avoid recalculation
         if align_func and len(thresholds) > 1:
             try:
                 fig = self.plot_similarity_matrix_per_threshold(
                     results, thresholds, align_func,
+                    similarity_func=similarity_func,
                     title="Dataset Similarity at Each Threshold Level"
                 )
                 self.save_figure(fig, os.path.join(output_dir, "similarity_per_threshold.png"))
                 plt.close(fig)
                 
-                # Save per-threshold similarity data
-                from .metrics import ComparisonMetrics
-                metrics = ComparisonMetrics()
+                # Save per-threshold similarity data (use cached if available)
                 all_sim_data = []
                 for threshold in thresholds:
                     try:
-                        aligned_t = align_func(threshold)
-                        if not aligned_t.empty:
-                            sim_t = metrics.calculate_all_pairwise_similarities(aligned_t, datasets, threshold=1)
-                            if not sim_t.empty:
-                                sim_t['threshold'] = threshold
-                                all_sim_data.append(sim_t)
+                        if similarity_func:
+                            sim_t = similarity_func(threshold)
+                        else:
+                            from .metrics import ComparisonMetrics
+                            metrics = ComparisonMetrics()
+                            aligned_t = align_func(threshold)
+                            if not aligned_t.empty:
+                                sim_t = metrics.calculate_all_pairwise_similarities(aligned_t, datasets, threshold=1)
+                        if sim_t is not None and not sim_t.empty:
+                            sim_t = sim_t.copy()
+                            sim_t['threshold'] = threshold
+                            all_sim_data.append(sim_t)
                     except:
                         pass
                 if all_sim_data:

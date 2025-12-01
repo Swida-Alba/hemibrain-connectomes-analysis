@@ -366,13 +366,13 @@ class ComparisonMetrics:
         if show_progress and len(thresholds) > 1:
             threshold_iter = tqdm(
                 thresholds, 
-                desc="Building similarity matrix",
+                desc="Computing similarity metrics",
                 unit="threshold"
             )
         
         for threshold in threshold_iter:
             if show_progress and len(thresholds) > 1:
-                threshold_iter.set_postfix({"threshold": threshold})
+                threshold_iter.set_postfix({"t": threshold})
             
             # Align data at this threshold
             aligned = self._align_results_at_threshold(results, datasets, threshold, label_mapper)
