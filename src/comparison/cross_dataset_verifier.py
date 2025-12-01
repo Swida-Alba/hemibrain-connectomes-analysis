@@ -900,7 +900,8 @@ class CrossDatasetVerifier:
                         except Exception:
                             pass
                     
-                    for dir_name in ['upstream', 'downstream']:
+                    # Compute for all three directions: upstream, downstream, and both
+                    for dir_name in ['upstream', 'downstream', 'both']:
                         try:
                             # Compute pairwise directional scores directly
                             dir_rank_values = []
@@ -957,8 +958,10 @@ class CrossDatasetVerifier:
                 if include_directional:
                     error_row['avg_rank_corr_upstream'] = np.nan
                     error_row['avg_rank_corr_downstream'] = np.nan
+                    error_row['avg_rank_corr_both'] = np.nan
                     error_row['avg_jaccard_upstream'] = np.nan
                     error_row['avg_jaccard_downstream'] = np.nan
+                    error_row['avg_jaccard_both'] = np.nan
                 results.append(error_row)
         
         # Reset batch mode flag

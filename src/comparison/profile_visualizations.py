@@ -1378,12 +1378,14 @@ class ProfileVisualizer:
                 directional_cols = f"{score_cell_colored(upstream)}{score_cell_colored(downstream)}" if has_directional else ""
                 
                 # Jaccard columns - directional and combined
+                # Use avg_jaccard_both for proper set-based Jaccard on combined up+down partners
+                jaccard_both = row.get('avg_jaccard_both', row.get('avg_jaccard', np.nan))
                 jaccard_up = row.get('avg_jaccard_upstream', np.nan)
                 jaccard_down = row.get('avg_jaccard_downstream', np.nan)
                 if has_directional_jaccard:
-                    jaccard_cols = f"{jaccard_cell_colored(jaccard)}{jaccard_cell_colored(jaccard_up)}{jaccard_cell_colored(jaccard_down)}"
+                    jaccard_cols = f"{jaccard_cell_colored(jaccard_both)}{jaccard_cell_colored(jaccard_up)}{jaccard_cell_colored(jaccard_down)}"
                 else:
-                    jaccard_cols = jaccard_cell_colored(jaccard)
+                    jaccard_cols = jaccard_cell_colored(jaccard_both)
                 
                 html_parts.append(f'''
                     <tr>
