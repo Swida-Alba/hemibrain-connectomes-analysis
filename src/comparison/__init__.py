@@ -63,6 +63,8 @@ from .connectivity_profiler import (
     FuzzyMatchConfig,
     normalize_partner_type,
     compute_ranks,
+    clear_profiler_conn_cache,
+    get_profiler_conn_cache_info,
 )
 from .profile_comparator import (
     ProfileComparator,
@@ -98,6 +100,8 @@ __all__ = [
     'FuzzyMatchConfig',
     'normalize_partner_type',
     'compute_ranks',
+    'clear_profiler_conn_cache',
+    'get_profiler_conn_cache_info',
     'ProfileComparator',
     'ComparisonResult',
     'DEFAULT_SCORE_WEIGHTS',

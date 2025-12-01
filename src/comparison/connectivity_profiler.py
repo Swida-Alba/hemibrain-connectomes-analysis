@@ -38,6 +38,33 @@ import pandas as pd
 
 
 # ============================================================================
+# Module-Level Connection Data Cache
+# ============================================================================
+# Cache structure: {dataset_key: {'conn_df': DataFrame, 'type_lookup': dict}}
+# This is shared across all ConnectivityProfiler instances to avoid repeated
+# disk reads when processing multiple neurons/types from the same dataset.
+
+_PROFILER_CONN_CACHE: Dict[str, Dict[str, Any]] = {}
+
+
+def clear_profiler_conn_cache():
+    """Clear the module-level connection data cache."""
+    global _PROFILER_CONN_CACHE
+    _PROFILER_CONN_CACHE.clear()
+
+
+def get_profiler_conn_cache_info() -> Dict[str, Any]:
+    """Get info about cached connection data."""
+    info = {}
+    for dataset, data in _PROFILER_CONN_CACHE.items():
+        info[dataset] = {
+            'conn_df_rows': len(data.get('conn_df', [])) if data.get('conn_df') is not None else 0,
+            'type_lookup_size': len(data.get('type_lookup', {})),
+        }
+    return info
+
+
+# ============================================================================
 # Configuration Classes
 # ============================================================================
 
@@ -1746,35 +1773,43 @@ class ConnectivityProfiler:
             self._log(f"Warning: Query failed for {neuron} in {dataset}: {e}")
             return pd.DataFrame(), pd.DataFrame()
     
-    def _query_connections_local(
-        self,
-        neuron: Union[str, int, List],
-        dataset: str
-    ) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    def _get_cached_conn_df(self, dataset: str) -> Optional[pd.DataFrame]:
         """
-        Query upstream and downstream connections from local dataset files.
+        Get connection DataFrame from module-level cache, loading from disk only once.
+        
+        This method handles:
+        1. Check module-level cache first
+        2. Load from disk if not cached
+        3. Standardize column names
+        4. Join type info from neuron_df if needed
+        5. Cache for future use
         
         Returns:
-            Tuple of (upstream_df, downstream_df)
+            Cached and preprocessed connection DataFrame, or None if not available
         """
-        # Find dataset folder
+        global _PROFILER_CONN_CACHE
+        
+        # Build cache key
+        safe_name = dataset.replace(':', '_').replace('.', '_')
+        
+        # Check module-level cache first
+        if safe_name in _PROFILER_CONN_CACHE and 'conn_df' in _PROFILER_CONN_CACHE[safe_name]:
+            cached_df = _PROFILER_CONN_CACHE[safe_name]['conn_df']
+            if cached_df is not None:
+                return cached_df
+        
+        # Load from disk
         src_dir = Path(__file__).parent.parent
         project_root = src_dir.parent
         datasets_folder = project_root / 'datasets'
-        
-        safe_name = dataset.replace(':', '_').replace('.', '_')
         dataset_path = datasets_folder / safe_name
         
         # Try to load connections file - check multiple naming conventions
-        # Priority order: merged_connections > connections > generic
         conn_files = [
-            # Merged connections format (used by FlyWire FAFB/BANC converters)
             dataset_path / f'{safe_name}_merged_connections.parquet',
             dataset_path / f'{safe_name}_merged_connections.csv',
-            # Standard connections format
             dataset_path / f'{safe_name}_connections.parquet',
             dataset_path / f'{safe_name}_connections.csv',
-            # Generic fallback
             dataset_path / 'connections.parquet',
             dataset_path / 'connections.csv',
         ]
@@ -1787,14 +1822,17 @@ class ConnectivityProfiler:
                         conn_df = pd.read_parquet(conn_file)
                     else:
                         conn_df = pd.read_csv(conn_file)
-                    self._log(f"Loaded connections from {conn_file}", level='debug')
+                    self._log(f"Loaded connections from {conn_file.name} ({len(conn_df):,} rows)", level='debug')
                     break
                 except Exception as e:
                     self._log(f"Warning: Could not load {conn_file}: {e}")
         
         if conn_df is None or conn_df.empty:
-            self._log(f"Warning: No connection data found for {dataset}")
-            return pd.DataFrame(), pd.DataFrame()
+            # Cache the None result to avoid repeated disk checks
+            if safe_name not in _PROFILER_CONN_CACHE:
+                _PROFILER_CONN_CACHE[safe_name] = {}
+            _PROFILER_CONN_CACHE[safe_name]['conn_df'] = None
+            return None
         
         # Standardize column names
         col_mapping = {
@@ -1817,8 +1855,39 @@ class ConnectivityProfiler:
             else:
                 conn_df['weight'] = 1
         
-        # Filter by minimum synapses
-        conn_df = conn_df[conn_df['weight'] >= self.config.min_synapse_threshold]
+        # Cache the preprocessed DataFrame
+        if safe_name not in _PROFILER_CONN_CACHE:
+            _PROFILER_CONN_CACHE[safe_name] = {}
+        _PROFILER_CONN_CACHE[safe_name]['conn_df'] = conn_df
+        
+        self._log(f"Cached connection data for {dataset} ({len(conn_df):,} rows)")
+        
+        return conn_df
+    
+    def _query_connections_local(
+        self,
+        neuron: Union[str, int, List],
+        dataset: str
+    ) -> Tuple[pd.DataFrame, pd.DataFrame]:
+        """
+        Query upstream and downstream connections from local dataset files.
+        
+        Uses module-level cache to load connection data once per dataset.
+        
+        Returns:
+            Tuple of (upstream_df, downstream_df)
+        """
+        # Get cached connection DataFrame
+        conn_df = self._get_cached_conn_df(dataset)
+        
+        if conn_df is None or conn_df.empty:
+            self._log(f"Warning: No connection data found for {dataset}")
+            return pd.DataFrame(), pd.DataFrame()
+        
+        # Filter by minimum synapses (apply on a view, not copy yet)
+        min_syn = self.config.min_synapse_threshold
+        if min_syn > 0:
+            conn_df = conn_df[conn_df['weight'] >= min_syn]
         
         # Build neuron mask
         if isinstance(neuron, str):
@@ -1885,6 +1954,8 @@ class ConnectivityProfiler:
         For each untyped 1-hop partner, query their connections and return
         only typed 2-hop partners with their weights and ranks.
         
+        Uses module-level cache for connection data.
+        
         Args:
             untyped_bodyids: List of untyped 1-hop partner bodyIds
             dataset: Dataset identifier
@@ -1900,58 +1971,16 @@ class ConnectivityProfiler:
         if not untyped_bodyids:
             return {}
         
-        # Load connection data for the dataset
-        src_dir = Path(__file__).parent.parent
-        project_root = src_dir.parent
-        datasets_folder = project_root / 'datasets'
-        
-        safe_name = dataset.replace(':', '_').replace('.', '_')
-        dataset_path = datasets_folder / safe_name
-        
-        # Find and load connections file
-        conn_files = [
-            dataset_path / f'{safe_name}_merged_connections.parquet',
-            dataset_path / f'{safe_name}_merged_connections.csv',
-            dataset_path / f'{safe_name}_connections.parquet',
-            dataset_path / f'{safe_name}_connections.csv',
-            dataset_path / 'connections.parquet',
-            dataset_path / 'connections.csv',
-        ]
-        
-        conn_df = None
-        for conn_file in conn_files:
-            if conn_file.exists():
-                try:
-                    if str(conn_file).endswith('.parquet'):
-                        conn_df = pd.read_parquet(conn_file)
-                    else:
-                        conn_df = pd.read_csv(conn_file)
-                    break
-                except Exception as e:
-                    self._log(f"Warning: Could not load {conn_file}: {e}")
+        # Use cached connection data
+        conn_df = self._get_cached_conn_df(dataset)
         
         if conn_df is None or conn_df.empty:
             return {}
         
-        # Standardize column names
-        col_mapping = {
-            'pre_pt_root_id': 'bodyId_pre',
-            'post_pt_root_id': 'bodyId_post',
-            'pre_type': 'type_pre',
-            'post_type': 'type_post',
-            'syn_count': 'weight',
-        }
-        conn_df = conn_df.rename(columns={k: v for k, v in col_mapping.items() if k in conn_df.columns})
-        
-        # Ensure weight column
-        if 'weight' not in conn_df.columns:
-            if 'syn_count' in conn_df.columns:
-                conn_df['weight'] = conn_df['syn_count']
-            else:
-                conn_df['weight'] = 1
-        
         # Filter by minimum synapses
-        conn_df = conn_df[conn_df['weight'] >= self.config.min_synapse_threshold]
+        min_syn = self.config.min_synapse_threshold
+        if min_syn > 0:
+            conn_df = conn_df[conn_df['weight'] >= min_syn]
         
         results = {}
         top_k_2hop = self.config.top_k_2hop
