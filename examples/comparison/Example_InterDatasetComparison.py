@@ -128,7 +128,7 @@ def run_comprehensive_comparison():
         # Performance Settings (for parallel processing)
         # -----------------------------------------------------------------
         parallel=True,                # Enable parallel processing
-        max_workers=None,             # Auto-detect optimal worker count
+        max_workers=6,             # Auto-detect optimal worker count
     )
     
     # =========================================================================

@@ -44,13 +44,19 @@ import pandas as pd
 # This is shared across all ConnectivityProfiler instances to avoid repeated
 # disk reads when processing multiple neurons/types from the same dataset.
 
+import threading
+
 _PROFILER_CONN_CACHE: Dict[str, Dict[str, Any]] = {}
+_PROFILER_CONN_CACHE_LOCK = threading.Lock()
+_PROFILER_CACHE_LOGGED: set = set()  # Track which datasets have been logged
 
 
 def clear_profiler_conn_cache():
     """Clear the module-level connection data cache."""
-    global _PROFILER_CONN_CACHE
-    _PROFILER_CONN_CACHE.clear()
+    global _PROFILER_CONN_CACHE, _PROFILER_CACHE_LOGGED
+    with _PROFILER_CONN_CACHE_LOCK:
+        _PROFILER_CONN_CACHE.clear()
+        _PROFILER_CACHE_LOGGED.clear()
 
 
 def get_profiler_conn_cache_info() -> Dict[str, Any]:
@@ -1778,91 +1784,103 @@ class ConnectivityProfiler:
         Get connection DataFrame from module-level cache, loading from disk only once.
         
         This method handles:
-        1. Check module-level cache first
+        1. Check module-level cache first (with thread lock)
         2. Load from disk if not cached
         3. Standardize column names
         4. Join type info from neuron_df if needed
         5. Cache for future use
         
+        Thread-safe: Uses module-level lock to prevent race conditions.
+        
         Returns:
             Cached and preprocessed connection DataFrame, or None if not available
         """
-        global _PROFILER_CONN_CACHE
+        global _PROFILER_CONN_CACHE, _PROFILER_CONN_CACHE_LOCK, _PROFILER_CACHE_LOGGED
         
         # Build cache key
         safe_name = dataset.replace(':', '_').replace('.', '_')
         
-        # Check module-level cache first
+        # Quick check without lock (for already cached data)
         if safe_name in _PROFILER_CONN_CACHE and 'conn_df' in _PROFILER_CONN_CACHE[safe_name]:
             cached_df = _PROFILER_CONN_CACHE[safe_name]['conn_df']
             if cached_df is not None:
                 return cached_df
         
-        # Load from disk
-        src_dir = Path(__file__).parent.parent
-        project_root = src_dir.parent
-        datasets_folder = project_root / 'datasets'
-        dataset_path = datasets_folder / safe_name
+        # Acquire lock for loading
+        with _PROFILER_CONN_CACHE_LOCK:
+            # Double-check after acquiring lock (another thread may have loaded)
+            if safe_name in _PROFILER_CONN_CACHE and 'conn_df' in _PROFILER_CONN_CACHE[safe_name]:
+                cached_df = _PROFILER_CONN_CACHE[safe_name]['conn_df']
+                if cached_df is not None:
+                    return cached_df
+            
+            # Load from disk (inside lock to prevent duplicate loading)
+            src_dir = Path(__file__).parent.parent
+            project_root = src_dir.parent
+            datasets_folder = project_root / 'datasets'
+            dataset_path = datasets_folder / safe_name
         
-        # Try to load connections file - check multiple naming conventions
-        conn_files = [
-            dataset_path / f'{safe_name}_merged_connections.parquet',
-            dataset_path / f'{safe_name}_merged_connections.csv',
-            dataset_path / f'{safe_name}_connections.parquet',
-            dataset_path / f'{safe_name}_connections.csv',
-            dataset_path / 'connections.parquet',
-            dataset_path / 'connections.csv',
-        ]
-        
-        conn_df = None
-        for conn_file in conn_files:
-            if conn_file.exists():
-                try:
-                    if str(conn_file).endswith('.parquet'):
-                        conn_df = pd.read_parquet(conn_file)
-                    else:
-                        conn_df = pd.read_csv(conn_file)
-                    self._log(f"Loaded connections from {conn_file.name} ({len(conn_df):,} rows)", level='debug')
-                    break
-                except Exception as e:
-                    self._log(f"Warning: Could not load {conn_file}: {e}")
-        
-        if conn_df is None or conn_df.empty:
-            # Cache the None result to avoid repeated disk checks
+            # Try to load connections file - check multiple naming conventions
+            conn_files = [
+                dataset_path / f'{safe_name}_merged_connections.parquet',
+                dataset_path / f'{safe_name}_merged_connections.csv',
+                dataset_path / f'{safe_name}_connections.parquet',
+                dataset_path / f'{safe_name}_connections.csv',
+                dataset_path / 'connections.parquet',
+                dataset_path / 'connections.csv',
+            ]
+            
+            conn_df = None
+            for conn_file in conn_files:
+                if conn_file.exists():
+                    try:
+                        if str(conn_file).endswith('.parquet'):
+                            conn_df = pd.read_parquet(conn_file)
+                        else:
+                            conn_df = pd.read_csv(conn_file)
+                        break
+                    except Exception as e:
+                        self._log(f"Warning: Could not load {conn_file}: {e}")
+            
+            if conn_df is None or conn_df.empty:
+                # Cache the None result to avoid repeated disk checks
+                if safe_name not in _PROFILER_CONN_CACHE:
+                    _PROFILER_CONN_CACHE[safe_name] = {}
+                _PROFILER_CONN_CACHE[safe_name]['conn_df'] = None
+                return None
+            
+            # Standardize column names
+            col_mapping = {
+                'pre_pt_root_id': 'bodyId_pre',
+                'post_pt_root_id': 'bodyId_post',
+                'pre_type': 'type_pre',
+                'post_type': 'type_post',
+                'syn_count': 'weight',
+            }
+            conn_df = conn_df.rename(columns={k: v for k, v in col_mapping.items() if k in conn_df.columns})
+            
+            # If type columns missing, try to join from neuron_df
+            if 'type_pre' not in conn_df.columns or 'type_post' not in conn_df.columns:
+                conn_df = self._join_type_info_from_neuron_df(conn_df, dataset_path, safe_name)
+            
+            # Ensure required columns exist
+            if 'weight' not in conn_df.columns:
+                if 'syn_count' in conn_df.columns:
+                    conn_df['weight'] = conn_df['syn_count']
+                else:
+                    conn_df['weight'] = 1
+            
+            # Cache the preprocessed DataFrame
             if safe_name not in _PROFILER_CONN_CACHE:
                 _PROFILER_CONN_CACHE[safe_name] = {}
-            _PROFILER_CONN_CACHE[safe_name]['conn_df'] = None
-            return None
-        
-        # Standardize column names
-        col_mapping = {
-            'pre_pt_root_id': 'bodyId_pre',
-            'post_pt_root_id': 'bodyId_post',
-            'pre_type': 'type_pre',
-            'post_type': 'type_post',
-            'syn_count': 'weight',
-        }
-        conn_df = conn_df.rename(columns={k: v for k, v in col_mapping.items() if k in conn_df.columns})
-        
-        # If type columns missing, try to join from neuron_df
-        if 'type_pre' not in conn_df.columns or 'type_post' not in conn_df.columns:
-            conn_df = self._join_type_info_from_neuron_df(conn_df, dataset_path, safe_name)
-        
-        # Ensure required columns exist
-        if 'weight' not in conn_df.columns:
-            if 'syn_count' in conn_df.columns:
-                conn_df['weight'] = conn_df['syn_count']
-            else:
-                conn_df['weight'] = 1
-        
-        # Cache the preprocessed DataFrame
-        if safe_name not in _PROFILER_CONN_CACHE:
-            _PROFILER_CONN_CACHE[safe_name] = {}
-        _PROFILER_CONN_CACHE[safe_name]['conn_df'] = conn_df
-        
-        self._log(f"Cached connection data for {dataset} ({len(conn_df):,} rows)")
-        
-        return conn_df
+            _PROFILER_CONN_CACHE[safe_name]['conn_df'] = conn_df
+            
+            # Log only once per dataset (track in module-level set)
+            if safe_name not in _PROFILER_CACHE_LOGGED:
+                _PROFILER_CACHE_LOGGED.add(safe_name)
+                self._log(f"Cached connection data for {dataset} ({len(conn_df):,} rows)")
+            
+            return conn_df
     
     def _query_connections_local(
         self,
