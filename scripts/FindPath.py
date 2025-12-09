@@ -15,33 +15,33 @@ if __name__ == '__main__':
         token='',
         data_folder='/Users/apple/Local/connection_data',
         # saveas='_name_test1',
-        # dataset='male-cns:v0.9', 
-        dataset='hemibrain:v1.2.1',
+        dataset='male-cns:v0.9', 
+        # dataset='hemibrain:v1.2.1',
         # dataset='optic-lobe:v1.1',
         # dataset='flywire_FAFB_v783',
-        sourceNeurons=['aMe26'],  # pd.read_excel('sourceNeurons.xlsx', header=None).iloc[:,0].tolist()
-        targetNeurons=['PPL101','PPL103'],  # pd.read_excel('targetNeurons.xlsx', header=None).iloc[:,0].tolist()
+        sourceNeurons=['L2'],  # pd.read_excel('sourceNeurons.xlsx', header=None).iloc[:,0].tolist()
+        targetNeurons=['l-LNv'],  # pd.read_excel('targetNeurons.xlsx', header=None).iloc[:,0].tolist()
         # sourceNeurons = pd.read_excel('sourceNeurons.xlsx', header=None).iloc[:,0].tolist(),
         # targetNeurons = pd.read_excel('targetNeurons.xlsx', header=None).iloc[:,0].tolist(),
         custom_source_name='', # you can specify a custom name for the source neurons, especially when you are using a list of many types of neurons or a list of neurons read from a file
         custom_target_name='',  # you can specify a custom name for the target neurons
         custom_source_group_names=[],
         custom_target_group_names=[],
-        min_synapse_num=1,
+        min_synapse_num=3,
         min_ratio=0.0,
         min_traversal_probability=0,
         filter_by='bodyId',  # 'bodyId' or 'type' level filtering
         showfig=False,
-        max_interlayer=1,
+        max_interlayer=3,
         keyword_in_path_to_remove=['None'],
         network_layout='distributed',
         use_cache=True,  # Enable caching for faster subsequent runs
-        use_parallel=True,  # Enable parallel processing for pathfinding (4-14x faster for large datasets)
-        n_jobs=-1,  # Use all CPU cores (-1 = auto-detect, or specify number like 4)
-        edgeN_limit=50,
+        edgeN_limit=500,
         output_format='csv',  # 'xlsx' (default) or 'csv'
+        # pathfinding='Bidirectional',  # 'Bidirectional' (fastest), 'DP' (backward), 'MemoizedDFS' (depends on repeats), 'DFS'
+        skip_bodyId=True,
     )
 
     fc.InitializeNeuronInfo()
-    # fc.FindPath()
-    fc.FindAllPath(forward_only=True)
+    fc.FindPath()
+    # fc.FindAllPath(forward_only=True)

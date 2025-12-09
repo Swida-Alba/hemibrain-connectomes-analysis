@@ -961,6 +961,77 @@ class ProfileVisualizer:
         return saved_files
 
     @staticmethod
+    def _generate_plotly_heatmap_div(
+        df: pd.DataFrame, 
+        title: str = '', 
+        colorscale: str = 'Viridis',
+        height: int = 800
+    ) -> str:
+        """Generate Plotly heatmap HTML div with hierarchical clustering."""
+        try:
+            import plotly.graph_objects as go
+            from plotly.offline import plot
+            
+            # Clustering
+            row_order = df.index.tolist()
+            col_order = df.columns.tolist()
+            df_ordered = df
+            
+            try:
+                from scipy.cluster.hierarchy import linkage, leaves_list
+                from scipy.spatial.distance import pdist
+                
+                # Only cluster if matrix is large enough and has no NaNs
+                if df.shape[0] > 2 and df.shape[1] > 2 and not df.isna().any().any():
+                    # Cluster rows
+                    row_dist = pdist(df.values, metric='euclidean')
+                    row_linkage = linkage(row_dist, method='ward')
+                    row_idx = leaves_list(row_linkage)
+                    row_order = [df.index[i] for i in row_idx]
+                    
+                    # Cluster cols
+                    col_dist = pdist(df.values.T, metric='euclidean')
+                    col_linkage = linkage(col_dist, method='ward')
+                    col_idx = leaves_list(col_linkage)
+                    col_order = [df.columns[i] for i in col_idx]
+                    
+                    # Reorder
+                    df_ordered = df.loc[row_order, col_order]
+            except ImportError:
+                pass
+            except Exception as e:
+                print(f"Clustering failed: {e}")
+                df_ordered = df
+
+            # Create figure
+            fig = go.Figure(data=go.Heatmap(
+                z=df_ordered.values,
+                x=df_ordered.columns,
+                y=df_ordered.index,
+                colorscale=colorscale,
+                colorbar=dict(title='Similarity'),
+                hovertemplate='Row: %{y}<br>Col: %{x}<br>Value: %{z:.3f}<extra></extra>'
+            ))
+            
+            fig.update_layout(
+                title=title,
+                height=height,
+                xaxis=dict(tickangle=-45, side='bottom'),
+                yaxis=dict(autorange='reversed', side='left'),
+                margin=dict(b=150, l=150, r=50, t=80),
+                font=dict(family="Segoe UI, sans-serif"),
+                plot_bgcolor='white'
+            )
+            
+            # Return div
+            return plot(fig, output_type='div', include_plotlyjs='cdn')
+            
+        except ImportError:
+            return f"<div class='status-error'>Plotly not installed. Cannot generate interactive heatmap.</div>"
+        except Exception as e:
+            return f"<div class='status-error'>Error generating heatmap: {str(e)}</div>"
+
+    @staticmethod
     def generate_html_report(
         verification_results: Dict[str, pd.DataFrame],
         profiles: Optional[Dict[str, Dict[str, ConnectivityProfile]]] = None,
@@ -998,43 +1069,49 @@ class ProfileVisualizer:
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>{title}</title>
+    <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
     <style>
         :root {{
-            --very-high-color: #2e7d32;
-            --high-color: #4CAF50;
-            --medium-color: #FFC107;
-            --low-color: #FF9800;
-            --very-low-color: #F44336;
+            --primary-color: #1a237e;
+            --secondary-color: #3949ab;
+            --success-color: #2e7d32;
+            --warning-color: #ff9800;
+            --danger-color: #f44336;
+            --light-bg: #f8f9fa;
+            --border-color: #e9ecef;
         }}
         
         body {{
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
             margin: 0;
             padding: 20px;
             background: #f5f5f5;
             color: #333;
+            line-height: 1.6;
         }}
         
         .container {{
-            max-width: 1400px;
+            max-width: 1600px;
             margin: 0 auto;
         }}
         
         header {{
-            background: linear-gradient(135deg, #1a237e, #3949ab);
-            color: white;
-            padding: 30px;
-            border-radius: 12px;
-            margin-bottom: 30px;
+            background: white;
+            padding: 25px;
+            border-radius: 8px;
+            margin-bottom: 25px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.05);
+            border-left: 5px solid var(--primary-color);
         }}
         
         h1 {{
-            margin: 0 0 10px 0;
-            font-size: 2em;
+            margin: 0 0 5px 0;
+            font-size: 1.8em;
+            color: var(--primary-color);
         }}
         
         .timestamp {{
-            opacity: 0.8;
+            color: #666;
             font-size: 0.9em;
         }}
         
@@ -1048,55 +1125,67 @@ class ProfileVisualizer:
         .card {{
             background: white;
             padding: 20px;
-            border-radius: 12px;
-            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+            border-radius: 8px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.05);
+            transition: transform 0.2s;
+        }}
+        
+        .card:hover {{
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(0,0,0,0.1);
         }}
         
         .card h3 {{
             margin: 0 0 10px 0;
-            font-size: 0.9em;
+            font-size: 0.85em;
             color: #666;
             text-transform: uppercase;
+            letter-spacing: 0.5px;
         }}
         
         .card .value {{
-            font-size: 2em;
-            font-weight: bold;
+            font-size: 2.2em;
+            font-weight: 600;
+            color: var(--primary-color);
         }}
         
         .section {{
             background: white;
             padding: 25px;
-            border-radius: 12px;
+            border-radius: 8px;
             margin-bottom: 25px;
-            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+            box-shadow: 0 2px 8px rgba(0,0,0,0.05);
         }}
         
         .section h2 {{
             margin-top: 0;
             padding-bottom: 15px;
-            border-bottom: 2px solid #e0e0e0;
+            border-bottom: 1px solid var(--border-color);
+            color: #444;
+            font-size: 1.4em;
         }}
         
         table {{
             width: 100%;
             border-collapse: collapse;
             margin-top: 15px;
+            font-size: 0.95em;
         }}
         
         th, td {{
-            padding: 12px;
+            padding: 12px 15px;
             text-align: left;
-            border-bottom: 1px solid #e0e0e0;
+            border-bottom: 1px solid var(--border-color);
         }}
         
         th {{
-            background: #f5f5f5;
+            background: var(--light-bg);
             font-weight: 600;
+            color: #555;
         }}
         
         tr:hover {{
-            background: #f9f9f9;
+            background: #f8f9fa;
         }}
         
         .confidence-badge {{
@@ -1107,61 +1196,37 @@ class ProfileVisualizer:
             font-weight: 500;
         }}
         
-        .confidence-very-high {{ background: var(--very-high-color); color: white; }}
-        .confidence-high {{ background: var(--high-color); color: white; }}
-        .confidence-medium {{ background: var(--medium-color); color: #333; }}
-        .confidence-low {{ background: var(--low-color); color: white; }}
-        .confidence-very-low {{ background: var(--very-low-color); color: white; }}
+        .confidence-High {{ background: #e8f5e9; color: #2e7d32; }}
+        .confidence-Medium {{ background: #fff3e0; color: #ef6c00; }}
+        .confidence-Low {{ background: #ffebee; color: #c62828; }}
+        .confidence-Very-Low {{ background: #ffebee; color: #c62828; }}
         
-        .score-bar {{
-            height: 20px;
-            background: #e0e0e0;
-            border-radius: 10px;
-            overflow: hidden;
-            min-width: 100px;
-        }}
-        
-        .score-bar-fill {{
-            height: 100%;
-            border-radius: 10px;
-            transition: width 0.3s;
-        }}
-        
-        .matrix-container {{
-            overflow-x: auto;
-        }}
-        
-        .matrix-table {{
-            font-size: 0.85em;
-        }}
-        
-        .matrix-table td {{
-            text-align: center;
-            min-width: 80px;
-        }}
-        
-        .matrix-cell {{
-            padding: 8px;
+        .heatmap-container {{
+            width: 100%;
+            min-height: 600px;
+            border: 1px solid var(--border-color);
             border-radius: 4px;
+            margin-top: 20px;
         }}
         
-        .role-tag {{
+        .nav-link {{
             display: inline-block;
-            padding: 2px 8px;
-            border-radius: 4px;
-            font-size: 0.8em;
-            margin-left: 5px;
+            margin-top: 10px;
+            color: var(--secondary-color);
+            text-decoration: none;
+            font-weight: 500;
         }}
         
-        .role-source {{ background: #e3f2fd; color: #1565c0; }}
-        .role-target {{ background: #e8f5e9; color: #2e7d32; }}
-        .role-intermediate {{ background: #f3e5f5; color: #7b1fa2; }}
+        .nav-link:hover {{
+            text-decoration: underline;
+        }}
         
         footer {{
             text-align: center;
             padding: 20px;
-            color: #666;
+            color: #888;
             font-size: 0.9em;
+            margin-top: 40px;
         }}
     </style>
 </head>
@@ -1170,7 +1235,7 @@ class ProfileVisualizer:
         <header>
             <h1>{title}</h1>
             <div class="timestamp">Generated: {timestamp}</div>
-            {'<div style="margin-top: 10px;"><a href="' + main_report_url + '" style="color: #90caf9; text-decoration: none; font-weight: 500;">← Back to Main Comparison Report</a></div>' if main_report_url else ''}
+            {'<a href="' + main_report_url + '" class="nav-link">← Back to Main Comparison Report</a>' if main_report_url else ''}
         </header>
 ''']
         
@@ -1192,22 +1257,41 @@ class ProfileVisualizer:
             </div>
             <div class="card">
                 <h3>High Confidence</h3>
-                <div class="value" style="color: var(--high-color);">{high_conf}</div>
+                <div class="value" style="color: var(--success-color);">{high_conf}</div>
             </div>
             <div class="card">
                 <h3>Medium Confidence</h3>
-                <div class="value" style="color: var(--medium-color);">{medium_conf}</div>
+                <div class="value" style="color: var(--warning-color);">{medium_conf}</div>
             </div>
             <div class="card">
-                <h3>Needs Review</h3>
-                <div class="value" style="color: var(--very-low-color);">{low_conf}</div>
+                <h3>Low Confidence</h3>
+                <div class="value" style="color: var(--danger-color);">{low_conf}</div>
             </div>
             <div class="card">
-                <h3>Avg Rank Corr</h3>
-                <div class="value">{avg_rank_corr:.2f}</div>
+                <h3>Avg Rank Correlation</h3>
+                <div class="value">{avg_rank_corr:.3f}</div>
             </div>
         </div>
-''')
+            ''')
+
+        # Similarity Heatmap (Interactive)
+        if similarity_matrix is not None and not similarity_matrix.empty:
+            heatmap_div = ProfileVisualizer._generate_plotly_heatmap_div(
+                similarity_matrix, 
+                title='Pairwise Similarity (Rank Correlation)',
+                colorscale='Viridis'
+            )
+            
+            html_parts.append(f'''
+        <div class="section">
+            <h2>Similarity Matrix</h2>
+            <p>Pairwise rank correlation between connectivity profiles. Rows/columns are clustered by similarity.</p>
+            <div class="heatmap-container">
+                {heatmap_div}
+            </div>
+        </div>
+            ''')
+
         
         # Add link to connectivity profile comparison if available
         if profile_comparison_url:
@@ -1411,93 +1495,7 @@ class ProfileVisualizer:
         </div>
 ''')
         
-        # Similarity matrix - filter and sort by same rule as verification summary
-        if similarity_matrix is not None and not similarity_matrix.empty:
-            # Filter out all-NaN rows
-            matrix_filtered = similarity_matrix.dropna(how='all').copy()
-            
-            # Sort by: 1) role order, 2) datasets_found, 3) avg_rank_corr (same as verification summary)
-            if not matrix_filtered.empty and not summary_df.empty:
-                # Create mappings from summary_df
-                role_map = {}
-                score_map = {}
-                datasets_found_map = {}
-                if 'role' in summary_df.columns:
-                    role_map = summary_df.set_index('neuron_type')['role'].to_dict()
-                if 'avg_rank_corr' in summary_df.columns:
-                    score_map = summary_df.set_index('neuron_type')['avg_rank_corr'].to_dict()
-                if 'datasets_found' in summary_df.columns:
-                    datasets_found_map = summary_df.set_index('neuron_type')['datasets_found'].to_dict()
-                
-                # Add sorting columns
-                role_order = {'source': 0, 'source/target': 0.5, 'target': 1, 'intermediate': 2}
-                matrix_filtered['_role'] = matrix_filtered.index.map(lambda x: role_map.get(x, 'intermediate'))
-                matrix_filtered['_role_order'] = matrix_filtered['_role'].apply(
-                    lambda x: min([role_order.get(r.strip(), 3) for r in str(x).split('/')]) if pd.notna(x) else 3
-                )
-                matrix_filtered['_datasets_found'] = matrix_filtered.index.map(lambda x: datasets_found_map.get(x, 0))
-                matrix_filtered['_score'] = matrix_filtered.index.map(lambda x: score_map.get(x, 0) if not pd.isna(score_map.get(x, np.nan)) else 0)
-                
-                # Sort by: role order (asc), datasets_found (desc), score (desc)
-                matrix_filtered = matrix_filtered.sort_values(
-                    ['_role_order', '_datasets_found', '_score'], ascending=[True, False, False]
-                )
-                
-                # Drop helper columns
-                matrix_filtered = matrix_filtered.drop(columns=['_role', '_role_order', '_datasets_found', '_score'])
-            
-            html_parts.append('''
-        <div class="section">
-            <h2>🔥 Cross-Dataset Similarity Matrix</h2>
-            <p>Rank correlation scores for each neuron type across dataset pairs. 
-               Higher values (green) indicate more consistent connectivity profiles.
-               Types are sorted by: Role → Datasets Found → Rank Corr.</p>
-            <div class="matrix-container">
-                <table class="matrix-table">
-                    <thead>
-                        <tr>
-                            <th>Type</th>
-''')
-            
-            for col in matrix_filtered.columns:
-                html_parts.append(f'                            <th>{col}</th>\n')
-            
-            html_parts.append('''                        </tr>
-                    </thead>
-                    <tbody>
-''')
-            
-            for idx, row in matrix_filtered.iterrows():
-                html_parts.append(f'                        <tr>\n                            <td><strong>{idx}</strong></td>\n')
-                for col in matrix_filtered.columns:
-                    val = row[col]
-                    if pd.isna(val):
-                        cell_style = 'background: #f5f5f5;'
-                        display_val = '-'
-                    else:
-                        # Color gradient based on normalized [0,1] range
-                        # Matches confidence thresholds: VeryHigh>=0.85, High>=0.7, Medium>=0.5, Low>=0.3, VeryLow<0.3
-                        if val >= 0.85:
-                            bg_color = 'rgba(46, 125, 50, 0.7)'  # Dark Green - Very High
-                        elif val >= 0.7:
-                            bg_color = 'rgba(76, 175, 80, 0.7)'  # Green - High
-                        elif val >= 0.5:
-                            bg_color = 'rgba(255, 193, 7, 0.7)'  # Yellow - Medium
-                        elif val >= 0.3:
-                            bg_color = 'rgba(255, 152, 0, 0.7)'  # Orange - Low
-                        else:
-                            bg_color = 'rgba(244, 67, 54, 0.5)'  # Red - Very Low
-                        cell_style = f'background: {bg_color};'
-                        display_val = f'{val:.2f}'
-                    
-                    html_parts.append(f'                            <td><div class="matrix-cell" style="{cell_style}">{display_val}</div></td>\n')
-                html_parts.append('                        </tr>\n')
-            
-            html_parts.append('''                    </tbody>
-                </table>
-            </div>
-        </div>
-''')
+
         
         # Jaccard similarity matrix (if metric_matrices available)
         jaccard_matrix = None
@@ -1505,81 +1503,52 @@ class ProfileVisualizer:
             jaccard_matrix = metric_matrices['jaccard']
         
         if jaccard_matrix is not None and not jaccard_matrix.empty:
-            # Filter and sort Jaccard matrix the same way as rank corr matrix
-            jaccard_filtered = jaccard_matrix.dropna(how='all').copy()
+            heatmap_div = ProfileVisualizer._generate_plotly_heatmap_div(
+                jaccard_matrix, 
+                title='Jaccard Similarity (Partner Overlap)',
+                colorscale='Blues'
+            )
             
-            if not jaccard_filtered.empty and not summary_df.empty:
-                # Use same sorting as rank corr matrix
-                role_map = summary_df.set_index('neuron_type')['role'].to_dict() if 'role' in summary_df.columns else {}
-                score_map = summary_df.set_index('neuron_type')['avg_rank_corr'].to_dict() if 'avg_rank_corr' in summary_df.columns else {}
-                datasets_found_map = summary_df.set_index('neuron_type')['datasets_found'].to_dict() if 'datasets_found' in summary_df.columns else {}
-                
-                role_order = {'source': 0, 'source/target': 0.5, 'target': 1, 'intermediate': 2}
-                jaccard_filtered['_role'] = jaccard_filtered.index.map(lambda x: role_map.get(x, 'intermediate'))
-                jaccard_filtered['_role_order'] = jaccard_filtered['_role'].apply(
-                    lambda x: min([role_order.get(r.strip(), 3) for r in str(x).split('/')]) if pd.notna(x) else 3
-                )
-                jaccard_filtered['_datasets_found'] = jaccard_filtered.index.map(lambda x: datasets_found_map.get(x, 0))
-                jaccard_filtered['_score'] = jaccard_filtered.index.map(lambda x: score_map.get(x, 0) if not pd.isna(score_map.get(x, np.nan)) else 0)
-                jaccard_filtered = jaccard_filtered.sort_values(
-                    ['_role_order', '_datasets_found', '_score'], ascending=[True, False, False]
-                )
-                jaccard_filtered = jaccard_filtered.drop(columns=['_role', '_role_order', '_datasets_found', '_score'])
-            
-            html_parts.append('''
+            html_parts.append(f'''
         <div class="section">
-            <h2>🔗 Jaccard Similarity Matrix</h2>
-            <p>Jaccard similarity scores for each neuron type across dataset pairs. 
-               Measures partner set overlap (intersection/union). 
-               Thresholds: Very High &gt;0.5, High &gt;0.3, Medium &gt;0.2, Low &gt;0.1, Very Low ≤0.1</p>
-            <div class="matrix-container">
-                <table class="matrix-table">
-                    <thead>
-                        <tr>
-                            <th>Type</th>
-''')
-            
-            for col in jaccard_filtered.columns:
-                html_parts.append(f'                            <th>{col}</th>\n')
-            
-            html_parts.append('''                        </tr>
-                    </thead>
-                    <tbody>
-''')
-            
-            for idx, row in jaccard_filtered.iterrows():
-                html_parts.append(f'                        <tr>\n                            <td><strong>{idx}</strong></td>\n')
-                for col in jaccard_filtered.columns:
-                    val = row[col]
-                    if pd.isna(val):
-                        cell_style = 'background: #f5f5f5;'
-                        display_val = '-'
-                    else:
-                        # Jaccard thresholds: >0.5 very high, >0.3 high, >0.2 medium, >0.1 low, <=0.1 very low
-                        if val > 0.5:
-                            bg_color = 'rgba(46, 125, 50, 0.7)'  # Dark Green - Very High
-                        elif val > 0.3:
-                            bg_color = 'rgba(76, 175, 80, 0.7)'  # Green - High
-                        elif val > 0.2:
-                            bg_color = 'rgba(255, 193, 7, 0.7)'  # Yellow - Medium
-                        elif val > 0.1:
-                            bg_color = 'rgba(255, 152, 0, 0.7)'  # Orange - Low
-                        else:
-                            bg_color = 'rgba(244, 67, 54, 0.5)'  # Red - Very Low
-                        cell_style = f'background: {bg_color};'
-                        display_val = f'{val:.2f}'
-                    
-                    html_parts.append(f'                            <td><div class="matrix-cell" style="{cell_style}">{display_val}</div></td>\n')
-                html_parts.append('                        </tr>\n')
-            
-            html_parts.append('''                    </tbody>
-                </table>
+            <h2>Jaccard Similarity Matrix</h2>
+            <p>Jaccard similarity scores for each neuron type across dataset pairs. Measures partner set overlap (intersection/union).</p>
+            <div class="heatmap-container">
+                {heatmap_div}
             </div>
         </div>
-''')
+            ''')
             
+        # Cosine similarity matrix (if metric_matrices available)
+        cosine_matrix = None
+        if metric_matrices and 'cosine' in metric_matrices:
+            cosine_matrix = metric_matrices['cosine']
+        
+        if cosine_matrix is not None and not cosine_matrix.empty:
+            heatmap_div = ProfileVisualizer._generate_plotly_heatmap_div(
+                cosine_matrix, 
+                title='Cosine Similarity (Vector Alignment)',
+                colorscale='Greens'
+            )
+            
+            html_parts.append(f'''
+        <div class="section">
+            <h2>Cosine Similarity Matrix</h2>
+            <p>Cosine similarity scores for each neuron type across dataset pairs. Measures orientation of connectivity vectors.</p>
+            <div class="heatmap-container">
+                {heatmap_div}
+            </div>
+        </div>
+            ''')
+
             # Dataset pair similarity summary - average scores across all types for each dataset pair
             # Include both rank correlation and Jaccard
+            
+            # Re-derive matrix_filtered for the summary table since we removed the static table generation
+            matrix_filtered = pd.DataFrame()
+            if similarity_matrix is not None and not similarity_matrix.empty:
+                 matrix_filtered = similarity_matrix.dropna(how='all').copy()
+            
             if not matrix_filtered.empty:
                 # Get Jaccard matrix for avg Jaccard calculation
                 jaccard_matrix_for_summary = None

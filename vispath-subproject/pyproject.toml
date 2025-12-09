@@ -33,6 +33,7 @@ dependencies = [
     "scipy>=1.7.0",
     "plotly>=5.0.0",
     "networkx>=2.6.0",
+    "polars>=1.0.0",
     "openpyxl>=3.0.0",
 ]
 

@@ -1,6 +1,6 @@
 # NeuPrint Connectome Analysis v4.1
 
-A comprehensive Python toolkit for analyzing and visualizing connectome data from **all NeuPrint databases**. Features type-based pathfinding algorithms, interactive network visualizations, 3D neuron morphology rendering with video export, and high-performance caching. Supports hemibrain, optic lobe, FIB, MANC, and other NeuPrint datasets.
+A comprehensive Python toolkit for analyzing and visualizing connectome data from **all NeuPrint databases and FlyWire datasets**. Features type-based pathfinding algorithms, interactive network visualizations, 3D neuron morphology rendering with video export, and high-performance caching. Supports hemibrain, optic lobe, FIB, MANC, and other NeuPrint datasets.
 
 [![Python Version](https://img.shields.io/badge/python-3.8%2B-blue)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
@@ -12,10 +12,12 @@ A comprehensive Python toolkit for analyzing and visualizing connectome data fro
 - 🌐 **Interactive Networks**: Cytoscape.js-powered network graphs with hierarchical and force-directed layouts
 - 🪞 **Contralateral Mirroring**: Automatically mirror neurons and ROIs to the contralateral hemisphere for full-brain visualization
 - 📊 **Rich Visualizations**: Sankey diagrams, heatmaps with clustering, and connection matrices
-- 🗄️ **Universal Dataset Support**: Works with all NeuPrint datasets (hemibrain, optic-lobe, FIB, MANC, etc.) and **FlyWire FAFB/BANC** datasets.
-- ⚡ **High Performance**: 10-100x speedup with local caching, 4-14x with parallel processing
+- 🗄️ **Universal Dataset Support**: Seamless compatibility between **NeuPrint datasets** (hemibrain, MANC, etc.) and **FlyWire FAFB/BANC** datasets.
+- ⚖️ **Advanced Comparisons**: Cross-dataset and intra-dataset comparisons at multiple threshold levels to reveal robust connectivity patterns.
+- 🧬 **Connectivity Analysis**: Profile-based homolog finding (inter/intra-dataset) and connectivity similarity comparisons.
+- ⚡ **High Performance**: 10-100x speedup with local caching, 4-14x with parallel processing, Polars-accelerated large data operations
 - 🎯 **Flexible Filtering**: Multiple filtering modes (synapse count, connection ratio, traversal probability)
-- 💾 **Smart Caching**: Efficient local storage with automatic complete dataset handling
+- 💾 **Smart Caching**: Efficient local storage with Polars for memory-efficient consolidation of large caches
 - 🔧 **Modular Design**: Reorganized src/ layout for better maintainability
 
 ---
@@ -24,6 +26,8 @@ A comprehensive Python toolkit for analyzing and visualizing connectome data fro
 
 ### 🚀 Getting Started
 - **[Installation Guide](#installation-for-users-who-can-prepare-the-python-environments-by-themselves)** - Setup and dependencies
+- **[Quick Start Guide](QUICK_START.md)** - **Start Here!** Examples for pathfinding, visualization, and comparison
+- **[Output Files Reference](docs/OUTPUT_FILES.md)** - Detailed explanation of all generated files
 - **[FlyWire FAFB Integration](docs/FAFB_INTEGRATION.md)** - Guide for setting up and using local FAFB datasets (Data Prep & Download)
 - **[FlyWire BANC Integration](docs/BANC_INTEGRATION.md)** - Guide for setting up and using local BANC datasets (Data Prep & Download)
 - **[FlyWire Usage](docs/FLYWIRE_USAGE.md)** - Guide for using FlyWire/FAFB/BANC datasets (Local File based)
@@ -36,9 +40,11 @@ For comprehensive documentation, see **[docs/README.md](docs/README.md)** - your
 
 ### 🔑 Core Features
 Detailed documentation in **[docs/core-features/](docs/core-features/)** including:
-- **✨ NEW: [Cross-Dataset Comparison Guide](docs/core-features/CrossDatasetComparison_Guide.md)** - Compare connectivity across hemibrain, male-cns, FlyWire, and more
+- **✨ NEW: [Homolog Finding Guide](docs/core-features/HomologFinding_Guide.md)** - Find homologous neurons across datasets using connectivity profiles
+- **✨ [Cross-Dataset Comparison Guide](docs/core-features/CrossDatasetComparison_Guide.md)** - Compare connectivity across hemibrain, male-cns, FlyWire, and more
+- **[LabelMapper Guide](docs/core-features/LabelMapper_Guide.md)** - Standardize neuron identifiers across datasets
 - **Cache System** - 10-100x faster queries with intelligent local storage
-- **Path Finding** - Graph-based algorithms for multi-hop connections
+- **[Path Finding Methods](docs/core-features/PathFinding_Methods.md)** - Comparison of Bidirectional, DP, and DFS algorithms
 - **Parallel Processing** - 4-14x speedup with multi-core execution
 - **Filtering** - Multiple filtering modes and criteria
 - See **[Core Features Overview](docs/core-features/README.md)** for complete list
@@ -380,6 +386,7 @@ fc = FindNeuronConnection(
 ✅ **Neuron Registry**: Search cached neurons without API calls  
 ✅ **Database Architecture**: Efficient parquet-based storage with query indexing  
 ✅ **Complete Dataset**: Automatically downloads all neurons (including type=None) for cache enrichment  
+✅ **Polars Acceleration**: Memory-efficient loading and consolidation for datasets with millions of connections  
 
 ### Cache Benefits
 
@@ -596,6 +603,25 @@ fc.FindAllPath()  # Will automatically use parallel processing if beneficial
 **Automatic Optimization:**
 - Datasets with <100 pairs: Uses sequential processing (overhead not worth it)
 - Datasets with >100 pairs: Uses parallel processing (significant speedup)
+
+### Polars Acceleration & Skip BodyId
+
+For large-scale analyses, two new features provide significant speedups:
+
+1. **Polars Integration**: The toolkit now uses [Polars](https://pola.rs/) for high-performance CSV writing and matrix generation. This is automatic and requires no configuration.
+2. **Skip BodyId Processing**: If you only need type-level connectivity data, you can skip the resource-intensive bodyId-level processing:
+
+```python
+params = ComparisonParameters(
+    # ... other parameters ...
+    skip_bodyId=True  # Skip bodyId-level data saving and calculations
+)
+```
+
+This is particularly useful for:
+- Large-scale cross-dataset comparisons
+- Quick type-level connectivity checks
+- Reducing disk usage (skips saving large bodyId CSVs)
 
 **Examples:**
 ```python
@@ -1357,7 +1383,54 @@ python FindDirect.py
 
 ---
 
-## 🆕 What’s New in V4.0 (November 2025)
+## 🆕 What's New in V4.1 (December 2025)
+
+### HomologFinder Improvements
+
+- **Hierarchical ConnectivityStatus**: Profile quality is now classified into 5 levels:
+  - `NONE`: 0 partners - skipped from comparison
+  - `RARE`: < 5 partners - included with **WARNING** (treat results carefully)
+  - `INCOMPLETE`: < top_k partners - included with Warning
+  - `INCOMPLETE_EXPANSION`: < top_m types - included with Warning  
+  - `COMPLETE`: Full profile meeting all criteria
+
+- **Status Tracking in Output Files**:
+  - `source_status_summary.json`: Tracks skipped (NONE) and warned (RARE) sources
+  - `bodyid_results.csv`: Includes `source_status` and `target_status` columns
+
+- **Renamed Column**: `shared_partner_count` → `adjacency_score`
+  - Clarifies this is from adjacency expansion candidate-finding, not comparison overlap
+
+- **Dict-Based similarity_metric**: Now accepts `Union[str, Dict[str, float]]`
+  ```python
+  # String (single metric)
+  finder = HomologFinder(similarity_metric='rank_corr')
+  
+  # Dict (weighted combination)
+  finder = HomologFinder(similarity_metric={
+      'rank_corr': 0.5,
+      'jaccard': 0.3,
+      'cosine': 0.2
+  })
+  ```
+
+- **Improved Output Folder Structure**:
+  - `profiles/query/`: Now includes `source_bodyids.csv`
+  - `profiles/matches/`: Now includes `top_target_bodyids.csv`
+
+- **Visualization Fix**: String body IDs (e.g., `"535898"`) now correctly recognized as body IDs instead of being treated as type names
+
+- **Vector Prefiltering (fast mode)**: Candidate set is trimmed to the top 5% by adjacency score and then filtered to cosine>0 before full scoring, reducing comparisons while keeping plausible matches
+
+### Performance Optimizations
+
+- **Polars Integration**: 10-100x faster CSV saving and matrix generation using Polars library.
+- **Skip BodyId Processing**: New `skip_bodyId=True` parameter in `ComparisonParameters` to bypass resource-intensive bodyId-level data saving and calculations for large-scale type-level analyses.
+- **Progress Tracking**: Added granular progress bars for heavy aggregation steps.
+
+---
+
+## 🆕 What's New in V4.0 (November 2025)
 
 - **Contralateral Mirroring**: `VisualizeSkeleton` now supports mirroring neurons and ROIs to the contralateral hemisphere.
   - Set `mirror_on_contralateral=True` to enable.

@@ -5,7 +5,6 @@ import bokeh.palettes as bp
 # Add src directory to Python path
 sys.path.insert(0, str(Path(__file__).parent.parent / 'src'))
 from coana import VisualizeSkeleton
-import statvis as sv
 
 # please provide your own neuprint token, which can be found at https://neuprint.janelia.org/account
 # dataset = 'hemibrain:v1.2.1'
@@ -14,12 +13,12 @@ import statvis as sv
 # If alignment looks off, try brain_mesh='template' to view in native JRCFIB2018F space.
 
 vs = VisualizeSkeleton(
-    dataset = 'flywire_FAFB_v783',
-    # dataset = 'male-cns:v0.9',
+    # dataset = 'flywire_FAFB_v783', 
+    dataset = 'male-cns:v0.9',
     # dataset = 'hemibrain:v1.2.1',
     token = '',
     data_folder='/Users/apple/Local/connection_data',
-    neuron_layers = ['aMe12', 'KCg-d', 'PPL101'], # or in the format: 'VA1d_adPN -> LHCENT3 -> MBON01'
+    neuron_layers = ['MeVPLo2','aMe12'], # or in the format: 'VA1d_adPN -> LHCENT3 -> MBON01'
     custom_layer_names = [],
     skip_synapse=False,
     neuron_alpha = 0.2,
@@ -27,13 +26,14 @@ vs = VisualizeSkeleton(
     synapse_size = 'real',
     use_size_slider = False,
     synapse_alpha = 0.6,
-    mesh_roi = ['ME(R)', 'ME(L)', 'EB', 'AL(R)', 'AL(L)'],
+    # mesh_roi = ['EB'],
+    # mesh_color=(1,1,1,0),
     skeleton_mode = 'tube',
     synapse_mode = 'cone',
-    legend_mode = 'merge',
+    legend_mode = 'normal',
     merge_neurons=True,
     skeleton_mesh_simplification=0.9,
-    roi_mesh_simplification=0.95,
+    roi_mesh_simplification=0.9,
     
     show_fig = True,
     brain_mesh = 'whole',
@@ -44,4 +44,4 @@ vs = VisualizeSkeleton(
 
 vs.plot_neurons()
 # Use lower scale (1) for faster rendering of large scenes
-vs.export_video(fps=30, scale=1)
+# vs.export_video(fps=30, scale=1)

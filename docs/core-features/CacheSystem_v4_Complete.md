@@ -27,6 +27,7 @@ neuprint_cache/optic-lobe_v1_1/
 - ✅ All connections in one database
 - ✅ Maximum cache reuse
 - ✅ Each connection stored only once
+- ✅ Polars-accelerated loading for large caches
 
 ## Test Results
 
@@ -230,6 +231,32 @@ Layer 0->1:
 - Large databases (>1GB) may slow down
 - Consider periodic cleanup of old connections
 - Use `ManageCache.py` tools (when available)
+- **Install Polars** for faster loading: `pip install polars`
+
+## Performance: Polars Integration
+
+For large caches (millions of connections), we use **Polars** for memory-efficient loading:
+
+```python
+# Automatic - Polars is used when available
+# No code changes needed!
+```
+
+### Benefits
+- **1.5-2x faster** parquet loading compared to pure Pandas
+- **Lower memory usage** during batch consolidation
+- **Graceful fallback** to Pandas if Polars not installed
+
+### Installation
+```bash
+pip install polars
+```
+
+### How it works
+1. Cache loading uses `polars.read_parquet()` for speed
+2. Data is converted to Pandas for API compatibility
+3. Batch consolidation uses Polars lazy evaluation
+4. Falls back to Pandas if Polars is unavailable
 
 ## Credits
 

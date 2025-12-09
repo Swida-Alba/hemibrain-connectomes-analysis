@@ -5,13 +5,170 @@ Documentation for the fundamental features of the Hemibrain Connectomes Analysis
 ## Overview
 
 This directory contains documentation for the core analytical capabilities:
+- **✨ Module Calling Tree**: Visual architecture and dependency relationships (NEW)
+- **✨ Connectivity Profiler**: 1-hop/2-hop hybrid profile building approach (NEW)
+- **✨ Homolog Finding**: Find homologs across datasets using connectivity profiles
 - **✨ Cross-Dataset Comparison**: Compare connectivity across multiple datasets
 - **✨ Connectivity Profile Verification**: Verify neuron types using connectivity fingerprints
-- **Path Finding**: Finding direct and multi-hop connections
+- **[Path Finding Methods](./PathFinding_Methods.md)**: Comparison of Bidirectional, DP, and DFS algorithms
 - **Custom Groups**: Flexible neuron grouping for custom analysis
 - **Cache System**: High-performance local data storage
 - **Parallel Processing**: Multi-core acceleration
 - **Filtering**: Connection and neuron filtering options
+
+---
+
+## ✨ Module Calling Tree (NEW)
+
+### [Module Calling Tree](./Module_Calling_Tree.md)
+Visual architecture guide showing how all modules in the project interact.
+
+**Key Topics**:
+- Module dependency hierarchy
+- Calling flows for each feature (Connection Query, Profile Building, Homolog Finding, Comparison)
+- Import graph for all modules
+- Key dependency rules and best practices
+
+**Overview**:
+```
+User Entry Points
+    │
+    ├── FindNeuronConnection (coana.py)
+    │       └── Connection queries, caching
+    │
+    ├── ConnectivityProfiler (connectivity_profiler.py)
+    │       └── 1-hop/2-hop hybrid profile building
+    │
+    ├── HomologFinder (profile_comparator.py)
+    │       └── Homolog discovery via profiles
+    │
+    └── VisualizePath (vispath-subproject)
+            └── Network visualization (standalone)
+```
+
+---
+
+```
+
+---
+
+## Path Finding Methods
+
+### [Path Finding Methods](./PathFinding_Methods.md)
+Detailed comparison of the available pathfinding algorithms in `FindAllPath`.
+
+**Key Topics**:
+- **Bidirectional Search**: The default, fastest method ($O(b^{d/2})$).
+- **Optimized Backward Search (DP)**: Best for finding all paths to specific targets.
+- **Memoized DFS**: Good for dense graphs with overlapping paths.
+- **Standard DFS**: Low memory but slow for deep paths.
+- **Parallel Processing**: High-performance mode for large datasets.
+
+**Comparison Table**:
+| Algorithm | Speed | Memory | Best Use Case |
+| :--- | :--- | :--- | :--- |
+| **Bidirectional** | ⭐⭐⭐⭐⭐ | ⭐⭐⭐ | **General purpose** |
+| **DP (Backward)** | ⭐⭐⭐⭐ | ⭐⭐ | Many sources to few targets |
+| **Memoized DFS** | ⭐⭐⭐ | ⭐⭐⭐ | Dense graphs |
+| **Standard DFS** | ⭐ | ⭐⭐⭐⭐⭐ | Low memory |
+
+---
+
+## ✨ Connectivity Profiler (NEW)
+
+### [Connectivity Profiler Guide](./ConnectivityProfiler_Guide.md)
+Core module for building connectivity profiles using the 1-hop/2-hop hybrid approach.
+
+**Key Topics**:
+- 1-hop/2-hop hybrid approach with top-k/top-m expansion
+- ProfilerConfig settings and customization
+- Cache system integration (memory → disk-index → disk-df)
+- Fuzzy type matching for cross-dataset comparison
+- Profile aggregation and normalization
+
+**Architecture**:
+```
+ConnectivityProfiler
+    │
+    ├── ProfilerConfig
+    │   - top_k_bodyid=15 (top K partners per direction)
+    │   - top_m_type=5 (min unique types)
+    │   - expand_untyped_2hop=True (fetch 2-hop for untyped)
+    │
+    └── ConnectivityProfile (output)
+        - upstream_partners: Dict[str, float]
+        - downstream_partners: Dict[str, float]
+        - metadata (bodyId, type, dataset)
+```
+
+**Quick Start**:
+```python
+from src.comparison import ConnectivityProfiler, ProfilerConfig
+
+# Configure profiler
+config = ProfilerConfig(
+    top_k_bodyid=15,        # Top 15 partners per direction
+    top_m_type=5,           # Ensure at least 5 unique types
+    expand_untyped_2hop=True,  # Fetch 2-hop for untyped partners
+    min_synapse_threshold=3
+)
+
+# Create profiler
+profiler = ConnectivityProfiler(
+    datasets=['hemibrain:v1.2.1', 'male-cns:v0.9'],
+    config=config
+)
+
+# Get profile for a neuron
+profile = profiler.get_profile('aMe12', 'hemibrain:v1.2.1')
+print(profile.upstream_partners)
+print(profile.downstream_partners)
+```
+
+---
+
+## ✨ Homolog Finding
+
+### [Homolog Finding Guide](./HomologFinding_Guide.md)
+Complete guide to finding homologous neurons across datasets using connectivity profiles.
+
+**Key Topics**:
+- Finding homologs by connectivity fingerprint comparison
+- Fast discovery via adjacency expansion (2-hop neighbors)
+- Loose mode (type-level) vs Strict mode (per-bodyId)
+- Top-k/top-m profile construction rules
+- Similarity metrics: Jaccard, cosine, rank correlation
+
+**Quick Start**:
+```python
+from src.comparison import HomologFinder
+
+# Initialize finder with top-k/top-m settings
+finder = HomologFinder(
+    top_k=15,   # Top 15 partners per direction
+    top_m=5,    # Ensure at least 5 unique types
+    use_cache=True
+)
+
+# Fast search via adjacency expansion
+results = finder.find_homologs_fast(
+    query='aMe12',
+    source_dataset='flywire_FAFB_v783',
+    target_dataset='hemibrain:v1.2.1',
+    mode='loose',  # Type-level comparison
+    top_n=20
+)
+
+# Comprehensive search
+results = finder.find_homologs(
+    query='Mi1',
+    source_dataset='hemibrain:v1.2.1',
+    target_dataset='flywire_FAFB_v783',
+    mode='strict'  # Per-bodyId results for type queries
+)
+```
+
+**Example Script**: [`examples/comparison/Example_HomologFinding.py`](../../examples/comparison/Example_HomologFinding.py)
 
 ---
 
@@ -261,34 +418,8 @@ Filter neurons by various criteria before analysis.
 
 ### Algorithm Improvements
 
-#### [Pathfinding Optimization](./PathFinding_Optimization.md)
-Depth-first search optimization for faster path finding.
-
-**Key improvements**:
-- Early termination
-- Memory-efficient recursion
-- Cutoff optimization
-- Dynamic ETA calculation
-
 #### [Pathfinding Optimization Summary](./PATHFINDING_OPTIMIZATION_SUMMARY.md)
 Complete summary of all pathfinding optimizations.
-
-#### [Realistic Estimation](./PathFinding_RealisticEstimation.md)
-Improved time estimation for long-running searches.
-
-#### [Dynamic ETA](./PathFinding_DynamicETA.md)
-Real-time estimation updates based on actual progress.
-
-### DFS Implementation
-
-#### [PathfindingOptimization_DFS.md](./PathfindingOptimization_DFS.md)
-Depth-first search algorithm details and optimizations.
-
-**Optimizations**:
-- Branch pruning
-- Weight-based early stopping
-- Path deduplication
-- Memory reuse
 
 ---
 

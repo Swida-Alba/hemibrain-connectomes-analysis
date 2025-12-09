@@ -46,9 +46,10 @@ Connectivity Profile Comparison:
 import os
 import sys
 import logging
+from pathlib import Path
 
 # Add src to path
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 'src'))
+sys.path.insert(0, str(Path(__file__).parent.parent / 'src'))
 
 from comparison import (
     ComparisonAnalyzer,
@@ -77,14 +78,56 @@ def run_comprehensive_comparison():
     # =========================================================================
     print("\n📋 Step 1: Creating ComparisonParameters...")
     
-    target_map = LabelMapper(
-      target_mapping_dict={
-        'flywire_FAFB_v783': [[720575940619067259,720575940613413791,720575940631973089,720575940642237344,720575940606868828,720575940609174392,720575940610478531,720575940628527095]],
-        'flywire_BANC_v626': [[720575941552713626,720575941589129982,720575941645302945,720575941689244824]],
-        'male-cns:v0.9': [[15832,16461,16552,17336,16634,17355,17916,18945]],
-      },
-      target_labels=['s-LNv'],
-    )
+    # label_map = LabelMapper(
+    #     target_mapping_dict={
+    #         'flywire_FAFB_v783': [[720575940619067259,720575940613413791,720575940631973089,720575940642237344,720575940606868828,720575940609174392,720575940610478531,720575940628527095]],
+    #         'flywire_BANC_v626': [[720575941552713626,720575941589129982,720575941645302945,720575941689244824]],
+    #         'male-cns:v0.9': [[15832,16461,16552,17336,16634,17355,17916,18945]],
+    #     },
+    #     target_labels=['s-LNv'],
+    #     source_mapping_dict={
+    #         'flywire_FAFB_v783': ['L1','L2','L3'],
+    #         'flywire_BANC_v626': ['L1','L2','L3'],
+    #         'male-cns:v0.9': ['L1','L2','L3'],
+    #     },
+    #     source_labels=['L1','L2','L3'],
+    # )
+    
+    # target_map = LabelMapper(
+    #   target_mapping_dict={
+    #     'flywire_FAFB_v783': [['l-LNv.*']],
+    #     'flywire_BANC_v626': [['l-LNv.*']],
+    #     'male-cns:v0.9': [['l-LNv.*']],
+    #   },
+    #   target_labels=['l-LNv'],
+    # )
+    
+    # target_map = LabelMapper(
+    #   target_mapping_dict={
+    #     'flywire_FAFB_v783': [[720575940625254636,720575940619074049]],
+    #     'flywire_BANC_v626': [[720575941568371246]],
+    #     'male-cns:v0.9': [[12254,13531]],
+    #   },
+    #   target_labels=['5th s-LNv'],
+    # )
+    
+    # target_map = LabelMapper(
+    #   target_mapping_dict={
+    #     'flywire_FAFB_v783': [[720575940634984800,720575940627933336]],
+    #     'flywire_BANC_v626': [[720575941671706023,720575941645496264]],
+    #     'male-cns:v0.9': [[11901,14633]],
+    #   },
+    #   target_labels=['ITP LNd'],
+    # )
+    
+    # target_map = LabelMapper(
+    #     target_mapping_dict={
+    #         'flywire_FAFB_v783': [[720575940634984800,720575940627933336,720575940625254636,720575940619074049]],
+    #         'flywire_BANC_v626': [[720575941671706023,720575941645496264,720575941568371246]],
+    #         'male-cns:v0.9': [[11901,14633,12254,13531]],
+    #     },
+    #     target_labels=['E cells'],
+    # )
     
     params = ComparisonParameters(
         # Token - empty means load from NEUPRINT_APPLICATION_TOKEN env var
@@ -94,21 +137,19 @@ def run_comprehensive_comparison():
         saveas=None,  # Auto-generate timestamp folder
         
         # Datasets to compare
-        # datasets=['male-cns:v0.9', 'flywire_FAFB_v783', 'hemibrain:v1.2.1', 'flywire_BANC_v626',],
-        # datasets_nickname=['male-CNS', 'FAFB', 'hemibrain', 'BANC'],
+        datasets=['male-cns:v0.9', 'flywire_FAFB_v783', 'hemibrain:v1.2.1', 'flywire_BANC_v626',],
+        datasets_nickname=['male-CNS', 'FAFB', 'hemibrain', 'BANC'],
         
-        datasets=['flywire_FAFB_v783', 'flywire_BANC_v626','male-cns:v0.9'],
-        datasets_nickname=['FAFB', 'BANC', 'male-cns'],
+        # datasets=['flywire_FAFB_v783', 'flywire_BANC_v626','male-cns:v0.9'],
+        # datasets_nickname=['FAFB', 'BANC', 'male-cns'],
         
-        # Source neurons - aMe12 medulla neurons
-        # source_neurons=['aMe12','aMe26','aMe10','aMe5','aMe9'],
-        # source_neurons=['aMe12'],
-        source_neurons = ['L1','L2','L3'],
+        # overall_label_mapper=label_map,
+        # source_neurons = ['L1','L2','L3'],
         # source_neurons=neurons_network,
         
         # Target neurons - PPL101 dopaminergic neurons
         # target_neurons=['PPL101'],
-        target_neurons=target_map,
+        # target_neurons=target_map,
         
         # target_neurons=neurons_network,
         
@@ -126,44 +167,36 @@ def run_comprehensive_comparison():
         # - 'edge': Evaluates each edge independently by weight
         comparison_mode='edge',  # Change to 'edge' to use edge-based comparison
         
-        skip_bodyId=True,
+        skip_bodyId=True, # Skip bodyId-level results for speed and local storage
         
         # Performance Settings (for parallel processing)
         # -----------------------------------------------------------------
-        parallel=True,                # Enable parallel processing
+        parallel=True,               # Enable parallel processing
         max_workers=12,             # Auto-detect optimal worker count
         pathfinding='Bidirectional', # 'MemoizedDFS', 'Bidirectional', 'DP', 'DFS'
     )
     
-    # =========================================================================
-    # Step 2: Create Analyzer and Run Comparison
-    # =========================================================================
-    print("\n🔬 Step 2: Running comparison analysis...")
-    
     analyzer = ComparisonAnalyzer(params, verbose=True)
     results = analyzer.run_comparison()
-    
-    # =========================================================================
-    # Step 3: Generate Text Report
-    # =========================================================================
-    print("\n📝 Step 3: Generating text report...")
-    
     analyzer.generate_report()
-    
-    # =========================================================================
-    # Step 4: Export All Results
-    # =========================================================================
-    print("\n💾 Step 4: Exporting all results...")
-    
-    # NOTE: export_results() no longer runs connectivity profile verification.
-    # Call run_connectivity_profile_verification() separately in Step 6 if needed.
     analyzer.export_results()
     
-    # =========================================================================
-    # Step 5: Additional Analysis with ComparisonVisualizer
-    # =========================================================================
-    print("\n📈 Step 5: Additional visualization analysis...")
     
+    ### ====== optional comparison of connectivity profiles ======
+    # comparison_results = analyzer.connectivity_profile_comparison()
+    
+    
+    
+    # Note: Standard visualizations are already generated by analyzer.export_results()
+    # which calls analyzer._generate_visualizations() -> visualizer.save_all_plots().
+    # This includes:
+    # - path_counts.png
+    # - similarity_per_threshold.png
+    # - edge_overlap.png
+    # - threshold_comparison.png
+    # - Interactive HTML heatmaps
+    
+    # You can add custom, ad-hoc visualizations here if needed.
     try:
         viz = ComparisonVisualizer(verbose=True)
         print('   ComparisonVisualizer ready for custom analysis')
@@ -180,61 +213,6 @@ def run_comprehensive_comparison():
         
     except Exception as e:
         print(f"   Visualization analysis skipped: {e}")
-    
-    # =========================================================================
-    # Step 6: Direct Comparison (NEW - specific neurons)
-    # =========================================================================
-    print("\n🎯 Step 6: Running direct comparison of specific neurons...")
-    
-    # Direct comparison allows comparing specific neurons by type name or bodyId
-    try:
-        # Compare specific types across all datasets
-        direct_results = analyzer.direct_comparison(
-            neurons_a=['aMe12'],  # Source neurons
-            neurons_b=['aMe12'],  # Target neurons (same type for verification)
-        )
-        
-        if direct_results and not direct_results['results'].empty:
-            print(f"   Direct comparison: {len(direct_results['results'])} pairs")
-            print(f"   Average combined score: {direct_results['summary'].get('avg_combined', 0):.3f}")
-    except Exception as e:
-        print(f"   Direct comparison skipped: {e}")
-    
-    # # =========================================================================
-    # # Step 7: Connectivity Profile Comparison (OPTIONAL - batch comparison)
-    # # =========================================================================
-    # print("\n🔍 Step 7: Running connectivity profile comparison...")
-    
-    # This step compares all neuron types from the comparison results.
-    # Parameters are read from ComparisonParameters by default, or can be overridden:
-    try:
-      comparison_results = analyzer.connectivity_profile_comparison()
-      if comparison_results:
-        summary = comparison_results.get('summary')
-        matrix = comparison_results.get('matrix')
-        heatmap = comparison_results.get('heatmap_path')
-        heatmaps = comparison_results.get('heatmap_paths')
-        report = comparison_results.get('report_path') # This might not be returned currently?
-
-        import pandas as pd
-        if isinstance(summary, pd.DataFrame) and not summary.empty:
-          print(f"   Compared {len(summary)} neuron types across {len(params.datasets)} datasets")
-        elif isinstance(summary, dict) and summary:
-          print(f"   Summary (dict): {summary}")
-
-        if isinstance(matrix, pd.DataFrame) and not matrix.empty:
-          print(f"   Matrix shape: {matrix.shape[0]} types x {max(0, matrix.shape[1]-1)} pairs")
-        
-        if heatmap:
-          print(f"   Heatmap: {heatmap}")
-        elif heatmaps:
-          print(f"   Heatmaps generated: {list(heatmaps.keys())}")
-          
-        if report:
-          print(f"   HTML report: {report}")
-    except Exception as e:
-      print(f"   Profile comparison skipped: {e}")
-    
     return analyzer
 
 

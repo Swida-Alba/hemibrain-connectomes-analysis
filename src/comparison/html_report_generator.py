@@ -322,7 +322,6 @@ def _generate_toc(thresholds: List[int]) -> str:
                 <li><a href="#path-matrices">🛤️ Path Presence Matrices</a></li>
                 <li><a href="#conservation">🏆 Conservation Analysis</a></li>
                 <li><a href="#statistics">📉 Statistics</a></li>
-                <li><a href="connectivity_profile_comparison.html" target="_blank" style="color: #7c3aed;">🔬 Connectivity Profile Comparison Report ↗</a></li>
             </ul>
         </div>
 """
@@ -792,36 +791,63 @@ def _generate_similarity_section(analyzer, dataset_names: List[str], thresholds:
         # Chart size scales with number of datasets but caps for 4-in-row layout
         chart_size = min(n * cell_size + 80, 200)
         
-        # Display all 4 metrics in a single row with responsive layout
+        # Check if GED is disabled (all non-diagonal values are 0)
+        ged_disabled = True
+        for i in range(n):
+            for j in range(n):
+                if i != j and ged_sim[i][j] != 0:
+                    ged_disabled = False
+                    break
+            if not ged_disabled:
+                break
+        
+        # Determine number of metrics to display (3 if GED disabled, 4 if enabled)
+        num_metrics = 3 if ged_disabled else 4
+        max_width_pct = f"{100 // num_metrics}%" if num_metrics <= 4 else "25%"
+        
+        # Display metrics in a single row with responsive layout
         html_parts.append(f"""
                 <div class="card">
                     <h3>Threshold = {threshold}</h3>
                     
-                    <!-- All 4 metrics in one row -->
+                    <!-- Metrics in one row -->
                     <div style="display: flex; flex-wrap: nowrap; gap: 10px; overflow-x: auto; padding: 8px 0;">
                         <!-- Jaccard -->
-                        <div style="flex: 1; min-width: {chart_size}px; max-width: 25%; background: #eff6ff; border-radius: 6px; padding: 8px;">
+                        <div style="flex: 1; min-width: {chart_size}px; max-width: {max_width_pct}; background: #eff6ff; border-radius: 6px; padding: 8px;">
                             <h5 style="font-size: 10px; margin: 0 0 4px 0; color: #1e40af; text-align: center;">🔷 Jaccard</h5>
                             <div id="jaccard_{threshold}" style="width: 100%; height: {chart_size}px;"></div>
-                        </div>
+                        </div>""")
+        
+        # Only show GED if not disabled
+        if not ged_disabled:
+            html_parts.append(f"""
                         <!-- GED -->
-                        <div style="flex: 1; min-width: {chart_size}px; max-width: 25%; background: #eff6ff; border-radius: 6px; padding: 8px;">
+                        <div style="flex: 1; min-width: {chart_size}px; max-width: {max_width_pct}; background: #eff6ff; border-radius: 6px; padding: 8px;">
                             <h5 style="font-size: 10px; margin: 0 0 4px 0; color: #1e40af; text-align: center;">🔷 GED</h5>
                             <div id="ged_{threshold}" style="width: 100%; height: {chart_size}px;"></div>
-                        </div>
+                        </div>""")
+        
+        html_parts.append(f"""
                         <!-- Spearman -->
-                        <div style="flex: 1; min-width: {chart_size}px; max-width: 25%; background: #fef3c7; border-radius: 6px; padding: 8px;">
+                        <div style="flex: 1; min-width: {chart_size}px; max-width: {max_width_pct}; background: #fef3c7; border-radius: 6px; padding: 8px;">
                             <h5 style="font-size: 10px; margin: 0 0 4px 0; color: #92400e; text-align: center;">🔶 Spearman</h5>
                             <div id="spearman_{threshold}" style="width: 100%; height: {chart_size}px;"></div>
                         </div>
                         <!-- RV -->
-                        <div style="flex: 1; min-width: {chart_size}px; max-width: 25%; background: #fef3c7; border-radius: 6px; padding: 8px;">
+                        <div style="flex: 1; min-width: {chart_size}px; max-width: {max_width_pct}; background: #fef3c7; border-radius: 6px; padding: 8px;">
                             <h5 style="font-size: 10px; margin: 0 0 4px 0; color: #92400e; text-align: center;">🔶 RV Coef</h5>
                             <div id="rv_{threshold}" style="width: 100%; height: {chart_size}px;"></div>
                         </div>
-                    </div>
+                    </div>""")
+        
+        # Add note about GED being disabled if applicable
+        ged_note = ""
+        if ged_disabled:
+            ged_note = " | ⚠️ GED disabled (too many nodes)"
+        
+        html_parts.append(f"""
                     <p style="font-size: 0.75em; color: #64748b; margin-top: 8px; text-align: center;">
-                        🔷 Topology-based (binary edge presence) | 🔶 Matrix-based (weight-sensitive)
+                        🔷 Topology-based (binary edge presence) | 🔶 Matrix-based (weight-sensitive){ged_note}
                     </p>
                 </div>
                 <script>
@@ -831,6 +857,7 @@ def _generate_similarity_section(analyzer, dataset_names: List[str], thresholds:
                         const spearmanSim = {json.dumps(spearman_sim)};
                         const rvSim = {json.dumps(rv_sim)};
                         const gedSim = {json.dumps(ged_sim)};
+                        const gedDisabled = {'true' if ged_disabled else 'false'};
                         const layout = {{
                             margin: {{ l: 45, r: 10, t: 10, b: 45 }},
                             xaxis: {{ tickangle: -45, scaleanchor: 'y', constrain: 'domain', tickfont: {{size: 8}} }},
@@ -848,10 +875,13 @@ def _generate_similarity_section(analyzer, dataset_names: List[str], thresholds:
                             z: jaccard, x: labels, y: labels, type: 'heatmap',
                             colorscale: greenScale, zmin: 0, zmax: 1, showscale: false
                         }}], {{...layout, annotations: makeAnnotations(jaccard, labels)}}, {{responsive: true}});
-                        Plotly.newPlot('ged_{threshold}', [{{
-                            z: gedSim, x: labels, y: labels, type: 'heatmap',
-                            colorscale: greenScale, zmin: 0, zmax: 1, showscale: false
-                        }}], {{...layout, annotations: makeAnnotations(gedSim, labels)}}, {{responsive: true}});
+                        // Only plot GED if not disabled
+                        if (!gedDisabled) {{
+                            Plotly.newPlot('ged_{threshold}', [{{
+                                z: gedSim, x: labels, y: labels, type: 'heatmap',
+                                colorscale: greenScale, zmin: 0, zmax: 1, showscale: false
+                            }}], {{...layout, annotations: makeAnnotations(gedSim, labels)}}, {{responsive: true}});
+                        }}
                         // Matrix-based metrics
                         Plotly.newPlot('spearman_{threshold}', [{{
                             z: spearmanSim, x: labels, y: labels, type: 'heatmap',
@@ -881,9 +911,16 @@ def _generate_networks_section(analyzer, dataset_names: List[str], thresholds: L
     is_source_equals_target = False
     self_edge_warning = ""
     try:
-        src_list = analyzer.parameters._ensure_flat_list(analyzer.parameters.source_neurons)
-        tgt_list = analyzer.parameters._ensure_flat_list(analyzer.parameters.target_neurons)
-        if set(src_list) == set(tgt_list):
+        if hasattr(analyzer, 'label_mapper') and analyzer.label_mapper:
+            src_set = set(analyzer.label_mapper.get_all_std_labels('source'))
+            tgt_set = set(analyzer.label_mapper.get_all_std_labels('target'))
+        else:
+            src_list = analyzer.parameters._ensure_flat_list(analyzer.parameters.source_neurons)
+            tgt_list = analyzer.parameters._ensure_flat_list(analyzer.parameters.target_neurons)
+            src_set = set(src_list)
+            tgt_set = set(tgt_list)
+            
+        if src_set == tgt_set:
             is_source_equals_target = True
             # Count self-edges across all thresholds
             self_edge_count = 0
@@ -997,9 +1034,10 @@ def _generate_networks_section(analyzer, dataset_names: List[str], thresholds: L
                         const nodes = netData.nodes;
                         const allEdges = netData.allEdges;
                         const allNodes = netData.allNodes;
-                        const deadEndNodeIds = netData.deadEndNodeIds || new Set();
+                        const originalDeadEndNodeIds = netData.deadEndNodeIds || new Set();
                         const conservedEdgeIds = netData.conservedEdgeIds;
                         const uniqueEdgeIds = netData.uniqueEdgeIds || new Set();
+                        const nodeRoles = netData.nodeRoles || {{}};
                         
                         const mode = window.networkFilterMode[threshold];
                         
@@ -1028,12 +1066,98 @@ def _generate_networks_section(analyzer, dataset_names: List[str], thresholds: L
                             filteredNodes = allNodes.filter(n => connectedNodeIds.has(n.id));
                         }}
                         
+                        // Recalculate dead-ends based on CURRENT filtered edges
+                        // Dead-end = intermediate node with only incoming OR only outgoing edges in current view
+                        // OR node that only connects to dead-ends (recursive)
+                        // IMPORTANT: Source and target nodes are NEVER dead-ends
+                        let dynamicDeadEndNodeIds = new Set();
+                        
+                        if (filteredEdges.length > 0) {{
+                            // Build adjacency for current filtered graph
+                            let adjOut = {{}};
+                            let adjIn = {{}};
+                            let activeNodes = new Set();
+                            
+                            filteredEdges.forEach(e => {{
+                                if (!adjOut[e.from]) adjOut[e.from] = [];
+                                adjOut[e.from].push(e.to);
+                                
+                                if (!adjIn[e.to]) adjIn[e.to] = [];
+                                adjIn[e.to].push(e.from);
+                                
+                                activeNodes.add(e.from);
+                                activeNodes.add(e.to);
+                            }});
+                            
+                            // Iterative dead-end detection
+                            let changed = true;
+                            while (changed) {{
+                                changed = false;
+                                activeNodes.forEach(nodeId => {{
+                                    if (dynamicDeadEndNodeIds.has(nodeId)) return;
+                                    
+                                    const role = nodeRoles[nodeId] || 'intermediate';
+                                    if (role !== 'intermediate') return;
+                                    
+                                    const outNeighbors = adjOut[nodeId] || [];
+                                    const inNeighbors = adjIn[nodeId] || [];
+                                    
+                                    // Condition 1: All outgoing paths lead to dead-ends (or no outgoing)
+                                    // every() returns True for empty sequence
+                                    const leadsToDeadEnd = outNeighbors.every(n => dynamicDeadEndNodeIds.has(n));
+                                    
+                                    // Condition 2: All incoming paths come from dead-ends (or no incoming)
+                                    const comesFromDeadEnd = inNeighbors.every(n => dynamicDeadEndNodeIds.has(n));
+                                    
+                                    if (leadsToDeadEnd || comesFromDeadEnd) {{
+                                        dynamicDeadEndNodeIds.add(nodeId);
+                                        changed = true;
+                                    }}
+                                }});
+                            }}
+                        }}
+                        
+                        // Update node colors to reflect current dead-end status
+                        // Source and target always keep their colors, never become dead-end
+                        const roleColors = {{
+                            'source': {{ background: '#ef4444', border: '#b91c1c' }},
+                            'intermediate': {{ background: '#3b82f6', border: '#1d4ed8' }},
+                            'target': {{ background: '#8b5cf6', border: '#6d28d9' }},
+                            'dead-end': {{ background: '#9ca3af', border: '#6b7280' }}
+                        }};
+                        
+                        filteredNodes = filteredNodes.map(n => {{
+                            const role = nodeRoles[n.id] || 'intermediate';
+                            // Source and target are NEVER dead-ends - they keep their role
+                            const isDeadEnd = (role === 'intermediate') && dynamicDeadEndNodeIds.has(n.id);
+                            const displayRole = isDeadEnd ? 'dead-end' : role;
+                            const colors = roleColors[displayRole];
+                            return {{
+                                ...n,
+                                color: colors,
+                                title: n.label + ' (' + displayRole + ')'
+                            }};
+                        }});
+                        
                         // Apply dead-end filter if enabled
+                        // NEVER hide source or target nodes, even if dead-end toggle is on
                         if (window.hideDeadEndNodes[threshold]) {{
-                            filteredNodes = filteredNodes.filter(n => !deadEndNodeIds.has(n.id));
-                            filteredEdges = filteredEdges.filter(e => 
-                                !deadEndNodeIds.has(e.from) && !deadEndNodeIds.has(e.to)
-                            );
+                            filteredNodes = filteredNodes.filter(n => {{
+                                const role = nodeRoles[n.id] || 'intermediate';
+                                // Keep source and target nodes always
+                                if (role === 'source' || role === 'target') return true;
+                                // Filter out dead-end intermediates
+                                return !dynamicDeadEndNodeIds.has(n.id);
+                            }});
+                            filteredEdges = filteredEdges.filter(e => {{
+                                const fromRole = nodeRoles[e.from] || 'intermediate';
+                                const toRole = nodeRoles[e.to] || 'intermediate';
+                                // Keep edges to/from source or target
+                                if (fromRole === 'source' || fromRole === 'target') return true;
+                                if (toRole === 'source' || toRole === 'target') return true;
+                                // Filter out edges involving dead-end intermediates
+                                return !dynamicDeadEndNodeIds.has(e.from) && !dynamicDeadEndNodeIds.has(e.to);
+                            }});
                         }}
                         
                         // Apply to network
@@ -1117,13 +1241,128 @@ def _generate_networks_section(analyzer, dataset_names: List[str], thresholds: L
                 </script>
 """)
     
-    # Networks in single column for proper display
-    html_parts.append('<div style="display: flex; flex-direction: column; gap: 20px;">')
-    for threshold in thresholds:
-        html_parts.append(_generate_conservation_network(analyzer, dataset_names, threshold, nickname_map))
+    # Mode toggle (Threshold vs Dataset)
+    nicknames = [nickname_map[d] for d in dataset_names]
+    nicknames_json = json.dumps(nicknames)
+    
+    html_parts.append(f'''
+                <!-- Toggle Mode Selector -->
+                <div style="margin-bottom: 15px;">
+                    <span style="font-weight: 600; margin-right: 10px;">View by:</span>
+                    <button class="tab-btn active" id="network_mode_threshold" onclick="switchNetworkMode('threshold')">Threshold</button>
+                    <button class="tab-btn" id="network_mode_dataset" onclick="switchNetworkMode('dataset')">Dataset</button>
+                </div>
+''')
+    
+    # By Threshold View
+    html_parts.append('<div id="network_by_threshold" class="tabs"><div class="tab-buttons">')
+    for i, t in enumerate(thresholds):
+        active = 'active' if i == 0 else ''
+        html_parts.append(f'<button class="tab-btn {active}" onclick="showNetworkTab({t})">t = {t}</button>')
     html_parts.append('</div>')
     
+    # Network containers (only first visible initially)
+    for i, threshold in enumerate(thresholds):
+        active = 'active' if i == 0 else ''
+        html_parts.append(f'<div id="network_tab_{threshold}" class="tab-content {active}">')
+        html_parts.append(_generate_conservation_network(analyzer, dataset_names, threshold, nickname_map))
+        html_parts.append('</div>')
+    
+    html_parts.append('</div>')  # Close network_by_threshold tabs div
+    
+    # By Dataset View
+    html_parts.append('<div id="network_by_dataset" class="tabs" style="display: none;"><div class="tab-buttons">')
+    for i, d in enumerate(dataset_names):
+        active = 'active' if i == 0 else ''
+        nick = nickname_map[d]
+        html_parts.append(f'<button class="tab-btn {active}" onclick="showNetworkDatasetTab(\'{nick}\')">{nick}</button>')
+    html_parts.append('</div>')
+    
+    # Dataset-centric network containers (showing all thresholds for one dataset)
+    for i, d in enumerate(dataset_names):
+        nick = nickname_map[d]
+        active = 'active' if i == 0 else ''
+        html_parts.append(f'<div id="network_dataset_tab_{nick}" class="tab-content {active}">')
+        html_parts.append(_generate_dataset_network(analyzer, d, thresholds, nickname_map))
+        html_parts.append('</div>')
+    
+    html_parts.append('</div>')  # Close network_by_dataset tabs div
+    
+    # JavaScript for tab switching
     html_parts.append("""
+                <script>
+                    function switchNetworkMode(mode) {
+                        document.getElementById('network_mode_threshold').classList.toggle('active', mode === 'threshold');
+                        document.getElementById('network_mode_dataset').classList.toggle('active', mode === 'dataset');
+                        document.getElementById('network_by_threshold').style.display = mode === 'threshold' ? 'block' : 'none';
+                        document.getElementById('network_by_dataset').style.display = mode === 'dataset' ? 'block' : 'none';
+                        
+                        // Re-fit visible networks (must call redraw() first to recalculate canvas dimensions)
+                        setTimeout(function() {
+                            Object.values(window.allNetworks || {}).forEach(function(netData) {
+                                if (netData && netData.network) {
+                                    netData.network.redraw();
+                                    netData.network.fit({ animation: true });
+                                }
+                            });
+                        }, 100);
+                    }
+                    
+                    // Re-draw and fit networks after page load to handle any initial rendering issues
+                    window.addEventListener('load', function() {
+                        setTimeout(function() {
+                            Object.values(window.allNetworks || {}).forEach(function(netData) {
+                                if (netData && netData.network) {
+                                    netData.network.redraw();
+                                    netData.network.fit({ animation: true });
+                                }
+                            });
+                        }, 300);
+                    });
+                    
+                    function showNetworkTab(threshold) {
+                        // Hide all network tabs in threshold view
+                        document.querySelectorAll('#network_by_threshold .tab-content').forEach(el => el.classList.remove('active'));
+                        // Remove active from all buttons in threshold view
+                        document.querySelectorAll('#network_by_threshold .tab-btn').forEach(el => el.classList.remove('active'));
+                        // Show selected tab
+                        document.getElementById('network_tab_' + threshold).classList.add('active');
+                        // Mark button as active
+                        event.target.classList.add('active');
+                        
+                        // Re-fit the network since it may have been hidden
+                        // Must call redraw() first to recalculate canvas dimensions
+                        if (window.allNetworks && window.allNetworks[threshold]) {
+                            setTimeout(function() {
+                                const netData = window.allNetworks[threshold];
+                                netData.network.redraw();
+                                netData.network.fit({ animation: true });
+                            }, 100);
+                        }
+                    }
+                    
+                    function showNetworkDatasetTab(dataset) {
+                        // Hide all network tabs in dataset view
+                        document.querySelectorAll('#network_by_dataset .tab-content').forEach(el => el.classList.remove('active'));
+                        // Remove active from all buttons in dataset view
+                        document.querySelectorAll('#network_by_dataset .tab-btn').forEach(el => el.classList.remove('active'));
+                        // Show selected tab
+                        document.getElementById('network_dataset_tab_' + dataset).classList.add('active');
+                        // Mark button as active
+                        event.target.classList.add('active');
+                        
+                        // Re-fit the network since it may have been hidden
+                        // Must call redraw() first to recalculate canvas dimensions
+                        setTimeout(function() {
+                            Object.keys(window.allNetworks || {}).forEach(function(key) {
+                                if (key.startsWith(dataset + '_')) {
+                                    window.allNetworks[key].network.redraw();
+                                    window.allNetworks[key].network.fit({ animation: true });
+                                }
+                            });
+                        }, 100);
+                    }
+                </script>
             </div>
         </div>
 """)
@@ -1148,17 +1387,23 @@ def _generate_conservation_network(analyzer, dataset_names: List[str], threshold
     num_datasets = len(available)
     nicknames = [nickname_map[d] for d in available]
     
-    # Get source and target neurons from parameters
+    # Get source and target neurons
     source_neurons = set()
     target_neurons = set()
+    
+    # Always start with parameters (these are the user's intent)
     try:
-        # Get flat list of source/target neuron patterns
         src_list = analyzer.parameters._ensure_flat_list(analyzer.parameters.source_neurons)
         tgt_list = analyzer.parameters._ensure_flat_list(analyzer.parameters.target_neurons)
-        source_neurons = set(src_list)
-        target_neurons = set(tgt_list)
+        source_neurons.update(src_list)
+        target_neurons.update(tgt_list)
     except:
         pass
+    
+    # If label mapper is available, ALSO include the mapped keys
+    if hasattr(analyzer, 'label_mapper') and analyzer.label_mapper:
+        source_neurons.update(analyzer.label_mapper.get_all_std_labels('source'))
+        target_neurons.update(analyzer.label_mapper.get_all_std_labels('target'))
     
     # Build nodes and edges with conservation coloring
     nodes = []
@@ -1172,6 +1417,10 @@ def _generate_conservation_network(analyzer, dataset_names: List[str], threshold
     has_outgoing = set()  # nodes that have at least one outgoing edge
     has_incoming = set()  # nodes that have at least one incoming edge
     
+    # Build adjacency maps for recursive dead-end detection
+    outgoing_map = {}  # label -> list of target labels
+    incoming_map = {}  # label -> list of source labels
+    
     # Collect edge data per dataset
     for edge_key, row in aligned.iterrows():
         if ' -> ' not in str(edge_key):
@@ -1182,6 +1431,13 @@ def _generate_conservation_network(analyzer, dataset_names: List[str], threshold
         edge_tuple = (source, target)
         if edge_tuple not in edge_data:
             edge_data[edge_tuple] = {}
+        
+        # Update adjacency maps
+        if source not in outgoing_map: outgoing_map[source] = []
+        outgoing_map[source].append(target)
+        
+        if target not in incoming_map: incoming_map[target] = []
+        incoming_map[target].append(source)
         
         for dataset in available:
             weight = row.get(dataset, 0)
@@ -1197,12 +1453,20 @@ def _generate_conservation_network(analyzer, dataset_names: List[str], threshold
     def matches_patterns(label: str, patterns: set) -> bool:
         import re
         for pattern in patterns:
-            # Convert glob-style pattern to regex
-            regex_pattern = pattern.replace('.', r'\.').replace('*', '.*')
+            # Handle regex patterns (containing .* or other regex chars)
+            # vs simple glob patterns (containing just *)
+            if '.*' in pattern:
+                # Already a regex pattern (e.g., "aMe.*"), use directly
+                regex_pattern = pattern
+            elif '*' in pattern:
+                # Simple glob pattern (e.g., "aMe*"), convert * to .*
+                # Escape special regex chars except *
+                regex_pattern = re.escape(pattern).replace(r'\*', '.*')
+            else:
+                # Exact match pattern, escape for regex
+                regex_pattern = re.escape(pattern)
+            
             if re.match(f'^{regex_pattern}$', label, re.IGNORECASE):
-                return True
-            # Also check exact match
-            if label == pattern:
                 return True
         return False
     
@@ -1226,15 +1490,35 @@ def _generate_conservation_network(analyzer, dataset_names: List[str], threshold
     
     # Detect dead-end nodes: intermediate nodes that only have incoming OR only outgoing edges
     # (i.e., they're not on a complete path from source to target)
+    # Recursive detection: also include nodes that only connect to dead-ends
     dead_end_nodes = set()
-    for label in all_node_labels:
-        role = node_roles.get(label, 'intermediate')
-        if role == 'intermediate':
-            # Dead-end if only incoming (sink) or only outgoing (orphan source in middle)
-            only_incoming = label in has_incoming and label not in has_outgoing
-            only_outgoing = label in has_outgoing and label not in has_incoming
-            if only_incoming or only_outgoing:
+    
+    # Iterative dead-end detection
+    changed = True
+    while changed:
+        changed = False
+        for label in all_node_labels:
+            if label in dead_end_nodes:
+                continue
+                
+            role = node_roles.get(label, 'intermediate')
+            if role != 'intermediate':
+                continue
+            
+            # Get neighbors
+            out_neighbors = outgoing_map.get(label, [])
+            in_neighbors = incoming_map.get(label, [])
+            
+            # Condition 1: All outgoing paths lead to dead-ends (or no outgoing)
+            # every() returns True for empty sequence
+            leads_to_dead_end = all(n in dead_end_nodes for n in out_neighbors)
+            
+            # Condition 2: All incoming paths come from dead-ends (or no incoming)
+            comes_from_dead_end = all(n in dead_end_nodes for n in in_neighbors)
+            
+            if leads_to_dead_end or comes_from_dead_end:
                 dead_end_nodes.add(label)
+                changed = True
     
     # Node colors by role
     role_colors = {
@@ -1323,6 +1607,30 @@ def _generate_conservation_network(analyzer, dataset_names: List[str], threshold
         })
         edge_id += 1
     
+    # Ensure ALL source and target neurons are present in the network (even if isolated)
+    # This fixes the issue where target neurons drop out if they have no connections
+    for label in source_neurons:
+        if label not in node_ids:
+            node_ids[label] = node_counter
+            nodes.append({
+                'id': node_counter,
+                'label': label,
+                'title': f"{label} (source - isolated)",
+                'color': role_colors['source']
+            })
+            node_counter += 1
+            
+    for label in target_neurons:
+        if label not in node_ids:
+            node_ids[label] = node_counter
+            nodes.append({
+                'id': node_counter,
+                'label': label,
+                'title': f"{label} (target - isolated)",
+                'color': role_colors['target']
+            })
+            node_counter += 1
+    
     div_id = f"network_{threshold}"
     nodes_json = json.dumps(nodes)
     edges_json = json.dumps(edges)
@@ -1331,6 +1639,9 @@ def _generate_conservation_network(analyzer, dataset_names: List[str], threshold
     conserved_node_ids_json = json.dumps(list(conserved_node_ids))
     dead_end_node_ids = [node_ids[label] for label in dead_end_nodes if label in node_ids]
     dead_end_node_ids_json = json.dumps(dead_end_node_ids)
+    # Map node IDs to roles for dynamic dead-end calculation
+    node_roles_by_id = {node_ids[label]: role for label, role in node_roles.items() if label in node_ids}
+    node_roles_json = json.dumps(node_roles_by_id)
     
     # Count dead-end nodes and conserved edges for display
     dead_end_count = len(dead_end_nodes)
@@ -1365,7 +1676,7 @@ def _generate_conservation_network(analyzer, dataset_names: List[str], threshold
                     </button>
                 </div>
             </div>
-            <div id="{div_id}" style="height: 450px; border: 1px solid var(--border-color); border-radius: 8px;"></div>
+            <div id="{div_id}" style="height: 900px; border: 1px solid var(--border-color); border-radius: 8px;"></div>
         </div>
         <script>
             (function() {{
@@ -1375,6 +1686,7 @@ def _generate_conservation_network(analyzer, dataset_names: List[str], threshold
                 const uniqueEdgeIds = new Set({unique_ids_json});
                 const conservedNodeIds = new Set({conserved_node_ids_json});
                 const deadEndNodeIds = new Set({dead_end_node_ids_json});
+                const nodeRoles = {node_roles_json};
                 
                 const nodes = new vis.DataSet(allNodes);
                 const edges = new vis.DataSet(allEdges);
@@ -1433,9 +1745,550 @@ def _generate_conservation_network(analyzer, dataset_names: List[str], threshold
                     conservedEdgeIds: conservedEdgeIds,
                     uniqueEdgeIds: uniqueEdgeIds,
                     conservedNodeIds: conservedNodeIds,
-                    deadEndNodeIds: deadEndNodeIds
+                    deadEndNodeIds: deadEndNodeIds,
+                    nodeRoles: nodeRoles
                 }};
             }})();
+        </script>
+'''
+
+
+def _generate_dataset_network(analyzer, dataset: str, thresholds: List[int],
+                               nickname_map: Dict[str, str]) -> str:
+    """Generate network visualization for a single dataset across all thresholds.
+    
+    Shows unique edges with conservation-style coloring based on how many thresholds
+    the edge appears at. Hover shows weights at all threshold levels.
+    """
+    nick = nickname_map[dataset]
+    num_thresholds = len(thresholds)
+    
+    # Collect edges: {(source, target): {threshold: weight}}
+    edge_weights = {}  # {(source, target): {t: weight}}
+    all_nodes = set()
+    
+    for threshold in thresholds:
+        aligned = analyzer.get_aligned_data(threshold)
+        if dataset not in aligned.columns:
+            continue
+        
+        for edge_key, row in aligned.iterrows():
+            if ' -> ' not in str(edge_key):
+                continue
+            parts = str(edge_key).split(' -> ')
+            source, target = parts[0], parts[1] if len(parts) > 1 else ''
+            weight = row.get(dataset, 0)
+            if weight > 0:
+                edge_tuple = (source, target)
+                if edge_tuple not in edge_weights:
+                    edge_weights[edge_tuple] = {}
+                edge_weights[edge_tuple][threshold] = int(weight)
+                all_nodes.add(source)
+                all_nodes.add(target)
+    
+    if not all_nodes:
+        return f'<div class="card"><p>No connections for {nick} at any threshold.</p></div>'
+    
+    # Get source and target neurons for role coloring
+    source_neurons = set()
+    target_neurons = set()
+    
+    # If label mapper is available, use standardized labels
+    if hasattr(analyzer, 'label_mapper') and analyzer.label_mapper:
+        source_neurons = set(analyzer.label_mapper.get_all_std_labels('source'))
+        target_neurons = set(analyzer.label_mapper.get_all_std_labels('target'))
+    else:
+        # Otherwise use parameters
+        try:
+            src_list = analyzer.parameters._ensure_flat_list(analyzer.parameters.source_neurons)
+            tgt_list = analyzer.parameters._ensure_flat_list(analyzer.parameters.target_neurons)
+            source_neurons = set(src_list)
+            target_neurons = set(tgt_list)
+        except:
+            pass
+    
+    def matches_patterns(label: str, patterns: set) -> bool:
+        import re
+        for pattern in patterns:
+            # Handle regex patterns (containing .* or other regex chars)
+            # vs simple glob patterns (containing just *)
+            if '.*' in pattern:
+                # Already a regex pattern (e.g., "aMe.*"), use directly
+                regex_pattern = pattern
+            elif '*' in pattern:
+                # Simple glob pattern (e.g., "aMe*"), convert * to .*
+                # Escape special regex chars except *
+                regex_pattern = re.escape(pattern).replace(r'\*', '.*')
+            else:
+                # Exact match pattern, escape for regex
+                regex_pattern = re.escape(pattern)
+            
+            if re.match(f'^{regex_pattern}$', label, re.IGNORECASE):
+                return True
+        return False
+    
+    # Determine node roles
+    node_roles = {}
+    for label in all_nodes:
+        node_roles[label] = 'intermediate'
+    for label in all_nodes:
+        if matches_patterns(label, target_neurons):
+            node_roles[label] = 'target'
+    for label in all_nodes:
+        if matches_patterns(label, source_neurons):
+            node_roles[label] = 'source'
+    
+    # Track incoming/outgoing for dead-end detection
+    has_outgoing = set()
+    has_incoming = set()
+    for (source, target) in edge_weights.keys():
+        has_outgoing.add(source)
+        has_incoming.add(target)
+    
+    # Detect dead-end nodes
+    dead_end_nodes = set()
+    for label in all_nodes:
+        role = node_roles.get(label, 'intermediate')
+        if role == 'intermediate':
+            only_incoming = label in has_incoming and label not in has_outgoing
+            only_outgoing = label in has_outgoing and label not in has_incoming
+            if only_incoming or only_outgoing:
+                dead_end_nodes.add(label)
+    
+    # Node colors by role
+    role_colors = {
+        'source': {'background': '#ef4444', 'border': '#b91c1c'},
+        'intermediate': {'background': '#3b82f6', 'border': '#1d4ed8'},
+        'target': {'background': '#8b5cf6', 'border': '#6d28d9'},
+        'dead-end': {'background': '#9ca3af', 'border': '#6b7280'}
+    }
+    
+    # Create nodes
+    nodes = []
+    node_ids = {}
+    node_counter = 0
+    for label in sorted(all_nodes):
+        node_ids[label] = node_counter
+        role = node_roles.get(label, 'intermediate')
+        is_dead_end = label in dead_end_nodes
+        display_role = 'dead-end' if is_dead_end else role
+        colors = role_colors[display_role]
+        nodes.append({
+            'id': node_counter,
+            'label': label,
+            'title': f"{label} ({display_role})",
+            'color': colors
+        })
+        node_counter += 1
+    
+    # Create unique edges with conservation-style coloring
+    # gray (1 threshold) -> orange (some) -> green (all thresholds)
+    edges = []
+    edge_id = 0
+    edges_by_threshold = {t: [] for t in thresholds}  # Track which edges appear at each threshold
+    conserved_edge_ids = []  # Edges at ALL thresholds
+    unique_edge_ids = []  # Edges at only 1 threshold
+    
+    for (source, target), t_weights in edge_weights.items():
+        thresholds_present = len(t_weights)
+        
+        # Conservation-style coloring
+        if thresholds_present == num_thresholds:
+            color = '#22c55e'  # All thresholds - green
+            conservation = 'All thresholds'
+            conserved_edge_ids.append(edge_id)
+        elif thresholds_present > 1:
+            color = '#f59e0b'  # Partial - orange
+            conservation = f'{thresholds_present}/{num_thresholds} thresholds'
+        else:
+            color = '#94a3b8'  # Unique - gray
+            conservation = '1 threshold only'
+            unique_edge_ids.append(edge_id)
+        
+        # Build hover with all threshold weights
+        hover_lines = [f"{source} → {target}", f"Conservation: {conservation}"]
+        for t in thresholds:
+            w = t_weights.get(t, 0)
+            status = f"{int(w)}" if w > 0 else "—"
+            hover_lines.append(f"t={t}: {status}")
+        
+        edges.append({
+            'id': edge_id,
+            'from': node_ids[source],
+            'to': node_ids[target],
+            'color': {'color': color, 'highlight': color},
+            'width': 2 + min(thresholds_present, 3),
+            'title': '\n'.join(hover_lines),
+            'thresholds': list(t_weights.keys())  # Store which thresholds this edge appears at
+        })
+        
+        # Track edges by threshold for filtering
+        for t in t_weights.keys():
+            edges_by_threshold[t].append(edge_id)
+        
+        edge_id += 1
+    
+    div_id = f"network_{nick}_dataset"
+    nodes_json = json.dumps(nodes)
+    edges_json = json.dumps(edges)
+    edges_by_threshold_json = json.dumps({str(t): ids for t, ids in edges_by_threshold.items()})
+    thresholds_json = json.dumps(thresholds)
+    conserved_ids_json = json.dumps(conserved_edge_ids)
+    unique_ids_json = json.dumps(unique_edge_ids)
+    dead_end_node_ids = [node_ids[label] for label in dead_end_nodes if label in node_ids]
+    dead_end_node_ids_json = json.dumps(dead_end_node_ids)
+    node_roles_by_id = {node_ids[label]: role for label, role in node_roles.items() if label in node_ids}
+    node_roles_json = json.dumps(node_roles_by_id)
+    
+    # Count statistics
+    total_edges = len(edges)
+    conserved_count = len(conserved_edge_ids)
+    unique_count = len(unique_edge_ids)
+    dead_end_count = len(dead_end_nodes)
+    
+    conserved_info = f'<span style="color: #22c55e;"><strong>{conserved_count}</strong> all-t</span>'
+    partial_count = total_edges - conserved_count - unique_count
+    partial_info = f'<span style="color: #f59e0b;"><strong>{partial_count}</strong> partial</span>' if partial_count > 0 else ''
+    unique_info = f'<span style="color: #94a3b8;"><strong>{unique_count}</strong> single-t</span>' if unique_count > 0 else ''
+    dead_end_info = f'<span style="color: #9ca3af;"><strong>{dead_end_count}</strong> dead-end</span>' if dead_end_count > 0 else ''
+    
+    stats_parts = [s for s in [conserved_info, partial_info, unique_info, dead_end_info] if s]
+    stats_str = ' | '.join(stats_parts)
+    
+    # Build threshold filter buttons
+    threshold_buttons = []
+    for t in thresholds:
+        count = len(edges_by_threshold[t])
+        btn_html = f'<button id="t_btn_{nick}_{t}" class="threshold-filter-btn active" onclick="toggleDatasetThreshold(\'{nick}\', {t})" style="padding: 4px 8px; border-radius: 4px; border: 1px solid var(--border-color); background: #22c55e; color: white; cursor: pointer; font-size: 11px; margin-right: 4px;">t={t} ({count})</button>'
+        threshold_buttons.append(btn_html)
+    
+    return f'''
+        <div class="card">
+            <h3>{nick}: Cross-Threshold Network</h3>
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
+                <div style="color: var(--secondary-color);">
+                    <strong>{len(nodes)}</strong> neurons | <strong>{total_edges}</strong> edges | {stats_str}
+                </div>
+                <div style="display: flex; gap: 8px;">
+                    <button id="deadend_btn_{nick}" onclick="toggleDatasetDeadEnd('{nick}')" 
+                        style="padding: 6px 12px; border-radius: 6px; border: 1px solid var(--border-color); 
+                               background: var(--secondary-color); color: white; cursor: pointer; font-size: 12px;">
+                        👁️ Show Dead-ends
+                    </button>
+                    <button id="physics_btn_{nick}" onclick="toggleDatasetNetworkPhysics('{nick}')" 
+                        style="padding: 6px 12px; border-radius: 6px; border: 1px solid var(--border-color); 
+                               background: var(--secondary-color); color: white; cursor: pointer; font-size: 12px;">
+                        📌 Static Mode
+                    </button>
+                </div>
+            </div>
+            <div style="margin-bottom: 10px;">
+                <strong>Show thresholds:</strong> {''.join(threshold_buttons)}
+                <span style="margin-left: 10px; color: var(--secondary-color);">
+                    <span style="color: #22c55e;">● All</span>
+                    <span style="color: #f59e0b; margin-left: 8px;">● Partial</span>
+                    <span style="color: #94a3b8; margin-left: 8px;">● Single</span>
+                </span>
+            </div>
+            <div id="{div_id}" style="height: 900px; border: 1px solid var(--border-color); border-radius: 8px;"></div>
+        </div>
+        <script>
+            (function() {{
+                const allNodes = {nodes_json};
+                const allEdges = {edges_json};
+                const edgesByThreshold = {edges_by_threshold_json};
+                const thresholds = {thresholds_json};
+                const conservedEdgeIds = new Set({conserved_ids_json});
+                const uniqueEdgeIds = new Set({unique_ids_json});
+                const deadEndNodeIds = new Set({dead_end_node_ids_json});
+                const nodeRoles = {node_roles_json};
+                
+                const nodes = new vis.DataSet(allNodes);
+                const edges = new vis.DataSet(allEdges);
+                const container = document.getElementById('{div_id}');
+                const data = {{ nodes: nodes, edges: edges }};
+                
+                const options = {{
+                    nodes: {{
+                        shape: 'dot',
+                        size: 18,
+                        font: {{ size: 11 }},
+                        borderWidth: 2
+                    }},
+                    edges: {{
+                        arrows: {{ to: {{ enabled: true, scaleFactor: 0.7 }} }},
+                        smooth: {{ type: 'curvedCW', roundness: 0.1 }}
+                    }},
+                    layout: {{
+                        hierarchical: {{
+                            enabled: true,
+                            direction: 'UD',
+                            sortMethod: 'directed',
+                            levelSeparation: 120,
+                            nodeSpacing: 100,
+                            treeSpacing: 120
+                        }}
+                    }},
+                    physics: {{ enabled: false }},
+                    interaction: {{
+                        hover: true,
+                        tooltipDelay: 50,
+                        multiselect: true,
+                        dragNodes: true
+                    }}
+                }};
+                
+                const network = new vis.Network(container, data, options);
+                
+                setTimeout(function() {{
+                    network.setOptions({{ layout: {{ hierarchical: false }} }});
+                    network.fit({{ animation: true }});
+                }}, 200);
+                
+                // Register with global toggle
+                window.allNetworks['{nick}_dataset'] = {{
+                    network: network,
+                    nodes: nodes,
+                    edges: edges,
+                    allNodes: allNodes,
+                    allEdges: allEdges,
+                    edgesByThreshold: edgesByThreshold,
+                    thresholds: thresholds,
+                    conservedEdgeIds: conservedEdgeIds,
+                    uniqueEdgeIds: uniqueEdgeIds,
+                    deadEndNodeIds: deadEndNodeIds,
+                    nodeRoles: nodeRoles,
+                    activeThresholds: new Set(thresholds.map(String)),
+                    hideDeadEnds: false
+                }};
+            }})();
+            
+            // Dataset network state
+            if (!window.datasetNetworkPhysicsEnabled) {{
+                window.datasetNetworkPhysicsEnabled = {{}};
+            }}
+            window.datasetNetworkPhysicsEnabled['{nick}'] = false;
+            
+            function toggleDatasetThreshold(dataset, threshold) {{
+                const netData = window.allNetworks[dataset + '_dataset'];
+                if (!netData) return;
+                
+                const tStr = String(threshold);
+                const btn = document.getElementById('t_btn_' + dataset + '_' + threshold);
+                
+                if (netData.activeThresholds.has(tStr)) {{
+                    netData.activeThresholds.delete(tStr);
+                    btn.style.background = '#94a3b8';
+                }} else {{
+                    netData.activeThresholds.add(tStr);
+                    btn.style.background = '#22c55e';
+                }}
+                
+                updateDatasetNetworkDisplay(dataset);
+            }}
+            
+            function toggleDatasetDeadEnd(dataset) {{
+                const netData = window.allNetworks[dataset + '_dataset'];
+                if (!netData) return;
+                
+                netData.hideDeadEnds = !netData.hideDeadEnds;
+                const btn = document.getElementById('deadend_btn_' + dataset);
+                
+                if (netData.hideDeadEnds) {{
+                    btn.innerHTML = '🚫 Hide Dead-ends';
+                    btn.style.background = '#f59e0b';
+                }} else {{
+                    btn.innerHTML = '👁️ Show Dead-ends';
+                    btn.style.background = 'var(--secondary-color)';
+                }}
+                
+                updateDatasetNetworkDisplay(dataset);
+            }}
+            
+            function updateDatasetNetworkDisplay(dataset) {{
+                const netData = window.allNetworks[dataset + '_dataset'];
+                if (!netData) return;
+                
+                const net = netData.network;
+                const edges = netData.edges;
+                const nodes = netData.nodes;
+                const allEdges = netData.allEdges;
+                const allNodes = netData.allNodes;
+                const edgesByThreshold = netData.edgesByThreshold;
+                const activeThresholds = netData.activeThresholds;
+                const nodeRoles = netData.nodeRoles;
+                
+                // Get edge IDs that appear in at least one active threshold
+                let activeEdgeIds = new Set();
+                activeThresholds.forEach(t => {{
+                    (edgesByThreshold[t] || []).forEach(id => activeEdgeIds.add(id));
+                }});
+                
+                // Filter edges to only those with at least one active threshold
+                let filteredEdges = allEdges.filter(e => {{
+                    const edgeThresholds = e.thresholds || [];
+                    return edgeThresholds.some(t => activeThresholds.has(String(t)));
+                }});
+                
+                // Get connected nodes
+                let connectedNodeIds = new Set();
+                filteredEdges.forEach(e => {{
+                    connectedNodeIds.add(e.from);
+                    connectedNodeIds.add(e.to);
+                }});
+                
+                let filteredNodes = allNodes.filter(n => connectedNodeIds.has(n.id));
+                
+                // Recalculate dead-ends based on filtered edges
+                // IMPORTANT: Source and target nodes are NEVER dead-ends
+                let hasOutgoing = new Set();
+                let hasIncoming = new Set();
+                filteredEdges.forEach(e => {{
+                    hasOutgoing.add(e.from);
+                    hasIncoming.add(e.to);
+                }});
+                
+                let dynamicDeadEndNodeIds = new Set();
+                filteredNodes.forEach(n => {{
+                    const role = nodeRoles[n.id] || 'intermediate';
+                    // Only intermediate nodes can be dead-ends
+                    // Source and target nodes are NEVER dead-ends
+                    if (role === 'intermediate') {{
+                        const onlyIn = hasIncoming.has(n.id) && !hasOutgoing.has(n.id);
+                        const onlyOut = hasOutgoing.has(n.id) && !hasIncoming.has(n.id);
+                        if (onlyIn || onlyOut) {{
+                            dynamicDeadEndNodeIds.add(n.id);
+                        }}
+                    }}
+                }});
+                
+                // Update node colors
+                // Source and target always keep their colors, never become dead-end
+                const roleColors = {{
+                    'source': {{ background: '#ef4444', border: '#b91c1c' }},
+                    'intermediate': {{ background: '#3b82f6', border: '#1d4ed8' }},
+                    'target': {{ background: '#8b5cf6', border: '#6d28d9' }},
+                    'dead-end': {{ background: '#9ca3af', border: '#6b7280' }}
+                }};
+                
+                filteredNodes = filteredNodes.map(n => {{
+                    const role = nodeRoles[n.id] || 'intermediate';
+                    // Source and target are NEVER dead-ends - they keep their role
+                    const isDeadEnd = (role === 'intermediate') && dynamicDeadEndNodeIds.has(n.id);
+                    const displayRole = isDeadEnd ? 'dead-end' : role;
+                    const colors = roleColors[displayRole];
+                    return {{
+                        ...n,
+                        color: colors,
+                        title: n.label + ' (' + displayRole + ')'
+                    }};
+                }});
+                
+                // Apply dead-end filter if enabled
+                // NEVER hide source or target nodes, even if dead-end toggle is on
+                if (netData.hideDeadEnds) {{
+                    filteredNodes = filteredNodes.filter(n => {{
+                        const role = nodeRoles[n.id] || 'intermediate';
+                        // Keep source and target nodes always
+                        if (role === 'source' || role === 'target') return true;
+                        // Filter out dead-end intermediates
+                        return !dynamicDeadEndNodeIds.has(n.id);
+                    }});
+                    filteredEdges = filteredEdges.filter(e => {{
+                        const fromRole = nodeRoles[e.from] || 'intermediate';
+                        const toRole = nodeRoles[e.to] || 'intermediate';
+                        // Keep edges to/from source or target
+                        if (fromRole === 'source' || fromRole === 'target') return true;
+                        if (toRole === 'source' || toRole === 'target') return true;
+                        // Filter out edges involving dead-end intermediates
+                        return !dynamicDeadEndNodeIds.has(e.from) && !dynamicDeadEndNodeIds.has(e.to);
+                    }});
+                }}
+                
+                // Apply to network
+                edges.clear();
+                edges.add(filteredEdges);
+                nodes.clear();
+                nodes.add(filteredNodes);
+                
+                // Reinitialize layout
+                net.setOptions({{
+                    nodes: {{ size: 18, font: {{ size: 11 }} }},
+                    edges: {{ smooth: {{ type: 'curvedCW', roundness: 0.1 }} }},
+                    layout: {{
+                        hierarchical: {{
+                            enabled: true,
+                            direction: 'UD',
+                            sortMethod: 'directed',
+                            levelSeparation: 120,
+                            nodeSpacing: 80,
+                            treeSpacing: 100
+                        }}
+                    }},
+                    physics: {{ enabled: false }}
+                }});
+                setTimeout(() => {{
+                    net.setOptions({{ layout: {{ hierarchical: false }} }});
+                    net.fit({{ animation: true }});
+                }}, 200);
+            }}
+            
+            function toggleDatasetNetworkPhysics(dataset) {{
+                window.datasetNetworkPhysicsEnabled[dataset] = !window.datasetNetworkPhysicsEnabled[dataset];
+                const btn = document.getElementById('physics_btn_' + dataset);
+                const netData = window.allNetworks[dataset + '_dataset'];
+                
+                if (!netData) return;
+                
+                const net = netData.network;
+                
+                if (window.datasetNetworkPhysicsEnabled[dataset]) {{
+                    btn.innerHTML = '💥 Duang Mode';
+                    btn.style.background = 'var(--primary-color)';
+                    net.setOptions({{
+                        nodes: {{ size: 20, font: {{ size: 12 }} }},
+                        edges: {{ smooth: {{ type: 'continuous', roundness: 0.2 }} }},
+                        layout: {{ hierarchical: false }},
+                        physics: {{
+                            enabled: true,
+                            solver: 'forceAtlas2Based',
+                            forceAtlas2Based: {{
+                                gravitationalConstant: -80,
+                                centralGravity: 0.005,
+                                springLength: 120,
+                                springConstant: 0.06,
+                                damping: 0.5,
+                                avoidOverlap: 0.8
+                            }},
+                            stabilization: {{ enabled: true, iterations: 100, updateInterval: 25 }},
+                            minVelocity: 0.5
+                        }}
+                    }});
+                    net.once('stabilized', () => {{ net.fit({{ animation: true }}); }});
+                }} else {{
+                    btn.innerHTML = '📌 Static Mode';
+                    btn.style.background = 'var(--secondary-color)';
+                    net.setOptions({{
+                        nodes: {{ size: 18, font: {{ size: 11 }} }},
+                        edges: {{ smooth: {{ type: 'curvedCW', roundness: 0.1 }} }},
+                        layout: {{
+                            hierarchical: {{
+                                enabled: true,
+                                direction: 'UD',
+                                sortMethod: 'directed',
+                                levelSeparation: 120,
+                                nodeSpacing: 80,
+                                treeSpacing: 100
+                            }}
+                        }},
+                        physics: {{ enabled: false }}
+                    }});
+                    setTimeout(() => {{
+                        net.setOptions({{ layout: {{ hierarchical: false }} }});
+                        net.fit({{ animation: true }});
+                    }}, 200);
+                }}
+            }}
         </script>
 '''
 
@@ -2398,17 +3251,25 @@ def _generate_stats_table(analyzer, dataset_names: List[str], threshold: int,
     
     # Pairwise similarities
     html.append(f'''<div class="card"><h3>Pairwise Similarities <span style="color: var(--primary-color);">(Threshold = {threshold})</span></h3>
-        <table><thead><tr><th>Dataset 1</th><th>Dataset 2</th><th>Jaccard</th><th>Cosine</th><th>Common</th></tr></thead><tbody>''')
+        <table><thead><tr><th>Dataset 1</th><th>Dataset 2</th><th>Jaccard</th><th>Rank Corr</th><th>Common</th></tr></thead><tbody>''')
     
+    from scipy.stats import spearmanr
     for i, d1 in enumerate(available):
         for d2 in available[i+1:]:
             c1, c2 = aligned[d1], aligned[d2]
             s1, s2 = set(aligned.index[c1 > 0]), set(aligned.index[c2 > 0])
             inter, union = len(s1 & s2), len(s1 | s2)
             jac = inter / union if union > 0 else 0
+            # Use rank correlation instead of cosine
             w1, w2 = c1.values, c2.values
-            cos = np.dot(w1, w2) / (np.linalg.norm(w1) * np.linalg.norm(w2)) if np.linalg.norm(w1) > 0 and np.linalg.norm(w2) > 0 else 0
-            html.append(f'<tr><td>{nickname_map[d1]}</td><td>{nickname_map[d2]}</td><td>{jac:.3f}</td><td>{cos:.3f}</td><td>{inter}</td></tr>')
+            # Only compute rank correlation where both have values
+            mask = (w1 > 0) & (w2 > 0)
+            if mask.sum() >= 2:
+                rank_corr, _ = spearmanr(w1[mask], w2[mask])
+                rank_corr = rank_corr if not np.isnan(rank_corr) else 0
+            else:
+                rank_corr = 0
+            html.append(f'<tr><td>{nickname_map[d1]}</td><td>{nickname_map[d2]}</td><td>{jac:.3f}</td><td>{rank_corr:.3f}</td><td>{inter}</td></tr>')
     
     html.append('</tbody></table></div>')
     return ''.join(html)
@@ -2418,6 +3279,22 @@ def _generate_footer() -> str:
     """Generate footer."""
     return """
         <button class="print-btn" onclick="window.print()">🖨️ Print Report</button>
+        <script>
+            // Final initialization: ensure all visible networks are properly rendered
+            // This runs after all network scripts have executed
+            window.addEventListener('load', function() {
+                setTimeout(function() {
+                    // Get all currently visible networks and redraw them
+                    Object.values(window.allNetworks || {}).forEach(function(netData) {
+                        if (netData && netData.network) {
+                            // Force canvas redraw to ensure proper dimensions
+                            netData.network.redraw();
+                            netData.network.fit({ animation: false });
+                        }
+                    });
+                }, 500);
+            });
+        </script>
     </div>
 </body>
 </html>

@@ -31,10 +31,97 @@ import os
 import re
 import warnings
 from dataclasses import dataclass, field, asdict
+from enum import Enum
 from pathlib import Path
 from typing import Dict, List, Optional, Union, Tuple, Any
 import numpy as np
 import pandas as pd
+
+
+# ============================================================================
+# Connectivity Status Classification
+# ============================================================================
+
+class ConnectivityStatus(Enum):
+    """
+    Hierarchical classification of neuron connectivity profile status.
+    
+    This enum provides a precise classification of connectivity quality,
+    ordered from worst (NONE) to best (COMPLETE):
+    
+    - NONE: 0 partners in both directions - no valid connectivity profile
+    - ORPHAN: Alias for NONE (0 partners both directions) for clarity in reports
+    - UNIDIRECTIONAL: 0 partners in one direction, >0 in the other
+    - RARE: < 5 partners in either direction - too few for reliable comparison
+    - INCOMPLETE: fewer connections than top_k criteria in either direction
+    - INCOMPLETE_EXPANSION: has top_k partners but < top_m unique types
+    - COMPLETE: has both top_k connections and top_m unique types
+    
+    The hierarchical order is important:
+    1. First check if 0 partners (NONE)
+    2. Then check if < 5 partners (RARE) 
+    3. Then check if < top_k partners (INCOMPLETE)
+    4. Then check if < top_m types (INCOMPLETE_EXPANSION)
+    5. Otherwise COMPLETE
+    
+    Note: NONE and RARE are considered invalid for comparison and should be
+    skipped. INCOMPLETE and INCOMPLETE_EXPANSION may produce unreliable results
+    but can still be compared with appropriate warnings.
+    """
+    NONE = "none"  # 0 partners both directions - no connectivity
+    ORPHAN = "orphan"  # Alias: both directions 0 partners
+    UNIDIRECTIONAL = "unidirectional"  # One direction has 0 partners
+    RARE = "rare"  # < 5 partners in either direction - too sparse for reliable comparison
+    INCOMPLETE = "incomplete"  # < top_k partners - incomplete profile
+    INCOMPLETE_EXPANSION = "incomplete_expansion"  # < top_m types - insufficient type diversity
+    COMPLETE = "complete"  # Full profile meeting all criteria
+    
+    def is_valid_for_comparison(self) -> bool:
+        """Check if this status is valid for comparison (not NONE).
+        
+        Note: RARE and UNIDIRECTIONAL sources are included but should be treated with caution.
+        NONE/ORPHAN sources have no partners and cannot be compared at all.
+        """
+        return self not in {ConnectivityStatus.NONE, ConnectivityStatus.ORPHAN}
+    
+    def requires_warning(self) -> bool:
+        """Check if this status requires a WARNING when used in comparison.
+        
+        Returns True for RARE sources (< 5 partners) which may produce
+        unreliable comparison results.
+        """
+        return self == ConnectivityStatus.RARE
+    
+    def is_complete(self) -> bool:
+        """Check if this status represents a complete profile."""
+        return self == ConnectivityStatus.COMPLETE
+    
+    @classmethod
+    def get_description(cls, status: 'ConnectivityStatus') -> str:
+        """Get human-readable description of the status."""
+        descriptions = {
+            cls.NONE: "No connections (0 partners both directions)",
+            cls.ORPHAN: "No connections (0 partners both directions)",
+            cls.UNIDIRECTIONAL: "Connections in only one direction",
+            cls.RARE: "Rare (<5 partners in either direction)",
+            cls.INCOMPLETE: "Incomplete (fewer than top_k partners)",
+            cls.INCOMPLETE_EXPANSION: "Incomplete expansion (fewer than top_m unique types)",
+            cls.COMPLETE: "Complete (meets all criteria)"
+        }
+        return descriptions.get(status, "Unknown")
+
+
+# ============================================================================
+# Custom Exceptions
+# ============================================================================
+
+class DataNotAvailableError(Exception):
+    """
+    Raised when connection data is not available for a dataset.
+    
+    This error provides guidance on how to build the missing cache.
+    """
+    pass
 
 
 # ============================================================================
@@ -220,6 +307,8 @@ class ConnectivityProfile:
     """
     neuron_id: Union[str, int, List]
     dataset: str
+    # Optional type label for the neuron/profile (set for type-level queries or aggregates)
+    neuron_type: Optional[str] = None
     
     # Partner data: partner_type → actual synapse weight (enables easy aggregation)
     # Weights are stored as actual synapse counts (typically < 4096 per pair)
@@ -277,24 +366,95 @@ class ConnectivityProfile:
     untyped_upstream_2hop_ranks: Optional[Dict[int, Dict[str, int]]] = None  # untyped_bodyId → {2hop_type → rank}
     untyped_downstream_2hop_ranks: Optional[Dict[int, Dict[str, int]]] = None  # untyped_bodyId → {2hop_type → rank}
     
+    # Round 7: BodyId-level data for typed partners (for intra-dataset comparison)
+    # Stores bodyId → weight for ALL typed 1-hop partners (not aggregated by type)
+    typed_upstream_bodyids: Optional[Dict[int, float]] = None  # typed bodyId → weight
+    typed_downstream_bodyids: Optional[Dict[int, float]] = None  # typed bodyId → weight
+    
     # Minimum partners threshold for weak connectivity warning
     MIN_PARTNERS_THRESHOLD: int = field(default=5, repr=False)
     
+    # Connectivity status classification (set in __post_init__)
+    _connectivity_status: Optional[str] = field(default=None, repr=False)
+    
     def __post_init__(self):
-        """Check for weak connectivity and sparse profiles."""
-        # Weak connectivity check - record but don't warn
-        # The is_weak_connectivity flag is recorded in the profile for later use
-        if (self.actual_upstream_count < self.MIN_PARTNERS_THRESHOLD or 
-            self.actual_downstream_count < self.MIN_PARTNERS_THRESHOLD):
-            self.is_weak_connectivity = True
-            # Suppressed warning - recorded in profile.is_weak_connectivity instead
-            # Callers should check this flag and handle appropriately
+        """Check for weak connectivity and sparse profiles, compute connectivity status."""
+        # Compute connectivity status using hierarchical classification
+        self._connectivity_status = self._compute_connectivity_status().value
         
-        # Sparse profile check (Round 5)
+        # is_weak_connectivity is now derived from connectivity_status for backward compatibility
+        # NONE and RARE are considered "weak"
+        status = ConnectivityStatus(self._connectivity_status)
+        self.is_weak_connectivity = not status.is_valid_for_comparison()
+        
+        # Sparse profile check (Round 5) - still tracked separately
         if self.unique_types_upstream > 0 or self.unique_types_downstream > 0:
             if (self.unique_types_upstream < self.top_m_type_target or 
                 self.unique_types_downstream < self.top_m_type_target):
                 self.is_sparse = True
+    
+    def _compute_connectivity_status(self) -> ConnectivityStatus:
+        """
+        Compute connectivity status using hierarchical classification.
+        
+        The hierarchy is:
+        1. NONE: 0 partners in either direction
+        2. RARE: < 5 partners in either direction (MIN_PARTNERS_THRESHOLD)
+        3. INCOMPLETE: fewer connections than top_k criteria in either direction
+        4. INCOMPLETE_EXPANSION: has top_k but < top_m unique types
+        5. COMPLETE: meets all criteria
+        
+        Returns:
+            ConnectivityStatus enum value
+        """
+        # Get partner counts (for bodyId-level profiles, use typed_*_bodyids if available)
+        up_count = self.actual_upstream_count
+        down_count = self.actual_downstream_count
+        
+        # Level 1: Check for NONE/ORPHAN (0 partners both directions)
+        if up_count == 0 and down_count == 0:
+            return ConnectivityStatus.NONE
+
+        # Level 1b: Check for UNIDIRECTIONAL (one direction missing)
+        if up_count == 0 or down_count == 0:
+            return ConnectivityStatus.UNIDIRECTIONAL
+        
+        # Level 2: Check for RARE (< 5 partners)
+        if up_count < self.MIN_PARTNERS_THRESHOLD or down_count < self.MIN_PARTNERS_THRESHOLD:
+            return ConnectivityStatus.RARE
+        
+        # Level 3: Check for INCOMPLETE (< top_k partners)
+        # We check against actual_upstream/downstream_count vs the target top_k
+        top_k_target = self.top_k_bodyid_used  # This is the actual K used
+        if up_count < top_k_target or down_count < top_k_target:
+            return ConnectivityStatus.INCOMPLETE
+        
+        # Level 4: Check for INCOMPLETE_EXPANSION (< top_m unique types)
+        # Only applies if top_m_type_target > 0 (dynamic expansion enabled)
+        if self.top_m_type_target > 0:
+            up_types = self.unique_types_upstream
+            down_types = self.unique_types_downstream
+            if up_types < self.top_m_type_target or down_types < self.top_m_type_target:
+                return ConnectivityStatus.INCOMPLETE_EXPANSION
+        
+        # Level 5: COMPLETE
+        return ConnectivityStatus.COMPLETE
+    
+    @property
+    def connectivity_status(self) -> ConnectivityStatus:
+        """Get the connectivity status enum."""
+        if self._connectivity_status is None:
+            self._connectivity_status = self._compute_connectivity_status().value
+        return ConnectivityStatus(self._connectivity_status)
+    
+    @property
+    def connectivity_status_str(self) -> str:
+        """Get the connectivity status as a string."""
+        return self.connectivity_status.value
+    
+    def is_valid_for_comparison(self) -> bool:
+        """Check if this profile is valid for comparison (not NONE or RARE)."""
+        return self.connectivity_status.is_valid_for_comparison()
     
     def to_dict(self) -> dict:
         """Convert profile to serializable dictionary."""
@@ -307,6 +467,7 @@ class ConnectivityProfile:
         result = {
             'neuron_id': str(self.neuron_id) if not isinstance(self.neuron_id, str) else self.neuron_id,
             'dataset': self.dataset,
+            'neuron_type': self.neuron_type,
             'upstream_partners': {str(k): float(v) for k, v in self.upstream_partners.items()},
             'downstream_partners': {str(k): float(v) for k, v in self.downstream_partners.items()},
             'upstream_ranks': {str(k): int(v) for k, v in self.upstream_ranks.items()},
@@ -325,6 +486,7 @@ class ConnectivityProfile:
             'actual_upstream_count': int(self.actual_upstream_count),
             'actual_downstream_count': int(self.actual_downstream_count),
             'is_weak_connectivity': bool(self.is_weak_connectivity),
+            'connectivity_status': self.connectivity_status_str,  # Hierarchical status
             # Round 5 additions
             'unique_types_upstream': int(self.unique_types_upstream),
             'unique_types_downstream': int(self.unique_types_downstream),
@@ -333,41 +495,69 @@ class ConnectivityProfile:
             'top_m_type_target': int(self.top_m_type_target),
         }
         
-        # Add partner type mappings if present
-        if self.partner_type_mapping_upstream:
-            result['partner_type_mapping_upstream'] = {str(k): str(v) for k, v in self.partner_type_mapping_upstream.items()}
-        if self.partner_type_mapping_downstream:
-            result['partner_type_mapping_downstream'] = {str(k): str(v) for k, v in self.partner_type_mapping_downstream.items()}
+        # Add partner type mappings - always include for consistent parquet schema
+        result['partner_type_mapping_upstream'] = (
+            {str(k): str(v) for k, v in self.partner_type_mapping_upstream.items()}
+            if self.partner_type_mapping_upstream else {}
+        )
+        result['partner_type_mapping_downstream'] = (
+            {str(k): str(v) for k, v in self.partner_type_mapping_downstream.items()}
+            if self.partner_type_mapping_downstream else {}
+        )
         
         # Round 6: Add untyped 1-hop bodyIds and 2-hop partner data
-        if self.untyped_upstream_bodyids:
-            result['untyped_upstream_bodyids'] = {str(k): float(v) for k, v in self.untyped_upstream_bodyids.items()}
-        if self.untyped_downstream_bodyids:
-            result['untyped_downstream_bodyids'] = {str(k): float(v) for k, v in self.untyped_downstream_bodyids.items()}
+        # Always include for consistent parquet schema
+        result['untyped_upstream_bodyids'] = (
+            {str(k): float(v) for k, v in self.untyped_upstream_bodyids.items()}
+            if self.untyped_upstream_bodyids else {}
+        )
+        result['untyped_downstream_bodyids'] = (
+            {str(k): float(v) for k, v in self.untyped_downstream_bodyids.items()}
+            if self.untyped_downstream_bodyids else {}
+        )
         
         # 2-hop typed partners for untyped 1-hop: {untyped_bodyId: {2hop_type: weight}}
-        if self.untyped_upstream_2hop:
-            result['untyped_upstream_2hop'] = {
+        result['untyped_upstream_2hop'] = (
+            {
                 str(bid): {str(t): float(w) for t, w in types.items()}
                 for bid, types in self.untyped_upstream_2hop.items()
             }
-        if self.untyped_downstream_2hop:
-            result['untyped_downstream_2hop'] = {
+            if self.untyped_upstream_2hop else {}
+        )
+        result['untyped_downstream_2hop'] = (
+            {
                 str(bid): {str(t): float(w) for t, w in types.items()}
                 for bid, types in self.untyped_downstream_2hop.items()
             }
+            if self.untyped_downstream_2hop else {}
+        )
         
         # 2-hop ranks
-        if self.untyped_upstream_2hop_ranks:
-            result['untyped_upstream_2hop_ranks'] = {
+        result['untyped_upstream_2hop_ranks'] = (
+            {
                 str(bid): {str(t): int(r) for t, r in types.items()}
                 for bid, types in self.untyped_upstream_2hop_ranks.items()
             }
-        if self.untyped_downstream_2hop_ranks:
-            result['untyped_downstream_2hop_ranks'] = {
+            if self.untyped_upstream_2hop_ranks else {}
+        )
+        result['untyped_downstream_2hop_ranks'] = (
+            {
                 str(bid): {str(t): int(r) for t, r in types.items()}
                 for bid, types in self.untyped_downstream_2hop_ranks.items()
             }
+            if self.untyped_downstream_2hop_ranks else {}
+        )
+        
+        # Round 7: Add typed 1-hop bodyId data for intra-dataset comparison
+        # Always include these keys (even if empty) to ensure consistent parquet schema
+        result['typed_upstream_bodyids'] = (
+            {str(k): float(v) for k, v in self.typed_upstream_bodyids.items()}
+            if self.typed_upstream_bodyids else {}
+        )
+        result['typed_downstream_bodyids'] = (
+            {str(k): float(v) for k, v in self.typed_downstream_bodyids.items()}
+            if self.typed_downstream_bodyids else {}
+        )
         
         return result
     
@@ -377,6 +567,15 @@ class ConnectivityProfile:
         # Remove the non-init field before creating instance
         data = data.copy()
         data.pop('MIN_PARTNERS_THRESHOLD', None)
+        
+        # Handle neuron_type (optional)
+        if 'neuron_type' not in data:
+            data['neuron_type'] = None
+        
+        # Handle connectivity_status - store as _connectivity_status for the instance
+        # Will be recomputed in __post_init__ but we preserve it if present
+        if 'connectivity_status' in data:
+            data['_connectivity_status'] = data.pop('connectivity_status')
         
         # Convert partner_type_mapping keys back to int if present
         if 'partner_type_mapping_upstream' in data and data['partner_type_mapping_upstream']:
@@ -414,6 +613,16 @@ class ConnectivityProfile:
         if 'untyped_downstream_2hop_ranks' in data and data['untyped_downstream_2hop_ranks']:
             data['untyped_downstream_2hop_ranks'] = {
                 int(bid): types for bid, types in data['untyped_downstream_2hop_ranks'].items()
+            }
+        
+        # Round 7: Convert typed bodyId keys back to int
+        if 'typed_upstream_bodyids' in data and data['typed_upstream_bodyids']:
+            data['typed_upstream_bodyids'] = {
+                int(k): v for k, v in data['typed_upstream_bodyids'].items()
+            }
+        if 'typed_downstream_bodyids' in data and data['typed_downstream_bodyids']:
+            data['typed_downstream_bodyids'] = {
+                int(k): v for k, v in data['typed_downstream_bodyids'].items()
             }
         
         return cls(**data)
@@ -474,18 +683,32 @@ class ConnectivityProfile:
     
     def summary(self) -> str:
         """Generate human-readable summary of the profile."""
+        status = self.connectivity_status
+        status_icon = {
+            ConnectivityStatus.NONE: "❌",
+            ConnectivityStatus.RARE: "⚠️",
+            ConnectivityStatus.INCOMPLETE: "📉",
+            ConnectivityStatus.INCOMPLETE_EXPANSION: "📊",
+            ConnectivityStatus.COMPLETE: "✅"
+        }.get(status, "?")
+        
         lines = [
             f"ConnectivityProfile for {self.neuron_id} ({self.dataset})",
+            f"  Status: {status_icon} {status.value.upper()} - {ConnectivityStatus.get_description(status)}",
             f"  Neurons aggregated: {self.num_neurons_aggregated}",
             f"  Upstream partners: {self.actual_upstream_count} (top-{self.upstream_top_k} stored, {self.unique_types_upstream} unique types)",
             f"  Downstream partners: {self.actual_downstream_count} (top-{self.downstream_top_k} stored, {self.unique_types_downstream} unique types)",
         ]
         
-        if self.is_weak_connectivity:
-            lines.append("  ⚠️ WEAK CONNECTIVITY: May have unreliable comparisons")
-        
-        if self.is_sparse:
-            lines.append(f"  ⚠️ SPARSE PROFILE: < {self.top_m_type_target} unique types in one or both directions")
+        # Add specific warnings based on status
+        if status == ConnectivityStatus.NONE:
+            lines.append("  ❌ NO CONNECTIVITY: Cannot be used for comparison")
+        elif status == ConnectivityStatus.RARE:
+            lines.append("  ⚠️ RARE CONNECTIVITY: Too few partners (<5) for reliable comparison")
+        elif status == ConnectivityStatus.INCOMPLETE:
+            lines.append(f"  📉 INCOMPLETE: Fewer than {self.top_k_bodyid_used} partners in one or both directions")
+        elif status == ConnectivityStatus.INCOMPLETE_EXPANSION:
+            lines.append(f"  📊 INCOMPLETE EXPANSION: Fewer than {self.top_m_type_target} unique types after expansion")
         
         if self.untyped_upstream_count > 0 or self.untyped_downstream_count > 0:
             lines.append(f"  Untyped excluded: {self.untyped_upstream_count} up, {self.untyped_downstream_count} down")
@@ -927,6 +1150,7 @@ class ConnectivityProfile:
         return ConnectivityProfile(
             neuron_id=neuron_type,
             dataset=dataset,
+            neuron_type=neuron_type,
             upstream_partners=upstream_weights,
             downstream_partners=downstream_weights,
             upstream_ranks=upstream_ranks,
@@ -1107,6 +1331,15 @@ class ConnectivityProfiler:
         
         # Client cache per dataset
         self._clients: Dict[str, Any] = {}
+        
+        # Threading lock for cache writes (prevents corruption during parallel processing)
+        import threading
+        self._cache_write_lock = threading.Lock()
+        
+        # Flag to defer cache writes during parallel processing
+        self._defer_cache_writes = False
+        self._pending_cache_writes: Dict[str, Dict[str, ConnectivityProfile]] = {}
+        self._in_progress_bar = False  # Flag to use tqdm.write instead of print
     
     def _log(self, message: str, level: str = 'info'):
         """Print message if verbose mode enabled.
@@ -1120,7 +1353,14 @@ class ConnectivityProfiler:
         # Only print warnings and key info messages, suppress debug-level messages
         if level == 'debug':
             return  # Suppress verbose loading/joining messages
-        print(f"[ConnectivityProfiler] {message}")
+        
+        msg = f"[ConnectivityProfiler] {message}"
+        # Use tqdm.write when inside a progress bar to avoid interrupting it
+        if getattr(self, '_in_progress_bar', False):
+            from tqdm import tqdm
+            tqdm.write(msg)
+        else:
+            print(msg)
     
     def _get_config_hash(self) -> str:
         """Get hash of current configuration for cache invalidation."""
@@ -1142,9 +1382,202 @@ class ConnectivityProfiler:
         safe_dataset = dataset.replace(':', '_').replace('.', '_')
         return self.cache_dir / safe_dataset / 'connectivity_profiles.parquet'
     
+    def _get_profile_batch_dir(self, dataset: str) -> Path:
+        """Get path to batch directory for per-profile files (interruption-safe)."""
+        safe_dataset = dataset.replace(':', '_').replace('.', '_')
+        return self.cache_dir / safe_dataset / '_profile_batch_files'
+    
+    def _save_profile_to_batch_file(self, profile: ConnectivityProfile):
+        """
+        Save a single profile to its own batch file (interruption-safe).
+        
+        Similar to connection cache's per-batch saving, this approach:
+        - Writes each profile to a separate small file immediately
+        - Never loads existing data, just appends new file
+        - Survives interruptions (Ctrl+C, OOM, crashes)
+        - Files are consolidated later via _consolidate_profile_batch_files()
+        
+        File naming: {batch_dir}/{neuron_id}.parquet
+        """
+        batch_dir = self._get_profile_batch_dir(profile.dataset)
+        batch_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Sanitize neuron_id for filename (handle special characters)
+        safe_neuron_id = str(profile.neuron_id).replace('/', '_').replace('\\', '_').replace(':', '_')
+        batch_file = batch_dir / f"{safe_neuron_id}.parquet"
+        
+        # Convert profile to row
+        row_data = self._profile_to_row(profile)
+        df = pd.DataFrame([row_data])
+        
+        # Atomic write with temp file
+        temp_file = batch_file.with_suffix('.parquet.tmp')
+        try:
+            df.to_parquet(temp_file, index=False)
+            temp_file.rename(batch_file)
+        except Exception as e:
+            if temp_file.exists():
+                try:
+                    temp_file.unlink()
+                except:
+                    pass
+            self._log(f"Warning: Could not save profile batch file: {e}")
+    
+    def _consolidate_profile_batch_files(self, dataset: str, delete_after: bool = True) -> int:
+        """
+        Merge all profile batch files into the main connectivity_profiles.parquet.
+        
+        Uses Polars for memory-efficient consolidation of potentially large caches.
+        
+        Args:
+            dataset: Dataset identifier
+            delete_after: If True, delete batch files after successful consolidation
+            
+        Returns:
+            Number of profiles consolidated
+        """
+        batch_dir = self._get_profile_batch_dir(dataset)
+        if not batch_dir.exists():
+            return 0
+        
+        # Find all batch files
+        batch_files = sorted(batch_dir.glob('*.parquet'))
+        batch_files = [f for f in batch_files if not f.name.endswith('.tmp')]
+        
+        if not batch_files:
+            return 0
+        
+        self._log(f"Consolidating {len(batch_files)} profile batch files for {dataset}...")
+        
+        try:
+            import polars as pl
+            
+            # Load existing main cache if exists
+            main_cache_path = self._get_cache_parquet_path(dataset)
+            all_dfs = []
+            
+            if main_cache_path.exists():
+                try:
+                    existing_df = pl.read_parquet(str(main_cache_path))
+                    all_dfs.append(existing_df)
+                except Exception as e:
+                    self._log(f"Warning: Could not read existing cache, will rebuild: {e}")
+            
+            # Load all batch files
+            for bf in batch_files:
+                try:
+                    df = pl.read_parquet(str(bf))
+                    all_dfs.append(df)
+                except Exception as e:
+                    self._log(f"Warning: Skipping corrupt batch file {bf.name}: {e}")
+            
+            if not all_dfs:
+                return 0
+            
+            # Normalize schema before concatenation to handle type mismatches
+            # neuron_id should be Int64 (bodyIds only - type profiles are NOT cached)
+            # Numeric columns should be Float64 for consistency
+            
+            normalized_dfs = []
+            for df in all_dfs:
+                # Cast columns for schema compatibility
+                cast_exprs = []
+                for col in df.columns:
+                    if col == 'neuron_id':
+                        # neuron_id is always Int64 (bodyId) - type profiles are not cached
+                        cast_exprs.append(pl.col(col).cast(pl.Int64))
+                    elif df[col].dtype in (pl.Int64, pl.Int32, pl.Int16, pl.Int8):
+                        # Cast integers to Float64 for consistency (except neuron_id)
+                        cast_exprs.append(pl.col(col).cast(pl.Float64))
+                    else:
+                        cast_exprs.append(pl.col(col))
+                
+                if cast_exprs:
+                    normalized_dfs.append(df.select(cast_exprs))
+                else:
+                    normalized_dfs.append(df)
+            
+            # Concatenate with schema alignment
+            combined = pl.concat(normalized_dfs, how='diagonal_relaxed')
+            # Keep only the last occurrence of each neuron_id (latest profile)
+            combined = combined.unique(subset=['neuron_id'], keep='last')
+            
+            # Save consolidated cache
+            main_cache_path.parent.mkdir(parents=True, exist_ok=True)
+            temp_path = main_cache_path.with_suffix('.parquet.tmp')
+            combined.write_parquet(str(temp_path))
+            temp_path.rename(main_cache_path)
+            
+            # Update in-memory cache
+            self._disk_cache_df[dataset] = combined.to_pandas()
+            self._build_disk_cache_index(dataset)
+            
+            consolidated_count = len(batch_files)
+            
+            # Delete batch files if requested
+            if delete_after:
+                for bf in batch_files:
+                    try:
+                        bf.unlink()
+                    except:
+                        pass
+                # Remove batch directory if empty
+                try:
+                    batch_dir.rmdir()
+                except:
+                    pass
+            
+            self._log(f"Consolidated {consolidated_count} profiles into main cache ({len(combined)} total)")
+            return consolidated_count
+            
+        except ImportError:
+            # Fallback to Pandas
+            main_cache_path = self._get_cache_parquet_path(dataset)
+            all_dfs = []
+            
+            if main_cache_path.exists():
+                try:
+                    all_dfs.append(pd.read_parquet(main_cache_path))
+                except:
+                    pass
+            
+            for bf in batch_files:
+                try:
+                    all_dfs.append(pd.read_parquet(bf))
+                except:
+                    pass
+            
+            if not all_dfs:
+                return 0
+            
+            combined = pd.concat(all_dfs, ignore_index=True)
+            combined = combined.drop_duplicates(subset=['neuron_id'], keep='last')
+            
+            main_cache_path.parent.mkdir(parents=True, exist_ok=True)
+            combined.to_parquet(main_cache_path, index=False)
+            
+            self._disk_cache_df[dataset] = combined
+            self._build_disk_cache_index(dataset)
+            
+            if delete_after:
+                for bf in batch_files:
+                    try:
+                        bf.unlink()
+                    except:
+                        pass
+                try:
+                    batch_dir.rmdir()
+                except:
+                    pass
+            
+            return len(batch_files)
+    
     def _load_cache_dataframe(self, dataset: str, force_reload: bool = False) -> Optional[pd.DataFrame]:
         """
         Load the cache dataframe for a dataset with in-memory caching.
+        
+        If batch files exist from interrupted runs, consolidates them first
+        into the main connectivity_profiles.parquet file.
         
         First load reads from disk and caches in memory.
         Subsequent loads return the cached DataFrame instantly.
@@ -1162,25 +1595,57 @@ class ConnectivityProfiler:
         
         # Load from disk
         cache_path = self._get_cache_parquet_path(dataset)
-        if cache_path.exists():
+        
+        # Clean up any leftover temp files from interrupted runs
+        temp_path = cache_path.with_suffix('.parquet.tmp')
+        if temp_path.exists():
             try:
+                temp_path.unlink()
+                self._log(f"Cleaned up incomplete temp file: {temp_path.name}")
+            except Exception:
+                pass
+        
+        # Check for batch files from interrupted runs and consolidate them
+        batch_dir = self._get_profile_batch_dir(dataset)
+        if batch_dir.exists():
+            batch_files = [f for f in batch_dir.glob('*.parquet') if not f.name.endswith('.tmp')]
+            if batch_files:
+                self._log(f"Found {len(batch_files)} profile batch files from previous run, consolidating...")
+                self._consolidate_profile_batch_files(dataset, delete_after=True)
+        
+        # Now load the main cache file (which includes any consolidated batch files)
+        if not cache_path.exists():
+            return None
+        
+        try:
+            # Try Polars for memory-efficient loading of large caches
+            try:
+                import polars as pl
+                df_pl = pl.read_parquet(str(cache_path))
+                df = df_pl.to_pandas()
+                del df_pl
+            except ImportError:
                 df = pd.read_parquet(cache_path)
-                # Cache in memory
-                self._disk_cache_df[dataset] = df
-                # Build index for O(1) lookups
-                self._build_disk_cache_index(dataset)
-                return df
-            except Exception as e:
-                # Corrupt parquet file - delete it so it can be regenerated
-                self._log(f"Warning: Corrupt cache parquet for {dataset}, removing: {e}")
-                try:
-                    cache_path.unlink()
-                except:
-                    pass
-        return None
+        except Exception as e:
+            # Corrupt parquet file - delete it so it can be regenerated
+            self._log(f"Warning: Corrupt cache parquet for {dataset}, removing: {e}")
+            try:
+                cache_path.unlink()
+            except:
+                pass
+            return None
+        
+        # Cache in memory
+        self._disk_cache_df[dataset] = df
+        # Build index for O(1) lookups
+        self._build_disk_cache_index(dataset)
+        return df
     
     def _build_disk_cache_index(self, dataset: str):
-        """Build O(1) lookup index for disk cache DataFrame."""
+        """Build O(1) lookup index for disk cache DataFrame.
+        
+        Uses vectorized operations instead of iterrows for 10-100x speedup.
+        """
         if dataset not in self._disk_cache_df:
             self._disk_cache_index[dataset] = {}
             return
@@ -1190,25 +1655,72 @@ class ConnectivityProfiler:
             self._disk_cache_index[dataset] = {}
             return
         
-        # Build index: neuron_id -> row_index
+        # Build index using vectorized operations (much faster than iterrows)
+        # neuron_id -> row_index
+        neuron_ids = df['neuron_id'].astype(str).tolist()
         self._disk_cache_index[dataset] = {
-            str(row['neuron_id']): idx 
-            for idx, row in df.iterrows()
+            nid: idx for idx, nid in enumerate(neuron_ids)
         }
     
     def _save_cache_dataframe(self, df: pd.DataFrame, dataset: str):
         """
-        Save the cache dataframe for a dataset.
+        Save the cache dataframe for a dataset using atomic write.
         Also updates the in-memory cache.
+        
+        Uses a write-to-temp-then-rename strategy to ensure the cache file
+        is never left in a corrupted state if the process is interrupted
+        (Ctrl+C, power cut, system crash, etc.).
+        
+        Safety guarantees:
+        - Ctrl+C during write: temp file may be incomplete, original untouched
+        - Power cut during write: temp file may be incomplete, original untouched  
+        - Ctrl+C/power cut during rename: atomic on POSIX, either old or new exists
         """
         cache_path = self._get_cache_parquet_path(dataset)
         cache_path.parent.mkdir(parents=True, exist_ok=True)
+        
+        # Use atomic write: write to temp file, fsync, then rename
+        # This ensures the cache is never corrupted by interrupts or power loss
+        temp_path = cache_path.with_suffix('.parquet.tmp')
         try:
-            df.to_parquet(cache_path, index=False)
+            # Try Polars for faster parquet writing (especially for large caches)
+            use_polars = False
+            try:
+                import polars as pl
+                if len(df) > 5000:
+                    use_polars = True
+            except ImportError:
+                pass
+            
+            # Write to temporary file first
+            if use_polars:
+                df_pl = pl.from_pandas(df)
+                df_pl.write_parquet(str(temp_path))
+                del df_pl
+            else:
+                df.to_parquet(temp_path, index=False)
+            
+            # Ensure data is flushed to disk before rename (protects against power loss)
+            # This is critical: without fsync, data may be in OS buffer when rename happens
+            try:
+                with open(temp_path, 'r+b') as f:
+                    os.fsync(f.fileno())
+            except Exception:
+                pass  # fsync failure is non-fatal, rename will still work for Ctrl+C
+            
+            # Atomic rename (on POSIX systems, rename is atomic)
+            temp_path.rename(cache_path)
+            
             # Update in-memory cache
             self._disk_cache_df[dataset] = df
             self._build_disk_cache_index(dataset)
         except Exception as e:
+            # Clean up temp file if it exists
+            if temp_path.exists():
+                try:
+                    temp_path.unlink()
+                except Exception:
+                    pass
             self._log(f"Warning: Could not save cache parquet: {e}")
     
     def _load_from_cache(
@@ -1325,6 +1837,9 @@ class ConnectivityProfiler:
             untyped_downstream_2hop=parse_json(row.get('untyped_downstream_2hop')),
             untyped_upstream_2hop_ranks=parse_json(row.get('untyped_upstream_2hop_ranks')),
             untyped_downstream_2hop_ranks=parse_json(row.get('untyped_downstream_2hop_ranks')),
+            # Round 7: typed bodyId-level data
+            typed_upstream_bodyids=parse_json(row.get('typed_upstream_bodyids')),
+            typed_downstream_bodyids=parse_json(row.get('typed_downstream_bodyids')),
         )
     
     def _profile_to_row(self, profile: ConnectivityProfile) -> dict:
@@ -1332,92 +1847,226 @@ class ConnectivityProfiler:
         data = profile.to_dict()
         
         # Convert nested dicts to JSON strings for parquet storage
+        # Use empty JSON object '{}' instead of None to avoid parquet struct/non-struct mixing error
         for key in ['upstream_partners', 'downstream_partners', 'upstream_ranks', 'downstream_ranks',
                     'partner_type_mapping_upstream', 'partner_type_mapping_downstream',
                     'untyped_upstream_bodyids', 'untyped_downstream_bodyids',
                     'untyped_upstream_2hop', 'untyped_downstream_2hop',
-                    'untyped_upstream_2hop_ranks', 'untyped_downstream_2hop_ranks']:
+                    'untyped_upstream_2hop_ranks', 'untyped_downstream_2hop_ranks',
+                    'typed_upstream_bodyids', 'typed_downstream_bodyids']:
             if key in data and data[key] is not None:
                 data[key] = json.dumps(data[key])
             else:
-                data[key] = None
+                # Use empty JSON object string instead of None to ensure consistent column type
+                data[key] = '{}'
         
         return data
     
     def _save_to_cache(self, profile: ConnectivityProfile):
-        """Save profile to cache (parquet)."""
-        # Memory cache
+        """
+        Save profile to cache using per-file approach for interruption safety.
+        
+        IMPORTANT: Only bodyId-level profiles are saved to disk cache.
+        Type-level profiles (neuron_id is a string) are only kept in memory cache
+        since they can be quickly rebuilt from bodyId profiles using aggregate_bodyid_profiles().
+        
+        Uses individual files per profile (like connection batch files) to ensure:
+        - Each profile is saved immediately as its own file
+        - Interrupted runs don't lose progress
+        - Files are consolidated later into main cache
+        
+        When _defer_cache_writes is True (during parallel processing), writes are queued
+        and flushed later via flush_pending_cache_writes().
+        """
+        # Memory cache (always, no lock needed for dict assignment)
         cache_key = (str(profile.neuron_id), profile.dataset)
         self._memory_cache[cache_key] = profile
+        
+        # Only save bodyId-level profiles to disk (neuron_id must be an integer)
+        # Type-level profiles are computed on-the-fly and not cached to disk
+        is_bodyid_profile = isinstance(profile.neuron_id, (int, np.integer))
+        if not is_bodyid_profile:
+            # Skip disk cache for type-level profiles
+            return
         
         # Disk cache (parquet)
         if not self.config.use_cache:
             return
         
-        # Load existing cache or create new
-        cache_df = self._load_cache_dataframe(profile.dataset)
+        # If deferred writes enabled (parallel processing), queue for later batch save
+        if getattr(self, '_defer_cache_writes', False):
+            dataset = profile.dataset
+            if dataset not in self._pending_cache_writes:
+                self._pending_cache_writes[dataset] = {}
+            self._pending_cache_writes[dataset][str(profile.neuron_id)] = profile
+            return
         
-        # Convert profile to row
-        new_row = self._profile_to_row(profile)
-        new_row_df = pd.DataFrame([new_row])
+        # INTERRUPTION-SAFE: Save to individual batch file (no loading of existing data)
+        # This approach survives Ctrl+C, OOM, and crashes
+        self._save_profile_to_batch_file(profile)
         
-        if cache_df is not None and not cache_df.empty:
-            # Remove existing entry for this neuron if present
-            cache_df = cache_df[cache_df['neuron_id'] != str(profile.neuron_id)]
-            # Append new row
-            cache_df = pd.concat([cache_df, new_row_df], ignore_index=True)
-        else:
-            cache_df = new_row_df
+        # Also update in-memory index for immediate lookup
+        if profile.dataset in self._disk_cache_df:
+            # Add to in-memory DataFrame and index
+            new_row = self._profile_to_row(profile)
+            new_row_df = pd.DataFrame([new_row])
+            
+            # Remove existing entry if present
+            df = self._disk_cache_df[profile.dataset]
+            df = df[df['neuron_id'] != str(profile.neuron_id)]
+            df = pd.concat([df, new_row_df], ignore_index=True)
+            self._disk_cache_df[profile.dataset] = df
+            
+            # Update index
+            self._disk_cache_index[profile.dataset][str(profile.neuron_id)] = len(df) - 1
+    
+    def flush_pending_cache_writes(self, silent: bool = False):
+        """
+        Flush all pending cache writes to disk using batch approach.
         
-        # Save back to parquet
-        self._save_cache_dataframe(cache_df, profile.dataset)
+        Called after parallel processing completes to safely write all 
+        accumulated profile updates.
+        
+        IMPORTANT: Only bodyId-level profiles are saved to disk.
+        Type-level profiles are kept in memory only.
+        
+        Args:
+            silent: If True, suppress logging messages (for use during progress bars)
+        """
+        if not getattr(self, '_pending_cache_writes', None):
+            return
+        
+        with self._cache_write_lock:
+            for dataset, profiles in self._pending_cache_writes.items():
+                if not profiles:
+                    continue
+                
+                # Filter to only bodyId-level profiles (neuron_id must be integer)
+                # Type-level profiles stay in memory only
+                bodyid_profiles = {
+                    k: v for k, v in profiles.items() 
+                    if isinstance(v.neuron_id, (int, np.integer))
+                }
+                
+                if not bodyid_profiles:
+                    if not silent:
+                        self._log(f"Skipped {len(profiles)} type-level profiles (not cached to disk)")
+                    continue
+                
+                # Save all profiles in ONE batch file (much faster than per-profile files)
+                # This batch file will be consolidated later
+                self._save_profiles_batch_file(bodyid_profiles, dataset)
+                
+                if not silent:
+                    skipped = len(profiles) - len(bodyid_profiles)
+                    msg = f"Saved {len(bodyid_profiles)} profiles to batch file for {dataset}"
+                    if skipped > 0:
+                        msg += f" (skipped {skipped} type-level profiles)"
+                    self._log(msg)
+            
+            # Clear pending writes
+            self._pending_cache_writes = {}
+    
+    def _save_profiles_batch_file(self, profiles: Dict[str, ConnectivityProfile], dataset: str):
+        """
+        Save multiple profiles to a single batch file (much faster than per-profile).
+        
+        File naming: {batch_dir}/batch_{timestamp}_{count}.parquet
+        """
+        if not profiles:
+            return
+            
+        batch_dir = self._get_profile_batch_dir(dataset)
+        batch_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Create batch filename with timestamp and count
+        import time
+        timestamp = int(time.time() * 1000)
+        batch_file = batch_dir / f"batch_{timestamp}_{len(profiles)}.parquet"
+        
+        # Convert all profiles to rows
+        rows = [self._profile_to_row(p) for p in profiles.values()]
+        df = pd.DataFrame(rows)
+        
+        # Atomic write with temp file
+        temp_file = batch_file.with_suffix('.parquet.tmp')
+        try:
+            df.to_parquet(temp_file, index=False)
+            temp_file.rename(batch_file)
+        except Exception as e:
+            if temp_file.exists():
+                try:
+                    temp_file.unlink()
+                except:
+                    pass
+            self._log(f"Warning: Could not save profiles batch file: {e}")
     
     def _save_profiles_to_cache_batch(
         self, 
         profiles: Dict[str, ConnectivityProfile], 
-        dataset: str
+        dataset: str,
+        silent: bool = False
     ):
         """
-        Save multiple profiles to cache in a single batch operation.
+        Save multiple profiles to cache using batch file approach.
         
-        This is more efficient than calling _save_to_cache repeatedly
-        when building cache for many profiles.
+        All bodyId-level profiles are saved to a single batch file for efficiency.
+        Type-level profiles are only kept in memory, not saved to disk.
+        Use consolidate_profile_cache() to merge into main cache file.
         
         Args:
             profiles: Dict mapping neuron_id to ConnectivityProfile
             dataset: Dataset identifier
+            silent: If True, suppress logging messages
         """
         if not profiles:
             return
         
-        # Memory cache update
+        # Memory cache update (all profiles, including type-level)
         for neuron_id, profile in profiles.items():
             cache_key = (str(neuron_id), dataset)
             self._memory_cache[cache_key] = profile
         
-        # Disk cache (parquet)
+        # Disk cache using batch file approach (one file for all profiles)
         if not self.config.use_cache:
             return
         
-        # Load existing cache
-        cache_df = self._load_cache_dataframe(dataset)
+        # Filter to only bodyId-level profiles for disk cache
+        bodyid_profiles = {
+            k: v for k, v in profiles.items() 
+            if isinstance(v.neuron_id, (int, np.integer))
+        }
         
-        # Convert all new profiles to rows
-        new_rows = [self._profile_to_row(p) for p in profiles.values()]
-        new_df = pd.DataFrame(new_rows)
+        if not bodyid_profiles:
+            return
         
-        if cache_df is not None and not cache_df.empty:
-            # Remove existing entries for these neurons
-            neuron_ids = set(str(p.neuron_id) for p in profiles.values())
-            cache_df = cache_df[~cache_df['neuron_id'].isin(neuron_ids)]
-            # Append new rows
-            cache_df = pd.concat([cache_df, new_df], ignore_index=True)
+        # Save all profiles to ONE batch file (much faster)
+        self._save_profiles_batch_file(bodyid_profiles, dataset)
+        
+        if not silent:
+            self._log(f"Saved {len(bodyid_profiles)} profiles to batch file")
+    
+    def consolidate_profile_cache(self, dataset: str = None):
+        """
+        Consolidate profile batch files into main cache file.
+        
+        Call this after profile building to merge individual profile files
+        into the main connectivity_profiles.parquet. This improves subsequent
+        load times.
+        
+        Args:
+            dataset: Dataset to consolidate. If None, consolidates all datasets.
+        """
+        if dataset:
+            count = self._consolidate_profile_batch_files(dataset)
+            if count > 0:
+                self._log(f"Consolidated {count} profiles for {dataset}")
         else:
-            cache_df = new_df
-        
-        # Save back to parquet
-        self._save_cache_dataframe(cache_df, dataset)
-        self._log(f"Saved {len(profiles)} profiles to cache")
+            # Consolidate all datasets
+            for ds in list(self._disk_cache_df.keys()):
+                count = self._consolidate_profile_batch_files(ds)
+                if count > 0:
+                    self._log(f"Consolidated {count} profiles for {ds}")
 
     def read_connectivity_profile_cache(
         self,
@@ -1573,6 +2222,166 @@ class ConnectivityProfiler:
             'top_k_distribution': top_k_dist,
             'cache_modified': datetime.fromtimestamp(cache_mtime).isoformat()
         }
+    
+    def ensure_data_available(self, dataset: str, raise_on_missing: bool = True) -> bool:
+        """
+        Ensure connection data is available for a dataset.
+        
+        This method checks if the required connection cache files exist for
+        building connectivity profiles. For local datasets (FlyWire/FAFB/BANC),
+        it checks the datasets/ folder for merged_connections files.
+        
+        Args:
+            dataset: Dataset identifier (e.g., 'flywire_FAFB_v783', 'hemibrain:v1.2.1')
+            raise_on_missing: If True, raise DataNotAvailableError when data is missing
+            
+        Returns:
+            True if data is available, False otherwise
+            
+        Raises:
+            DataNotAvailableError: If raise_on_missing=True and data is not found
+            
+        Example:
+            >>> profiler.ensure_data_available('flywire_FAFB_v783')
+            True  # Data exists
+            
+            >>> profiler.ensure_data_available('some_new_dataset')
+            DataNotAvailableError: Connection data not found for 'some_new_dataset'.
+            Please run: python src/build_connection_cache.py some_new_dataset
+        """
+        dataset_lower = dataset.lower()
+        is_local = any(x in dataset_lower for x in ['flywire', 'fafb', 'banc'])
+        
+        if is_local:
+            # Check for local connection files
+            safe_name = dataset.replace(':', '_').replace('.', '_')
+            src_dir = Path(__file__).parent.parent
+            project_root = src_dir.parent
+            datasets_folder = project_root / 'datasets'
+            dataset_path = datasets_folder / safe_name
+            
+            # Check for connection files
+            conn_files = [
+                dataset_path / f'{safe_name}_merged_connections.parquet',
+                dataset_path / f'{safe_name}_merged_connections.csv',
+                dataset_path / f'{safe_name}_connections.parquet',
+                dataset_path / f'{safe_name}_connections.csv',
+                dataset_path / 'connections.parquet',
+                dataset_path / 'connections.csv',
+            ]
+            
+            data_exists = any(f.exists() for f in conn_files)
+            
+            if not data_exists and raise_on_missing:
+                raise DataNotAvailableError(
+                    f"Connection data not found for '{dataset}'.\n\n"
+                    f"Expected location: {dataset_path}/\n"
+                    f"Expected files: {safe_name}_merged_connections.parquet or .csv\n\n"
+                    f"To build the connection cache, run:\n"
+                    f"  python src/build_connection_cache.py {dataset}\n\n"
+                    f"Or ensure the dataset files exist in the datasets/ folder."
+                )
+            
+            return data_exists
+        else:
+            # For NeuPrint datasets, check if we can create a client
+            try:
+                client = self._get_client_for_dataset(dataset)
+                if client is None:
+                    if raise_on_missing:
+                        raise DataNotAvailableError(
+                            f"Cannot connect to NeuPrint for '{dataset}'.\n\n"
+                            f"Please ensure:\n"
+                            f"  1. NEUPRINT_APPLICATION_CREDENTIALS environment variable is set\n"
+                            f"  2. The token has access to dataset '{dataset}'\n"
+                            f"  3. NeuPrint server (neuprint.janelia.org) is accessible"
+                        )
+                    return False
+                return True
+            except Exception as e:
+                if raise_on_missing:
+                    raise DataNotAvailableError(
+                        f"Failed to verify data availability for '{dataset}': {e}"
+                    )
+                return False
+    
+    def get_data_status(self, datasets: List[str] = None) -> Dict[str, Dict[str, Any]]:
+        """
+        Get status of connection data for multiple datasets.
+        
+        Args:
+            datasets: List of datasets to check. If None, uses self.datasets.
+            
+        Returns:
+            Dict mapping dataset -> status info:
+                - 'available': bool
+                - 'type': 'local' or 'neuprint'
+                - 'path': Path to data file (for local)
+                - 'rows': Number of connection rows (if available)
+                - 'error': Error message (if not available)
+        """
+        if datasets is None:
+            datasets = self.datasets
+        
+        status = {}
+        for dataset in datasets:
+            dataset_lower = dataset.lower()
+            is_local = any(x in dataset_lower for x in ['flywire', 'fafb', 'banc'])
+            
+            try:
+                available = self.ensure_data_available(dataset, raise_on_missing=False)
+                
+                if is_local:
+                    safe_name = dataset.replace(':', '_').replace('.', '_')
+                    src_dir = Path(__file__).parent.parent
+                    project_root = src_dir.parent
+                    dataset_path = project_root / 'datasets' / safe_name
+                    
+                    # Find the actual file
+                    conn_file = None
+                    for fname in [f'{safe_name}_merged_connections.parquet',
+                                  f'{safe_name}_merged_connections.csv',
+                                  f'{safe_name}_connections.parquet',
+                                  'connections.parquet']:
+                        f = dataset_path / fname
+                        if f.exists():
+                            conn_file = f
+                            break
+                    
+                    rows = None
+                    if conn_file and available:
+                        try:
+                            conn_df = self._get_cached_conn_df(dataset)
+                            if conn_df is not None:
+                                rows = len(conn_df)
+                        except:
+                            pass
+                    
+                    status[dataset] = {
+                        'available': available,
+                        'type': 'local',
+                        'path': str(conn_file) if conn_file else str(dataset_path),
+                        'rows': rows,
+                        'error': None if available else f"No connection file found in {dataset_path}"
+                    }
+                else:
+                    status[dataset] = {
+                        'available': available,
+                        'type': 'neuprint',
+                        'path': 'neuprint.janelia.org',
+                        'rows': None,  # Would need API call to count
+                        'error': None if available else "Cannot connect to NeuPrint"
+                    }
+            except Exception as e:
+                status[dataset] = {
+                    'available': False,
+                    'type': 'local' if is_local else 'neuprint',
+                    'path': None,
+                    'rows': None,
+                    'error': str(e)
+                }
+        
+        return status
 
     def _normalize_neuprint_dataset_name(self, dataset: str) -> str:
         """
@@ -1670,7 +2479,7 @@ class ConnectivityProfiler:
                     if str(neuron_file).endswith('.parquet'):
                         neuron_df = pd.read_parquet(neuron_file)
                     else:
-                        neuron_df = pd.read_csv(neuron_file)
+                        neuron_df = pd.read_csv(neuron_file, low_memory=False)
                     self._log(f"Loaded neuron info from {neuron_file}", level='debug')
                     break
                 except Exception as e:
@@ -1745,13 +2554,25 @@ class ConnectivityProfiler:
         
         min_syn = self.config.min_synapse_threshold
         
-        # Build neuron condition
+        # Import API utilities for Cypher escaping and timeout
+        try:
+            from src.utils.api_utils import escape_cypher_string, api_call_with_retry, APITimeoutError, APIRetryExhaustedError
+        except ImportError:
+            # Fallback: inline escape function
+            def escape_cypher_string(value):
+                if not isinstance(value, str):
+                    return str(value)
+                return value.replace('\\', '\\\\').replace("'", "\\'")
+            api_call_with_retry = None
+        
+        # Build neuron condition with proper escaping for special characters
         if isinstance(neuron, str):
+            escaped_neuron = escape_cypher_string(neuron)
             # Type-based query with regex support
             if '.*' in neuron or '*' in neuron:
-                neuron_cond = f"n.type =~ '{neuron}'"
+                neuron_cond = f"n.type =~ '{escaped_neuron}'"
             else:
-                neuron_cond = f"n.type = '{neuron}'"
+                neuron_cond = f"n.type = '{escaped_neuron}'"
         elif isinstance(neuron, int):
             neuron_cond = f"n.bodyId = {neuron}"
         elif isinstance(neuron, list):
@@ -1777,8 +2598,25 @@ class ConnectivityProfiler:
         """
         
         try:
-            upstream_df = client.fetch_custom(upstream_query)
-            downstream_df = client.fetch_custom(downstream_query)
+            # Use timeout wrapper if available
+            if api_call_with_retry is not None:
+                upstream_df = api_call_with_retry(
+                    lambda: client.fetch_custom(upstream_query),
+                    timeout=60.0,
+                    max_retries=2,
+                    description=f"Upstream query for {neuron}",
+                    verbose=False
+                )
+                downstream_df = api_call_with_retry(
+                    lambda: client.fetch_custom(downstream_query),
+                    timeout=60.0,
+                    max_retries=2,
+                    description=f"Downstream query for {neuron}",
+                    verbose=False
+                )
+            else:
+                upstream_df = client.fetch_custom(upstream_query)
+                downstream_df = client.fetch_custom(downstream_query)
             return upstream_df, downstream_df
         except Exception as e:
             self._log(f"Warning: Query failed for {neuron} in {dataset}: {e}")
@@ -1786,14 +2624,12 @@ class ConnectivityProfiler:
     
     def _get_cached_conn_df(self, dataset: str) -> Optional[pd.DataFrame]:
         """
-        Get connection DataFrame from module-level cache, loading from disk only once.
+        Get connection DataFrame from cache, checking FNC's cache first.
         
-        This method handles:
-        1. Check module-level cache first (with thread lock)
-        2. Load from disk if not cached
-        3. Standardize column names
-        4. Join type info from neuron_df if needed
-        5. Cache for future use
+        Priority:
+        1. Check profiler's own cache (fastest)
+        2. Check FNC's module-level cache (already indexed)
+        3. Load from disk if needed
         
         Thread-safe: Uses module-level lock to prevent race conditions.
         
@@ -1805,13 +2641,69 @@ class ConnectivityProfiler:
         # Build cache key
         safe_name = dataset.replace(':', '_').replace('.', '_')
         
-        # Quick check without lock (for already cached data)
+        # Quick check without lock (for already cached data in profiler cache)
         if safe_name in _PROFILER_CONN_CACHE and 'conn_df' in _PROFILER_CONN_CACHE[safe_name]:
             cached_df = _PROFILER_CONN_CACHE[safe_name]['conn_df']
             if cached_df is not None:
                 return cached_df
         
-        # Acquire lock for loading
+        # Check FNC's module-level cache (set by coana.py after build_connection_cache)
+        try:
+            from coana import _FNC_CACHE
+            if safe_name in _FNC_CACHE and 'conn_df' in _FNC_CACHE[safe_name]:
+                fnc_df = _FNC_CACHE[safe_name]['conn_df']
+                fnc_index = _FNC_CACHE[safe_name].get('conn_index', {})
+                if fnc_df is not None and not fnc_df.empty:
+                    # Use FNC's cache - it's already loaded and indexed
+                    # Store reference in profiler cache too
+                    if safe_name not in _PROFILER_CONN_CACHE:
+                        _PROFILER_CONN_CACHE[safe_name] = {}
+                    
+                    # Need to ensure type columns exist and build post index
+                    conn_df = fnc_df
+                    
+                    # Check if type columns exist, if not join from neuron_df
+                    if 'type_pre' not in conn_df.columns or 'type_post' not in conn_df.columns:
+                        src_dir = Path(__file__).parent.parent
+                        project_root = src_dir.parent
+                        dataset_path = project_root / 'datasets' / safe_name
+                        conn_df = self._join_type_info_from_neuron_df(conn_df, dataset_path, safe_name)
+                    
+                    _PROFILER_CONN_CACHE[safe_name]['conn_df'] = conn_df
+                    # Use FNC's pre index
+                    _PROFILER_CONN_CACHE[safe_name]['bodyid_pre_index'] = fnc_index
+                    
+                    # Use FNC's post index if available, otherwise build it
+                    fnc_post_index = _FNC_CACHE[safe_name].get('conn_index_post')
+                    if fnc_post_index:
+                        _PROFILER_CONN_CACHE[safe_name]['bodyid_post_index'] = fnc_post_index
+                    elif 'bodyid_post_index' not in _PROFILER_CONN_CACHE[safe_name]:
+                        # Build bodyId_post index only if not available from FNC
+                        # This happens once per dataset, log it so user knows what's happening
+                        n_rows = len(conn_df)
+                        if n_rows > 100000:
+                            self._log(f"Building post index for {dataset} ({n_rows:,} rows)...")
+                        post_index = {}
+                        if 'bodyId_post' in conn_df.columns:
+                            post_col = conn_df['bodyId_post'].values
+                            for idx in range(len(post_col)):
+                                post_key = str(post_col[idx])
+                                if post_key not in post_index:
+                                    post_index[post_key] = []
+                                post_index[post_key].append(idx)
+                        _PROFILER_CONN_CACHE[safe_name]['bodyid_post_index'] = post_index
+                        if n_rows > 100000:
+                            self._log(f"Post index built: {len(post_index):,} unique downstream neurons")
+                    
+                    if safe_name not in _PROFILER_CACHE_LOGGED:
+                        _PROFILER_CACHE_LOGGED.add(safe_name)
+                        self._log(f"Using FNC cache for {dataset} ({len(conn_df):,} rows, indexed)")
+                    
+                    return conn_df
+        except ImportError:
+            pass
+        
+        # Acquire lock for loading from disk
         with _PROFILER_CONN_CACHE_LOCK:
             # Double-check after acquiring lock (another thread may have loaded)
             if safe_name in _PROFILER_CONN_CACHE and 'conn_df' in _PROFILER_CONN_CACHE[safe_name]:
@@ -1823,16 +2715,23 @@ class ConnectivityProfiler:
             src_dir = Path(__file__).parent.parent
             project_root = src_dir.parent
             datasets_folder = project_root / 'datasets'
+            cache_folder = project_root / 'cache'
             dataset_path = datasets_folder / safe_name
+            cache_path = cache_folder / safe_name
         
             # Try to load connections file - check multiple naming conventions
+            # Priority: 1) datasets/ folder (pre-processed data)
+            #           2) cache/ folder (built by FNC.build_connection_cache)
             conn_files = [
+                # datasets/ folder (for pre-processed datasets like FlyWire)
                 dataset_path / f'{safe_name}_merged_connections.parquet',
                 dataset_path / f'{safe_name}_merged_connections.csv',
                 dataset_path / f'{safe_name}_connections.parquet',
                 dataset_path / f'{safe_name}_connections.csv',
                 dataset_path / 'connections.parquet',
                 dataset_path / 'connections.csv',
+                # cache/ folder (for NeuPrint datasets built via build_connection_cache)
+                cache_path / 'connections.parquet',
             ]
             
             conn_df = None
@@ -1840,7 +2739,14 @@ class ConnectivityProfiler:
                 if conn_file.exists():
                     try:
                         if str(conn_file).endswith('.parquet'):
-                            conn_df = pd.read_parquet(conn_file)
+                            # Try Polars for large connection files
+                            try:
+                                import polars as pl
+                                conn_df_pl = pl.read_parquet(str(conn_file))
+                                conn_df = conn_df_pl.to_pandas()
+                                del conn_df_pl
+                            except ImportError:
+                                conn_df = pd.read_parquet(conn_file)
                         else:
                             conn_df = pd.read_csv(conn_file)
                         break
@@ -1875,15 +2781,65 @@ class ConnectivityProfiler:
                 else:
                     conn_df['weight'] = 1
             
-            # Cache the preprocessed DataFrame
+            # Build O(1) lookup indexes for fast querying
+            # This dramatically speeds up profile building
+            bodyid_pre_index = {}  # bodyId -> list of row indices where it's pre
+            bodyid_post_index = {}  # bodyId -> list of row indices where it's post
+            
+            n_rows = len(conn_df)
+            if n_rows > 100000:
+                self._log(f"Building connection indexes for {dataset} ({n_rows:,} rows)...")
+            
+            if 'bodyId_pre' in conn_df.columns and 'bodyId_post' in conn_df.columns:
+                # Try Polars for faster index building (2-3x faster for large datasets)
+                try:
+                    import polars as pl
+                    
+                    # Build indexes using Polars group_by (much faster than Python loop)
+                    df_pl = pl.DataFrame({
+                        'bodyId_pre': conn_df['bodyId_pre'].astype(str).values,
+                        'bodyId_post': conn_df['bodyId_post'].astype(str).values,
+                        'idx': range(n_rows)
+                    })
+                    
+                    # Group by pre and collect indices using iter_rows for efficiency
+                    pre_result = df_pl.group_by('bodyId_pre').agg(pl.col('idx'))
+                    bodyid_pre_index = {row[0]: row[1] for row in pre_result.iter_rows()}
+                    
+                    # Group by post and collect indices
+                    post_result = df_pl.group_by('bodyId_post').agg(pl.col('idx'))
+                    bodyid_post_index = {row[0]: row[1] for row in post_result.iter_rows()}
+                    
+                    del df_pl, pre_result, post_result
+                    
+                except ImportError:
+                    # Fallback to optimized Python with defaultdict
+                    from collections import defaultdict
+                    bodyid_pre_index = defaultdict(list)
+                    bodyid_post_index = defaultdict(list)
+                    pre_col = conn_df['bodyId_pre'].values
+                    post_col = conn_df['bodyId_post'].values
+                    for idx in range(len(pre_col)):
+                        bodyid_pre_index[str(pre_col[idx])].append(idx)
+                        bodyid_post_index[str(post_col[idx])].append(idx)
+                    # Convert to regular dict
+                    bodyid_pre_index = dict(bodyid_pre_index)
+                    bodyid_post_index = dict(bodyid_post_index)
+            
+            if n_rows > 100000:
+                self._log(f"Indexes built: {len(bodyid_pre_index):,} upstream, {len(bodyid_post_index):,} downstream neurons")
+            
+            # Cache the preprocessed DataFrame and indexes
             if safe_name not in _PROFILER_CONN_CACHE:
                 _PROFILER_CONN_CACHE[safe_name] = {}
             _PROFILER_CONN_CACHE[safe_name]['conn_df'] = conn_df
+            _PROFILER_CONN_CACHE[safe_name]['bodyid_pre_index'] = bodyid_pre_index
+            _PROFILER_CONN_CACHE[safe_name]['bodyid_post_index'] = bodyid_post_index
             
             # Log only once per dataset (track in module-level set)
             if safe_name not in _PROFILER_CACHE_LOGGED:
                 _PROFILER_CACHE_LOGGED.add(safe_name)
-                self._log(f"Cached connection data for {dataset} ({len(conn_df):,} rows)")
+                self._log(f"Cached connection data for {dataset} ({len(conn_df):,} rows, indexed)")
             
             return conn_df
     
@@ -1895,11 +2851,13 @@ class ConnectivityProfiler:
         """
         Query upstream and downstream connections from local dataset files.
         
-        Uses module-level cache to load connection data once per dataset.
+        Uses module-level cache with pre-built indexes for O(1) lookups.
         
         Returns:
             Tuple of (upstream_df, downstream_df)
         """
+        global _PROFILER_CONN_CACHE
+        
         # Get cached connection DataFrame
         conn_df = self._get_cached_conn_df(dataset)
         
@@ -1907,14 +2865,97 @@ class ConnectivityProfiler:
             self._log(f"Warning: No connection data found for {dataset}")
             return pd.DataFrame(), pd.DataFrame()
         
-        # Filter by minimum synapses (apply on a view, not copy yet)
         min_syn = self.config.min_synapse_threshold
-        if min_syn > 0:
-            conn_df = conn_df[conn_df['weight'] >= min_syn]
+        safe_name = dataset.replace(':', '_').replace('.', '_')
         
-        # Build neuron mask
-        if isinstance(neuron, str):
-            # Type-based query
+        # Get pre-built indexes for O(1) lookup
+        cache_entry = _PROFILER_CONN_CACHE.get(safe_name, {})
+        bodyid_pre_index = cache_entry.get('bodyid_pre_index', {})
+        bodyid_post_index = cache_entry.get('bodyid_post_index', {})
+        
+        # For bodyId queries (int), use O(1) index lookup
+        if isinstance(neuron, int):
+            neuron_str = str(neuron)
+            
+            # Upstream: connections where this neuron is post (inputs to neuron)
+            up_indices = bodyid_post_index.get(neuron_str, [])
+            if up_indices:
+                upstream = conn_df.iloc[up_indices].copy()
+                if min_syn > 0:
+                    upstream = upstream[upstream['weight'] >= min_syn]
+                if not upstream.empty:
+                    upstream = upstream.rename(columns={
+                        'bodyId_pre': 'partner_bodyId',
+                        'type_pre': 'partner_type',
+                        'bodyId_post': 'neuron_bodyId',
+                    })
+                    upstream = upstream[['partner_bodyId', 'partner_type', 'neuron_bodyId', 'weight']]
+            else:
+                upstream = pd.DataFrame()
+            
+            # Downstream: connections where this neuron is pre (outputs from neuron)
+            down_indices = bodyid_pre_index.get(neuron_str, [])
+            if down_indices:
+                downstream = conn_df.iloc[down_indices].copy()
+                if min_syn > 0:
+                    downstream = downstream[downstream['weight'] >= min_syn]
+                if not downstream.empty:
+                    downstream = downstream.rename(columns={
+                        'bodyId_post': 'partner_bodyId',
+                        'type_post': 'partner_type',
+                        'bodyId_pre': 'neuron_bodyId',
+                    })
+                    downstream = downstream[['partner_bodyId', 'partner_type', 'neuron_bodyId', 'weight']]
+            else:
+                downstream = pd.DataFrame()
+            
+            return upstream, downstream
+        
+        # For list of bodyIds, use index lookup for each
+        elif isinstance(neuron, list):
+            up_indices = []
+            down_indices = []
+            for n in neuron:
+                n_str = str(n)
+                up_indices.extend(bodyid_post_index.get(n_str, []))
+                down_indices.extend(bodyid_pre_index.get(n_str, []))
+            
+            if up_indices:
+                upstream = conn_df.iloc[up_indices].copy()
+                if min_syn > 0:
+                    upstream = upstream[upstream['weight'] >= min_syn]
+                if not upstream.empty:
+                    upstream = upstream.rename(columns={
+                        'bodyId_pre': 'partner_bodyId',
+                        'type_pre': 'partner_type',
+                        'bodyId_post': 'neuron_bodyId',
+                    })
+                    upstream = upstream[['partner_bodyId', 'partner_type', 'neuron_bodyId', 'weight']]
+            else:
+                upstream = pd.DataFrame()
+            
+            if down_indices:
+                downstream = conn_df.iloc[down_indices].copy()
+                if min_syn > 0:
+                    downstream = downstream[downstream['weight'] >= min_syn]
+                if not downstream.empty:
+                    downstream = downstream.rename(columns={
+                        'bodyId_post': 'partner_bodyId',
+                        'type_post': 'partner_type',
+                        'bodyId_pre': 'neuron_bodyId',
+                    })
+                    downstream = downstream[['partner_bodyId', 'partner_type', 'neuron_bodyId', 'weight']]
+            else:
+                downstream = pd.DataFrame()
+            
+            return upstream, downstream
+        
+        # For type-based queries (string), fall back to O(n) filtering
+        elif isinstance(neuron, str):
+            # Apply min_syn filter first
+            if min_syn > 0:
+                conn_df = conn_df[conn_df['weight'] >= min_syn]
+            
             if '.*' in neuron or '*' in neuron:
                 pattern = neuron.replace('.*', '.*').replace('*', '.*')
                 if 'type_pre' in conn_df.columns:
@@ -1928,42 +2969,29 @@ class ConnectivityProfiler:
                     mask_down = conn_df['type_pre'] == neuron
                 else:
                     return pd.DataFrame(), pd.DataFrame()
-        elif isinstance(neuron, int):
-            if 'bodyId_post' in conn_df.columns:
-                mask_up = conn_df['bodyId_post'] == neuron
-                mask_down = conn_df['bodyId_pre'] == neuron
-            else:
-                return pd.DataFrame(), pd.DataFrame()
-        elif isinstance(neuron, list):
-            if 'bodyId_post' in conn_df.columns:
-                mask_up = conn_df['bodyId_post'].isin(neuron)
-                mask_down = conn_df['bodyId_pre'].isin(neuron)
-            else:
-                return pd.DataFrame(), pd.DataFrame()
+            
+            upstream = conn_df[mask_up].copy()
+            if not upstream.empty:
+                upstream = upstream.rename(columns={
+                    'bodyId_pre': 'partner_bodyId',
+                    'type_pre': 'partner_type',
+                    'bodyId_post': 'neuron_bodyId',
+                })
+                upstream = upstream[['partner_bodyId', 'partner_type', 'neuron_bodyId', 'weight']]
+            
+            downstream = conn_df[mask_down].copy()
+            if not downstream.empty:
+                downstream = downstream.rename(columns={
+                    'bodyId_post': 'partner_bodyId',
+                    'type_post': 'partner_type',
+                    'bodyId_pre': 'neuron_bodyId',
+                })
+                downstream = downstream[['partner_bodyId', 'partner_type', 'neuron_bodyId', 'weight']]
+            
+            return upstream, downstream
+        
         else:
             raise ValueError(f"Unsupported neuron type: {type(neuron)}")
-        
-        # Extract upstream connections
-        upstream = conn_df[mask_up].copy()
-        if not upstream.empty:
-            upstream = upstream.rename(columns={
-                'bodyId_pre': 'partner_bodyId',
-                'type_pre': 'partner_type',
-                'bodyId_post': 'neuron_bodyId',
-            })
-            upstream = upstream[['partner_bodyId', 'partner_type', 'neuron_bodyId', 'weight']]
-        
-        # Extract downstream connections
-        downstream = conn_df[mask_down].copy()
-        if not downstream.empty:
-            downstream = downstream.rename(columns={
-                'bodyId_post': 'partner_bodyId',
-                'type_post': 'partner_type',
-                'bodyId_pre': 'neuron_bodyId',
-            })
-            downstream = downstream[['partner_bodyId', 'partner_type', 'neuron_bodyId', 'weight']]
-        
-        return upstream, downstream
     
     def _fetch_2hop_partners(
         self,
@@ -1977,7 +3005,8 @@ class ConnectivityProfiler:
         For each untyped 1-hop partner, query their connections and return
         only typed 2-hop partners with their weights and ranks.
         
-        Uses module-level cache for connection data.
+        Uses batched processing with Polars for efficiency when there are
+        many untyped partners (common in datasets with incomplete type annotations).
         
         Args:
             untyped_bodyids: List of untyped 1-hop partner bodyIds
@@ -1991,6 +3020,8 @@ class ConnectivityProfiler:
             where weights_dict = {typed_type → normalized_weight}
             and ranks_dict = {typed_type → rank}
         """
+        global _PROFILER_CONN_CACHE
+        
         if not untyped_bodyids:
             return {}
         
@@ -2000,83 +3031,165 @@ class ConnectivityProfiler:
         if conn_df is None or conn_df.empty:
             return {}
         
-        # Filter by minimum synapses
-        min_syn = self.config.min_synapse_threshold
-        if min_syn > 0:
-            conn_df = conn_df[conn_df['weight'] >= min_syn]
+        # Get pre-built indexes for O(1) lookup per bodyId
+        safe_name = dataset.replace(':', '_').replace('.', '_')
+        cache_entry = _PROFILER_CONN_CACHE.get(safe_name, {})
+        bodyid_pre_index = cache_entry.get('bodyid_pre_index', {})
+        bodyid_post_index = cache_entry.get('bodyid_post_index', {})
         
-        results = {}
+        min_syn = self.config.min_synapse_threshold
         top_k_2hop = self.config.top_k_2hop
         
+        # Determine index and columns based on direction
+        if direction == 'upstream':
+            index_to_use = bodyid_post_index
+            partner_type_col = 'type_pre'
+            source_bid_col = 'bodyId_post'
+        else:
+            index_to_use = bodyid_pre_index
+            partner_type_col = 'type_post'
+            source_bid_col = 'bodyId_pre'
+        
+        # Check column existence once
+        if partner_type_col not in conn_df.columns:
+            return {bid: ({}, {}) for bid in untyped_bodyids}
+        
+        # === BATCHED APPROACH: Collect all indices at once ===
+        # This is much faster than processing one bodyId at a time
+        all_indices = []
+        bid_to_indices = {}
         for untyped_bid in untyped_bodyids:
-            # Query connections for this untyped neuron
-            # Direction determines which connections to fetch:
-            # - upstream untyped partner → get their upstream (further back in circuit)
-            # - downstream untyped partner → get their downstream (further forward in circuit)
-            if direction == 'upstream':
-                # Untyped partner is upstream of original neuron
-                # Get their upstream connections (2-hop upstream)
-                if 'bodyId_post' in conn_df.columns:
-                    mask = conn_df['bodyId_post'] == untyped_bid
-                    partner_type_col = 'type_pre'
-                    partner_bid_col = 'bodyId_pre'
-                else:
+            bid_str = str(untyped_bid)
+            indices = index_to_use.get(bid_str, [])
+            if indices:
+                bid_to_indices[untyped_bid] = (len(all_indices), len(all_indices) + len(indices))
+                all_indices.extend(indices)
+        
+        # If no indices found, return empty results
+        if not all_indices:
+            return {bid: ({}, {}) for bid in untyped_bodyids}
+        
+        # Single iloc for all indices (much faster than multiple small ilocs)
+        all_hop2_df = conn_df.iloc[all_indices]
+        
+        # Apply min_syn filter once
+        if min_syn > 0:
+            all_hop2_df = all_hop2_df[all_hop2_df['weight'] >= min_syn]
+        
+        # Filter to only typed 2-hop partners once
+        typed_mask = all_hop2_df[partner_type_col].notna() & (all_hop2_df[partner_type_col].astype(str).str.strip() != '')
+        all_hop2_df = all_hop2_df[typed_mask]
+        
+        if all_hop2_df.empty:
+            return {bid: ({}, {}) for bid in untyped_bodyids}
+        
+        # Apply fuzzy matching once
+        if self.config.fuzzy_match.enabled:
+            all_hop2_df = all_hop2_df.copy()
+            all_hop2_df['partner_type_normalized'] = all_hop2_df[partner_type_col].apply(
+                lambda x: normalize_partner_type(x, self.config.fuzzy_match)
+            )
+        else:
+            all_hop2_df = all_hop2_df.copy()
+            all_hop2_df['partner_type_normalized'] = all_hop2_df[partner_type_col].astype(str)
+        
+        # Process results per untyped bodyId
+        results = {}
+        
+        try:
+            import polars as pl
+            
+            # Convert entire filtered DataFrame to Polars once
+            pl_df = pl.from_pandas(all_hop2_df[[source_bid_col, 'partner_type_normalized', 'weight']])
+            
+            # Ensure consistent type for bodyId column - cast to Int64 to match untyped_bid
+            # This fixes "cannot compare string with numeric type (i32)" error
+            try:
+                pl_df = pl_df.with_columns(pl.col(source_bid_col).cast(pl.Int64))
+            except Exception:
+                # If cast fails, keep as-is (will handle comparison differently)
+                pass
+            
+            # Process each untyped bodyId
+            for untyped_bid in untyped_bodyids:
+                if untyped_bid not in bid_to_indices:
+                    results[untyped_bid] = ({}, {})
                     continue
-            else:
-                # Untyped partner is downstream of original neuron
-                # Get their downstream connections (2-hop downstream)
-                if 'bodyId_pre' in conn_df.columns:
-                    mask = conn_df['bodyId_pre'] == untyped_bid
-                    partner_type_col = 'type_post'
-                    partner_bid_col = 'bodyId_post'
-                else:
+                
+                # Filter for this bodyId - ensure consistent types
+                try:
+                    bid_df = pl_df.filter(pl.col(source_bid_col) == int(untyped_bid))
+                except (ValueError, TypeError):
+                    # Fallback to string comparison
+                    bid_df = pl_df.filter(pl.col(source_bid_col).cast(pl.Utf8) == str(untyped_bid))
+                
+                if len(bid_df) == 0:
+                    results[untyped_bid] = ({}, {})
                     continue
-            
-            hop2_df = conn_df[mask].copy()
-            
-            if hop2_df.empty:
-                results[untyped_bid] = ({}, {})
-                continue
-            
-            # Filter to only typed 2-hop partners
-            if partner_type_col in hop2_df.columns:
-                typed_mask = hop2_df[partner_type_col].notna() & (hop2_df[partner_type_col].astype(str).str.strip() != '')
-                hop2_df = hop2_df[typed_mask]
-            else:
-                results[untyped_bid] = ({}, {})
-                continue
-            
-            if hop2_df.empty:
-                results[untyped_bid] = ({}, {})
-                continue
-            
-            # Apply fuzzy matching
-            if self.config.fuzzy_match.enabled:
-                hop2_df['partner_type_normalized'] = hop2_df[partner_type_col].apply(
-                    lambda x: normalize_partner_type(x, self.config.fuzzy_match)
+                
+                # Take top-k by weight
+                bid_df = bid_df.sort('weight', descending=True).head(top_k_2hop)
+                
+                # Aggregate by type
+                aggregated = (
+                    bid_df
+                    .group_by('partner_type_normalized')
+                    .agg(pl.col('weight').sum())
                 )
-            else:
-                hop2_df['partner_type_normalized'] = hop2_df[partner_type_col].astype(str)
-            
-            # Sort by weight and take top-k
-            hop2_df = hop2_df.sort_values('weight', ascending=False).head(top_k_2hop)
-            
-            # Aggregate by type
-            aggregated = hop2_df.groupby('partner_type_normalized').agg({
-                'weight': 'sum'
-            }).reset_index()
-            
-            # Normalize weights
-            total_weight = aggregated['weight'].sum()
-            weights_dict = {}
-            for _, row in aggregated.iterrows():
-                ptype = row['partner_type_normalized']
-                weights_dict[ptype] = row['weight'] / total_weight if total_weight > 0 else 0.0
-            
-            # Compute ranks
-            ranks_dict = compute_ranks(weights_dict)
-            
-            results[untyped_bid] = (weights_dict, ranks_dict)
+                
+                # Normalize weights
+                total_weight = aggregated['weight'].sum()
+                if total_weight > 0:
+                    types = aggregated['partner_type_normalized'].to_list()
+                    weights = aggregated['weight'].to_list()
+                    weights_dict = {t: w / total_weight for t, w in zip(types, weights)}
+                else:
+                    weights_dict = {}
+                
+                # Compute ranks
+                ranks_dict = compute_ranks(weights_dict)
+                results[untyped_bid] = (weights_dict, ranks_dict)
+                
+        except ImportError:
+            # Fallback to Pandas - still batched but slightly slower
+            for untyped_bid in untyped_bodyids:
+                bid_str = str(untyped_bid)
+                if untyped_bid not in bid_to_indices:
+                    results[untyped_bid] = ({}, {})
+                    continue
+                
+                # Filter for this bodyId - handle type mismatch between column and bid
+                try:
+                    # Try numeric comparison first
+                    mask = all_hop2_df[source_bid_col] == int(untyped_bid)
+                except (ValueError, TypeError):
+                    # Fallback to string comparison
+                    mask = all_hop2_df[source_bid_col].astype(str) == str(untyped_bid)
+                hop2_df = all_hop2_df[mask]
+                
+                if hop2_df.empty:
+                    results[untyped_bid] = ({}, {})
+                    continue
+                
+                # Take top-k by weight
+                hop2_df = hop2_df.nlargest(top_k_2hop, 'weight')
+                
+                # Aggregate by type using vectorized operations
+                aggregated = hop2_df.groupby('partner_type_normalized')['weight'].sum()
+                total_weight = aggregated.sum()
+                
+                if total_weight > 0:
+                    weights_dict = (aggregated / total_weight).to_dict()
+                else:
+                    weights_dict = {}
+                
+                ranks_dict = compute_ranks(weights_dict)
+                results[untyped_bid] = (weights_dict, ranks_dict)
+        
+        # Fill in missing bodyIds
+        for untyped_bid in untyped_bodyids:
+            if untyped_bid not in results:
+                results[untyped_bid] = ({}, {})
         
         return results
     
@@ -2085,7 +3198,7 @@ class ConnectivityProfiler:
         conn_df: pd.DataFrame,
         direction: str,
         top_k: int
-    ) -> Tuple[Dict[str, float], Dict[str, int], int, float, float, int, int, Dict[int, str], int, Dict[int, float]]:
+    ) -> Tuple[Dict[str, float], Dict[str, int], int, float, float, int, int, Dict[int, str], int, Dict[int, float], Dict[int, float]]:
         """
         Process connection DataFrame into normalized weights and ranks.
         
@@ -2095,6 +3208,9 @@ class ConnectivityProfiler:
         Round 6: Also returns untyped partner bodyIds with their weights
         for 2-hop expansion.
         
+        Round 7: Also returns typed partner bodyIds with their weights
+        for intra-dataset bodyId-level comparison.
+        
         Args:
             conn_df: DataFrame with partner_type, weight columns
             direction: 'upstream' or 'downstream' (for logging)
@@ -2103,10 +3219,11 @@ class ConnectivityProfiler:
         Returns:
             Tuple of (partners_dict, ranks_dict, untyped_count, 
                      untyped_weight_fraction, total_weight, actual_count,
-                     unique_types, type_mapping, k_used, untyped_bodyids)
+                     unique_types, type_mapping, k_used, untyped_bodyids, typed_bodyids)
             where untyped_bodyids = {bodyId → weight} for untyped 1-hop partners
+            and typed_bodyids = {bodyId → weight} for typed 1-hop partners
         """
-        empty_result = ({}, {}, 0, 0.0, 0.0, 0, 0, {}, top_k, {})
+        empty_result = ({}, {}, 0, 0.0, 0.0, 0, 0, {}, top_k, {}, {})
         
         if conn_df.empty:
             return empty_result
@@ -2127,17 +3244,21 @@ class ConnectivityProfiler:
             untyped_df = conn_df[untyped_mask].copy()
             if not untyped_df.empty:
                 # Sort by weight and take top-k untyped
-                untyped_df = untyped_df.sort_values('weight', ascending=False).head(self.config.top_k_bodyid)
-                for _, row in untyped_df.iterrows():
-                    try:
-                        bid = int(row['partner_bodyId'])
-                        w = float(row['weight'])
-                        untyped_bodyids_dict[bid] = w
-                    except (ValueError, TypeError):
-                        pass
-        
-        # Store original conn_df for dynamic expansion
-        original_conn_df = conn_df.copy()
+                untyped_df = untyped_df.nlargest(self.config.top_k_bodyid, 'weight')
+                # Use vectorized extraction instead of iterrows
+                try:
+                    bids = untyped_df['partner_bodyId'].astype(int).tolist()
+                    weights = untyped_df['weight'].astype(float).tolist()
+                    untyped_bodyids_dict = dict(zip(bids, weights))
+                except (ValueError, TypeError):
+                    # Fallback for edge cases
+                    for _, row in untyped_df.iterrows():
+                        try:
+                            bid = int(row['partner_bodyId'])
+                            w = float(row['weight'])
+                            untyped_bodyids_dict[bid] = w
+                        except (ValueError, TypeError):
+                            pass
         
         # Filter untyped if configured
         if not self.config.include_untyped_partners:
@@ -2185,37 +3306,95 @@ class ConnectivityProfiler:
             # No dynamic expansion - just sort and take top_k
             conn_df = conn_df.sort_values('weight', ascending=False).head(top_k)
         
-        # Aggregate by normalized partner type
-        aggregated = conn_df.groupby('partner_type_normalized').agg({
-            'weight': 'sum'
-        }).reset_index()
-        
-        actual_count = len(aggregated)
-        unique_types = actual_count
-        
-        # Sort by weight (already done but re-sort aggregated)
-        aggregated = aggregated.sort_values('weight', ascending=False)
-        
-        # Store actual synapse weights (not normalized)
-        # This preserves rank structure and enables easy bodyId→type aggregation via sum
-        partners_dict = {}
-        for _, row in aggregated.iterrows():
-            partners_dict[row['partner_type_normalized']] = float(row['weight'])
+        # === POLARS OPTIMIZATION: Aggregate by normalized partner type ===
+        # Use Polars for faster groupby aggregation (2-3x speedup)
+        try:
+            import polars as pl
+            
+            # Convert to Polars for fast aggregation
+            pl_df = pl.from_pandas(conn_df[['partner_type_normalized', 'weight']])
+            
+            # Group by and aggregate - Polars is significantly faster
+            aggregated_pl = (
+                pl_df
+                .group_by('partner_type_normalized')
+                .agg(pl.col('weight').sum())
+                .sort('weight', descending=True)
+            )
+            
+            actual_count = len(aggregated_pl)
+            unique_types = actual_count
+            
+            # Convert to dict directly (faster than iterrows)
+            partners_dict = dict(zip(
+                aggregated_pl['partner_type_normalized'].to_list(),
+                aggregated_pl['weight'].to_list()
+            ))
+            
+        except ImportError:
+            # Fallback to Pandas if Polars not available
+            aggregated = conn_df.groupby('partner_type_normalized').agg({
+                'weight': 'sum'
+            }).reset_index()
+            
+            actual_count = len(aggregated)
+            unique_types = actual_count
+            
+            # Sort by weight
+            aggregated = aggregated.sort_values('weight', ascending=False)
+            
+            # Store actual synapse weights (not normalized)
+            partners_dict = {}
+            for _, row in aggregated.iterrows():
+                partners_dict[row['partner_type_normalized']] = float(row['weight'])
         
         # Compute ranks (derived from weights: higher weight = lower rank number)
         ranks_dict = compute_ranks(partners_dict)
         
+        # === POLARS OPTIMIZATION: Build bodyId → type mapping ===
         # Round 5: Build bodyId → type mapping
+        # Round 7: Build typed bodyId → weight mapping for intra-dataset comparison
         type_mapping = {}
+        typed_bodyids_dict = {}
         if 'partner_bodyId' in conn_df.columns:
-            for _, row in conn_df.iterrows():
-                bid = row.get('partner_bodyId')
-                ptype = row.get('partner_type_normalized')
-                if bid is not None and ptype is not None:
-                    try:
-                        type_mapping[int(bid)] = str(ptype)
-                    except (ValueError, TypeError):
-                        pass
+            try:
+                import polars as pl
+                
+                # Filter and convert in one pass using Polars
+                # Only include non-untyped, non-null entries
+                pl_map_df = pl.from_pandas(
+                    conn_df[['partner_bodyId', 'partner_type_normalized', 'weight']]
+                )
+                
+                # Filter out untyped and null
+                valid_df = pl_map_df.filter(
+                    (pl.col('partner_type_normalized').is_not_null()) &
+                    (pl.col('partner_type_normalized') != 'untyped') &
+                    (pl.col('partner_bodyId').is_not_null())
+                )
+                
+                if len(valid_df) > 0:
+                    # Extract to lists for dict construction (faster than iterrows)
+                    bodyids = valid_df['partner_bodyId'].cast(pl.Int64).to_list()
+                    types = valid_df['partner_type_normalized'].cast(pl.Utf8).to_list()
+                    weights = valid_df['weight'].cast(pl.Float64).to_list()
+                    
+                    type_mapping = dict(zip(bodyids, types))
+                    typed_bodyids_dict = dict(zip(bodyids, weights))
+                    
+            except (ImportError, Exception):
+                # Fallback to Pandas iterrows (slower)
+                for _, row in conn_df.iterrows():
+                    bid = row.get('partner_bodyId')
+                    ptype = row.get('partner_type_normalized')
+                    weight = row.get('weight', 0.0)
+                    if bid is not None and ptype is not None and ptype != 'untyped':
+                        try:
+                            bid_int = int(bid)
+                            type_mapping[bid_int] = str(ptype)
+                            typed_bodyids_dict[bid_int] = float(weight)
+                        except (ValueError, TypeError):
+                            pass
         
         return (
             partners_dict,
@@ -2228,6 +3407,7 @@ class ConnectivityProfiler:
             type_mapping,
             k_used,
             untyped_bodyids_dict,  # Round 6: untyped bodyId → weight
+            typed_bodyids_dict,    # Round 7: typed bodyId → weight
         )
     
     def get_profile(
@@ -2249,6 +3429,9 @@ class ConnectivityProfiler:
         
         Returns:
             ConnectivityProfile with both proportion and rank representations
+            
+        Raises:
+            DataNotAvailableError: If connection data is not available for the dataset
         
         Example:
             >>> profile = profiler.get_profile('aMe12', 'hemibrain:v1.2.1')
@@ -2263,12 +3446,21 @@ class ConnectivityProfiler:
         
         self._log(f"Extracting profile for {neuron} in {dataset}", level='debug')
         
-        # Query connections based on dataset type
-        dataset_lower = dataset.lower()
-        if 'flywire' in dataset_lower or 'fafb' in dataset_lower or 'banc' in dataset_lower:
-            upstream_df, downstream_df = self._query_connections_local(neuron, dataset)
-        else:
-            upstream_df, downstream_df = self._query_connections_neuprint(neuron, dataset)
+        # Ensure connection data is available before querying
+        # This provides a helpful error message if data is missing
+        self.ensure_data_available(dataset, raise_on_missing=True)
+        
+        # Query connections - ALWAYS try local cache first (much faster)
+        # Local cache includes: FlyWire/FAFB/BANC datasets AND NeuPrint datasets
+        # with pre-built connection cache from FNC.build_connection_cache()
+        upstream_df, downstream_df = self._query_connections_local(neuron, dataset)
+        
+        # Fall back to NeuPrint API only if local data not available
+        if upstream_df.empty and downstream_df.empty:
+            dataset_lower = dataset.lower()
+            if 'flywire' not in dataset_lower and 'fafb' not in dataset_lower and 'banc' not in dataset_lower:
+                # Try NeuPrint API as fallback
+                upstream_df, downstream_df = self._query_connections_neuprint(neuron, dataset)
         
         # Count neurons aggregated
         neurons_aggregated = 1
@@ -2281,17 +3473,17 @@ class ConnectivityProfiler:
             elif not downstream_df.empty and 'neuron_bodyId' in downstream_df.columns:
                 neurons_aggregated = downstream_df['neuron_bodyId'].nunique()
         
-        # Process upstream (Round 5/6: expanded return tuple with untyped bodyids)
+        # Process upstream (Round 5/6/7: expanded return tuple with untyped and typed bodyids)
         (up_partners, up_ranks, up_untyped_count, up_untyped_frac, 
          up_total_weight, up_actual_count, up_unique_types,
-         up_type_mapping, up_k_used, up_untyped_bodyids) = self._process_connections(
+         up_type_mapping, up_k_used, up_untyped_bodyids, up_typed_bodyids) = self._process_connections(
             upstream_df, 'upstream', self.config.top_k_bodyid
         )
         
-        # Process downstream (Round 5/6: expanded return tuple with untyped bodyids)
+        # Process downstream (Round 5/6/7: expanded return tuple with untyped and typed bodyids)
         (down_partners, down_ranks, down_untyped_count, down_untyped_frac,
          down_total_weight, down_actual_count, down_unique_types,
-         down_type_mapping, down_k_used, down_untyped_bodyids) = self._process_connections(
+         down_type_mapping, down_k_used, down_untyped_bodyids, down_typed_bodyids) = self._process_connections(
             downstream_df, 'downstream', self.config.top_k_bodyid
         )
         
@@ -2320,10 +3512,12 @@ class ConnectivityProfiler:
                     down_2hop_weights = {bid: data[0] for bid, data in down_2hop_data.items() if data[0]}
                     down_2hop_ranks = {bid: data[1] for bid, data in down_2hop_data.items() if data[1]}
         
-        # Create profile with Round 5 and Round 6 fields
+        # Create profile with Round 5, Round 6, and Round 7 fields
+        profile_type = neuron if isinstance(neuron, str) else None
         profile = ConnectivityProfile(
             neuron_id=neuron,
             dataset=dataset,
+            neuron_type=profile_type,
             upstream_partners=up_partners,
             downstream_partners=down_partners,
             upstream_ranks=up_ranks,
@@ -2353,6 +3547,9 @@ class ConnectivityProfiler:
             untyped_downstream_2hop=down_2hop_weights if down_2hop_weights else None,
             untyped_upstream_2hop_ranks=up_2hop_ranks if up_2hop_ranks else None,
             untyped_downstream_2hop_ranks=down_2hop_ranks if down_2hop_ranks else None,
+            # Round 7 fields: typed bodyId-level data for intra-dataset comparison
+            typed_upstream_bodyids=up_typed_bodyids if up_typed_bodyids else None,
+            typed_downstream_bodyids=down_typed_bodyids if down_typed_bodyids else None,
         )
         
         # Save to cache
@@ -2451,6 +3648,8 @@ class ConnectivityProfiler:
             
             # Try to load neurons file
             neurons_files = [
+                dataset_path / f'{safe_name}_allneurons_neuron_df.parquet',
+                dataset_path / f'{safe_name}_allneurons_neuron_df.csv',
                 dataset_path / f'{safe_name}_neurons.parquet',
                 dataset_path / f'{safe_name}_neurons.csv',
                 dataset_path / 'neurons.parquet',
@@ -2494,9 +3693,19 @@ class ConnectivityProfiler:
                 return []
             
             try:
+                # Import API utilities for Cypher escaping
+                try:
+                    from src.utils.api_utils import escape_cypher_string
+                except ImportError:
+                    def escape_cypher_string(value):
+                        if not isinstance(value, str):
+                            return str(value)
+                        return value.replace('\\', '\\\\').replace("'", "\\'")
+                
+                escaped_type = escape_cypher_string(neuron_type)
                 query = f"""
                 MATCH (n:Neuron)
-                WHERE n.type = '{neuron_type}'
+                WHERE n.type = '{escaped_type}'
                 RETURN n.bodyId AS bodyId
                 """
                 result = client.fetch_custom(query)

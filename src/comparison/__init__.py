@@ -59,12 +59,14 @@ from .visualizations import ComparisonVisualizer
 from .connectivity_profiler import (
     ConnectivityProfile,
     ConnectivityProfiler,
+    ConnectivityStatus,
     ProfilerConfig,
     FuzzyMatchConfig,
     normalize_partner_type,
     compute_ranks,
     clear_profiler_conn_cache,
     get_profiler_conn_cache_info,
+    DataNotAvailableError,
 )
 from .profile_comparator import (
     ProfileComparator,
@@ -96,12 +98,14 @@ __all__ = [
     # Connectivity Profile module (new)
     'ConnectivityProfile',
     'ConnectivityProfiler',
+    'ConnectivityStatus',
     'ProfilerConfig',
     'FuzzyMatchConfig',
     'normalize_partner_type',
     'compute_ranks',
     'clear_profiler_conn_cache',
     'get_profiler_conn_cache_info',
+    'DataNotAvailableError',
     'ProfileComparator',
     'ComparisonResult',
     'DEFAULT_SCORE_WEIGHTS',

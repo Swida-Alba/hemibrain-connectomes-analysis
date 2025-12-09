@@ -34,7 +34,6 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Union, Any
 import numpy as np
 import pandas as pd
-import warnings
 
 from .connectivity_profiler import (
     ConnectivityProfile, 
@@ -211,14 +210,13 @@ class CrossDatasetVerifier:
         """
         Compare profiles using strict mode (per-bodyId with rank correlation).
         
-        Strict mode computes:
+        This delegates to ProfileComparator.compare_profiles() which handles:
         1. Rank correlation between matching partner types (always uses ranks)
         2. Jaccard on typed partners only
-        3. Jaccard including 2-hop expanded partners (if available)
-        4. Combined score weighted by metrics
+        3. Combined score weighted by metrics
         
-        This is more stringent than loose matching. Always uses ranks for
-        bodyId-level comparison (proportions are not used).
+        Strict mode adds the min_common_partners check - if fewer common partners
+        than threshold, rank correlation is treated as undefined.
         
         Args:
             profile_a: First connectivity profile
@@ -229,124 +227,60 @@ class CrossDatasetVerifier:
         Returns:
             ComparisonResult with strict mode metrics
         """
-        from scipy import stats
-        
+        # Delegate to ProfileComparator for core comparison
         weights = score_weights or self.score_weights or DEFAULT_SCORE_WEIGHTS
-        min_common = self.min_common_partners
+        result = ProfileComparator.compare_profiles(profile_a, profile_b, direction, weights)
         
+        # Check min_common_partners for strict mode
+        min_common = self.min_common_partners
         directions = []
         if direction in ['both', 'upstream']:
             directions.append('upstream')
         if direction in ['both', 'downstream']:
             directions.append('downstream')
         
-        # Collect metrics for each direction
-        all_jaccard = []
-        all_rank_corr = []
-        all_cosine = []
-        all_overlap_a = []
-        all_overlap_b = []
-        
+        # Count common partners across directions
+        total_common = 0
         for dir_name in directions:
-            # Get typed partner data
             if dir_name == 'upstream':
-                partners_a = profile_a.upstream_partners or {}
-                partners_b = profile_b.upstream_partners or {}
-                ranks_a = profile_a.upstream_ranks or {}
-                ranks_b = profile_b.upstream_ranks or {}
+                partners_a = set(profile_a.upstream_partners.keys()) if profile_a.upstream_partners else set()
+                partners_b = set(profile_b.upstream_partners.keys()) if profile_b.upstream_partners else set()
             else:
-                partners_a = profile_a.downstream_partners or {}
-                partners_b = profile_b.downstream_partners or {}
-                ranks_a = profile_a.downstream_ranks or {}
-                ranks_b = profile_b.downstream_ranks or {}
+                partners_a = set(profile_a.downstream_partners.keys()) if profile_a.downstream_partners else set()
+                partners_b = set(profile_b.downstream_partners.keys()) if profile_b.downstream_partners else set()
+            total_common += len(partners_a & partners_b)
+        
+        # If insufficient common partners, mark rank as undefined
+        if total_common < min_common:
+            # Recompute with adjusted notes
+            notes = result.notes or ""
+            if notes:
+                notes += "; "
+            notes += f"Insufficient common partners ({total_common} < {min_common})"
             
-            # Compute Jaccard
-            set_a = set(partners_a.keys())
-            set_b = set(partners_b.keys())
-            
-            if set_a or set_b:
-                intersection = len(set_a & set_b)
-                union = len(set_a | set_b)
-                jaccard = intersection / union if union > 0 else 0.0
-                all_jaccard.append(jaccard)
-                
-                # Overlap fractions
-                overlap_a = intersection / len(set_a) if set_a else 0.0
-                overlap_b = intersection / len(set_b) if set_b else 0.0
-                all_overlap_a.append(overlap_a)
-                all_overlap_b.append(overlap_b)
-            
-            # Compute rank correlation on common partners (always uses ranks)
-            common = set_a & set_b
-            if len(common) >= min_common:
-                if ranks_a and ranks_b:
-                    # Always use ranks for bodyId-level comparison
-                    rank_list_a = [ranks_a.get(p, len(ranks_a) + 1) for p in common]
-                    rank_list_b = [ranks_b.get(p, len(ranks_b) + 1) for p in common]
-                else:
-                    # Fall back to weights if ranks not available
-                    rank_list_a = [partners_a.get(p, 0) for p in common]
-                    rank_list_b = [partners_b.get(p, 0) for p in common]
-                
-                # Check for constant arrays
-                if np.std(rank_list_a) > 0 and np.std(rank_list_b) > 0:
-                    with warnings.catch_warnings():
-                        warnings.filterwarnings('ignore', message='An input array is constant')
-                        corr, _ = stats.spearmanr(rank_list_a, rank_list_b)
-                    if not np.isnan(corr):
-                        all_rank_corr.append(corr)
-            
-            # Compute cosine similarity on weights
-            if common:
-                vec_a = np.array([partners_a.get(p, 0) for p in common])
-                vec_b = np.array([partners_b.get(p, 0) for p in common])
-                norm_a = np.linalg.norm(vec_a)
-                norm_b = np.linalg.norm(vec_b)
-                if norm_a > 0 and norm_b > 0:
-                    cosine = np.dot(vec_a, vec_b) / (norm_a * norm_b)
-                    all_cosine.append(cosine)
+            # Create new result with NaN rank and adjusted combined score
+            result = ComparisonResult(
+                profile_a_id=result.profile_a_id,
+                profile_b_id=result.profile_b_id,
+                dataset_a=result.dataset_a,
+                dataset_b=result.dataset_b,
+                direction=result.direction,
+                jaccard=result.jaccard,
+                cosine=result.cosine,
+                rank_correlation=np.nan,
+                overlap_a_in_b=result.overlap_a_in_b,
+                overlap_b_in_a=result.overlap_b_in_a,
+                combined=weights.get('jaccard', 0.50) * result.jaccard + weights.get('rank', 0.50) * 0.5,
+                confidence=ComparisonResult.determine_confidence(
+                    weights.get('jaccard', 0.50) * result.jaccard + weights.get('rank', 0.50) * 0.5
+                ),
+                weak_connectivity_a=result.weak_connectivity_a,
+                weak_connectivity_b=result.weak_connectivity_b,
+                notes=notes
+            )
         
-        # Aggregate metrics
-        jaccard = np.mean(all_jaccard) if all_jaccard else 0.0
-        rank_corr = np.mean(all_rank_corr) if all_rank_corr else np.nan
-        cosine = np.mean(all_cosine) if all_cosine else 0.0  # Computed but not used in combined
-        overlap_a_in_b = np.mean(all_overlap_a) if all_overlap_a else 0.0
-        overlap_b_in_a = np.mean(all_overlap_b) if all_overlap_b else 0.0
-        
-        # Normalize rank correlation from [-1, 1] to [0, 1]
-        rank_norm = (rank_corr + 1) / 2 if not np.isnan(rank_corr) else 0.5  # Use 0.5 for missing
-        
-        # Compute combined score using only Jaccard + normalized rank correlation
-        combined = (
-            weights.get('jaccard', 0.50) * jaccard +
-            weights.get('rank', 0.50) * rank_norm
-        )
-        
-        # Determine confidence
-        confidence = ComparisonResult.determine_confidence(combined)
-        
-        # Add note if rank correlation is NaN
-        notes = ""
-        if np.isnan(rank_corr):
-            notes = "Rank correlation undefined (insufficient common partners or constant input)"
-        
-        return ComparisonResult(
-            profile_a_id=str(profile_a.neuron_id),
-            profile_b_id=str(profile_b.neuron_id),
-            dataset_a=profile_a.dataset,
-            dataset_b=profile_b.dataset,
-            direction=direction,
-            jaccard=jaccard,
-            cosine=cosine,
-            rank_correlation=rank_corr,
-            overlap_a_in_b=overlap_a_in_b,
-            overlap_b_in_a=overlap_b_in_a,
-            combined=combined,
-            confidence=confidence,
-            weak_connectivity_a=profile_a.is_weak_connectivity,
-            weak_connectivity_b=profile_b.is_weak_connectivity,
-            notes=notes
-        )
+        return result
+
 
     def _get_profile(
         self,
@@ -823,13 +757,15 @@ class CrossDatasetVerifier:
                     avg_cosine = np.nanmean([p.cosine for p in valid_pairs])
                     rank_values = [p.rank_correlation_norm for p in valid_pairs if not np.isnan(p.rank_correlation)]
                     avg_rank = np.mean(rank_values) if rank_values else np.nan
+                    rank_union_values = [p.rank_union for p in valid_pairs if not np.isnan(p.rank_union)]
+                    avg_rank_union = np.mean(rank_union_values) if rank_union_values else np.nan
                     avg_overlap_a_in_b = np.nanmean([p.overlap_a_in_b for p in valid_pairs])
                     avg_overlap_b_in_a = np.nanmean([p.overlap_b_in_a for p in valid_pairs])
                     avg_overlap = np.nanmean([avg_overlap_a_in_b, avg_overlap_b_in_a])
                 else:
-                    avg_jaccard = avg_cosine = avg_rank = avg_overlap_a_in_b = avg_overlap_b_in_a = avg_overlap = np.nan
+                    avg_jaccard = avg_cosine = avg_rank = avg_rank_union = avg_overlap_a_in_b = avg_overlap_b_in_a = avg_overlap = np.nan
             else:
-                avg_jaccard = avg_cosine = avg_rank = avg_overlap_a_in_b = avg_overlap_b_in_a = avg_overlap = np.nan
+                avg_jaccard = avg_cosine = avg_rank = avg_rank_union = avg_overlap_a_in_b = avg_overlap_b_in_a = avg_overlap = np.nan
             
             # Get unique_types from profiles
             total_unique_types = 0
@@ -860,6 +796,7 @@ class CrossDatasetVerifier:
                 'total_datasets': len(datasets),
                 'avg_jaccard': avg_jaccard,
                 'avg_rank_corr': avg_rank,
+                'avg_rank_union': avg_rank_union,
                 'avg_overlap': avg_overlap,
                 'confidence': confidence_level,
                 'datasets_compared': len(verification.datasets),
@@ -998,49 +935,57 @@ class CrossDatasetVerifier:
                 except Exception:
                     pass
             
-            with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                # Submit all verification tasks
-                future_to_type = {
-                    executor.submit(
-                        self._verify_single_type,
-                        neuron_type, datasets, direction, score_weights, include_directional
-                    ): neuron_type
-                    for neuron_type in neuron_types
-                }
-                
-                # Collect results with progress bar
-                for future in tqdm(
-                    as_completed(future_to_type), 
-                    total=len(neuron_types),
-                    desc="Verifying types (parallel)",
-                    disable=not self.verbose,
-                    leave=True
-                ):
-                    neuron_type = future_to_type[future]
-                    try:
-                        result_row = future.result()
-                        results.append(result_row)
-                    except Exception as e:
-                        self._log(f"Warning: Failed to verify {neuron_type}: {e}")
-                        error_row = {
-                            'neuron_type': neuron_type,
-                            'datasets_found': 0,
-                            'total_datasets': len(datasets),
-                            'avg_jaccard': np.nan,
-                            'avg_rank_corr': np.nan,
-                            'avg_overlap': np.nan,
-                            'confidence': 'Error',
-                            'datasets_compared': 0,
-                            'total_unique_types': 0,
-                        }
-                        if include_directional:
-                            error_row['avg_rank_corr_upstream'] = np.nan
-                            error_row['avg_rank_corr_downstream'] = np.nan
-                            error_row['avg_rank_corr_both'] = np.nan
-                            error_row['avg_jaccard_upstream'] = np.nan
-                            error_row['avg_jaccard_downstream'] = np.nan
-                            error_row['avg_jaccard_both'] = np.nan
-                        results.append(error_row)
+            # 3. Enable deferred cache writes to prevent parallel write corruption
+            self.profiler._defer_cache_writes = True
+            
+            try:
+                with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                    # Submit all verification tasks
+                    future_to_type = {
+                        executor.submit(
+                            self._verify_single_type,
+                            neuron_type, datasets, direction, score_weights, include_directional
+                        ): neuron_type
+                        for neuron_type in neuron_types
+                    }
+                    
+                    # Collect results with progress bar
+                    for future in tqdm(
+                        as_completed(future_to_type), 
+                        total=len(neuron_types),
+                        desc="Verifying types (parallel)",
+                        disable=not self.verbose,
+                        leave=True
+                    ):
+                        neuron_type = future_to_type[future]
+                        try:
+                            result_row = future.result()
+                            results.append(result_row)
+                        except Exception as e:
+                            self._log(f"Warning: Failed to verify {neuron_type}: {e}")
+                            error_row = {
+                                'neuron_type': neuron_type,
+                                'datasets_found': 0,
+                                'total_datasets': len(datasets),
+                                'avg_jaccard': np.nan,
+                                'avg_rank_corr': np.nan,
+                                'avg_overlap': np.nan,
+                                'confidence': 'Error',
+                                'datasets_compared': 0,
+                                'total_unique_types': 0,
+                            }
+                            if include_directional:
+                                error_row['avg_rank_corr_upstream'] = np.nan
+                                error_row['avg_rank_corr_downstream'] = np.nan
+                                error_row['avg_rank_corr_both'] = np.nan
+                                error_row['avg_jaccard_upstream'] = np.nan
+                                error_row['avg_jaccard_downstream'] = np.nan
+                                error_row['avg_jaccard_both'] = np.nan
+                            results.append(error_row)
+            finally:
+                # Disable deferred writes and flush pending cache writes
+                self.profiler._defer_cache_writes = False
+                self.profiler.flush_pending_cache_writes()
         else:
             # Sequential execution (original behavior)
             iterator = tqdm(neuron_types, desc="Verifying types", disable=not self.verbose, leave=True)
@@ -1273,11 +1218,19 @@ class CrossDatasetVerifier:
             if max_workers is None:
                 max_workers = min(32, (os.cpu_count() or 1) + 4)
             
-            with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                futures = {executor.submit(compute_row_for_type, nt): nt for nt in neuron_types}
-                for future in as_completed(futures):
-                    neuron_type, row = future.result()
-                    matrix_data[neuron_type] = row
+            # Enable deferred cache writes to prevent parallel write corruption
+            self.profiler._defer_cache_writes = True
+            
+            try:
+                with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                    futures = {executor.submit(compute_row_for_type, nt): nt for nt in neuron_types}
+                    for future in as_completed(futures):
+                        neuron_type, row = future.result()
+                        matrix_data[neuron_type] = row
+            finally:
+                # Disable deferred writes and flush pending cache writes
+                self.profiler._defer_cache_writes = False
+                self.profiler.flush_pending_cache_writes()
         else:
             for neuron_type in neuron_types:
                 _, row = compute_row_for_type(neuron_type)

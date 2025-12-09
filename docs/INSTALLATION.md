@@ -75,6 +75,7 @@ The following packages are **required**:
 |---------|---------|---------|
 | numpy | Numerical computing | >=1.20.0, <2.0.0 |
 | pandas | Data manipulation | >=1.3.0, <2.0.0 |
+| polars | Memory-efficient large data | >=1.0.0 |
 | scipy | Scientific computing | >=1.7.0 |
 | plotly | Interactive visualizations | >=5.0.0 |
 | matplotlib | Static plots | >=3.4.0 |
@@ -84,6 +85,8 @@ The following packages are **required**:
 | neuprint-python | NeUPRINT database | >=0.4.0 |
 
 **Important:** numpy is constrained to <2.0.0 for binary compatibility with pandas 1.x.
+
+**Note on Polars:** Polars is used for memory-efficient operations when building and loading large connection caches (millions of connections). It gracefully falls back to pandas if not available, but Polars is recommended for cross-dataset comparison workflows.
 
 ## Optional Dependencies
 

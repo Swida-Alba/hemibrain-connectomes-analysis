@@ -1,4 +1,19 @@
-# Cache System Guide (v3.0)
+# Cache System Guide
+
+> **⚠️ This guide is outdated.** The current cache system is v4.0.
+> 
+> **Please see [CacheSystem_Guide_v4.md](./CacheSystem_Guide_v4.md) for the current documentation.**
+>
+> Key improvements in v4.0:
+> - Unified database architecture (`connections.parquet` + `neuron_index.parquet`)
+> - In-memory caching with 178,000x speedup
+> - O(1) dict-based lookups
+> - Module-level cache sharing
+> - Built-in cache building methods (`build_connection_cache()`, `build_connectivity_profile_cache()`)
+
+---
+
+# Cache System Guide (v3.0) - DEPRECATED
 
 Complete guide to the local caching system for Neuprint connection data.
 

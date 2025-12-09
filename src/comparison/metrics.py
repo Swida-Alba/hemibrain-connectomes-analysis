@@ -235,8 +235,15 @@ class ComparisonMetrics:
         
         if len(shared) < 2:
             return np.nan
+            
+        wa = weights_a[shared]
+        wb = weights_b[shared]
         
-        return weights_a[shared].corr(weights_b[shared])
+        # Check for zero variance to avoid numpy warnings
+        if wa.std() == 0 or wb.std() == 0:
+            return np.nan
+        
+        return wa.corr(wb)
     
     def calculate_all_pairwise_similarities(
         self,
@@ -1046,7 +1053,15 @@ class ComparisonMetrics:
         
         for dataset in available:
             # Get top N edges for this dataset
-            top = aligned_data.nlargest(top_n, dataset).copy()
+            if top_n > 0:
+                top = aligned_data.nlargest(top_n, dataset).copy()
+            else:
+                # If top_n <= 0, include all edges sorted by weight
+                top = aligned_data.sort_values(dataset, ascending=False).copy()
+                # Filter out zero-weight edges if desired, or keep them? 
+                # Usually "top edges" implies existing edges.
+                top = top[top[dataset] > 0]
+            
             top['dataset'] = dataset
             top['rank_in_dataset'] = range(1, len(top) + 1)
             top['weight'] = top[dataset]
@@ -1093,7 +1108,11 @@ class ComparisonMetrics:
         # Get top edges for each dataset
         top_edges = {}
         for dataset in available:
-            top_edges[dataset] = set(aligned_data.nlargest(top_n, dataset).index)
+            if top_n > 0:
+                top_edges[dataset] = set(aligned_data.nlargest(top_n, dataset).index)
+            else:
+                # All edges with weight > 0
+                top_edges[dataset] = set(aligned_data[aligned_data[dataset] > 0].index)
         
         rows = []
         
@@ -1101,24 +1120,35 @@ class ComparisonMetrics:
             intersection = len(top_edges[d1] & top_edges[d2])
             union = len(top_edges[d1] | top_edges[d2])
             
+            # If top_n is not fixed, use size of d1 as reference for percentage
+            ref_size = top_n if top_n > 0 else len(top_edges[d1])
+            
             rows.append({
                 'dataset_1': d1,
                 'dataset_2': d2,
                 'top_n': top_n,
                 'overlap_count': intersection,
-                'overlap_pct': round(intersection / top_n * 100, 2),
+                'overlap_pct': round(intersection / ref_size * 100, 2) if ref_size > 0 else 0,
                 'jaccard_top_edges': intersection / union if union > 0 else 0
             })
         
         # Also calculate all-dataset intersection
         if len(available) > 2:
             all_intersection = set.intersection(*top_edges.values())
+            
+            # For ALL comparison, if top_n is -1, use union size as reference
+            if top_n > 0:
+                ref_size = top_n
+            else:
+                all_union = set.union(*top_edges.values())
+                ref_size = len(all_union)
+                
             rows.append({
                 'dataset_1': 'ALL',
                 'dataset_2': 'ALL',
                 'top_n': top_n,
                 'overlap_count': len(all_intersection),
-                'overlap_pct': round(len(all_intersection) / top_n * 100, 2),
+                'overlap_pct': round(len(all_intersection) / ref_size * 100, 2) if ref_size > 0 else 0,
                 'jaccard_top_edges': None
             })
         

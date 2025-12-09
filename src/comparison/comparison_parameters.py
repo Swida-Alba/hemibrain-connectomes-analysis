@@ -134,8 +134,11 @@ class ComparisonParameters:
     target_labels: Union[str, List[str]] = ''
     """Unified label(s) for target group(s) - string or list matching group count"""
     
-    top_edges: int = 50
-    """Number of top edges for visualization focus"""
+    top_edges: int = -1
+    """Number of top edges for visualization focus. -1 means include all edges."""
+    
+    overall_label_mapper: Optional[Any] = None
+    """LabelMapper object or configuration for defining source, target, and intermediate neuron labels."""
     
     # Connectivity Profile Verification Settings
     # These are used by run_connectivity_profile_verification() when called separately
@@ -147,10 +150,10 @@ class ComparisonParameters:
     - 'strict': Only compare explicitly typed partners
     - 'loose': Include untyped partners in comparison"""
     
-    verification_top_k: int = 5
+    verification_top_k: int = 15
     """Number of top partners to include per type for profile comparison"""
     
-    verification_top_m: int = 0
+    verification_top_m: int = 5
     """Minimum synapse count for top partners (0 = no filter)"""
     
     verification_min_synapse_threshold: int = 3
@@ -192,6 +195,14 @@ class ComparisonParameters:
               all strong edges regardless of path context, providing more accurate
               edge presence comparison across datasets.
     """
+
+    pathfinding: str = 'MemoizedDFS'
+    """Pathfinding algorithm to use in FindAllPath:
+    - 'DP': Optimized DP (Depth First Search) - original implementation
+    - 'Bidirectional': Meet-in-the-middle BFS - optimized for deep paths (faster for L>=2)
+    - 'MemoizedDFS': DFS with path fragment caching - efficient for overlapping paths (default)
+    - 'DFS': Standard DFS (recursive) - low memory, good for finding single paths
+    """
     
     # Output settings
     output_folder: str = '.'
@@ -217,9 +228,13 @@ class ComparisonParameters:
     _output_format: str = field(default='csv', repr=False)
     """Internal: output format fixed to CSV for comparison"""
     
-    allow_single_dataset: bool = False
+    allow_single_dataset: bool = True
     """Allow single dataset for threshold sensitivity analysis only"""
-    
+
+    skip_bodyId: bool = False
+    """If True, skip bodyId-level data saving, visualization, and calculations.
+    Useful for large-scale analyses where only type-level data is needed."""
+
     def __post_init__(self):
         """Validate and process parameters after initialization."""
         from .label_mapper import LabelMapper
@@ -227,30 +242,82 @@ class ComparisonParameters:
         # Ensure datasets is a list
         if isinstance(self.datasets, str):
             self.datasets = [self.datasets]
+
+        # 1. Enforce Exclusivity: overall_label_mapper vs source/target LabelMappers
+        has_overall = self.overall_label_mapper is not None
+        is_source_mapper = isinstance(self.source_neurons, LabelMapper)
+        is_target_mapper = isinstance(self.target_neurons, LabelMapper)
+
+        if has_overall and (is_source_mapper or is_target_mapper):
+            raise ValueError(
+                "Ambiguous LabelMapper configuration: 'overall_label_mapper' cannot be used "
+                "simultaneously with 'source_neurons' or 'target_neurons' as LabelMappers. "
+                "Please provide either a single overall mapper OR specific source/target mappers."
+            )
         
-        # Process source_neurons: handle LabelMapper, string, or list
-        if isinstance(self.source_neurons, LabelMapper):
-            # LabelMapper provides neurons per dataset - keep reference
-            self._source_mapper = self.source_neurons
-            self.source_neurons = []  # Will be resolved per dataset
-        elif isinstance(self.source_neurons, str):
-            self.source_neurons = [self.source_neurons]
-        elif not self.source_neurons:
-            self.source_neurons = []
+        # 2. Handle overall_label_mapper logic
+        if has_overall:
+            # If source_neurons provided alongside overall_label_mapper, raise error
+            if self.source_neurons:
+                raise ValueError(
+                    "Ambiguous configuration: 'source_neurons' cannot be provided when "
+                    "'overall_label_mapper' is used. The mapper defines the source neurons."
+                )
+            # If target_neurons provided alongside overall_label_mapper, raise error
+            if self.target_neurons:
+                raise ValueError(
+                    "Ambiguous configuration: 'target_neurons' cannot be provided when "
+                    "'overall_label_mapper' is used. The mapper defines the target neurons."
+                )
+            
+            # Extract source/target info from overall_label_mapper
+            # We don't populate self.source_neurons list here because it's dataset-specific.
+            # Instead, we rely on the mapper being present.
+            
+            # Auto-populate labels if not provided
+            if not self.source_labels:
+                self.source_labels = self.overall_label_mapper.get_all_std_labels('source')
+            if not self.target_labels:
+                self.target_labels = self.overall_label_mapper.get_all_std_labels('target')
+                
+            # Set internal mapper references
+            self._source_mapper = self.overall_label_mapper
+            self._target_mapper = self.overall_label_mapper
+
+        # 3. Merge Logic: If source/target are mappers (and no overall), merge into overall_label_mapper
+        elif is_source_mapper or is_target_mapper:
+            self.overall_label_mapper = LabelMapper()
+            
+            if is_source_mapper:
+                self.overall_label_mapper.merge(self.source_neurons)
+                self._source_mapper = self.source_neurons
+                self.source_neurons = []  # Clear list, rely on mapper
+                
+                if not self.source_labels:
+                    self.source_labels = self._source_mapper.get_all_std_labels('source')
+
+            if is_target_mapper:
+                self.overall_label_mapper.merge(self.target_neurons)
+                self._target_mapper = self.target_neurons
+                self.target_neurons = []  # Clear list, rely on mapper
+                
+                if not self.target_labels:
+                    self.target_labels = self._target_mapper.get_all_std_labels('target')
         
-        # Process target_neurons: same handling
-        if isinstance(self.target_neurons, LabelMapper):
-            self._target_mapper = self.target_neurons
-            self.target_neurons = []
-        elif isinstance(self.target_neurons, str):
-            self.target_neurons = [self.target_neurons]
-        elif not self.target_neurons:
-            self.target_neurons = []
-        
-        # Initialize mapper references if not set
-        if not hasattr(self, '_source_mapper'):
+        # 4. Handle string/list inputs (if not mappers)
+        else:
+            if isinstance(self.source_neurons, str):
+                self.source_neurons = [self.source_neurons]
+            elif not self.source_neurons:
+                self.source_neurons = []
+                
+            if isinstance(self.target_neurons, str):
+                self.target_neurons = [self.target_neurons]
+            elif not self.target_neurons:
+                self.target_neurons = []
+            
+            # Initialize mapper references to None if not set
             self._source_mapper = None
-        if not hasattr(self, '_target_mapper'):
             self._target_mapper = None
         
         # Ensure source_labels is a list
@@ -274,7 +341,6 @@ class ComparisonParameters:
             raise ValueError(f"comparison_mode must be one of {valid_modes}, got: {self.comparison_mode}")
         
         # Validate minimum requirements
-        # Allow single dataset if allow_single_dataset=True (for threshold sensitivity analysis)
         if len(self.datasets) < 1:
             raise ValueError("At least 1 dataset is required")
         if len(self.datasets) < 2 and not self.allow_single_dataset:
@@ -286,11 +352,22 @@ class ComparisonParameters:
         if not self.thresholds:
             raise ValueError("At least one threshold is required")
         
-        # Validate neurons (unless using LabelMapper)
+        # Validate neurons: Must have either explicit list OR a mapper
         if not self._source_mapper and not self.source_neurons:
-            raise ValueError("source_neurons cannot be empty (provide list, nested list, or LabelMapper)")
+             # If we have an overall mapper but it has no source mappings, that might be an issue,
+             # but technically _source_mapper should be set if overall_label_mapper is present.
+             # Double check if overall_label_mapper is set but empty?
+             if self.overall_label_mapper:
+                 # If overall mapper exists, we assume it handles source neurons unless it's empty
+                 pass 
+             else:
+                raise ValueError("source_neurons cannot be empty (provide list, nested list, or LabelMapper)")
+                
         if not self._target_mapper and not self.target_neurons:
-            raise ValueError("target_neurons cannot be empty (provide list, nested list, or LabelMapper)")
+             if self.overall_label_mapper:
+                 pass
+             else:
+                raise ValueError("target_neurons cannot be empty (provide list, nested list, or LabelMapper)")
         
         # Cache the timestamp for consistent output_name
         self._cached_timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')

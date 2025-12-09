@@ -24,6 +24,7 @@ Example:
 import os
 import json
 from datetime import datetime
+from itertools import combinations
 from typing import Dict, List, Optional, Any, Union, Tuple
 import pandas as pd
 import numpy as np
@@ -33,6 +34,7 @@ from .comparison_parameters import ComparisonParameters
 from .label_mapper import LabelMapper
 from .data_loader import DataLoader
 from .metrics import ComparisonMetrics
+from .interactive_heatmap import generate_interactive_heatmap
 
 
 class ComparisonAnalyzer:
@@ -79,6 +81,17 @@ class ComparisonAnalyzer:
         self.label_mapper = label_mapper
         self.verbose = verbose
         
+        # Extract and merge LabelMappers from parameters
+        if self.label_mapper is None:
+            # Initialize unified mapper
+            self.label_mapper = LabelMapper()
+            
+            # Merge overall_label_mapper from parameters
+            # Note: ComparisonParameters.__post_init__ ensures that source/target mappers
+            # are already merged into overall_label_mapper if they existed.
+            if self.parameters.overall_label_mapper:
+                 self.label_mapper.merge(self.parameters.overall_label_mapper)
+
         # Initialize components
         self.metrics = ComparisonMetrics()
         
@@ -94,6 +107,36 @@ class ComparisonAnalyzer:
         # Resolve dataset configurations from strings
         self._dataset_configs: Dict[str, DatasetConfig] = {}
         self._resolve_dataset_configs()
+        
+        # Validate datasets if LabelMapper is provided
+        if self.label_mapper:
+            # Determine role to validate based on usage in parameters
+            role_to_validate = 'both'
+            
+            # Check if mapper is used for source/target
+            # Note: ComparisonParameters moves mapper to _source_mapper/_target_mapper in __post_init__
+            is_source_mapper = getattr(self.parameters, '_source_mapper', None) is not None
+            is_target_mapper = getattr(self.parameters, '_target_mapper', None) is not None
+            
+            # Fallback: check if source_neurons/target_neurons ARE mappers
+            if not is_source_mapper:
+                is_source_mapper = isinstance(self.parameters.source_neurons, LabelMapper)
+            if not is_target_mapper:
+                is_target_mapper = isinstance(self.parameters.target_neurons, LabelMapper)
+            
+            # If explicitly passed in init but not in params, assume 'both' (or check params types)
+            # If in params, restrict validation to relevant role
+            if is_source_mapper and not is_target_mapper:
+                role_to_validate = 'source'
+            elif is_target_mapper and not is_source_mapper:
+                role_to_validate = 'target'
+            
+            # Get dataset names from parameters
+            dataset_names = [
+                ds.dataset if isinstance(ds, DatasetConfig) else ds 
+                for ds in self.parameters.datasets
+            ]
+            self.label_mapper.validate_datasets(dataset_names, role=role_to_validate)
         
         # Setup output directory and data loader
         if parameters.output_folder:
@@ -240,6 +283,17 @@ class ComparisonAnalyzer:
         safe_dataset_name = self.parameters._sanitize_name(dataset_name)
         fnc_output_path = self.parameters.get_dataset_output_path(dataset_name, threshold)
         
+        # Determine custom names based on labels
+        # If single label provided, use it as custom name.
+        # If multiple labels provided, leave empty to allow auto-naming (or group naming).
+        custom_source_name = ''
+        if self.parameters.source_labels and len(self.parameters.source_labels) == 1:
+            custom_source_name = self.parameters.source_labels[0]
+            
+        custom_target_name = ''
+        if self.parameters.target_labels and len(self.parameters.target_labels) == 1:
+            custom_target_name = self.parameters.target_labels[0]
+
         # Let FindNeuronConnection handle client creation
         # It will auto-detect client_type from dataset name and create/reuse clients as needed
         # - If dataset contains 'flywire' or 'fafb' -> uses local data
@@ -247,6 +301,8 @@ class ComparisonAnalyzer:
         fnc = FindNeuronConnection(
             sourceNeurons=source_neurons,
             targetNeurons=target_neurons,
+            custom_source_name=custom_source_name,
+            custom_target_name=custom_target_name,
             max_interlayer=max_interlayer,
             min_synapse_num=threshold,
             min_traversal_probability=0,  # Use 0 to match FindPath.py - default 0.001 can miss weak but important edges
@@ -255,6 +311,9 @@ class ComparisonAnalyzer:
             # Redirect output to comparison folder structure
             saveas=fnc_output_path,  # Absolute path - overrides data_folder
             verbose_mode='simple',  # Use simplified progress output for comparison runs
+            skip_bodyId=self.parameters.skip_bodyId,  # Skip bodyId-level processing if requested
+            label_mapper=self.label_mapper,  # Pass label mapper for standardization
+            pathfinding=self.parameters.pathfinding,  # Pass pathfinding algorithm
         )
         
         # Initialize and run analysis
@@ -299,6 +358,22 @@ class ComparisonAnalyzer:
             conn_df = conn_df.copy()
             conn_df['dataset'] = dataset_name
             conn_df['threshold'] = threshold
+            
+            # Apply label mapping if available
+            if self.label_mapper:
+                self._log(f"Applying label mapping to {dataset_name} results")
+                conn_df = self.label_mapper.apply_to_dataframe(conn_df, dataset_name)
+                
+                # Overwrite original types with standardized labels
+                # This ensures merging in downstream analysis and visualizations
+                if 'std_label_pre' in conn_df.columns:
+                    # Only overwrite if label is not empty
+                    mask = conn_df['std_label_pre'] != ''
+                    conn_df.loc[mask, 'type_pre'] = conn_df.loc[mask, 'std_label_pre']
+                    
+                if 'std_label_post' in conn_df.columns:
+                    mask = conn_df['std_label_post'] != ''
+                    conn_df.loc[mask, 'type_post'] = conn_df.loc[mask, 'std_label_post']
         
         return conn_df
     
@@ -344,6 +419,20 @@ class ComparisonAnalyzer:
             conn_df = conn_df.copy()
             conn_df['dataset'] = dataset_name
             conn_df['threshold'] = threshold
+            
+            # Apply label mapping if available
+            if self.label_mapper:
+                self._log(f"Applying label mapping to {dataset_name} edge results")
+                conn_df = self.label_mapper.apply_to_dataframe(conn_df, dataset_name)
+                
+                # Overwrite original types with standardized labels
+                if 'std_label_pre' in conn_df.columns:
+                    mask = conn_df['std_label_pre'] != ''
+                    conn_df.loc[mask, 'type_pre'] = conn_df.loc[mask, 'std_label_pre']
+                    
+                if 'std_label_post' in conn_df.columns:
+                    mask = conn_df['std_label_post'] != ''
+                    conn_df.loc[mask, 'type_post'] = conn_df.loc[mask, 'std_label_post']
         
         return conn_df
     
@@ -391,18 +480,28 @@ class ComparisonAnalyzer:
             token = self.parameters.resolve_token()
             client = Client('neuprint.janelia.org', dataset=dataset_name, token=token)
             
+            # Import API utilities for Cypher escaping
+            try:
+                from src.utils.api_utils import escape_cypher_string
+            except ImportError:
+                def escape_cypher_string(value):
+                    if not isinstance(value, str):
+                        return str(value)
+                    return value.replace('\\', '\\\\').replace("'", "\\'")
+            
             # Build type patterns for Cypher query
             # Handle regex patterns (convert .* to Cypher regex)
             def format_types_for_cypher(types_list):
                 formatted = []
                 for t in types_list:
                     if isinstance(t, str):
+                        escaped_t = escape_cypher_string(t)
                         if '.*' in t or '*' in t:
                             # Convert to Cypher regex pattern
-                            pattern = t.replace('.*', '.*').replace('*', '.*')
+                            pattern = escaped_t.replace('.*', '.*').replace('*', '.*')
                             formatted.append(f"a.type =~ '{pattern}'")
                         else:
-                            formatted.append(f"a.type = '{t}'")
+                            formatted.append(f"a.type = '{escaped_t}'")
                 return formatted
             
             # Build source and target type conditions
@@ -1068,11 +1167,11 @@ class ComparisonAnalyzer:
         
         # Compute comparison metrics
         return self.run_comparison_analysis()
-    
+
     def run_comparison_analysis(self) -> Dict[str, Any]:
         """
         Run full comparison analysis on results.
-        
+
         Returns:
             Dictionary with all comparison metrics and findings
         """
@@ -1082,35 +1181,37 @@ class ComparisonAnalyzer:
         
         self._log("Computing comparison metrics")
         self._log("  Step 1/2: Generating comparison summary...")
-        
+
         dataset_names = self.parameters.get_dataset_names()
-        
+
         # Generate comprehensive summary
+        # Pass label_mapper=None because raw_results are already mapped
         summary = self.metrics.generate_comparison_summary(
             results=self.raw_results,
             datasets=dataset_names,
             thresholds=self.parameters.thresholds,
-            label_mapper=self.label_mapper
+            label_mapper=None
         )
-        
+
         self._log("  Step 2/2: Calculating cross-threshold similarities...")
-        
+
         # Calculate cross-threshold similarities and cache them
+        # Pass label_mapper=None because raw_results are already mapped
         similarities = self.metrics.calculate_similarity_across_thresholds(
             results=self.raw_results,
             datasets=dataset_names,
             thresholds=self.parameters.thresholds,
-            label_mapper=self.label_mapper
+            label_mapper=None
         )
         summary['threshold_similarities'] = similarities
-        
+
         # Cache per-threshold similarities for reuse in visualizations
         if not similarities.empty and 'threshold' in similarities.columns:
             for threshold in self.parameters.thresholds:
                 thresh_sims = similarities[similarities['threshold'] == threshold]
                 if not thresh_sims.empty:
                     self._similarity_cache[threshold] = thresh_sims.copy()
-        
+
         # Store for later use
         self.comparison_report = summary
         
@@ -1162,11 +1263,12 @@ class ComparisonAnalyzer:
         
         dataset_names = self.parameters.get_dataset_names()
         
+        # Pass label_mapper=None because raw_results are already mapped in run_path_analysis/run_edge_analysis
         aligned = self.metrics._align_results_at_threshold(
             self.raw_results,
             dataset_names,
             threshold,
-            self.label_mapper
+            label_mapper=None
         )
         
         self.aligned_results[threshold] = aligned
@@ -1350,7 +1452,7 @@ class ComparisonAnalyzer:
             for _, row in sim_t.iterrows():
                 jaccard = row.get('jaccard_similarity', 0)
                 svd = row.get('svd_similarity', 0)
-                if pd.isna(svd):
+                if not self.raw_results: 
                     svd = 0
                 pearson = row.get('pearson_correlation', 0)
                 if pd.isna(pearson):
@@ -1462,6 +1564,10 @@ class ComparisonAnalyzer:
         with open(params_path, 'w') as f:
             import json
             json.dump(self.parameters.to_dict(), f, indent=2, default=str)
+            
+        # Save label mapping (always generate a compatible JSON)
+        label_map_path = os.path.join(out_dir, "label_map.json")
+        self._export_label_map(label_map_path)
         
         # Save report (skip logging since we already logged "Saving parameters and report")
         report_path = os.path.join(out_dir, "comparison_report.txt")
@@ -1516,8 +1622,79 @@ class ComparisonAnalyzer:
             self._log(f"Warning: Failed to generate HTML report: {e}")
         
         self._log(f"All results exported to: {out_dir}")
-        self._log(f"Note: Run run_connectivity_profile_verification() separately for profile verification.")
+        self._log(f"Note: Run connectivity_profile_comparison() separately for profile verification.")
     
+    def _export_label_map(self, filepath: str):
+        """
+        Export label mapping to JSON, creating one from parameters if needed.
+        
+        Ensures that a valid LabelMapper JSON is always saved, merging data from
+        an existing LabelMapper and any list-based parameters.
+        """
+        output = {}
+        dataset_names = self.parameters.get_dataset_names()
+        
+        # Helper for smart labels
+        def generate_smart_labels(groups, user_labels):
+            if user_labels:
+                if isinstance(user_labels, list) and len(user_labels) == len(groups):
+                    return user_labels
+                if isinstance(user_labels, str) and len(groups) == 1:
+                    return [user_labels]
+            
+            # Generate defaults
+            labels = []
+            for i, g in enumerate(groups):
+                if len(g) == 1:
+                    labels.append(str(g[0]))
+                else:
+                    labels.append(f"Group_{i+1}")
+            return labels
+
+        # --- Source Mapping ---
+        # Priority 1: Analyzer's label_mapper (contains merged overall/source/target mappers)
+        if self.label_mapper:
+            d = self.label_mapper.to_dict()
+            if 'source_mapping' in d and d['source_mapping']:
+                output['source_mapping'] = d['source_mapping']
+        
+        # Priority 2: List in parameters (fallback if no explicit mapping)
+        if 'source_mapping' not in output and self.parameters.source_neurons:
+            groups = self.parameters.get_source_groups()
+            labels = generate_smart_labels(groups, self.parameters.source_labels)
+            
+            source_data = {'custom_label': labels}
+            for ds in dataset_names:
+                source_data[ds] = groups
+            output['source_mapping'] = source_data
+
+        # --- Target Mapping ---
+        # Priority 1: Analyzer's label_mapper
+        if self.label_mapper:
+            d = self.label_mapper.to_dict()
+            if 'target_mapping' in d and d['target_mapping']:
+                output['target_mapping'] = d['target_mapping']
+                
+        # Priority 2: List in parameters (fallback)
+        if 'target_mapping' not in output and self.parameters.target_neurons:
+            groups = self.parameters.get_target_groups()
+            labels = generate_smart_labels(groups, self.parameters.target_labels)
+            
+            target_data = {'custom_label': labels}
+            for ds in dataset_names:
+                target_data[ds] = groups
+            output['target_mapping'] = target_data
+
+        # --- Intermediate Mapping ---
+        if self.label_mapper:
+            d = self.label_mapper.to_dict()
+            if 'intermediate_mapping' in d:
+                output['intermediate_mapping'] = d['intermediate_mapping']
+
+        if output:
+            with open(filepath, 'w') as f:
+                json.dump(output, f, indent=2)
+
     def _export_cross_dataset_comparisons(self, comparison_results_dir: str):
         """
         Export cross-dataset comparison results at each threshold level.
@@ -2550,24 +2727,29 @@ class ComparisonAnalyzer:
         
         # Get top edges union from all datasets
         top_n = self.parameters.top_edges
-        top_edges_union = set()
         
-        for dataset in dataset_names:
-            if dataset in aligned.columns:
-                dataset_top = set(aligned.nlargest(top_n, dataset).index)
-                top_edges_union.update(dataset_top)
-        
-        # Limit total rows to reasonable number (2x top_edges)
-        max_rows = top_n * 2
-        if len(top_edges_union) > max_rows:
-            # Sort by max weight across all datasets
-            available = [d for d in dataset_names if d in aligned.columns]
-            aligned['_max_weight'] = aligned[available].max(axis=1)
-            top_edges_union = set(aligned.nlargest(max_rows, '_max_weight').index)
-            aligned = aligned.drop(columns=['_max_weight'])
-        
-        # Filter to top edges
-        matrix_df = aligned.loc[aligned.index.isin(top_edges_union)].copy()
+        if top_n > 0:
+            top_edges_union = set()
+            
+            for dataset in dataset_names:
+                if dataset in aligned.columns:
+                    dataset_top = set(aligned.nlargest(top_n, dataset).index)
+                    top_edges_union.update(dataset_top)
+            
+            # Limit total rows to reasonable number (2x top_edges)
+            max_rows = top_n * 2
+            if len(top_edges_union) > max_rows:
+                # Sort by max weight across all datasets
+                available = [d for d in dataset_names if d in aligned.columns]
+                aligned['_max_weight'] = aligned[available].max(axis=1)
+                top_edges_union = set(aligned.nlargest(max_rows, '_max_weight').index)
+                aligned = aligned.drop(columns=['_max_weight'])
+            
+            # Filter to top edges
+            matrix_df = aligned.loc[aligned.index.isin(top_edges_union)].copy()
+        else:
+            # Include all edges if top_edges <= 0
+            matrix_df = aligned.copy()
         
         if matrix_df.empty:
             return
@@ -3848,298 +4030,478 @@ class ComparisonAnalyzer:
         self._log(f"Saved: {os.path.basename(output_path)}")
 
     # =========================================================================
-    # Connectivity Profile Verification
+    # Connectivity Profile Comparison
     # =========================================================================
     
-    def run_connectivity_profile_verification(
+    def direct_comparison(
+        self,
+        neurons_a: Optional[Union[str, int, List[Union[str, int]]]] = None,
+        neurons_b: Optional[Union[str, int, List[Union[str, int]]]] = None,
+        dataset_a: Optional[str] = None,
+        dataset_b: Optional[str] = None,
+        direction: Optional[str] = None,
+        comparison_mode: str = 'type',
+        output_dir: Optional[str] = None,
+        save_results: bool = True
+    ) -> Dict[str, Any]:
+        """
+        Direct comparison of specific neurons between datasets.
+        
+        This is a convenience method for directly comparing neurons by type name
+        or bodyId. Uses ProfileComparator.direct_comparison() under the hood.
+        
+        If neurons_a/neurons_b are not provided, uses source_neurons/target_neurons
+        from ComparisonParameters.
+        
+        Args:
+            neurons_a: Neurons to compare from dataset_a (default: params.source_neurons)
+            neurons_b: Neurons to compare from dataset_b (default: params.target_neurons)
+            dataset_a: First dataset (default: first in params.datasets)
+            dataset_b: Second dataset (default: second in params.datasets)
+            direction: 'upstream', 'downstream', or 'both' (default: params.verification_direction)
+            comparison_mode: 'type' (aggregate) or 'bodyid' (individual)
+            output_dir: Where to save results (default: params output folder)
+            save_results: If True, save results to CSV
+        
+        Returns:
+            Dict with 'results' DataFrame and 'summary' statistics
+        
+        Example:
+            >>> analyzer = ComparisonAnalyzer(params)
+            >>> # Compare specific types
+            >>> results = analyzer.direct_comparison('aMe12', 'aMe12')
+            >>> # Or use defaults from params
+            >>> results = analyzer.direct_comparison()
+        """
+        from .profile_comparator import ProfileComparator
+        from .connectivity_profiler import ConnectivityProfiler, ProfilerConfig
+        
+        p = self.parameters
+        
+        # Resolve defaults
+        datasets = p.get_dataset_names()
+        ds_a = dataset_a or (datasets[0] if len(datasets) > 0 else None)
+        ds_b = dataset_b or (datasets[1] if len(datasets) > 1 else ds_a)
+        direction = direction or p.verification_direction
+        
+        # Use source/target neurons if not specified
+        if neurons_a is None:
+            neurons_a = p.source_neurons
+        if neurons_b is None:
+            neurons_b = p.target_neurons
+        
+        # Resolve output directory
+        if output_dir is None:
+            output_dir = os.path.join(p.full_output_path, "direct_comparison")
+        os.makedirs(output_dir, exist_ok=True)
+        
+        # Create profiler
+        config = ProfilerConfig(
+            top_k_bodyid=p.verification_top_k,
+            top_m_type=p.verification_top_m,
+            min_synapse_threshold=p.verification_min_synapse_threshold,
+            include_untyped_partners=p.verification_include_untyped,
+            use_cache=True
+        )
+        
+        profiler = ConnectivityProfiler(
+            datasets=[ds_a, ds_b],
+            config=config,
+            token=p.resolve_token(),
+            verbose=self.verbose
+        )
+        
+        # Run direct comparison
+        self._log(f"Running direct comparison: {neurons_a} ({ds_a}) vs {neurons_b} ({ds_b})")
+        
+        results = ProfileComparator.direct_comparison(
+            neurons_a=neurons_a,
+            neurons_b=neurons_b,
+            dataset_a=ds_a,
+            dataset_b=ds_b,
+            profiler=profiler,
+            direction=direction,
+            comparison_mode=comparison_mode,
+            label_mapper=self.label_mapper,
+            score_weights=p.verification_score_weights,
+            verbose=self.verbose
+        )
+        
+        # Save results
+        if save_results and not results['results'].empty:
+            timestamp = pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')
+            filepath = os.path.join(output_dir, f'direct_comparison_{timestamp}.csv')
+            results['results'].to_csv(filepath, index=False)
+            self._log(f"Saved: {filepath}")
+            results['output_file'] = filepath
+        
+        return results
+    
+    def connectivity_profile_comparison(
         self,
         output_dir: Optional[str] = None,
+        neuron_types: Optional[List[str]] = None,
         direction: Optional[str] = None,
         comparison_mode: Optional[str] = None,
-        include_partner_details: Optional[bool] = None,
         include_visualizations: Optional[bool] = None,
         top_k: Optional[int] = None,
         top_m: Optional[int] = None,
         min_synapse_threshold: Optional[int] = None,
         include_untyped_partners: Optional[bool] = None,
-        # Strict mode parameters
-        min_common_partners: Optional[int] = None,
-        # Score weights for combined score
         score_weights: Optional[Dict[str, float]] = None,
-        # Parallel processing parameters
-        parallel: Optional[bool] = None,
-        max_workers: Optional[int] = None,
-        _skip_html_regeneration: bool = False
+        _skip_html_regeneration: bool = False,
     ) -> Dict[str, pd.DataFrame]:
         """
-        Run connectivity profile verification for all neuron types in the comparison.
+        Reconstructed connectivity profile comparison.
         
-        This method integrates the connectivity profile analysis with the comparison
-        results, verifying that neurons with the same type labels have similar
-        connectivity patterns across datasets.
+        Workflow:
+        1) For each neuron type, run pairwise direct comparisons across all dataset pairs
+           using ProfileComparator.direct_comparison (same-label only).
+        2) Merge pairwise results into a comparison matrix (type x dataset-pair).
+        3) Compute per-type average similarity across all datasets.
+        4) Save CSVs and an optional HTML + heatmap visualization.
         
-        Two comparison modes are supported:
-        
-        **Loose Mode** (default): Type-level aggregated comparison
-        - Aggregates all neurons of the same type into one profile
-        - Computes Jaccard similarity, cosine similarity, rank correlation
-        - Faster and good for initial screening
-        - Best when: You want to compare overall type connectivity patterns
-        
-        **Strict Mode**: Per-bodyId individual comparison  
-        - Compares individual neuron profiles within each type
-        - Uses rank correlation on matching partner types (always uses ranks)
-        - Includes 2-hop profile matching via profiler config
-        - More computationally intensive but more precise
-        - Best when: You want to verify individual neuron assignments
-        
-        The verification workflow:
-        1. Extracts source, target, and intermediate types from comparison results
-        2. Computes connectivity profiles for each type in each dataset
-        3. Compares profiles using the selected mode's similarity metrics
-        4. Generates verification report with confidence scores
-        5. 2-hop expansion handled by profiler if config.expand_untyped_2hop is True
-        
-        All parameters default to values from ComparisonParameters if not provided.
-        
-        Args:
-            output_dir: Directory to save verification results (default: comparison output folder)
-            direction: 'upstream', 'downstream', or 'both' for profile comparison
-                      (default: params.verification_direction)
-            comparison_mode: 'loose' (type-aggregated) or 'strict' (per-bodyId)
-                           (default: params.verification_mode)
-            include_partner_details: Include per-type partner overlap CSVs
-                                    (default: params.verification_include_partner_details)
-            include_visualizations: Generate visualization plots/heatmaps
-                                   (default: params.verification_include_visualizations)
-            top_k: Number of top partners per direction 
-                  (default: params.verification_top_k)
-            top_m: Minimum unique partner types 
-                  (default: params.verification_top_m)
-            min_synapse_threshold: Minimum synapse count for connections
-                                  (default: params.verification_min_synapse_threshold)
-            include_untyped_partners: Include partners without type annotations
-                                     (default: params.verification_include_untyped)
-            min_common_partners: (strict mode) Minimum shared partners required for comparison
-                                (default: params.verification_min_common_partners)
-            score_weights: Custom weights for combined score {'jaccard': 0.5, 'rank': 0.5}
-                          (default: params.verification_score_weights)
-            parallel: Enable parallel processing for batch operations
-                     (default: params.parallel)
-            max_workers: Maximum parallel workers (default: params.max_workers)
-            _skip_html_regeneration: Internal flag - skip HTML regeneration (used when called from export_results)
-        
-        Returns:
-            Dict with keys:
-            - 'source': DataFrame with source type verification
-            - 'target': DataFrame with target type verification  
-            - 'intermediate': DataFrame with intermediate type verification
-            - 'summary': Overall summary DataFrame
-            - 'similarity_matrix': Cross-dataset similarity matrix
-            - 'comparison_mode': The mode used ('loose' or 'strict')
-        
-        Note:
-            - Ranks are always used for bodyId-level comparison (proportions not used)
-            - 2-hop expansion is controlled via profiler config.expand_untyped_2hop
-            - If 2-hop doesn't return typed neurons in top_k, untyped partners are ignored
-        
-        Example:
-            >>> analyzer = ComparisonAnalyzer(params)
-            >>> results = analyzer.run_comparison()
-            >>> 
-            >>> # Use defaults from ComparisonParameters
-            >>> verification = analyzer.run_connectivity_profile_verification()
-            >>> 
-            >>> # Override specific parameters
-            >>> verification = analyzer.run_connectivity_profile_verification(
-            ...     comparison_mode='strict',
-            ...     top_k=10
-            ... )
-            >>> print(verification['summary'])
+        Only the essential arguments are kept; unused legacy flags were removed.
         """
-        # Apply defaults from ComparisonParameters
+        # Defaults from parameters
         p = self.parameters
         direction = direction if direction is not None else p.verification_direction
         comparison_mode = comparison_mode if comparison_mode is not None else p.verification_mode
-        include_partner_details = include_partner_details if include_partner_details is not None else p.verification_include_partner_details
         include_visualizations = include_visualizations if include_visualizations is not None else p.verification_include_visualizations
         top_k = top_k if top_k is not None else p.verification_top_k
         top_m = top_m if top_m is not None else p.verification_top_m
         min_synapse_threshold = min_synapse_threshold if min_synapse_threshold is not None else p.verification_min_synapse_threshold
         include_untyped_partners = include_untyped_partners if include_untyped_partners is not None else p.verification_include_untyped
-        min_common_partners = min_common_partners if min_common_partners is not None else p.verification_min_common_partners
         score_weights = score_weights if score_weights is not None else p.verification_score_weights
-        parallel = parallel if parallel is not None else p.parallel
-        max_workers = max_workers if max_workers is not None else p.max_workers
-        
-        try:
-            from .connectivity_profiler import ConnectivityProfiler, ProfilerConfig
-            from .cross_dataset_verifier import CrossDatasetVerifier
-            from .profile_visualizations import ProfileVisualizer
-        except ImportError as e:
-            self._log(f"Warning: Connectivity profile modules not available: {e}")
+
+        # Visuals can be suppressed either by caller or via the internal skip flag
+        visuals_enabled = bool(include_visualizations and not _skip_html_regeneration)
+
+        # Validate datasets
+        dataset_names = self.parameters.get_dataset_names()
+        if len(dataset_names) < 2:
+            self._log("Need at least 2 datasets for profile comparison")
             return {}
-        
-        # Validate comparison_mode
+
+        # Resolve neuron types
+        if neuron_types is None:
+            src_types, tgt_types, inter_types = self._extract_types_from_results()
+            ordered = list(src_types) + [t for t in tgt_types if t not in src_types]
+            seen = set(ordered)
+            ordered += [t for t in inter_types if t not in seen]
+            neuron_types = ordered
+        neuron_types = list(dict.fromkeys(neuron_types))  # dedupe, keep order
+
+        if not neuron_types:
+            self._log("No neuron types available for profile comparison")
+            return {}
+
         if comparison_mode not in ['loose', 'strict']:
             self._log(f"Warning: Invalid comparison_mode '{comparison_mode}', using 'loose'")
             comparison_mode = 'loose'
-        
-        self._log(f"Running connectivity profile verification (mode: {comparison_mode})...")
-        
-        # Setup output directory
+
+        # Output dir
         if output_dir is None:
-            output_dir = os.path.join(
-                self.parameters.full_output_path,
-                "connectivity_profile_verification"
-            )
+            output_dir = os.path.join(self.parameters.full_output_path, "connectivity_profile_comparison")
         os.makedirs(output_dir, exist_ok=True)
-        
-        # Get dataset names
-        dataset_names = self.parameters.get_dataset_names()
-        
-        if len(dataset_names) < 2:
-            self._log("Need at least 2 datasets for verification")
+
+        # Profiler
+        try:
+            from .connectivity_profiler import ConnectivityProfiler, ProfilerConfig
+            from .profile_comparator import ProfileComparator
+        except ImportError as e:
+            self._log(f"Warning: Connectivity profile modules not available: {e}")
             return {}
-        
-        # Extract neuron types from comparison results
-        source_types, target_types, intermediate_types = self._extract_types_from_results()
-        
-        # Combine types with priority: source first, then target, then intermediate
-        # This ensures source/target types are always included in the similarity matrix
-        all_types_ordered = list(source_types) + [t for t in target_types if t not in source_types]
-        seen = set(all_types_ordered)
-        all_types_ordered += [t for t in intermediate_types if t not in seen]
-        
-        self._log(f"Found {len(source_types)} source, {len(target_types)} target, "
-                  f"{len(intermediate_types)} intermediate types")
-        
-        if not all_types_ordered:
-            self._log("No neuron types found in comparison results")
-            return {}
-        
-        # Create profiler with config from parameters
-        config = ProfilerConfig(
-            top_k_bodyid=top_k,
-            top_m_type=top_m,
-            min_synapse_threshold=min_synapse_threshold,
-            include_untyped_partners=include_untyped_partners,
-            use_cache=True
-        )
-        
+
         profiler = ConnectivityProfiler(
             datasets=dataset_names,
-            config=config,
+            config=ProfilerConfig(
+                top_k_bodyid=top_k,
+                top_m_type=top_m,
+                min_synapse_threshold=min_synapse_threshold,
+                include_untyped_partners=include_untyped_partners,
+                use_cache=True,
+            ),
             token=self.parameters.resolve_token(),
-            verbose=self.verbose
-        )
-        
-        # Pre-load profiles from parquet cache for efficiency
-        # This leverages the build_connectivity_profile_cache / read_connectivity_profile_cache system
-        self._log("Pre-loading connectivity profiles from cache...")
-        preloaded_count = 0
-        for dataset in dataset_names:
-            try:
-                # Read all cached profiles for this dataset
-                cached_profiles = profiler.read_connectivity_profile_cache(
-                    dataset=dataset,
-                    neuron_types=all_types_ordered  # Only load types we need
-                )
-                if cached_profiles:
-                    self._log(f"  Loaded {len(cached_profiles)} cached profiles for {dataset}")
-                    preloaded_count += len(cached_profiles)
-            except Exception as e:
-                self._log(f"  Cache read failed for {dataset}: {e}")
-        
-        if preloaded_count > 0:
-            self._log(f"Pre-loaded {preloaded_count} profiles from cache")
-        else:
-            self._log("No cached profiles found - will extract on demand")
-        
-        # Create verifier with comparison mode and score weights
-        verifier = CrossDatasetVerifier(
-            profiler=profiler,
-            label_mapper=self.label_mapper,
             verbose=self.verbose,
-            comparison_mode=comparison_mode,
-            min_common_partners=min_common_partners,
-            score_weights=score_weights
         )
-        
-        # Run verification for all types
-        results = verifier.verify_comparison_results(
-            source_types=source_types,
-            target_types=target_types,
-            intermediate_types=intermediate_types,
-            datasets=dataset_names,
-            direction=direction,
-            parallel=parallel,
-            max_workers=max_workers
-        )
-        
-        # Store the comparison mode used
-        results['comparison_mode'] = comparison_mode
-        
-        # Build cross-dataset similarity matrix (use rank_corr as primary metric)
-        # Use all_types_ordered to ensure source/target types are always included
-        if all_types_ordered:
-            self._log("Building similarity matrix (rank correlation)...")
-            similarity_matrix = verifier.build_cross_dataset_similarity_matrix(
-                neuron_types=all_types_ordered[:50],  # Limit for performance, but source/target types are first
-                datasets=dataset_names,
-                metric='rank',  # Use rank correlation as primary metric
-                direction=direction,
-                parallel=parallel,
-                max_workers=max_workers
-            )
-            results['similarity_matrix'] = similarity_matrix
-            
-            # Store for HTML report access
-            self._profile_similarity_matrix = similarity_matrix
-            
-            # Build metric-specific matrices for additional visualizations
-            self._log("Building metric-specific matrices...")
-            metric_matrices = verifier.build_multi_metric_matrices(
-                neuron_types=all_types_ordered[:50],
-                datasets=dataset_names,
-                direction=direction,
-                parallel=parallel,
-                max_workers=max_workers
-            )
-            results['metric_matrices'] = metric_matrices
-            
-            # Save metric matrices to CSVs
-            metric_dir = os.path.join(output_dir, 'metric_matrices')
-            os.makedirs(metric_dir, exist_ok=True)
-            for metric_name, matrix in metric_matrices.items():
-                matrix.to_csv(os.path.join(metric_dir, f'similarity_matrix_{metric_name}.csv'))
-            self._log("Saved: metric_matrices/*.csv")
-        
-        # Save results
-        self._save_profile_verification_results(
-            results, output_dir, include_partner_details, verifier, dataset_names, direction
-        )
-        
-        # Generate visualizations if requested
-        if include_visualizations:
-            self._generate_profile_visualizations(
-                results, output_dir, profiler, dataset_names
-            )
-        
-        # Regenerate main HTML report to include profile similarity matrix
-        # Skip if called from export_results (HTML will be generated after this)
-        if not _skip_html_regeneration:
+
+        # Pairwise comparisons
+        pairwise_records: List[Dict[str, Any]] = []
+        matrix_store: Dict[str, Dict[str, float]] = {t: {} for t in neuron_types}
+
+        for ds_a, ds_b in combinations(dataset_names, 2):
+            pair_label = f"{ds_a} vs {ds_b}"
+            self._log(f"Comparing {len(neuron_types)} types: {pair_label}")
             try:
-                html_report_path = os.path.join(os.path.dirname(output_dir), "comparison_report.html")
-                self.generate_html_report(html_report_path)
-                self._log("Updated: comparison_report.html (with profile similarity)")
+                res = ProfileComparator.direct_comparison(
+                    neurons_a=neuron_types,
+                    neurons_b=neuron_types,
+                    dataset_a=ds_a,
+                    dataset_b=ds_b,
+                    profiler=profiler,
+                    direction=direction,
+                    comparison_mode=comparison_mode,
+                    label_mapper=self.label_mapper,
+                    score_weights=score_weights,
+                    top_k=top_k,
+                    top_m=top_m,
+                    min_synapse_threshold=min_synapse_threshold,
+                    include_untyped_partners=include_untyped_partners,
+                    same_label_only=True,
+                    verbose=self.verbose,
+                )
             except Exception as e:
-                self._log(f"Warning: Could not update HTML report with profile data: {e}")
+                self._log(f"Direct comparison failed for {pair_label}: {e}")
+                continue
+
+            # Prefer type_summary; fallback to results
+            type_df = res.get('type_summary')
+            if type_df is None or (hasattr(type_df, 'empty') and type_df.empty):
+                type_df = res.get('results', pd.DataFrame())
+
+            if type_df is None or type_df.empty:
+                self._log(f"No results for {pair_label}")
+                continue
+
+            # Collect all available metrics
+            metric_map = {
+                'avg_rank_corr': 'rank_corr', 'rank_corr': 'rank_corr',
+                'avg_rank_union': 'rank_union', 'rank_union': 'rank_union',
+                'avg_cosine': 'cosine', 'cosine': 'cosine',
+                'avg_jaccard': 'jaccard', 'jaccard': 'jaccard',
+                'avg_combined': 'combined', 'combined': 'combined'
+            }
+            
+            # Initialize stores for each metric if not exists
+            if not hasattr(self, '_matrix_stores'):
+                self._matrix_stores = {m: {t: {} for t in neuron_types} for m in set(metric_map.values())}
+
+            found_any = False
+            for col, canonical in metric_map.items():
+                if col in type_df.columns:
+                    for _, row in type_df.iterrows():
+                        ntype = row.get('neuron_type') or row.get('type') or row.get('pair') or row.get('type_a')
+                        if pd.isna(ntype):
+                            continue
+                        val = row.get(col)
+                        if pd.isna(val):
+                            continue
+                        self._matrix_stores[canonical].setdefault(str(ntype), {})[pair_label] = float(val)
+                        
+                        # Add to pairwise records (only once per canonical metric per pair)
+                        # We might overwrite if multiple cols map to same canonical, but that's fine (prefer last/best?)
+                        # Actually, let's just append all and filter later or just keep it simple
+                        pairwise_records.append({
+                            'neuron_type': str(ntype),
+                            'dataset_a': ds_a,
+                            'dataset_b': ds_b,
+                            'metric': canonical,
+                            'value': float(val),
+                        })
+                    found_any = True
+            
+            if not found_any:
+                self._log(f"No similarity columns found for {pair_label}")
+
+        if not pairwise_records:
+            self._log("No pairwise comparison results produced")
+            return {}
+
+        # Build matrix DataFrames for each metric
+        matrices = {}
+        pair_cols = [f"{a} vs {b}" for a, b in combinations(dataset_names, 2)]
         
-        self._log(f"Connectivity profile verification complete. Results saved to: {output_dir}")
+        for metric, store in self._matrix_stores.items():
+            # Check if store has any data
+            has_data = any(store.values())
+            if not has_data:
+                continue
+                
+            df = pd.DataFrame(store).T.reset_index().rename(columns={'index': 'neuron_type'})
+            existing_cols = [c for c in pair_cols if c in df.columns]
+            if not existing_cols:
+                continue
+                
+            df = df[['neuron_type'] + existing_cols]
+            matrices[metric] = df
+
+        if not matrices:
+            self._log("No valid matrices could be built")
+            return {}
+
+        # Use 'combined' or 'rank_corr' as primary for sorting/display
+        primary_metric = 'combined' if 'combined' in matrices else ('rank_corr' if 'rank_corr' in matrices else list(matrices.keys())[0])
         
-        return results
+        # Create summary DataFrame with averages for ALL metrics
+        # Start with all unique neuron types across all matrices
+        all_types = set()
+        for df in matrices.values():
+            all_types.update(df['neuron_type'].tolist())
+        
+        summary_df = pd.DataFrame({'neuron_type': sorted(list(all_types))})
+        
+        # Calculate and merge averages for each metric
+        for metric, df in matrices.items():
+            value_cols = [c for c in df.columns if c != 'neuron_type']
+            # Calculate mean for this metric
+            avg_series = df.set_index('neuron_type')[value_cols].mean(axis=1, skipna=True)
+            avg_df = avg_series.reset_index().rename(columns={0: f'avg_{metric}'})
+            summary_df = pd.merge(summary_df, avg_df, on='neuron_type', how='left')
+            
+        # Add n_pairs count (using primary metric)
+        primary_df = matrices[primary_metric]
+        primary_cols = [c for c in primary_df.columns if c != 'neuron_type']
+        count_series = primary_df.set_index('neuron_type')[primary_cols].count(axis=1)
+        count_df = count_series.reset_index().rename(columns={0: 'n_pairs'})
+        summary_df = pd.merge(summary_df, count_df, on='neuron_type', how='left')
+        
+        # Sort by primary metric average
+        if f'avg_{primary_metric}' in summary_df.columns:
+            summary_df = summary_df.sort_values(f'avg_{primary_metric}', ascending=False)
+
+        pairwise_df = pd.DataFrame(pairwise_records)
+
+        # Save outputs
+        timestamp = pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')
+        
+        # Save all matrices
+        for metric, df in matrices.items():
+            path = os.path.join(output_dir, f'comparison_matrix_{metric}_{timestamp}.csv')
+            df.to_csv(path, index=False)
+            
+        summary_path = os.path.join(output_dir, f'comparison_summary_{timestamp}.csv')
+        pairwise_path = os.path.join(output_dir, f'pairwise_results_{timestamp}.csv')
+        summary_df.to_csv(summary_path, index=False)
+        pairwise_df.to_csv(pairwise_path, index=False)
+        self._log(f"Saved matrices, summary, and pairwise results to {output_dir}")
+
+        report_path = None
+        heatmap_paths = {}
+
+        # Optional visualization
+        if visuals_enabled:
+            try:
+                import matplotlib.pyplot as plt
+                
+                for metric, df in matrices.items():
+                    cols = [c for c in df.columns if c != 'neuron_type']
+                    if not cols:
+                        continue
+                        
+                    fig, ax = plt.subplots(figsize=(max(6, len(cols)*0.8), max(6, len(df)*0.25)))
+                    heatmap_data = df.set_index('neuron_type')[cols]
+                    
+                    # Determine range and colormap based on data
+                    data_min = heatmap_data.min().min()
+                    if data_min < 0:
+                        # Use diverging colormap for data with negative values (e.g. correlations)
+                        cmap = 'RdBu_r'
+                        vmin = -1
+                        vmax = 1
+                    else:
+                        # Use sequential colormap for positive-only data (e.g. Jaccard)
+                        cmap = 'viridis'
+                        vmin = 0
+                        vmax = 1
+                        
+                    im = ax.imshow(heatmap_data.fillna(np.nan), aspect='auto', cmap=cmap, vmin=vmin, vmax=vmax)
+                    ax.set_xticks(range(len(cols)))
+                    ax.set_xticklabels(cols, rotation=45, ha='right')
+                    ax.set_yticks(range(len(heatmap_data.index)))
+                    ax.set_yticklabels(heatmap_data.index)
+                    ax.set_title(f'Connectivity Profile Similarity ({metric})')
+                    fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+                    
+                    path = os.path.join(output_dir, f'comparison_heatmap_{metric}_{timestamp}.png')
+                    fig.tight_layout()
+                    fig.savefig(path, dpi=200)
+                    plt.close(fig)
+                    heatmap_paths[metric] = path
+                    self._log(f"Saved heatmap: {path}")
+            except Exception as e:
+                self._log(f"Heatmap generation failed: {e}")
+
+            # Interactive Heatmap
+            interactive_path = None
+            try:
+                interactive_path = os.path.join(output_dir, f'comparison_interactive_{timestamp}.html')
+                interactive_matrices = {}
+                for metric, df in matrices.items():
+                    if 'neuron_type' in df.columns:
+                        interactive_matrices[metric] = df.set_index('neuron_type')
+                    else:
+                        interactive_matrices[metric] = df.copy()
+                
+                generate_interactive_heatmap(
+                    interactive_matrices, 
+                    interactive_path, 
+                    title=f"Connectivity Profile Comparison ({timestamp})",
+                    showfig=False
+                )
+                self._log(f"Saved interactive heatmap: {interactive_path}")
+            except Exception as e:
+                self._log(f"Interactive heatmap generation failed: {e}")
+
+            # HTML report
+            try:
+                report_path = os.path.join(output_dir, f'comparison_report_{timestamp}.html')
+                with open(report_path, 'w') as f:
+                    f.write("<html><head><title>Connectivity Profile Comparison</title>")
+                    f.write("<style>body{font-family:sans-serif; margin:20px;} table{border-collapse:collapse; width:100%;} th,td{border:1px solid #ddd; padding:8px; text-align:left;} th{background-color:#f2f2f2;} img{max-width:100%; height:auto; margin-bottom:20px;}</style>")
+                    f.write("</head><body>")
+                    f.write("<h2>Connectivity Profile Comparison</h2>")
+                    
+                    if interactive_path:
+                        f.write(f"<p><a href='{os.path.basename(interactive_path)}' target='_blank' style='font-size:16px; font-weight:bold; color:#4CAF50;'>👉 Open Interactive Heatmap</a></p>")
+                    
+                    f.write("<h3>Summary (Primary Metric: " + primary_metric + ")</h3>")
+                    f.write(summary_df.to_html(index=False))
+                    
+                    # Heatmaps section
+                    f.write("<h3>Similarity Heatmaps</h3>")
+                    for metric, path in heatmap_paths.items():
+                        f.write(f"<h4>{metric}</h4>")
+                        f.write(f"<p><img src='{os.path.basename(path)}'/></p>")
+                    
+                    # Matrices section
+                    f.write("<h3>Similarity Matrices</h3>")
+                    for metric, df in matrices.items():
+                        f.write(f"<h4>{metric}</h4>")
+                        f.write(df.to_html(index=False))
+                        
+                    f.write("<h3>Pairwise Records</h3>")
+                    f.write(pairwise_df.head(2000).to_html(index=False))
+                    f.write("</body></html>")
+                self._log(f"Saved HTML report: {report_path}")
+            except Exception as e:
+                self._log(f"HTML report generation failed: {e}")
+
+        return {
+            'matrix': matrices.get(primary_metric),
+            'matrices': matrices,
+            'summary': summary_df,
+            'pairwise_results': pairwise_df,
+            'comparison_mode': comparison_mode,
+            'report_path': report_path,
+            'heatmap_path': heatmap_paths.get(primary_metric),
+            'heatmap_paths': heatmap_paths,
+            'include_visualizations': visuals_enabled,
+        }
     
+    # Alias for backward compatibility
+    def run_connectivity_profile_verification(self, **kwargs) -> Dict[str, pd.DataFrame]:
+        """
+        Alias for connectivity_profile_comparison() for backward compatibility.
+        
+        Deprecated: Use connectivity_profile_comparison() instead.
+        """
+        # Remove arguments that were removed from the main method
+        kwargs.pop('parallel', None)
+        kwargs.pop('max_workers', None)
+        return self.connectivity_profile_comparison(**kwargs)
+    
+
     def _extract_types_from_results(self) -> Tuple[List[str], List[str], List[str]]:
         """
         Extract source, target, and intermediate neuron types from comparison results.
@@ -4236,9 +4598,38 @@ class ComparisonAnalyzer:
         direction: str
     ):
         """Save verification results to CSV files."""
+        # Helper to keep only id columns + requested metric columns
+        def _filter_df(df: pd.DataFrame, keep_cols: List[str]) -> pd.DataFrame:
+            present = [c for c in keep_cols if c in df.columns]
+            return df[present].copy() if present else df
+
+        metric_cols = ['jaccard', 'cosine', 'rank_corr', 'rank_union',
+                       'avg_jaccard', 'avg_cosine', 'avg_rank_corr', 'avg_rank_union']
+
+        # Save bodyId-level results when using the new core
+        if 'bodyid_results' in results and not results['bodyid_results'].empty:
+            keep = ['dataset_a', 'dataset_b', 'neuron_type', 'source_bodyId', 'target_bodyId'] + metric_cols
+            filtered = _filter_df(results['bodyid_results'], keep)
+            filtered.to_csv(
+                os.path.join(output_dir, 'bodyid_results.csv'),
+                index=False
+            )
+            self._log("Saved: bodyid_results.csv")
+
+        if 'type_summary' in results and not results['type_summary'].empty:
+            keep = ['dataset_a', 'dataset_b', 'neuron_type', 'n_source_bodyIds', 'n_target_bodyIds'] + metric_cols
+            filtered = _filter_df(results['type_summary'], keep)
+            filtered.to_csv(
+                os.path.join(output_dir, 'type_summary.csv'),
+                index=False
+            )
+            self._log("Saved: type_summary.csv")
+
         # Save summary
         if 'summary' in results and not results['summary'].empty:
-            results['summary'].to_csv(
+            keep = ['neuron_type', 'role', 'datasets_found'] + metric_cols
+            filtered = _filter_df(results['summary'], keep)
+            filtered.to_csv(
                 os.path.join(output_dir, 'verification_summary.csv'),
                 index=False
             )
@@ -4247,7 +4638,9 @@ class ComparisonAnalyzer:
         # Save by role
         for role in ['source', 'target', 'intermediate']:
             if role in results and not results[role].empty:
-                results[role].to_csv(
+                keep = ['neuron_type', 'role', 'datasets_found'] + metric_cols
+                filtered = _filter_df(results[role], keep)
+                filtered.to_csv(
                     os.path.join(output_dir, f'verification_{role}.csv'),
                     index=False
                 )
@@ -4317,13 +4710,13 @@ class ComparisonAnalyzer:
                 'jaccard': 'Jaccard Similarity',
                 'cosine': 'Cosine Similarity',
                 'rank': 'Rank Correlation',
-                'combined': 'Combined Score'
+                'rank_union': 'Rank Correlation (Union)'
             }
             
             for metric_name, matrix in results['metric_matrices'].items():
                 if matrix is not None and not matrix.empty:
                     try:
-                        vmin = -1.0 if metric_name == 'rank' else 0.0
+                        vmin = -1.0 if metric_name.startswith('rank') else 0.0
                         ProfileVisualizer.plot_similarity_heatmap(
                             matrix,
                             title=f"Cross-Dataset Profile Similarity ({metric_titles.get(metric_name, metric_name)})",

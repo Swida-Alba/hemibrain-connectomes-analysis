@@ -1,12 +1,12 @@
 {
   "source_mapping": {
-    "custom_label": ["aMe12"],
+    "std_label": ["aMe12"],
     "hemibrain:v1.2.1": [["aMe12"]],
     "male-cns:v0.9": [["aMe12"]],
-    "flywire_FAFB_v783": [["aMe12"]]
+    "flywire_FAFB_v783": [["720575940610453042"]]
   },
   "target_mapping": {
-    "custom_label": ["KCg-s1"],
+    "std_label": ["KCg-s1"],
     "hemibrain:v1.2.1": [["KCg-s1"]],
     "male-cns:v0.9": [["KCg-s1"]],
     "flywire_FAFB_v783": [["KCg-s1"]]

@@ -22,8 +22,8 @@ if __name__ == '__main__':
         token='',
         data_folder='/Users/apple/Local/connection_data',
         # dataset='flywire_FAFB_v783',  # Combined dataset and version in one parameter
-        # dataset = 'male-cns:v0.9',
-        dataset='hemibrain:v1.2.1',
+        dataset = 'male-cns:v0.9',
+        # dataset='hemibrain:v1.2.1',
         sourceNeurons=neurons_network,  # [] = all neurons; or list of types/instances like ['L3.*_R']
         targetNeurons=neurons_network,  # pd.read_excel('targetNeurons.xlsx', header=None).iloc[:,0].tolist()
         exclude_intra_type_connections=False,

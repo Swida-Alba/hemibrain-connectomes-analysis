@@ -2,15 +2,31 @@
 
 Welcome to the Hemibrain Connectomes Analysis documentation!
 
-## 🆕 Recent Updates (November 2025)
+## 🆕 Recent Updates (December 2025) - V4.1
 
-- **✨ NEW: [Cross-Dataset Comparison Guide](./core-features/CrossDatasetComparison_Guide.md)** - Compare connectivity across hemibrain, male-cns, FlyWire, and more
-- **✨ NEW: [Connectivity Profile Verification](./core-features/ConnectivityProfileVerification_Guide.md)** - Verify neuron types using connectivity fingerprints
+### HomologFinder Improvements
+- **Hierarchical ConnectivityStatus**: Profile quality classified into 5 levels (NONE, RARE, INCOMPLETE, INCOMPLETE_EXPANSION, COMPLETE)
+- **RARE Source Handling**: RARE sources (< 5 partners) now included with WARNING instead of being skipped
+- **Status Tracking**: New `source_status_summary.json` and status columns in results
+- **Renamed Column**: `shared_partner_count` → `adjacency_score` (clarifies this is from candidate-finding)
+- **Dict-Based similarity_metric**: Now accepts weighted metric combinations
+- **Improved Output Folder Structure**: New `source_bodyids.csv` and `top_target_bodyids.csv` files
+- **Vector Prefiltering (fast mode)**: Candidate pool is first reduced to top 5% by adjacency score, then filtered to cosine>0 before full scoring
+
+### Performance Optimizations
+- **Polars Integration**: 10-100x faster CSV saving and matrix generation using Polars library
+- **Skip BodyId Processing**: New `skip_bodyId=True` parameter in `ComparisonParameters` to bypass resource-intensive bodyId-level data saving and calculations for large-scale type-level analyses
+- **Progress Tracking**: Added granular progress bars for heavy aggregation steps
+
+### Other Updates
+- **✨ NEW: [Module Calling Tree](./core-features/Module_Calling_Tree.md)** - Visual guide to module dependencies and calling relationships
+- **✨ NEW: [Connectivity Profiler Guide](./core-features/ConnectivityProfiler_Guide.md)** - 1-hop/2-hop hybrid profile building approach
+- **✨ [Homolog Finding Guide](./core-features/HomologFinding_Guide.md)** - Find homologous neurons across datasets using connectivity profiles
+- **✨ [Cross-Dataset Comparison Guide](./core-features/CrossDatasetComparison_Guide.md)** - Compare connectivity across hemibrain, male-cns, FlyWire, and more
+- **✨ [Connectivity Profile Verification](./core-features/ConnectivityProfileVerification_Guide.md)** - Verify neuron types using connectivity fingerprints
 - **[BANC Integration](./BANC_INTEGRATION.md)** - Added support for BANC dataset (FlyWire-based).
 - **[Visualization Update Summary](./VISUALIZATION_UPDATE.md)** - Summary of all visualization-related updates and deprecations.
 - **[VisualizePath Updates Nov 2025](./visualizations/VisualizePath_Updates_Nov2025.md)** - Detailed guide on connection matrix support and new features.
-- **[VisualizePath Standalone Reorganization](./VISPATH_STANDALONE_REORGANIZATION.md)** - vispath now fully standalone, no statvis dependency
-- **[Import Strategy Update](./IMPORT_STRATEGY_UPDATE.md)** - Scripts/examples now use vispath-subproject
 - **[vispath-subproject README](../vispath-subproject/README.md)** - Corrected data format documentation
 - **[vispath-subproject Installation](../vispath-subproject/INSTALLATION.md)** - Added data format examples
 
@@ -27,8 +43,11 @@ Comprehensive guides for all visualization types:
 
 ### 🔧 [Core Features](./core-features/)
 Essential functionality documentation:
-- **✨ Cross-Dataset Comparison**: Compare connectivity across multiple datasets (NEW)
-- **✨ Connectivity Profile Verification**: Verify neuron types using connectivity fingerprints (NEW)
+- **✨ Module Calling Tree**: Visual architecture and dependency guide (NEW)
+- **✨ Connectivity Profiler**: 1-hop/2-hop hybrid profile building (NEW)
+- **✨ Homolog Finding**: Find homologous neurons across datasets
+- **✨ Cross-Dataset Comparison**: Compare connectivity across multiple datasets
+- **✨ Connectivity Profile Verification**: Verify neuron types using connectivity fingerprints
 - **Path Finding**: Multi-hop connection discovery
 - **Custom Groups**: Flexible neuron grouping for custom analysis
 - **Cache System**: High-performance local storage (10-100x speedup)
@@ -48,10 +67,11 @@ Advanced technical documentation:
 
 ### For New Users
 1. Start with [Installation Guide](./INSTALLATION.md)
-2. Read [Quick Start Guide](./QUICK_START_AFTER_REORGANIZATION.md)
+2. Read [Quick Start Guide](../QUICK_START.md)
 3. Explore [Visualization Overview](./visualizations/README.md)
 
 ### For Researchers
+- **[Homolog Finding](./core-features/HomologFinding_Guide.md)** - Find homologs across datasets
 - **[Cross-Dataset Comparison](./core-features/CrossDatasetComparison_Guide.md)** - Compare connectivity patterns
 - **[Connectivity Profile Verification](./core-features/ConnectivityProfileVerification_Guide.md)** - Verify neuron types
 - [Heatmap Guide](./visualizations/Heatmap_Guide.md) - Quantitative analysis
@@ -69,8 +89,8 @@ Advanced technical documentation:
 
 ### Getting Started
 - **[Installation](./INSTALLATION.md)**: Setup instructions and requirements
-- **[Quick Start](./QUICK_START_AFTER_REORGANIZATION.md)**: Get running in 5 minutes
-- **[Quickstart Simple Format](./QUICKSTART_SIMPLE_FORMAT.md)**: Using simple edge-list data
+- **[Quick Start](../QUICK_START.md)**: Get running in 5 minutes
+- **[Output Files Reference](./OUTPUT_FILES.md)**: Detailed explanation of all generated files
 - **[FlyWire-FAFB Integration](./FAFB_INTEGRATION.md)**: Setup guide for FAFB dataset
 - **[FlyWire-BANC Integration](./BANC_INTEGRATION.md)**: Setup guide for BANC dataset
 
@@ -81,6 +101,9 @@ Advanced technical documentation:
 - **[3D Skeleton Guide](./visualizations/3D_Skeleton_Guide.md)**: 3D rendering guide
 
 ### Core Functionality
+- **✨ [Module Calling Tree](./core-features/Module_Calling_Tree.md)**: Visual architecture and dependency guide
+- **✨ [Connectivity Profiler Guide](./core-features/ConnectivityProfiler_Guide.md)**: 1-hop/2-hop hybrid profile building
+- **✨ [Homolog Finding](./core-features/HomologFinding_Guide.md)**: Find homologs across datasets
 - **✨ [Cross-Dataset Comparison](./core-features/CrossDatasetComparison_Guide.md)**: Multi-dataset analysis
 - **✨ [Connectivity Profile Verification](./core-features/ConnectivityProfileVerification_Guide.md)**: Verify neuron types across datasets
 - **[Cache System Guide](./core-features/CacheSystem_Guide.md)**: Caching for 10-100x speedup
@@ -99,6 +122,7 @@ Advanced technical documentation:
 | Multi-hop paths | [FindAllPath](./core-features/FindAllPath_Documentation.md) |
 | **Compare across datasets** | **[Cross-Dataset Comparison](./core-features/CrossDatasetComparison_Guide.md)** |
 | **Verify neuron types** | **[Profile Verification](./core-features/ConnectivityProfileVerification_Guide.md)** |
+| **Find homologs** | **[Homolog Finding](./core-features/HomologFinding_Guide.md)** |
 | Custom neuron groups | [Custom Groups](./core-features/CustomGroups_Feature.md) |
 | Forward-only paths | [Forward-Only Guide](./core-features/ForwardOnly_Guide.md) |
 | Filter connections | [Connection Filters](./core-features/README.md#filtering) |
@@ -250,7 +274,7 @@ Documentation feedback welcome via GitHub Issues or pull requests.
 
 **Essential Reading**:
 - [Installation](./INSTALLATION.md)
-- [Quick Start](./QUICK_START_AFTER_REORGANIZATION.md)
+- [Quick Start](../QUICK_START.md)
 - [Visualization Overview](./visualizations/README.md)
 
 **Visualization Guides**:

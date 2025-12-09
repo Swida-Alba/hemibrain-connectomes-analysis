@@ -41,6 +41,14 @@ Complete overview of path finding algorithm optimizations.
 - Memory-efficient recursion
 - Progress tracking overhead reduction
 
+### [Performance Optimizations Dec 2025](./PERFORMANCE_OPTIMIZATIONS_DEC2025.md)
+Details on Polars integration and `skip_bodyId` optimization.
+
+**Key improvements**:
+- Polars-based I/O (10-100x faster)
+- Skip bodyId processing for type-level analysis
+- Granular progress tracking
+
 ---
 
 ## Data Formats

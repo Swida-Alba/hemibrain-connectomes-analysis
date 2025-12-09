@@ -677,12 +677,25 @@ def _process_single_neuron(requiredNeuron, ndf_alltypes, bodyId_alltypes):
     '''Helper function to process a single neuron identifier and return bodyIds'''
     bodyId_list = []
     
-    if type(requiredNeuron) == int:
-        # bodyId
-        if requiredNeuron in bodyId_alltypes:
-            bodyId_list.append(requiredNeuron)
+    # Check if it's a numeric bodyId (int, np.int64, or numeric string)
+    is_bodyid = False
+    bodyid_value = None
+    
+    if isinstance(requiredNeuron, (int, np.integer)):
+        # Native int or numpy integer types (np.int64, etc.)
+        is_bodyid = True
+        bodyid_value = int(requiredNeuron)
+    elif isinstance(requiredNeuron, str) and requiredNeuron.isdigit():
+        # String that looks like a number (e.g., "535898")
+        is_bodyid = True
+        bodyid_value = int(requiredNeuron)
+    
+    if is_bodyid:
+        # bodyId lookup
+        if bodyid_value in bodyId_alltypes:
+            bodyId_list.append(bodyid_value)
         else:
-            print(f'\033[33mbodyId {requiredNeuron} not found, please check your input (skipped)\033[0m')
+            print(f'\033[33mbodyId {bodyid_value} not found, please check your input (skipped)\033[0m')
     elif isinstance(requiredNeuron, str) and requiredNeuron.find('.*') != -1:
         # regex of instance
         find_df = ndf_alltypes[ndf_alltypes['instance'].str.match(requiredNeuron, na=False)]
@@ -3889,78 +3902,91 @@ def path_filter(path_df, keyword_in_path_to_remove=None):
 def build_path_dataframe_from_paths(paths, conn_data, targets, real_layer_map=None, level='type', type_lookup=None):
     """
     Build a DataFrame from a list of paths, calculating weights and probabilities.
+    Optimized with dictionary lookup for O(1) edge access.
     """
     if not paths:
         return pd.DataFrame()
         
+    # Determine source and target columns based on level
+    src_col = f'{level}_pre' if f'{level}_pre' in conn_data.columns else 'bodyId_pre'
+    tgt_col = f'{level}_post' if f'{level}_post' in conn_data.columns else 'bodyId_post'
+    
+    # Pre-process connection data into a lookup dictionary
+    # This avoids O(N) filtering inside the loop
+    print(f"Optimizing path building: Pre-indexing {len(conn_data)} connections...")
+    
+    # Ensure we work with strings for consistent lookup
+    # (The original code handled mixed types by trying both, so we normalize to string)
+    conn_data_str = conn_data.copy()
+    conn_data_str['src_str'] = conn_data_str[src_col].astype(str)
+    conn_data_str['tgt_str'] = conn_data_str[tgt_col].astype(str)
+    
+    # Define aggregation functions
+    agg_funcs = {
+        'weight': 'sum',
+    }
+    if 'traversal_probability' in conn_data.columns:
+        agg_funcs['traversal_probability'] = 'mean'
+    if 'connection_ratio' in conn_data.columns:
+        agg_funcs['connection_ratio'] = 'mean'
+    if 'nt_type' in conn_data.columns:
+        # Custom aggregator for nt_type to get unique values
+        def unique_nt_types(x):
+            types = x.dropna().unique().tolist()
+            valid_types = sorted([str(t) for t in types if t and str(t).lower() != 'none' and str(t).lower() != 'nan'])
+            return '|'.join(valid_types) if valid_types else 'Unknown'
+        agg_funcs['nt_type'] = unique_nt_types
+
+    # Group and aggregate
+    grouped = conn_data_str.groupby(['src_str', 'tgt_str']).agg(agg_funcs)
+    
+    # Convert to dictionary for fast lookup
+    # Key: (src_str, tgt_str), Value: dict of metrics
+    edge_lookup = grouped.to_dict('index')
+    
     rows = []
     
     # Use tqdm for progress bar
-    path_iterator = tqdm(paths, desc=f"Building {level}-level paths", unit="path", 
-                         disable=len(paths) < 100)  # Only show for >= 100 paths
+    path_iterator = tqdm(paths, desc=f"Enriching {level}-level paths", unit="path", 
+                         disable=len(paths) < 100)
     
     for path in path_iterator:
         # Calculate path metrics
         weights = []
         probs = []
         ratios = []
-        
-        # Determine source and target columns based on level
-        src_col = f'{level}_pre' if f'{level}_pre' in conn_data.columns else 'bodyId_pre'
-        tgt_col = f'{level}_post' if f'{level}_post' in conn_data.columns else 'bodyId_post'
+        nt_types = []
         
         valid_path = True
+        path_str_nodes = [str(n) for n in path]
+        
         for i in range(len(path) - 1):
-            u, v = path[i], path[i+1]
-            # Find connection
-            conn = conn_data[(conn_data[src_col] == u) & (conn_data[tgt_col] == v)]
-            if conn.empty:
-                # Try checking if u or v are in the columns directly (sometimes types are strings)
-                conn = conn_data[(conn_data[src_col].astype(str) == str(u)) & (conn_data[tgt_col].astype(str) == str(v))]
+            u_str, v_str = path_str_nodes[i], path_str_nodes[i+1]
             
-            if conn.empty:
+            # Fast lookup
+            metrics = edge_lookup.get((u_str, v_str))
+            
+            if not metrics:
                 # Debug print for first failure
                 if len(rows) == 0 and i == 0:
-                    print(f"Debug: Failed to find connection {u} -> {v} in conn_data")
+                    print(f"Debug: Failed to find connection {path[i]} -> {path[i+1]} in conn_data")
                     print(f"  src_col: {src_col}, tgt_col: {tgt_col}")
-                    print(f"  u type: {type(u)}, v type: {type(v)}")
-                    print(f"  conn_data columns: {conn_data.columns}")
-                    if not conn_data.empty:
-                        print(f"  Sample conn_data {src_col}: {conn_data[src_col].iloc[0]} ({type(conn_data[src_col].iloc[0])})")
                 valid_path = False
                 break
                 
-            # Get weight and probability
-            w = conn['weight'].sum()
-            p = conn['traversal_probability'].mean() if 'traversal_probability' in conn.columns else 0
-            r = conn['connection_ratio'].mean() if 'connection_ratio' in conn.columns else 0
+            # Get metrics
+            w = metrics.get('weight', 0)
+            p = metrics.get('traversal_probability', 0)
+            r = metrics.get('connection_ratio', 0)
             
             weights.append(w)
             probs.append(p)
             ratios.append(r)
             
-        if valid_path:
-            # Extract nt_types if available
-            nt_types = []
-            if 'nt_type' in conn_data.columns:
-                for i in range(len(path) - 1):
-                    u, v = path[i], path[i+1]
-                    conn = conn_data[(conn_data[src_col] == u) & (conn_data[tgt_col] == v)]
-                    if conn.empty:
-                        conn = conn_data[(conn_data[src_col].astype(str) == str(u)) & (conn_data[tgt_col].astype(str) == str(v))]
-                    
-                    if not conn.empty:
-                        # Get unique nt_types
-                        types = conn['nt_type'].dropna().unique().tolist()
-                        # Filter valid types
-                        valid_types = sorted([str(t) for t in types if t and str(t).lower() != 'none' and str(t).lower() != 'nan'])
-                        if valid_types:
-                            nt_types.append('|'.join(valid_types))
-                        else:
-                            nt_types.append('Unknown')
-                    else:
-                        nt_types.append('Unknown')
+            if 'nt_type' in metrics:
+                nt_types.append(metrics['nt_type'])
             
+        if valid_path:
             # Format path string with types
             if type_lookup:
                 path_formatted_parts = []
@@ -4013,7 +4039,7 @@ def build_path_dataframe_from_paths(paths, conn_data, targets, real_layer_map=No
             
     return pd.DataFrame(rows)
 
-def EnrichConnectionTable(conn_table, traversal_probability_threshold=0, dataset=None, script_path=None, target_neurons_df=None, aggregate_method='product'):
+def EnrichConnectionTable(conn_table, traversal_probability_threshold=0, dataset=None, script_path=None, target_neurons_df=None, aggregate_method='product', label_mapper=None):
     '''Add traversal probability, connection ratio, and layer information to the connection table
     
     Parameters
@@ -4034,6 +4060,8 @@ def EnrichConnectionTable(conn_table, traversal_probability_threshold=0, dataset
         Method for aggregating type-level traversal probabilities from bodyId level:
         - 'product': compound probability (product of block probs) for paths (default)
         - 'average': weighted average for direct parallel connections
+    label_mapper : LabelMapper, optional
+        LabelMapper object to standardize types in the local dataset for accurate ratio calculation.
     
     Returns
     -------
@@ -4093,6 +4121,57 @@ def EnrichConnectionTable(conn_table, traversal_probability_threshold=0, dataset
             # Ensure bodyId column is string for comparison
             if 'bodyId' in ndf_complete.columns:
                 ndf_complete['bodyId'] = ndf_complete['bodyId'].astype(str)
+            
+            mapped_dict = {}
+            # Apply label mapping to local dataset if provided
+            if label_mapper and 'type' in ndf_complete.columns:
+                # Create a copy to avoid modifying the original cache
+                ndf_complete = ndf_complete.copy()
+                
+                # Define mapping function that prioritizes bodyId mapping
+                def get_mapped_label(row):
+                    # 1. Try bodyId first (most specific)
+                    body_id = str(row['bodyId'])
+                    # Use get_label to check all roles (Source -> Target -> Intermediate)
+                    mapped_body = label_mapper.get_label(dataset, body_id)
+                    
+                    if body_id == '720575940634984800':
+                        # print(f"DEBUG: Mapping 720575940634984800 -> {mapped_body}")
+                        pass
+                    
+                    # Check if mapped (heuristic: different from original ID)
+                    if mapped_body != body_id:
+                         return mapped_body
+                    
+                    # 2. Try type if available
+                    if pd.notna(row['type']):
+                        type_val = str(row['type'])
+                        # Skip if type is same as bodyId (redundant)
+                        if type_val != body_id:
+                            mapped_type = label_mapper.get_label(dataset, type_val)
+                            if mapped_type != type_val:
+                                return mapped_type
+                            
+                    # No mapping found
+                    return ''
+
+                # Apply mapping
+                ndf_complete['std_label'] = ndf_complete.apply(get_mapped_label, axis=1)
+                
+                # Overwrite type with std_label where available
+                mask = ndf_complete['std_label'] != ''
+                ndf_complete.loc[mask, 'type'] = ndf_complete.loc[mask, 'std_label']
+                
+                # Create a dictionary of ONLY the mapped labels
+                mapped_dict = ndf_complete.loc[mask].set_index('bodyId')['std_label'].to_dict()
+                
+                # Also overwrite custom_group if present, to ensure grouping uses the mapped label
+                if 'custom_group' in ndf_complete.columns:
+                    ndf_complete.loc[mask, 'custom_group'] = ndf_complete.loc[mask, 'std_label']
+                
+                # print(f"DEBUG: Unique types after mapping: {ndf_complete['type'].unique()}")
+                # if 'custom_group' in ndf_complete.columns:
+                #      print(f"DEBUG: custom_group sample: {ndf_complete['custom_group'].unique()[:5]}")
                 
             bodyIds_needed = conn_df.bodyId_post.astype(str).unique().tolist()
             df_post = ndf_complete[ndf_complete['bodyId'].isin(bodyIds_needed)][['bodyId', 'post']].copy()
@@ -4104,6 +4183,30 @@ def EnrichConnectionTable(conn_table, traversal_probability_threshold=0, dataset
             # Ensure consistent types for filtering (convert to string to handle int64 vs str mismatch)
             target_bodyIds = target_neurons_df['bodyId'].astype(str);
             conn_bodyIds = conn_df.bodyId_post.astype(str).unique();
+            
+            # Apply label mapping to target_neurons_df if provided
+            if label_mapper and 'type' in target_neurons_df.columns:
+                target_neurons_df = target_neurons_df.copy()
+                
+                # Define mapping function (same as above)
+                def get_mapped_label_target(row):
+                    body_id = str(row['bodyId'])
+                    # Use get_label to check all roles
+                    mapped_body = label_mapper.get_label(dataset, body_id)
+                    if mapped_body != body_id:
+                         return mapped_body
+                    
+                    if pd.notna(row['type']):
+                        type_val = str(row['type'])
+                        if type_val != body_id:
+                            mapped_type = label_mapper.get_label(dataset, type_val)
+                            if mapped_type != type_val:
+                                return mapped_type
+                    return ''
+
+                target_neurons_df['std_label'] = target_neurons_df.apply(get_mapped_label_target, axis=1)
+                mask = target_neurons_df['std_label'] != ''
+                target_neurons_df.loc[mask, 'type'] = target_neurons_df.loc[mask, 'std_label']
             
             df_post = target_neurons_df[target_bodyIds.isin(conn_bodyIds)][['bodyId', 'post']].copy();
         else:
@@ -4135,15 +4238,31 @@ def EnrichConnectionTable(conn_table, traversal_probability_threshold=0, dataset
         # Map types if missing or empty
         type_map = ndf_complete.set_index('bodyId')['type'].to_dict();
         
-        # Update type_pre
-        mask_pre = (conn_df['type_pre'].isnull()) | (conn_df['type_pre'] == '') | (conn_df['type_pre'] == 'Unknown')
-        if mask_pre.any():
-            conn_df.loc[mask_pre, 'type_pre'] = conn_df.loc[mask_pre, 'bodyId_pre'].map(type_map).fillna('Unknown')
+        if label_mapper:
+            # 1. Apply explicit mappings (overwrite types for mapped neurons)
+            if mapped_dict:
+                conn_df['type_pre'] = conn_df['bodyId_pre'].map(mapped_dict).fillna(conn_df['type_pre'])
+                conn_df['type_post'] = conn_df['bodyId_post'].map(mapped_dict).fillna(conn_df['type_post'])
             
-        # Update type_post
-        mask_post = (conn_df['type_post'].isnull()) | (conn_df['type_post'] == '') | (conn_df['type_post'] == 'Unknown')
-        if mask_post.any():
-            conn_df.loc[mask_post, 'type_post'] = conn_df.loc[mask_post, 'bodyId_post'].map(type_map).fillna('Unknown')
+            # 2. Fill unknowns with type_map (original types + mapped types)
+            # This preserves existing valid types in conn_df that were NOT mapped, preventing fallback to bodyIds
+            mask_pre = (conn_df['type_pre'].isnull()) | (conn_df['type_pre'] == '') | (conn_df['type_pre'] == 'Unknown')
+            if mask_pre.any():
+                conn_df.loc[mask_pre, 'type_pre'] = conn_df.loc[mask_pre, 'bodyId_pre'].map(type_map).fillna('Unknown')
+                
+            mask_post = (conn_df['type_post'].isnull()) | (conn_df['type_post'] == '') | (conn_df['type_post'] == 'Unknown')
+            if mask_post.any():
+                conn_df.loc[mask_post, 'type_post'] = conn_df.loc[mask_post, 'bodyId_post'].map(type_map).fillna('Unknown')
+        else:
+            # Update type_pre
+            mask_pre = (conn_df['type_pre'].isnull()) | (conn_df['type_pre'] == '') | (conn_df['type_pre'] == 'Unknown')
+            if mask_pre.any():
+                conn_df.loc[mask_pre, 'type_pre'] = conn_df.loc[mask_pre, 'bodyId_pre'].map(type_map).fillna('Unknown')
+                
+            # Update type_post
+            mask_post = (conn_df['type_post'].isnull()) | (conn_df['type_post'] == '') | (conn_df['type_post'] == 'Unknown')
+            if mask_post.any():
+                conn_df.loc[mask_post, 'type_post'] = conn_df.loc[mask_post, 'bodyId_post'].map(type_map).fillna('Unknown')
 
     # Fill custom_group columns if they exist
     if 'custom_group_pre' in conn_df.columns:
@@ -4196,6 +4315,11 @@ def EnrichConnectionTable(conn_table, traversal_probability_threshold=0, dataset
         
     bodyid_pairs = conn_df[cols_to_keep].drop_duplicates(subset=['bodyId_pre', 'bodyId_post'])
     
+    # Add progress indicator for large aggregations
+    pbar = None
+    # if len(bodyid_pairs) > 50000:
+    #     pbar = tqdm(total=5, desc=f"  Enriching {len(bodyid_pairs):,} connections", unit="step")
+    
     if has_nt:
         # For nt_type, take the most frequent one (mode)
         weight_sum = bodyid_pairs.groupby([group_pre, group_post]).agg({
@@ -4205,8 +4329,12 @@ def EnrichConnectionTable(conn_table, traversal_probability_threshold=0, dataset
     else:
         weight_sum = bodyid_pairs.groupby([group_pre, group_post])['weight'].sum().reset_index(name='weight')
     
+    if pbar: pbar.update(1) # Step 1: Weight aggregation complete
+    
     # Calculate total incoming weights per group_post (sum across all group_pre sources)
     total_incoming_per_type = weight_sum.groupby(group_post)['weight'].sum().reset_index(name='total_incoming_weight')
+
+    if pbar: pbar.update(1) # Step 2: Incoming weights calculated
 
     # Calculate total post-synaptic sites for ALL neurons of each group_post
     # Only use target_neurons_df if we don't have a local dataset, or if we specifically need it for custom groups
@@ -4233,6 +4361,23 @@ def EnrichConnectionTable(conn_table, traversal_probability_threshold=0, dataset
         if use_local and group_post in conn_df.columns:
             # Get all groups that appear in connections
             groups_in_conn = conn_df[group_post].unique().tolist()
+            
+            # Apply label mapping to ndf_complete if available
+            # This ensures that when we look up total post counts for a type,
+            # we match the standardized labels used in conn_df
+            if label_mapper and ndf_complete is not None and group_post == 'type_post':
+                # Create a copy to avoid modifying the cached dataframe
+                ndf_complete = ndf_complete.copy()
+                
+                # Map types
+                ndf_complete['std_label'] = ndf_complete.apply(
+                    lambda row: label_mapper.get_label(dataset, row['type'] if pd.notna(row['type']) else row['bodyId']),
+                    axis=1
+                )
+                
+                # Overwrite type
+                mask = ndf_complete['std_label'] != ''
+                ndf_complete.loc[mask, 'type'] = ndf_complete.loc[mask, 'std_label']
             
             # Need to match back to original neurons for dataset lookup
             if group_post == 'custom_group_post' and 'bodyId_post' in conn_df.columns:
@@ -4287,6 +4432,8 @@ def EnrichConnectionTable(conn_table, traversal_probability_threshold=0, dataset
             all_post_neurons = conn_df[[group_post, 'bodyId_post', 'post']].drop_duplicates(subset=['bodyId_post'])
             type_post_totals = all_post_neurons.groupby(group_post)['post'].sum().reset_index(name='total_post')
     
+    if pbar: pbar.update(1) # Step 3: Post-synaptic totals calculated
+
     # Calculate group-to-group connection_ratio
     conn_type = weight_sum.merge(type_post_totals, on=group_post, how='left')
     
@@ -4295,6 +4442,8 @@ def EnrichConnectionTable(conn_table, traversal_probability_threshold=0, dataset
         lambda row: row['weight'] / row['total_post'] if pd.notnull(row['total_post']) and row['total_post'] > 0 else 0.0,
         axis=1
     )
+
+    if pbar: pbar.update(1) # Step 4: Ratios calculated
 
     # Group-to-group traversal_probability aggregation
     if aggregate_method == 'product':
@@ -4312,7 +4461,18 @@ def EnrichConnectionTable(conn_table, traversal_probability_threshold=0, dataset
         conn_type = conn_type.merge(weighted_sum, how='left', on=[group_pre, group_post])
         conn_type['block_probability'] = 1 - conn_type['traversal_probability']
     
-    conn_aggregated = conn_type.fillna({'connection_ratio': 0.0, 'traversal_probability': 0.0, 'block_probability': 1.0})
+    if pbar: 
+        pbar.update(1) # Step 5: Traversal probabilities calculated
+        pbar.close()
+    
+    # Fix FutureWarning: Downcasting object dtype arrays on .fillna, .ffill, .bfill is deprecated
+    # Explicitly convert to numeric before filling NaNs to avoid object-dtype downcasting issues
+    conn_aggregated = conn_type.copy()
+    conn_aggregated['connection_ratio'] = pd.to_numeric(conn_aggregated['connection_ratio'], errors='coerce').fillna(0.0)
+    conn_aggregated['traversal_probability'] = pd.to_numeric(conn_aggregated['traversal_probability'], errors='coerce').fillna(0.0)
+    conn_aggregated['block_probability'] = pd.to_numeric(conn_aggregated['block_probability'], errors='coerce').fillna(1.0)
+    # conn_aggregated = conn_aggregated.infer_objects() # No longer needed as we explicitly converted
+    
     conn_aggregated = conn_aggregated[[group_pre, group_post, 'weight', 'connection_ratio', 'traversal_probability', 'block_probability']]
     
     # Check if we're using custom groups
@@ -4326,9 +4486,16 @@ def EnrichConnectionTable(conn_table, traversal_probability_threshold=0, dataset
         # 2. Original type-based aggregation
         # Calculate from bodyId level for accuracy
         bodyid_pairs_type = conn_df[['bodyId_pre', 'bodyId_post', 'type_pre', 'type_post', 'weight']].drop_duplicates(subset=['bodyId_pre', 'bodyId_post'])
+        
+        pbar_type = None
+        # if len(bodyid_pairs_type) > 50000:
+        #     pbar_type = tqdm(total=4, desc=f"  Enriching {len(bodyid_pairs_type):,} type-level connections", unit="step")
+
         weight_sum_type = bodyid_pairs_type.groupby(['type_pre', 'type_post'])['weight'].sum().reset_index(name='weight')
         total_incoming_per_type_orig = weight_sum_type.groupby('type_post')['weight'].sum().reset_index(name='total_incoming_weight')
         
+        if pbar_type: pbar_type.update(1) # Step 1: Weight aggregation
+
         # Calculate type-level denominators
         if target_neurons_df is not None and 'type' in target_neurons_df.columns and 'post' in target_neurons_df.columns:
             all_post_neurons_type = target_neurons_df[['type', 'post']].copy()
@@ -4349,12 +4516,16 @@ def EnrichConnectionTable(conn_table, traversal_probability_threshold=0, dataset
             all_post_neurons_type = conn_df[['type_post', 'bodyId_post', 'post']].drop_duplicates(subset=['bodyId_post'])
             type_post_totals_orig = all_post_neurons_type.groupby('type_post')['post'].sum().reset_index(name='total_post')
         
+        if pbar_type: pbar_type.update(1) # Step 2: Post-synaptic totals
+
         conn_type = weight_sum_type.merge(type_post_totals_orig, on='type_post', how='left')
         conn_type['connection_ratio'] = conn_type.apply(
             lambda row: row['weight'] / row['total_post'] if pd.notnull(row['total_post']) and row['total_post'] > 0 else 0.0,
             axis=1
         )
         
+        if pbar_type: pbar_type.update(1) # Step 3: Ratios calculated
+
         # Type-level traversal probability
         if aggregate_method == 'product':
             conn_traversal_type = conn_df[['type_pre', 'type_post', 'block_probability']]
@@ -4369,13 +4540,21 @@ def EnrichConnectionTable(conn_table, traversal_probability_threshold=0, dataset
             conn_type = conn_type.merge(weighted_sum_type, how='left', on=['type_pre', 'type_post'])
             conn_type['block_probability'] = 1 - conn_type['traversal_probability']
         
-        conn_type = conn_type.fillna({'connection_ratio': 0.0, 'traversal_probability': 0.0, 'block_probability': 1.0})
+        if pbar_type: 
+            pbar_type.update(1) # Step 4: Traversal probabilities
+            pbar_type.close()
+        
+        conn_type = conn_type.fillna({'connection_ratio': 0.0, 'traversal_probability': 0.0, 'block_probability': 1.0}).infer_objects()
         conn_type = conn_type[['type_pre', 'type_post', 'weight', 'connection_ratio', 'traversal_probability', 'block_probability']]
         
+        # if len(bodyid_pairs) > 50000:
+        #     print(f"  Enrichment complete. Result shape: {conn_type.shape}. Returning results...", flush=True)
         return conn_df, conn_type, conn_group
     else:
         # No custom groups - return original type aggregation only
         conn_type = conn_aggregated.rename(columns={group_pre: 'type_pre', group_post: 'type_post'})
+        # if len(bodyid_pairs) > 50000:
+        #     print(f"  Enrichment complete. Result shape: {conn_type.shape}. Returning results...", flush=True)
         return conn_df, conn_type, None
 
 

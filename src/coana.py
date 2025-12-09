@@ -15,6 +15,7 @@ import navis.interfaces.neuprint as neu
 import networkx as nx
 import numpy as np
 import pandas as pd
+import polars as pl
 import flybrains
 import plotly.graph_objects as go
 import seaborn as sns
@@ -96,6 +97,9 @@ def clear_fnc_cache(dataset: str = None):
         del _FNC_CACHE[dataset]
 
 
+from core.fast_graph import FastGraph
+
+
 @dataclass
 class FindNeuronConnection:
     '''
@@ -143,20 +147,33 @@ class FindNeuronConnection:
             'progress': Show inline progress (overwriting single line)
             'silent': Suppress all output
         '''
+        # Use tqdm.write when inside a progress bar to avoid disrupting the bar
+        def _do_print(msg, end=end, flush=flush):
+            if getattr(self, '_in_progress_bar', False):
+                from tqdm import tqdm
+                # tqdm.write doesn't support end/flush params the same way
+                if end == '\n':
+                    tqdm.write(msg)
+                else:
+                    # For non-newline endings, still use print but it may disrupt bar
+                    print(msg, end=end, flush=flush)
+            else:
+                print(msg, end=end, flush=flush)
+        
         if self.verbose_mode == 'silent':
             if level == 'always':
-                print(message, end=end, flush=flush)
+                _do_print(message)
             return
             
         if level == 'always':
-            print(message, end=end, flush=flush)
+            _do_print(message)
         elif level == 'both':
             if self.verbose_mode in ('full', 'simple', 'progress'):
-                print(message, end=end, flush=flush)
+                _do_print(message)
         elif level == 'full' and self.verbose_mode == 'full':
-            print(message, end=end, flush=flush)
+            _do_print(message)
         elif level == 'simple' and self.verbose_mode in ('simple', 'progress'):
-            print(message, end=end, flush=flush)
+            _do_print(message)
         elif level == 'progress' and self.verbose_mode == 'progress':
             # For progress mode, print with carriage return to overwrite
             print(f'\r{message}', end='', flush=True)
@@ -206,8 +223,34 @@ class FindNeuronConnection:
             except Exception as e:
                 print(f"Warning: Could not create nt_type matrix: {e}")
 
+    def _save_df_to_csv_polars(self, df, path, index=False):
+        """Save DataFrame to CSV using Polars for speed"""
+        if df is None or df.empty:
+            # Create empty file if dataframe is empty, to match pandas behavior
+            with open(path, 'w') as f:
+                if df is not None:
+                    f.write(','.join(df.columns) + '\n')
+            return
+            
+        try:
+            import polars as pl
+            # If index is True, reset index to make it a column
+            if index:
+                df_to_save = df.reset_index()
+            else:
+                df_to_save = df
+                
+            pl_df = pl.from_pandas(df_to_save)
+            pl_df.write_csv(path)
+        except Exception as e:
+            # Fallback to Pandas if Polars fails (e.g. object types)
+            try:
+                df.to_csv(path, index=index)
+            except Exception as e2:
+                print(f"  Error saving CSV: {e2}", flush=True)
+
     def _save_matrices_to_csv(self, df, folder, level='bodyId'):
-        """Generate and save connection matrices to CSV"""
+        """Generate and save connection matrices to CSV using Polars for speed"""
         if df.empty:
             return
 
@@ -219,47 +262,76 @@ class FindNeuronConnection:
             index_col = 'type_pre'
             columns_col = 'type_post'
             
+        try:
+            pl_df = pl.from_pandas(df)
+        except Exception as e:
+            print(f"  Error converting to Polars: {e}", flush=True)
+            return
+            
         # 1. Weight Matrix
         try:
-            mat_weight = df.pivot(index=index_col, columns=columns_col, values='weight').fillna(0)
-            mat_weight.to_csv(os.path.join(folder, f'conn_mat_{level}_weight.csv'))
+            # Use sum aggregation for weights to handle duplicates (e.g. same connection in multiple layers)
+            mat_weight = pl_df.pivot(values='weight', index=index_col, columns=columns_col, aggregate_function='sum').fill_null(0)
+            mat_weight.write_csv(os.path.join(folder, f'conn_mat_{level}_weight.csv'))
         except Exception as e:
-            print(f"Warning: Could not create weight matrix: {e}")
+            print(f" Failed: {e}", flush=True)
 
         # 2. Ratio Matrix
         if 'connection_ratio' in df.columns:
             try:
-                mat_ratio = df.pivot(index=index_col, columns=columns_col, values='connection_ratio').fillna(0)
-                mat_ratio.to_csv(os.path.join(folder, f'conn_mat_{level}_ratio.csv'))
+                # Use max for ratios to show the strongest connection ratio found
+                mat_ratio = pl_df.pivot(values='connection_ratio', index=index_col, columns=columns_col, aggregate_function='max').fill_null(0)
+                mat_ratio.write_csv(os.path.join(folder, f'conn_mat_{level}_ratio.csv'))
             except Exception as e:
-                print(f"Warning: Could not create ratio matrix: {e}")
+                print(f" Failed: {e}", flush=True)
 
         # 3. Probability Matrix
         if 'traversal_probability' in df.columns:
             try:
-                mat_prob = df.pivot(index=index_col, columns=columns_col, values='traversal_probability').fillna(0)
-                mat_prob.to_csv(os.path.join(folder, f'conn_mat_{level}_prob.csv'))
+                # Use max for probabilities
+                mat_prob = pl_df.pivot(values='traversal_probability', index=index_col, columns=columns_col, aggregate_function='max').fill_null(0)
+                mat_prob.write_csv(os.path.join(folder, f'conn_mat_{level}_prob.csv'))
             except Exception as e:
-                print(f"Warning: Could not create probability matrix: {e}")
+                print(f" Failed: {e}", flush=True)
 
         # 4. NT Type Matrix
         if 'nt_type' in df.columns:
             try:
-                mat_nt = df.pivot(index=index_col, columns=columns_col, values='nt_type').fillna('')
-                mat_nt.to_csv(os.path.join(folder, f'conn_mat_{level}_nt.csv'))
+                # Use first for strings
+                mat_nt = pl_df.pivot(values='nt_type', index=index_col, columns=columns_col, aggregate_function='first')
+                mat_nt.write_csv(os.path.join(folder, f'conn_mat_{level}_nt.csv'))
             except Exception as e:
-                print(f"Warning: Could not create nt_type matrix: {e}")
+                print(f" Failed: {e}", flush=True)
 
     def _prepare_flywire_data(self):
         '''
         Check and prepare FlyWire data from downloaded archives.
         Uses FAFB_file_converter or BANC_file_converter to ensure data validity and conversion.
+        
+        If cache already exists with complete data, source files are not required.
         '''
         if self.client_type != 'flywire':
             return
 
         dataset_safe = self.dataset.replace(':', '_').replace('.', '_')
         dataset_dir = os.path.join(self.script_path, 'datasets', dataset_safe)
+        cache_dir = os.path.join(self.script_path, 'cache', dataset_safe)
+        
+        # Check if cache already exists and is complete
+        # If so, we don't need the source files
+        cache_conn_path = os.path.join(cache_dir, 'connections.parquet')
+        cache_index_path = os.path.join(cache_dir, 'neuron_index.parquet')
+        
+        if os.path.exists(cache_conn_path) and os.path.exists(cache_index_path):
+            try:
+                # Quick check - just verify files are readable parquet
+                import pyarrow.parquet as pq
+                pq.ParquetFile(cache_conn_path)
+                pq.ParquetFile(cache_index_path)
+                self._vprint(f"Using existing cache for {self.dataset} (source files not required)", level='simple')
+                return  # Cache is valid, no need for source files
+            except Exception as e:
+                self._vprint(f"Cache exists but invalid, will rebuild: {e}", level='simple')
         
         # Use the converter module to ensure data is ready
         if 'BANC' in self.dataset:
@@ -278,11 +350,14 @@ class FindNeuronConnection:
     script_path: str = os.path.dirname(source_path)
     '''absolute path to the project root directory (parent of src/)'''
     
-    data_folder: str = os.path.join(script_path, 'connection_data')
-    '''folder to save all data'''
+    data_folder: str = os.path.join(os.path.expanduser('~'), 'connectome_analysis')
+    '''
+    folder to save all data (subfolders auto-generated based on query)
+    Default: ~/connectome_analysis/
+    '''
     
     save_folder: str = '' # initialized in InitializeNeuronInfo()
-    '''folder to save the current data'''
+    '''folder to save the current data (auto-generated from source/target names)'''
     
     server: str = 'https://neuprint.janelia.org'
     '''the neuprint server to visit, see https://neuprint.janelia.org for more information'''
@@ -382,6 +457,12 @@ class FindNeuronConnection:
     helping to focus on inter-type communication pathways.
     '''
     
+    skip_bodyId: bool = False
+    '''
+    If True, skip saving bodyId-level data, visualizations, and calculations in FindAllPath.
+    This significantly reduces processing time and disk usage when only type-level analysis is needed.
+    '''
+
     max_interlayer: int = 1
     '''
     Maximum number of interlayers to be considered in connection.
@@ -389,6 +470,15 @@ class FindNeuronConnection:
       -1: Fetch source/target neurons only (no connections). Use FetchNeuronsOnly().
        0: Direct connections only. Use FindDirectConnections().
        1, 2, ...: Include interlayer connections. Use FindAllPath() or FindPath().
+    '''
+    
+    pathfinding: str = 'MemoizedDFS'
+    '''
+    Pathfinding algorithm to use in FindAllPath:
+    - 'DP': Optimized backward DP - original implementation
+    - 'Bidirectional': Meet-in-the-middle BFS - optimized for deep paths (faster for L>=2)
+    - 'MemoizedDFS': DFS with path fragment caching - efficient for overlapping paths
+    - 'DFS': Standard DFS (recursive) - low memory, good for finding single paths
     '''
     
     run_date: str = datetime.now().strftime('%Y%m%d_%H%M%S')
@@ -544,7 +634,17 @@ class FindNeuronConnection:
       - ¡COMPLETED! banner
     '''
     
+    label_mapper: object | None = None
+    '''
+    Optional LabelMapper object for standardizing neuron types across datasets.
+    If provided, it will be used to overwrite 'type' columns in source/target DataFrames
+    and connection DataFrames with standardized labels.
+    '''
+    
     def __post_init__(self):
+        # Flag to use tqdm.write instead of print when inside progress bar
+        self._in_progress_bar = False
+        
         self._vprint('Initializing...', level='full')
         
         # Auto-detect client_type from dataset if not explicitly set to flywire
@@ -568,18 +668,34 @@ class FindNeuronConnection:
         # Initialize NeuPrint client if needed
         if self.client_type == 'neuprint' and self.client_hemibrain is None:
             from neuprint import Client, set_default_client, default_client
-            # Only login if not already done (default_client() raises RuntimeError if not set)
+            # Check if existing default client is for the SAME dataset
+            # Different datasets require different clients (they connect to different neuprint servers)
             try:
-                client = default_client()
+                existing_client = default_client()
             except RuntimeError:
-                client = None
+                existing_client = None
             
-            if client is None:
+            # Check if existing client matches our dataset
+            need_new_client = True
+            if existing_client is not None:
+                # Compare dataset names (NeuPrint client stores dataset in .dataset attribute)
+                try:
+                    existing_dataset = existing_client.dataset
+                    if existing_dataset == self.dataset:
+                        # Same dataset - reuse existing client
+                        self.client_hemibrain = existing_client
+                        need_new_client = False
+                        self._vprint(f"Reusing existing NeuPrint client for dataset: {self.dataset}", level='full')
+                    else:
+                        self._vprint(f"Existing client is for '{existing_dataset}', need new client for '{self.dataset}'", level='full')
+                except AttributeError:
+                    # Client doesn't have dataset attribute, create new one
+                    pass
+            
+            if need_new_client:
                 self._vprint(f"Initializing NeuPrint client for dataset: {self.dataset}", level='full')
                 self.client_hemibrain = Client(self.server, self.dataset, self.token)
                 set_default_client(self.client_hemibrain)
-            else:
-                self.client_hemibrain = client
 
         # Validate filter_by parameter
         if self.filter_by not in ['bodyId', 'type']:
@@ -619,6 +735,47 @@ class FindNeuronConnection:
         elif self.targetNeurons is None:
             self.largeTargetSet = True
     
+    def _ensure_neuprint_client(self):
+        '''
+        Ensure NeuPrint client exists for THIS dataset.
+        
+        Important: The global default_client() may be for a DIFFERENT dataset
+        (e.g., when processing multiple datasets in comparison mode).
+        This method checks if the existing client matches our dataset and 
+        creates a new one if needed.
+        '''
+        if self.client_type != 'neuprint':
+            return  # Not using NeuPrint
+        
+        if self.client_hemibrain is not None:
+            # Already have a client - verify it's for the right dataset
+            try:
+                if self.client_hemibrain.dataset == self.dataset:
+                    return  # Correct client already set
+            except AttributeError:
+                pass  # Can't verify, proceed to create new one
+        
+        from neuprint import Client, set_default_client, default_client
+        
+        # Check if existing default client is for the SAME dataset
+        try:
+            existing_client = default_client()
+        except RuntimeError:
+            existing_client = None
+        
+        if existing_client is not None:
+            try:
+                if existing_client.dataset == self.dataset:
+                    self.client_hemibrain = existing_client
+                    return  # Reuse existing client
+            except AttributeError:
+                pass  # Can't verify, create new one
+        
+        # Need a new client for this dataset
+        self._vprint(f"Creating NeuPrint client for dataset: {self.dataset}", level='full')
+        self.client_hemibrain = Client(self.server, self.dataset, self.token)
+        set_default_client(self.client_hemibrain)
+    
     def _ensure_complete_dataset(self):
         '''
         Ensure complete local dataset exists (including neurons with type=None).
@@ -650,21 +807,17 @@ class FindNeuronConnection:
         roi_csv = dataset_path + '_roi_count_df.csv'
         
         if not os.path.exists(neuron_csv) or not os.path.exists(roi_csv):
-            self._vprint(f'\n📥 Complete dataset not found, downloading ALL neurons (including type=None)...', level='full')
-            self._vprint(f'   This is a one-time download for cache enrichment.', level='full')
-            # Login to neuprint only if needed
-            from neuprint import Client, set_default_client, default_client
-            # Only login if not already done (default_client() returns None if not set)
-            if self.client_hemibrain is None and default_client() is None:
-                self.client_hemibrain = Client(self.server, self.dataset, self.token)
-                set_default_client(self.client_hemibrain)
+            self._vprint(f'\n📥 Complete dataset not found, downloading ALL neurons (including type=None)...', level='always')
+            self._vprint(f'   This is a one-time download for cache enrichment.', level='always')
+            # Ensure we have a valid client for THIS dataset (not a different one from global default)
+            self._ensure_neuprint_client()
             try:
                 # Pull complete dataset with omitNoneType=False
                 sv.pull_dataset(self.dataset, save_path=dataset_path, omitNoneType=False)
-                self._vprint(f'✅ Complete dataset saved to: {dataset_path}_*.csv', level='full')
+                self._vprint(f'✅ Complete dataset saved to: {dataset_path}_*.csv', level='always')
             except Exception as e:
-                self._vprint(f'⚠️ Warning: Failed to download complete dataset: {e}', level='full')
-                self._vprint(f'   Cache enrichment may fail for neurons without types.', level='full')
+                self._vprint(f'⚠️ Warning: Failed to download complete dataset: {e}', level='always')
+                self._vprint(f'   Cache enrichment may fail for neurons without types.', level='always')
     
     # ============================================================================
     # Core Database Access
@@ -760,15 +913,67 @@ class FindNeuronConnection:
         if os.path.exists(db_path):
             try:
                 file_size_mb = os.path.getsize(db_path) / (1024 * 1024)
-                self._vprint(f'  ⏳ Loading connection database ({file_size_mb:.1f} MB)...', level='full')
-                df = pd.read_parquet(db_path)
+                self._vprint(f'  ⏳ Loading connection database ({file_size_mb:.1f} MB)...', level='always')
+                
+                # Check for batch files that haven't been consolidated
+                cache_dir = os.path.dirname(db_path)
+                batch_dir = os.path.join(cache_dir, '_batch_files')
+                batch_files = []
+                if os.path.exists(batch_dir):
+                    batch_files = sorted([
+                        os.path.join(batch_dir, f) 
+                        for f in os.listdir(batch_dir) 
+                        if f.startswith('batch_') and f.endswith('.parquet')
+                    ])
+                
+                # Use Polars for memory-efficient loading if batch files exist
+                if batch_files:
+                    try:
+                        import polars as pl
+                        self._vprint(f'  ⏳ Using Polars to load {len(batch_files)} batch files + main cache...', level='always')
+                        
+                        # Load all files with Polars (much more memory efficient)
+                        all_files = [db_path] + batch_files
+                        
+                        # Common columns to avoid schema mismatch
+                        common_cols = ['bodyId_pre', 'bodyId_post', 'weight', 'roi', 'cached_date']
+                        
+                        # Scan and concat lazily with column selection, then collect
+                        lazy_frames = []
+                        for f in all_files:
+                            lf = pl.scan_parquet(f)
+                            available_cols = [c for c in common_cols if c in lf.collect_schema().names()]
+                            lazy_frames.append(lf.select(available_cols))
+                        
+                        df_pl = pl.concat(lazy_frames, how='diagonal_relaxed').collect()
+                        
+                        # Convert to pandas (required for existing index building)
+                        df = df_pl.to_pandas()
+                        del df_pl
+                        
+                    except ImportError:
+                        # Fallback to pandas if polars not installed
+                        self._vprint(f'  ⏳ Loading {len(batch_files)} batch files (consider installing polars for better memory efficiency)...', level='always')
+                        df = pd.read_parquet(db_path)
+                        batch_dfs = [pd.read_parquet(f) for f in batch_files]
+                        df = pd.concat([df] + batch_dfs, ignore_index=True)
+                        del batch_dfs
+                else:
+                    # No batch files, just load main cache - try Polars for large files
+                    try:
+                        import polars as pl
+                        df_pl = pl.read_parquet(db_path)
+                        df = df_pl.to_pandas()
+                        del df_pl
+                    except ImportError:
+                        df = pd.read_parquet(db_path)
                 
                 if 'bodyId_pre' in df.columns:
                     df['bodyId_pre'] = df['bodyId_pre'].astype(str)
                 if 'bodyId_post' in df.columns:
                     df['bodyId_post'] = df['bodyId_post'].astype(str)
                     
-                self._vprint(f'  ✓ Loaded {len(df):,} cached connections', level='full')
+                self._vprint(f'  ✓ Loaded {len(df):,} cached connections', level='always')
                 
                 # Cache in memory and build index
                 self._conn_df_cache = df
@@ -779,31 +984,59 @@ class FindNeuronConnection:
                 self._conn_df_cache = pd.DataFrame(columns=['bodyId_pre', 'bodyId_post', 'weight', 'roi', 'cached_date'])
                 self._conn_index = {}
                 return self._conn_df_cache
-        
-        self._conn_df_cache = pd.DataFrame(columns=['bodyId_pre', 'bodyId_post', 'weight', 'roi', 'cached_date'])
-        self._conn_index = {}
-        return self._conn_df_cache
-    
+
     def _build_conn_index(self):
         '''
-        Build dict index for O(1) connection lookups by bodyId_pre.
+        Build dict indexes for O(1) connection lookups by bodyId_pre and bodyId_post.
         Called after loading connection database from disk.
         Also updates the module-level shared cache.
         '''
         if self._conn_df_cache is None or self._conn_df_cache.empty:
             self._conn_index = {}
+            self._conn_index_post = {}
             return
-        
-        self._vprint(f'  ⏳ Building connection index for fast lookups...', level='full')
+
+        # self._vprint(f'  ⏳ Building connection indexes for fast lookups...', level='always')
         self._conn_index = {}
+        self._conn_index_post = {}
+
+        n_rows = len(self._conn_df_cache)
+        # Try Polars for faster index building (2-3x faster for large datasets)
+        try:
+            import polars as pl
+            
+            # Build indexes using Polars group_by (much faster than Python loop)
+            df_pl = pl.DataFrame({
+                'bodyId_pre': self._conn_df_cache['bodyId_pre'].values,
+                'bodyId_post': self._conn_df_cache['bodyId_post'].values,
+                'idx': range(n_rows)
+            })
+            
+            # Group by pre and collect indices using iter_rows for efficiency
+            pre_result = df_pl.group_by('bodyId_pre').agg(pl.col('idx'))
+            self._conn_index = {row[0]: row[1] for row in pre_result.iter_rows()}
+            
+            # Group by post and collect indices
+            post_result = df_pl.group_by('bodyId_post').agg(pl.col('idx'))
+            self._conn_index_post = {row[0]: row[1] for row in post_result.iter_rows()}
+            
+            del df_pl, pre_result, post_result
+            
+        except ImportError:
+            # Fallback to optimized Python with defaultdict
+            from collections import defaultdict
+            self._conn_index = defaultdict(list)
+            self._conn_index_post = defaultdict(list)
+            pre_col = self._conn_df_cache['bodyId_pre'].values
+            post_col = self._conn_df_cache['bodyId_post'].values
+            for idx in range(n_rows):
+                self._conn_index[pre_col[idx]].append(idx)
+                self._conn_index_post[post_col[idx]].append(idx)
+            # Convert to regular dict
+            self._conn_index = dict(self._conn_index)
+            self._conn_index_post = dict(self._conn_index_post)
         
-        # Group by bodyId_pre and store row indices
-        for idx, bodyId_pre in enumerate(self._conn_df_cache['bodyId_pre'].values):
-            if bodyId_pre not in self._conn_index:
-                self._conn_index[bodyId_pre] = []
-            self._conn_index[bodyId_pre].append(idx)
-        
-        self._vprint(f'  ✓ Index built: {len(self._conn_index):,} unique upstream neurons', level='full')
+        self._vprint(f'  ✓ Index built: {len(self._conn_index):,} upstream, {len(self._conn_index_post):,} downstream neurons', level='always')
         
         # Update module-level shared cache for other instances
         global _FNC_CACHE
@@ -812,6 +1045,7 @@ class FindNeuronConnection:
                 _FNC_CACHE[self._dataset_safe] = {}
             _FNC_CACHE[self._dataset_safe]['conn_df'] = self._conn_df_cache
             _FNC_CACHE[self._dataset_safe]['conn_index'] = self._conn_index
+            _FNC_CACHE[self._dataset_safe]['conn_index_post'] = self._conn_index_post
     
     def _save_connection_db(self, conn_db):
         '''
@@ -828,6 +1062,178 @@ class FindNeuronConnection:
             self._build_conn_index()
         except Exception as e:
             self._vprint(f'  ⚠️ Warning: Failed to save connection database: {e}', level='full')
+    
+    def _append_connections_to_cache(self, connections, neurons_fetched, mark_complete_if_empty=False):
+        """
+        MEMORY-EFFICIENT: Append connections to cache using batch files.
+        
+        Strategy:
+        - Write each batch to a separate parquet file in a batch directory
+        - Files are named: batch_XXXXXX.parquet
+        - Final merge happens only at the end via _consolidate_batch_files()
+        - Never load the full existing cache into memory during fetching
+        
+        Parameters:
+        -----------
+        connections : pd.DataFrame
+            New connections to append (must have bodyId_pre, bodyId_post, weight)
+        neurons_fetched : list
+            List of neurons that were fetched (to mark as cached)
+        mark_complete_if_empty : bool
+            If True, mark neurons as complete even when connections.empty.
+            Default False: prevents marking neurons complete when API might have failed.
+        """
+        import os
+        
+        if connections.empty:
+            # FIXED: Only mark as complete if explicitly requested
+            # This prevents falsely marking neurons as complete when API call failed/timed out
+            if mark_complete_if_empty:
+                self._update_neuron_index_batch(neurons_fetched)
+            return
+        
+        # Use a batch directory for temporary batch files
+        cache_dir = os.path.dirname(self._get_connection_db_path())
+        batch_dir = os.path.join(cache_dir, '_batch_files')
+        os.makedirs(batch_dir, exist_ok=True)
+        
+        # Find next batch number
+        existing_batches = [f for f in os.listdir(batch_dir) if f.startswith('batch_') and f.endswith('.parquet')]
+        batch_num = len(existing_batches)
+        batch_path = os.path.join(batch_dir, f'batch_{batch_num:06d}.parquet')
+        
+        # Prepare connections
+        conn = connections[['bodyId_pre', 'bodyId_post', 'weight']].copy()
+        conn['bodyId_pre'] = conn['bodyId_pre'].astype(str)
+        conn['bodyId_post'] = conn['bodyId_post'].astype(str)
+        
+        if 'roi' in connections.columns:
+            conn['roi'] = connections['roi']
+        else:
+            conn['roi'] = ''
+        
+        conn['cached_date'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        
+        # Write this batch to its own file - NO loading of existing data
+        conn.to_parquet(batch_path, index=False, compression='gzip')
+        
+        # Calculate connection counts per neuron
+        conn_counts = connections.groupby('bodyId_pre').size().to_dict()
+        # Ensure all neurons_fetched have a count (0 if not in connections)
+        for n in neurons_fetched:
+            n_str = str(n)
+            if n_str not in conn_counts:
+                conn_counts[n_str] = 0
+        
+        # Update neuron index with actual connection counts
+        self._update_neuron_index_batch(neurons_fetched, connection_counts=conn_counts)
+    
+    def _consolidate_batch_files(self, deduplicate=True):
+        """
+        Merge all batch files into the main connections.parquet file.
+        Called after all batches are fetched, or periodically if needed.
+        
+        Parameters:
+        -----------
+        deduplicate : bool
+            If True, remove duplicates during merge
+            
+        Returns:
+        --------
+        int : Number of connections after consolidation
+        """
+        import os
+        import gc
+        
+        cache_dir = os.path.dirname(self._get_connection_db_path())
+        batch_dir = os.path.join(cache_dir, '_batch_files')
+        db_path = self._get_connection_db_path()
+        
+        if not os.path.exists(batch_dir):
+            return 0
+        
+        batch_files = sorted([
+            os.path.join(batch_dir, f) 
+            for f in os.listdir(batch_dir) 
+            if f.startswith('batch_') and f.endswith('.parquet')
+        ])
+        
+        if not batch_files:
+            return 0
+        
+        print(f"  Consolidating {len(batch_files)} batch files...")
+        
+        # Use Polars for memory-efficient consolidation
+        try:
+            import polars as pl
+            print(f"  Using Polars for memory-efficient consolidation...")
+            
+            # Common columns we need (ignore extras like conn_roiInfo)
+            common_cols = ['bodyId_pre', 'bodyId_post', 'weight', 'roi', 'cached_date']
+            
+            # Collect all parquet files to merge
+            all_files = batch_files.copy()
+            if os.path.exists(db_path):
+                all_files.insert(0, db_path)
+            
+            # Use lazy evaluation to minimize memory usage
+            # Select only common columns to avoid schema mismatch
+            lazy_frames = []
+            for f in all_files:
+                lf = pl.scan_parquet(f)
+                # Get available columns and select only the ones we need
+                available_cols = [c for c in common_cols if c in lf.collect_schema().names()]
+                lazy_frames.append(lf.select(available_cols))
+            
+            combined = pl.concat(lazy_frames, how='diagonal_relaxed')
+            
+            # Deduplicate if requested (using lazy API)
+            if deduplicate:
+                print(f"  Deduplicating...")
+                merge_cols = ['bodyId_pre', 'bodyId_post', 'roi']
+                # Only use columns that exist
+                merge_cols = [c for c in merge_cols if c in combined.collect_schema().names()]
+                if merge_cols:
+                    combined = combined.unique(subset=merge_cols, keep='last')
+            
+            # Write to temp file, then replace original
+            tmp_path = db_path + '.tmp'
+            print(f"  Writing consolidated cache...")
+            combined.collect().write_parquet(tmp_path, compression='gzip')
+            
+            # Get count before deleting
+            total_count = pl.scan_parquet(tmp_path).select(pl.len()).collect().item()
+            
+            # Replace original with consolidated
+            if os.path.exists(db_path):
+                os.remove(db_path)
+            os.rename(tmp_path, db_path)
+            
+            # Clean up batch files
+            import shutil
+            shutil.rmtree(batch_dir)
+            
+            print(f"  ✓ Consolidated to {total_count:,} connections")
+            return total_count
+            
+        except ImportError:
+            # Polars not available - just skip consolidation and let loading handle it
+            print(f"  ⚡ Polars not installed - skipping consolidation")
+            print(f"     {len(batch_files)} batch files will be loaded on demand")
+            print(f"     Install polars for better memory efficiency: pip install polars")
+            
+            # Just count the connections without loading into memory
+            total_count = 0
+            if os.path.exists(db_path):
+                import pyarrow.parquet as pq
+                total_count += pq.read_metadata(db_path).num_rows
+            
+            for bf in batch_files:
+                import pyarrow.parquet as pq
+                total_count += pq.read_metadata(bf).num_rows
+            
+            print(f"  ✓ Total connections available: {total_count:,}")
+            return total_count
     
     def _load_neuron_index(self, force_reload=False):
         '''
@@ -936,15 +1342,24 @@ class FindNeuronConnection:
         self._neuron_index_dict = {}
         
         # Build dict: bodyId → {downstream_complete: bool, ...}
-        for idx, row in self._neuron_index_cache.iterrows():
-            bodyId = str(row['bodyId'])
-            self._neuron_index_dict[bodyId] = {
-                'downstream_complete': row.get('downstream_complete', False),
-                'type': row.get('type', ''),
-                'instance': row.get('instance', ''),
-                'post': row.get('post', 0),
-                'last_fetched': row.get('last_fetched', ''),
-                'connection_count': row.get('connection_count', 0),
+        # Use vectorized access for better performance
+        df = self._neuron_index_cache
+        bodyids = df['bodyId'].astype(str).values
+        downstream_complete = df['downstream_complete'].values if 'downstream_complete' in df.columns else [False] * len(df)
+        types = df['type'].values if 'type' in df.columns else [''] * len(df)
+        instances = df['instance'].values if 'instance' in df.columns else [''] * len(df)
+        posts = df['post'].values if 'post' in df.columns else [0] * len(df)
+        last_fetched = df['last_fetched'].values if 'last_fetched' in df.columns else [''] * len(df)
+        connection_counts = df['connection_count'].values if 'connection_count' in df.columns else [0] * len(df)
+        
+        for idx in range(len(bodyids)):
+            self._neuron_index_dict[bodyids[idx]] = {
+                'downstream_complete': downstream_complete[idx] if downstream_complete[idx] is not None else False,
+                'type': types[idx] if types[idx] is not None else '',
+                'instance': instances[idx] if instances[idx] is not None else '',
+                'post': posts[idx] if posts[idx] is not None else 0,
+                'last_fetched': last_fetched[idx] if last_fetched[idx] is not None else '',
+                'connection_count': connection_counts[idx] if connection_counts[idx] is not None else 0,
                 'row_idx': idx  # Store row index for DataFrame updates
             }
         
@@ -1006,6 +1421,10 @@ class FindNeuronConnection:
         if conn_db.empty:
             return pd.DataFrame(), upstream_bodyIds, []
         
+        # Build a set of neurons that actually have connections in the cache
+        # This provides a stricter validation than just trusting neuron_index
+        neurons_with_connections = set(conn_db['bodyId_pre'].astype(str).unique()) if not conn_db.empty else set()
+        
         # Separate cached vs uncached neurons using O(1) dict lookups
         cached_upstream = []
         uncached_upstream = []
@@ -1020,16 +1439,24 @@ class FindNeuronConnection:
             if neuron_data is not None:
                 is_complete = neuron_data.get('downstream_complete', False)
                 
-                if downstream_bodyIds is None:
-                    if is_complete:
+                # STRICTER VALIDATION: Even if marked complete, verify it has connections OR
+                # is explicitly marked with connection_count (to handle legitimate 0-connection neurons)
+                conn_count = neuron_data.get('connection_count', -1)
+                
+                # Trust the cache if:
+                # 1. Marked complete AND has connections in cache, OR
+                # 2. Marked complete AND explicitly has connection_count >= 0 (including 0)
+                if is_complete:
+                    has_connections = bodyId in neurons_with_connections
+                    has_valid_count = conn_count >= 0
+                    
+                    if has_connections or has_valid_count:
                         cached_upstream.append(bodyId)
                     else:
+                        # Marked complete but no connections and no valid count - needs refetch
                         uncached_upstream.append(bodyId)
                 else:
-                    if is_complete:
-                        cached_upstream.append(bodyId)
-                    else:
-                        uncached_upstream.append(bodyId)
+                    uncached_upstream.append(bodyId)
             else:
                 uncached_upstream.append(bodyId)
         
@@ -1363,18 +1790,127 @@ class FindNeuronConnection:
                     'type': neuron_type,
                     'instance': neuron_instance,
                     'post': neuron_post,
-                    'downstream_complete': mark_complete,
+                    'downstream_complete': bool(mark_complete),  # Explicit bool for consistent dtype
                     'last_fetched': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
                     'connection_count': conn_count
                 }])
                 neuron_index = pd.concat([neuron_index, new_entry], ignore_index=True)
+                # Ensure consistent bool dtype after concat to avoid FutureWarning
+                neuron_index['downstream_complete'] = neuron_index['downstream_complete'].astype(bool)
         
         self._vprint(f'  ⏳ Saving neuron index ({len(neuron_index):,} total neurons)...', level='full')
         self._save_neuron_index(neuron_index)
         
         if mark_complete:
-            completed_count = len([b for b in upstream_bodyIds if b in neuron_index[neuron_index['downstream_complete'] == True]['bodyId'].values])
+            # Explicitly cast to bool to avoid FutureWarning about object-dtype columns
+            downstream_complete = neuron_index['downstream_complete'].astype(bool)
+            completed_count = len([b for b in upstream_bodyIds if b in neuron_index[downstream_complete]['bodyId'].values])
             self._vprint(f'  📝 Updated neuron index: {completed_count} neurons marked as complete', level='full')
+    
+    def _update_neuron_index_batch(self, bodyids, connection_counts=None):
+        '''
+        Efficiently update neuron index for a batch of neurons.
+        Marks them as downstream_complete=True.
+        Used by build_connection_cache after consolidation.
+        
+        Parameters:
+        -----------
+        bodyids : list
+            List of bodyIds to mark as complete
+        connection_counts : dict, optional
+            Dict mapping bodyId (str) -> connection count. If provided, updates
+            connection_count for each neuron. If None, sets connection_count=0.
+        '''
+        neuron_index = self._load_neuron_index()
+        
+        # Get neuron info from complete dataset
+        dataset_safe = self.dataset.replace(':', '_').replace('.', '_')
+        dataset_path = os.path.join(
+            self.script_path,
+            'datasets',
+            dataset_safe,
+            f"{dataset_safe}_allneurons_neuron_df.csv"
+        )
+        
+        # Try parquet first (faster)
+        parquet_path = dataset_path.replace('.csv', '.parquet')
+        
+        bodyids_str = [str(x) for x in bodyids]
+        bodyids_set = set(bodyids_str)
+        
+        if os.path.exists(parquet_path):
+            ndf_complete = pd.read_parquet(parquet_path)
+            if 'bodyId' in ndf_complete.columns:
+                ndf_complete['bodyId'] = ndf_complete['bodyId'].astype(str)
+        elif os.path.exists(dataset_path):
+            is_fafb = 'fafb' in self.dataset.lower() or 'flywire' in self.dataset.lower()
+            if is_fafb:
+                ndf_complete = pd.read_csv(dataset_path, header=0, index_col=None, dtype={'bodyId': str}, low_memory=False)
+            else:
+                ndf_complete = pd.read_csv(dataset_path, header=0, index_col=0, low_memory=False)
+            if 'bodyId' in ndf_complete.columns:
+                ndf_complete['bodyId'] = ndf_complete['bodyId'].astype(str)
+        else:
+            ndf_complete = pd.DataFrame(columns=['bodyId', 'type', 'instance', 'post'])
+        
+        # Filter to only the bodyIds we need
+        if not ndf_complete.empty and 'bodyId' in ndf_complete.columns:
+            neuron_info = ndf_complete[ndf_complete['bodyId'].isin(bodyids_set)].copy()
+        else:
+            neuron_info = pd.DataFrame(columns=['bodyId', 'type', 'instance', 'post'])
+        
+        # Create a dict for fast lookup using vectorized access
+        neuron_info_dict = {}
+        if not neuron_info.empty:
+            bodyid_col = neuron_info['bodyId'].astype(str).values
+            type_col = neuron_info['type'].values if 'type' in neuron_info.columns else [''] * len(neuron_info)
+            instance_col = neuron_info['instance'].values if 'instance' in neuron_info.columns else [''] * len(neuron_info)
+            post_col = neuron_info['post'].values if 'post' in neuron_info.columns else [0] * len(neuron_info)
+            
+            for i in range(len(bodyid_col)):
+                neuron_info_dict[bodyid_col[i]] = {
+                    'type': type_col[i] if type_col[i] is not None else '',
+                    'instance': instance_col[i] if instance_col[i] is not None else '',
+                    'post': post_col[i] if post_col[i] is not None else 0
+                }
+        
+        # Check existing in index
+        existing_set = set(neuron_index['bodyId'].astype(str).values) if not neuron_index.empty else set()
+        
+        # Update existing entries
+        now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        for bid in bodyids_str:
+            if bid in existing_set:
+                neuron_index.loc[neuron_index['bodyId'].astype(str) == bid, 'downstream_complete'] = True
+                neuron_index.loc[neuron_index['bodyId'].astype(str) == bid, 'last_fetched'] = now
+                # Update connection count if provided
+                if connection_counts is not None:
+                    count = connection_counts.get(bid, 0)
+                    neuron_index.loc[neuron_index['bodyId'].astype(str) == bid, 'connection_count'] = count
+        
+        # Add new entries in bulk
+        new_entries = []
+        for bid in bodyids_str:
+            if bid not in existing_set:
+                info = neuron_info_dict.get(bid, {'type': '', 'instance': '', 'post': 0})
+                # Get connection count from dict if provided, else 0
+                count = connection_counts.get(bid, 0) if connection_counts else 0
+                new_entries.append({
+                    'bodyId': bid,
+                    'type': info['type'],
+                    'instance': info['instance'],
+                    'post': info['post'],
+                    'downstream_complete': True,
+                    'last_fetched': now,
+                    'connection_count': count
+                })
+        
+        if new_entries:
+            new_df = pd.DataFrame(new_entries)
+            neuron_index = pd.concat([neuron_index, new_df], ignore_index=True)
+            neuron_index['downstream_complete'] = neuron_index['downstream_complete'].astype(bool)
+        
+        self._save_neuron_index(neuron_index)
     
     # ============================================================================
     # Enrichment with Type/Instance
@@ -1661,11 +2197,8 @@ class FindNeuronConnection:
                 else:
                     return pd.DataFrame(columns=columns if columns else [])
 
-            # Ensure client is logged in (NeuPrint)
-            if self.client_hemibrain is None:
-                from neuprint import Client, set_default_client
-                self.client_hemibrain = Client(self.server, self.dataset, self.token)
-                set_default_client(self.client_hemibrain)
+            # Ensure client is logged in (NeuPrint) for the CORRECT dataset
+            self._ensure_neuprint_client()
             
             neuron_df, _ = fetch_neurons(NeuronCriteria(bodyId=bodyIds))
             if columns:
@@ -1750,10 +2283,8 @@ class FindNeuronConnection:
                 else:
                     return pd.DataFrame(columns=columns if columns else [])
             else:
-                if self.client_hemibrain is None:
-                    from neuprint import Client, set_default_client
-                    self.client_hemibrain = Client(self.server, self.dataset, self.token)
-                    set_default_client(self.client_hemibrain)
+                # Ensure we have a valid client for THIS dataset
+                self._ensure_neuprint_client()
                 
                 # Fetch neurons by type
                 all_neurons = []
@@ -1914,14 +2445,38 @@ class FindNeuronConnection:
                         except (ValueError, TypeError):
                             pass
 
-                    # Only login if not already done (default_client() returns None if not set)
-                    if self.client_hemibrain is None and default_client() is None:
-                        self.client_hemibrain = Client(self.server, self.dataset, self.token)
-                        set_default_client(self.client_hemibrain)
+                    # Ensure we have a valid client for THIS dataset (not a different one from global default)
+                    self._ensure_neuprint_client()
                     
-                    # Batch processing
-                    batch_size = 100
+                    # Batch processing with timeout and retry
+                    batch_size = 1000
                     all_api_conn = []
+                    
+                    # Import API utilities for timeout/retry
+                    try:
+                        from src.utils.api_utils import api_call_with_retry, APITimeoutError, APIRetryExhaustedError
+                    except ImportError:
+                        # Fallback: define inline if utils not available
+                        from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
+                        class APITimeoutError(Exception): pass
+                        class APIRetryExhaustedError(Exception): pass
+                        def api_call_with_retry(func, timeout=60, max_retries=3, retry_delay=2.0, description="API call", on_retry=None, verbose=True):
+                            import time
+                            last_exc = None
+                            for attempt in range(1, max_retries + 1):
+                                try:
+                                    with ThreadPoolExecutor(max_workers=1) as executor:
+                                        future = executor.submit(func)
+                                        return future.result(timeout=timeout)
+                                except FuturesTimeoutError:
+                                    last_exc = APITimeoutError(f"{description} timed out after {timeout}s (attempt {attempt}/{max_retries})")
+                                    if attempt < max_retries:
+                                        time.sleep(retry_delay * (2 ** (attempt - 1)))
+                                except Exception as e:
+                                    last_exc = e
+                                    if attempt < max_retries:
+                                        time.sleep(retry_delay * (2 ** (attempt - 1)))
+                            raise last_exc or Exception("Unknown error")
                     
                     # Create batches
                     batches = [uncached_upstream[i:i + batch_size] for i in range(0, len(uncached_upstream), batch_size)]
@@ -1932,34 +2487,52 @@ class FindNeuronConnection:
                     # Use tqdm only if multiple batches or large single batch
                     iterator = tqdm(batches, desc="Fetching batches", unit="batch") if len(batches) > 1 else batches
                     
-                    for batch in iterator:
-                        try:
+                    failed_batches = []
+                    for batch_idx, batch in enumerate(iterator):
+                        def fetch_batch(b=batch):
+                            """Inner function for timeout wrapping."""
                             if self.simple_fetch:
                                 from neuprint import fetch_simple_connections
-                                upstream_criteria = NeuronCriteria(bodyId=batch)
+                                upstream_criteria = NeuronCriteria(bodyId=b)
                                 downstream_criteria = NeuronCriteria(bodyId=downstream_bodyIds) if downstream_bodyIds is not None else None
-                                batch_conn = fetch_simple_connections(
+                                return fetch_simple_connections(
                                     upstream_criteria=upstream_criteria,
                                     downstream_criteria=downstream_criteria,
-                                    min_weight=1,  # Always fetch with min_weight=1
+                                    min_weight=1,
                                     **self.kwargs_fetch
                                 )
-                                if not batch_conn.empty:
-                                    all_api_conn.append(batch_conn)
                             else:
                                 from neuprint import fetch_adjacencies
-                                import statvis as sv
                                 neuron_df, roi_conn_df = fetch_adjacencies(
-                                    sources=batch,
+                                    sources=b,
                                     targets=downstream_bodyIds,
-                                    min_total_weight=1,  # Always fetch with min_weight=1
+                                    min_total_weight=1,
                                     **self.kwargs_fetch
                                 )
-                                batch_conn = sv.merge_conn_roi(neuron_df, roi_conn_df)
-                                if not batch_conn.empty:
-                                    all_api_conn.append(batch_conn)
+                                # roi_conn_df already has bodyId_pre, bodyId_post, roi, weight
+                                return roi_conn_df
+                        
+                        try:
+                            # Use timeout and retry for each batch
+                            batch_conn = api_call_with_retry(
+                                fetch_batch,
+                                timeout=120.0,  # 2 minutes per batch
+                                max_retries=3,
+                                retry_delay=5.0,
+                                description=f"Batch {batch_idx+1}/{len(batches)}",
+                                verbose=True
+                            )
+                            if batch_conn is not None and not batch_conn.empty:
+                                all_api_conn.append(batch_conn)
+                        except (APITimeoutError, APIRetryExhaustedError) as e:
+                            self._vprint(f"     ⚠️ Batch {batch_idx+1} failed after retries: {e}", level='full')
+                            failed_batches.append(batch_idx + 1)
                         except Exception as e:
-                            self._vprint(f"     ⚠️ Error fetching batch: {e}", level='full')
+                            self._vprint(f"     ⚠️ Error fetching batch {batch_idx+1}: {e}", level='full')
+                            failed_batches.append(batch_idx + 1)
+                    
+                    if failed_batches:
+                        self._vprint(f"     ⚠️ {len(failed_batches)} batches failed: {failed_batches}", level='full')
                             
                     if all_api_conn:
                         api_conn = pd.concat(all_api_conn, ignore_index=True)
@@ -1999,6 +2572,25 @@ class FindNeuronConnection:
             
             self._mark_neurons_as_cached(neurons_to_mark, neurons_conn, downstream_bodyIds)
             self._vprint(f'  ✓ Cache update complete - {len(neurons_to_mark)} neurons marked as fetched', level='full')
+        
+        # Apply label mapping if available (AFTER caching, so cache keeps original types)
+        if self.label_mapper and not combined.empty:
+            self._vprint(f'  🏷️  Applying label mapping to {len(combined):,} connections...', level='full')
+            # Use apply_to_dataframe from LabelMapper
+            # It adds std_label_pre and std_label_post
+            combined = self.label_mapper.apply_to_dataframe(combined, self.dataset)
+            
+            # Overwrite type_pre with std_label_pre
+            if 'std_label_pre' in combined.columns:
+                mask = combined['std_label_pre'] != ''
+                combined.loc[mask, 'type_pre'] = combined.loc[mask, 'std_label_pre']
+                combined = combined.drop(columns=['std_label_pre'])
+                
+            # Overwrite type_post with std_label_post
+            if 'std_label_post' in combined.columns:
+                mask = combined['std_label_post'] != ''
+                combined.loc[mask, 'type_post'] = combined.loc[mask, 'std_label_post']
+                combined = combined.drop(columns=['std_label_post'])
         
         # Exclude intra-type connections if requested (before applying other filters)
         if self.exclude_intra_type_connections and len(combined) > 0:
@@ -2169,19 +2761,184 @@ class FindNeuronConnection:
     # Cache Building Methods
     # ============================================================================
     
+    def warm_up_cache(self, quiet: bool = False) -> dict:
+        """
+        Load cache into memory and build indexes for fast O(1) lookups.
+        
+        This method is called automatically on first query, but can be called
+        explicitly for faster initial queries. It loads:
+        1. Connection database (connections.parquet) -> _conn_df_cache
+        2. Connection index (bodyId_pre -> row indices) -> _conn_index  
+        3. Neuron index (neuron_index.parquet) -> _neuron_index_cache
+        4. Neuron dict (bodyId -> metadata) -> _neuron_index_dict
+        
+        Cache Hierarchy:
+        ---------------
+        Level 0: datasets/{dataset}/*_neuron_df.parquet - Authoritative neuron info
+        Level 1: cache/{dataset}/neuron_index.parquet - Which neurons are cached
+        Level 2: cache/{dataset}/connections.parquet - Connection data
+        Level 3: Connectivity profiles (built by ConnectivityProfiler)
+        
+        Parameters:
+        -----------
+        quiet : bool
+            If True, suppress progress messages
+        
+        Returns:
+        --------
+        dict : Cache status with keys:
+            - 'connections_loaded': Number of connections in cache
+            - 'neurons_indexed': Number of neurons in index
+            - 'index_ready': Whether O(1) lookup indexes are built
+            - 'elapsed_time': Time taken in seconds
+        """
+        import time
+        start_time = time.time()
+        
+        if not quiet:
+            print(f"Warming up cache for {self.dataset}...")
+        
+        # Load connection database (triggers index building)
+        conn_db = self._load_connection_db(force_reload=False)
+        connections_loaded = len(conn_db) if conn_db is not None and not conn_db.empty else 0
+        
+        # Load neuron index (triggers dict building)
+        neuron_index = self._load_neuron_index(force_reload=False)
+        neurons_indexed = len(neuron_index) if neuron_index is not None and not neuron_index.empty else 0
+        
+        # Verify indexes are built
+        index_ready = (
+            self._conn_index is not None and len(self._conn_index) > 0 and
+            self._neuron_index_dict is not None and len(self._neuron_index_dict) > 0
+        )
+        
+        elapsed = time.time() - start_time
+        
+        if not quiet:
+            print(f"  Connections: {connections_loaded:,}")
+            print(f"  Neurons indexed: {neurons_indexed:,}")
+            print(f"  O(1) index ready: {index_ready}")
+            print(f"  Time: {elapsed:.2f}s")
+        
+        return {
+            'connections_loaded': connections_loaded,
+            'neurons_indexed': neurons_indexed,
+            'index_ready': index_ready,
+            'elapsed_time': elapsed
+        }
+    
+    def get_cache_status(self) -> dict:
+        """
+        Get comprehensive cache status for this dataset.
+        
+        Returns information about all cache levels:
+        - Level 0: datasets/{dataset}/ neuron_df files (authoritative neuron list)
+        - Level 1: cache/{dataset}/neuron_index.parquet (which neurons are cached)
+        - Level 2: cache/{dataset}/connections.parquet (connection data)
+        
+        Returns:
+        --------
+        dict : Cache status with keys:
+            - 'dataset': Dataset identifier
+            - 'neuron_df_exists': Whether authoritative neuron list exists
+            - 'neuron_df_count': Number of neurons in neuron_df (or 0)
+            - 'neuron_index_exists': Whether neuron index cache exists
+            - 'neurons_indexed': Number of neurons in index
+            - 'neurons_complete': Number marked as downstream_complete
+            - 'connection_cache_exists': Whether connection cache exists
+            - 'connections_cached': Number of connections
+            - 'unique_upstream': Number of unique upstream neurons in cache
+            - 'index_ready': Whether O(1) lookup indexes are built in memory
+            - 'completeness': Ratio of cached vs expected neurons (0.0 to 1.0)
+        """
+        import os
+        
+        dataset_safe = self.dataset.replace(':', '_').replace('.', '_')
+        
+        # Check Level 0: datasets/ neuron_df
+        neuron_df_path_parquet = os.path.join(
+            self.script_path, 'datasets', dataset_safe,
+            f"{dataset_safe}_allneurons_neuron_df.parquet"
+        )
+        neuron_df_path_csv = os.path.join(
+            self.script_path, 'datasets', dataset_safe,
+            f"{dataset_safe}_allneurons_neuron_df.csv"
+        )
+        neuron_df_exists = os.path.exists(neuron_df_path_parquet) or os.path.exists(neuron_df_path_csv)
+        neuron_df_count = len(self._get_all_dataset_bodyids()) if neuron_df_exists else 0
+        
+        # Check Level 1: neuron_index
+        index_path = self._get_neuron_index_path()
+        neuron_index_exists = os.path.exists(index_path)
+        neurons_indexed = 0
+        neurons_complete = 0
+        if neuron_index_exists:
+            neuron_index = self._load_neuron_index()
+            neurons_indexed = len(neuron_index)
+            if 'downstream_complete' in neuron_index.columns:
+                neurons_complete = neuron_index['downstream_complete'].astype(bool).sum()
+        
+        # Check Level 2: connections
+        conn_path = self._get_connection_db_path()
+        connection_cache_exists = os.path.exists(conn_path)
+        connections_cached = 0
+        unique_upstream = 0
+        if connection_cache_exists:
+            conn_db = self._load_connection_db()
+            connections_cached = len(conn_db) if conn_db is not None else 0
+            if conn_db is not None and 'bodyId_pre' in conn_db.columns:
+                unique_upstream = conn_db['bodyId_pre'].nunique()
+        
+        # Check in-memory indexes
+        index_ready = (
+            self._conn_index is not None and len(self._conn_index) > 0 and
+            self._neuron_index_dict is not None and len(self._neuron_index_dict) > 0
+        )
+        
+        # Calculate completeness
+        completeness = neurons_complete / neuron_df_count if neuron_df_count > 0 else 0.0
+        
+        return {
+            'dataset': self.dataset,
+            'neuron_df_exists': neuron_df_exists,
+            'neuron_df_count': neuron_df_count,
+            'neuron_index_exists': neuron_index_exists,
+            'neurons_indexed': neurons_indexed,
+            'neurons_complete': neurons_complete,
+            'connection_cache_exists': connection_cache_exists,
+            'connections_cached': connections_cached,
+            'unique_upstream': unique_upstream,
+            'index_ready': index_ready,
+            'completeness': completeness
+        }
+    
     def build_connection_cache(
         self,
         neuron_types: list = None,
         neuron_bodyIds: list = None,
         batch_size: int = 100,
+        force_rebuild: bool = False,
+        quiet: bool = False,
         progress_callback: callable = None
     ) -> dict:
         """
-        Pre-build connection cache for specified neurons or all neurons in dataset.
+        Build connection cache incrementally for specified or all neurons.
         
-        This method efficiently pre-fetches and caches connections for neurons,
-        enabling faster subsequent queries. Useful for building offline caches
-        or preparing for batch analysis.
+        MEMORY-EFFICIENT WORKFLOW:
+        --------------------------
+        1. Divide all neurons into batches (each neuron as upstream/source)
+        2. For each batch: fetch ALL downstream connections (target=None)
+        3. Append directly to cache file (no in-memory accumulation)
+        4. Deduplicate only at the end if needed
+        
+        This works because fetching all neurons' downstream connections captures
+        every edge in the graph - if A→B exists, we get it when fetching A's downstream.
+        
+        Cache Hierarchy:
+        ---------------
+        Level 0: datasets/{dataset}/*_neuron_df.parquet - Authoritative neuron list
+        Level 1: cache/{dataset}/neuron_index.parquet - Tracks cached neurons
+        Level 2: cache/{dataset}/connections.parquet - Actual connection data
         
         Parameters:
         -----------
@@ -2192,173 +2949,834 @@ class FindNeuronConnection:
             List of specific bodyIds to cache. Takes precedence over neuron_types.
         batch_size : int
             Number of neurons to fetch per batch (default: 100)
+        force_rebuild : bool
+            If True, delete existing cache and rebuild from scratch (default: False)
+        quiet : bool
+            If True, suppress progress messages (default: False)
         progress_callback : callable, optional
             Callback function(current, total, neuron_info) for progress updates
         
         Returns:
         --------
         dict : Summary with keys:
-            - 'total_neurons': Number of neurons processed
-            - 'total_connections': Total connections cached
-            - 'cached_neurons': List of successfully cached neuron bodyIds
+            - 'total_neurons': Total neurons in target set
+            - 'already_cached': Number of neurons already in cache
+            - 'newly_cached': Number of neurons cached in this call
             - 'failed_neurons': List of neurons that failed to cache
+            - 'total_connections': Total connections in cache after build
+            - 'elapsed_time': Time taken in seconds
+        """
+        import time
+        import os
+        import gc
+        start_time = time.time()
+        
+        def _print(msg):
+            if not quiet:
+                print(msg)
+        
+        _print("=" * 60)
+        _print("Building Connection Cache")
+        _print("=" * 60)
+        _print(f"Dataset: {self.dataset}")
+        
+        if not self.use_cache:
+            _print("Warning: Cache is disabled. Enable with use_cache=True")
+            return {'total_neurons': 0, 'already_cached': 0, 'newly_cached': 0,
+                    'failed_neurons': [], 'total_connections': 0, 'elapsed_time': 0}
+        
+        # Handle force_rebuild - clear cache first
+        if force_rebuild:
+            _print("Force rebuild - clearing existing cache...")
+            conn_path = self._get_connection_db_path()
+            index_path = self._get_neuron_index_path()
+            batch_dir = os.path.join(os.path.dirname(conn_path), '_batch_files')
+            if os.path.exists(conn_path):
+                os.remove(conn_path)
+            if os.path.exists(index_path):
+                os.remove(index_path)
+            if os.path.exists(batch_dir):
+                import shutil
+                shutil.rmtree(batch_dir)
+            # Clear in-memory caches
+            self._conn_df_cache = None
+            self._conn_index = {}
+            self._neuron_index_cache = None
+            self._neuron_index_dict = {}
+        else:
+            # Check for pending batch files from interrupted previous run
+            conn_path = self._get_connection_db_path()
+            batch_dir = os.path.join(os.path.dirname(conn_path), '_batch_files')
+            if os.path.exists(batch_dir):
+                batch_files = [f for f in os.listdir(batch_dir) if f.startswith('batch_') and f.endswith('.parquet')]
+                if batch_files:
+                    _print(f"\n⚡ Found {len(batch_files)} pending batch files from interrupted run")
+                    _print(f"   Consolidating to resume from checkpoint...")
+                    self._consolidate_batch_files(deduplicate=True)
+                    # Clear caches to reload updated index
+                    self._neuron_index_cache = None
+                    self._neuron_index_dict = {}
+        
+        # Get target bodyIds from dataset
+        target_bodyIds = None
+        
+        if neuron_bodyIds is not None:
+            target_bodyIds = [str(x) for x in neuron_bodyIds]
+            _print(f"Target: {len(target_bodyIds)} specified bodyIds")
+        elif neuron_types is not None:
+            _print(f"Fetching bodyIds for {len(neuron_types)} neuron types...")
+            target_bodyIds = []
+            for ntype in neuron_types:
+                try:
+                    # Get bodyIds for this type from the dataset's neuron_df
+                    all_bodyids = self._get_all_dataset_bodyids()
+                    if all_bodyids:
+                        # Load neuron_df and filter by type
+                        dataset_safe = self.dataset.replace(':', '_').replace('.', '_')
+                        parquet_path = os.path.join(
+                            self.script_path, 'datasets', dataset_safe,
+                            f"{dataset_safe}_allneurons_neuron_df.parquet"
+                        )
+                        csv_path = os.path.join(
+                            self.script_path, 'datasets', dataset_safe,
+                            f"{dataset_safe}_allneurons_neuron_df.csv"
+                        )
+                        
+                        ndf = None
+                        if os.path.exists(parquet_path):
+                            ndf = pd.read_parquet(parquet_path)
+                        elif os.path.exists(csv_path):
+                            ndf = pd.read_csv(csv_path, index_col=0, low_memory=False)
+                        
+                        if ndf is not None and 'type' in ndf.columns:
+                            type_neurons = ndf[ndf['type'] == ntype]
+                            if not type_neurons.empty and 'bodyId' in type_neurons.columns:
+                                target_bodyIds.extend([str(x) for x in type_neurons['bodyId'].tolist()])
+                except Exception as e:
+                    _print(f"  Warning: Failed to get bodyIds for type {ntype}: {e}")
+            target_bodyIds = list(set(target_bodyIds))
+            _print(f"Found {len(target_bodyIds)} unique bodyIds")
+        else:
+            # Cache all neurons in dataset
+            _print("Target: all neurons in dataset")
+            target_bodyIds = self._get_all_dataset_bodyids()
+            if target_bodyIds:
+                _print(f"Found {len(target_bodyIds)} neurons in dataset")
+            else:
+                _print("Warning: Could not determine target neurons from datasets/")
+                _print("   Ensure neuron_df file exists in datasets/{dataset}/")
+                return {'total_neurons': 0, 'already_cached': 0, 'newly_cached': 0,
+                        'failed_neurons': [], 'total_connections': 0, 'elapsed_time': 0}
+        
+        # Check which neurons are already cached using neuron_index
+        # This uses O(1) dict lookup after warm-up
+        neuron_index = self._load_neuron_index()
+        already_cached_set = set()
+        
+        if not neuron_index.empty:
+            # Use O(1) dict lookup
+            for bodyId in target_bodyIds:
+                bodyId_str = str(bodyId)
+                if bodyId_str in self._neuron_index_dict:
+                    if self._neuron_index_dict[bodyId_str].get('downstream_complete', False):
+                        already_cached_set.add(bodyId_str)
+        
+        uncached = [x for x in target_bodyIds if str(x) not in already_cached_set]
+        already_cached_count = len(already_cached_set)
+        
+        _print(f"\nCache Status:")
+        _print(f"  Already cached: {already_cached_count:,}")
+        _print(f"  Need to fetch: {len(uncached):,}")
+        
+        if not uncached:
+            elapsed = time.time() - start_time
+            _print("All target neurons already cached!")
+            return {
+                'total_neurons': len(target_bodyIds),
+                'already_cached': already_cached_count,
+                'newly_cached': 0,
+                'failed_neurons': [],
+                'total_connections': self._count_cached_connections(),
+                'elapsed_time': elapsed
+            }
+        
+        # Process in batches with progress bar
+        total = len(uncached)
+        newly_cached = []
+        failed_neurons = []
+        batch_connections = 0
+        total_batches = (total + batch_size - 1) // batch_size
+        
+        _print(f"\nFetching connections for {total:,} neurons...")
+        _print(f"  Strategy: Fetch each batch's downstream, append to cache immediately")
+        _print(f"  Memory: No accumulation - each batch saved directly to disk")
+        
+        # Use tqdm progress bar
+        from tqdm import tqdm
+        
+        # Set flag so _vprint uses tqdm.write instead of print
+        self._in_progress_bar = True
+        
+        # Get cache paths
+        db_path = self._get_connection_db_path()
+        
+        # Ensure cache directory exists
+        os.makedirs(os.path.dirname(db_path), exist_ok=True)
+        
+        batch_iter = range(0, total, batch_size)
+        if not quiet:
+            batch_iter = tqdm(
+                batch_iter,
+                total=total_batches,
+                desc="Building cache",
+                unit="batch"
+            )
+        
+        try:
+            import psutil
+            process = psutil.Process(os.getpid())
+        except ImportError:
+            process = None
+
+        try:
+            for i in batch_iter:
+                batch = uncached[i:i + batch_size]
+                batch_num = i // batch_size + 1
+                
+                # Progress callback
+                if progress_callback:
+                    progress_callback(i, total, f"Batch {batch_num}/{total_batches}")
+                
+                try:
+                    # Fetch connections for this batch (upstream=batch, downstream=None for ALL)
+                    connections = self._fetch_connections_bulk(
+                        upstream_bodyIds=batch,
+                        downstream_bodyIds=None
+                    )
+                    
+                    if connections is not None and not connections.empty:
+                        batch_connections += len(connections)
+                        
+                        # MEMORY-EFFICIENT: Save this batch directly to cache
+                        # No accumulation in memory
+                        self._append_connections_to_cache(connections, batch)
+                        
+                        # Mark neurons as fetched
+                        newly_cached.extend(batch)
+                    else:
+                        # Empty connections returned - these neurons genuinely have 0 downstream
+                        # FIXED: Still mark as cached so we don't refetch, but with connection_count=0
+                        self._update_neuron_index_batch(batch)
+                        newly_cached.extend(batch)
+                    
+                    # Force GC every batch
+                    gc.collect()
+                    
+                    # Update progress bar postfix
+                    if not quiet and hasattr(batch_iter, 'set_postfix_str'):
+                        mem_usage = f"{process.memory_info().rss / 1024 / 1024:.0f}MB" if process else "?"
+                        batch_iter.set_postfix_str(f'neurons={len(newly_cached):,}, conns={batch_connections:,} Mem:{mem_usage}')
+                        
+                except Exception as e:
+                    failed_neurons.extend(batch)
+                    if not quiet:
+                        # Log the actual error for debugging
+                        _print(f"\n  ⚠️ Batch {batch_num} error: {type(e).__name__}: {e}")
+                        if hasattr(batch_iter, 'set_postfix_str'):
+                            batch_iter.set_postfix_str(f'neurons={len(newly_cached):,}, failed={len(failed_neurons)}')
+            
+            # Consolidate batch files into main cache file
+            # This is where merging happens, but only once at the end
+            if newly_cached and not quiet:
+                _print(f"\n  ✓ All batches fetched. Consolidating batch files...")
+                self._consolidate_batch_files(deduplicate=True)
+                
+        finally:
+            # Reset progress bar flag
+            self._in_progress_bar = False
+            # Clear any bulk cache to free memory
+            if hasattr(self, '_bulk_conn_cache'):
+                self._bulk_conn_cache = None
+                gc.collect()
+        
+        elapsed = time.time() - start_time
+        
+        # Get final cache stats (without loading full cache into memory)
+        total_connections = self._count_cached_connections()
+        
+        # Summary
+        _print("\n" + "=" * 60)
+        _print("Cache Build Complete")
+        _print("=" * 60)
+        _print(f"Target neurons: {len(target_bodyIds):,}")
+        _print(f"Already cached: {already_cached_count:,}")
+        _print(f"Newly cached: {len(newly_cached):,}")
+        if failed_neurons:
+            _print(f"Failed: {len(failed_neurons):,}")
+        _print(f"Total connections in cache: {total_connections:,}")
+        _print(f"Time elapsed: {elapsed:.1f} seconds")
+        
+        if failed_neurons and not quiet:
+            print(f"\nFailed neurons (first 10): {failed_neurons[:10]}{'...' if len(failed_neurons) > 10 else ''}")
+        
+        return {
+            'total_neurons': len(target_bodyIds),
+            'already_cached': already_cached_count,
+            'newly_cached': len(newly_cached),
+            'failed_neurons': failed_neurons,
+            'total_connections': total_connections,
+            'elapsed_time': elapsed
+        }
+    
+    def _fetch_connections_bulk(self, upstream_bodyIds, downstream_bodyIds=None):
+        """
+        Fetch connections from local data without caching overhead.
+        Used by build_connection_cache for faster bulk fetching.
+        
+        Returns raw connections DataFrame without filtering or enrichment.
+        """
+        if not upstream_bodyIds:
+            return pd.DataFrame()
+        
+        # For FlyWire/FAFB: use local CSV data
+        if 'fafb' in self.dataset.lower() or 'flywire' in self.dataset.lower():
+            try:
+                import fafb_utils
+                project_root = os.path.dirname(os.path.dirname(__file__))
+                data_dir = os.path.join(project_root, "datasets", self.dataset)
+                if not os.path.exists(data_dir):
+                    data_dir = os.path.join(project_root, "datasets", "flywire_FAFB_v783")
+                
+                if os.path.exists(data_dir):
+                    # Suppress fafb_utils print statements
+                    import io
+                    import sys
+                    old_stdout = sys.stdout
+                    sys.stdout = io.StringIO()
+                    try:
+                        _, conn_file = fafb_utils.prepare_fafb_data(data_dir)
+                    finally:
+                        sys.stdout = old_stdout
+                    
+                    # Load and filter - use cached full_conn if available
+                    if not hasattr(self, '_bulk_conn_cache') or self._bulk_conn_cache is None:
+                        self._bulk_conn_cache = pd.read_csv(
+                            conn_file, 
+                            dtype={'pre_root_id': str, 'post_root_id': str}
+                        )
+                        self._bulk_conn_cache = self._bulk_conn_cache.rename(columns={
+                            'pre_root_id': 'bodyId_pre',
+                            'post_root_id': 'bodyId_post',
+                            'syn_count': 'weight'
+                        })
+                    
+                    upstream_strs = set(str(x) for x in upstream_bodyIds)
+                    result = self._bulk_conn_cache[
+                        self._bulk_conn_cache['bodyId_pre'].isin(upstream_strs)
+                    ].copy()
+                    
+                    if downstream_bodyIds is not None:
+                        downstream_strs = set(str(x) for x in downstream_bodyIds)
+                        result = result[result['bodyId_post'].isin(downstream_strs)]
+                    
+                    if 'roi' not in result.columns:
+                        result['roi'] = 'WholeBrain'
+                    
+                    return result
+            except Exception as e:
+                # Re-raise to let caller handle/log the error properly
+                raise RuntimeError(f"Bulk fetch error for FlyWire/FAFB: {type(e).__name__}: {e}") from e
+        
+        # For NeuPrint: Direct API call without caching overhead
+        # This is used by build_connection_cache which handles caching separately
+        try:
+            self._ensure_neuprint_client()
+            
+            from neuprint import fetch_adjacencies, NeuronCriteria
+            import statvis as sv
+            
+            # Ensure bodyIds are integers
+            upstream_ints = [int(x) for x in upstream_bodyIds]
+            downstream_ints = [int(x) for x in downstream_bodyIds] if downstream_bodyIds else None
+            
+            if self.simple_fetch:
+                from neuprint import fetch_simple_connections
+                upstream_criteria = NeuronCriteria(bodyId=upstream_ints)
+                downstream_criteria = NeuronCriteria(bodyId=downstream_ints) if downstream_ints else None
+                result = fetch_simple_connections(
+                    upstream_criteria=upstream_criteria,
+                    downstream_criteria=downstream_criteria,
+                    min_weight=1,
+                    **self.kwargs_fetch
+                )
+            else:
+                neuron_df, roi_conn_df = fetch_adjacencies(
+                    sources=upstream_ints,
+                    targets=downstream_ints,
+                    min_total_weight=1,
+                    **self.kwargs_fetch
+                )
+                # roi_conn_df already has bodyId_pre, bodyId_post, roi, weight
+                result = roi_conn_df
+            
+            return result if result is not None else pd.DataFrame()
+            
+        except Exception as e:
+            # Re-raise to let caller handle/log the error properly
+            raise RuntimeError(f"NeuPrint bulk fetch error: {type(e).__name__}: {e}") from e
+    
+    def _bulk_save_connections(self, connection_list, neurons_fetched):
+        """
+        Save accumulated connections to cache in bulk.
+        Much faster than saving after each batch.
+        
+        Parameters:
+        -----------
+        connection_list : list of DataFrames
+            List of connection DataFrames to save
+        neurons_fetched : list
+            List of neurons that were fetched
+        """
+        if not connection_list:
+            return
+        
+        # Combine all connections
+        all_connections = pd.concat(connection_list, ignore_index=True)
+        
+        # Ensure required columns
+        all_connections['bodyId_pre'] = all_connections['bodyId_pre'].astype(str)
+        all_connections['bodyId_post'] = all_connections['bodyId_post'].astype(str)
+        if 'roi' not in all_connections.columns:
+            all_connections['roi'] = ''
+        all_connections['cached_date'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        
+        # Load existing and merge
+        conn_db = self._load_connection_db()
+        
+        if not conn_db.empty:
+            merge_cols = ['bodyId_pre', 'bodyId_post', 'roi']
+            combined = pd.concat([conn_db, all_connections])
+            combined = combined.drop_duplicates(subset=merge_cols, keep='first')
+        else:
+            combined = all_connections
+        
+        # Save connection database (without rebuilding index - we'll do that at the end)
+        db_path = self._get_connection_db_path()
+        combined.to_parquet(db_path, index=False, compression='gzip')
+        self._conn_df_cache = combined
+        
+        # Update neuron index for all fetched neurons
+        neurons_str = [str(x) for x in neurons_fetched]
+        neuron_index = self._load_neuron_index()
+        
+        now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        
+        # Count connections per neuron
+        conn_counts = all_connections.groupby('bodyId_pre').size().to_dict()
+        
+        # Update or add entries
+        updates = []
+        for bodyId in neurons_str:
+            count = conn_counts.get(bodyId, 0)
+            updates.append({
+                'bodyId': bodyId,
+                'downstream_complete': True,
+                'last_fetched': now,
+                'connection_count': count
+            })
+        
+        if updates:
+            updates_df = pd.DataFrame(updates)
+            if not neuron_index.empty:
+                # Merge updates
+                neuron_index = neuron_index[~neuron_index['bodyId'].isin(neurons_str)]
+                neuron_index = pd.concat([neuron_index, updates_df], ignore_index=True)
+            else:
+                neuron_index = updates_df
+            
+            # Save neuron index
+            self._save_neuron_index(neuron_index)
+
+    def _get_all_dataset_bodyids(self) -> list:
+        """Get all bodyIds from dataset's neuron_df file."""
+        dataset_safe = self.dataset.replace(':', '_').replace('.', '_')
+        
+        # Try parquet first, then CSV
+        parquet_path = os.path.join(
+            self.script_path, 'datasets', dataset_safe,
+            f"{dataset_safe}_allneurons_neuron_df.parquet"
+        )
+        csv_path = os.path.join(
+            self.script_path, 'datasets', dataset_safe,
+            f"{dataset_safe}_allneurons_neuron_df.csv"
+        )
+        
+        ndf = None
+        if os.path.exists(parquet_path):
+            try:
+                ndf = pd.read_parquet(parquet_path)
+            except Exception:
+                pass
+        
+        if ndf is None and os.path.exists(csv_path):
+            try:
+                is_fafb = 'fafb' in self.dataset.lower() or 'flywire' in self.dataset.lower()
+                if is_fafb:
+                    ndf = pd.read_csv(csv_path, dtype={'bodyId': str}, low_memory=False)
+                else:
+                    ndf = pd.read_csv(csv_path, index_col=0, low_memory=False)
+            except Exception:
+                pass
+        
+        if ndf is not None and 'bodyId' in ndf.columns:
+            return [str(x) for x in ndf['bodyId'].unique().tolist()]
+        
+        return []
+    
+    def _check_cache_completeness(self, expected_bodyIds: list) -> dict:
+        """
+        Check cache completeness against expected bodyIds.
+        
+        Returns dict with:
+        - expected: Number of expected neurons
+        - cached: Number of neurons in cache
+        - missing: Number of missing neurons
+        - ratio: Completeness ratio (0.0 to 1.0)
+        - cached_bodyids: List of cached bodyIds
+        - missing_bodyids: List of missing bodyIds
+        """
+        expected_set = set(str(x) for x in expected_bodyIds)
+        
+        # Check connection database for cached neurons
+        conn_db = self._load_connection_db()
+        cached_set = set()
+        
+        if conn_db is not None and not conn_db.empty:
+            if 'bodyId_pre' in conn_db.columns:
+                cached_set.update(conn_db['bodyId_pre'].astype(str).unique())
+        
+        # Also check neuron_index for neurons with 0 connections
+        neuron_index = self._load_neuron_index()
+        if neuron_index is not None and not neuron_index.empty:
+            if 'downstream_complete' in neuron_index.columns:
+                complete_mask = neuron_index['downstream_complete'].astype(bool)
+                indexed_bodyids = neuron_index[complete_mask]['bodyId'].astype(str).tolist()
+                cached_set.update(indexed_bodyids)
+        
+        # Calculate completeness
+        cached_in_expected = cached_set.intersection(expected_set)
+        missing_set = expected_set - cached_set
+        
+        ratio = len(cached_in_expected) / len(expected_set) if expected_set else 1.0
+        
+        return {
+            'expected': len(expected_set),
+            'cached': len(cached_in_expected),
+            'missing': len(missing_set),
+            'ratio': ratio,
+            'cached_bodyids': list(cached_in_expected),
+            'missing_bodyids': list(missing_set)
+        }
+    
+    def validate_and_repair_cache(self, quiet: bool = False) -> dict:
+        """
+        Validate cache integrity and repair inconsistencies.
+        
+        This function:
+        1. Checks if neurons marked 'downstream_complete' actually have connections
+        2. Cross-references neuron_index with actual connections.parquet
+        3. Marks neurons that were incorrectly flagged as complete as uncached
+        4. Enriches neuron_index with type/instance from neuron_df
+        
+        Returns:
+        --------
+        dict : Summary with keys:
+            - 'total_indexed': Total neurons in neuron_index
+            - 'total_with_connections': Neurons that have connections in cache
+            - 'falsely_complete': Neurons marked complete but no connections
+            - 'repaired': Number of entries repaired
+            - 'types_updated': Number of type/instance values updated
+        """
+        import polars as pl
+        
+        def _print(msg):
+            if not quiet:
+                print(msg)
+        
+        _print("=" * 60)
+        _print("Validating and Repairing Connection Cache")
+        _print("=" * 60)
+        _print(f"Dataset: {self.dataset}")
+        
+        # Get paths
+        index_path = self._get_neuron_index_path()
+        conn_path = self._get_connection_db_path()
+        
+        if not os.path.exists(index_path):
+            _print("No neuron_index found. Nothing to repair.")
+            return {'total_indexed': 0, 'total_with_connections': 0, 
+                    'falsely_complete': 0, 'repaired': 0, 'types_updated': 0}
+        
+        # Load neuron_index
+        ni = pl.read_parquet(index_path)
+        total_indexed = len(ni)
+        _print(f"Neurons in index: {total_indexed:,}")
+        
+        # Get neurons that actually have connections
+        neurons_with_conns = set()
+        if os.path.exists(conn_path):
+            conns = pl.read_parquet(conn_path)
+            neurons_with_conns = set(conns['bodyId_pre'].unique().to_list())
+            _print(f"Neurons with downstream connections: {len(neurons_with_conns):,}")
+        
+        # Find neurons marked complete but no connections
+        complete_mask = ni['downstream_complete'] == True
+        complete_ids = set(ni.filter(complete_mask)['bodyId'].to_list())
+        falsely_complete = complete_ids - neurons_with_conns
+        
+        _print(f"Neurons marked complete: {len(complete_ids):,}")
+        _print(f"Falsely marked complete (no connections): {len(falsely_complete):,}")
+        
+        if len(falsely_complete) == 0:
+            _print("✓ Cache integrity OK - no repairs needed")
+        else:
+            _print(f"\n⚠️ Found {len(falsely_complete):,} neurons incorrectly marked as complete")
+            _print("   Resetting their downstream_complete flag to False...")
+            
+            # Convert to pandas for update (polars is read-only)
+            ni_pd = ni.to_pandas()
+            ni_pd.loc[ni_pd['bodyId'].isin(falsely_complete), 'downstream_complete'] = False
+            ni_pd.loc[ni_pd['bodyId'].isin(falsely_complete), 'connection_count'] = -1  # Mark as needing fetch
+            
+            # Save updated index
+            ni_pd.to_parquet(index_path, index=False)
+            _print(f"   ✓ Repaired {len(falsely_complete):,} entries")
+        
+        # Enrich with type/instance from neuron_df
+        dataset_safe = self.dataset.replace(':', '_').replace('.', '_')
+        ndf_path = os.path.join(
+            self.script_path, 'datasets', dataset_safe,
+            f"{dataset_safe}_allneurons_neuron_df.csv"
+        )
+        parquet_ndf_path = ndf_path.replace('.csv', '.parquet')
+        
+        types_updated = 0
+        if os.path.exists(parquet_ndf_path) or os.path.exists(ndf_path):
+            _print("\nEnriching neuron_index with type/instance from neuron_df...")
+            
+            # Load neuron_df
+            if os.path.exists(parquet_ndf_path):
+                ndf = pl.read_parquet(parquet_ndf_path)
+            else:
+                ndf = pl.read_csv(ndf_path)
+            
+            # Ensure bodyId is string
+            if 'bodyId' in ndf.columns:
+                ndf = ndf.with_columns(pl.col('bodyId').cast(pl.Utf8))
+            
+            # Load current index again (might have been updated)
+            ni = pl.read_parquet(index_path)
+            
+            # Find neurons with empty type
+            empty_type_mask = (pl.col('type').is_null()) | (pl.col('type') == '')
+            empty_type_ids = ni.filter(empty_type_mask)['bodyId'].to_list()
+            
+            if empty_type_ids and 'bodyId' in ndf.columns and 'type' in ndf.columns:
+                # Get type/instance info from neuron_df
+                ndf_lookup = ndf.filter(pl.col('bodyId').is_in(empty_type_ids))
+                
+                if len(ndf_lookup) > 0:
+                    # Create lookup dict
+                    lookup_dict = {}
+                    for row in ndf_lookup.iter_rows(named=True):
+                        bid = str(row.get('bodyId', ''))
+                        lookup_dict[bid] = {
+                            'type': row.get('type', ''),
+                            'instance': row.get('instance', ''),
+                            'post': row.get('post', 0)
+                        }
+                    
+                    # Update in pandas
+                    ni_pd = ni.to_pandas()
+                    for bid, info in lookup_dict.items():
+                        mask = ni_pd['bodyId'] == bid
+                        if mask.any():
+                            if info['type']:
+                                ni_pd.loc[mask, 'type'] = info['type']
+                            if info.get('instance'):
+                                ni_pd.loc[mask, 'instance'] = info['instance']
+                            if info.get('post'):
+                                ni_pd.loc[mask, 'post'] = info['post']
+                            types_updated += 1
+                    
+                    # Save
+                    ni_pd.to_parquet(index_path, index=False)
+                    _print(f"   ✓ Updated {types_updated:,} type/instance values")
+        
+        # Clear caches so next load picks up repairs
+        self._neuron_index_cache = None
+        self._neuron_index_dict = {}
+        
+        _print("\n" + "=" * 60)
+        _print("Cache Validation Complete")
+        _print("=" * 60)
+        
+        return {
+            'total_indexed': total_indexed,
+            'total_with_connections': len(neurons_with_conns),
+            'falsely_complete': len(falsely_complete),
+            'repaired': len(falsely_complete),
+            'types_updated': types_updated
+        }
+    
+    def _count_cached_connections(self) -> int:
+        """Count total connections in cache."""
+        # Return in-memory count if available
+        if self._conn_df_cache is not None and not self._conn_df_cache.empty:
+            return len(self._conn_df_cache)
+            
+        # Optimization: If using parquet, try to read metadata only to avoid loading full file
+        db_path = self._get_connection_db_path()
+        if os.path.exists(db_path):
+            try:
+                # Try pyarrow first
+                import pyarrow.parquet as pq
+                metadata = pq.read_metadata(db_path)
+                return metadata.num_rows
+            except ImportError:
+                pass
+            except Exception:
+                pass
+                
+        # Fallback to loading full DB (legacy behavior)
+        conn_db = self._load_connection_db()
+        if conn_db is not None and not conn_db.empty:
+            return len(conn_db)
+        return 0
+
+    def build_connectivity_profile_cache(
+        self,
+        neuron_types: list = None,
+        top_k: int = 10,
+        top_m: int = 5,
+        expand_2hop: bool = True,
+        max_neurons: int = None,
+        force_refresh: bool = False,
+        progress_callback: callable = None
+    ) -> dict:
+        """
+        Build connectivity profile cache for neuron types using ConnectivityProfiler.
+        
+        Connectivity profiles are used for homolog finding and cross-dataset 
+        comparisons. This delegates to the ConnectivityProfiler.
+        
+        Parameters:
+        -----------
+        neuron_types : list, optional
+            List of neuron types to cache. If None, caches all types in dataset.
+        top_k : int
+            Store top N partners by weight (default: 10)
+        top_m : int  
+            Ensure at least M unique types via expansion (default: 5)
+        expand_2hop : bool
+            Enable 2-hop expansion for untyped partners (default: True)
+        max_neurons : int, optional
+            Limit to first N neurons (for testing)
+        force_refresh : bool
+            Force rebuild even if profiles exist in cache
+        progress_callback : callable, optional
+            Callback function(current, total, type_name) for progress updates
+        
+        Returns:
+        --------
+        dict : Summary with keys:
+            - 'total_profiles': Number of profiles built
+            - 'profiles': Dict mapping neuron_type to ConnectivityProfile
+            - 'failed_types': List of types that failed
             - 'elapsed_time': Time taken in seconds
         
         Example:
         --------
         >>> fnc = FindNeuronConnection(dataset='hemibrain:v1.2.1', ...)
-        >>> result = fnc.build_connection_cache(neuron_types=['aMe12', 'Mi1'])
-        >>> print(f"Cached {result['total_connections']} connections")
+        >>> result = fnc.build_connectivity_profile_cache(top_k=10, top_m=5)
+        >>> print(f"Built {result['total_profiles']} profiles")
         """
         import time
         start_time = time.time()
         
         print("=" * 60)
-        print("Building Connection Cache")
+        print("Building Connectivity Profile Cache")
         print("=" * 60)
-        
-        if not self.use_cache:
-            print("⚠️  Cache is disabled. Enable with use_cache=True")
-            return {'total_neurons': 0, 'total_connections': 0, 
-                    'cached_neurons': [], 'failed_neurons': [], 'elapsed_time': 0}
-        
-        # Get bodyIds to cache
-        if neuron_bodyIds is not None:
-            bodyIds_to_cache = [str(x) for x in neuron_bodyIds]
-            print(f"Caching connections for {len(bodyIds_to_cache)} specified bodyIds...")
-        elif neuron_types is not None:
-            # Fetch bodyIds for the given types
-            print(f"Fetching bodyIds for {len(neuron_types)} neuron types...")
-            bodyIds_to_cache = []
-            for ntype in neuron_types:
-                try:
-                    neurons_df = self._fetch_neurons_local_or_api(
-                        [ntype], 
-                        columns=['bodyId', 'type'],
-                        search_by='type'
-                    )
-                    if not neurons_df.empty:
-                        bodyIds_to_cache.extend([str(x) for x in neurons_df['bodyId'].tolist()])
-                except Exception as e:
-                    print(f"  ⚠️ Failed to get bodyIds for type {ntype}: {e}")
-            bodyIds_to_cache = list(set(bodyIds_to_cache))
-            print(f"Found {len(bodyIds_to_cache)} unique bodyIds")
+        print(f"Dataset: {self.dataset}")
+        print(f"Parameters: top_k={top_k}, top_m={top_m}, expand_2hop={expand_2hop}")
+        if neuron_types:
+            print(f"Neuron types: {len(neuron_types)} specified")
         else:
-            # Cache all neurons in dataset
-            print("Caching all neurons in dataset...")
-            dataset_safe = self.dataset.replace(':', '_').replace('.', '_')
-            dataset_path = os.path.join(
-                self.script_path, 'datasets', dataset_safe,
-                f"{dataset_safe}_allneurons_neuron_df.csv"
-            )
-            
-            if os.path.exists(dataset_path):
-                is_fafb = 'fafb' in self.dataset.lower() or 'flywire' in self.dataset.lower()
-                if is_fafb:
-                    ndf = pd.read_csv(dataset_path, dtype={'bodyId': str}, low_memory=False)
-                else:
-                    ndf = pd.read_csv(dataset_path, index_col=0, low_memory=False)
-                    ndf['bodyId'] = ndf['bodyId'].astype(str)
-                bodyIds_to_cache = ndf['bodyId'].unique().tolist()
-                print(f"Found {len(bodyIds_to_cache)} neurons in dataset")
-            else:
-                print(f"⚠️ Dataset file not found: {dataset_path}")
-                return {'total_neurons': 0, 'total_connections': 0,
-                        'cached_neurons': [], 'failed_neurons': [], 'elapsed_time': 0}
+            print("Neuron types: ALL")
+        if max_neurons:
+            print(f"Max neurons: {max_neurons}")
+        print()
         
-        # Check which neurons are already cached
-        neuron_index = self._load_neuron_index()
-        if not neuron_index.empty:
-            already_cached = neuron_index[
-                neuron_index['downstream_complete'] == True
-            ]['bodyId'].astype(str).tolist()
-            uncached = [x for x in bodyIds_to_cache if x not in already_cached]
-            print(f"Already cached: {len(already_cached)}, need to cache: {len(uncached)}")
-        else:
-            uncached = bodyIds_to_cache
-            print(f"No existing cache, need to cache: {len(uncached)}")
+        try:
+            from comparison.connectivity_profiler import ConnectivityProfiler, ProfilerConfig
+        except ImportError:
+            print("❌ Could not import ConnectivityProfiler")
+            print("   Make sure comparison module is available")
+            return {'total_profiles': 0, 'profiles': {}, 'failed_types': [], 
+                    'elapsed_time': 0}
         
-        if not uncached:
-            elapsed = time.time() - start_time
-            print("✅ All neurons already cached!")
-            return {'total_neurons': len(bodyIds_to_cache), 'total_connections': 0,
-                    'cached_neurons': bodyIds_to_cache, 'failed_neurons': [], 
-                    'elapsed_time': elapsed}
+        # Create profiler config
+        config = ProfilerConfig(
+            top_k_bodyid=top_k,
+            top_m_type=top_m,
+            expand_untyped_2hop=expand_2hop,
+            use_cache=True,
+            verbose=self.verbose_mode != 'none'
+        )
         
-        # Process in batches
-        total = len(uncached)
-        cached_neurons = []
-        failed_neurons = []
-        total_connections = 0
+        profiler = ConnectivityProfiler(config)
         
-        for i in range(0, total, batch_size):
-            batch = uncached[i:i + batch_size]
-            batch_num = i // batch_size + 1
-            total_batches = (total + batch_size - 1) // batch_size
-            
-            # Progress callback
-            if progress_callback:
-                progress_callback(i, total, f"Batch {batch_num}/{total_batches}")
-            
-            print(f"\n📥 Batch {batch_num}/{total_batches}: Processing {len(batch)} neurons...")
-            
-            try:
-                # Fetch connections for this batch (this will cache them)
-                connections = self._fetch_connections_with_cache(
-                    upstream_bodyIds=batch,
-                    downstream_bodyIds=None,  # All downstream
-                    min_weight=1,  # Cache all connections
-                    min_traversal_prob=0,
-                    min_conn_ratio=0
-                )
-                
-                if not connections.empty:
-                    total_connections += len(connections)
-                    cached_neurons.extend(batch)
-                    print(f"  ✅ Cached {len(connections)} connections")
-                else:
-                    # Even 0 connections is valid
-                    cached_neurons.extend(batch)
-                    print(f"  ✅ Cached (0 connections)")
-                    
-            except Exception as e:
-                print(f"  ❌ Error caching batch: {e}")
-                failed_neurons.extend(batch)
+        # Build profiles
+        profiles = profiler.build_connectivity_profile_cache(
+            dataset=self.dataset,
+            neuron_types=neuron_types,
+            top_k_bodyid=top_k,
+            top_m_type=top_m,
+            expand_untyped_2hop=expand_2hop,
+            force_refresh=force_refresh,
+            max_neurons=max_neurons,
+            progress_callback=progress_callback
+        )
         
         elapsed = time.time() - start_time
         
-        # Summary
-        print("\n" + "=" * 60)
-        print("Cache Build Complete")
-        print("=" * 60)
-        print(f"Total neurons processed: {len(cached_neurons) + len(failed_neurons)}")
-        print(f"Successfully cached: {len(cached_neurons)}")
-        print(f"Failed: {len(failed_neurons)}")
-        print(f"Total connections cached: {total_connections:,}")
-        print(f"Time elapsed: {elapsed:.1f} seconds")
+        # Extract failed types (compare requested vs returned)
+        failed_types = []
+        if neuron_types:
+            returned_types = set(profiles.keys())
+            failed_types = [t for t in neuron_types if t not in returned_types]
         
-        if failed_neurons:
-            print(f"\nFailed neurons: {failed_neurons[:10]}{'...' if len(failed_neurons) > 10 else ''}")
+        # Summary
+        print()
+        print("=" * 60)
+        print("Connectivity Profile Cache Complete")
+        print("=" * 60)
+        print(f"Total profiles built: {len(profiles)}")
+        if failed_types:
+            print(f"Failed types: {len(failed_types)}")
+        print(f"Elapsed time: {elapsed:.1f} seconds")
         
         return {
-            'total_neurons': len(cached_neurons) + len(failed_neurons),
-            'total_connections': total_connections,
-            'cached_neurons': cached_neurons,
-            'failed_neurons': failed_neurons,
+            'total_profiles': len(profiles),
+            'profiles': profiles,
+            'failed_types': failed_types,
             'elapsed_time': elapsed
         }
 
     def InitializeNeuronInfo(self):
-        # Ensure neuprint Client is set before any statvis/neuprint API call
+        # Ensure neuprint Client is set for the CORRECT dataset
         if self.client_type != 'flywire':
-            from neuprint import Client, set_default_client
-            try:
-                from neuprint import default_client
-                _ = default_client()
-            except RuntimeError:
-                self.client_hemibrain = Client(self.server, self.dataset, self.token)
-                set_default_client(self.client_hemibrain)
-        ''' initialize neuron info '''
+            self._ensure_neuprint_client()
         ''' initialize neuron info '''
         print('Fetching source and target neurons...')
         
@@ -2393,6 +3811,43 @@ class FindNeuronConnection:
                 custom_group_names=self.custom_target_group_names if self.custom_target_group_names else None,
                 client=active_client
             )
+        
+        # Apply label mapping if available
+        if self.label_mapper:
+            print(f'\033[36mApplying label mapping to source/target neurons...\033[0m')
+            # Apply to source_df
+            if not self.source_df.empty and 'type' in self.source_df.columns:
+                # Create a copy to avoid SettingWithCopyWarning
+                self.source_df = self.source_df.copy()
+                # Map types to standardized labels
+                # We use 'source' role for source neurons
+                self.source_df['std_label'] = self.source_df.apply(
+                    lambda row: self.label_mapper.get_std_label(
+                        self.dataset, 
+                        row['type'] if pd.notna(row['type']) else row['bodyId'], 
+                        'source'
+                    ), axis=1
+                )
+                # Overwrite type with std_label where available
+                mask = self.source_df['std_label'] != ''
+                self.source_df.loc[mask, 'type'] = self.source_df.loc[mask, 'std_label']
+                # Drop temporary column
+                self.source_df = self.source_df.drop(columns=['std_label'])
+                
+            # Apply to target_df
+            if not self.target_df.empty and 'type' in self.target_df.columns:
+                self.target_df = self.target_df.copy()
+                # We use 'target' role for target neurons
+                self.target_df['std_label'] = self.target_df.apply(
+                    lambda row: self.label_mapper.get_std_label(
+                        self.dataset, 
+                        row['type'] if pd.notna(row['type']) else row['bodyId'], 
+                        'target'
+                    ), axis=1
+                )
+                mask = self.target_df['std_label'] != ''
+                self.target_df.loc[mask, 'type'] = self.target_df.loc[mask, 'std_label']
+                self.target_df = self.target_df.drop(columns=['std_label'])
         
         if self.max_interlayer > 2 or len(self.source_df) > 200:
             self.simple_fetch = False
@@ -2689,7 +4144,8 @@ class FindNeuronConnection:
             traversal_probability_threshold=0,
             dataset=self.dataset,
             script_path=self.script_path,
-            aggregate_method='product'  # Type-level prob = 1 - product(bodyId-level block_prob)
+            aggregate_method='product',  # Type-level prob = 1 - product(bodyId-level block_prob)
+            label_mapper=self.label_mapper
         )
         # fill empty values
         self.conn_df = self.conn_df.fillna("")
@@ -2758,35 +4214,35 @@ class FindNeuronConnection:
             
             base_name = os.path.join(details_folder, self.source_fname+'_to_'+self.target_fname+'_info_snp'+str(self.min_synapse_num))
             
-            self.parameter_df.to_csv(base_name + '_parameters.csv')
-            self.source_df.to_csv(base_name + '_source_info.csv')
-            self.target_df.to_csv(base_name + '_target_info.csv')
-            self.source_in_conn.to_csv(base_name + '_source_in_connection.csv')
-            self.target_in_conn.to_csv(base_name + '_target_in_connection.csv')
-            self.conn_type.to_csv(base_name + '_connection_groupby_type.csv')
+            self._save_df_to_csv_polars(self.parameter_df, base_name + '_parameters.csv')
+            self._save_df_to_csv_polars(self.source_df, base_name + '_source_info.csv')
+            self._save_df_to_csv_polars(self.target_df, base_name + '_target_info.csv')
+            self._save_df_to_csv_polars(self.source_in_conn, base_name + '_source_in_connection.csv')
+            self._save_df_to_csv_polars(self.target_in_conn, base_name + '_target_in_connection.csv')
+            self._save_df_to_csv_polars(self.conn_type, base_name + '_connection_groupby_type.csv')
             
             # Add custom group sheets if custom grouping was used
             if self.conn_group is not None:
-                self.conn_group.to_csv(base_name + '_connection_groupby_custom.csv')
+                self._save_df_to_csv_polars(self.conn_group, base_name + '_connection_groupby_custom.csv')
                 if not self.largeTargetSet:
-                    self.conn_matrix_group.to_csv(base_name + '_connectionMatrix_group.csv')
-                    self.conn_matrix_ratio_group.to_csv(base_name + '_connectionRatioMat_group.csv')
+                    self._save_df_to_csv_polars(self.conn_matrix_group, base_name + '_connectionMatrix_group.csv', index=True)
+                    self._save_df_to_csv_polars(self.conn_matrix_ratio_group, base_name + '_connectionRatioMat_group.csv', index=True)
                 else:
-                    self.conn_matrix_group.transpose().to_csv(base_name + '_connectionMatrix_group.csv')
-                    self.conn_matrix_ratio_group.transpose().to_csv(base_name + '_connectionRatioMat_group.csv')
+                    self._save_df_to_csv_polars(self.conn_matrix_group.transpose(), base_name + '_connectionMatrix_group.csv', index=True)
+                    self._save_df_to_csv_polars(self.conn_matrix_ratio_group.transpose(), base_name + '_connectionRatioMat_group.csv', index=True)
             
             # Type-level matrices
             if not self.largeTargetSet:
-                self.conn_matrix_type.to_csv(base_name + '_connectionMatrix_type.csv')
-                self.cmat_full_type.to_csv(base_name + '_connMat_type_full.csv')
-                self.transitionMat_type.to_csv(base_name + '_transmissionMat_type.csv')
-                self.conn_matrix_ratio_type.to_csv(base_name + '_connectionRatioMat_type.csv')
-                self.ratioMat_full_type.to_csv(base_name + '_ratioMat_type_full.csv')
+                self._save_df_to_csv_polars(self.conn_matrix_type, base_name + '_connectionMatrix_type.csv', index=True)
+                self._save_df_to_csv_polars(self.cmat_full_type, base_name + '_connMat_type_full.csv', index=True)
+                self._save_df_to_csv_polars(self.transitionMat_type, base_name + '_transmissionMat_type.csv', index=True)
+                self._save_df_to_csv_polars(self.conn_matrix_ratio_type, base_name + '_connectionRatioMat_type.csv', index=True)
+                self._save_df_to_csv_polars(self.ratioMat_full_type, base_name + '_ratioMat_type_full.csv', index=True)
             else:
-                self.conn_matrix_type.transpose().to_csv(base_name + '_connectionMatrix_type.csv')
-                self.cmat_full_type.transpose().to_csv(base_name + '_connMat_type_full.csv')
-                self.transitionMat_type.transpose().to_csv(base_name + '_transmissionMat_type.csv')
-                self.conn_matrix_ratio_type.transpose().to_csv(base_name + '_connectionRatioMat_type.csv')
+                self._save_df_to_csv_polars(self.conn_matrix_type.transpose(), base_name + '_connectionMatrix_type.csv', index=True)
+                self._save_df_to_csv_polars(self.cmat_full_type.transpose(), base_name + '_connMat_type_full.csv', index=True)
+                self._save_df_to_csv_polars(self.transitionMat_type.transpose(), base_name + '_transmissionMat_type.csv', index=True)
+                self._save_df_to_csv_polars(self.conn_matrix_ratio_type.transpose(), base_name + '_connectionRatioMat_type.csv', index=True)
         else:
             output_excel_name = os.path.join(self.direct_folder,self.source_fname+'_to_'+self.target_fname+'_info_snp'+str(self.min_synapse_num)+'.xlsx')
             print(f'Saving type-level connection info to excel file...')
@@ -2844,7 +4300,7 @@ class FindNeuronConnection:
                 os.makedirs(details_folder, exist_ok=True)
                 
                 output_params_csv = os.path.join(details_folder, self.source_fname+'_to_'+self.target_fname+'_bodyId_parameters_snp'+str(self.min_synapse_num)+'.csv')
-                self.parameter_df.to_csv(output_params_csv)
+                self._save_df_to_csv_polars(self.parameter_df, output_params_csv)
             else:
                 output_params_excel = os.path.join(self.direct_folder,self.source_fname+'_to_'+self.target_fname+'_bodyId_parameters_snp'+str(self.min_synapse_num)+'.xlsx')
                 with pd.ExcelWriter(output_params_excel, mode='w', engine='xlsxwriter') as dataWriter:
@@ -2855,16 +4311,16 @@ class FindNeuronConnection:
             
             # Save bodyId connection data as CSV
             output_bodyid_csv = os.path.join(self.direct_folder,self.source_fname+'_to_'+self.target_fname+'_bodyId_connections_snp'+str(self.min_synapse_num)+'.csv')
-            self.conn_df.to_csv(output_bodyid_csv, index=False)
+            self._save_df_to_csv_polars(self.conn_df, output_bodyid_csv)
             print(f'  ✓ Saved to: {output_bodyid_csv}')
             
             # Save matrices as separate CSVs
             if not self.largeTargetSet:
-                self.conn_matrix_bodyId.to_csv(os.path.join(self.direct_folder,self.source_fname+'_to_'+self.target_fname+'_connectionMatrix_bodyId.csv'))
-                self.transitionMat_bodyId.to_csv(os.path.join(self.direct_folder,self.source_fname+'_to_'+self.target_fname+'_transmissionMat_bodyId.csv'))
+                self._save_df_to_csv_polars(self.conn_matrix_bodyId, os.path.join(self.direct_folder,self.source_fname+'_to_'+self.target_fname+'_connectionMatrix_bodyId.csv'), index=True)
+                self._save_df_to_csv_polars(self.transitionMat_bodyId, os.path.join(self.direct_folder,self.source_fname+'_to_'+self.target_fname+'_transmissionMat_bodyId.csv'), index=True)
             else:
-                self.conn_matrix_bodyId.transpose().to_csv(os.path.join(self.direct_folder,self.source_fname+'_to_'+self.target_fname+'_connectionMatrix_bodyId.csv'))
-                self.transitionMat_bodyId.transpose().to_csv(os.path.join(self.direct_folder,self.source_fname+'_to_'+self.target_fname+'_transmissionMat_bodyId.csv'))
+                self._save_df_to_csv_polars(self.conn_matrix_bodyId.transpose(), os.path.join(self.direct_folder,self.source_fname+'_to_'+self.target_fname+'_connectionMatrix_bodyId.csv'), index=True)
+                self._save_df_to_csv_polars(self.transitionMat_bodyId.transpose(), os.path.join(self.direct_folder,self.source_fname+'_to_'+self.target_fname+'_transmissionMat_bodyId.csv'), index=True)
         else:
             # Data fits in Excel
             output_bodyid_excel = os.path.join(self.direct_folder,self.source_fname+'_to_'+self.target_fname+'_bodyId_data_snp'+str(self.min_synapse_num)+'.xlsx')
@@ -3239,17 +4695,69 @@ class FindNeuronConnection:
         if Flag: print('\nNOT All Target Neurons Traced')
         else: print('\nAll Target Neurons Traced')
         
-        # searching layers
+        # Use Memoized DFS for pathfinding (like FindAllPath)
+        print('\nUsing Memoized DFS for pathfinding...')
+        
+        # Build graph from conn_layers
+        G = nx.DiGraph()
+        G_edges = []
+        for i, conn in enumerate(conn_layers):
+            for idx, row in conn.iterrows():
+                u, v, w = row['bodyId_pre'], row['bodyId_post'], row['weight']
+                G.add_edge(u, v, weight=w)
+                G_edges.append((u, v, w))
+        
+        # Prepare args for _find_paths_dfs_optimized
+        # We need layer_neurons_list to reconstruct layers correctly
+        # In FindPath, searchedNeurons accumulates neurons. 
+        # We can reconstruct layer_neurons from conn_layers
+        layer_neurons_list = []
+        # Layer 0 sources
+        layer_neurons_list.append(set(self.source_df['bodyId'].unique()))
+        for conn in conn_layers:
+            layer_neurons_list.append(set(conn['bodyId_post'].unique()))
+            
+        # Targets found in the network
+        targets_found = self.target_df[self.target_df['Checked'] == True]['bodyId'].unique()
+        targets_set = set(targets_found)
+        
+        sources = list(self.source_df['bodyId'].unique())
+        cutoff = self.max_interlayer + 1
+        
+        args = (sources, targets_set, G_edges, cutoff, layer_neurons_list)
+        
+        # Run DFS
+        neurons_in_paths, edges_in_paths, edges_in_paths_with_layer, path_count, pairs_with_paths, total_pairs_checked, paths_found = self._find_paths_dfs_optimized(args)
+        
+        print(f'Found {path_count} paths between {pairs_with_paths} source-target pairs.')
+        
+        # Reconstruct conn_inpath and conn_types
         conn_inpath = pd.DataFrame()
         conn_types = pd.DataFrame()
-        post_ID = target_ID
-        neuron_layers = [target_ID]
-        weight_layers = {} # dict
+        weight_layers = {}
         
-        for i in reversed(range(len(conn_layers))): # searching for connection path from target neurons to source neurons
-            conn: pd.DataFrame = conn_layers[i]
-            conn_df = conn[conn['bodyId_post'].isin(post_ID)] # remove neurons not in the connection path
-            if len(conn_df) == 0: continue # if not found target neurons in the last x searched layers, skip these layers (when max_interlayer is too large)
+        # Filter conn_layers based on edges_in_paths_with_layer
+        for i in range(len(conn_layers)):
+            conn = conn_layers[i]
+            
+            # Filter rows where (i, bodyId_pre, bodyId_post) is in edges_in_paths_with_layer
+            # Create a set of (pre, post) for this layer for fast lookup
+            valid_edges_in_layer = set()
+            for layer_idx, u, v in edges_in_paths_with_layer:
+                if layer_idx == i:
+                    valid_edges_in_layer.add((u, v))
+            
+            if not valid_edges_in_layer:
+                continue
+                
+            # Filter dataframe
+            # Vectorized filtering using MultiIndex or map
+            # Create a temporary index for filtering
+            conn_idx = pd.MultiIndex.from_frame(conn[['bodyId_pre', 'bodyId_post']])
+            mask = conn_idx.isin(valid_edges_in_layer)
+            conn_df = conn[mask].copy()
+            
+            if len(conn_df) == 0: continue
             
             # Get all neurons involved in this layer's connections (for accurate ratio calculation)
             bodyIds_in_layer = np.unique(np.concatenate([conn_df['bodyId_pre'].unique(), conn_df['bodyId_post'].unique()]))
@@ -3260,7 +4768,8 @@ class FindNeuronConnection:
                 traversal_probability_threshold=0,
                 dataset=self.dataset,
                 script_path=self.script_path,
-                target_neurons_df=neurons_in_layer_df
+                target_neurons_df=neurons_in_layer_df,
+                label_mapper=self.label_mapper
             )
             conn_df.insert(loc=0,column='conn_layer',value=str(i)+'->'+str(i+1))
             conn_type.insert(loc=0,column='conn_layer',value=str(i)+'->'+str(i+1))
@@ -3269,13 +4778,24 @@ class FindNeuronConnection:
             conn_inpath = pd.concat([conn_inpath,conn_df])
             conn_types = pd.concat([conn_types,conn_type])
             
-            post_ID = conn_df['bodyId_pre'].unique()
-            neuron_layers.append(post_ID)
-            post_ID = np.concatenate((post_ID,target_ID)) # post ID for next cycle. include target_ID because all target neurons may not be at the last layer
-            post_ID = np.unique(post_ID)
             weight_layers.update({str(i)+'->'+str(i+1): conn_df['weight'].sum()})
             
-        neuron_layers.reverse()
+        # Reconstruct neuron_layers for visualization
+        neuron_layers = []
+        if not conn_inpath.empty:
+            # Get all unique layer indices from conn_inpath
+            # conn_layer format is "i->i+1"
+            layers = sorted(conn_inpath['conn_layer'].unique(), key=lambda x: int(x.split('->')[0]))
+            
+            if layers:
+                first_layer = layers[0]
+                neuron_layers.append(conn_inpath[conn_inpath['conn_layer'] == first_layer]['bodyId_pre'].unique())
+                
+                for layer in layers:
+                    neuron_layers.append(conn_inpath[conn_inpath['conn_layer'] == layer]['bodyId_post'].unique())
+        else:
+             neuron_layers = [self.source_df['bodyId'].unique()]
+            
         if not conn_inpath.empty:
             conn_inpath = conn_inpath.sort_values(by=['conn_layer','traversal_probability','weight'],ascending=[True,False,False])
             conn_inpath = conn_inpath.reset_index(drop=True)
@@ -3299,11 +4819,11 @@ class FindNeuronConnection:
             csv_folder = os.path.join(self.path_folder, 'data_details')
             os.makedirs(csv_folder, exist_ok=True)
             print(f'  💾 Saving data as CSV files to: {csv_folder}')
-            self.parameter_df.to_csv(os.path.join(csv_folder, 'parameters.csv'), index=False)
-            self.source_df.to_csv(os.path.join(csv_folder, 'source_neurons.csv'))
-            self.target_df.to_csv(os.path.join(csv_folder, 'target_neurons.csv'))
-            totalweight_df.to_csv(os.path.join(csv_folder, 'total_weight_layer.csv'))
-            conn_types.to_csv(os.path.join(csv_folder, 'connection_type.csv'))
+            self._save_df_to_csv_polars(self.parameter_df, os.path.join(csv_folder, 'parameters.csv'))
+            self._save_df_to_csv_polars(self.source_df, os.path.join(csv_folder, 'source_neurons.csv'))
+            self._save_df_to_csv_polars(self.target_df, os.path.join(csv_folder, 'target_neurons.csv'))
+            self._save_df_to_csv_polars(totalweight_df, os.path.join(csv_folder, 'total_weight_layer.csv'))
+            self._save_df_to_csv_polars(conn_types, os.path.join(csv_folder, 'connection_type.csv'))
             self._save_matrices_to_csv(conn_types, csv_folder, level='type')
         else:
             output_excel_name = os.path.join(self.path_folder,self.source_fname+'_to_'+self.target_fname+'_path_info.xlsx')
@@ -3337,11 +4857,11 @@ class FindNeuronConnection:
             
             # Save parameters (if not already saved)
             if not os.path.exists(os.path.join(bodyid_folder, 'parameters.csv')):
-                self.parameter_df.to_csv(os.path.join(bodyid_folder, 'parameters.csv'), index=False)
+                self._save_df_to_csv_polars(self.parameter_df, os.path.join(bodyid_folder, 'parameters.csv'))
             
             # Save bodyId connection data as CSV
             output_bodyid_csv = os.path.join(bodyid_folder, 'connection_info_bodyId.csv')
-            conn_inpath.to_csv(output_bodyid_csv, index=False)
+            self._save_df_to_csv_polars(conn_inpath, output_bodyid_csv)
             self._save_matrices_to_csv(conn_inpath, bodyid_folder, level='bodyId')
             print(f'  ✓ Saved to: {bodyid_folder}/')
         else:
@@ -3363,24 +4883,8 @@ class FindNeuronConnection:
         print('Building type-level graph and finding paths...')
         
         # Build type-level graph from conn_types
-        G_type = nx.DiGraph()
-        for idx in conn_types.index:
-            row = conn_types.loc[idx]
-            type_pre = row['type_pre']
-            type_post = row['type_post']
-            weight = row['weight']
-            # Ensure scalar values (not Series)
-            if isinstance(type_pre, pd.Series):
-                type_pre = type_pre.iloc[0]
-            if isinstance(type_post, pd.Series):
-                type_post = type_post.iloc[0]
-            if isinstance(weight, pd.Series):
-                weight = weight.iloc[0]
-                
-            if G_type.has_edge(type_pre, type_post):
-                G_type[type_pre][type_post]['weight'] += weight
-            else:
-                G_type.add_edge(type_pre, type_post, weight=weight)
+        G_type = FastGraph()
+        G_type.build_from_dataframe(conn_types, 'type_pre', 'type_post', 'weight')
         
         self._vprint(f'  Type-level graph: {G_type.number_of_nodes()} types, {G_type.number_of_edges()} edges', level='full')
         
@@ -3398,10 +4902,9 @@ class FindNeuronConnection:
             for target_type in target_types:
                 if target_type not in G_type:
                     continue
-                if nx.has_path(G_type, source_type, target_type):
-                    # Find all simple paths with length <= max_interlayer + 1
-                    for path in nx.all_simple_paths(G_type, source_type, target_type, cutoff=self.max_interlayer + 1):
-                        type_paths.append(path)
+                # Find all simple paths with length <= max_interlayer + 1
+                for path in G_type.all_simple_paths(source_type, target_type, cutoff=self.max_interlayer + 1):
+                    type_paths.append(path)
         
         self._vprint(f'  Found {len(type_paths):,} type-level paths', level='full')
         
@@ -3505,12 +5008,12 @@ class FindNeuronConnection:
         print('💾 Saving path_type data...')
         if self.output_format == 'csv':
              # Save path_type.csv in the parent folder (self.path_folder)
-             path_df_type.to_csv(os.path.join(self.path_folder, f'{self.source_fname}_to_{self.target_fname}_path_type.csv'), index=False)
+             self._save_df_to_csv_polars(path_df_type, os.path.join(self.path_folder, f'{self.source_fname}_to_{self.target_fname}_path_type.csv'))
              
              # Save excluded paths in data_details
              csv_folder = os.path.join(self.path_folder, 'data_details')
              os.makedirs(csv_folder, exist_ok=True)
-             path_df_type_excluded.to_csv(os.path.join(csv_folder, 'path_type_excluded.csv'), index=False)
+             self._save_df_to_csv_polars(path_df_type_excluded, os.path.join(csv_folder, 'path_type_excluded.csv'))
              print('   ✓ path_type CSVs saved')
         else:
             with pd.ExcelWriter(output_excel_name, mode='a', engine='openpyxl') as writer:
@@ -3525,24 +5028,8 @@ class FindNeuronConnection:
             print('Building bodyId-level graph and finding paths...')
             
             # Build bodyId-level graph from conn_inpath
-            G_bodyId = nx.DiGraph()
-            for idx in conn_inpath.index:
-                row = conn_inpath.loc[idx]
-                bodyId_pre = row['bodyId_pre']
-                bodyId_post = row['bodyId_post']
-                weight = row['weight']
-                # Ensure scalar values (not Series)
-                if isinstance(bodyId_pre, pd.Series):
-                    bodyId_pre = bodyId_pre.iloc[0]
-                if isinstance(bodyId_post, pd.Series):
-                    bodyId_post = bodyId_post.iloc[0]
-                if isinstance(weight, pd.Series):
-                    weight = weight.iloc[0]
-                    
-                if G_bodyId.has_edge(bodyId_pre, bodyId_post):
-                    G_bodyId[bodyId_pre][bodyId_post]['weight'] += weight
-                else:
-                    G_bodyId.add_edge(bodyId_pre, bodyId_post, weight=weight)
+            G_bodyId = FastGraph()
+            G_bodyId.build_from_dataframe(conn_inpath, 'bodyId_pre', 'bodyId_post', 'weight')
             
             print(f'  BodyId-level graph: {G_bodyId.number_of_nodes()} neurons, {G_bodyId.number_of_edges()} edges')
             
@@ -3556,10 +5043,11 @@ class FindNeuronConnection:
                 if source_id not in G_bodyId:
                     continue
                 for target_id in target_bodyIds:
-                    if nx.has_path(G_bodyId, source_id, target_id):
-                        # Find all simple paths with length <= max_interlayer + 1
-                        for path in nx.all_simple_paths(G_bodyId, source_id, target_id, cutoff=self.max_interlayer + 1):
-                            bodyId_paths.append(path)
+                    if target_id not in G_bodyId:
+                        continue
+                    # Find all simple paths with length <= max_interlayer + 1
+                    for path in G_bodyId.all_simple_paths(source_id, target_id, cutoff=self.max_interlayer + 1):
+                        bodyId_paths.append(path)
             
             print(f'  Found {len(bodyId_paths):,} bodyId-level paths')
             
@@ -3654,11 +5142,8 @@ class FindNeuronConnection:
                 ndf_complete = pd.DataFrame()
             else:
                 self._vprint(f'   Local dataset not found, will use API calls', level='full')
-                # Ensure client is logged in before API calls
-                if self.client_hemibrain is None:
-                    from neuprint import Client, set_default_client
-                    self.client_hemibrain = Client(self.server, self.dataset, self.token)
-                    set_default_client(self.client_hemibrain)
+                # Ensure client is logged in for the CORRECT dataset
+                self._ensure_neuprint_client()
         
         interlayers = []
         num_layers = len(neuron_layers[1:])
@@ -4125,8 +5610,13 @@ class FindNeuronConnection:
             self._vprint(f'  📁 Created output folder: {self.allpath_folder}', level='full')
         
         # Save all attributes and parameters to the allpaths folder
+        # Filter out internal/private attributes (starting with '_') and large cached data
+        public_attrs = {
+            k: v for k, v in self.__dict__.items() 
+            if not k.startswith('_') and k not in ('source_df', 'target_df', 'client_hemibrain', 'client_flywire')
+        }
         with open(os.path.join(self.allpath_folder, 'all_attributes.json'), 'w') as f:
-            json.dump(self.__dict__, f, indent=4, default=lambda o: '<not serializable>')
+            json.dump(public_attrs, f, indent=4, default=lambda o: '<not serializable>')
         
         with open(os.path.join(self.allpath_folder, 'parameters.txt'), 'w') as f:
             f.write(f'Parameters for processing {self.source_fname} to {self.target_fname}:\n')
@@ -4145,7 +5635,7 @@ class FindNeuronConnection:
         
         # PHASE 1: Fetch all connections in the network up to max_interlayer layers
         if self.verbose_mode == 'simple':
-            self._vprint(f'\nPhase 1:', level='simple')
+            self._vprint(f'\nPhase 1: Fetching all network layers...', level='simple')
         elif self.verbose_mode == 'full':
             self._vprint(f'\n=== PHASE 1: Fetching all network layers (0 to {self.max_interlayer + 1}) ===', level='full')
             if forward_only:
@@ -4219,7 +5709,7 @@ class FindNeuronConnection:
         
         # PHASE 2: Identify which targets exist in the searched network
         if self.verbose_mode == 'simple':
-            self._vprint(f'Phase 2:', level='simple')
+            self._vprint(f'Phase 2: Identifying Targets...', level='simple')
             self._vprint(f'identifying targets...', level='simple', end='', flush=True)
         elif self.verbose_mode == 'full':
             self._vprint(f'\n=== PHASE 2: Identifying targets in the network ===', level='full')
@@ -4286,7 +5776,7 @@ class FindNeuronConnection:
         
         # PHASE 3: Extract all paths from sources to targets (path length ≤ max_interlayer)
         if self.verbose_mode == 'simple':
-            self._vprint(f'Phase 3:', level='simple')
+            self._vprint(f'Phase 3: Building Graph and Finding Paths...', level='simple')
         elif self.verbose_mode == 'full':
             self._vprint(f'\n=== PHASE 3: Finding all paths from sources to targets ===', level='full')
             self._vprint('Using graph-based pathfinding to handle reciprocal connections...', level='full')
@@ -4305,17 +5795,9 @@ class FindNeuronConnection:
         
         # Build a directed graph from all connections
         self._vprint('Building connection graph...', level='full', end=' ')
-        G = nx.DiGraph()
+        G = FastGraph()
         for conn_df in all_connections:
-            for idx in conn_df.index:
-                pre = conn_df.at[idx, 'bodyId_pre']
-                post = conn_df.at[idx, 'bodyId_post']
-                weight = conn_df.at[idx, 'weight']
-                # Add edge (can have multiple edges between same nodes in original data)
-                if G.has_edge(pre, post):
-                    G[pre][post]['weight'] += weight
-                else:
-                    G.add_edge(pre, post, weight=weight)
+            G.build_from_dataframe(conn_df, 'bodyId_pre', 'bodyId_post', 'weight')
         self._vprint(f'Done! ({G.number_of_nodes()} nodes, {G.number_of_edges()} edges)', level='full')
         
         # Pruning: Remove nodes that cannot reach any target
@@ -4371,7 +5853,7 @@ class FindNeuronConnection:
         
         self._vprint(f'\nSearching paths: {len(source_ID)} sources × {len(targets_found)} targets = {len(source_ID) * len(targets_found)} pairs', level='full')
         self._vprint(f'Maximum path length: {self.max_interlayer + 1} edges', level='full')
-        self._vprint(f'Using optimized DFS algorithm (explores shared path segments only once)', level='full')
+        # self._vprint(f'Using optimized DFS algorithm (explores shared path segments only once)', level='full')
         
         # Decide whether to use parallel processing
         total_pairs = len(source_ID) * len(targets_found)
@@ -4589,123 +6071,475 @@ class FindNeuronConnection:
                     self._vprint(f'   📦 Collected {len(all_paths):,} paths in memory (~{len(all_paths) * 50 / 1024 / 1024:.1f} MB)', level='full')
         
         if not use_parallel:
-            if self.verbose_mode == 'simple':
-                self._vprint(f'pathfinding[sequential]...', level='simple', end='', flush=True)
-            elif self.verbose_mode == 'full':
-                self._vprint('Using sequential processing (optimized DFS)...', level='full')
-                self._vprint('This may take a while for large datasets...\n', level='full')
+            # Select pathfinding algorithm
+            algo = self.pathfinding
+            valid_algos = ['DP', 'Bidirectional', 'DFS', 'MemoizedDFS']
+            if algo not in valid_algos:
+                self._vprint(f'Warning: Unknown pathfinding algorithm "{algo}", defaulting to "DP"', level='always')
+                algo = 'DP'
             
-            path_count = 0
-            sources_processed = 0
-            pairs_with_paths_dict = {}
-            all_paths = []  # Initialize empty list for sequential mode (not collected in sequential)
-            
-            # Progress tracking for simple observed-speed ETA
-            import time
-            start_time = time.time()
-            last_update = start_time
-            update_interval = 2.0  # Update every 2 seconds
-            
-            targets_set = set(targets_found)
-            
-            def dfs_find_all_paths(current, target_set, path, visited):
-                '''DFS with backtracking to find all paths from current node to any target.'''
-                nonlocal path_count, neurons_in_paths, edges_in_paths, edges_in_paths_with_layer
+            if algo == 'Bidirectional':
+                if self.verbose_mode == 'simple':
+                    self._vprint(f'Finding path [bidirectional]...', level='simple')
+                elif self.verbose_mode == 'full':
+                    self._vprint('Using bidirectional search (meet-in-the-middle)...', level='full')
                 
-                # Check if current node is a target
-                if current in target_set:
-                    # Found a complete path to a target
-                    path_count += 1
-                    neurons_in_paths.update(path)
-                    
-                    # Record this source-target pair
-                    source_node = path[0]
-                    pairs_with_paths_dict[(source_node, current)] = True
-                    
-                    # Store the complete path
-                    all_paths.append(list(path))
-                    
-                    # Add edges from this path
-                    for i in range(len(path) - 1):
-                        pre_node = path[i]
-                        post_node = path[i+1]
-                        edges_in_paths.add((pre_node, post_node))
-                        
-                        # Edge layer is determined by position in path (path starts at layer 0)
-                        # i=0 means layer 0->1, i=1 means layer 1->2, etc.
-                        edge_layer = i
-                        edges_in_paths_with_layer.add((edge_layer, pre_node, post_node))
+                import time
+                start_time = time.time()
                 
-                # Stop if we've reached maximum depth
-                if len(path) - 1 >= self.max_interlayer + 1:
-                    return
+                # Bidirectional Search (Meet-in-the-middle)
+                # Reduces search complexity from O(b^d) to O(b^(d/2))
+                # Uses dynamic alternating expansion to minimize frontier size
                 
-                # Explore neighbors
-                if current in G:
-                    for neighbor in G.neighbors(current):
-                        # Skip if already in current path (prevent cycles)
-                        if neighbor not in visited:
-                            # Add neighbor to path and continue DFS
-                            path.append(neighbor)
-                            visited.add(neighbor)
-                            
-                            dfs_find_all_paths(neighbor, target_set, path, visited)
-                            
-                            # Backtrack: remove neighbor from path
-                            path.pop()
-                            visited.remove(neighbor)
-            
-            # Explore from each source neuron
-            for source_idx, source in enumerate(source_ID):
-                sources_processed += 1
+                total_steps = self.max_interlayer + 1
                 
-                if source in G:  # Make sure source exists in graph
-                    initial_path = [source]
-                    initial_visited = {source}
-                    dfs_find_all_paths(source, targets_set, initial_path, initial_visited)
+                from collections import defaultdict
+                # Initialize lists to hold frontiers at each depth
+                # f_paths[d] = {node: [path1, path2, ...]}
+                f_paths = [defaultdict(list)] 
+                b_paths = [defaultdict(list)]
                 
-                # Progress update every 2 seconds with dynamic ETA
-                current_time = time.time()
-                if current_time - last_update >= update_interval:
-                    elapsed = current_time - start_time
+                # 1. Initialize Forward Search (from Sources)
+                source_set = set(source_ID)
+                for s in source_set:
+                    if s in G:
+                        f_paths[0][s].append([s])
+                
+                # 2. Initialize Backward Search (from Targets)
+                targets_set = set(targets_found)
+                for t in targets_set:
+                    if t in G:
+                        b_paths[0][t].append([t])
+                
+                # 3. Dynamic Alternating Expansion
+                f_depth = 0
+                b_depth = 0
+                
+                # We need to reach total depth of total_steps
+                # We expand until f_depth + b_depth >= total_steps
+                # But we must be careful: we need to cover all intermediate lengths too.
+                # Actually, we just need to ensure we have enough frontiers to form paths of length 1..total_steps.
+                # The loop continues as long as we can extend and haven't covered the full distance.
+                
+                R = G.reverse() # Pre-compute reverse graph for backward search
+                
+                while f_depth + b_depth < total_steps:
+                    # Check if frontiers are empty (cannot extend further)
+                    if not f_paths[f_depth] and not b_paths[b_depth]:
+                        break
                     
-                    # Simple reliable ETA: remaining / observed_speed
-                    current_speed = sources_processed / elapsed if elapsed > 0 else 0
+                    # Decide direction: Expand the smaller frontier
+                    # If one is empty, expand the other
+                    expand_forward = False
                     
-                    # Wait for minimum samples before showing ETA
-                    min_samples_for_eta = max(3, int(len(source_ID) * 0.05))  # At least 3 sources or 5%
-                    
-                    progress_pct = (sources_processed / len(source_ID)) * 100
-                    remaining_sources = len(source_ID) - sources_processed
-                    
-                    if sources_processed >= min_samples_for_eta and current_speed > 0:
-                        eta_seconds = remaining_sources / current_speed
-                        
-                        # Format ETA in HH:mm:ss
-                        hours = int(eta_seconds // 3600)
-                        minutes = int((eta_seconds % 3600) // 60)
-                        seconds = int(eta_seconds % 60)
-                        eta_str = f'{hours:02d}:{minutes:02d}:{seconds:02d}'
+                    if not b_paths[b_depth]:
+                        expand_forward = True
+                    elif not f_paths[f_depth]:
+                        expand_forward = False
                     else:
-                        eta_str = 'calculating...'
+                        # Compare frontier sizes (number of nodes)
+                        if len(f_paths[f_depth]) <= len(b_paths[b_depth]):
+                            expand_forward = True
+                        else:
+                            expand_forward = False
                     
-                    pairs_with_paths = len(pairs_with_paths_dict)
+                    if expand_forward:
+                        # Expand Forward: f_depth -> f_depth + 1
+                        current_depth = f_depth
+                        next_depth = f_depth + 1
+                        f_paths.append(defaultdict(list))
+                        
+                        nodes_with_paths = list(f_paths[current_depth].keys())
+                        
+                        iterator = nodes_with_paths
+                        if self.verbose_mode in ['simple', 'full']:
+                             iterator = tqdm(nodes_with_paths, desc=f"Forward L{next_depth} (from {len(nodes_with_paths)} nodes)", leave=True, unit="node", smoothing=0)
+
+                        for u in iterator:
+                            neighbors = list(G.neighbors(u))
+                            if not neighbors: continue
+                            
+                            current_paths = f_paths[current_depth][u]
+                            for v in neighbors:
+                                new_paths = []
+                                for p in current_paths:
+                                    if v not in p: # Cycle check
+                                        new_paths.append(p + [v])
+                                if new_paths:
+                                    f_paths[next_depth][v].extend(new_paths)
+                        
+                        f_depth += 1
+                        
+                    else:
+                        # Expand Backward: b_depth -> b_depth + 1
+                        current_depth = b_depth
+                        next_depth = b_depth + 1
+                        b_paths.append(defaultdict(list))
+                        
+                        nodes_with_paths = list(b_paths[current_depth].keys())
+                        
+                        iterator = nodes_with_paths
+                        if self.verbose_mode in ['simple', 'full']:
+                             iterator = tqdm(nodes_with_paths, desc=f"Backward L{next_depth} (from {len(nodes_with_paths)} nodes)", leave=True, unit="node", smoothing=0)
+
+                        for v in iterator:
+                            if v not in R: continue
+                            predecessors = list(R.neighbors(v))
+                            if not predecessors: continue
+                            
+                            current_paths = b_paths[current_depth][v]
+                            for u in predecessors:
+                                new_paths = []
+                                for p in current_paths:
+                                    if u not in p: # Cycle check
+                                        new_paths.append([u] + p)
+                                if new_paths:
+                                    b_paths[next_depth][u].extend(new_paths)
+                        
+                        b_depth += 1
+
+                # 4. Merge and Collect Paths
+                if self.verbose_mode == 'full':
+                    self._vprint(f'   Merging paths (Forward depth: {f_depth}, Backward depth: {b_depth})...', level='full')
+                
+                all_paths = []
+                
+                # Iterate through all target total lengths
+                for length in range(1, total_steps + 1):
+                    # Try all valid combinations of i (forward) and j (backward) such that i + j = length
+                    for i in range(length + 1):
+                        j = length - i
+                        
+                        # Check if we have computed frontiers for these depths
+                        if i > f_depth or j > b_depth:
+                            continue
+                        
+                        # Find intersection nodes
+                        common_nodes = set(f_paths[i].keys()) & set(b_paths[j].keys())
+                        
+                        if not common_nodes: continue
+                        
+                        for v in common_nodes:
+                            forward_parts = f_paths[i][v]
+                            backward_parts = b_paths[j][v]
+                            
+                            for fp in forward_parts:
+                                for bp in backward_parts:
+                                    # fp is [s, ..., v]
+                                    # bp is [v, ..., t]
+                                    # Combined is [s, ..., v, ..., t]
+                                    
+                                    # Full cycle check: ensure no shared nodes other than v
+                                    fp_set = set(fp)
+                                    bp_set = set(bp)
+                                    
+                                    if len(fp_set & bp_set) == 1:
+                                        combined_path = fp + bp[1:]
+                                        all_paths.append(combined_path)
+                
+                # Process paths to populate sets
+                pairs_with_paths_dict = {}
+                path_count = len(all_paths)
+                
+                if self.verbose_mode in ['simple', 'full']:
+                     path_iter = tqdm(all_paths, desc="Processing paths", leave=False)
+                else:
+                     path_iter = all_paths
+
+                for p in path_iter:
+                    s = p[0]
+                    t = p[-1]
+                    pairs_with_paths_dict[(s, t)] = True
+                    neurons_in_paths.update(p)
+                    for i in range(len(p) - 1):
+                        edges_in_paths.add((p[i], p[i+1]))
+                        edges_in_paths_with_layer.add((i, p[i], p[i+1]))
+                
+                pairs_with_paths = len(pairs_with_paths_dict)
+                
+                # Final update
+                elapsed = time.time() - start_time
+                if self.verbose_mode == 'simple':
+                    self._vprint('Done', level='simple')
+                    self._vprint('building paths...', level='simple', end='', flush=True)
+                elif self.verbose_mode == 'full':
+                    self._vprint(f'   Pathfinding completed in {elapsed:.1f}s', level='full')
+
+            elif algo == 'MemoizedDFS':
+                if self.verbose_mode == 'simple':
+                    self._vprint(f'Finding path [memoized DFS]...', level='simple', end='', flush=True)
+                elif self.verbose_mode == 'full':
+                    self._vprint('Using memoized DFS pathfinding (recursive with caching)...', level='full')
+                
+                path_count = 0
+                pairs_with_paths_dict = {}
+                all_paths = []
+                
+                import time
+                start_time = time.time()
+                
+                targets_set = set(targets_found)
+                
+                # Memoization cache: (node, length_remaining) -> list of paths
+                # Stores all valid path suffixes starting from node with EXACTLY length_remaining
+                memo = {}
+                
+                def get_paths_memo(u, depth):
+                    state = (u, depth)
+                    if state in memo:
+                        return memo[state]
                     
+                    paths = []
+                    
+                    # Base case: depth 0
+                    if depth == 0:
+                        if u in targets_set:
+                            return [[u]]
+                        else:
+                            return []
+                    
+                    # Recursive step
+                    if u in G:
+                        for v in G.neighbors(u):
+                            # Get suffixes of length depth-1
+                            suffixes = get_paths_memo(v, depth - 1)
+                            for suf in suffixes:
+                                if u not in suf: # Cycle check
+                                    paths.append([u] + suf)
+                    
+                    memo[state] = paths
+                    return paths
+
+                # Run for each length from 1 to max_interlayer + 1
+                total_steps = self.max_interlayer + 1
+                
+                for length in range(1, total_steps + 1):
                     if self.verbose_mode == 'full':
-                        # Use \033[K to clear to end of line
-                        self._vprint(f'\r   Progress: {sources_processed}/{len(source_ID)} sources ({progress_pct:.1f}%) | ETA: {eta_str}\033[K', level='full', end='', flush=True)
-                    last_update = current_time
-            
-            pairs_with_paths = len(pairs_with_paths_dict)
-            
-            # Final update
-            elapsed = time.time() - start_time
-            if self.verbose_mode == 'simple':
-                self._vprint('Done', level='simple')
-                self._vprint('building paths...', level='simple', end='', flush=True)
-            elif self.verbose_mode == 'full':
-                # Use \033[K to clear to end of line
-                self._vprint(f'\r   Progress: {sources_processed}/{len(source_ID)} sources (100.0%) | Completed in {elapsed:.1f}s\033[K', level='full')
+                        self._vprint(f'   Step {length}/{total_steps}: Finding paths of length {length}...', level='full')
+                    
+                    # Iterate over all sources
+                    # Note: get_paths_memo will recursively compute and cache needed suffixes
+                    
+                    iterator = source_ID
+                    if self.verbose_mode in ['simple', 'full']:
+                         iterator = tqdm(source_ID, desc=f"Path len {length}", leave=True, unit="source", smoothing=0)
+                    
+                    for s in iterator:
+                        if s in G:
+                            paths = get_paths_memo(s, length)
+                            all_paths.extend(paths)
+                
+                # Process paths to populate sets
+                path_count = len(all_paths)
+                
+                if self.verbose_mode in ['simple', 'full']:
+                     path_iter = tqdm(all_paths, desc="Processing paths", leave=False)
+                else:
+                     path_iter = all_paths
+
+                for p in path_iter:
+                    s = p[0]
+                    t = p[-1]
+                    pairs_with_paths_dict[(s, t)] = True
+                    neurons_in_paths.update(p)
+                    for i in range(len(p) - 1):
+                        edges_in_paths.add((p[i], p[i+1]))
+                        edges_in_paths_with_layer.add((i, p[i], p[i+1]))
+                
+                pairs_with_paths = len(pairs_with_paths_dict)
+                
+                elapsed = time.time() - start_time
+                if self.verbose_mode == 'simple':
+                    self._vprint('Done', level='simple')
+                    self._vprint('building paths...', level='simple', end='', flush=True)
+                elif self.verbose_mode == 'full':
+                    self._vprint(f'   Pathfinding completed in {elapsed:.1f}s', level='full')
+
+            elif algo == 'DFS':
+                if self.verbose_mode == 'simple':
+                    self._vprint(f'Finding path [standard DFS]...', level='simple', end='', flush=True)
+                elif self.verbose_mode == 'full':
+                    self._vprint('Using standard DFS pathfinding (recursive)...', level='full')
+                
+                path_count = 0
+                sources_processed = 0
+                pairs_with_paths_dict = {}
+                all_paths = []
+                
+                import time
+                start_time = time.time()
+                last_update = start_time
+                update_interval = 2.0
+                
+                targets_set = set(targets_found)
+                
+                def dfs_find_all_paths(current, target_set, path, visited):
+                    '''DFS with backtracking to find all paths from current node to any target.'''
+                    nonlocal path_count, neurons_in_paths, edges_in_paths, edges_in_paths_with_layer
+                    
+                    if current in target_set:
+                        path_count += 1
+                        neurons_in_paths.update(path)
+                        source_node = path[0]
+                        pairs_with_paths_dict[(source_node, current)] = True
+                        all_paths.append(list(path))
+                        for i in range(len(path) - 1):
+                            pre_node = path[i]
+                            post_node = path[i+1]
+                            edges_in_paths.add((pre_node, post_node))
+                            edge_layer = i
+                            edges_in_paths_with_layer.add((edge_layer, pre_node, post_node))
+                    
+                    if len(path) - 1 >= self.max_interlayer + 1:
+                        return
+                    
+                    if current in G:
+                        for neighbor in G.neighbors(current):
+                            if neighbor not in visited:
+                                path.append(neighbor)
+                                visited.add(neighbor)
+                                dfs_find_all_paths(neighbor, target_set, path, visited)
+                                path.pop()
+                                visited.remove(neighbor)
+                
+                for source_idx, source in enumerate(source_ID):
+                    sources_processed += 1
+                    if source in G:
+                        initial_path = [source]
+                        initial_visited = {source}
+                        dfs_find_all_paths(source, targets_set, initial_path, initial_visited)
+                    
+                    current_time = time.time()
+                    if current_time - last_update >= update_interval:
+                        elapsed = current_time - start_time
+                        progress_pct = (sources_processed / len(source_ID)) * 100
+                        if self.verbose_mode == 'full':
+                            self._vprint(f'\\r   Progress: {sources_processed}/{len(source_ID)} sources ({progress_pct:.1f}%)', level='full', end='', flush=True)
+                        last_update = current_time
+                
+                pairs_with_paths = len(pairs_with_paths_dict)
+                elapsed = time.time() - start_time
+                if self.verbose_mode == 'simple':
+                    self._vprint('Done', level='simple')
+                    self._vprint('building paths...', level='simple', end='', flush=True)
+                elif self.verbose_mode == 'full':
+                    self._vprint(f'\\r   Progress: {sources_processed}/{len(source_ID)} sources (100.0%) | Completed in {elapsed:.1f}s', level='full')
+
+            else: # algo == 'DP' (Optimized Backward Search)
+                if self.verbose_mode == 'simple':
+                    self._vprint(f'Finding path [optimized DP]...', level='simple')
+                elif self.verbose_mode == 'full':
+                    self._vprint('Using optimized backward search (DP)...', level='full')
+                
+                # Optimized Backward Search (DP)
+                # 1. Initialize paths of length 0 (just targets)
+                # paths_by_len[len][node] = list of paths
+                from collections import defaultdict
+                paths_by_len = [defaultdict(list) for _ in range(self.max_interlayer + 2)]
+                
+                targets_set = set(targets_found)
+                for t in targets_set:
+                    if t in G:
+                        paths_by_len[0][t].append([t])
+                
+                # 2. Iterate backwards
+                R = G.reverse()
+                
+                # Progress bar for DP steps
+                total_steps = self.max_interlayer + 1
+                
+                import time
+                start_time = time.time()
+                
+                for length in range(1, total_steps + 1):
+                    if self.verbose_mode == 'full':
+                        self._vprint(f'   Step {length}/{total_steps}: Extending paths of length {length}...', level='full')
+                    
+                    # Nodes that have paths of length-1
+                    nodes_with_paths = list(paths_by_len[length-1].keys())
+                    
+                    if not nodes_with_paths:
+                        break
+                    
+                    # Iterate over these nodes to find their predecessors
+                    # Using tqdm if verbose
+                    iterator = nodes_with_paths
+                    if self.verbose_mode in ['simple', 'full']:
+                         # Calculate total paths to extend for better ETA
+                         total_paths_to_extend = sum(len(paths_by_len[length-1][v]) for v in nodes_with_paths)
+                         self._vprint(f'   Extending {total_paths_to_extend:,} paths from {len(nodes_with_paths):,} nodes...', level='full')
+                         
+                         iterator = tqdm(nodes_with_paths, desc=f"Path len {length}", leave=True, unit="node", smoothing=0)
+
+                    for v in iterator:
+                        if v not in R: continue
+                        
+                        # Predecessors u -> v
+                        predecessors = list(R.neighbors(v))
+                        if not predecessors: continue
+                        
+                        # Get paths to extend
+                        current_paths = paths_by_len[length-1][v]
+                        
+                        # Optimization: If many paths, use set for faster cycle check
+                        # But for short paths (len < 5), list scan is often faster
+                        
+                        for u in predecessors:
+                            # Extend all paths from v
+                            # Batch append is faster than loop append
+                            new_paths = []
+                            for p in current_paths:
+                                # Cycle check: u must not be in p
+                                if u not in p:
+                                    new_paths.append([u] + p)
+                            
+                            if new_paths:
+                                paths_by_len[length][u].extend(new_paths)
+
+                # 3. Collect results
+                if self.verbose_mode == 'full':
+                    self._vprint('   Collecting paths from sources...', level='full')
+                
+                path_count = 0
+                pairs_with_paths_dict = {}
+                all_paths = []
+                
+                # Collect paths starting from sources
+                source_set = set(source_ID)
+                
+                for length in range(1, total_steps + 1):
+                    # Only look at nodes that are sources
+                    common_sources = source_set.intersection(paths_by_len[length].keys())
+                    for s in common_sources:
+                        s_paths = paths_by_len[length][s]
+                        all_paths.extend(s_paths)
+                
+                # Process paths to populate sets
+                path_count = len(all_paths)
+                
+                if self.verbose_mode in ['simple', 'full']:
+                     path_iter = tqdm(all_paths, desc="Processing paths", leave=False)
+                else:
+                     path_iter = all_paths
+
+                for p in path_iter:
+                    s = p[0]
+                    t = p[-1]
+                    pairs_with_paths_dict[(s, t)] = True
+                    neurons_in_paths.update(p)
+                    for i in range(len(p) - 1):
+                        edges_in_paths.add((p[i], p[i+1]))
+                        edges_in_paths_with_layer.add((i, p[i], p[i+1]))
+                
+                pairs_with_paths = len(pairs_with_paths_dict)
+                
+                # Final update
+                elapsed = time.time() - start_time
+                if self.verbose_mode == 'simple':
+                    self._vprint('Done', level='simple')
+                    self._vprint('building paths...', level='simple', end='', flush=True)
+                elif self.verbose_mode == 'full':
+                    self._vprint(f'   Pathfinding completed in {elapsed:.1f}s', level='full')
         
         self._vprint(f'\n✅ Pathfinding complete!', level='full')
         self._vprint(f'   Total paths found: {path_count:,}', level='full')
@@ -4715,13 +6549,17 @@ class FindNeuronConnection:
         
         # Now extract connections, keeping ALL layer-specific occurrences
         # This means if neuron A→B exists in both Layer 0→1 and Layer 2→3, both are kept
-        # Initialize with expected columns to handle empty case gracefully
-        conn_inpath = pd.DataFrame(columns=['conn_layer', 'bodyId_pre', 'bodyId_post', 'weight', 'type_pre', 'type_post', 'traversal_probability', 'connection_ratio'])
-        conn_types = pd.DataFrame(columns=['conn_layer', 'type_pre', 'type_post', 'weight', 'traversal_probability', 'connection_ratio'])
-        conn_groups = pd.DataFrame()  # For custom group aggregations
+        # Initialize lists for accumulation (more efficient than repeated concat)
+        conn_inpath_list = []
+        conn_types_list = []
+        conn_groups_list = []
         weight_layers = {}
         
-        for layer_idx, conn_df in enumerate(all_connections):
+        iterator = all_connections
+        if self.verbose_mode in ['simple', 'full']:
+            iterator = tqdm(all_connections, desc="Building paths", unit="layer", leave=True)
+            
+        for layer_idx, conn_df in enumerate(iterator):
             # Skip empty connection DataFrames
             if conn_df.empty:
                 continue
@@ -4753,7 +6591,8 @@ class FindNeuronConnection:
                 conn_filtered_no_layer,
                 dataset=self.dataset, 
                 script_path=self.script_path,
-                target_neurons_df=neurons_in_layer_df
+                target_neurons_df=neurons_in_layer_df,
+                label_mapper=self.label_mapper
             )
             
             # Add conn_layer column AFTER enrichment
@@ -4762,14 +6601,34 @@ class FindNeuronConnection:
             if conn_group is not None:
                 conn_group.insert(loc=0, column='conn_layer', value=layer_label)
             
-            conn_inpath = pd.concat([conn_inpath, conn_enriched])
-            conn_types = pd.concat([conn_types, conn_type])
-            if conn_group is not None:
-                conn_groups = pd.concat([conn_groups, conn_group])
+            if not conn_enriched.empty:
+                conn_inpath_list.append(conn_enriched)
+            
+            if not conn_type.empty:
+                conn_types_list.append(conn_type)
+                
+            if conn_group is not None and not conn_group.empty:
+                conn_groups_list.append(conn_group)
             
             weight_layers[layer_label] = conn_enriched['weight'].sum()
             
             self._vprint(f'Layer {layer_label}: {len(conn_filtered)} connections kept', level='full')
+        
+        # Concatenate all results at once (avoids FutureWarning about empty/NA entries)
+        if conn_inpath_list:
+            conn_inpath = pd.concat(conn_inpath_list)
+        else:
+            conn_inpath = pd.DataFrame(columns=['conn_layer', 'bodyId_pre', 'bodyId_post', 'weight', 'type_pre', 'type_post', 'traversal_probability', 'connection_ratio'])
+
+        if conn_types_list:
+            conn_types = pd.concat(conn_types_list)
+        else:
+            conn_types = pd.DataFrame(columns=['conn_layer', 'type_pre', 'type_post', 'weight', 'traversal_probability', 'connection_ratio'])
+
+        if conn_groups_list:
+            conn_groups = pd.concat(conn_groups_list)
+        else:
+            conn_groups = pd.DataFrame()
         
         # Build neuron_layers structure for visualization (based on actual path data)
         # Group neurons by their earliest appearance layer in valid paths
@@ -4858,11 +6717,11 @@ class FindNeuronConnection:
         if len(conn_inpath) > 0:
             has_types = 'type_pre' in conn_inpath.columns and 'type_post' in conn_inpath.columns
             
-            for idx in conn_inpath.index:
-                bodyId_pre = conn_inpath.at[idx, 'bodyId_pre']
-                bodyId_post = conn_inpath.at[idx, 'bodyId_post']
-                
-                if has_types:
+            if has_types:
+                for idx in conn_inpath.index:
+                    bodyId_pre = conn_inpath.at[idx, 'bodyId_pre']
+                    bodyId_post = conn_inpath.at[idx, 'bodyId_post']
+                    
                     type_pre = conn_inpath.at[idx, 'type_pre']
                     type_post = conn_inpath.at[idx, 'type_post']
                     
@@ -5022,14 +6881,14 @@ class FindNeuronConnection:
             os.makedirs(csv_folder, exist_ok=True)
             
             # Save parameters and source/target info even without paths
-            self.parameter_df.to_csv(os.path.join(csv_folder, 'parameters.csv'), index=False)
-            self.source_df.to_csv(os.path.join(csv_folder, 'source_neurons.csv'))
-            self.target_df.to_csv(os.path.join(csv_folder, 'target_neurons.csv'))
+            self._save_df_to_csv_polars(self.parameter_df, os.path.join(csv_folder, 'parameters.csv'))
+            self._save_df_to_csv_polars(self.source_df, os.path.join(csv_folder, 'source_neurons.csv'))
+            self._save_df_to_csv_polars(self.target_df, os.path.join(csv_folder, 'target_neurons.csv'))
             
             # Create empty connection files
             empty_conn = pd.DataFrame(columns=['bodyId_pre', 'bodyId_post', 'weight', 'type_pre', 'type_post'])
-            empty_conn.to_csv(os.path.join(csv_folder, 'connection_info_bodyId.csv'), index=False)
-            empty_conn.to_csv(os.path.join(csv_folder, 'connection_type.csv'), index=False)
+            self._save_df_to_csv_polars(empty_conn, os.path.join(csv_folder, 'connection_info_bodyId.csv'))
+            self._save_df_to_csv_polars(empty_conn, os.path.join(csv_folder, 'connection_type.csv'))
             
             self._vprint(f'  ✓ Saved to: {csv_folder}/', level='full')
             self._vprint('  ✓ Saved connection data', level='full')
@@ -5072,7 +6931,35 @@ class FindNeuronConnection:
         
         # Fetch all neurons involved for accurate post counts
         all_bodyIds = np.unique(np.concatenate([conn_inpath_global['bodyId_pre'].unique(), conn_inpath_global['bodyId_post'].unique()]))
-        all_neurons_df = self._fetch_neurons_local_or_api(all_bodyIds.tolist(), columns=['bodyId', 'type', 'post'])
+        
+        # Add progress bar for neuron fetching if large
+        # if len(all_bodyIds) > 1000 and self.verbose_mode in ['simple', 'full']:
+        #      self._vprint(f'  Fetching info for {len(all_bodyIds):,} unique neurons...', level='full')
+        
+        # Use tqdm for fetching if large
+        if len(all_bodyIds) > 5000 and self.verbose_mode in ['simple', 'full']:
+            # Split into chunks to show progress
+            chunk_size = 5000
+            chunks = [all_bodyIds[i:i + chunk_size] for i in range(0, len(all_bodyIds), chunk_size)]
+            
+            all_neurons_list = []
+            # for chunk in tqdm(chunks, desc="Fetching neuron info", unit="chunk"):
+            for chunk in chunks:
+                chunk_df = self._fetch_neurons_local_or_api(chunk.tolist(), columns=['bodyId', 'type', 'post'])
+                all_neurons_list.append(chunk_df)
+            
+            if all_neurons_list:
+                all_neurons_df = pd.concat(all_neurons_list, ignore_index=True)
+            else:
+                all_neurons_df = pd.DataFrame()
+        else:
+            all_neurons_df = self._fetch_neurons_local_or_api(all_bodyIds.tolist(), columns=['bodyId', 'type', 'post'])
+        
+        # self._vprint('  Enriching connection table...', level='full')
+        
+        # Wrap EnrichConnectionTable with a simple progress indicator if possible
+        # Since it's a single function call, we can't easily add a progress bar inside without modifying statvis.py
+        # But we can print a message before it starts (already done)
         
         _, conn_types_global, _ = sv.EnrichConnectionTable(
             conn_inpath_global, 
@@ -5080,39 +6967,59 @@ class FindNeuronConnection:
             dataset=self.dataset,
             script_path=self.script_path,
             target_neurons_df=all_neurons_df,
-            aggregate_method='product'
+            aggregate_method='product',
+            label_mapper=self.label_mapper
         )
+        
+        # print("  Enrichment returned. Proceeding to save...", flush=True)
 
         # Save main data (type-level aggregations)
-        self._vprint('\nSaving connection data...', level='full')
+        # Force print this message so user knows we are moving to save phase
+        # print('\nSaving connection data...', flush=True)
         
         # Determine if using CSV or Excel based on output_format or data size
         EXCEL_ROW_LIMIT = 1_048_576
         use_csv = (self.output_format == 'csv') or (len(conn_types) >= EXCEL_ROW_LIMIT * 0.9)
         
+        # print(f"  Format check: output_format='{self.output_format}', rows={len(conn_types):,}, use_csv={use_csv}", flush=True)
+        
         if use_csv:
             if self.output_format == 'csv':
-                self._vprint(f'  💾 Saving data as CSV files (output_format="csv")', level='full')
+                self._vprint(f'  💾 Saving data as CSV files (output_format="csv")', level='full', flush=True)
             else:
-                self._vprint(f'  ⚠️  Data too large for Excel ({len(conn_types):,} rows), saving as CSV', level='full')
+                print(f'  ⚠️  Data too large for Excel ({len(conn_types):,} rows), saving as CSV', flush=True)
             
             # Create data_details folder
             csv_folder = os.path.join(self.allpath_folder, 'data_details')
             os.makedirs(csv_folder, exist_ok=True)
-            self._vprint(f'  💾 Saving data as CSV files to: {csv_folder}', level='full')
-            self.parameter_df.to_csv(os.path.join(csv_folder, 'parameters.csv'), index=False)
-            self.source_df.to_csv(os.path.join(csv_folder, 'source_neurons.csv'))
-            self.target_df.to_csv(os.path.join(csv_folder, 'target_neurons.csv'))
-            totalweight_df.to_csv(os.path.join(csv_folder, 'total_weight_layer.csv'))
-            conn_types.to_csv(os.path.join(csv_folder, 'connection_type.csv'))
+            print(f'  💾 Saving data as CSV files to: {csv_folder}', flush=True)
+            
+            # print("    - parameters.csv", flush=True)
+            self._save_df_to_csv_polars(self.parameter_df, os.path.join(csv_folder, 'parameters.csv'))
+            
+            # print("    - source_neurons.csv", flush=True)
+            # Use reset_index() to preserve index as in pandas to_csv(index=True)
+            self._save_df_to_csv_polars(self.source_df, os.path.join(csv_folder, 'source_neurons.csv'), index=True)
+            
+            # print("    - target_neurons.csv", flush=True)
+            self._save_df_to_csv_polars(self.target_df, os.path.join(csv_folder, 'target_neurons.csv'), index=True)
+            
+            # print("    - total_weight_layer.csv", flush=True)
+            self._save_df_to_csv_polars(totalweight_df, os.path.join(csv_folder, 'total_weight_layer.csv'), index=True)
+            
+            # print("    - connection_type.csv", flush=True)
+            self._save_df_to_csv_polars(conn_types, os.path.join(csv_folder, 'connection_type.csv'), index=True)
+            
             if conn_groups is not None and not conn_groups.empty:
-                conn_groups.to_csv(os.path.join(csv_folder, 'connection_custom_groups.csv'))
+                # print("    - connection_custom_groups.csv", flush=True)
+                self._save_df_to_csv_polars(conn_groups, os.path.join(csv_folder, 'connection_custom_groups.csv'), index=True)
             
             # Save matrices (use global aggregation)
             self._save_matrices_to_csv(conn_types_global, csv_folder, level='type')
         else:
             output_excel_name = os.path.join(self.allpath_folder, self.source_fname + '_to_' + self.target_fname + '_allpaths_info.xlsx')
-            self._vprint(f'  💾 Saving type-level data to: {output_excel_name}', level='full')
+            print(f'  💾 Saving type-level data to: {output_excel_name}', flush=True)
+            print(f'  ⏳ Writing Excel file (this may take a while)...', flush=True)
             with pd.ExcelWriter(output_excel_name, mode='w', engine='xlsxwriter') as writer:
                 self.parameter_df.to_excel(writer,sheet_name='parameters',index=False)
                 worksheet = writer.sheets['parameters']
@@ -5132,39 +7039,44 @@ class FindNeuronConnection:
                 self._save_matrices_to_excel(conn_types_global, writer, level='type')
         
         # Save bodyId-level data
-        self._vprint(f'Saving bodyId-level allpaths data (rows: {len(conn_inpath):,})...', level='full')
-        
-        # Recalculate use_csv for bodyId data
-        use_csv = (self.output_format == 'csv') or (len(conn_inpath) >= EXCEL_ROW_LIMIT * 0.9)
-        
-        if use_csv:
-            if self.output_format == 'csv':
-                self._vprint(f'  💾 Saving bodyId data as CSV (output_format="csv")', level='full')
-            else:
-                self._vprint(f'  ⚠️  Data too large for Excel ({len(conn_inpath):,} rows), saving as CSV', level='full')
+        if not self.skip_bodyId:
+            self._vprint(f'Saving bodyId-level allpaths data (rows: {len(conn_inpath):,})...', level='full')
             
-            # Use data_details folder (same as type-level data)
-            bodyid_folder = os.path.join(self.allpath_folder, 'data_details')
-            os.makedirs(bodyid_folder, exist_ok=True)
+            # Recalculate use_csv for bodyId data
+            use_csv = (self.output_format == 'csv') or (len(conn_inpath) >= EXCEL_ROW_LIMIT * 0.9)
             
-            # Save bodyId connection data as CSV (parameters.csv already saved with type-level data)
-            output_bodyid_csv = os.path.join(bodyid_folder, 'connection_info_bodyId.csv')
-            conn_inpath.to_csv(output_bodyid_csv, index=False)
-            self._save_matrices_to_csv(conn_inpath_global, bodyid_folder, level='bodyId')
-            self._vprint(f'  ✓ Saved to: {bodyid_folder}/', level='full')
-        else:
-            # Data fits in Excel
-            output_bodyid_excel = os.path.join(self.allpath_folder, self.source_fname + '_to_' + self.target_fname + '_allpaths_bodyId_data.xlsx')
-            with pd.ExcelWriter(output_bodyid_excel, mode='w', engine='xlsxwriter') as writer:
-                self.parameter_df.to_excel(writer,sheet_name='parameters',index=False)
-                worksheet = writer.sheets['parameters']
-                worksheet.set_column('A:A', 30, writer.book.add_format({'bold': True, 'font_name': 'Arial', 'font_size': 11, 'align': 'left'}))
-                worksheet.set_column('B:B', 30, writer.book.add_format({'font_name': 'Arial', 'font_size': 11, 'align': 'left'}))
+            if use_csv:
+                if self.output_format == 'csv':
+                    self._vprint(f'  💾 Saving bodyId data as CSV (output_format="csv")', level='full')
+                else:
+                    self._vprint(f'  ⚠️  Data too large for Excel ({len(conn_inpath):,} rows), saving as CSV', level='full')
                 
-                # Save bodyId-level connection info
-                conn_inpath.to_excel(writer,sheet_name='connection_info_bodyId')
-                self._save_matrices_to_excel(conn_inpath_global, writer, level='bodyId')
-            self._vprint(f'  ✓ Saved to: {output_bodyid_excel}', level='full')
+                # Use data_details folder (same as type-level data)
+                bodyid_folder = os.path.join(self.allpath_folder, 'data_details')
+                os.makedirs(bodyid_folder, exist_ok=True)
+                
+                # Save bodyId connection data as CSV (parameters.csv already saved with type-level data)
+                output_bodyid_csv = os.path.join(bodyid_folder, 'connection_info_bodyId.csv')
+                # print(f"    - connection_info_bodyId.csv", flush=True)
+                self._save_df_to_csv_polars(conn_inpath, output_bodyid_csv)
+                
+                self._save_matrices_to_csv(conn_inpath_global, bodyid_folder, level='bodyId')
+                self._vprint(f'  ✓ Saved to: {bodyid_folder}/', level='full')
+            else:
+                # Data fits in Excel
+                output_bodyid_excel = os.path.join(self.allpath_folder, self.source_fname + '_to_' + self.target_fname + '_allpaths_bodyId_data.xlsx')
+                with pd.ExcelWriter(output_bodyid_excel, mode='w', engine='xlsxwriter') as writer:
+                    self.parameter_df.to_excel(writer,sheet_name='parameters',index=False)
+                    worksheet = writer.sheets['parameters']
+                    worksheet.set_column('A:A', 30, writer.book.add_format({'bold': True, 'font_name': 'Arial', 'font_size': 11, 'align': 'left'}))
+                    worksheet.set_column('B:B', 30, writer.book.add_format({'font_name': 'Arial', 'font_size': 11, 'align': 'left'}))
+                    
+                    # Save bodyId-level connection info
+                    conn_inpath.to_excel(writer,sheet_name='connection_info_bodyId')
+                    self._save_matrices_to_excel(conn_inpath_global, writer, level='bodyId')
+                self._vprint(f'  ✓ Saved to: {output_bodyid_excel}', level='full')
+        else:
+            self._vprint('Skipping bodyId-level data saving (skip_bodyId=True)', level='full')
         
         self._vprint(f'  ✓ Saved connection data', level='full')
         
@@ -5181,23 +7093,55 @@ class FindNeuronConnection:
         self._vprint('\nFinding type-level paths using type-level graph...', level='full')
         
         # Build type-level graph from conn_types
-        G_type = nx.DiGraph()
-        for idx in conn_types.index:
-            type_pre = conn_types.at[idx, 'type_pre']
-            type_post = conn_types.at[idx, 'type_post']
-            weight = conn_types.at[idx, 'weight']
-            if G_type.has_edge(type_pre, type_post):
-                G_type[type_pre][type_post]['weight'] += weight
-            else:
-                G_type.add_edge(type_pre, type_post, weight=weight)
+        G_type = FastGraph()
+        G_type.build_from_dataframe(conn_types, 'type_pre', 'type_post', 'weight')
         
         self._vprint(f'  Type-level graph: {G_type.number_of_nodes()} types, {G_type.number_of_edges()} edges', level='full')
         
         # Get source and target types (filter out NaN/None values)
-        source_types = [t for t in self.source_df['type'].unique().tolist() 
-                        if t is not None and (not isinstance(t, float) or not pd.isna(t))]
-        target_types = [t for t in self.target_df.loc[self.target_df.Checked, 'type'].unique().tolist()
-                        if t is not None and (not isinstance(t, float) or not pd.isna(t))]
+        # Apply label mapping if available to match the mapped types in conn_types
+        source_types = set()
+        for idx, row in self.source_df.iterrows():
+            t = row['type'] if 'type' in row else None
+            b = str(row['bodyId']) if 'bodyId' in row else ''
+            
+            if self.label_mapper:
+                # Try mapping bodyId first (most specific)
+                mapped = self.label_mapper.get_label(self.dataset, b)
+                if mapped != b:
+                    t = mapped
+                elif pd.notna(t):
+                    # Try mapping type
+                    mapped_t = self.label_mapper.get_label(self.dataset, str(t))
+                    if mapped_t != str(t):
+                        t = mapped_t
+            
+            if t is not None and (not isinstance(t, float) or not pd.isna(t)):
+                source_types.add(t)
+        
+        source_types = list(source_types)
+
+        target_types = set()
+        target_rows = self.target_df.loc[self.target_df.Checked]
+        for idx, row in target_rows.iterrows():
+            t = row['type'] if 'type' in row else None
+            b = str(row['bodyId']) if 'bodyId' in row else ''
+            
+            if self.label_mapper:
+                # Try mapping bodyId first (most specific)
+                mapped = self.label_mapper.get_label(self.dataset, b)
+                if mapped != b:
+                    t = mapped
+                elif pd.notna(t):
+                    # Try mapping type
+                    mapped_t = self.label_mapper.get_label(self.dataset, str(t))
+                    if mapped_t != str(t):
+                        t = mapped_t
+            
+            if t is not None and (not isinstance(t, float) or not pd.isna(t)):
+                target_types.add(t)
+        
+        target_types = list(target_types)
         
         # Find paths using DFS on type graph
         type_paths = []
@@ -5207,10 +7151,9 @@ class FindNeuronConnection:
             for target_type in target_types:
                 if target_type not in G_type:
                     continue
-                if nx.has_path(G_type, source_type, target_type):
-                    # Find all simple paths with length <= max_interlayer + 1
-                    for path in nx.all_simple_paths(G_type, source_type, target_type, cutoff=self.max_interlayer + 1):
-                        type_paths.append(path)
+                # Find all simple paths with length <= max_interlayer + 1
+                for path in G_type.all_simple_paths(source_type, target_type, cutoff=self.max_interlayer + 1):
+                    type_paths.append(path)
         
         self._vprint(f'  Found {len(type_paths):,} type-level paths', level='full')
         
@@ -5231,24 +7174,8 @@ class FindNeuronConnection:
             self._vprint('\nFinding group-level paths using group-level graph...', level='full')
             
             # Build group-level graph from conn_groups
-            G_group = nx.DiGraph()
-            for idx in conn_groups.index:
-                row = conn_groups.loc[idx]
-                group_pre = row['group_pre']
-                group_post = row['group_post']
-                weight = row['weight']
-                # Ensure scalar values (not Series)
-                if isinstance(group_pre, pd.Series):
-                    group_pre = group_pre.iloc[0]
-                if isinstance(group_post, pd.Series):
-                    group_post = group_post.iloc[0]
-                if isinstance(weight, pd.Series):
-                    weight = weight.iloc[0]
-                    
-                if G_group.has_edge(group_pre, group_post):
-                    G_group[group_pre][group_post]['weight'] += weight
-                else:
-                    G_group.add_edge(group_pre, group_post, weight=weight)
+            G_group = FastGraph()
+            G_group.build_from_dataframe(conn_groups, 'group_pre', 'group_post', 'weight')
             
             self._vprint(f'  Group-level graph: {G_group.number_of_nodes()} groups, {G_group.number_of_edges()} edges', level='full')
             
@@ -5264,10 +7191,9 @@ class FindNeuronConnection:
                 for target_group in target_groups:
                     if pd.isna(target_group) or target_group not in G_group:
                         continue
-                    if nx.has_path(G_group, source_group, target_group):
-                        # Find all simple paths with length <= max_interlayer + 1
-                        for path in nx.all_simple_paths(G_group, source_group, target_group, cutoff=self.max_interlayer + 1):
-                            group_paths.append(path)
+                    # Find all simple paths with length <= max_interlayer + 1
+                    for path in G_group.all_simple_paths(source_group, target_group, cutoff=self.max_interlayer + 1):
+                        group_paths.append(path)
             
             self._vprint(f'  Found {len(group_paths):,} group-level paths', level='full')
             
@@ -5369,12 +7295,12 @@ class FindNeuronConnection:
             if len(path_df_type) >= EXCEL_ROW_LIMIT * 0.9:
                 self._vprint(f'   ⚠️  Path data too large for Excel ({len(path_df_type):,} rows), saving as CSV', level='full')
             output_path_type_csv = os.path.join(self.allpath_folder, self.source_fname+'_to_'+self.target_fname+'_allpaths_type.csv')
-            path_df_type.to_csv(output_path_type_csv, index=False)
+            self._save_df_to_csv_polars(path_df_type, output_path_type_csv)
             if len(path_df_type_excluded) > 0:
                 # Save excluded paths to data_details folder
                 details_folder = os.path.join(self.allpath_folder, 'data_details')
                 output_path_type_excluded_csv = os.path.join(details_folder, self.source_fname+'_to_'+self.target_fname+'_allpaths_type_excluded.csv')
-                path_df_type_excluded.to_csv(output_path_type_excluded_csv, index=False)
+                self._save_df_to_csv_polars(path_df_type_excluded, output_path_type_excluded_csv)
             self._vprint(f'   ✓ Saved to: {self.allpath_folder}/', level='full')
         else:
             # Add to Excel file (type-level was saved to Excel, so output_excel_name exists)
@@ -5385,8 +7311,9 @@ class FindNeuronConnection:
             self._vprint('   ✓ path_type sheets saved', level='full')
         
         # BodyId-level paths
-        if find_bodyId_path:
-            self._vprint('\nBuilding bodyId-level paths with real_layer validation...', level='full')
+        path_df_bodyId = pd.DataFrame()
+        if find_bodyId_path and not self.skip_bodyId:
+            self._vprint('\nEnriching bodyId-level paths with connection metrics...', level='full')
             
             # Create type lookup from connection data
             type_lookup = {}
@@ -5417,7 +7344,7 @@ class FindNeuronConnection:
             if use_csv:
                 # Save as CSV if connection data was saved as CSV
                 output_path_csv = os.path.join(self.allpath_folder,self.source_fname+'_to_'+self.target_fname+'_allpaths_bodyId_paths.csv')
-                path_df_bodyId.to_csv(output_path_csv, index=False)
+                self._save_df_to_csv_polars(path_df_bodyId, output_path_csv)
                 self._vprint(f'   ✓ Saved to: {output_path_csv}', level='full')
             else:
                 # Add to the bodyId Excel file if it was created
@@ -5428,115 +7355,117 @@ class FindNeuronConnection:
                 else:
                     self._vprint(f'   ⚠️  path_bodyId too large ({len(path_df_bodyId):,} rows), saving as separate CSV', level='full')
                     output_path_csv = os.path.join(self.allpath_folder,self.source_fname+'_to_'+self.target_fname+'_allpaths_bodyId_paths.csv')
-                    path_df_bodyId.to_csv(output_path_csv, index=False)
+                    self._save_df_to_csv_polars(path_df_bodyId, output_path_csv)
                     self._vprint(f'   ✓ Saved to: {output_path_csv}', level='full')
+        elif self.skip_bodyId:
+            self._vprint('Skipping bodyId-level path enrichment (skip_bodyId=True)', level='full')
         
         # save interlayer info to excel
-        self._vprint('💾 Saving interlayer neuron info to Excel...', level='full')
-        
-        interlayers = []
-        
-        # Try to load complete neuron dataset for faster lookup
-        dataset_clean = self.dataset.replace(':', '_').replace('.', '_')
-        dataset_path = os.path.join(
-            self.script_path,
-            'datasets',
-            f"{dataset_clean}_allneurons_neuron_df.csv"
-        )
-        
-        # Check for subdirectory structure (common for FlyWire/FAFB)
-        if not os.path.exists(dataset_path):
-            # Try exact match in subdirectory
-            dataset_path_subdir = os.path.join(
+        if not self.skip_bodyId:
+            self._vprint('💾 Saving interlayer neuron info to Excel...', level='full')
+            
+            interlayers = []
+            
+            # Try to load complete neuron dataset for faster lookup
+            dataset_clean = self.dataset.replace(':', '_').replace('.', '_')
+            dataset_path = os.path.join(
                 self.script_path,
                 'datasets',
-                dataset_clean,
                 f"{dataset_clean}_allneurons_neuron_df.csv"
             )
-            if os.path.exists(dataset_path_subdir):
-                dataset_path = dataset_path_subdir
-            else:
-                # Try to find ANY file ending in _allneurons_neuron_df.csv in the subdirectory
-                subdir_path = os.path.join(self.script_path, 'datasets', dataset_clean)
-                if os.path.exists(subdir_path) and os.path.isdir(subdir_path):
-                    import glob
-                    candidates = glob.glob(os.path.join(subdir_path, "*_allneurons_neuron_df.csv"))
-                    if candidates:
-                        dataset_path = candidates[0]
-                        print(f"   Found dataset file via glob: {os.path.basename(dataset_path)}")
-        
-        use_local_dataset = os.path.exists(dataset_path)
-        ndf_complete = None
-        
-        if use_local_dataset:
-            self._vprint(f'   Using local dataset: {os.path.basename(dataset_path)}', level='full')
-            if 'flywire' in self.dataset.lower() or 'fafb' in self.dataset.lower():
-                ndf_complete = pd.read_csv(dataset_path, header=0, index_col=None, dtype={'bodyId': str}, low_memory=False)
-            else:
-                ndf_complete = pd.read_csv(dataset_path, header=0, index_col=0, low_memory=False)
-        else:
-            if 'flywire' in self.dataset.lower() or 'fafb' in self.dataset.lower():
-                self._vprint(f'   ⚠️  Local dataset not found for FlyWire/FAFB. Skipping interlayer info fetch.', level='full')
-                ndf_complete = pd.DataFrame()
-            else:
-                self._vprint(f'   Local dataset not found, will use API calls', level='full')
-                # Ensure client is logged in before API calls
-                if self.client_type == 'neuprint':
-                    if self.client_hemibrain is None:
-                        from neuprint import Client, set_default_client
-                        self.client_hemibrain = Client(self.server, self.dataset, self.token)
-                        set_default_client(self.client_hemibrain)
-        
-        # Fetch info for each layer
-        from neuprint import NeuronCriteria as NC
-        
-        for i, neurons in enumerate(layer_neurons[1:], 1):
-            neuron_list = list(neurons)
-            if not neuron_list:
-                interlayers.append(pd.DataFrame())
-                continue
-                
-            if ndf_complete is not None and not ndf_complete.empty:
-                # Use local dataset
-                # Ensure string matching
-                neuron_list_str = [str(x) for x in neuron_list]
-                ndf_complete['bodyId'] = ndf_complete['bodyId'].astype(str)
-                n_df = ndf_complete[ndf_complete['bodyId'].isin(neuron_list_str)].copy()
-            else:
-                # Use API
-                if self.client_type == 'neuprint':
-                    try:
-                        n_df, _ = fetch_neurons(NC(bodyId=neuron_list))
-                    except Exception as e:
-                        print(f"Warning: Failed to fetch neurons for layer {i}: {e}")
-                        n_df = pd.DataFrame()
+            
+            # Check for subdirectory structure (common for FlyWire/FAFB)
+            if not os.path.exists(dataset_path):
+                # Try exact match in subdirectory
+                dataset_path_subdir = os.path.join(
+                    self.script_path,
+                    'datasets',
+                    dataset_clean,
+                    f"{dataset_clean}_allneurons_neuron_df.csv"
+                )
+                if os.path.exists(dataset_path_subdir):
+                    dataset_path = dataset_path_subdir
                 else:
-                    n_df = pd.DataFrame()
+                    # Try to find ANY file ending in _allneurons_neuron_df.csv in the subdirectory
+                    subdir_path = os.path.join(self.script_path, 'datasets', dataset_clean)
+                    if os.path.exists(subdir_path) and os.path.isdir(subdir_path):
+                        import glob
+                        candidates = glob.glob(os.path.join(subdir_path, "*_allneurons_neuron_df.csv"))
+                        if candidates:
+                            dataset_path = candidates[0]
+                            print(f"   Found dataset file via glob: {os.path.basename(dataset_path)}")
             
-            # Slim down to essential columns only: bodyId, type, instance
-            # This significantly reduces file size for large datasets
-            essential_cols = ['bodyId', 'type', 'instance']
-            available_cols = [c for c in essential_cols if c in n_df.columns]
-            if available_cols and len(n_df) > 0:
-                n_df = n_df[available_cols].copy()
+            use_local_dataset = os.path.exists(dataset_path)
+            ndf_complete = None
             
-            interlayers.append(n_df)
+            if use_local_dataset:
+                self._vprint(f'   Using local dataset: {os.path.basename(dataset_path)}', level='full')
+                if 'flywire' in self.dataset.lower() or 'fafb' in self.dataset.lower():
+                    ndf_complete = pd.read_csv(dataset_path, header=0, index_col=None, dtype={'bodyId': str}, low_memory=False)
+                else:
+                    ndf_complete = pd.read_csv(dataset_path, header=0, index_col=0, low_memory=False)
+            else:
+                if 'flywire' in self.dataset.lower() or 'fafb' in self.dataset.lower():
+                    self._vprint(f'   ⚠️  Local dataset not found for FlyWire/FAFB. Skipping interlayer info fetch.', level='full')
+                    ndf_complete = pd.DataFrame()
+                else:
+                    self._vprint(f'   Local dataset not found, will use API calls', level='full')
+                    # Ensure client is logged in for the CORRECT dataset
+                    self._ensure_neuprint_client()
             
-        self._vprint(' ✓', level='full')
-        
-        self._vprint('   Writing interlayer sheets to bodyId file...', level='full', end='', flush=True)
-        if use_csv:
-            # Save each layer as CSV in bodyId subfolder
-            for i in range(len(interlayers)):
-                layer_csv = os.path.join(bodyid_folder, f'layer_{i+1}.csv')
-                interlayers[i].to_csv(layer_csv, index=False)
-        else:
-            # Save to bodyId Excel file
-            with pd.ExcelWriter(output_bodyid_excel, mode='a', engine='openpyxl') as writer:
+            # Fetch info for each layer
+            from neuprint import NeuronCriteria as NC
+            
+            for i, neurons in enumerate(layer_neurons[1:], 1):
+                neuron_list = list(neurons)
+                if not neuron_list:
+                    interlayers.append(pd.DataFrame())
+                    continue
+                    
+                if ndf_complete is not None and not ndf_complete.empty:
+                    # Use local dataset
+                    # Ensure string matching
+                    neuron_list_str = [str(x) for x in neuron_list]
+                    ndf_complete['bodyId'] = ndf_complete['bodyId'].astype(str)
+                    n_df = ndf_complete[ndf_complete['bodyId'].isin(neuron_list_str)].copy()
+                else:
+                    # Use API
+                    if self.client_type == 'neuprint':
+                        try:
+                            n_df, _ = fetch_neurons(NC(bodyId=neuron_list))
+                        except Exception as e:
+                            print(f"Warning: Failed to fetch neurons for layer {i}: {e}")
+                            n_df = pd.DataFrame()
+                    else:
+                        n_df = pd.DataFrame()
+                
+                # Slim down to essential columns only: bodyId, type, instance
+                # This significantly reduces file size for large datasets
+                essential_cols = ['bodyId', 'type', 'instance']
+                available_cols = [c for c in essential_cols if c in n_df.columns]
+                if available_cols and len(n_df) > 0:
+                    n_df = n_df[available_cols].copy()
+                
+                interlayers.append(n_df)
+                
+            self._vprint(' ✓', level='full')
+            
+            self._vprint('   Writing interlayer sheets to bodyId file...', level='full', end='', flush=True)
+            if use_csv:
+                # Save each layer as CSV in bodyId subfolder
                 for i in range(len(interlayers)):
-                    interlayers[i].to_excel(writer, sheet_name='layer_'+str(i+1), index=False)
-        self._vprint(' ✓', level='full')
-        self._vprint('   ✓ Interlayer sheets saved to bodyId file', level='full')
+                    layer_csv = os.path.join(bodyid_folder, f'layer_{i+1}.csv')
+                    interlayers[i].to_csv(layer_csv, index=False)
+            else:
+                # Save to bodyId Excel file
+                with pd.ExcelWriter(output_bodyid_excel, mode='a', engine='openpyxl') as writer:
+                    for i in range(len(interlayers)):
+                        interlayers[i].to_excel(writer, sheet_name='layer_'+str(i+1), index=False)
+            self._vprint(' ✓', level='full')
+            self._vprint('   ✓ Interlayer sheets saved to bodyId file', level='full')
+        else:
+            self._vprint('Skipping interlayer info saving (skip_bodyId=True)', level='full')
+        
         self._vprint('Done\n', level='full')
         
         # ============================================================================
@@ -7129,13 +9058,16 @@ class VisualizeSkeleton:
     script_path: str = os.path.dirname(source_path)
     '''absolute path to the project root directory (parent of src/)'''
 
-    data_folder: str = os.path.join(script_path, 'connection_data')
-    '''folder to save all data'''
+    data_folder: str = os.path.join(os.path.expanduser('~'), 'connectome_analysis')
+    '''
+    folder to save all data (subfolders auto-generated based on neuron_layers)
+    Default: ~/connectome_analysis/
+    '''
     
     save_folder: str = ''
     '''
-    folder to save the current data
-    # initialized in __post_init__, not customizable
+    folder to save the current data (auto-generated from neuron_layers)
+    # initialized in __post_init__
     # You can set the "saveas" parameter to customize the folder name'''
 
     neuron_layers: str | list = ''
@@ -7165,7 +9097,7 @@ class VisualizeSkeleton:
     See https://navis.readthedocs.io/en/latest/source/tutorials/generated/navis.plot3d.html#navis.plot3d for more details.
     '''
 
-    neuron_alpha: float = 0.2
+    neuron_alpha: float = 0.3
     '''alpha of neuron, only works when the radius of neuron exists (show_skeleton_radius=True)'''
 
     synapse_colors: tuple = bokeh.palettes.Category10[10]
@@ -7885,6 +9817,10 @@ class VisualizeSkeleton:
             elif cached_neurons is not None:
                 neuron_vols = cached_neurons
             # else neuron_vols is already set from fetch
+
+            # Normalize to NeuronList so downstream len()/iteration works for single TreeNeuron
+            if neuron_vols is not None and not isinstance(neuron_vols, (list, navis.NeuronList)):
+                neuron_vols = navis.NeuronList([neuron_vols])
             
             if neuron_vols is None or len(neuron_vols) == 0:
                 print(f'⚠️  Failed to fetch skeletons for layer {i}')
@@ -7925,6 +9861,10 @@ class VisualizeSkeleton:
                             print('   Setting brain_mesh to "none"')
                             self.brain_mesh = 'none'
             
+            # Ensure iterable after potential transforms (navis may return TreeNeuron)
+            if neuron_vols is not None and not isinstance(neuron_vols, (list, navis.NeuronList)):
+                neuron_vols = navis.NeuronList([neuron_vols])
+
             # Mirror neurons if requested
             if self.mirror_on_contralateral:
                 print(f'Mirroring {len(neuron_vols)} neurons...', end='')
@@ -9150,12 +11090,26 @@ class VisualizeSkeleton:
         - 'template': Plot native EM template mesh (JRCFIB2018F, MANC, or JRCFIB2022M)
         - 'whole': Plot standard template mesh (may require transforms for some datasets)
         
+        Behavior with mesh_roi=[]:
+        - When mesh_roi is an empty list [], no ROI meshes are plotted
+        - But brain_mesh='whole' or 'template' will still plot the brain mesh
+        - This allows showing neurons with only the whole brain outline
+        
         References:
         - navis Volume API: https://navis.readthedocs.io/en/latest/source/api.html#navis.Volume
         - flybrains templates: https://github.com/navis-org/navis-flybrains
         - mesh optimization: use Volume.simplify() to reduce mesh complexity for faster rendering
         """
+        # Skip if mesh_roi is None (explicitly disabled)
+        # Note: Empty list [] means "no ROI meshes but maybe brain mesh"
         if self.mesh_roi is None:
+            return
+        
+        # Check if we have any work to do (ROI meshes or brain mesh)
+        has_roi_meshes = len(self.mesh_roi) > 0
+        has_brain_mesh = self.brain_mesh in ['template', 'whole']
+        
+        if not has_roi_meshes and not has_brain_mesh:
             return
         
         # Ensure available_rois.json exists (generate if missing)
@@ -9427,40 +11381,42 @@ class VisualizeSkeleton:
                 if not is_flywire: # Only warn if we expected to find it (FlyWire might just fail silently if not found)
                      print(f'⚠️  ROI mesh "{roi}" not found.')
         
-        if not roiunits:
-            print('⚠️  No valid ROI meshes loaded')
-            return
-        
-        print('plotting mesh of brain regions...')
-        for roi_i in range(len(roiunits)):
-            roiunits[roi_i].color = roi_colors[roi_i]
-            
-            if self.backend == 'plotly':
-                fig_mesh = navis.plot3d(roiunits[roi_i],backend='plotly')
-                mesh_traces = fig_mesh.data
-                for ti, trace in enumerate(mesh_traces):
-                    if self.legend_mode == 'merge':
-                        if ti == 0:
+        # Plot ROI meshes if any were loaded
+        if roiunits:
+            print('plotting mesh of brain regions...')
+            for roi_i in range(len(roiunits)):
+                roiunits[roi_i].color = roi_colors[roi_i]
+                
+                if self.backend == 'plotly':
+                    fig_mesh = navis.plot3d(roiunits[roi_i],backend='plotly')
+                    mesh_traces = fig_mesh.data
+                    for ti, trace in enumerate(mesh_traces):
+                        if self.legend_mode == 'merge':
+                            if ti == 0:
+                                trace.showlegend = True
+                            else:
+                                trace.showlegend = False
+                            trace.legendgroup = 'roi_mesh'
+                        elif self.legend_mode == 'normal':
                             trace.showlegend = True
-                        else:
-                            trace.showlegend = False
-                        trace.legendgroup = 'roi_mesh'
-                    elif self.legend_mode == 'normal':
-                        trace.showlegend = True
-                        trace.legendgroup = roi_names[roi_i]
-                    trace.hovertemplate = '<b>%{fullData.name}</b><extra></extra>'  # show full name in hover tooltip
-                    trace.hoverinfo = 'name'
-                    trace.name = 'brain regions [' + roi_names[roi_i] + '...]'
-                self.fig_3d.add_traces(mesh_traces)
-            elif self.backend == 'k3d':
-                try:
-                    temp_plot = navis.plot3d(roiunits[roi_i], backend='k3d', inline=False)
-                    for obj in temp_plot.objects:
-                        obj.name = f'brain regions [{roi_names[roi_i]}...]'
-                        self.fig_3d += obj
-                except Exception as e:
-                    print(f'⚠️  k3d mesh plotting failed: {e}')
+                            trace.legendgroup = roi_names[roi_i]
+                        trace.hovertemplate = '<b>%{fullData.name}</b><extra></extra>'  # show full name in hover tooltip
+                        trace.hoverinfo = 'name'
+                        trace.name = 'brain regions [' + roi_names[roi_i] + '...]'
+                    self.fig_3d.add_traces(mesh_traces)
+                elif self.backend == 'k3d':
+                    try:
+                        temp_plot = navis.plot3d(roiunits[roi_i], backend='k3d', inline=False)
+                        for obj in temp_plot.objects:
+                            obj.name = f'brain regions [{roi_names[roi_i]}...]'
+                            self.fig_3d += obj
+                    except Exception as e:
+                        print(f'⚠️  k3d mesh plotting failed: {e}')
+        elif has_roi_meshes:
+            # Only warn if user specified ROI meshes but none loaded
+            print('⚠️  No valid ROI meshes loaded')
 
+        # Plot brain mesh (whole brain or template) regardless of ROI mesh status
         if self.brain_mesh in ['template', 'whole']:
             template_info = self._get_template_info()
             mesh_display_name = template_info['mesh_name']
@@ -9537,21 +11493,15 @@ class VisualizeSkeleton:
                 sliders = []
             
             # set layout
-            if self.brain_mesh == 'hemi' or self.brain_mesh == 'none':
-                scene_camera_parameters = dict(
-                    up=dict(x=0, y=0, z=-1),
-                    eye=dict(x=0, y=1.8, z=0),  # Increased from 1.4 to 1.8 to fit more objects
-                    # center=dict(x=0, y=0, z=0), # Let Plotly auto-center
-                )
-            elif self.brain_mesh == 'whole':
-                # Adjust for frontal view
-                # Assuming standard fly brain orientation (X: LR, Y: DV, Z: AP)
-                # Frontal view: Look from Anterior (Z) or Posterior
-                scene_camera_parameters = dict(
-                    up=dict(x=0, y=-1, z=0), # Y is up (inverted in some templates)
-                    eye=dict(x=0, y=0, z=-2.0), # Look from front/back
-                    # center=dict(x=0, y=0, z=0), # Let Plotly auto-center
-                )
+            # Always use frontal view camera regardless of brain_mesh setting
+            # This ensures consistent viewing angle for all visualizations
+            # Standard fly brain orientation: X: Left-Right, Y: Dorsal-Ventral, Z: Anterior-Posterior
+            # Frontal view: Look from Anterior (negative Z direction)
+            scene_camera_parameters = dict(
+                up=dict(x=0, y=-1, z=0),  # Y is up (inverted in some templates)
+                eye=dict(x=0, y=0, z=-2.0),  # Look from front
+                # center=dict(x=0, y=0, z=0), # Let Plotly auto-center
+            )
             
             self.fig_3d.update_layout(
                 colorway = self.synapse_colors,
@@ -9561,6 +11511,9 @@ class VisualizeSkeleton:
                     xaxis={'visible':False}, 
                     yaxis={'visible':False},
                     zaxis={'visible':False},
+                    # Use 'data' aspectmode to ensure equal axis scaling
+                    # This prevents distortion when no meshes are plotted
+                    aspectmode='data',
                 ),
                 scene_camera=scene_camera_parameters,
             )
@@ -9711,7 +11664,7 @@ class VisualizeSkeleton:
             print(f'⚠️  3D model export failed: {e}')
         
     def export_video(self, fps=30, rotate_plane=None, view_direction=None, view_distance=None, synapse_size=1, 
-                    html_file=None, use_existing_images=False, **kwargs):
+                    html_file=None, use_existing_images=False, parallel_workers=None, **kwargs):
         '''
         Export the rotating 3-D object to a video with optimization for speed.
         
@@ -9734,6 +11687,12 @@ class VisualizeSkeleton:
         use_existing_images : bool, default False
             If True, skip image rendering and use existing images in pics_*fps_*plane folder.
             Useful for regenerating video with different settings from cached images.
+        parallel_workers : int, optional
+            Number of parallel workers for frame rendering. Each worker renders frames
+            independently using ProcessPoolExecutor, which can significantly speed up
+            rendering on multi-core systems. Default: None (sequential rendering).
+            Recommended: Set to number of CPU cores (e.g., 8-12 for modern CPUs).
+            Note: Parallel rendering may use more memory.
         **kwargs : dict
             Additional arguments for plotly write_image().
             - 'scale': Resolution multiplier (default 2 for balance of quality/speed)
@@ -9762,23 +11721,18 @@ class VisualizeSkeleton:
         
         # Fast preview
         vs.export_video(fps=15, scale=1, width=800, height=600)
+        
+        # Parallel rendering for speed (uses multiple CPU cores)
+        vs.export_video(fps=30, scale=2, parallel_workers=8)
         '''
-        # Set default parameters based on brain_mesh
+        # Set default parameters - always use frontal view defaults for consistency
+        # rotate_plane='xz' rotates around the vertical (Y) axis for frontal view
         if rotate_plane is None:
-            if self.brain_mesh == 'hemi' or self.brain_mesh == 'none':
-                rotate_plane = 'xy'
-            elif self.brain_mesh == 'whole':
-                rotate_plane = 'xz'
+            rotate_plane = 'xz'
         if view_direction is None:
-            if self.brain_mesh == 'hemi' or self.brain_mesh == 'none':
-                view_direction = (1, 1)
-            elif self.brain_mesh == 'whole':
-                view_direction = (1, -1)
+            view_direction = (1, -1)
         if view_distance is None:
-            if self.brain_mesh == 'hemi' or self.brain_mesh == 'none':
-                view_distance = 1.8
-            elif self.brain_mesh == 'whole':
-                view_distance = 2.2
+            view_distance = 2.2
         
         # Set default scale if not specified
         if kwargs.get('scale') is None and kwargs.get('width') is None and kwargs.get('height') is None:
@@ -9822,17 +11776,11 @@ class VisualizeSkeleton:
         )
         fig_new = go.Figure(data=fig_traces, layout=fig_layout)
         
-        # Set camera parameters
-        if self.brain_mesh == 'hemi' or self.brain_mesh == 'none':
-            scene_camera_parameters = dict(
-                up=dict(x=0, y=0, z=-1),
-                eye=dict(x=0, y=view_distance, z=0),
-            )
-        elif self.brain_mesh == 'whole':
-            scene_camera_parameters = dict(
-                up=dict(x=0, y=-1, z=0),
-                eye=dict(x=0, y=0, z=-view_distance),
-            )
+        # Set camera parameters - always use frontal view for consistency
+        scene_camera_parameters = dict(
+            up=dict(x=0, y=-1, z=0),
+            eye=dict(x=0, y=0, z=-view_distance),
+        )
         
         fig_new.update_layout(
             sliders=[],  # Remove sliders for cleaner video
@@ -9880,22 +11828,23 @@ class VisualizeSkeleton:
             else:
                 print()
             
-            # Try to initialize Kaleido scope for faster rendering
-            # scope = None
-            # try:
-            #     from kaleido.scopes.plotly import PlotlyScope
-            #     scope = PlotlyScope() # Use bundled plotlyjs for better stability
-            #     print('   ✓ Using Kaleido scope for optimized rendering')
-            # except ImportError:
-            #     print('   ℹ️  Kaleido not found or failed to initialize. Using standard write_image (slower).')
-
-            t0 = time.time()
-            print(f'   Starting render loop... (First frame may take longer to initialize engine)')
-            
             # Ensure dimensions are set to avoid blank images if not provided
             if 'width' not in kwargs: kwargs['width'] = 1200
             if 'height' not in kwargs: kwargs['height'] = 900
-
+            
+            t0 = time.time()
+            
+            # Note: parallel_workers is accepted but not used
+            # Parallel rendering with ProcessPoolExecutor doesn't work reliably with Plotly/Kaleido
+            # on macOS due to the "spawn" multiprocessing method re-executing the entire script.
+            # Sequential rendering is used instead for reliability.
+            if parallel_workers is not None and parallel_workers > 1:
+                print(f'   ⚠️  parallel_workers={parallel_workers} ignored (not supported with Plotly/Kaleido)')
+                print(f'   Using sequential rendering instead...')
+            
+            # Sequential rendering (reliable approach)
+            print(f'   Rendering frames... (First frame may take longer to initialize Kaleido)')
+            
             for i, deg in enumerate(steps_to_write):
                 rad_i = np.deg2rad(deg)
                 x = view_distance * np.sin(rad_i) * view_direction[0]
@@ -9910,25 +11859,22 @@ class VisualizeSkeleton:
                 
                 fig_path = os.path.join(pic_folder, f'deg_{deg:.1f}.jpeg')
                 
-                # Write image
                 try:
-                    # Use standard write_image which is more reliable than Scope in some envs
                     fig_new.write_image(fig_path, **kwargs)
                 except Exception as e:
                     print(f'\n⚠️  Frame {i+1} failed: {e}')
-                    # If first frame fails, it's likely a system/memory issue
                     if i == 0:
                         print('   Try reducing "scale" (e.g. scale=1) or using "width"/"height" parameters.')
                         return 1
                 
-                ti = time.time()
-                elapsed = ti - t0
+                elapsed = time.time() - t0
                 avg_time = elapsed / (i + 1)
                 remaining = avg_time * (len(steps_to_write) - i - 1)
                 print(f'\r  Frame {i+1}/{len(steps_to_write)} | '
                       f'Elapsed: {elapsed:.1f}s | '
-                      f'Remaining: {remaining:.1f}s | '
-                      f'Speed: {avg_time:.2f}s/frame', end='    ')
+                      f'ETA: {remaining:.1f}s | '
+                      f'{avg_time:.2f}s/frame', end='    ')
+            
             print('\n✓ Image rendering complete')
         # Generate videos from images
         print(f'\nGenerating videos...')

@@ -82,7 +82,11 @@ Find homologous neurons across datasets using connectivity profiles.
 python examples/comparison/Example_HomologFinding.py
 ```
 
-**Features:** Connectivity profile matching, cross-dataset homolog identification
+**Features:**
+- Connectivity profile matching using 1-hop/2-hop hybrid approach
+- Cross-dataset homolog identification
+- Both bodyId-level and type-level results saved automatically
+- Output files: `bodyid_results.csv` (sorted by source, rank_corr), `type_summary.csv`
 
 ---
 

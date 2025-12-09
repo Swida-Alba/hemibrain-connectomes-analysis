@@ -65,10 +65,14 @@ class LabelMapper:
         self,
         source_mapping_file: Optional[str] = None,
         target_mapping_file: Optional[str] = None,
+        mapping_file: Optional[str] = None,
         source_mapping_dict: Optional[Dict] = None,
         target_mapping_dict: Optional[Dict] = None,
+        intermediate_mapping_dict: Optional[Dict] = None,
         source_labels: Optional[List[str]] = None,
         target_labels: Optional[List[str]] = None,
+        intermediate_labels: Optional[List[str]] = None,
+        intermediate_mapping_file: Optional[str] = None,
     ):
         """
         Initialize LabelMapper.
@@ -76,22 +80,38 @@ class LabelMapper:
         Args:
             source_mapping_file: Path to CSV or JSON file for source mappings
             target_mapping_file: Path to CSV or JSON file for target mappings
+            intermediate_mapping_file: Path to CSV or JSON file for intermediate mappings
+            mapping_file: Path to JSON file containing source, target, and intermediate mappings
             source_mapping_dict: Dictionary mapping datasets to source neurons
             target_mapping_dict: Dictionary mapping datasets to target neurons
+            intermediate_mapping_dict: Dictionary mapping datasets to intermediate neurons
             source_labels: Standard labels for source groups (used with dict input)
             target_labels: Standard labels for target groups (used with dict input)
+            intermediate_labels: Standard labels for intermediate groups (used with dict input)
         """
         # Internal storage: {std_label: {dataset: [neuron_ids]}}
         self._source_mapping: Dict[str, Dict[str, List]] = defaultdict(lambda: defaultdict(list))
         self._target_mapping: Dict[str, Dict[str, List]] = defaultdict(lambda: defaultdict(list))
+        self._intermediate_mapping: Dict[str, Dict[str, List]] = defaultdict(lambda: defaultdict(list))
         
         # Reverse lookup: {dataset: {neuron_id: std_label}}
         self._source_reverse: Dict[str, Dict[str, str]] = defaultdict(dict)
         self._target_reverse: Dict[str, Dict[str, str]] = defaultdict(dict)
+        self._intermediate_reverse: Dict[str, Dict[str, str]] = defaultdict(dict)
+        
+        # Handle unified mapping file
+        if mapping_file:
+            if source_mapping_file is None:
+                source_mapping_file = mapping_file
+            if target_mapping_file is None:
+                target_mapping_file = mapping_file
+            if intermediate_mapping_file is None:
+                intermediate_mapping_file = mapping_file
         
         # Store file paths for export
         self._source_file = source_mapping_file
         self._target_file = target_mapping_file
+        self._intermediate_file = intermediate_mapping_file
         
         # Load from files if provided
         if source_mapping_file:
@@ -103,10 +123,192 @@ class LabelMapper:
             self._load_target_from_file(target_mapping_file)
         elif target_mapping_dict:
             self._load_target_from_dict(target_mapping_dict, target_labels or [])
+            
+        if intermediate_mapping_file:
+            self._load_intermediate_from_file(intermediate_mapping_file)
+        elif intermediate_mapping_dict:
+            self._load_intermediate_from_dict(intermediate_mapping_dict, intermediate_labels or [])
         
         # Build reverse lookups
         self._build_reverse_lookups()
     
+    def merge(self, other: 'LabelMapper') -> None:
+        """
+        Merge another LabelMapper into this one.
+        
+        Args:
+            other: Another LabelMapper instance to merge
+        """
+        # Merge source mappings
+        for label, ds_map in other._source_mapping.items():
+            for ds, neurons in ds_map.items():
+                # Avoid duplicates
+                current = set(self._source_mapping[label][ds])
+                new_neurons = [n for n in neurons if n not in current]
+                self._source_mapping[label][ds].extend(new_neurons)
+        
+        # Merge target mappings
+        for label, ds_map in other._target_mapping.items():
+            for ds, neurons in ds_map.items():
+                current = set(self._target_mapping[label][ds])
+                new_neurons = [n for n in neurons if n not in current]
+                self._target_mapping[label][ds].extend(new_neurons)
+                
+        # Merge intermediate mappings
+        for label, ds_map in other._intermediate_mapping.items():
+            for ds, neurons in ds_map.items():
+                current = set(self._intermediate_mapping[label][ds])
+                new_neurons = [n for n in neurons if n not in current]
+                self._intermediate_mapping[label][ds].extend(new_neurons)
+        
+        # Rebuild reverse lookups
+        self._build_reverse_lookups()
+
+    def validate_datasets(self, datasets: List[str], role: str = 'both') -> None:
+        """
+        Validate that all requested datasets exist in the mapping.
+        
+        Args:
+            datasets: List of dataset names to check
+            role: 'source', 'target', or 'both'
+            
+        Raises:
+            ValueError: If any dataset is missing from the mapping
+        """
+        missing = []
+        
+        if role in ['source', 'both']:
+            # Check source mapping
+            # Get all datasets present in source mapping
+            present_datasets = set()
+            for label_map in self._source_mapping.values():
+                present_datasets.update(label_map.keys())
+            
+            for ds in datasets:
+                if ds not in present_datasets:
+                    missing.append(f"{ds} (source)")
+                    
+        if role in ['target', 'both']:
+            # Check target mapping
+            present_datasets = set()
+            for label_map in self._target_mapping.values():
+                present_datasets.update(label_map.keys())
+                
+            for ds in datasets:
+                if ds not in present_datasets:
+                    missing.append(f"{ds} (target)")
+        
+        if missing:
+            raise ValueError(f"Datasets missing from LabelMapper: {', '.join(missing)}")
+
+    def get_mapped_label(self, label: str, dataset: str) -> Optional[Union[str, int, List[Union[str, int]]]]:
+        """
+        Get the mapped label(s) or ID(s) for a given standard label in a specific dataset.
+        
+        Args:
+            label: The standard label (or custom_label) to look up.
+            dataset: The target dataset name.
+            
+        Returns:
+            The mapped value. If the mapping contains a single value, returns that value.
+            If it contains multiple values, returns a list.
+            Returns None if no mapping is found.
+        """
+        # Check source mapping
+        if label in self._source_mapping and dataset in self._source_mapping[label]:
+            values = self._source_mapping[label][dataset]
+            if values:
+                return values[0] if len(values) == 1 else values
+        
+        # Check target mapping
+        if label in self._target_mapping and dataset in self._target_mapping[label]:
+            values = self._target_mapping[label][dataset]
+            if values:
+                return values[0] if len(values) == 1 else values
+                
+        # Check intermediate mapping
+        if label in self._intermediate_mapping and dataset in self._intermediate_mapping[label]:
+            values = self._intermediate_mapping[label][dataset]
+            if values:
+                return values[0] if len(values) == 1 else values
+                
+        return None
+
+    def to_dict(self) -> Dict:
+        """
+        Convert current mappings to a dictionary compatible with _load_from_json.
+        
+        Returns:
+            Dictionary with 'source_mapping', 'target_mapping', and/or 'intermediate_mapping'
+        """
+        output = {}
+        
+        # Export source mapping
+        if self._source_mapping:
+            source_labels = sorted(self._source_mapping.keys())
+            source_data = {'custom_label': source_labels}
+            
+            # Get all datasets
+            datasets = set()
+            for label_map in self._source_mapping.values():
+                datasets.update(label_map.keys())
+            
+            for ds in sorted(datasets):
+                ds_groups = []
+                for label in source_labels:
+                    ds_groups.append(self._source_mapping[label].get(ds, []))
+                source_data[ds] = ds_groups
+                
+            output['source_mapping'] = source_data
+            
+        # Export target mapping
+        if self._target_mapping:
+            target_labels = sorted(self._target_mapping.keys())
+            target_data = {'custom_label': target_labels}
+            
+            # Get all datasets
+            datasets = set()
+            for label_map in self._target_mapping.values():
+                datasets.update(label_map.keys())
+            
+            for ds in sorted(datasets):
+                ds_groups = []
+                for label in target_labels:
+                    ds_groups.append(self._target_mapping[label].get(ds, []))
+                target_data[ds] = ds_groups
+                
+            output['target_mapping'] = target_data
+
+        # Export intermediate mapping
+        if self._intermediate_mapping:
+            intermediate_labels = sorted(self._intermediate_mapping.keys())
+            intermediate_data = {'custom_label': intermediate_labels}
+            
+            # Get all datasets
+            datasets = set()
+            for label_map in self._intermediate_mapping.values():
+                datasets.update(label_map.keys())
+            
+            for ds in sorted(datasets):
+                ds_groups = []
+                for label in intermediate_labels:
+                    ds_groups.append(self._intermediate_mapping[label].get(ds, []))
+                intermediate_data[ds] = ds_groups
+                
+            output['intermediate_mapping'] = intermediate_data
+            
+        return output
+
+    def export_to_json(self, filepath: str) -> None:
+        """
+        Export current mappings to a JSON file compatible with _load_from_json.
+        
+        Args:
+            filepath: Path to save the JSON file
+        """
+        with open(filepath, 'w') as f:
+            json.dump(self.to_dict(), f, indent=2)
+
     def _load_source_from_file(self, filepath: str) -> None:
         """Load source mapping from CSV or JSON file."""
         if filepath.endswith('.json'):
@@ -120,6 +322,13 @@ class LabelMapper:
             self._load_from_json(filepath, 'target')
         else:
             self._load_from_csv(filepath, 'target')
+
+    def _load_intermediate_from_file(self, filepath: str) -> None:
+        """Load intermediate mapping from CSV or JSON file."""
+        if filepath.endswith('.json'):
+            self._load_from_json(filepath, 'intermediate')
+        else:
+            self._load_from_csv(filepath, 'intermediate')
     
     def _load_from_csv(self, filepath: str, role: str) -> None:
         """
@@ -138,7 +347,7 @@ class LabelMapper:
         
         Args:
             filepath: Path to CSV file
-            role: 'source' or 'target'
+            role: 'source', 'target', or 'intermediate'
         """
         if not os.path.exists(filepath):
             raise FileNotFoundError(f"Mapping file not found: {filepath}")
@@ -167,13 +376,18 @@ class LabelMapper:
         
         Args:
             df: DataFrame with custom_label column
-            role: 'source' or 'target'
+            role: 'source', 'target', or 'intermediate'
         """
         # Identify dataset columns (exclude custom_label, std_pattern, notes, description, etc.)
         exclude_cols = {'custom_label', 'std_pattern', 'notes', 'description', 'comment'}
         dataset_cols = [c for c in df.columns if c.lower() not in exclude_cols]
         
-        mapping = self._source_mapping if role == 'source' else self._target_mapping
+        if role == 'source':
+            mapping = self._source_mapping
+        elif role == 'target':
+            mapping = self._target_mapping
+        else:
+            mapping = self._intermediate_mapping
         
         for _, row in df.iterrows():
             custom_label = row.get('custom_label', '')
@@ -221,12 +435,17 @@ class LabelMapper:
         
         Args:
             df: DataFrame with std_label column
-            role: 'source' or 'target'
+            role: 'source', 'target', or 'intermediate'
         """
         # Get dataset columns (all except std_label)
         dataset_cols = [c for c in df.columns if c != 'std_label']
         
-        mapping = self._source_mapping if role == 'source' else self._target_mapping
+        if role == 'source':
+            mapping = self._source_mapping
+        elif role == 'target':
+            mapping = self._target_mapping
+        else:
+            mapping = self._intermediate_mapping
         
         for _, row in df.iterrows():
             std_label = row['std_label']
@@ -271,7 +490,7 @@ class LabelMapper:
         
         JSON Format:
             {
-                "source_mapping": {  # or "target_mapping"
+                "source_mapping": {  # or "target_mapping" or "intermediate_mapping"
                     "custom_label": ["label1", "label2"],  # or "std_label" for legacy
                     "dataset1": [["id1", "id2"], ["id3"]],
                     "dataset2": [["id4"], ["id5", "id6"]]
@@ -280,7 +499,7 @@ class LabelMapper:
         
         Args:
             filepath: Path to JSON file
-            role: 'source' or 'target'
+            role: 'source', 'target', or 'intermediate'
         """
         if not os.path.exists(filepath):
             raise FileNotFoundError(f"Mapping file not found: {filepath}")
@@ -304,7 +523,13 @@ class LabelMapper:
             raise ValueError(f"JSON {key} must have 'custom_label' or 'std_label' array")
         
         std_labels = mapping_data[label_key]
-        mapping = self._source_mapping if role == 'source' else self._target_mapping
+        
+        if role == 'source':
+            mapping = self._source_mapping
+        elif role == 'target':
+            mapping = self._target_mapping
+        else:
+            mapping = self._intermediate_mapping
         
         # Get dataset keys (all except label key)
         dataset_keys = [k for k in mapping_data.keys() if k != label_key]
@@ -341,6 +566,16 @@ class LabelMapper:
             labels: ['label1', 'label2', ...] matching group count
         """
         self._load_from_dict(mapping_dict, labels, 'target')
+
+    def _load_intermediate_from_dict(self, mapping_dict: Dict, labels: List[str]) -> None:
+        """
+        Load intermediate mapping from dictionary.
+        
+        Args:
+            mapping_dict: {dataset: [[group1_ids], [group2_ids], ...]}
+            labels: ['label1', 'label2', ...] matching group count
+        """
+        self._load_from_dict(mapping_dict, labels, 'intermediate')
     
     def _load_from_dict(self, mapping_dict: Dict, labels: List[str], role: str) -> None:
         """
@@ -349,9 +584,14 @@ class LabelMapper:
         Args:
             mapping_dict: {dataset: [[group1_ids], [group2_ids], ...]} or {dataset: [flat_ids]}
             labels: Standard labels for groups
-            role: 'source' or 'target'
+            role: 'source', 'target', or 'intermediate'
         """
-        mapping = self._source_mapping if role == 'source' else self._target_mapping
+        if role == 'source':
+            mapping = self._source_mapping
+        elif role == 'target':
+            mapping = self._target_mapping
+        else:
+            mapping = self._intermediate_mapping
         
         for dataset, neurons in mapping_dict.items():
             # Ensure neurons is a list of groups
@@ -362,8 +602,14 @@ class LabelMapper:
             if isinstance(neurons[0], list):
                 groups = neurons
             else:
-                # Wrap in single group
-                groups = [neurons]
+                # Handle flat list: check if it matches labels length
+                # If labels are provided and length matches neurons length (and > 1),
+                # treat each neuron as a separate group
+                if labels and len(labels) == len(neurons) and len(labels) > 1:
+                    groups = [[n] for n in neurons]
+                else:
+                    # Wrap in single group
+                    groups = [neurons]
             
             # Auto-generate labels if not provided
             if not labels:
@@ -390,6 +636,12 @@ class LabelMapper:
             for dataset, neuron_ids in dataset_dict.items():
                 for neuron_id in neuron_ids:
                     self._target_reverse[dataset][str(neuron_id)] = std_label
+
+        # Intermediate reverse lookup
+        for std_label, dataset_dict in self._intermediate_mapping.items():
+            for dataset, neuron_ids in dataset_dict.items():
+                for neuron_id in neuron_ids:
+                    self._intermediate_reverse[dataset][str(neuron_id)] = std_label
     
     def _sanitize_dataset_name(self, dataset: str) -> str:
         """Convert dataset name to column-safe format."""
@@ -417,12 +669,18 @@ class LabelMapper:
         Args:
             dataset: Dataset identifier
             original_id: Original neuron ID (type name or bodyId)
-            role: 'source' or 'target'
+            role: 'source', 'target', or 'intermediate'
             
         Returns:
             Standardized label, or auto-generated if not found
         """
-        reverse = self._source_reverse if role == 'source' else self._target_reverse
+        if role == 'source':
+            reverse = self._source_reverse
+        elif role == 'target':
+            reverse = self._target_reverse
+        else:
+            reverse = self._intermediate_reverse
+            
         str_id = str(original_id)
         
         # Try exact match
@@ -444,12 +702,17 @@ class LabelMapper:
         Args:
             std_label: Standard label
             dataset: Dataset identifier
-            role: 'source' or 'target'
+            role: 'source', 'target', or 'intermediate'
             
         Returns:
             List of neuron IDs (may be empty if dataset doesn't have this label)
         """
-        mapping = self._source_mapping if role == 'source' else self._target_mapping
+        if role == 'source':
+            mapping = self._source_mapping
+        elif role == 'target':
+            mapping = self._target_mapping
+        else:
+            mapping = self._intermediate_mapping
         
         if std_label in mapping:
             if dataset in mapping[std_label]:
@@ -466,12 +729,17 @@ class LabelMapper:
         Get all standard labels for a role.
         
         Args:
-            role: 'source' or 'target'
+            role: 'source', 'target', or 'intermediate'
             
         Returns:
             List of all standard labels
         """
-        mapping = self._source_mapping if role == 'source' else self._target_mapping
+        if role == 'source':
+            mapping = self._source_mapping
+        elif role == 'target':
+            mapping = self._target_mapping
+        else:
+            mapping = self._intermediate_mapping
         return list(mapping.keys())
     
     def get_datasets(self, role: str) -> List[str]:
@@ -479,12 +747,17 @@ class LabelMapper:
         Get all datasets that have mappings for a role.
         
         Args:
-            role: 'source' or 'target'
+            role: 'source', 'target', or 'intermediate'
             
         Returns:
             List of dataset identifiers
         """
-        mapping = self._source_mapping if role == 'source' else self._target_mapping
+        if role == 'source':
+            mapping = self._source_mapping
+        elif role == 'target':
+            mapping = self._target_mapping
+        else:
+            mapping = self._intermediate_mapping
         datasets = set()
         for label_dict in mapping.values():
             datasets.update(label_dict.keys())
@@ -499,9 +772,9 @@ class LabelMapper:
             original_id: Original neuron ID
             
         Returns:
-            Generated label in format {original_id}_etc
+            Generated label (returns original_id as string to allow merging)
         """
-        return f"{original_id}_etc"
+        return str(original_id)
     
     def get_mapping_summary(self) -> pd.DataFrame:
         """
@@ -531,6 +804,16 @@ class LabelMapper:
                     'neuron_count': len(neurons),
                     'neurons': str(neurons[:5]) + ('...' if len(neurons) > 5 else '')
                 })
+
+        for std_label, dataset_dict in self._intermediate_mapping.items():
+            for dataset, neurons in dataset_dict.items():
+                rows.append({
+                    'role': 'intermediate',
+                    'std_label': std_label,
+                    'dataset': dataset,
+                    'neuron_count': len(neurons),
+                    'neurons': str(neurons[:5]) + ('...' if len(neurons) > 5 else '')
+                })
         
         return pd.DataFrame(rows)
     
@@ -549,17 +832,23 @@ class LabelMapper:
         resolved_target = {}
         for std_label, dataset_dict in self._target_mapping.items():
             resolved_target[std_label] = dict(dataset_dict)
+
+        resolved_intermediate = {}
+        for std_label, dataset_dict in self._intermediate_mapping.items():
+            resolved_intermediate[std_label] = dict(dataset_dict)
         
         return {
             'source_mapping_file': self._source_file,
             'target_mapping_file': self._target_file,
+            'intermediate_mapping_file': self._intermediate_file,
             'resolved_source_mapping': resolved_source,
-            'resolved_target_mapping': resolved_target
+            'resolved_target_mapping': resolved_target,
+            'resolved_intermediate_mapping': resolved_intermediate
         }
     
     def has_mapping(self) -> bool:
         """Check if any mappings are defined."""
-        return bool(self._source_mapping) or bool(self._target_mapping)
+        return bool(self._source_mapping) or bool(self._target_mapping) or bool(self._intermediate_mapping)
     
     def get_all_neurons_for_dataset(self, dataset: str, role: str) -> List:
         """
@@ -570,12 +859,17 @@ class LabelMapper:
         
         Args:
             dataset: Dataset identifier
-            role: 'source' or 'target'
+            role: 'source', 'target', or 'intermediate'
             
         Returns:
             List of neuron IDs for this dataset
         """
-        mapping = self._source_mapping if role == 'source' else self._target_mapping
+        if role == 'source':
+            mapping = self._source_mapping
+        elif role == 'target':
+            mapping = self._target_mapping
+        else:
+            mapping = self._intermediate_mapping
         
         all_neurons = []
         for std_label, dataset_dict in mapping.items():
@@ -589,11 +883,47 @@ class LabelMapper:
         
         return all_neurons
     
+    def get_label(self, dataset: str, original_id: Union[str, int]) -> str:
+        """
+        Get standardized label for a neuron ID, checking all mappings.
+        Priority: Source -> Target -> Intermediate
+        
+        Args:
+            dataset: Dataset identifier
+            original_id: Original neuron ID
+            
+        Returns:
+            Standardized label, or auto-generated if not found
+        """
+        str_id = str(original_id)
+        sanitized = self._sanitize_dataset_name(dataset)
+        
+        # Check source
+        if dataset in self._source_reverse and str_id in self._source_reverse[dataset]:
+            return self._source_reverse[dataset][str_id]
+        if sanitized in self._source_reverse and str_id in self._source_reverse[sanitized]:
+            return self._source_reverse[sanitized][str_id]
+            
+        # Check target
+        if dataset in self._target_reverse and str_id in self._target_reverse[dataset]:
+            return self._target_reverse[dataset][str_id]
+        if sanitized in self._target_reverse and str_id in self._target_reverse[sanitized]:
+            return self._target_reverse[sanitized][str_id]
+
+        # Check intermediate
+        if dataset in self._intermediate_reverse and str_id in self._intermediate_reverse[dataset]:
+            return self._intermediate_reverse[dataset][str_id]
+        if sanitized in self._intermediate_reverse and str_id in self._intermediate_reverse[sanitized]:
+            return self._intermediate_reverse[sanitized][str_id]
+            
+        return self.auto_generate_label(original_id)
+
     def apply_to_dataframe(self, df: pd.DataFrame, dataset: str) -> pd.DataFrame:
         """
         Apply standard labels to a connection DataFrame.
         
         Adds 'std_label_pre' and 'std_label_post' columns based on type columns.
+        Uses get_label() to check all mappings (source, target, intermediate).
         
         Args:
             df: DataFrame with type_pre and type_post columns
@@ -610,21 +940,21 @@ class LabelMapper:
         # Apply to pre (source) neurons
         if 'type_pre' in df.columns:
             df['std_label_pre'] = df['type_pre'].apply(
-                lambda x: self.get_std_label(dataset, x, 'source') if pd.notna(x) else ''
+                lambda x: self.get_label(dataset, x) if pd.notna(x) else ''
             )
         elif 'bodyId_pre' in df.columns:
             df['std_label_pre'] = df['bodyId_pre'].apply(
-                lambda x: self.get_std_label(dataset, x, 'source')
+                lambda x: self.get_label(dataset, x)
             )
         
         # Apply to post (target) neurons
         if 'type_post' in df.columns:
             df['std_label_post'] = df['type_post'].apply(
-                lambda x: self.get_std_label(dataset, x, 'target') if pd.notna(x) else ''
+                lambda x: self.get_label(dataset, x) if pd.notna(x) else ''
             )
         elif 'bodyId_post' in df.columns:
             df['std_label_post'] = df['bodyId_post'].apply(
-                lambda x: self.get_std_label(dataset, x, 'target')
+                lambda x: self.get_label(dataset, x)
             )
         
         return df
@@ -764,11 +1094,12 @@ class LabelMapper:
         # Check for at least one mapping section
         has_source = 'source_mapping' in data
         has_target = 'target_mapping' in data
+        has_intermediate = 'intermediate_mapping' in data
         
-        if not has_source and not has_target:
+        if not has_source and not has_target and not has_intermediate:
             result['valid'] = False
             result['errors'].append(
-                "JSON must have 'source_mapping' and/or 'target_mapping' keys. "
+                "JSON must have 'source_mapping', 'target_mapping', or 'intermediate_mapping' keys. "
                 f"Found: {list(data.keys())}"
             )
             return result
@@ -776,7 +1107,7 @@ class LabelMapper:
         summary_sections = {}
         
         # Validate each section
-        for section_name in ['source_mapping', 'target_mapping']:
+        for section_name in ['source_mapping', 'target_mapping', 'intermediate_mapping']:
             if section_name not in data:
                 continue
             

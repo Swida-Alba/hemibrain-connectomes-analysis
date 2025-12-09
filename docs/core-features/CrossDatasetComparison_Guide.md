@@ -36,6 +36,7 @@ params = ComparisonParameters(
     max_interlayer=1,
     thresholds=[1, 5, 10],
     output_folder='/path/to/output',
+    skip_bodyId=True,  # Optional: Skip bodyId-level data for faster type-level analysis
 )
 
 # Run comparison
@@ -279,6 +280,123 @@ results = analyzer.run_comparison()
    - Use `comparison_mode='edge'` to capture all potential connections
    - Use moderate thresholds (5+) to filter weak/spurious connections
    - Consider using wildcards (`aMe.*`) to include all subtypes
+
+### Example 6: Using LabelMapper for Cross-Dataset Standardization
+
+When neuron names differ across datasets (e.g., `aMe12` in hemibrain vs `aMe12_R` in FAFB), use `LabelMapper` to standardize them.
+
+**Option A: Using a Mapping File (Recommended)**
+
+Create a CSV file `mappings.csv`:
+```csv
+std_label,hemibrain:v1.2.1,male-cns:v0.9,flywire_FAFB_v783
+aMe12,aMe12,aMe12,720575940610453042
+PPL101,PPL101,PPL101,720575940621886666
+```
+
+Then use it in your script:
+
+```python
+from comparison import ComparisonParameters, ComparisonAnalyzer, LabelMapper
+
+# Initialize LabelMapper with the mapping file
+mapper = LabelMapper(mapping_file='mappings.csv')
+
+params = ComparisonParameters(
+    datasets=['hemibrain:v1.2.1', 'male-cns:v0.9', 'flywire_FAFB_v783'],
+    
+    # Pass the mapper to source/target neurons
+    # The mapper will look up the standardized labels 'aMe12' and 'PPL101'
+    source_neurons=mapper,
+    target_neurons=mapper,
+    
+    # Specify which standardized labels to use
+    source_labels=['aMe12'],
+    target_labels=['PPL101'],
+    
+    max_interlayer=1,
+    thresholds=[5, 10],
+    output_folder='/path/to/output',
+)
+
+analyzer = ComparisonAnalyzer(params)
+results = analyzer.run_comparison()
+```
+
+**Option B: Separate Source and Target Mappings**
+
+If you have separate files for source and target mappings:
+
+```python
+# Initialize with separate files
+mapper = LabelMapper(
+    source_mapping_file='source_mappings.csv',
+    target_mapping_file='target_mappings.csv'
+)
+
+params = ComparisonParameters(
+    datasets=['hemibrain:v1.2.1', 'male-cns:v0.9'],
+    
+    # Use the mapper
+    source_neurons=mapper,
+    target_neurons=mapper,
+    
+    # ... other parameters
+)
+```
+
+**Option C: Using Dictionaries (No File)**
+
+```python
+# Define mappings in code
+source_map = {
+    'hemibrain:v1.2.1': ['aMe12'],
+    'male-cns:v0.9': ['aMe12'],
+    'flywire_FAFB_v783': ['720575940610453042']
+}
+
+target_map = {
+    'hemibrain:v1.2.1': ['PPL101'],
+    'male-cns:v0.9': ['PPL101'],
+    'flywire_FAFB_v783': ['720575940621886666']
+}
+
+# Create mapper from dicts
+mapper = LabelMapper(
+    source_mapping_dict=source_map,
+    target_mapping_dict=target_map,
+    source_labels=['aMe12'],  # Optional: name for the group
+    target_labels=['PPL101']
+)
+
+params = ComparisonParameters(
+    datasets=['hemibrain:v1.2.1', 'male-cns:v0.9', 'flywire_FAFB_v783'],
+    source_neurons=mapper,
+    target_neurons=mapper,
+    # ...
+)
+```
+
+**Option D: Using `overall_label_mapper`**
+
+Alternatively, you can pass the mapper to `overall_label_mapper` and use simple lists for source/target neurons (referencing standardized labels).
+
+```python
+mapper = LabelMapper(mapping_file='mappings.csv')
+
+params = ComparisonParameters(
+    datasets=['hemibrain:v1.2.1', 'male-cns:v0.9'],
+    
+    # Pass mapper here
+    overall_label_mapper=mapper,
+    
+    # Use standardized labels directly
+    source_neurons=['aMe12'],
+    target_neurons=['PPL101'],
+    
+    # ...
+)
+```
 
 ---
 
@@ -614,9 +732,10 @@ If an edge appears at t=3 but disappears at t=5:
 
 **Solutions:**
 1. Enable caching (automatic if cache exists)
-2. Reduce number of thresholds
-3. Reduce `top_edges` parameter
-4. Use smaller `max_interlayer`
+2. Use `skip_bodyId=True` to skip expensive bodyId-level processing if only type-level data is needed
+3. Reduce number of thresholds
+4. Reduce `top_edges` parameter
+5. Use smaller `max_interlayer`
 
 ### FlyWire Dataset Not Found
 
@@ -644,6 +763,7 @@ ComparisonParameters(
     output_folder: str,               # Base output directory
     saveas: str = None,               # Custom folder name (auto if None)
     token: str = '',                  # NeuPrint API token
+    skip_bodyId: bool = False,        # Skip bodyId-level processing for speed
 )
 ```
 

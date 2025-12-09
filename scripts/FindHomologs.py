@@ -35,33 +35,25 @@ import sys
 from pathlib import Path
 
 # Add repo src/ to path to force loading the in-repo comparison module (avoids picking up any older installed version)
-project_root = Path(__file__).parent.parent.parent
-sys.path.insert(0, str(project_root / "src"))
+sys.path.insert(0, str(Path(__file__).parent.parent / 'src'))
 
 import pandas as pd
 from comparison.profile_comparator import HomologFinder
 
-
-def main():
-    """Run homolog finding examples."""
-    print("\n" + "=" * 70)
-    print("  CONNECTIVITY PROFILE-BASED HOMOLOG FINDING")
-    print("  Using HomologFinder with module-level defaults")
-    print("=" * 70)
-    
+if __name__ == "__main__":
     finder = HomologFinder(
         token='',
 
-        source='aMe12', # MTe07
+        source='aMe12', # MTe07/MeVPLo2
         source_dataset='flywire_FAFB_v783',
-        target_dataset='male-cns:v0.9',
+        target_dataset='flywire_FAFB_v783',
         # source='aMe12',
         # source_dataset='male-cns:v0.9',
         # target_dataset='flywire_FAFB_v783',
         
-        output_dir='/Users/apple/Local/connection_data',
+        output_dir='/Users/apple/Local/connection_data/HomologFinding/',
         visualize_skeleton=True,  # Enable to visualize top candidates
-        visualize_top_n=1,         # Number of candidates to visualize
+        visualize_top_n=5,         # Number of candidates to visualize
         verbose=True,
         similarity_metric='jaccard',
         top_n=30,
@@ -70,27 +62,10 @@ def main():
     
     # Run using defaults - no arguments needed!
     results1 = finder.find_homologs_fast()
+    # results2 = finder.direct_comparison(
+    #     neurons_a='aMe12',
+    #     neurons_b='aMe12',
+    #     dataset_a='flywire_FAFB_v783',
+    #     dataset_b='male-cns:v0.9',
+    #     )
     # results2 = finder.find_homologs()
-    
-    # display_results(results1, "Top matches for aMe12")
-    
-    if not results1.empty:
-        top_match = results1.iloc[0]
-        print(f"\nTop match: {top_match['target_type']} (rank_corr: {top_match['rank_corr']:.3f})")
-    
-    
-    print("\nFolder Structure (when output_dir is set):")
-    print("  {saveas}/")
-    print("  ├── README.txt              # Parameters and summary")
-    print("  ├── results/")
-    print("  │   ├── bodyid_results.csv  # BodyId-level (sorted by source, rank_corr)")
-    print("  │   ├── type_summary.csv    # Type-level aggregated")
-    print("  │   └── homolog_results.csv # Legacy format")
-    print("  ├── profiles/")
-    print("  │   ├── query/              # Query neuron profile")
-    print("  │   └── matches/            # Top match profiles")
-    print("  └── overlaps/               # Partner overlap details")
-
-
-if __name__ == "__main__":
-    main()
