@@ -14,6 +14,7 @@ Date: 2025-10-27
 
 import pandas as pd
 import numpy as np
+import polars as pl
 import networkx as nx
 import os
 import json
@@ -6514,6 +6515,67 @@ class VisualizePath:
         if self.showfig:
             webbrowser.open('file://' + os.path.abspath(output_path))
     
+    def _save_df_to_csv_polars(self, df, path, index=False):
+        """Save DataFrame to CSV using Polars for speed"""
+        if df is None or df.empty:
+            # Create empty file if dataframe is empty, to match pandas behavior
+            with open(path, 'w') as f:
+                if df is not None:
+                    f.write(','.join(df.columns) + '\n')
+            return
+            
+        try:
+            # If index is True, reset index to make it a column
+            if index:
+                df_to_save = df.reset_index()
+            else:
+                df_to_save = df
+                
+            pl_df = pl.from_pandas(df_to_save)
+            pl_df.write_csv(path)
+        except Exception as e:
+            # Fallback to Pandas if Polars fails (e.g. object types)
+            try:
+                df.to_csv(path, index=index)
+            except Exception as e2:
+                print(f"  Error saving CSV: {e2}", flush=True)
+
+    def _save_dfs_to_excel_polars(self, data_map, path):
+        """
+        Save multiple DataFrames to Excel using Polars.
+        
+        Parameters
+        ----------
+        data_map : dict
+            {sheet_name: (df, include_index)}
+        path : str
+            Output path
+        """
+        try:
+            import xlsxwriter
+            with xlsxwriter.Workbook(path, {'nan_inf_to_errors': True}) as workbook:
+                for sheet_name, (df, include_index) in data_map.items():
+                    if df is None:
+                        continue
+                        
+                    if include_index:
+                        df_to_save = df.reset_index()
+                    else:
+                        df_to_save = df
+                    
+                    # Convert to Polars
+                    pl_df = pl.from_pandas(df_to_save)
+                    
+                    # Write to worksheet
+                    # Polars write_excel supports workbook argument
+                    pl_df.write_excel(workbook=workbook, worksheet=sheet_name)
+        except Exception as e:
+            self._vprint(f"Polars Excel save failed ({e}), falling back to Pandas...")
+            with pd.ExcelWriter(path, engine='openpyxl') as writer:
+                for sheet_name, (df, include_index) in data_map.items():
+                    if df is not None:
+                        df.to_excel(writer, sheet_name=sheet_name, index=include_index)
+
     def save_data(self):
         """
         Save connection data and original paths to Excel or CSV files.
@@ -6542,73 +6604,80 @@ class VisualizePath:
         if self.conn_df is None:
             self.build_network()
         
+        # Create matrices
+        all_nodes = sorted(list(set(self.conn_df['source']).union(set(self.conn_df['target']))))
+        
+        # Weight matrix
+        weight_matrix = self.conn_df.pivot_table(
+            index='source', 
+            columns='target', 
+            values='weight', 
+            fill_value=0
+        ).reindex(index=all_nodes, columns=all_nodes, fill_value=0)
+        
+        # Ratio matrix
+        ratio_matrix = None
+        if 'ratio' in self.conn_df.columns:
+            ratio_matrix = self.conn_df.pivot_table(
+                index='source', 
+                columns='target', 
+                values='ratio', 
+                fill_value=0
+            ).reindex(index=all_nodes, columns=all_nodes, fill_value=0)
+            
+        # Probability matrix
+        prob_matrix = None
+        if 'probability' in self.conn_df.columns:
+            prob_matrix = self.conn_df.pivot_table(
+                index='source', 
+                columns='target', 
+                values='probability', 
+                fill_value=0
+            ).reindex(index=all_nodes, columns=all_nodes, fill_value=0)
+            
+        # NT Type matrix
+        nt_matrix = None
+        if 'nt_type' in self.conn_df.columns:
+            nt_matrix = self.conn_df.pivot_table(
+                index='source', 
+                columns='target', 
+                values='nt_type', 
+                aggfunc='first',
+                fill_value=''
+            ).reindex(index=all_nodes, columns=all_nodes, fill_value='')
+
         if self.output_format == 'csv':
             self._vprint("\nSaving data to CSV files...")
             created_files = []
             
             # Save connections
             conn_path = os.path.join(self.output_folder, self.base_filename + '_data_connections.csv')
-            self.conn_df.to_csv(conn_path, index=False)
+            self._save_df_to_csv_polars(self.conn_df, conn_path, index=False)
             created_files.append(conn_path)
             
             # Save original paths
             paths_path = os.path.join(self.output_folder, self.base_filename + '_data_original_paths.csv')
-            self.path_df.to_csv(paths_path, index=False)
+            self._save_df_to_csv_polars(self.path_df, paths_path, index=False)
             created_files.append(paths_path)
             
-            # Create matrices
-            all_nodes = sorted(list(set(self.conn_df['source']).union(set(self.conn_df['target']))))
-            
-            # Weight matrix
-            weight_matrix = self.conn_df.pivot_table(
-                index='source', 
-                columns='target', 
-                values='weight', 
-                fill_value=0
-            ).reindex(index=all_nodes, columns=all_nodes, fill_value=0)
-            
+            # Save matrices
             weight_path = os.path.join(self.output_folder, self.base_filename + '_data_connMatrix_weight.csv')
-            weight_matrix.to_csv(weight_path)
+            self._save_df_to_csv_polars(weight_matrix, weight_path, index=True)
             created_files.append(weight_path)
             
-            # Ratio matrix
-            if 'ratio' in self.conn_df.columns:
-                ratio_matrix = self.conn_df.pivot_table(
-                    index='source', 
-                    columns='target', 
-                    values='ratio', 
-                    fill_value=0
-                ).reindex(index=all_nodes, columns=all_nodes, fill_value=0)
-                
+            if ratio_matrix is not None:
                 ratio_path = os.path.join(self.output_folder, self.base_filename + '_data_connMatrix_ratio.csv')
-                ratio_matrix.to_csv(ratio_path)
+                self._save_df_to_csv_polars(ratio_matrix, ratio_path, index=True)
                 created_files.append(ratio_path)
                 
-            # Probability matrix
-            if 'probability' in self.conn_df.columns:
-                prob_matrix = self.conn_df.pivot_table(
-                    index='source', 
-                    columns='target', 
-                    values='probability', 
-                    fill_value=0
-                ).reindex(index=all_nodes, columns=all_nodes, fill_value=0)
-                
+            if prob_matrix is not None:
                 prob_path = os.path.join(self.output_folder, self.base_filename + '_data_connMatrix_prob.csv')
-                prob_matrix.to_csv(prob_path)
+                self._save_df_to_csv_polars(prob_matrix, prob_path, index=True)
                 created_files.append(prob_path)
                 
-            # NT Type matrix
-            if 'nt_type' in self.conn_df.columns:
-                nt_matrix = self.conn_df.pivot_table(
-                    index='source', 
-                    columns='target', 
-                    values='nt_type', 
-                    aggfunc='first',
-                    fill_value=''
-                ).reindex(index=all_nodes, columns=all_nodes, fill_value='')
-                
+            if nt_matrix is not None:
                 nt_path = os.path.join(self.output_folder, self.base_filename + '_data_connMatrix_nt_type.csv')
-                nt_matrix.to_csv(nt_path)
+                self._save_df_to_csv_polars(nt_matrix, nt_path, index=True)
                 created_files.append(nt_path)
             
             self._vprint(f"Data saved to {len(created_files)} CSV files in: {self.output_folder}")
@@ -6619,63 +6688,20 @@ class VisualizePath:
             
             output_path = os.path.join(self.output_folder, self.base_filename + '_data.xlsx')
             
-            # Create matrices
-            # Get all unique nodes to ensure square matrices or at least consistent axes
-            all_nodes = sorted(list(set(self.conn_df['source']).union(set(self.conn_df['target']))))
+            data_map = {
+                'connections': (self.conn_df, False),
+                'original_paths': (self.path_df, False),
+                'connMatrix_weight': (weight_matrix, True)
+            }
             
-            # Weight matrix
-            weight_matrix = self.conn_df.pivot_table(
-                index='source', 
-                columns='target', 
-                values='weight', 
-                fill_value=0
-            ).reindex(index=all_nodes, columns=all_nodes, fill_value=0)
-            
-            # Ratio matrix
-            ratio_matrix = None
-            if 'ratio' in self.conn_df.columns:
-                ratio_matrix = self.conn_df.pivot_table(
-                    index='source', 
-                    columns='target', 
-                    values='ratio', 
-                    fill_value=0
-                ).reindex(index=all_nodes, columns=all_nodes, fill_value=0)
+            if ratio_matrix is not None:
+                data_map['connMatrix_ratio'] = (ratio_matrix, True)
+            if prob_matrix is not None:
+                data_map['connMatrix_prob'] = (prob_matrix, True)
+            if nt_matrix is not None:
+                data_map['connMatrix_nt_type'] = (nt_matrix, True)
                 
-            # Probability matrix
-            prob_matrix = None
-            if 'probability' in self.conn_df.columns:
-                prob_matrix = self.conn_df.pivot_table(
-                    index='source', 
-                    columns='target', 
-                    values='probability', 
-                    fill_value=0
-                ).reindex(index=all_nodes, columns=all_nodes, fill_value=0)
-                
-            # NT Type matrix
-            nt_matrix = None
-            if 'nt_type' in self.conn_df.columns:
-                # For categorical data, fill_value needs to be handled carefully
-                # pivot_table with aggfunc='first' (or lambda x: x.mode()[0]) works for strings
-                # But we already aggregated in build_network, so 'first' is fine
-                nt_matrix = self.conn_df.pivot_table(
-                    index='source', 
-                    columns='target', 
-                    values='nt_type', 
-                    aggfunc='first',
-                    fill_value=''
-                ).reindex(index=all_nodes, columns=all_nodes, fill_value='')
-
-            with pd.ExcelWriter(output_path, engine='openpyxl') as writer:
-                self.conn_df.to_excel(writer, sheet_name='connections', index=False)
-                self.path_df.to_excel(writer, sheet_name='original_paths', index=False)
-                
-                weight_matrix.to_excel(writer, sheet_name='connMatrix_weight')
-                if ratio_matrix is not None:
-                    ratio_matrix.to_excel(writer, sheet_name='connMatrix_ratio')
-                if prob_matrix is not None:
-                    prob_matrix.to_excel(writer, sheet_name='connMatrix_prob')
-                if nt_matrix is not None:
-                    nt_matrix.to_excel(writer, sheet_name='connMatrix_nt_type')
+            self._save_dfs_to_excel_polars(data_map, output_path)
             
             self._vprint(f"Data saved: {output_path}")
             
