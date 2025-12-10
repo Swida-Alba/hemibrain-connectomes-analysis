@@ -15,7 +15,7 @@ A comprehensive Python toolkit for analyzing and visualizing connectome data fro
 - 📊 **Rich Visualizations**: Sankey diagrams, heatmaps with clustering, and connection matrices
 - ⚖️ **Advanced Comparisons**: Cross-dataset and intra-dataset comparisons at multiple threshold levels to reveal robust 
 - connectivity patterns.
-- ⚡ **High Performance**: 10-100x speedup with local caching, 4-14x with parallel processing, Polars-accelerated large data operations, Optimized graph algorithms and pathfinding
+- ⚡ **High Performance**: 10-100x speedup with local caching, Polars-accelerated large data operations, optimized graph algorithms and pathfinding
 - 🎯 **Flexible Filtering**: Multiple filtering modes (synapse count, connection ratio, traversal probability)
 - 💾 **Smart Caching**: Efficient local storage with Polars for memory-efficient consolidation of large caches
 - 🔧 **Modular Design**: Reorganized src/ layout for better maintainability
@@ -33,7 +33,7 @@ A comprehensive Python toolkit for analyzing and visualizing connectome data fro
 - **[FlyWire Usage](docs/FLYWIRE_USAGE.md)** - Guide for using FlyWire/FAFB/BANC datasets (Local File based)
 - **[Basic Usage](#basic-functions)** - FindDirect.py and FindPath.py tutorials
 - **[Quick Start After Reorganization](docs/QUICK_START_AFTER_REORGANIZATION.md)** - Get started with v3.0 structure
-- **[Performance Optimization](#performance-optimization)** - Caching and parallel processing
+- **[Performance Optimizations](#performance-optimizations)** - Caching and Polars acceleration
 
 ### 📖 Core Documentation
 For comprehensive documentation, see **[docs/README.md](docs/README.md)** - your central navigation hub for all documentation.
@@ -45,7 +45,7 @@ Detailed documentation in **[docs/core-features/](docs/core-features/)** includi
 - **[LabelMapper Guide](docs/core-features/LabelMapper_Guide.md)** - Standardize neuron identifiers across datasets
 - **Cache System** - 10-100x faster queries with intelligent local storage
 - **[Path Finding Methods](docs/core-features/PathFinding_Methods.md)** - Comparison of Bidirectional, DP, and DFS algorithms
-- **Parallel Processing** - 4-14x speedup with multi-core execution
+- **Internal Threading** - Automatic multi-threading for profile building
 - **Filtering** - Multiple filtering modes and criteria
 - See **[Core Features Overview](docs/core-features/README.md)** for complete list
 
@@ -569,8 +569,8 @@ Transforms are stored in `~/flybrain-data` (managed by flybrains package) and sh
 
 
 **Automatic Optimization:**
-- Datasets with <100 pairs: Uses sequential processing (overhead not worth it)
-- Datasets with >100 pairs: Uses parallel processing (significant speedup)
+- Internal ThreadPoolExecutor for profile building operations
+- Polars for high-performance CSV/matrix operations
 
 ### Polars Acceleration & Skip BodyId
 

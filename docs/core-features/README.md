@@ -503,9 +503,7 @@ filterBy = {
    - forward_only for biological realism
    - Use cache for speedup
    ↓
-3. Enable parallel processing for large datasets
-   ↓
-4. Filter results:
+3. Filter results:
    - By connection ratio
    - By traversal probability
    ↓
@@ -515,7 +513,7 @@ filterBy = {
 ### Performance Tips
 
 1. **Always use cache**: 10-100x speedup on repeated queries
-2. **Enable parallel processing**: 4-14x speedup for large datasets
+2. **Use Polars optimization**: Automatic 10-100x faster CSV/matrix operations
 3. **Use appropriate filters**: Reduce unnecessary computation
 4. **Forward-only mode**: Faster and more biologically realistic
 5. **Optimize depth**: Lower max_depth = faster results
@@ -532,12 +530,7 @@ filterBy = {
 ### Path Finding Issues
 - **Too many paths**: Increase `min_weight`, reduce `max_depth`
 - **No paths found**: Check source/target names, reduce `min_weight`
-- **Slow performance**: Enable cache and parallel processing
-
-### Parallel Processing Issues
-- **No speedup**: Dataset too small, parallel overhead dominates
-- **Memory error**: Reduce `n_workers` or dataset size
-- **Progress bar frozen**: Large batches being processed, wait for next update
+- **Slow performance**: Enable cache and check Polars is being used
 
 ---
 
@@ -577,5 +570,4 @@ filterBy = {
 See `examples/` directory for complete workflows:
 - `example_pathfinding.py`: Basic path finding
 - `example_cache_setup.py`: Cache configuration
-- `example_parallel.py`: Parallel processing
 - `example_filtering.py`: Various filter combinations

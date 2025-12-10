@@ -10,7 +10,7 @@ examples/
 ├── basic/                    # Basic usage examples
 ├── comparison/               # Cross-dataset comparison examples
 ├── data/                     # Sample data files (CSV, JSON)
-├── performance/              # Caching and parallel processing examples
+├── performance/              # Caching examples
 └── visualization/
     ├── input_formats/        # Data format and input examples
     └── skeleton/             # 3D skeleton visualization examples
@@ -103,18 +103,7 @@ python examples/performance/Example_CachingDemo.py
 
 **Features:** Cache enable/disable, performance comparison, cache management
 
-### 2. Parallel Processing
-**File:** `performance/Example_ParallelProcessing.py`
-
-Multi-core parallel processing for 4-14x speedup on large datasets.
-
-```bash
-python examples/performance/Example_ParallelProcessing.py
-```
-
-**Features:** Sequential vs. parallel comparison, CPU core configuration
-
-### 3. Build Connectivity Cache
+### 2. Build Connectivity Cache
 **File:** `performance/Example_BuildConnectivityCache.py`
 
 Pre-build connectivity profile cache for efficient homolog finding.
