@@ -51,7 +51,6 @@ Essential functionality documentation:
 - **Path Finding**: Multi-hop connection discovery
 - **Custom Groups**: Flexible neuron grouping for custom analysis
 - **Cache System**: High-performance local storage (10-100x speedup)
-- **Parallel Processing**: Multi-core acceleration (4-14x speedup)
 - **Filtering**: Connection and neuron filtering options
 
 ### ⚙️ [Technical](./technical/)
@@ -109,7 +108,6 @@ Advanced technical documentation:
 - **[Cache System Guide](./core-features/CacheSystem_Guide.md)**: Caching for 10-100x speedup
 - **[Path Finding](./core-features/FindAllPath_Documentation.md)**: Multi-hop path discovery
 - **[Custom Groups](./core-features/CustomGroups_Feature.md)**: Flexible neuron grouping
-- **[Parallel Processing](./core-features/ParallelProcessing_Documentation.md)**: Multi-core acceleration
 
 ---
 
@@ -139,7 +137,6 @@ Advanced technical documentation:
 | Task | Documentation |
 |------|--------------|
 | Enable caching | [Cache Quick Start](./core-features/CacheSystem_QuickStart.md) |
-| Parallel processing | [Parallel Processing Guide](./core-features/ParallelProcessing_Documentation.md) |
 | Optimize queries | [Deep Backend Optimizations](./technical/DeepBackendOptimizations.md) |
 
 ### Customizing Output
@@ -174,11 +171,10 @@ Advanced technical documentation:
 ### Workflow 3: High-Performance Analysis
 ```
 1. Setup cache (first time)
-2. Enable parallel processing
-3. Run large-scale queries
-4. Generate visualizations
+2. Run large-scale queries
+3. Generate visualizations
 ```
-**Documentation**: [Cache Setup](./core-features/CacheSystem_QuickStart.md) → [Parallel Processing](./core-features/ParallelProcessing_Documentation.md)
+**Documentation**: [Cache Setup](./core-features/CacheSystem_QuickStart.md) → [Performance Optimizations](./technical/PERFORMANCE_OPTIMIZATIONS_DEC2025.md)
 
 ### Workflow 4: Publication Figures
 ```
@@ -201,7 +197,7 @@ Advanced technical documentation:
 
 ### Recent Improvements
 - ⚡ Cache v4 with pair-level optimization
-- ⚡ Improved parallel processing with better progress tracking
+- ⚡ Polars integration for 10-100x faster CSV/matrix operations
 - 🎨 Enhanced color customization for all visualizations
 - 📊 Better heatmap clustering with algorithm selection
 
@@ -281,7 +277,7 @@ Documentation feedback welcome via GitHub Issues or pull requests.
 - [Heatmap](./visualizations/Heatmap_Guide.md) | [Network](./visualizations/Network_Guide.md) | [Sankey](./visualizations/Sankey_Guide.md) | [3D](./visualizations/3D_Skeleton_Guide.md)
 
 **Core Features**:
-- [Cache System](./core-features/CacheSystem_Guide.md) | [Path Finding](./core-features/FindAllPath_Documentation.md) | [Parallel Processing](./core-features/ParallelProcessing_Documentation.md)
+- [Cache System](./core-features/CacheSystem_Guide.md) | [Path Finding](./core-features/FindAllPath_Documentation.md) | [Module Calling Tree](./core-features/Module_Calling_Tree.md)
 
 **Technical**:
 - [Optimization](./technical/DeepBackendOptimizations.md) | [Architecture](./technical/README.md) | [Data Formats](./technical/COLUMN_RECOGNITION_UPDATE.md)

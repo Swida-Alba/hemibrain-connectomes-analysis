@@ -216,17 +216,19 @@ query_batch(neurons)  # 1 query
 - Categorical data for repeated strings
 - Sparse matrices for sparse data
 
-### Parallel Processing
+### Internal Parallel Processing
 
-**Worker Pool Strategy**:
-- Pre-fork workers for fast startup
-- Task queue for load balancing
-- Result aggregation in main process
+Some internal operations use ThreadPoolExecutor for parallel processing:
+
+**Profile Building** (HomologFinder, CrossDatasetVerifier):
+- ThreadPoolExecutor for building connectivity profiles
+- Automatic worker count: `min(32, cpu_count + 4)`
+- Deferred cache writes for reduced I/O contention
 
 **Memory Sharing**:
 - Read-only data shared across workers
 - Write data collected after completion
-- Avoid serialization overhead
+- Batch processing for memory safety
 
 ---
 
@@ -309,7 +311,7 @@ End-to-end workflows:
 **Slow Performance**:
 - Profile to find bottlenecks
 - Check cache is enabled
-- Verify parallel processing is working
+- Verify Polars optimization is being used
 
 **Data Corruption**:
 - Validate input data formats
@@ -422,10 +424,10 @@ Adding new cached data types:
 - Cached query: 0.05-0.2s
 - Speedup: 10-100x
 
-**Parallel Processing** (4 cores):
-- 100 neurons: 4s (vs 15s sequential)
-- 500 neurons: 15s (vs 90s sequential)
-- 2000 neurons: 70s (vs 480s sequential)
+**Polars Optimization**:
+- CSV writing: 10-100x faster
+- Matrix generation: 5-50x faster
+- DataFrame operations: 2-10x faster
 
 **Visualization Generation**:
 - Heatmap (100×100): 0.8s
@@ -442,7 +444,6 @@ Adding new cached data types:
 - Incremental cache updates
 - Streaming visualization for large datasets
 - WebGL rendering for networks
-- Parallel visualization generation
 
 ### Research Directions
 - Machine learning for path prediction

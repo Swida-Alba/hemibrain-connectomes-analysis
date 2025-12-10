@@ -500,5 +500,5 @@ This enables fast, offline analysis with minimal storage requirements.
 
 **See Also:**
 - Main README for quick start
-- ParallelProcessing_Documentation.md for performance optimization
+- [Module Calling Tree](./Module_Calling_Tree.md) for architecture overview
 - Configuration_Guide.md for filter parameters

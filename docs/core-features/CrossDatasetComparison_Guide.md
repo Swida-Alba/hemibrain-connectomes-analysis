@@ -189,27 +189,45 @@ analyzer = ComparisonAnalyzer(params)
 results = analyzer.run_comparison()
 ```
 
-### Example 3: Custom Source/Target per Dataset
+### Example 3: Using LabelMapper for Dataset-Specific Naming
+
+When neuron names differ across datasets, use `LabelMapper` to define the mapping:
 
 ```python
+from comparison import ComparisonParameters, ComparisonAnalyzer
+from comparison.label_mapper import LabelMapper
+
+# Create mapper with dataset-specific neuron names
+mapper = LabelMapper(
+    source_mapping_dict={
+        'hemibrain:v1.2.1': [['aMe12']],
+        'male-cns:v0.9': [['aMe12-like']],  # Different naming convention
+    },
+    source_labels=['aMe12'],
+    target_mapping_dict={
+        'hemibrain:v1.2.1': [['PPL101']],
+        'male-cns:v0.9': [['PPL1_dopamine']],  # Different naming
+    },
+    target_labels=['PPL101']
+)
+
 params = ComparisonParameters(
     datasets=['hemibrain:v1.2.1', 'male-cns:v0.9'],
     
-    # Different neuron names per dataset (if naming differs)
-    source_neurons={
-        'hemibrain:v1.2.1': ['aMe12'],
-        'male-cns:v0.9': ['aMe12'],  # Same name
-    },
-    target_neurons={
-        'hemibrain:v1.2.1': ['PPL101'],
-        'male-cns:v0.9': ['PPL101'],
-    },
+    # Pass the mapper object - it handles dataset-specific naming
+    source_neurons=mapper,
+    target_neurons=mapper,
     
     max_interlayer=1,
     thresholds=[1, 5, 10],
     output_folder='/path/to/output',
 )
+
+analyzer = ComparisonAnalyzer(params)
+results = analyzer.run_comparison()
 ```
+
+See the [LabelMapper Guide](./LabelMapper_Guide.md) for more details on mapping configuration.
 
 ### Example 4: Accessing Results Programmatically
 
@@ -752,18 +770,18 @@ If an edge appears at t=3 but disappears at t=5:
 
 ```python
 ComparisonParameters(
-    datasets: List[str],              # Dataset identifiers
-    datasets_nickname: List[str],     # Short display names
-    source_neurons: Union[List, Dict],# Source neuron patterns
-    target_neurons: Union[List, Dict],# Target neuron patterns
-    max_interlayer: int,              # Max intermediate layers
-    thresholds: List[int],            # Synapse count thresholds
-    top_edges: int = 50,              # Max edges to analyze
-    comparison_mode: str = 'path',    # 'path' or 'edge'
-    output_folder: str,               # Base output directory
-    saveas: str = None,               # Custom folder name (auto if None)
-    token: str = '',                  # NeuPrint API token
-    skip_bodyId: bool = False,        # Skip bodyId-level processing for speed
+    datasets: List[str],                      # Dataset identifiers
+    datasets_nickname: List[str],             # Short display names
+    source_neurons: Union[List, LabelMapper], # Source neuron patterns (list or mapper)
+    target_neurons: Union[List, LabelMapper], # Target neuron patterns (list or mapper)
+    max_interlayer: int,                      # Max intermediate layers
+    thresholds: List[int],                    # Synapse count thresholds
+    top_edges: int = 50,                      # Max edges to analyze
+    comparison_mode: str = 'path',            # 'path' or 'edge'
+    output_folder: str,                       # Base output directory
+    saveas: str = None,                       # Custom folder name (auto if None)
+    token: str = '',                          # NeuPrint API token
+    skip_bodyId: bool = False,                # Skip bodyId-level processing for speed
 )
 ```
 

@@ -333,44 +333,32 @@ fc = FindNeuronConnection(
 
 ---
 
-## Parallel Processing
+## Performance Optimization
 
-### [Parallel Processing Documentation](./ParallelProcessing_Documentation.md)
-Multi-core acceleration for large-scale analyses.
+### Polars Integration
 
-**Key Topics**:
-- Multi-core neuron fetching
-- Progress tracking and ETA
-- Memory management
-- Worker pool optimization
+The toolkit uses Polars for high-performance data operations:
 
-**Quick Start**:
-```python
-from findpath import FindAllPath
+**Key Benefits**:
+- 10-100x faster CSV writing
+- 5-50x faster matrix generation
+- 2-10x faster DataFrame operations
 
-fap = FindAllPath(
-    # ... other parameters ...
-    use_parallel=True,      # Enable parallel processing
-    n_workers=4             # Number of CPU cores to use
-)
-```
+**Automatically Used In**:
+- ComparisonAnalyzer output generation
+- HomologFinder result saving
+- Profile aggregation operations
 
-### Related Documents
-- **[Implementation Summary](./ParallelProcessing_Implementation_Summary.md)**: Technical details
-- **[Quick Reference](./ParallelProcessing_QuickReference.md)**: Command reference
-- **[Progress Tracking](./ParallelProcessing_ProgressTracking.md)**: Real-time progress displays
-- **[Improved Progress v2](./ParallelProcessing_ImprovedProgress_v2.md)**: Enhanced ETA and statistics
+### Internal Parallel Processing
 
-### Performance Impact
+Some internal operations use ThreadPoolExecutor for parallel processing:
 
-| Dataset Size | Sequential | Parallel (4 cores) | Speedup |
-|--------------|------------|-------------------|---------|
-| 10 neurons | 1 sec | 0.8 sec | 1.25x |
-| 100 neurons | 15 sec | 4 sec | **3.75x** |
-| 500 neurons | 90 sec | 15 sec | **6x** |
-| 2000 neurons | 8 min | 70 sec | **6.9x** |
+**Profile Building** (in HomologFinder, CrossDatasetVerifier):
+- Automatic worker count optimization
+- Deferred cache writes for reduced I/O
+- Memory-safe batch processing
 
-**Best speedup**: 4-14x on large datasets with 4-8 cores
+See [Module Calling Tree](./Module_Calling_Tree.md) for architecture details.
 
 ---
 
@@ -464,8 +452,7 @@ fap = FindAllPath(
     max_depth=3,
     min_weight=1,
     forward_only=True,
-    use_cache=True,
-    use_parallel=True
+    use_cache=True
 )
 
 paths = fap.find_all_paths()

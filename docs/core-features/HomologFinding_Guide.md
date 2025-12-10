@@ -493,8 +493,6 @@ HomologFinder(
 | `visualize_skeleton` | bool | False | Enable skeleton visualization |
 | `visualize_top_n` | int | 5 | Number of top candidates to visualize |
 | `similarity_metric` | str/dict | 'rank_corr' | Metric for sorting results (see below) |
-| `parallel` | bool | False | Enable parallel profile building |
-| `max_workers` | int | None | Max parallel workers (None = cpu_count + 4) |
 | `verbose` | bool | True | Enable verbose logging |
 
 **similarity_metric Options:**

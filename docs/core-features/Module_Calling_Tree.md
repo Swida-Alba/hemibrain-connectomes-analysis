@@ -604,8 +604,6 @@ Disk Cache (./cache/)
 │      source_dataset='hemibrain:v1.2.1',                                     │
 │      target_dataset='male-cns:v0.9',                                        │
 │      token='YOUR_TOKEN',  # Passed to profiler                             │
-│      parallel=True,                                                         │
-│      max_workers=16,                                                        │
 │      verbose=True                                                           │
 │  )                                                                          │
 │  └─ Creates internal ConnectivityProfiler instance                         │
