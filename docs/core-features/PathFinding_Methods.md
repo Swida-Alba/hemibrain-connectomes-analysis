@@ -1,88 +1,84 @@
 # Pathfinding Methods in FindAllPath
 
-The `FindAllPath` function in `coana.py` supports multiple pathfinding algorithms to optimize performance based on the network structure and query requirements. You can select the algorithm using the `pathfinding` parameter in `FindNeuronConnection`.
+The `FindAllPath` function in `coana.py` leverages the optimized `FastGraph` core to support multiple advanced pathfinding algorithms. You can select the algorithm using the `pathfinding` parameter in `FindNeuronConnection`.
 
 ## Available Algorithms
 
-### 1. Bidirectional Search (Meet-in-the-middle)
+### 1. Bidirectional Search (Layer Intersection)
 **Parameter:** `pathfinding='Bidirectional'`
+**Method:** `FastGraph.find_paths_bidirectional_bfs`
 
-This is the **recommended** algorithm for most use cases. It simultaneously expands from the source neurons (forward) and target neurons (backward) and attempts to meet in the middle.
+This algorithm performs a simultaneous Breadth-First Search (BFS) from both the source and target sets.
 
 *   **Mechanism**: 
-    *   Maintains two frontiers: one from sources, one from targets.
-    *   Dynamically expands the smaller frontier to minimize the search space.
-    *   Merges paths when frontiers intersect.
-*   **Time Complexity**: $O(b^{d/2})$, where $b$ is the branching factor and $d$ is the path length. This is significantly faster than standard DFS ($O(b^d)$).
-*   **Memory Cost**: Moderate to High. Needs to store frontiers from both directions.
-*   **Pros**: 
-    *   Drastically reduces search depth (e.g., for 4 hops, it only searches 2 hops from each side).
-    *   Best balance of speed and memory for finding specific connections.
-*   **Cons**: 
-    *   Memory usage can grow if the graph is extremely dense.
+    *   Expands "layers" of nodes from sources (Forward) and targets (Backward).
+    *   Finds the intersection of these layers at the midpoint (e.g., for length 4, intersects Forward Layer 2 and Backward Layer 2).
+    *   Reconstructs paths by backtracking from the intersection nodes.
+*   **Best Use Case**: Finding **shortest paths** or all paths of a specific length in shallow graphs.
+*   **Pros**: Guarantees finding shortest paths first.
+*   **Cons**: High memory usage for dense graphs as it stores full layers.
 
-### 2. Optimized Backward Search (DP)
-**Parameter:** `pathfinding='DP'`
-
-This algorithm uses Dynamic Programming to build paths backwards from the target neurons.
-
-*   **Mechanism**:
-    *   Starts with paths of length 0 (just the targets).
-    *   Iteratively extends paths backwards by one hop using the reverse graph.
-    *   Stores all valid path suffixes of length $L$ at each node.
-    *   Finally, filters for paths that start at the specified source neurons.
-*   **Time Complexity**: $O(L \cdot E)$, where $L$ is max path length and $E$ is number of edges.
-*   **Memory Cost**: High. Stores all valid path suffixes for every node at every length.
-*   **Pros**:
-    *   Very efficient when you have a small set of targets and want to find *all* paths reaching them from a large set of sources.
-    *   Avoids redundant computations for shared suffixes.
-*   **Cons**:
-    *   Can consume significant memory if the number of paths is large.
-
-### 3. Memoized DFS
+### 2. Meet-in-the-middle DFS (Bidirectional Memoized DFS)
 **Parameter:** `pathfinding='MemoizedDFS'`
+**Method:** `FastGraph.find_paths_meet_in_the_middle`
 
-A recursive Depth-First Search augmented with memoization (caching).
+**The Gold Standard for deep paths.** This is the most robust algorithm for finding long paths (5+ hops) in dense connectomes.
+
+*   **Mechanism**: 
+    *   **Forward Phase**: Performs DFS from sources for /2$ steps. Stores these half-paths in a memory-efficient hash map.
+    *   **Backward Phase**: Performs DFS from targets for /2$ steps.
+    *   **Join**: When the backward search hits a node existing in the forward map, it stitches the paths together.
+*   **Best Use Case**: Deep pathfinding (Length $\ge$ 5) where standard DFS is too slow and BFS runs out of memory.
+*   **Pros**: Drastically reduces memory usage compared to storing full paths.
+*   **Cons**: Requires storing half-paths in memory (though much less than full paths).
+
+### 3. Backward Reachability (DP)
+**Parameter:** `pathfinding='DP'`
+**Method:** `FastGraph.find_paths_backward_dp`
+
+A hybrid approach combining Backward BFS for pruning and Forward DFS for path construction.
 
 *   **Mechanism**:
-    *   Recursively explores paths from sources.
-    *   Caches the result of `(node, length_remaining)` -> `list of path suffixes`.
-    *   If a node is visited again with the same remaining length, the cached result is returned immediately.
-*   **Time Complexity**: Depends on the number of unique states `(node, length)`.
-*   **Memory Cost**: Moderate. Stores the cache of path suffixes.
-*   **Pros**:
-    *   Faster than standard DFS for graphs with many overlapping paths.
-*   **Cons**:
-    *   Recursion depth limits in Python (though usually not an issue for typical connectome path lengths of < 10).
-    *   Overhead of managing the cache.
+    *   **Phase 1 (Backward Reachability)**: Computes sets $ containing all nodes that can reach a target in exactly $ steps.
+    *   **Phase 2 (Guided DFS)**: Runs a forward DFS from sources, but only visits a neighbor $ if  \in R_{k-1}$.
+*   **Best Use Case**: Sparse graphs or queries where many branches lead to dead ends.
+*   **Pros**: **Lowest memory footprint**. Aggressively prunes dead ends before the main search.
+*   **Cons**: Requires two passes over the graph.
 
-### 4. Standard DFS
+### 4. Backward Memoized DFS
 **Parameter:** `pathfinding='DFS'`
+**Method:** `FastGraph.find_paths_memoized_dfs` (direction='backward')
 
-The classic Depth-First Search algorithm.
+A standard Depth-First Search starting from targets, augmented with memoization.
 
 *   **Mechanism**:
-    *   Recursively explores one path at a time until it hits a target or the max length.
-    *   Backtracks to explore other branches.
-*   **Time Complexity**: $O(b^d)$. Exponential with depth.
-*   **Memory Cost**: Low. Only stores the current path stack.
-*   **Pros**:
-    *   Lowest memory footprint.
-    *   Simple implementation.
-*   **Cons**:
-    *   **Extremely slow** for dense graphs or paths longer than 2-3 hops.
-    *   Recomputes shared sub-paths many times.
-    *   Not recommended for complex connectome analysis.
+    *   Recursively explores paths from targets to sources.
+    *   Memoizes which nodes can reach the source within $k$ steps.
+*   **Best Use Case**: When targets are fewer than sources.
+*   **Pros**: Faster than pure backtracking due to memoization.
+*   **Cons**: Can use significant memory for memoization tables.
+
+### 5. Backward DFS with Backtracking
+**Parameter:** `pathfinding='Backtracking'`
+**Method:** `FastGraph.find_paths_dfs_backtracking`
+
+A pure Depth-First Search (Iterative Deepening) starting from targets, with **no memoization**.
+
+*   **Mechanism**:
+    *   Explores paths from targets to sources using recursion and backtracking.
+    *   Does not store visited states (except for current path cycle checking).
+*   **Best Use Case**: **Extreme memory constraints** where even memoization tables are too large.
+*   **Pros**: Absolute lowest memory overhead (excluding the reverse graph structure).
+*   **Cons**: Slower than memoized methods due to re-visiting nodes.
 
 ## Comparison Summary
 
-| Algorithm | Speed | Memory | Best Use Case |
-| :--- | :--- | :--- | :--- |
-| **Bidirectional** | ⭐⭐⭐⭐⭐ | ⭐⭐⭐ | **General purpose**, finding connections between specific groups. |
-| **DP (Backward)** | ⭐⭐⭐⭐ | ⭐⭐ | Many sources to few targets. |
-| **Memoized DFS** | ⭐⭐⭐ | ⭐⭐⭐ | Dense graphs with overlapping paths. |
-| **Standard DFS** | ⭐ | ⭐⭐⭐⭐⭐ | Low memory environments, very short paths. |
+| Algorithm | Parameter | Underlying Method | Best For | Memory |
+| :--- | :--- | :--- | :--- | :--- |
+| **Meet-in-the-middle** | `MemoizedDFS` | `find_paths_meet_in_the_middle` | **Deep Paths (L $\ge$ 5)** | Low |
+| **Bidirectional BFS** | `Bidirectional` | `find_paths_bidirectional_bfs` | Shortest Paths | High |
+| **Backward DP** | `DP` | `find_paths_backward_dp` | Pruning Dead Ends | Low |
+| **Backward Memoized** | `DFS` | `find_paths_memoized_dfs` | Standard Traversal | Medium |
+| **Backtracking** | `Backtracking` | `find_paths_dfs_backtracking` | **Extreme Memory Constraints** | **Lowest** |
 
-## Parallel Processing
 
-Note that `FindAllPath` also supports a `use_parallel=True` mode. When enabled, this overrides the `pathfinding` parameter and uses a parallelized implementation (typically based on optimized forward/backward searches distributed across CPU cores). This is recommended for large-scale analyses.

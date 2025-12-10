@@ -6480,6 +6480,7 @@ class HomologFinder:
                             neuron_alpha=0.6,  # Higher alpha for single neuron
                             legend_mode='normal',
                             merge_neurons=False,
+                            verbose='simple',
                         )
                         vs.plot_neurons()
                         
@@ -6541,6 +6542,7 @@ class HomologFinder:
                         data_folder=str(type_dir),
                         show_fig=False,
                         brain_mesh='whole',
+                        verbose='simple',
                     )
                     vs.plot_neurons()
                     
@@ -6589,7 +6591,8 @@ class HomologFinder:
                         show_fig=False,
                         brain_mesh='whole',
                         legend_mode='normal',  # Show legend for multiple neurons
-                        neuron_alpha=0.6 if len(source_layers) == 1 else 0.2  # Higher alpha for single neuron
+                        neuron_alpha=0.6 if len(source_layers) == 1 else 0.2,  # Higher alpha for single neuron
+                        verbose='simple',
                     )
                     vs.plot_neurons()
                     

@@ -283,7 +283,7 @@ param_suffix += f"p{format_decimal(self.min_traversal_probability)}"
 param_suffix += f"_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}"
 
 self.save_folder = os.path.join(
-    self.data_folder, 
+    self.output_dir, 
     self.source_fname + '_to_' + self.target_fname + param_suffix
 )
 ```

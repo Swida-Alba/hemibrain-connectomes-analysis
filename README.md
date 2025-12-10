@@ -1,4 +1,4 @@
-# NeuPrint Connectome Analysis v4.1
+# Drosophila Connectome Analysis v4.1
 
 A comprehensive Python toolkit for analyzing and visualizing connectome data from **all NeuPrint databases and FlyWire datasets**. Features type-based pathfinding algorithms, interactive network visualizations, 3D neuron morphology rendering with video export, and high-performance caching. Supports hemibrain, optic lobe, FIB, MANC, and other NeuPrint datasets.
 
@@ -6,16 +6,15 @@ A comprehensive Python toolkit for analyzing and visualizing connectome data fro
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 ## ✨ Key Features
-
-- 🔍 **Type-Based Pathfinding**: Comprehensive multi-hop path discovery between neuron populations with forward-only validation
+- 🗄️ **Universal Dataset Support**: Seamless compatibility between **NeuPrint datasets** (hemibrain, MANC, etc.) and **FlyWire FAFB/BANC** datasets.
+- 🔍 **Cross-Dataset Comparison**: Analyze and compare connectivity patterns across multiple datasets seamlessly
+- 🧬 **Connectivity Analysis**: Connectivity-based homolog finding (inter/intra-dataset) and similarity comparisons.
+- 🔍 **Population-Level Fast Pathfinding**: Comprehensive multi-hop path discovery between neuron populations with forward-only validation
 - 🎬 **3D Visualization**: Interactive neuron skeleton rendering with rotating video export (navis-based)
 - 🌐 **Interactive Networks**: Cytoscape.js-powered network graphs with hierarchical and force-directed layouts
-- 🪞 **Contralateral Mirroring**: Automatically mirror neurons and ROIs to the contralateral hemisphere for full-brain visualization
 - 📊 **Rich Visualizations**: Sankey diagrams, heatmaps with clustering, and connection matrices
-- 🗄️ **Universal Dataset Support**: Seamless compatibility between **NeuPrint datasets** (hemibrain, MANC, etc.) and **FlyWire FAFB/BANC** datasets.
 - ⚖️ **Advanced Comparisons**: Cross-dataset and intra-dataset comparisons at multiple threshold levels to reveal robust connectivity patterns.
-- 🧬 **Connectivity Analysis**: Profile-based homolog finding (inter/intra-dataset) and connectivity similarity comparisons.
-- ⚡ **High Performance**: 10-100x speedup with local caching, 4-14x with parallel processing, Polars-accelerated large data operations
+- ⚡ **High Performance**: 10-100x speedup with local caching, 4-14x with parallel processing, Polars-accelerated large data operations, Optimized graph algorithms and pathfinding
 - 🎯 **Flexible Filtering**: Multiple filtering modes (synapse count, connection ratio, traversal probability)
 - 💾 **Smart Caching**: Efficient local storage with Polars for memory-efficient consolidation of large caches
 - 🔧 **Modular Design**: Reorganized src/ layout for better maintainability
@@ -566,39 +565,7 @@ Transforms are stored in `~/flybrain-data` (managed by flybrains package) and sh
 - Full Guide: [docs/visualizations/VisualizeSkeleton_Updates_Nov2024.md](docs/visualizations/VisualizeSkeleton_Updates_Nov2024.md)
 - Brain Template Fix: [docs/bugfixes/Brain_Template_Fix_Nov2024.md](docs/bugfixes/Brain_Template_Fix_Nov2024.md)
 
-## Performance Optimization
 
-### Parallel Processing for Pathfinding
-
-For large datasets with many source-target neuron pairs, pathfinding can be accelerated using parallel processing:
-
-```python
-# Enable parallel processing (recommended for >100 source-target pairs)
-fc = FindNeuronConnection(
-    token='your_token_here',
-    dataset='hemibrain:v1.2.1',
-    sourceNeurons=['PPL1-01', 'PPL1-02', 'PPL1-03'],
-    targetNeurons=['MBON14', 'MBON11', 'MBON01'],
-    max_interlayer=3,
-    use_parallel=True,    # Enable parallel processing
-    n_jobs=-1             # Use all CPU cores (-1 = auto-detect)
-)
-
-fc.InitializeNeuronInfo()
-fc.FindAllPath()  # Will automatically use parallel processing if beneficial
-```
-
-**Performance Benefits:**
-- **4-core CPU**: 3-4x faster for large datasets
-- **8-core CPU**: 6-8x faster for large datasets
-- **16+ core CPU**: 10-14x faster for large datasets
-
-**Parameters:**
-- `use_parallel`: Enable/disable parallel processing (default: `False`)
-- `n_jobs`: Number of processes to use
-  - `-1`: Use all CPU cores (recommended)
-  - `1`: Sequential processing
-  - `N`: Use exactly N processes
 
 **Automatic Optimization:**
 - Datasets with <100 pairs: Uses sequential processing (overhead not worth it)
@@ -623,44 +590,7 @@ This is particularly useful for:
 - Quick type-level connectivity checks
 - Reducing disk usage (skips saving large bodyId CSVs)
 
-**Examples:**
-```python
-# Example 1: Use all CPU cores (recommended for workstations)
-fc = FindNeuronConnection(
-    token='your_token_here',
-    dataset='hemibrain:v1.2.1',
-    sourceNeurons=['PPL1-01'],
-    targetNeurons=['MBON14'],
-    max_interlayer=3,
-    use_parallel=True,
-    n_jobs=-1  # Auto-detect and use all cores
-)
 
-# Example 2: Use specific number of cores (recommended for laptops)
-fc = FindNeuronConnection(
-    token='your_token_here',
-    dataset='hemibrain:v1.2.1',
-    sourceNeurons=['PPL1-01'],
-    targetNeurons=['MBON14'],
-    max_interlayer=3,
-    use_parallel=True,
-    n_jobs=4  # Use exactly 4 cores, leave others for system
-)
-
-# Example 3: Disable parallel processing (small datasets)
-fc = FindNeuronConnection(
-    token='your_token_here',
-    dataset='hemibrain:v1.2.1',
-    sourceNeurons=['PPL1-01'],
-    targetNeurons=['MBON14'],
-    max_interlayer=3,
-    use_parallel=False  # Use sequential processing
-)
-```
-
-**Documentation:**
-- Full details: [ParallelProcessing_Documentation.md](docs/ParallelProcessing_Documentation.md)
-- Examples: [Example_ParallelProcessing.py](Example_ParallelProcessing.py)
 
 ### Caching System
 

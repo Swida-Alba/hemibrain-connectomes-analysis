@@ -150,9 +150,9 @@ fc.FindDirectConnections(full_data=False)  # Automatically creates VisualizePath
 ## File Locations
 
 All visualizations are saved in the respective output folders:
-- **FindPath:** `{data_folder}/{source}_to_{target}/paths_{params}/`
-- **FindAllPath:** `{data_folder}/{source}_to_{target}/allpaths_{params}/`
-- **FindDirectConnections:** `{data_folder}/{source}_to_{target}/direct_{min_synapse}/`
+- **FindPath:** `{output_dir}/{source}_to_{target}/paths_{params}/`
+- **FindAllPath:** `{output_dir}/{source}_to_{target}/allpaths_{params}/`
+- **FindDirectConnections:** `{output_dir}/{source}_to_{target}/direct_{min_synapse}/`
 
 Each folder contains:
 - `network_selected_paths.html` - Interactive network

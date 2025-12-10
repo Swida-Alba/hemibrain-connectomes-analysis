@@ -264,8 +264,7 @@ fc = FindNeuronConnection(
     dataset='hemibrain:v1.2.1',
     sourceNeurons=['KC.*'],
     targetNeurons=['MBON.*'],
-    use_cache=True,
-    use_parallel=True
+    use_cache=True
 )
 
 # 3. Run analysis
@@ -289,7 +288,6 @@ vis.visualize()
 
 ### Core Feature Documentation
 - [Cache System Guide](../docs/CacheSystem_Guide.md)
-- [Parallel Processing](../docs/ParallelProcessing_Documentation.md)
 - [Path Finding](../docs/FindAllPath_Documentation.md)
 - [Visualization](../docs/VisualizeSelectedPaths_Guide.md)
 
@@ -305,8 +303,7 @@ vis.visualize()
 1. **Get a NeuPrint Token:** Visit [https://neuprint.janelia.org/account](https://neuprint.janelia.org/account)
 2. **Start small:** Use limited source/target neurons for testing
 3. **Enable caching:** `use_cache=True` for significant speedup
-4. **Use parallel processing:** `use_parallel=True` for large datasets
-5. **Check sample data:** `data/` folder has ready-to-use examples
+4. **Check sample data:** `data/` folder has ready-to-use examples
 
 ---
 
@@ -319,7 +316,6 @@ vis.visualize()
 
 **Slow performance?**
 - Enable caching: `use_cache=True`
-- Use parallel processing: `use_parallel=True`
 - Reduce dataset size for testing
 
 **File picker not working?**

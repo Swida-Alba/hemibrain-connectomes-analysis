@@ -20,7 +20,7 @@ if __name__ == '__main__':
     fc = FindNeuronConnection(
         # please provide your own neuprint token, which can be found at https://neuprint.janelia.org/account
         token='',
-        data_folder='/Users/apple/Local/connection_data',
+        output_dir='/Users/apple/Local/connection_data',
         # dataset='flywire_FAFB_v783',  # Combined dataset and version in one parameter
         dataset = 'male-cns:v0.9',
         # dataset='hemibrain:v1.2.1',

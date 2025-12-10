@@ -41,15 +41,16 @@ import pandas as pd
 from comparison.profile_comparator import HomologFinder
 
 if __name__ == "__main__":
+    # dataset = 'male-cns:v0.9'
     finder = HomologFinder(
         token='',
 
-        source='aMe12', # MTe07/MeVPLo2
-        source_dataset='flywire_FAFB_v783',
-        target_dataset='flywire_FAFB_v783',
+        source='MTe07', # MTe07/MeVPLo2
+        # source_dataset=dataset,
+        # target_dataset=dataset,
         # source='aMe12',
-        # source_dataset='male-cns:v0.9',
-        # target_dataset='flywire_FAFB_v783',
+        source_dataset='flywire_FAFB_v783',
+        target_dataset='male-cns:v0.9',
         
         output_dir='/Users/apple/Local/connection_data/HomologFinding/',
         visualize_skeleton=True,  # Enable to visualize top candidates

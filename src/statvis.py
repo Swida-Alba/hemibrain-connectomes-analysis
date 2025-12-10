@@ -3899,7 +3899,7 @@ def path_filter(path_df, keyword_in_path_to_remove=None):
     
     return kept, excluded
 
-def build_path_dataframe_from_paths(paths, conn_data, targets, real_layer_map=None, level='type', type_lookup=None):
+def build_path_dataframe_from_paths(paths, conn_data, targets, real_layer_map=None, level='type', type_lookup=None, edge_lookup=None):
     """
     Build a DataFrame from a list of paths, calculating weights and probabilities.
     Optimized with dictionary lookup for O(1) edge access.
@@ -3911,38 +3911,39 @@ def build_path_dataframe_from_paths(paths, conn_data, targets, real_layer_map=No
     src_col = f'{level}_pre' if f'{level}_pre' in conn_data.columns else 'bodyId_pre'
     tgt_col = f'{level}_post' if f'{level}_post' in conn_data.columns else 'bodyId_post'
     
-    # Pre-process connection data into a lookup dictionary
-    # This avoids O(N) filtering inside the loop
-    print(f"Optimizing path building: Pre-indexing {len(conn_data)} connections...")
-    
-    # Ensure we work with strings for consistent lookup
-    # (The original code handled mixed types by trying both, so we normalize to string)
-    conn_data_str = conn_data.copy()
-    conn_data_str['src_str'] = conn_data_str[src_col].astype(str)
-    conn_data_str['tgt_str'] = conn_data_str[tgt_col].astype(str)
-    
-    # Define aggregation functions
-    agg_funcs = {
-        'weight': 'sum',
-    }
-    if 'traversal_probability' in conn_data.columns:
-        agg_funcs['traversal_probability'] = 'mean'
-    if 'connection_ratio' in conn_data.columns:
-        agg_funcs['connection_ratio'] = 'mean'
-    if 'nt_type' in conn_data.columns:
-        # Custom aggregator for nt_type to get unique values
-        def unique_nt_types(x):
-            types = x.dropna().unique().tolist()
-            valid_types = sorted([str(t) for t in types if t and str(t).lower() != 'none' and str(t).lower() != 'nan'])
-            return '|'.join(valid_types) if valid_types else 'Unknown'
-        agg_funcs['nt_type'] = unique_nt_types
+    if edge_lookup is None:
+        # Pre-process connection data into a lookup dictionary
+        # This avoids O(N) filtering inside the loop
+        print(f"Optimizing path building: Pre-indexing {len(conn_data)} connections...")
+        
+        # Ensure we work with strings for consistent lookup
+        # (The original code handled mixed types by trying both, so we normalize to string)
+        conn_data_str = conn_data.copy()
+        conn_data_str['src_str'] = conn_data_str[src_col].astype(str)
+        conn_data_str['tgt_str'] = conn_data_str[tgt_col].astype(str)
+        
+        # Define aggregation functions
+        agg_funcs = {
+            'weight': 'sum',
+        }
+        if 'traversal_probability' in conn_data.columns:
+            agg_funcs['traversal_probability'] = 'mean'
+        if 'connection_ratio' in conn_data.columns:
+            agg_funcs['connection_ratio'] = 'mean'
+        if 'nt_type' in conn_data.columns:
+            # Custom aggregator for nt_type to get unique values
+            def unique_nt_types(x):
+                types = x.dropna().unique().tolist()
+                valid_types = sorted([str(t) for t in types if t and str(t).lower() != 'none' and str(t).lower() != 'nan'])
+                return '|'.join(valid_types) if valid_types else 'Unknown'
+            agg_funcs['nt_type'] = unique_nt_types
 
-    # Group and aggregate
-    grouped = conn_data_str.groupby(['src_str', 'tgt_str']).agg(agg_funcs)
-    
-    # Convert to dictionary for fast lookup
-    # Key: (src_str, tgt_str), Value: dict of metrics
-    edge_lookup = grouped.to_dict('index')
+        # Group and aggregate
+        grouped = conn_data_str.groupby(['src_str', 'tgt_str']).agg(agg_funcs)
+        
+        # Convert to dictionary for fast lookup
+        # Key: (src_str, tgt_str), Value: dict of metrics
+        edge_lookup = grouped.to_dict('index')
     
     rows = []
     
@@ -4038,6 +4039,129 @@ def build_path_dataframe_from_paths(paths, conn_data, targets, real_layer_map=No
             rows.append(row)
             
     return pd.DataFrame(rows)
+
+def process_paths_streaming(path_gen, conn_data, targets, output_path, 
+                          excluded_path=None, real_layer_map=None, 
+                          level='type', type_lookup=None, 
+                          keyword_in_path_to_remove=None,
+                          batch_size=100000):
+    """
+    Stream paths from generator, process in batches, and write to CSV.
+    Returns total count of saved paths.
+    """
+    import gc
+    import os
+    
+    # Pre-process connection data into a lookup dictionary once
+    # Determine source and target columns based on level
+    src_col = f'{level}_pre' if f'{level}_pre' in conn_data.columns else 'bodyId_pre'
+    tgt_col = f'{level}_post' if f'{level}_post' in conn_data.columns else 'bodyId_post'
+    
+    print(f"Optimizing path building: Pre-indexing {len(conn_data)} connections...")
+    
+    # Ensure we work with strings for consistent lookup
+    conn_data_str = conn_data.copy()
+    conn_data_str['src_str'] = conn_data_str[src_col].astype(str)
+    conn_data_str['tgt_str'] = conn_data_str[tgt_col].astype(str)
+    
+    # Define aggregation functions
+    agg_funcs = {
+        'weight': 'sum',
+    }
+    if 'traversal_probability' in conn_data.columns:
+        agg_funcs['traversal_probability'] = 'mean'
+    if 'connection_ratio' in conn_data.columns:
+        agg_funcs['connection_ratio'] = 'mean'
+    if 'nt_type' in conn_data.columns:
+        def unique_nt_types(x):
+            types = x.dropna().unique().tolist()
+            valid_types = sorted([str(t) for t in types if t and str(t).lower() != 'none' and str(t).lower() != 'nan'])
+            return '|'.join(valid_types) if valid_types else 'Unknown'
+        agg_funcs['nt_type'] = unique_nt_types
+
+    # Group and aggregate
+    grouped = conn_data_str.groupby(['src_str', 'tgt_str']).agg(agg_funcs)
+    
+    # Convert to dictionary for fast lookup
+    edge_lookup = grouped.to_dict('index')
+    
+    batch = []
+    total_saved = 0
+    total_excluded = 0
+    
+    # Initialize CSV files (write headers)
+    first_batch = True
+    
+    # Use tqdm for progress bar if possible
+    try:
+        from tqdm import tqdm
+        iterator = tqdm(path_gen, desc=f"Streaming {level}-level paths", unit="path")
+    except ImportError:
+        iterator = path_gen
+    
+    for path in iterator:
+        batch.append(path)
+        
+        if len(batch) >= batch_size:
+            # Process batch
+            df = build_path_dataframe_from_paths(batch, conn_data, targets, 
+                                               real_layer_map, level, type_lookup,
+                                               edge_lookup=edge_lookup)
+            
+            # Filter zero-weight
+            if not df.empty:
+                df = df[df['weights'].apply(lambda w_list: all(w > 0 for w in w_list))]
+            
+            # Split path (convert to string)
+            df = split_path(df)
+            
+            # Filter keywords
+            df, excluded = path_filter(df, keyword_in_path_to_remove)
+            
+            # Write to CSV
+            if not df.empty:
+                mode = 'w' if first_batch else 'a'
+                header = first_batch
+                df.to_csv(output_path, mode=mode, header=header, index=False)
+                total_saved += len(df)
+                
+            if excluded_path and not excluded.empty:
+                mode = 'w' if first_batch else 'a'
+                header = first_batch
+                excluded.to_csv(excluded_path, mode=mode, header=header, index=False)
+                total_excluded += len(excluded)
+            
+            if first_batch:
+                first_batch = False
+                
+            batch = []
+            gc.collect()
+            
+    # Process remaining
+    if batch:
+        df = build_path_dataframe_from_paths(batch, conn_data, targets, 
+                                           real_layer_map, level, type_lookup,
+                                           edge_lookup=edge_lookup)
+        
+        if not df.empty:
+            df = df[df['weights'].apply(lambda w_list: all(w > 0 for w in w_list))]
+        
+        df = split_path(df)
+        df, excluded = path_filter(df, keyword_in_path_to_remove)
+        
+        if not df.empty:
+            mode = 'w' if first_batch else 'a'
+            header = first_batch
+            df.to_csv(output_path, mode=mode, header=header, index=False)
+            total_saved += len(df)
+            
+        if excluded_path and not excluded.empty:
+            mode = 'w' if first_batch else 'a'
+            header = first_batch
+            excluded.to_csv(excluded_path, mode=mode, header=header, index=False)
+            total_excluded += len(excluded)
+            
+    return total_saved
 
 def EnrichConnectionTable(conn_table, traversal_probability_threshold=0, dataset=None, script_path=None, target_neurons_df=None, aggregate_method='product', label_mapper=None):
     '''Add traversal probability, connection ratio, and layer information to the connection table

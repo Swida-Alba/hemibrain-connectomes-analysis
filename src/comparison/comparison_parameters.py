@@ -134,11 +134,17 @@ class ComparisonParameters:
     target_labels: Union[str, List[str]] = ''
     """Unified label(s) for target group(s) - string or list matching group count"""
     
+    intermediate_labels: Union[str, List[str]] = ''
+    """Unified label(s) for intermediate group(s) - string or list matching group count"""
+    
     top_edges: int = -1
     """Number of top edges for visualization focus. -1 means include all edges."""
     
     overall_label_mapper: Optional[Any] = None
     """LabelMapper object or configuration for defining source, target, and intermediate neuron labels."""
+    
+    verbose: bool = True
+    """Whether to print initialization summary and progress updates."""
     
     # Connectivity Profile Verification Settings
     # These are used by run_connectivity_profile_verification() when called separately
@@ -198,10 +204,11 @@ class ComparisonParameters:
 
     pathfinding: str = 'MemoizedDFS'
     """Pathfinding algorithm to use in FindAllPath:
-    - 'DP': Optimized DP (Depth First Search) - original implementation
-    - 'Bidirectional': Meet-in-the-middle BFS - optimized for deep paths (faster for L>=2)
-    - 'MemoizedDFS': DFS with path fragment caching - efficient for overlapping paths (default)
-    - 'DFS': Standard DFS (recursive) - low memory, good for finding single paths
+    - 'MemoizedDFS': Meet-in-the-middle DFS - optimized for deep paths (L>=5) (default)
+    - 'Bidirectional': Bidirectional BFS - optimized for shortest paths
+    - 'DP': Backward Reachability (DP) - optimized for pruning dead ends (lowest memory)
+    - 'DFS': Backward Memoized DFS - standard traversal
+    - 'Backtracking': Backward DFS with backtracking - no memoization (lowest memory, slower)
     """
     
     # Output settings
@@ -279,6 +286,8 @@ class ComparisonParameters:
                 self.source_labels = self.overall_label_mapper.get_all_std_labels('source')
             if not self.target_labels:
                 self.target_labels = self.overall_label_mapper.get_all_std_labels('target')
+            if not self.intermediate_labels:
+                self.intermediate_labels = self.overall_label_mapper.get_all_std_labels('intermediate')
                 
             # Set internal mapper references
             self._source_mapper = self.overall_label_mapper
@@ -331,6 +340,12 @@ class ComparisonParameters:
             self.target_labels = [self.target_labels]
         elif not self.target_labels:
             self.target_labels = []
+            
+        # Ensure intermediate_labels is a list
+        if isinstance(self.intermediate_labels, str) and self.intermediate_labels:
+            self.intermediate_labels = [self.intermediate_labels]
+        elif not self.intermediate_labels:
+            self.intermediate_labels = []
         
         # Sort thresholds
         self.thresholds = sorted(self.thresholds)
@@ -348,6 +363,38 @@ class ComparisonParameters:
                 "At least 2 datasets are required for cross-dataset comparison. "
                 "Set allow_single_dataset=True for single-dataset threshold sensitivity analysis."
             )
+
+        # Print initialization summary
+        if self.verbose:
+            print("\n=== ComparisonParameters Initialization Summary ===")
+            print(f"Datasets Included ({len(self.datasets)}):")
+            for i, ds in enumerate(self.datasets):
+                nickname = self.datasets_nickname[i] if self.datasets_nickname and i < len(self.datasets_nickname) else "N/A"
+                print(f"  - {ds} (Nickname: {nickname})")
+                
+            print(f"\nSource Neurons:")
+            if self.overall_label_mapper:
+                 print(f"  Defined by LabelMapper (Labels: {self.source_labels})")
+            else:
+                 print(f"  {self.source_neurons}")
+                 
+            print(f"\nTarget Neurons:")
+            if self.overall_label_mapper:
+                 print(f"  Defined by LabelMapper (Labels: {self.target_labels})")
+            else:
+                 print(f"  {self.target_neurons}")
+            
+            if self.intermediate_labels:
+                print(f"\nIntermediate Neurons:")
+                if self.overall_label_mapper:
+                    print(f"  Defined by LabelMapper (Labels: {self.intermediate_labels})")
+                else:
+                    # If intermediate labels provided but no mapper, just print labels
+                    print(f"  Labels: {self.intermediate_labels}")
+                 
+            print(f"\nLabel Mapper Provided: {'Yes' if self.overall_label_mapper else 'No'}")
+            print(f"Comparison Mode: {self.comparison_mode}")
+            print("===================================================\n")
         
         if not self.thresholds:
             raise ValueError("At least one threshold is required")
@@ -371,6 +418,41 @@ class ComparisonParameters:
         
         # Cache the timestamp for consistent output_name
         self._cached_timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+
+        # 5. Verify LabelMapper consistency (if used)
+        if self.overall_label_mapper and not self.overall_label_mapper.is_empty:
+            # Get dataset names from parameters
+            param_datasets = set()
+            for ds in self.datasets:
+                # Handle DatasetConfig objects or strings
+                ds_name = ds.dataset if hasattr(ds, 'dataset') else str(ds)
+                param_datasets.add(ds_name)
+            
+            # Get datasets from mapper
+            source_datasets = set()
+            if self._source_mapper:
+                for label_map in self._source_mapper._source_mapping.values():
+                    source_datasets.update(label_map.keys())
+            
+            target_datasets = set()
+            if self._target_mapper:
+                for label_map in self._target_mapper._target_mapping.values():
+                    target_datasets.update(label_map.keys())
+            
+            mapper_datasets = source_datasets.union(target_datasets)
+            
+            # Check 1: Datasets in LabelMapper should match ComparisonParameters.datasets
+            missing_in_mapper = param_datasets - mapper_datasets
+            if missing_in_mapper:
+                print(f"\033[93mWarning: Datasets defined in parameters but missing from LabelMapper: {missing_in_mapper}\033[0m")
+                
+            # Check 2: Source vs Target consistency in Mapper
+            if source_datasets != target_datasets:
+                 print(f"\033[93mWarning: Inconsistent datasets between source and target mappings in LabelMapper.\033[0m")
+                 if source_datasets - target_datasets:
+                     print(f"\033[93m  Source only: {source_datasets - target_datasets}\033[0m")
+                 if target_datasets - source_datasets:
+                     print(f"\033[93m  Target only: {target_datasets - source_datasets}\033[0m")
     
     @property
     def run_timestamp(self) -> str:

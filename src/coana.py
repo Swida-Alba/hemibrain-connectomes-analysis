@@ -4,6 +4,7 @@ import sys
 import json
 import shutil
 import time
+import gc
 import logging
 from dataclasses import dataclass, field
 
@@ -12,16 +13,22 @@ import matplotlib.patches as mp
 import matplotlib.pyplot as plt
 import navis
 import navis.interfaces.neuprint as neu
-import networkx as nx
+# import networkx as nx
 import numpy as np
 import pandas as pd
 import polars as pl
 import flybrains
-import plotly.graph_objects as go
+# import plotly.graph_objects as go
 import seaborn as sns
 from tqdm import tqdm
 from neuprint import *
 from neuprint.utils import connection_table_to_matrix
+try:
+    import src.statvis_polars as svp
+    from src.statvis_polars import EnrichConnectionTablePolars
+except ImportError:
+    import statvis_polars as svp
+    from statvis_polars import EnrichConnectionTablePolars
 
 # Add vispath-subproject to path for VisualizePath import
 vispath_src = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'vispath-subproject', 'src')
@@ -71,6 +78,14 @@ import img2pdf
 import statvis as sv
 import FAFB_file_converter
 import BANC_file_converter
+
+try:
+    from .visualize_skeleton import VisualizeSkeleton
+except ImportError:
+    try:
+        from src.visualize_skeleton import VisualizeSkeleton
+    except ImportError:
+        from visualize_skeleton import VisualizeSkeleton
 
 # Ignore the navis warning
 logging.getLogger('navis').setLevel(logging.WARNING)
@@ -180,6 +195,10 @@ class FindNeuronConnection:
 
     def _save_matrices_to_excel(self, df, writer, level='bodyId'):
         """Generate and save connection matrices to Excel"""
+        # Convert Polars to Pandas if needed
+        if isinstance(df, pl.DataFrame):
+            df = df.to_pandas()
+
         if df.empty:
             return
 
@@ -225,34 +244,57 @@ class FindNeuronConnection:
 
     def _save_df_to_csv_polars(self, df, path, index=False):
         """Save DataFrame to CSV using Polars for speed"""
-        if df is None or df.empty:
-            # Create empty file if dataframe is empty, to match pandas behavior
-            with open(path, 'w') as f:
-                if df is not None:
-                    f.write(','.join(df.columns) + '\n')
+        import polars as pl
+        if df is None:
             return
+
+        is_polars = isinstance(df, pl.DataFrame)
+        
+        if is_polars:
+            if df.is_empty():
+                with open(path, 'w') as f:
+                    f.write(','.join(df.columns) + '\n')
+                return
             
-        try:
-            import polars as pl
-            # If index is True, reset index to make it a column
-            if index:
-                df_to_save = df.reset_index()
-            else:
-                df_to_save = df
-                
-            pl_df = pl.from_pandas(df_to_save)
-            pl_df.write_csv(path)
-        except Exception as e:
-            # Fallback to Pandas if Polars fails (e.g. object types)
             try:
-                df.to_csv(path, index=index)
-            except Exception as e2:
-                print(f"  Error saving CSV: {e2}", flush=True)
+                # Polars doesn't have index, so ignore index param
+                df.write_csv(path)
+            except Exception as e:
+                print(f"Error saving Polars DF: {e}")
+        else:
+            if df.empty:
+                # Create empty file if dataframe is empty, to match pandas behavior
+                with open(path, 'w') as f:
+                    if df is not None:
+                        f.write(','.join(df.columns) + '\n')
+                return
+                
+            try:
+                import polars as pl
+                # If index is True, reset index to make it a column
+                if index:
+                    df_to_save = df.reset_index()
+                else:
+                    df_to_save = df
+                    
+                pl_df = pl.from_pandas(df_to_save)
+                pl_df.write_csv(path)
+            except Exception as e:
+                # Fallback to Pandas if Polars fails (e.g. object types)
+                try:
+                    df.to_csv(path, index=index)
+                except Exception as e2:
+                    print(f"  Error saving CSV (Polars: {e}, Pandas: {e2})", flush=True)
 
     def _save_matrices_to_csv(self, df, folder, level='bodyId'):
         """Generate and save connection matrices to CSV using Polars for speed"""
-        if df.empty:
-            return
+        import polars as pl
+        
+        is_polars = isinstance(df, pl.DataFrame)
+        if is_polars:
+            if df.is_empty(): return
+        else:
+            if df.empty: return
 
         # Determine columns
         if level == 'bodyId':
@@ -262,22 +304,26 @@ class FindNeuronConnection:
             index_col = 'type_pre'
             columns_col = 'type_post'
             
-        try:
-            pl_df = pl.from_pandas(df)
-        except Exception as e:
-            print(f"  Error converting to Polars: {e}", flush=True)
-            return
+        if is_polars:
+            pl_df = df
+        else:
+            try:
+                pl_df = pl.from_pandas(df)
+            except Exception as e:
+                print(f"  Error converting to Polars: {e}", flush=True)
+                return
             
         # 1. Weight Matrix
-        try:
-            # Use sum aggregation for weights to handle duplicates (e.g. same connection in multiple layers)
-            mat_weight = pl_df.pivot(values='weight', index=index_col, columns=columns_col, aggregate_function='sum').fill_null(0)
-            mat_weight.write_csv(os.path.join(folder, f'conn_mat_{level}_weight.csv'))
-        except Exception as e:
-            print(f" Failed: {e}", flush=True)
+        if level != 'bodyId':
+            try:
+                # Use sum aggregation for weights to handle duplicates (e.g. same connection in multiple layers)
+                mat_weight = pl_df.pivot(values='weight', index=index_col, columns=columns_col, aggregate_function='sum').fill_null(0)
+                mat_weight.write_csv(os.path.join(folder, f'conn_mat_{level}_weight.csv'))
+            except Exception as e:
+                print(f" Failed: {e}", flush=True)
 
         # 2. Ratio Matrix
-        if 'connection_ratio' in df.columns:
+        if level != 'bodyId' and 'connection_ratio' in df.columns:
             try:
                 # Use max for ratios to show the strongest connection ratio found
                 mat_ratio = pl_df.pivot(values='connection_ratio', index=index_col, columns=columns_col, aggregate_function='max').fill_null(0)
@@ -286,7 +332,7 @@ class FindNeuronConnection:
                 print(f" Failed: {e}", flush=True)
 
         # 3. Probability Matrix
-        if 'traversal_probability' in df.columns:
+        if level != 'bodyId' and 'traversal_probability' in df.columns:
             try:
                 # Use max for probabilities
                 mat_prob = pl_df.pivot(values='traversal_probability', index=index_col, columns=columns_col, aggregate_function='max').fill_null(0)
@@ -350,7 +396,7 @@ class FindNeuronConnection:
     script_path: str = os.path.dirname(source_path)
     '''absolute path to the project root directory (parent of src/)'''
     
-    data_folder: str = os.path.join(os.path.expanduser('~'), 'connectome_analysis')
+    output_dir: str = os.path.join(os.path.expanduser('~'), 'connectome_analysis')
     '''
     folder to save all data (subfolders auto-generated based on query)
     Default: ~/connectome_analysis/
@@ -475,10 +521,11 @@ class FindNeuronConnection:
     pathfinding: str = 'MemoizedDFS'
     '''
     Pathfinding algorithm to use in FindAllPath:
-    - 'DP': Optimized backward DP - original implementation
-    - 'Bidirectional': Meet-in-the-middle BFS - optimized for deep paths (faster for L>=2)
-    - 'MemoizedDFS': DFS with path fragment caching - efficient for overlapping paths
-    - 'DFS': Standard DFS (recursive) - low memory, good for finding single paths
+    - 'MemoizedDFS': Meet-in-the-middle DFS - optimized for deep paths (L>=5) (default)
+    - 'Bidirectional': Bidirectional BFS - optimized for shortest paths
+    - 'DP': Backward Reachability (DP) - optimized for pruning dead ends (lowest memory)
+    - 'DFS': Backward Memoized DFS - standard traversal
+    - 'Backtracking': Backward DFS with backtracking - no memoization (lowest memory, slower)
     '''
     
     run_date: str = datetime.now().strftime('%Y%m%d_%H%M%S')
@@ -579,23 +626,6 @@ class FindNeuronConnection:
     when True, save fetched connection data to local cache and check cache before fetching from API\n
     when False, always fetch from API (slower but ensures latest data)\n
     Cache is stored in: cache/{dataset}/connections/ (in project root)\n
-    '''
-    
-    use_parallel: bool = False
-    '''
-    whether to use parallel processing for pathfinding (PHASE 3)\n
-    when True, uses multiprocessing to speed up path searches on multi-core systems\n
-    recommended for large datasets (>10000 source-target pairs)\n
-    set to False if you encounter issues or prefer sequential processing
-    '''
-    
-    n_jobs: int = -1
-    '''
-    number of parallel processes for pathfinding\n
-    -1: use all available CPU cores\n
-    1: sequential processing (same as use_parallel=False)\n
-    n > 1: use n parallel processes\n
-    only used when use_parallel=True
     '''
     
     cache_folder: str = ''
@@ -847,7 +877,7 @@ class FindNeuronConnection:
         
         Returns:
         --------
-        pd.DataFrame : Connection database
+        pl.DataFrame : Connection database (Polars)
         '''
         # Return cached DataFrame if available
         if self._conn_df_cache is not None and not force_reload:
@@ -871,7 +901,8 @@ class FindNeuronConnection:
             if csv_path and os.path.exists(csv_path):
                 try:
                     self._vprint(f'  ⏳ Reading {csv_path} (this may take a while)...', level='full')
-                    df = pd.read_csv(csv_path, dtype={'pre_root_id': str, 'post_root_id': str, 'bodyId_pre': str, 'bodyId_post': str})
+                    # Use Polars to read CSV
+                    df = pl.read_csv(csv_path, dtypes={'pre_root_id': pl.Utf8, 'post_root_id': pl.Utf8, 'bodyId_pre': pl.Utf8, 'bodyId_post': pl.Utf8})
                     
                     column_map = {
                         'pre_root_id': 'bodyId_pre',
@@ -882,26 +913,32 @@ class FindNeuronConnection:
                         'post': 'bodyId_post',
                         'synapses': 'weight'
                     }
-                    df = df.rename(columns=column_map)
+                    # Rename columns if they exist
+                    existing_cols = df.columns
+                    rename_dict = {k: v for k, v in column_map.items() if k in existing_cols and v not in existing_cols}
+                    if rename_dict:
+                        df = df.rename(rename_dict)
                     
                     if 'weight' not in df.columns:
-                        df['weight'] = 1
+                        df = df.with_columns(pl.lit(1).alias('weight'))
                     if 'roi' not in df.columns:
-                        df['roi'] = 'None'
+                        df = df.with_columns(pl.lit('None').alias('roi'))
                     if 'cached_date' not in df.columns:
-                        df['cached_date'] = datetime.now().strftime("%Y-%m-%d")
+                        df = df.with_columns(pl.lit(datetime.now().strftime("%Y-%m-%d")).alias('cached_date'))
                         
                     cols_to_keep = ['bodyId_pre', 'bodyId_post', 'weight', 'roi', 'nt_type', 'cached_date']
                     cols_to_keep = [c for c in cols_to_keep if c in df.columns]
-                    df = df[cols_to_keep]
+                    df = df.select(cols_to_keep)
                     
-                    df['bodyId_pre'] = df['bodyId_pre'].astype(str)
-                    df['bodyId_post'] = df['bodyId_post'].astype(str)
+                    df = df.with_columns([
+                        pl.col('bodyId_pre').cast(pl.Utf8),
+                        pl.col('bodyId_post').cast(pl.Utf8)
+                    ])
                     
                     self._vprint(f'  ✓ Imported {len(df):,} connections from CSV', level='full')
                     
                     self._vprint(f'  💾 Saving to cache for faster future access...', level='full')
-                    df.to_parquet(db_path, index=False, compression='gzip')
+                    df.write_parquet(db_path, compression='gzip')
                     
                     # Cache in memory and build index
                     self._conn_df_cache = df
@@ -926,52 +963,31 @@ class FindNeuronConnection:
                         if f.startswith('batch_') and f.endswith('.parquet')
                     ])
                 
-                # Use Polars for memory-efficient loading if batch files exist
-                if batch_files:
-                    try:
-                        import polars as pl
-                        self._vprint(f'  ⏳ Using Polars to load {len(batch_files)} batch files + main cache...', level='always')
-                        
-                        # Load all files with Polars (much more memory efficient)
-                        all_files = [db_path] + batch_files
-                        
-                        # Common columns to avoid schema mismatch
-                        common_cols = ['bodyId_pre', 'bodyId_post', 'weight', 'roi', 'cached_date']
-                        
-                        # Scan and concat lazily with column selection, then collect
-                        lazy_frames = []
-                        for f in all_files:
-                            lf = pl.scan_parquet(f)
-                            available_cols = [c for c in common_cols if c in lf.collect_schema().names()]
-                            lazy_frames.append(lf.select(available_cols))
-                        
-                        df_pl = pl.concat(lazy_frames, how='diagonal_relaxed').collect()
-                        
-                        # Convert to pandas (required for existing index building)
-                        df = df_pl.to_pandas()
-                        del df_pl
-                        
-                    except ImportError:
-                        # Fallback to pandas if polars not installed
-                        self._vprint(f'  ⏳ Loading {len(batch_files)} batch files (consider installing polars for better memory efficiency)...', level='always')
-                        df = pd.read_parquet(db_path)
-                        batch_dfs = [pd.read_parquet(f) for f in batch_files]
-                        df = pd.concat([df] + batch_dfs, ignore_index=True)
-                        del batch_dfs
-                else:
-                    # No batch files, just load main cache - try Polars for large files
-                    try:
-                        import polars as pl
-                        df_pl = pl.read_parquet(db_path)
-                        df = df_pl.to_pandas()
-                        del df_pl
-                    except ImportError:
-                        df = pd.read_parquet(db_path)
+                # Use Polars for memory-efficient loading
+                self._vprint(f'  ⏳ Using Polars to load {len(batch_files)} batch files + main cache...', level='always')
                 
-                if 'bodyId_pre' in df.columns:
-                    df['bodyId_pre'] = df['bodyId_pre'].astype(str)
-                if 'bodyId_post' in df.columns:
-                    df['bodyId_post'] = df['bodyId_post'].astype(str)
+                # Load all files with Polars
+                all_files = [db_path] + batch_files
+                
+                # Common columns to avoid schema mismatch
+                # We scan the first file to get schema, assuming consistency
+                lf_schema = pl.scan_parquet(db_path).collect_schema()
+                common_cols = ['bodyId_pre', 'bodyId_post', 'weight', 'roi', 'cached_date']
+                available_cols = [c for c in common_cols if c in lf_schema.names()]
+                
+                # Scan and concat lazily with column selection, then collect
+                lazy_frames = []
+                for f in all_files:
+                    lf = pl.scan_parquet(f)
+                    lazy_frames.append(lf.select(available_cols))
+                
+                df = pl.concat(lazy_frames, how='diagonal_relaxed').collect()
+                
+                # Ensure string types
+                df = df.with_columns([
+                    pl.col('bodyId_pre').cast(pl.Utf8),
+                    pl.col('bodyId_post').cast(pl.Utf8)
+                ])
                     
                 self._vprint(f'  ✓ Loaded {len(df):,} cached connections', level='always')
                 
@@ -981,7 +997,7 @@ class FindNeuronConnection:
                 return df
             except Exception as e:
                 self._vprint(f'  ⚠️ Warning: Failed to load connection database: {e}', level='full')
-                self._conn_df_cache = pd.DataFrame(columns=['bodyId_pre', 'bodyId_post', 'weight', 'roi', 'cached_date'])
+                self._conn_df_cache = pl.DataFrame(schema={'bodyId_pre': pl.Utf8, 'bodyId_post': pl.Utf8, 'weight': pl.Int64, 'roi': pl.Utf8, 'cached_date': pl.Utf8})
                 self._conn_index = {}
                 return self._conn_df_cache
 
@@ -991,7 +1007,7 @@ class FindNeuronConnection:
         Called after loading connection database from disk.
         Also updates the module-level shared cache.
         '''
-        if self._conn_df_cache is None or self._conn_df_cache.empty:
+        if self._conn_df_cache is None or self._conn_df_cache.is_empty():
             self._conn_index = {}
             self._conn_index_post = {}
             return
@@ -1005,12 +1021,16 @@ class FindNeuronConnection:
         try:
             import polars as pl
             
-            # Build indexes using Polars group_by (much faster than Python loop)
-            df_pl = pl.DataFrame({
-                'bodyId_pre': self._conn_df_cache['bodyId_pre'].values,
-                'bodyId_post': self._conn_df_cache['bodyId_post'].values,
-                'idx': range(n_rows)
-            })
+            # If _conn_df_cache is already Polars, use it directly
+            if isinstance(self._conn_df_cache, pl.DataFrame):
+                df_pl = self._conn_df_cache.with_row_index('idx')
+            else:
+                # Fallback if somehow it's Pandas (shouldn't happen with new load)
+                df_pl = pl.DataFrame({
+                    'bodyId_pre': self._conn_df_cache['bodyId_pre'].values,
+                    'bodyId_post': self._conn_df_cache['bodyId_post'].values,
+                    'idx': range(n_rows)
+                })
             
             # Group by pre and collect indices using iter_rows for efficiency
             pre_result = df_pl.group_by('bodyId_pre').agg(pl.col('idx'))
@@ -1020,22 +1040,16 @@ class FindNeuronConnection:
             post_result = df_pl.group_by('bodyId_post').agg(pl.col('idx'))
             self._conn_index_post = {row[0]: row[1] for row in post_result.iter_rows()}
             
-            del df_pl, pre_result, post_result
+            # del df_pl, pre_result, post_result
             
         except ImportError:
             # Fallback to optimized Python with defaultdict
             from collections import defaultdict
             self._conn_index = defaultdict(list)
             self._conn_index_post = defaultdict(list)
-            pre_col = self._conn_df_cache['bodyId_pre'].values
-            post_col = self._conn_df_cache['bodyId_post'].values
-            for idx in range(n_rows):
-                self._conn_index[pre_col[idx]].append(idx)
-                self._conn_index_post[post_col[idx]].append(idx)
-            # Convert to regular dict
-            self._conn_index = dict(self._conn_index)
-            self._conn_index_post = dict(self._conn_index_post)
-        
+            # Assuming Polars DF, convert to numpy/list for iteration if Polars not available (unlikely)
+            pass
+
         self._vprint(f'  ✓ Index built: {len(self._conn_index):,} upstream, {len(self._conn_index_post):,} downstream neurons', level='always')
         
         # Update module-level shared cache for other instances
@@ -1051,10 +1065,16 @@ class FindNeuronConnection:
         '''
         Save unified connection database with compression.
         Also updates the in-memory cache and rebuilds the index.
+        Uses Polars for efficient writing.
         '''
         db_path = self._get_connection_db_path()
         try:
-            conn_db.to_parquet(db_path, index=False, compression='gzip')
+            import polars as pl
+            # Ensure conn_db is Polars DataFrame
+            if not isinstance(conn_db, pl.DataFrame):
+                conn_db = pl.from_pandas(conn_db)
+                
+            conn_db.write_parquet(db_path, compression='gzip')
             self._vprint(f'  ✓ Database saved successfully', level='full')
             
             # Update in-memory cache
@@ -1397,20 +1417,11 @@ class FindNeuronConnection:
         '''
         Query unified connection database for specific connections using O(1) dict lookups.
         Returns (cached_df, uncached_upstream_ids)
-        
-        Parameters:
-        -----------
-        upstream_bodyIds : list
-            List of upstream neuron bodyIds to query
-        downstream_bodyIds : list or None
-            List of downstream neuron bodyIds (None = all downstream)
-        
-        Returns:
-        --------
-        tuple: (cached_connections_df, list_of_uncached_upstream_ids, list_of_partially_cached_ids)
+        Uses Polars for performance.
         '''
+        import polars as pl
         if not self.use_cache:
-            return pd.DataFrame(), upstream_bodyIds, []
+            return pl.DataFrame(), upstream_bodyIds, []
         
         self._vprint(f'  ⏳ Querying cache for {len(upstream_bodyIds):,} neurons...', level='full')
         
@@ -1418,12 +1429,16 @@ class FindNeuronConnection:
         conn_db = self._load_connection_db()
         neuron_index = self._load_neuron_index()
         
-        if conn_db.empty:
-            return pd.DataFrame(), upstream_bodyIds, []
+        if conn_db.is_empty():
+            return pl.DataFrame(), upstream_bodyIds, []
         
         # Build a set of neurons that actually have connections in the cache
         # This provides a stricter validation than just trusting neuron_index
-        neurons_with_connections = set(conn_db['bodyId_pre'].astype(str).unique()) if not conn_db.empty else set()
+        if isinstance(conn_db, pl.DataFrame):
+             neurons_with_connections = set(conn_db['bodyId_pre'].cast(pl.Utf8).unique().to_list())
+        else:
+             # Fallback if somehow Pandas
+             neurons_with_connections = set(conn_db['bodyId_pre'].astype(str).unique())
         
         # Separate cached vs uncached neurons using O(1) dict lookups
         cached_upstream = []
@@ -1472,23 +1487,21 @@ class FindNeuronConnection:
                     row_indices.extend(self._conn_index[bodyId])
             
             if row_indices:
-                cached_conn = conn_db.iloc[row_indices].copy()
+                # Polars slicing
+                cached_conn = conn_db[row_indices]
             else:
-                cached_conn = pd.DataFrame()
+                cached_conn = pl.DataFrame()
             
             # Filter by downstream if specified
-            if downstream_bodyIds is not None and not cached_conn.empty:
+            if downstream_bodyIds is not None and not cached_conn.is_empty():
                 downstream_set = set(str(b) for b in downstream_bodyIds)
-                cached_conn = cached_conn[cached_conn['bodyId_post'].isin(downstream_set)].copy()
-            
-            # Note: Neurons with 0 connections are valid! Don't refetch them.
-            # The neuron_index already tracks which neurons are complete via downstream_complete flag.
-            # Only refetch if they're marked incomplete (which is already handled above in the loop).
+                # Polars filter
+                cached_conn = cached_conn.filter(pl.col('bodyId_post').cast(pl.Utf8).is_in(downstream_set))
             
             # Return both cached connections and list of partially cached neurons for later marking
             return cached_conn, uncached_upstream, partially_cached
         
-        return pd.DataFrame(), uncached_upstream, []
+        return pl.DataFrame(), uncached_upstream, []
     
     def _try_recover_neuron_metadata(self, bodyId, conn_db, neuron_index):
         '''
@@ -2343,6 +2356,14 @@ class FindNeuronConnection:
         
         # Step 1: Query database for cached connections
         cached_conn, uncached_upstream, partially_cached = self._query_connection_db(upstream_bodyIds, downstream_bodyIds)
+        
+        # Convert Polars to Pandas for compatibility with rest of pipeline
+        try:
+            import polars as pl
+            if isinstance(cached_conn, pl.DataFrame):
+                cached_conn = cached_conn.to_pandas()
+        except ImportError:
+            pass
         
         if not cached_conn.empty:
             self._vprint(f'  📂 Found {len(set(upstream_bodyIds) - set(uncached_upstream))}/{len(upstream_bodyIds)} neurons in cache', level='full')
@@ -3813,7 +3834,7 @@ class FindNeuronConnection:
             )
         
         # Apply label mapping if available
-        if self.label_mapper:
+        if self.label_mapper and not self.label_mapper.is_empty:
             print(f'\033[36mApplying label mapping to source/target neurons...\033[0m')
             # Apply to source_df
             if not self.source_df.empty and 'type' in self.source_df.columns:
@@ -3874,15 +3895,15 @@ class FindNeuronConnection:
             if os.path.isabs(self.saveas):
                 self.save_folder = self.saveas
             else:
-                self.save_folder = os.path.join(self.data_folder, self.saveas)
+                self.save_folder = os.path.join(self.output_dir, self.saveas)
         elif not self.save_folder: # if save_folder is not specified, save in data_folder, with auto-generated name
             # Create base folder with just source_to_target (no parameters)
             folder_name = self.source_fname + '_to_' + self.target_fname
             if self.folder_prefix:
                 folder_name = f"{self.folder_prefix}_{folder_name}"
-            self.save_folder = os.path.join(self.data_folder, folder_name)
+            self.save_folder = os.path.join(self.output_dir, folder_name)
         elif not os.path.isabs(self.save_folder): # if save_folder is not absolute path, save in data_folder with specified relative path and name
-            self.save_folder = os.path.join(self.data_folder, self.save_folder)
+            self.save_folder = os.path.join(self.output_dir, self.save_folder)
         if not os.path.exists(self.save_folder): os.makedirs(self.save_folder)
         print(f'data will be saved in: {self.save_folder}\n')
         
@@ -4353,117 +4374,6 @@ class FindNeuronConnection:
     def VisualizeDirectConnections_simple(self):
         # Visualize connection matrix in heatmap using CreateHeatmap class
         print('Visualizing connection matrix in heatmap...')
-        # print('  (Legacy heatmap generation disabled)')
-        
-        # # Optionally filter out empty rows/columns
-        # if filter_zeros:
-        #     # Filter matrices to remove empty rows/columns
-        #     cmat_bodyId = self.cmat_full_bodyId.loc[
-        #         self.cmat_full_bodyId.sum(axis=1) > 0,
-        #         self.cmat_full_bodyId.sum(axis=0) > 0
-        #     ]
-        #     cmat_type = self.cmat_full_type.loc[
-        #         self.cmat_full_type.sum(axis=1) > 0,
-        #         self.cmat_full_type.sum(axis=0) > 0
-        #     ]
-        #     transitionMat_bodyId = self.transitionMat_bodyId.loc[
-        #         self.transitionMat_bodyId.sum(axis=1) > 0,
-        #         self.transitionMat_bodyId.sum(axis=0) > 0
-        #     ]
-        #     transitionMat_type = self.transitionMat_type.loc[
-        #         self.transitionMat_type.sum(axis=1) > 0,
-        #         self.transitionMat_type.sum(axis=0) > 0
-        #     ]
-        #     ratioMat_bodyId = self.ratioMat_full_bodyId.loc[
-        #         self.ratioMat_full_bodyId.sum(axis=1) > 0,
-        #         self.ratioMat_full_bodyId.sum(axis=0) > 0
-        #     ]
-        #     ratioMat_type = self.ratioMat_full_type.loc[
-        #         self.ratioMat_full_type.sum(axis=1) > 0,
-        #         self.ratioMat_full_type.sum(axis=0) > 0
-        #     ]
-        #     print(f'  Filtered matrices: bodyId ({self.cmat_full_bodyId.shape} → {cmat_bodyId.shape}), type ({self.cmat_full_type.shape} → {cmat_type.shape})')
-        # else:
-        #     # Use full matrices
-        #     cmat_bodyId = self.cmat_full_bodyId
-        #     cmat_type = self.cmat_full_type
-        #     transitionMat_bodyId = self.transitionMat_bodyId
-        #     transitionMat_type = self.transitionMat_type
-        #     ratioMat_bodyId = self.ratioMat_full_bodyId
-        #     ratioMat_type = self.ratioMat_full_type
-        
-        # # Create heatmap generator instance
-        # heatmap_gen = sv.CreateHeatmap(
-        #     output_folder=self.direct_folder,
-        #     showfig=self.showfig
-        # )
-        
-        # # Add connection matrix heatmaps (use filtered or full matrices based on parameter)
-        # # Use interactive mode for bodyId heatmaps (allows user to switch scales)
-        # heatmap_gen.add_heatmap(
-        #     matrix=cmat_bodyId,
-        #     name=f'heatmap_connMatrix_bodyId_snp{self.min_synapse_num}',
-        #     title=f'heatmap of connection matrix: {self.source_fname} to {self.target_fname}<br>based on bodyId',
-        #     color_scale='green',
-        #     interactive=True,  # Enable interactive controls
-        #     conn_df=self.conn_df  # Pass connection data for enhanced hover info
-        # )
-        
-        # # Type heatmaps - enable interactive UI for user control
-        # heatmap_gen.add_heatmap(
-        #     matrix=cmat_type,
-        #     name=f'heatmap_connMatrix_type_snp{self.min_synapse_num}',
-        #     title=f'heatmap of connection matrix: {self.source_fname} to {self.target_fname}<br>based on type',
-        #     color_scale='purple',
-        #     interactive=True  # Enable interactive controls
-        # )
-        
-        # # Add transmission matrix heatmaps
-        # heatmap_gen.add_heatmap(
-        #     matrix=transitionMat_bodyId,
-        #     name=f'heatmap_transmissionMat_bodyId_snp{self.min_synapse_num}',
-        #     title=f'heatmap of full transmission matrix: {self.source_fname} to {self.target_fname}<br>based on bodyId',
-        #     color_scale='green',
-        #     interactive=True,  # Enable interactive controls
-        #     conn_df=self.conn_df  # Pass connection data for enhanced hover info
-        # )
-        
-        # heatmap_gen.add_heatmap(
-        #     matrix=transitionMat_type,
-        #     name=f'heatmap_transmissionMat_type_snp{self.min_synapse_num}',
-        #     title=f'heatmap of full transmission matrix: {self.source_fname} to {self.target_fname}<br>based on type',
-        #     color_scale='purple',
-        #     interactive=True  # Enable interactive controls
-        # )
-        
-        # # Add ratio matrix heatmaps (use filtered or full matrices)
-        # heatmap_gen.add_heatmap(
-        #     matrix=ratioMat_bodyId,
-        #     name=f'heatmap_ratioMat_bodyId_snp{self.min_synapse_num}',
-        #     title=f'heatmap of connection ratio matrix: {self.source_fname} to {self.target_fname}<br>based on bodyId',
-        #     color_scale='orange',
-        #     interactive=True,  # Enable interactive controls
-        #     conn_df=self.conn_df  # Pass connection data for enhanced hover info
-        # )
-        
-        # heatmap_gen.add_heatmap(
-        #     matrix=ratioMat_type,
-        #     name=f'heatmap_ratioMat_type_snp{self.min_synapse_num}',
-        #     title=f'heatmap of connection ratio matrix: {self.source_fname} to {self.target_fname}<br>based on type',
-        #     color_scale='orange',
-        #     interactive=True  # Enable interactive controls
-        # )
-        
-        # # Generate all heatmaps
-        # heatmap_gen.create_all()
-        # # Visualize by sankey diagram and network graph, only for neuron type
-        # print('Visualizing by Sankey diagram and network graph...')
-        # # sankey_name = 'sankey_type_snp'+str(self.min_synapse_num)+'.html'
-        # # sv.SankeyDirect(self.conn_matrix_type,file_path=os.path.join(self.direct_folder,sankey_name),showfig=self.showfig,node_color=self.node_color,link_color=self.link_color)
-        # # Create ratio-based Sankey diagram
-        # # sankey_ratio_name = 'sankey_type_ratio_snp'+str(self.min_synapse_num)+'.html'
-        # # sv.SankeyDirect(self.conn_matrix_ratio_type,file_path=os.path.join(self.direct_folder,sankey_ratio_name),showfig=self.showfig,node_color=self.node_color,link_color=self.link_color)
-        # print('Done\n')
         
         # VisualizePath network visualization for direct connections
         print('Creating VisualizePath network visualization...')
@@ -4695,41 +4605,42 @@ class FindNeuronConnection:
         if Flag: print('\nNOT All Target Neurons Traced')
         else: print('\nAll Target Neurons Traced')
         
-        # Use Memoized DFS for pathfinding (like FindAllPath)
-        print('\nUsing Memoized DFS for pathfinding...')
+        # Use FastGraph for pathfinding
+        print('\nUsing FastGraph for pathfinding...')
         
         # Build graph from conn_layers
-        G = nx.DiGraph()
-        G_edges = []
-        for i, conn in enumerate(conn_layers):
-            for idx, row in conn.iterrows():
-                u, v, w = row['bodyId_pre'], row['bodyId_post'], row['weight']
-                G.add_edge(u, v, weight=w)
-                G_edges.append((u, v, w))
-        
-        # Prepare args for _find_paths_dfs_optimized
-        # We need layer_neurons_list to reconstruct layers correctly
-        # In FindPath, searchedNeurons accumulates neurons. 
-        # We can reconstruct layer_neurons from conn_layers
-        layer_neurons_list = []
-        # Layer 0 sources
-        layer_neurons_list.append(set(self.source_df['bodyId'].unique()))
+        G = FastGraph()
         for conn in conn_layers:
-            layer_neurons_list.append(set(conn['bodyId_post'].unique()))
-            
-        # Targets found in the network
-        targets_found = self.target_df[self.target_df['Checked'] == True]['bodyId'].unique()
-        targets_set = set(targets_found)
+            G.build_from_dataframe(conn, 'bodyId_pre', 'bodyId_post', 'weight')
         
         sources = list(self.source_df['bodyId'].unique())
+        # Targets found in the network (Checked=True)
+        targets = list(self.target_df[self.target_df['Checked'] == True]['bodyId'].unique())
         cutoff = self.max_interlayer + 1
         
-        args = (sources, targets_set, G_edges, cutoff, layer_neurons_list)
-        
-        # Run DFS
-        neurons_in_paths, edges_in_paths, edges_in_paths_with_layer, path_count, pairs_with_paths, total_pairs_checked, paths_found = self._find_paths_dfs_optimized(args)
-        
+        paths_found = []
+        # Use memoized DFS to find all paths
+        for path in G.find_paths_memoized_dfs(sources, targets, cutoff, verbose=True):
+            paths_found.append(path)
+            
+        path_count = len(paths_found)
+        pairs_with_paths = len(set((p[0], p[-1]) for p in paths_found))
         print(f'Found {path_count} paths between {pairs_with_paths} source-target pairs.')
+        
+        # Process paths to extract neurons and edges
+        neurons_in_paths = set()
+        edges_in_paths = set()
+        edges_in_paths_with_layer = set()
+        
+        for path in paths_found:
+            neurons_in_paths.update(path)
+            for i in range(len(path) - 1):
+                u, v = path[i], path[i+1]
+                edges_in_paths.add((u, v))
+                # Determine layer index
+                # Since conn_layers are sequential (L0->L1, L1->L2...), 
+                # edge at index i in path corresponds to layer i
+                edges_in_paths_with_layer.add((i, u, v))
         
         # Reconstruct conn_inpath and conn_types
         conn_inpath = pd.DataFrame()
@@ -5326,217 +5237,6 @@ class FindNeuronConnection:
         
         self._vprint('Done\n')
     
-    def _create_interactive_network_for_path(self, conn_types, conn_inpath, neuron_layers, target_type, target_ID, output_folder):
-        '''Create interactive network visualizations for FindPath method'''
-        
-        # Network by type
-        self._vprint('Building interactive network by type...', level='full')
-        G_type = nx.DiGraph()
-        
-        # Add nodes with layer information
-        for layer_idx, layer in enumerate(neuron_layers):
-            if layer_idx == 0:
-                # Source neurons
-                source_types = conn_types[conn_types['conn_layer'] == '0->1']['type_pre'].unique()
-                for node_type in source_types:
-                    G_type.add_node(node_type, layer=layer_idx, node_type='source')
-            else:
-                # Get types in this layer
-                layer_conn = conn_types[conn_types['conn_layer'] == f'{layer_idx-1}->{layer_idx}']
-                for node_type in layer_conn['type_post'].unique():
-                    is_target = node_type in target_type
-                    G_type.add_node(node_type, layer=layer_idx, 
-                                   node_type='target' if is_target else 'intermediate')
-        
-        # Add edges
-        for idx in conn_types.index:
-            source = conn_types.at[idx, 'type_pre']
-            target = conn_types.at[idx, 'type_post']
-            weight = conn_types.at[idx, 'weight']
-            prob = conn_types.at[idx, 'traversal_probability']
-            G_type.add_edge(source, target, weight=weight, probability=prob)
-        
-        # Create layout based on network_layout parameter
-        print(f'Using "{self.network_layout}" layout...')
-        pos_type = self._get_network_layout(G_type)
-        
-        # Create plotly figure for type network
-        self._plot_interactive_network(
-            G_type, pos_type, 
-            title=f'Interactive Network: {self.source_fname} to {self.target_fname} (by type)',
-            filename=os.path.join(output_folder, f'Network_type_path.html'),
-            color_by='node_type'
-        )
-        
-        # Network by bodyId (only if network is not too large)
-        if len(conn_inpath) < 5000:  # Limit for performance
-            print('Building interactive network by bodyId...')
-            G_bodyId = nx.DiGraph()
-            
-            # Add nodes with layer information
-            for layer_idx, layer in enumerate(neuron_layers):
-                for bodyId in layer:
-                    is_target = bodyId in target_ID
-                    is_source = layer_idx == 0
-                    if is_target:
-                        node_cat = 'target'
-                    elif is_source:
-                        node_cat = 'source'
-                    else:
-                        node_cat = 'intermediate'
-                    G_bodyId.add_node(bodyId, layer=layer_idx, node_type=node_cat)
-            
-            # Add edges
-            for idx in conn_inpath.index:
-                source = conn_inpath.at[idx, 'bodyId_pre']
-                target = conn_inpath.at[idx, 'bodyId_post']
-                weight = conn_inpath.at[idx, 'weight']
-                prob = conn_inpath.at[idx, 'traversal_probability']
-                G_bodyId.add_edge(source, target, weight=weight, probability=prob)
-            
-            # Create layout based on network_layout parameter
-            pos_bodyId = self._get_network_layout(G_bodyId)
-            
-            # Fetch neuron info for labels (use local dataset if available)
-            all_bodyIds = list(G_bodyId.nodes())
-            node_info_df = self._fetch_neurons_local_or_api(all_bodyIds, columns=['bodyId', 'type'])
-            node_labels = {}
-            for idx in node_info_df.index:
-                bodyId = node_info_df.at[idx, 'bodyId']
-                neuron_type = node_info_df.at[idx, 'type'] if node_info_df.at[idx, 'type'] else 'None'
-                node_labels[bodyId] = f"{neuron_type}_{bodyId}"
-            
-            # Create plotly figure for bodyId network
-            self._plot_interactive_network(
-                G_bodyId, pos_bodyId,
-                title=f'Interactive Network: {self.source_fname} to {self.target_fname} (by bodyId)',
-                filename=os.path.join(output_folder, f'Network_bodyId_path.html'),
-                color_by='node_type',
-                node_labels=node_labels
-            )
-        else:
-            print(f'Skipping bodyId network (too large: {len(conn_inpath)} connections)')
-    
-    @staticmethod
-    def _find_paths_dfs_optimized(args):
-        '''
-        Helper function for parallel pathfinding using optimized DFS with backtracking.
-        
-        This function explores all paths from a set of source neurons to all target neurons
-        in a single DFS traversal per source. This avoids redundant edge exploration when
-        paths share common segments (e.g., A→B→C→T and A→B→D→T both explore A→B only once).
-        
-        Parameters:
-        -----------
-        args : tuple
-            (sources, targets_set, G_edges, cutoff, layer_neurons_list)
-            - sources: list of source neuron IDs to explore from
-            - targets_set: set of target neuron IDs to find
-            - G_edges: list of (u, v, weight) tuples representing graph edges
-            - cutoff: maximum path length (number of edges)
-            - layer_neurons_list: list of sets for layer membership
-        
-        Returns:
-        --------
-        tuple: (neurons_set, edges_set, edges_with_layer_set, path_count, pairs_with_paths, total_pairs_checked, paths_found)
-               paths_found is list of paths (each path is list of node IDs)
-        '''
-        import networkx as nx
-        
-        sources, targets_set, G_edges, cutoff, layer_neurons_list = args
-        
-        # Reconstruct graph from edges (graphs can't be pickled easily)
-        G = nx.DiGraph()
-        for u, v, weight in G_edges:
-            G.add_edge(u, v, weight=weight)
-        
-        # Convert layer_neurons_list back to list of sets
-        layer_neurons = [set(layer) for layer in layer_neurons_list]
-        
-        # Accumulate results across all sources
-        neurons_in_paths = set()
-        edges_in_paths = set()
-        edges_in_paths_with_layer = set()
-        path_count = 0
-        pairs_with_paths_dict = {}  # Track (source, target) pairs that have paths
-        paths_found = []  # Store actual paths
-        
-        def dfs_find_all_paths(current, target_set, path, visited):
-            '''
-            DFS with backtracking to find all paths from current node to any target.
-            
-            Parameters:
-            -----------
-            current : node
-                Current node in the traversal
-            target_set : set
-                Set of target nodes to find
-            path : list
-                Current path being explored
-            visited : set
-                Nodes in current path (to prevent cycles)
-            '''
-            nonlocal path_count, neurons_in_paths, edges_in_paths, edges_in_paths_with_layer, paths_found
-            
-            # Check if current node is a target
-            if current in target_set:
-                # Found a complete path to a target
-                path_count += 1
-                neurons_in_paths.update(path)
-                
-                # Record this source-target pair
-                source_node = path[0]
-                pairs_with_paths_dict[(source_node, current)] = True
-                
-                # Store the complete path
-                paths_found.append(list(path))
-                
-                # Add edges from this path
-                for i in range(len(path) - 1):
-                    pre_node = path[i]
-                    post_node = path[i+1]
-                    edges_in_paths.add((pre_node, post_node))
-                    
-                    # Edge layer is determined by position in path (path starts at layer 0)
-                    # i=0 means layer 0->1, i=1 means layer 1->2, etc.
-                    edge_layer = i
-                    edges_in_paths_with_layer.add((edge_layer, pre_node, post_node))
-                
-                # Continue searching for more paths through this target
-                # (in case this target is also an intermediate node to other targets)
-            
-            # Stop if we've reached maximum depth
-            if len(path) - 1 >= cutoff:
-                return
-            
-            # Explore neighbors
-            if current in G:
-                for neighbor in G.neighbors(current):
-                    # Skip if already in current path (prevent cycles)
-                    if neighbor not in visited:
-                        # Add neighbor to path and continue DFS
-                        path.append(neighbor)
-                        visited.add(neighbor)
-                        
-                        dfs_find_all_paths(neighbor, target_set, path, visited)
-                        
-                        # Backtrack: remove neighbor from path
-                        path.pop()
-                        visited.remove(neighbor)
-        
-        # Explore from each source neuron
-        for source in sources:
-            if source in G:  # Make sure source exists in graph
-                initial_path = [source]
-                initial_visited = {source}
-                dfs_find_all_paths(source, targets_set, initial_path, initial_visited)
-        
-        pairs_with_paths = len(pairs_with_paths_dict)
-        total_pairs_checked = len(sources) * len(targets_set)
-        
-        return (neurons_in_paths, edges_in_paths, edges_in_paths_with_layer, 
-                path_count, pairs_with_paths, total_pairs_checked, paths_found)
-    
     def FindAllPath(self, find_bodyId_path=True, forward_only=True, exclude_searched_neurons=None):
         '''
         Find all paths between source and target neurons within max_interlayer.
@@ -5564,6 +5264,8 @@ class FindNeuronConnection:
         2. Identify which target neurons exist in the searched network
         3. Find all paths from sources to targets with path length ≤ max_interlayer
         '''
+        import polars as pl
+        
         # Reset status columns if they exist (to allow sequential calls)
         self._reset_temp_columns()
         
@@ -5676,17 +5378,24 @@ class FindNeuronConnection:
                 min_traversal_prob=self.min_traversal_probability
             )
             
-            # Ensure connection dataframe has string bodyIds
+            # Convert to Polars for faster processing
             if not conn_df.empty:
+                # Ensure string types
                 conn_df['bodyId_pre'] = conn_df['bodyId_pre'].astype(str)
                 conn_df['bodyId_post'] = conn_df['bodyId_post'].astype(str)
-            
-            # Store connections for pathfinding
-            conn_df.insert(loc=0, column='conn_layer', value=f'{layer_idx}->{layer_idx+1}')
-            all_connections.append(conn_df)
-            
-            # Collect all downstream neurons for next layer
-            post_neurons = set(conn_df['bodyId_post'].unique())
+                
+                conn_pl = pl.from_pandas(conn_df)
+                
+                # Add conn_layer column
+                conn_pl = conn_pl.with_columns(pl.lit(f'{layer_idx}->{layer_idx+1}').alias('conn_layer'))
+                
+                all_connections.append(conn_pl)
+                
+                # Collect all downstream neurons for next layer
+                post_neurons = set(conn_pl['bodyId_post'].unique().to_list())
+            else:
+                all_connections.append(pl.DataFrame())
+                post_neurons = set()
             
             # Calculate newly discovered neurons
             next_layer = post_neurons - all_neurons_in_network
@@ -5855,691 +5564,90 @@ class FindNeuronConnection:
         self._vprint(f'Maximum path length: {self.max_interlayer + 1} edges', level='full')
         # self._vprint(f'Using optimized DFS algorithm (explores shared path segments only once)', level='full')
         
-        # Decide whether to use parallel processing
-        total_pairs = len(source_ID) * len(targets_found)
-        use_parallel = self.use_parallel and len(source_ID) > 4  # Parallelize if >4 sources
+        # Select pathfinding algorithm
+        algo = self.pathfinding
+        valid_algos = ['DP', 'Bidirectional', 'DFS', 'MemoizedDFS', 'Backtracking']
+        if algo not in valid_algos:
+            self._vprint(f'Warning: Unknown pathfinding algorithm "{algo}", defaulting to "DP"', level='always')
+            algo = 'DP'
         
-        if use_parallel:
-            import multiprocessing as mp
-            import os as os_module
+        path_count = 0
+        all_paths = []  # Initialize list to store all found paths
+        pairs_with_paths_dict = {}
+        
+        import time
+        start_time = time.time()
+        
+        path_gen = None
+        
+        if algo == 'Bidirectional':
+            if self.verbose_mode == 'simple':
+                self._vprint(f'Finding path [bidirectional]...', level='simple')
+            elif self.verbose_mode == 'full':
+                self._vprint('Using bidirectional BFS (layer intersection)...', level='full')
             
-            # Determine number of processes
-            if self.n_jobs == -1:
-                n_processes = mp.cpu_count()
-            elif self.n_jobs == 1:
-                use_parallel = False  # Fall back to sequential
-                n_processes = 1
+            path_gen = G.find_paths_bidirectional_bfs(source_ID, targets_found, self.max_interlayer + 1, verbose=(self.verbose_mode in ['simple', 'full']))
+            
+        elif algo == 'MemoizedDFS':
+            if self.verbose_mode == 'simple':
+                self._vprint(f'Finding path [memoized DFS]...', level='simple')
+            elif self.verbose_mode == 'full':
+                self._vprint('Using Bidirectional DFS (Meet-in-the-middle)...', level='full')
+                self._vprint('   ⚡ Optimized for memory: storing L/2 paths', level='full')
+            
+            path_gen = G.find_paths_meet_in_the_middle(source_ID, targets_found, self.max_interlayer + 1, verbose=(self.verbose_mode in ['simple', 'full']))
+            
+        elif algo == 'DFS':
+            if self.verbose_mode == 'simple':
+                self._vprint(f'Finding path [standard DFS]...', level='simple')
+            elif self.verbose_mode == 'full':
+                self._vprint('Using standard DFS pathfinding (recursive)...', level='full')
+            
+            # Use Backward Memoized DFS as a proxy for standard DFS behavior (finding all paths)
+            path_gen = G.find_paths_memoized_dfs(source_ID, targets_found, self.max_interlayer + 1, direction='backward', verbose=(self.verbose_mode in ['simple', 'full']))
+
+        elif algo == 'Backtracking':
+            if self.verbose_mode == 'simple':
+                self._vprint(f'Finding path [backtracking]...', level='simple')
+            elif self.verbose_mode == 'full':
+                self._vprint('Using backward DFS with backtracking (no memoization)...', level='full')
+            
+            path_gen = G.find_paths_dfs_backtracking(source_ID, targets_found, self.max_interlayer + 1, verbose=(self.verbose_mode in ['simple', 'full']))
+
+        else: # algo == 'DP'
+            if self.verbose_mode == 'simple':
+                self._vprint(f'Finding path [optimized DP]...', level='simple')
+            elif self.verbose_mode == 'full':
+                self._vprint('Using optimized backward search (DP)...', level='full')
+            
+            path_gen = G.find_paths_backward_dp(source_ID, targets_found, self.max_interlayer + 1, verbose=(self.verbose_mode in ['simple', 'full']))
+
+        # Common collection logic
+        if path_gen:
+            if self.verbose_mode in ['simple', 'full']:
+                    path_iter = tqdm(path_gen, desc="Processing paths", leave=False, unit="path")
             else:
-                n_processes = min(self.n_jobs, mp.cpu_count())
+                    path_iter = path_gen
+
+            for p in path_iter:
+                path_count += 1
+                all_paths.append(p)  # Collect path
+                s = p[0]
+                t = p[-1]
+                pairs_with_paths_dict[(s, t)] = True
+                neurons_in_paths.update(p)
+                for i in range(len(p) - 1):
+                    edges_in_paths.add((p[i], p[i+1]))
+                    edges_in_paths_with_layer.add((i, p[i], p[i+1]))
             
-            if use_parallel:
-                if self.verbose_mode == 'simple':
-                    self._vprint(f'pathfinding[parallel]...', level='simple', end='', flush=True)
-                elif self.verbose_mode == 'full':
-                    self._vprint(f'Using parallel processing with {n_processes} processes...', level='full')
-                
-                # Prepare graph edges for pickling
-                G_edges = [(u, v, data['weight']) for u, v, data in G.edges(data=True)]
-                
-                # Prepare layer neurons as list of lists (sets can't be pickled easily)
-                layer_neurons_list = [list(layer) for layer in layer_neurons]
-                
-                # Convert targets to set for efficient lookup
-                targets_set = set(targets_found)
-                
-                # Split sources into chunks for parallel processing (not pairs!)
-                # Each chunk will explore all targets from its source neurons
-                sources_list = list(source_ID)
-                
-                # Distribute sources across processes
-                # Use fewer sources per chunk for better load balancing
-                if len(sources_list) > 20:
-                    target_chunk_size = max(1, len(sources_list) // (n_processes * 4))
-                else:
-                    target_chunk_size = max(1, len(sources_list) // n_processes)
-                
-                chunk_size = target_chunk_size
-                source_chunks = [sources_list[i:i + chunk_size] for i in range(0, len(sources_list), chunk_size)]
-                
-                self._vprint(f'Split into {len(source_chunks)} chunks (~{chunk_size} sources per chunk)', level='full')
-                self._vprint(f'Each chunk will explore paths to all {len(targets_set)} targets', level='full')
-                
-                # More realistic time estimate based on graph complexity
-                # With DFS optimization, each source is explored once (not once per target)
-                # Factors affecting speed:
-                # - Graph size (nodes and edges)
-                # - Path length (cutoff)
-                # - Graph density (average degree)
-                
-                # Base estimate on graph complexity
-                avg_degree = G.number_of_edges() / G.number_of_nodes() if G.number_of_nodes() > 0 else 1
-                path_complexity = self.max_interlayer + 1  # Maximum path length
-                
-                # Time estimation based on empirical measurements from hemibrain connectome
-                # Calibrated with: 142K nodes, avg_degree=36.8, depth=3 → 12 sec/source with 12 workers
-                # Observed: 0.0069 sources/sec/process for very dense graphs
-                
-                # Base speed estimates (sources/sec per process) - calibrated to real performance
-                if avg_degree < 3:
-                    base_speed = 50   # Very sparse: trivial pathfinding
-                elif avg_degree < 8:
-                    base_speed = 10   # Sparse: fast pathfinding
-                elif avg_degree < 15:
-                    base_speed = 2    # Medium: moderate complexity
-                elif avg_degree < 25:
-                    base_speed = 0.3  # Dense: significant path explosion
-                elif avg_degree < 40:
-                    base_speed = 0.05 # Very dense: severe path explosion
-                else:
-                    base_speed = 0.01 # Extremely dense: exponential explosion
-                
-                # Depth penalty - each layer multiplies search space
-                # Empirically: depth=3, degree=37 → penalty ~5x from depth=2
-                if path_complexity <= 2:
-                    depth_factor = 1.0
-                elif path_complexity == 3:
-                    depth_factor = (avg_degree / 10) ** 1.2  # Calibrated: 36.8/10^1.2 = 5.1
-                else:
-                    depth_factor = (avg_degree / 10) ** (path_complexity - 2)
-                
-                adjusted_speed = base_speed / max(1, depth_factor)
-                
-                # Large graph overhead (memory, cache misses)
-                if G.number_of_nodes() > 100000:
-                    # Calibrated: 142K nodes → 1.4x penalty
-                    size_factor = 1 + ((G.number_of_nodes() - 100000) / 100000) * 0.4
-                    adjusted_speed = adjusted_speed / size_factor
-                
-                # Ensure minimum speed (avoid infinity)
-                adjusted_speed = max(0.0001, adjusted_speed)
-                
-                # Total with parallelization
-                total_estimated_speed = adjusted_speed * n_processes
-                estimated_time = len(sources_list) / total_estimated_speed if total_estimated_speed > 0 else 0
-                
-                # Overhead: startup (excluded), load imbalance, synchronization
-                estimated_time *= 1.3
-                
-                if estimated_time < 10:
-                    time_str = f"~{estimated_time:.0f} seconds"
-                elif estimated_time < 120:
-                    time_str = f"~{estimated_time/60:.1f} minutes"
-                else:
-                    time_str = f"~{estimated_time/60:.0f} minutes"
-                
-                self._vprint(f'Estimated time: {time_str} (graph: {G.number_of_nodes()} nodes, {G.number_of_edges()} edges, avg degree: {avg_degree:.1f})', level='full')
-                self._vprint(f'Processing...\n', level='full')
-                
-                # Prepare arguments for each process
-                args_list = [
-                    (chunk, targets_set, G_edges, self.max_interlayer + 1, layer_neurons_list)
-                    for chunk in source_chunks
-                ]
-                
-                # Progress tracking
-                import time
-                start_time = time.time()
-                last_update = start_time
-                update_interval = 0.5  # Update every 0.5 seconds for better feedback
-                
-                # Run parallel pathfinding with progress tracking
-                path_count = 0
-                pairs_with_paths = 0
-                chunks_completed = 0
-                sources_processed = 0
-                all_paths = []  # Collect paths from all workers
-                
-                # For simple observed-speed ETA calculation
-                first_chunk_time = None  # Track when first chunk completes (exclude startup overhead)
-                productive_start_time = None  # Start time for actual work (after first chunk)
-                
-                self._vprint(f'⏳ Starting {n_processes} worker processes...', level='full')
-                self._vprint(f'   (First update will appear when a chunk completes)', level='full')
-                self._vprint('', level='full')
-                
-                with mp.Pool(processes=n_processes) as pool:
-                    # Use imap_unordered for progress tracking (returns results as they complete)
-                    for neurons_set, edges_set, edges_layer_set, p_count, p_with_paths, chunk_size_actual, paths_chunk in pool.imap_unordered(
-                        self._find_paths_dfs_optimized, args_list
-                    ):
-                        # Update totals
-                        neurons_in_paths.update(neurons_set)
-                        edges_in_paths.update(edges_set)
-                        edges_in_paths_with_layer.update(edges_layer_set)
-                        path_count += p_count
-                        pairs_with_paths += p_with_paths
-                        all_paths.extend(paths_chunk)  # Collect paths from this worker
-                        chunks_completed += 1
-                        sources_processed += len(source_chunks[chunks_completed - 1])  # Actual sources in this chunk
-                        
-                        # Progress update - show every chunk for better feedback
-                        current_time = time.time()
-                        
-                        # Record first chunk completion time to exclude startup overhead
-                        if first_chunk_time is None:
-                            first_chunk_time = current_time
-                            startup_overhead = first_chunk_time - start_time
-                            # Start productive time tracking AFTER first chunk
-                            productive_start_time = first_chunk_time
-                            self._vprint(f'   ⚡ Workers initialized in {startup_overhead:.1f}s, starting main processing...\n', level='full')
-                        
-                        # Calculate current speed using ONLY productive time (excludes startup)
-                        productive_elapsed = current_time - productive_start_time if productive_start_time else 0.1
-                        current_speed = sources_processed / productive_elapsed if productive_elapsed > 0 else 0
-                        
-                        progress_pct = (sources_processed / len(sources_list)) * 100
-                        remaining_sources = len(sources_list) - sources_processed
-                        
-                        # Simple reliable ETA: remaining / observed_speed
-                        # Wait for minimum samples before showing ETA
-                        min_samples_for_eta = max(3, int(len(sources_list) * 0.05))  # At least 3 sources or 5%
-                        
-                        if sources_processed >= min_samples_for_eta and current_speed > 0:
-                            eta_seconds = remaining_sources / current_speed
-                            
-                            # Format ETA in HH:mm:ss
-                            hours = int(eta_seconds // 3600)
-                            minutes = int((eta_seconds % 3600) // 60)
-                            seconds = int(eta_seconds % 60)
-                            eta_str = f'{hours:02d}:{minutes:02d}:{seconds:02d}'
-                        else:
-                            eta_str = 'calculating...'
-                        
-                        # Update more frequently - show every chunk or every 0.5 seconds
-                        should_update = (current_time - last_update >= update_interval or 
-                                       chunks_completed == 1 or  # Always show first chunk
-                                       chunks_completed % 5 == 0 or  # Show every 5 chunks
-                                       chunks_completed == len(source_chunks))  # Always show completion
-                        
-                        if should_update and self.verbose_mode == 'full':
-                            # Use \033[K to clear to end of line (removes residual characters)
-                            self._vprint(f'\r   Progress: {sources_processed}/{len(sources_list)} sources ({progress_pct:.1f}%) | ETA: {eta_str}\033[K', level='full', end='', flush=True)
-                            last_update = current_time
-                
-                # Final newline
-                if self.verbose_mode == 'full':
-                    self._vprint('', level='full')
-                
-                elapsed = time.time() - start_time
-                if self.verbose_mode == 'simple':
-                    self._vprint('Done', level='simple')
-                    self._vprint('building paths...', level='simple', end='', flush=True)
-                elif self.verbose_mode == 'full':
-                    self._vprint(f'\n✅ Parallel pathfinding complete in {elapsed:.1f}s!', level='full')
-                    self._vprint(f'   Average: {len(sources_list)/elapsed:.1f} sources/s (explored {len(targets_set)} targets per source)', level='full')
-                    self._vprint(f'   Processed by {n_processes} workers across {len(source_chunks)} chunks', level='full')
-                    self._vprint(f'   📦 Collected {len(all_paths):,} paths in memory (~{len(all_paths) * 50 / 1024 / 1024:.1f} MB)', level='full')
-        
-        if not use_parallel:
-            # Select pathfinding algorithm
-            algo = self.pathfinding
-            valid_algos = ['DP', 'Bidirectional', 'DFS', 'MemoizedDFS']
-            if algo not in valid_algos:
-                self._vprint(f'Warning: Unknown pathfinding algorithm "{algo}", defaulting to "DP"', level='always')
-                algo = 'DP'
+            pairs_with_paths = len(pairs_with_paths_dict)
             
-            if algo == 'Bidirectional':
-                if self.verbose_mode == 'simple':
-                    self._vprint(f'Finding path [bidirectional]...', level='simple')
-                elif self.verbose_mode == 'full':
-                    self._vprint('Using bidirectional search (meet-in-the-middle)...', level='full')
-                
-                import time
-                start_time = time.time()
-                
-                # Bidirectional Search (Meet-in-the-middle)
-                # Reduces search complexity from O(b^d) to O(b^(d/2))
-                # Uses dynamic alternating expansion to minimize frontier size
-                
-                total_steps = self.max_interlayer + 1
-                
-                from collections import defaultdict
-                # Initialize lists to hold frontiers at each depth
-                # f_paths[d] = {node: [path1, path2, ...]}
-                f_paths = [defaultdict(list)] 
-                b_paths = [defaultdict(list)]
-                
-                # 1. Initialize Forward Search (from Sources)
-                source_set = set(source_ID)
-                for s in source_set:
-                    if s in G:
-                        f_paths[0][s].append([s])
-                
-                # 2. Initialize Backward Search (from Targets)
-                targets_set = set(targets_found)
-                for t in targets_set:
-                    if t in G:
-                        b_paths[0][t].append([t])
-                
-                # 3. Dynamic Alternating Expansion
-                f_depth = 0
-                b_depth = 0
-                
-                # We need to reach total depth of total_steps
-                # We expand until f_depth + b_depth >= total_steps
-                # But we must be careful: we need to cover all intermediate lengths too.
-                # Actually, we just need to ensure we have enough frontiers to form paths of length 1..total_steps.
-                # The loop continues as long as we can extend and haven't covered the full distance.
-                
-                R = G.reverse() # Pre-compute reverse graph for backward search
-                
-                while f_depth + b_depth < total_steps:
-                    # Check if frontiers are empty (cannot extend further)
-                    if not f_paths[f_depth] and not b_paths[b_depth]:
-                        break
-                    
-                    # Decide direction: Expand the smaller frontier
-                    # If one is empty, expand the other
-                    expand_forward = False
-                    
-                    if not b_paths[b_depth]:
-                        expand_forward = True
-                    elif not f_paths[f_depth]:
-                        expand_forward = False
-                    else:
-                        # Compare frontier sizes (number of nodes)
-                        if len(f_paths[f_depth]) <= len(b_paths[b_depth]):
-                            expand_forward = True
-                        else:
-                            expand_forward = False
-                    
-                    if expand_forward:
-                        # Expand Forward: f_depth -> f_depth + 1
-                        current_depth = f_depth
-                        next_depth = f_depth + 1
-                        f_paths.append(defaultdict(list))
-                        
-                        nodes_with_paths = list(f_paths[current_depth].keys())
-                        
-                        iterator = nodes_with_paths
-                        if self.verbose_mode in ['simple', 'full']:
-                             iterator = tqdm(nodes_with_paths, desc=f"Forward L{next_depth} (from {len(nodes_with_paths)} nodes)", leave=True, unit="node", smoothing=0)
-
-                        for u in iterator:
-                            neighbors = list(G.neighbors(u))
-                            if not neighbors: continue
-                            
-                            current_paths = f_paths[current_depth][u]
-                            for v in neighbors:
-                                new_paths = []
-                                for p in current_paths:
-                                    if v not in p: # Cycle check
-                                        new_paths.append(p + [v])
-                                if new_paths:
-                                    f_paths[next_depth][v].extend(new_paths)
-                        
-                        f_depth += 1
-                        
-                    else:
-                        # Expand Backward: b_depth -> b_depth + 1
-                        current_depth = b_depth
-                        next_depth = b_depth + 1
-                        b_paths.append(defaultdict(list))
-                        
-                        nodes_with_paths = list(b_paths[current_depth].keys())
-                        
-                        iterator = nodes_with_paths
-                        if self.verbose_mode in ['simple', 'full']:
-                             iterator = tqdm(nodes_with_paths, desc=f"Backward L{next_depth} (from {len(nodes_with_paths)} nodes)", leave=True, unit="node", smoothing=0)
-
-                        for v in iterator:
-                            if v not in R: continue
-                            predecessors = list(R.neighbors(v))
-                            if not predecessors: continue
-                            
-                            current_paths = b_paths[current_depth][v]
-                            for u in predecessors:
-                                new_paths = []
-                                for p in current_paths:
-                                    if u not in p: # Cycle check
-                                        new_paths.append([u] + p)
-                                if new_paths:
-                                    b_paths[next_depth][u].extend(new_paths)
-                        
-                        b_depth += 1
-
-                # 4. Merge and Collect Paths
-                if self.verbose_mode == 'full':
-                    self._vprint(f'   Merging paths (Forward depth: {f_depth}, Backward depth: {b_depth})...', level='full')
-                
-                all_paths = []
-                
-                # Iterate through all target total lengths
-                for length in range(1, total_steps + 1):
-                    # Try all valid combinations of i (forward) and j (backward) such that i + j = length
-                    for i in range(length + 1):
-                        j = length - i
-                        
-                        # Check if we have computed frontiers for these depths
-                        if i > f_depth or j > b_depth:
-                            continue
-                        
-                        # Find intersection nodes
-                        common_nodes = set(f_paths[i].keys()) & set(b_paths[j].keys())
-                        
-                        if not common_nodes: continue
-                        
-                        for v in common_nodes:
-                            forward_parts = f_paths[i][v]
-                            backward_parts = b_paths[j][v]
-                            
-                            for fp in forward_parts:
-                                for bp in backward_parts:
-                                    # fp is [s, ..., v]
-                                    # bp is [v, ..., t]
-                                    # Combined is [s, ..., v, ..., t]
-                                    
-                                    # Full cycle check: ensure no shared nodes other than v
-                                    fp_set = set(fp)
-                                    bp_set = set(bp)
-                                    
-                                    if len(fp_set & bp_set) == 1:
-                                        combined_path = fp + bp[1:]
-                                        all_paths.append(combined_path)
-                
-                # Process paths to populate sets
-                pairs_with_paths_dict = {}
-                path_count = len(all_paths)
-                
-                if self.verbose_mode in ['simple', 'full']:
-                     path_iter = tqdm(all_paths, desc="Processing paths", leave=False)
-                else:
-                     path_iter = all_paths
-
-                for p in path_iter:
-                    s = p[0]
-                    t = p[-1]
-                    pairs_with_paths_dict[(s, t)] = True
-                    neurons_in_paths.update(p)
-                    for i in range(len(p) - 1):
-                        edges_in_paths.add((p[i], p[i+1]))
-                        edges_in_paths_with_layer.add((i, p[i], p[i+1]))
-                
-                pairs_with_paths = len(pairs_with_paths_dict)
-                
-                # Final update
-                elapsed = time.time() - start_time
-                if self.verbose_mode == 'simple':
-                    self._vprint('Done', level='simple')
-                    self._vprint('building paths...', level='simple', end='', flush=True)
-                elif self.verbose_mode == 'full':
-                    self._vprint(f'   Pathfinding completed in {elapsed:.1f}s', level='full')
-
-            elif algo == 'MemoizedDFS':
-                if self.verbose_mode == 'simple':
-                    self._vprint(f'Finding path [memoized DFS]...', level='simple', end='', flush=True)
-                elif self.verbose_mode == 'full':
-                    self._vprint('Using memoized DFS pathfinding (recursive with caching)...', level='full')
-                
-                path_count = 0
-                pairs_with_paths_dict = {}
-                all_paths = []
-                
-                import time
-                start_time = time.time()
-                
-                targets_set = set(targets_found)
-                
-                # Memoization cache: (node, length_remaining) -> list of paths
-                # Stores all valid path suffixes starting from node with EXACTLY length_remaining
-                memo = {}
-                
-                def get_paths_memo(u, depth):
-                    state = (u, depth)
-                    if state in memo:
-                        return memo[state]
-                    
-                    paths = []
-                    
-                    # Base case: depth 0
-                    if depth == 0:
-                        if u in targets_set:
-                            return [[u]]
-                        else:
-                            return []
-                    
-                    # Recursive step
-                    if u in G:
-                        for v in G.neighbors(u):
-                            # Get suffixes of length depth-1
-                            suffixes = get_paths_memo(v, depth - 1)
-                            for suf in suffixes:
-                                if u not in suf: # Cycle check
-                                    paths.append([u] + suf)
-                    
-                    memo[state] = paths
-                    return paths
-
-                # Run for each length from 1 to max_interlayer + 1
-                total_steps = self.max_interlayer + 1
-                
-                for length in range(1, total_steps + 1):
-                    if self.verbose_mode == 'full':
-                        self._vprint(f'   Step {length}/{total_steps}: Finding paths of length {length}...', level='full')
-                    
-                    # Iterate over all sources
-                    # Note: get_paths_memo will recursively compute and cache needed suffixes
-                    
-                    iterator = source_ID
-                    if self.verbose_mode in ['simple', 'full']:
-                         iterator = tqdm(source_ID, desc=f"Path len {length}", leave=True, unit="source", smoothing=0)
-                    
-                    for s in iterator:
-                        if s in G:
-                            paths = get_paths_memo(s, length)
-                            all_paths.extend(paths)
-                
-                # Process paths to populate sets
-                path_count = len(all_paths)
-                
-                if self.verbose_mode in ['simple', 'full']:
-                     path_iter = tqdm(all_paths, desc="Processing paths", leave=False)
-                else:
-                     path_iter = all_paths
-
-                for p in path_iter:
-                    s = p[0]
-                    t = p[-1]
-                    pairs_with_paths_dict[(s, t)] = True
-                    neurons_in_paths.update(p)
-                    for i in range(len(p) - 1):
-                        edges_in_paths.add((p[i], p[i+1]))
-                        edges_in_paths_with_layer.add((i, p[i], p[i+1]))
-                
-                pairs_with_paths = len(pairs_with_paths_dict)
-                
-                elapsed = time.time() - start_time
-                if self.verbose_mode == 'simple':
-                    self._vprint('Done', level='simple')
-                    self._vprint('building paths...', level='simple', end='', flush=True)
-                elif self.verbose_mode == 'full':
-                    self._vprint(f'   Pathfinding completed in {elapsed:.1f}s', level='full')
-
-            elif algo == 'DFS':
-                if self.verbose_mode == 'simple':
-                    self._vprint(f'Finding path [standard DFS]...', level='simple', end='', flush=True)
-                elif self.verbose_mode == 'full':
-                    self._vprint('Using standard DFS pathfinding (recursive)...', level='full')
-                
-                path_count = 0
-                sources_processed = 0
-                pairs_with_paths_dict = {}
-                all_paths = []
-                
-                import time
-                start_time = time.time()
-                last_update = start_time
-                update_interval = 2.0
-                
-                targets_set = set(targets_found)
-                
-                def dfs_find_all_paths(current, target_set, path, visited):
-                    '''DFS with backtracking to find all paths from current node to any target.'''
-                    nonlocal path_count, neurons_in_paths, edges_in_paths, edges_in_paths_with_layer
-                    
-                    if current in target_set:
-                        path_count += 1
-                        neurons_in_paths.update(path)
-                        source_node = path[0]
-                        pairs_with_paths_dict[(source_node, current)] = True
-                        all_paths.append(list(path))
-                        for i in range(len(path) - 1):
-                            pre_node = path[i]
-                            post_node = path[i+1]
-                            edges_in_paths.add((pre_node, post_node))
-                            edge_layer = i
-                            edges_in_paths_with_layer.add((edge_layer, pre_node, post_node))
-                    
-                    if len(path) - 1 >= self.max_interlayer + 1:
-                        return
-                    
-                    if current in G:
-                        for neighbor in G.neighbors(current):
-                            if neighbor not in visited:
-                                path.append(neighbor)
-                                visited.add(neighbor)
-                                dfs_find_all_paths(neighbor, target_set, path, visited)
-                                path.pop()
-                                visited.remove(neighbor)
-                
-                for source_idx, source in enumerate(source_ID):
-                    sources_processed += 1
-                    if source in G:
-                        initial_path = [source]
-                        initial_visited = {source}
-                        dfs_find_all_paths(source, targets_set, initial_path, initial_visited)
-                    
-                    current_time = time.time()
-                    if current_time - last_update >= update_interval:
-                        elapsed = current_time - start_time
-                        progress_pct = (sources_processed / len(source_ID)) * 100
-                        if self.verbose_mode == 'full':
-                            self._vprint(f'\\r   Progress: {sources_processed}/{len(source_ID)} sources ({progress_pct:.1f}%)', level='full', end='', flush=True)
-                        last_update = current_time
-                
-                pairs_with_paths = len(pairs_with_paths_dict)
-                elapsed = time.time() - start_time
-                if self.verbose_mode == 'simple':
-                    self._vprint('Done', level='simple')
-                    self._vprint('building paths...', level='simple', end='', flush=True)
-                elif self.verbose_mode == 'full':
-                    self._vprint(f'\\r   Progress: {sources_processed}/{len(source_ID)} sources (100.0%) | Completed in {elapsed:.1f}s', level='full')
-
-            else: # algo == 'DP' (Optimized Backward Search)
-                if self.verbose_mode == 'simple':
-                    self._vprint(f'Finding path [optimized DP]...', level='simple')
-                elif self.verbose_mode == 'full':
-                    self._vprint('Using optimized backward search (DP)...', level='full')
-                
-                # Optimized Backward Search (DP)
-                # 1. Initialize paths of length 0 (just targets)
-                # paths_by_len[len][node] = list of paths
-                from collections import defaultdict
-                paths_by_len = [defaultdict(list) for _ in range(self.max_interlayer + 2)]
-                
-                targets_set = set(targets_found)
-                for t in targets_set:
-                    if t in G:
-                        paths_by_len[0][t].append([t])
-                
-                # 2. Iterate backwards
-                R = G.reverse()
-                
-                # Progress bar for DP steps
-                total_steps = self.max_interlayer + 1
-                
-                import time
-                start_time = time.time()
-                
-                for length in range(1, total_steps + 1):
-                    if self.verbose_mode == 'full':
-                        self._vprint(f'   Step {length}/{total_steps}: Extending paths of length {length}...', level='full')
-                    
-                    # Nodes that have paths of length-1
-                    nodes_with_paths = list(paths_by_len[length-1].keys())
-                    
-                    if not nodes_with_paths:
-                        break
-                    
-                    # Iterate over these nodes to find their predecessors
-                    # Using tqdm if verbose
-                    iterator = nodes_with_paths
-                    if self.verbose_mode in ['simple', 'full']:
-                         # Calculate total paths to extend for better ETA
-                         total_paths_to_extend = sum(len(paths_by_len[length-1][v]) for v in nodes_with_paths)
-                         self._vprint(f'   Extending {total_paths_to_extend:,} paths from {len(nodes_with_paths):,} nodes...', level='full')
-                         
-                         iterator = tqdm(nodes_with_paths, desc=f"Path len {length}", leave=True, unit="node", smoothing=0)
-
-                    for v in iterator:
-                        if v not in R: continue
-                        
-                        # Predecessors u -> v
-                        predecessors = list(R.neighbors(v))
-                        if not predecessors: continue
-                        
-                        # Get paths to extend
-                        current_paths = paths_by_len[length-1][v]
-                        
-                        # Optimization: If many paths, use set for faster cycle check
-                        # But for short paths (len < 5), list scan is often faster
-                        
-                        for u in predecessors:
-                            # Extend all paths from v
-                            # Batch append is faster than loop append
-                            new_paths = []
-                            for p in current_paths:
-                                # Cycle check: u must not be in p
-                                if u not in p:
-                                    new_paths.append([u] + p)
-                            
-                            if new_paths:
-                                paths_by_len[length][u].extend(new_paths)
-
-                # 3. Collect results
-                if self.verbose_mode == 'full':
-                    self._vprint('   Collecting paths from sources...', level='full')
-                
-                path_count = 0
-                pairs_with_paths_dict = {}
-                all_paths = []
-                
-                # Collect paths starting from sources
-                source_set = set(source_ID)
-                
-                for length in range(1, total_steps + 1):
-                    # Only look at nodes that are sources
-                    common_sources = source_set.intersection(paths_by_len[length].keys())
-                    for s in common_sources:
-                        s_paths = paths_by_len[length][s]
-                        all_paths.extend(s_paths)
-                
-                # Process paths to populate sets
-                path_count = len(all_paths)
-                
-                if self.verbose_mode in ['simple', 'full']:
-                     path_iter = tqdm(all_paths, desc="Processing paths", leave=False)
-                else:
-                     path_iter = all_paths
-
-                for p in path_iter:
-                    s = p[0]
-                    t = p[-1]
-                    pairs_with_paths_dict[(s, t)] = True
-                    neurons_in_paths.update(p)
-                    for i in range(len(p) - 1):
-                        edges_in_paths.add((p[i], p[i+1]))
-                        edges_in_paths_with_layer.add((i, p[i], p[i+1]))
-                
-                pairs_with_paths = len(pairs_with_paths_dict)
-                
-                # Final update
-                elapsed = time.time() - start_time
-                if self.verbose_mode == 'simple':
-                    self._vprint('Done', level='simple')
-                    self._vprint('building paths...', level='simple', end='', flush=True)
-                elif self.verbose_mode == 'full':
-                    self._vprint(f'   Pathfinding completed in {elapsed:.1f}s', level='full')
+            elapsed = time.time() - start_time
+            if self.verbose_mode == 'simple':
+                self._vprint('Done', level='simple')
+                self._vprint('building paths...', level='simple', end='', flush=True)
+            elif self.verbose_mode == 'full':
+                self._vprint(f'   Pathfinding completed in {elapsed:.1f}s', level='full')
         
         self._vprint(f'\n✅ Pathfinding complete!', level='full')
         self._vprint(f'   Total paths found: {path_count:,}', level='full')
@@ -6561,33 +5669,46 @@ class FindNeuronConnection:
             
         for layer_idx, conn_df in enumerate(iterator):
             # Skip empty connection DataFrames
-            if conn_df.empty:
+            if conn_df.is_empty():
                 continue
                 
             # Get the actual layer index from the conn_layer label
-            layer_label = conn_df['conn_layer'].iloc[0]
+            layer_label = conn_df['conn_layer'][0]
             actual_layer_idx = int(layer_label.split('->')[0])
             
             # Filter to keep only edges that are in valid paths for THIS specific layer
-            conn_filtered = conn_df[
-                conn_df.apply(
-                    lambda row: (actual_layer_idx, row['bodyId_pre'], row['bodyId_post']) in edges_in_paths_with_layer,
-                    axis=1
-                )
-            ]
+            # Create a set of valid (pre, post) for this layer
+            valid_pairs = { (u, v) for (l, u, v) in edges_in_paths_with_layer if l == actual_layer_idx }
             
-            if len(conn_filtered) == 0:
+            if not valid_pairs:
+                continue
+                
+            # Create a DataFrame for filtering
+            valid_pairs_df = pl.DataFrame(list(valid_pairs), schema=['bodyId_pre', 'bodyId_post'], orient='row')
+            # Ensure types match
+            valid_pairs_df = valid_pairs_df.with_columns([
+                pl.col('bodyId_pre').cast(pl.Utf8),
+                pl.col('bodyId_post').cast(pl.Utf8)
+            ])
+            
+            # Filter conn_df (inner join is efficient for filtering)
+            conn_filtered = conn_df.join(valid_pairs_df, on=['bodyId_pre', 'bodyId_post'], how='inner')
+            
+            if conn_filtered.is_empty():
                 continue
             
             # Remove conn_layer temporarily (will add back after enrichment)
-            conn_filtered_no_layer = conn_filtered.drop(columns=['conn_layer'])
+            conn_filtered_no_layer = conn_filtered.drop('conn_layer')
             
             # Get all neurons involved in this layer's connections (for accurate ratio calculation)
-            bodyIds_in_layer = np.unique(np.concatenate([conn_filtered_no_layer['bodyId_pre'].unique(), conn_filtered_no_layer['bodyId_post'].unique()]))
-            neurons_in_layer_df = self._fetch_neurons_local_or_api(bodyIds_in_layer.tolist(), columns=['bodyId', 'type', 'post'])
+            bodyIds_in_layer = pl.concat([conn_filtered_no_layer['bodyId_pre'], conn_filtered_no_layer['bodyId_post']]).unique()
+            
+            # _fetch_neurons_local_or_api likely returns Pandas, convert to Polars
+            neurons_in_layer_df_pd = self._fetch_neurons_local_or_api(bodyIds_in_layer.to_list(), columns=['bodyId', 'type', 'post'])
+            neurons_in_layer_df = pl.from_pandas(neurons_in_layer_df_pd)
             
             # Enrich with traversal probability (use local dataset if available)
-            conn_enriched, conn_type, conn_group = sv.EnrichConnectionTable(
+            conn_enriched, conn_type, conn_group = EnrichConnectionTablePolars(
                 conn_filtered_no_layer,
                 dataset=self.dataset, 
                 script_path=self.script_path,
@@ -6596,18 +5717,18 @@ class FindNeuronConnection:
             )
             
             # Add conn_layer column AFTER enrichment
-            conn_enriched.insert(loc=0, column='conn_layer', value=layer_label)
-            conn_type.insert(loc=0, column='conn_layer', value=layer_label)
+            conn_enriched = conn_enriched.with_columns(pl.lit(layer_label).alias('conn_layer'))
+            conn_type = conn_type.with_columns(pl.lit(layer_label).alias('conn_layer'))
             if conn_group is not None:
-                conn_group.insert(loc=0, column='conn_layer', value=layer_label)
+                conn_group = conn_group.with_columns(pl.lit(layer_label).alias('conn_layer'))
             
-            if not conn_enriched.empty:
+            if not conn_enriched.is_empty():
                 conn_inpath_list.append(conn_enriched)
             
-            if not conn_type.empty:
+            if not conn_type.is_empty():
                 conn_types_list.append(conn_type)
                 
-            if conn_group is not None and not conn_group.empty:
+            if conn_group is not None and not conn_group.is_empty():
                 conn_groups_list.append(conn_group)
             
             weight_layers[layer_label] = conn_enriched['weight'].sum()
@@ -6616,19 +5737,26 @@ class FindNeuronConnection:
         
         # Concatenate all results at once (avoids FutureWarning about empty/NA entries)
         if conn_inpath_list:
-            conn_inpath = pd.concat(conn_inpath_list)
+            conn_inpath = pl.concat(conn_inpath_list)
         else:
-            conn_inpath = pd.DataFrame(columns=['conn_layer', 'bodyId_pre', 'bodyId_post', 'weight', 'type_pre', 'type_post', 'traversal_probability', 'connection_ratio'])
+            conn_inpath = pl.DataFrame(schema={
+                'conn_layer': pl.Utf8, 'bodyId_pre': pl.Utf8, 'bodyId_post': pl.Utf8, 
+                'weight': pl.Int64, 'type_pre': pl.Utf8, 'type_post': pl.Utf8, 
+                'traversal_probability': pl.Float64, 'connection_ratio': pl.Float64
+            })
 
         if conn_types_list:
-            conn_types = pd.concat(conn_types_list)
+            conn_types = pl.concat(conn_types_list)
         else:
-            conn_types = pd.DataFrame(columns=['conn_layer', 'type_pre', 'type_post', 'weight', 'traversal_probability', 'connection_ratio'])
+            conn_types = pl.DataFrame(schema={
+                'conn_layer': pl.Utf8, 'type_pre': pl.Utf8, 'type_post': pl.Utf8, 
+                'weight': pl.Int64, 'traversal_probability': pl.Float64, 'connection_ratio': pl.Float64
+            })
 
         if conn_groups_list:
-            conn_groups = pd.concat(conn_groups_list)
+            conn_groups = pl.concat(conn_groups_list)
         else:
-            conn_groups = pd.DataFrame()
+            conn_groups = pl.DataFrame()
         
         # Build neuron_layers structure for visualization (based on actual path data)
         # Group neurons by their earliest appearance layer in valid paths
@@ -6644,9 +5772,9 @@ class FindNeuronConnection:
                 neurons_in_layer = set(source_ID) & neurons_in_paths
             else:
                 # Neurons that appear as targets in this layer's incoming connections
-                if len(conn_inpath) > 0 and layer_label_in in conn_inpath['conn_layer'].values:
-                    incoming = conn_inpath[conn_inpath['conn_layer'] == layer_label_in]
-                    neurons_in_layer = set(incoming['bodyId_post'].unique())
+                if len(conn_inpath) > 0 and layer_label_in in conn_inpath['conn_layer'].unique().to_list():
+                    incoming = conn_inpath.filter(pl.col('conn_layer') == layer_label_in)
+                    neurons_in_layer = set(incoming['bodyId_post'].unique().to_list())
             
             if len(neurons_in_layer) > 0:
                 neuron_layers.append(np.array(list(neurons_in_layer)))
@@ -6696,58 +5824,62 @@ class FindNeuronConnection:
             self._vprint('  ⚠ No targets found in paths', level='full')
         
         # Sort the combined connection data (only if non-empty)
-        if not conn_inpath.empty:
-            conn_inpath = conn_inpath.sort_values(by=['conn_layer','traversal_probability','weight'],ascending=[True,False,False])
-            conn_inpath = conn_inpath.reset_index(drop=True)
-        if not conn_types.empty:
-            conn_types = conn_types.sort_values(by=['conn_layer','traversal_probability','weight'],ascending=[True,False,False])
-            conn_types = conn_types.reset_index(drop=True)
+        if not conn_inpath.is_empty():
+            conn_inpath = conn_inpath.sort(['conn_layer','traversal_probability','weight'], descending=[False,True,True])
+        if not conn_types.is_empty():
+            conn_types = conn_types.sort(['conn_layer','traversal_probability','weight'], descending=[False,True,True])
 
-        totalweight_df = pd.DataFrame(weight_layers.items(),columns=['conn_layer','weight'])
-        if not totalweight_df.empty:
-            totalweight_df = totalweight_df.sort_values(by='conn_layer',ascending=True)
+        totalweight_df = pl.DataFrame(list(weight_layers.items()), schema={'conn_layer': pl.Utf8, 'weight': pl.Float64}, orient="row")
+        if not totalweight_df.is_empty():
+            totalweight_df = totalweight_df.sort('conn_layer')
         
         # Create type-level real layer map from bodyId-level real layers
         # For type-level analysis, use the earliest layer any neuron of that type appears
         # Targets already have their real layers updated based on actual path appearances
         real_layer_map_type = {}
-        target_types_set = set(self.target_df.loc[self.target_df.Checked, 'type'].unique())
+        
+        # Handle target_df (Pandas or Polars)
+        if isinstance(self.target_df, pd.DataFrame):
+             target_types_set = set(self.target_df.loc[self.target_df.Checked, 'type'].unique())
+        else:
+             target_types_set = set(self.target_df.filter(pl.col('Checked'))['type'].unique().to_list())
+             
         target_type_appearances = {}  # Track appearance layers for target types
         
-        if len(conn_inpath) > 0:
-            has_types = 'type_pre' in conn_inpath.columns and 'type_post' in conn_inpath.columns
+        if not conn_inpath.is_empty():
+            # Create mapping from bodyId to type
+            # Extract unique bodyId -> type from conn_inpath
+            pre_map = conn_inpath.select(['bodyId_pre', 'type_pre']).rename({'bodyId_pre': 'bodyId', 'type_pre': 'type'})
+            post_map = conn_inpath.select(['bodyId_post', 'type_post']).rename({'bodyId_post': 'bodyId', 'type_post': 'type'})
+            body_type_map = pl.concat([pre_map, post_map]).unique()
             
-            if has_types:
-                for idx in conn_inpath.index:
-                    bodyId_pre = conn_inpath.at[idx, 'bodyId_pre']
-                    bodyId_post = conn_inpath.at[idx, 'bodyId_post']
-                    
-                    type_pre = conn_inpath.at[idx, 'type_pre']
-                    type_post = conn_inpath.at[idx, 'type_post']
-                    
-                    # Map each type to earliest real layer of any neuron of that type
-                    # For targets, use their updated real_layer from bodyId map
-                    if bodyId_pre in real_layer_map_bodyId:
-                        layer_pre = real_layer_map_bodyId[bodyId_pre]
-                        if type_pre not in real_layer_map_type or layer_pre < real_layer_map_type[type_pre]:
-                            real_layer_map_type[type_pre] = layer_pre
-                        
-                        # Track target type appearances
-                        if type_pre in target_types_set and bodyId_pre in target_appearance_layers:
-                            if type_pre not in target_type_appearances:
-                                target_type_appearances[type_pre] = set()
-                            target_type_appearances[type_pre].update(target_appearance_layers[bodyId_pre])
-                    
-                    if bodyId_post in real_layer_map_bodyId:
-                        layer_post = real_layer_map_bodyId[bodyId_post]
-                        if type_post not in real_layer_map_type or layer_post < real_layer_map_type[type_post]:
-                            real_layer_map_type[type_post] = layer_post
-                        
-                        # Track target type appearances
-                        if type_post in target_types_set and bodyId_post in target_appearance_layers:
-                            if type_post not in target_type_appearances:
-                                target_type_appearances[type_post] = set()
-                            target_type_appearances[type_post].update(target_appearance_layers[bodyId_post])
+            # Create DataFrame from real_layer_map_bodyId
+            # Ensure keys are strings
+            real_layer_df = pl.DataFrame({
+                'bodyId': [str(k) for k in real_layer_map_bodyId.keys()],
+                'real_layer': list(real_layer_map_bodyId.values())
+            })
+            
+            # Join
+            # Ensure bodyId in body_type_map is string (it should be from previous steps)
+            type_layers = body_type_map.join(real_layer_df, on='bodyId', how='inner')
+            
+            # Group by type and find min layer
+            min_layers = type_layers.group_by('type').agg(pl.col('real_layer').min())
+            
+            real_layer_map_type = dict(zip(min_layers['type'].to_list(), min_layers['real_layer'].to_list()))
+            
+            # Handle target type appearances
+            body_to_type_dict = dict(zip(body_type_map['bodyId'].to_list(), body_type_map['type'].to_list()))
+            
+            for bodyId, layers in target_appearance_layers.items():
+                bodyId_str = str(bodyId)
+                if bodyId_str in body_to_type_dict:
+                    type_val = body_to_type_dict[bodyId_str]
+                    if type_val in target_types_set:
+                        if type_val not in target_type_appearances:
+                            target_type_appearances[type_val] = set()
+                        target_type_appearances[type_val].update(layers)
         
         self._vprint(f'\nCreated type-level real layer map for {len(real_layer_map_type)} types', level='full')
         
@@ -6757,60 +5889,39 @@ class FindNeuronConnection:
         
         # Create group-level real layer map if custom groups exist
         real_layer_map_group = {}
-        if conn_groups is not None and not conn_groups.empty and 'custom_group' in self.source_df.columns:
-            target_groups_set = set(self.target_df.loc[self.target_df.Checked, 'custom_group'].unique())
-            target_group_appearances = {}  # Track appearance layers for target groups
+        if conn_groups is not None and not conn_groups.is_empty() and 'custom_group' in self.source_df.columns:
+            if isinstance(self.target_df, pd.DataFrame):
+                 target_groups_set = set(self.target_df.loc[self.target_df.Checked, 'custom_group'].unique())
+            else:
+                 target_groups_set = set(self.target_df.filter(pl.col('Checked'))['custom_group'].unique().to_list())
             
-            # Build bodyId to custom_group mapping from source and target dataframes
-            bodyid_to_group = {}
-            for df in [self.source_df, self.target_df]:
-                if 'custom_group' in df.columns:
-                    for idx in df.index:
-                        bodyid = df.at[idx, 'bodyId']
-                        group = df.at[idx, 'custom_group']
-                        if pd.notna(group):
-                            bodyid_to_group[bodyid] = group
+            target_group_appearances = {}
             
-            # Map each group to earliest real layer of any neuron in that group
-            for bodyid, real_layer in real_layer_map_bodyId.items():
-                if bodyid in bodyid_to_group:
-                    group = bodyid_to_group[bodyid]
-                    if group not in real_layer_map_group or real_layer < real_layer_map_group[group]:
-                        real_layer_map_group[group] = real_layer
-                    
-                    # Track target group appearances
-                    if group in target_groups_set and bodyid in target_appearance_layers:
-                        if group not in target_group_appearances:
-                            target_group_appearances[group] = set()
-                        target_group_appearances[group].update(target_appearance_layers[bodyid])
-            
-            # Ensure all groups in conn_groups have layer assignments
-            # Use type-level real_layer_map to assign layers to groups
-            if 'type_pre' in conn_inpath.columns and 'custom_group_pre' in conn_inpath.columns:
-                # Build type to group mapping from conn_inpath
-                type_to_group = {}
-                for idx in conn_inpath.index:
-                    group_pre = conn_inpath.at[idx, 'custom_group_pre']
-                    type_pre = conn_inpath.at[idx, 'type_pre']
-                    if pd.notna(group_pre) and group_pre not in real_layer_map_group:
-                        # Use type's layer for this group if type has layer
-                        if type_pre in real_layer_map_type:
-                            if group_pre not in type_to_group:
-                                type_to_group[group_pre] = []
-                            type_to_group[group_pre].append(real_layer_map_type[type_pre])
-                    
-                    group_post = conn_inpath.at[idx, 'custom_group_post']
-                    type_post = conn_inpath.at[idx, 'type_post']
-                    if pd.notna(group_post) and group_post not in real_layer_map_group:
-                        if type_post in real_layer_map_type:
-                            if group_post not in type_to_group:
-                                type_to_group[group_post] = []
-                            type_to_group[group_post].append(real_layer_map_type[type_post])
+            if not conn_inpath.is_empty() and 'custom_group_pre' in conn_inpath.columns:
+                # Create mapping from bodyId to group from conn_inpath
+                pre_map = conn_inpath.select(['bodyId_pre', 'custom_group_pre']).rename({'bodyId_pre': 'bodyId', 'custom_group_pre': 'group'})
+                post_map = conn_inpath.select(['bodyId_post', 'custom_group_post']).rename({'bodyId_post': 'bodyId', 'custom_group_post': 'group'})
+                body_group_map = pl.concat([pre_map, post_map]).unique()
                 
-                # Assign minimum layer to each group
-                for group, layers in type_to_group.items():
-                    if layers:
-                        real_layer_map_group[group] = min(layers)
+                # Join with real_layer_df
+                group_layers = body_group_map.join(real_layer_df, on='bodyId', how='inner')
+                
+                # Group by group and find min layer
+                min_layers = group_layers.group_by('group').agg(pl.col('real_layer').min())
+                
+                real_layer_map_group = dict(zip(min_layers['group'].to_list(), min_layers['real_layer'].to_list()))
+                
+                # Handle target group appearances
+                body_to_group_dict = dict(zip(body_group_map['bodyId'].to_list(), body_group_map['group'].to_list()))
+                
+                for bodyId, layers in target_appearance_layers.items():
+                    bodyId_str = str(bodyId)
+                    if bodyId_str in body_to_group_dict:
+                        group_val = body_to_group_dict[bodyId_str]
+                        if group_val in target_groups_set:
+                            if group_val not in target_group_appearances:
+                                target_group_appearances[group_val] = set()
+                            target_group_appearances[group_val].update(layers)
             
             print(f'\nCreated group-level real layer map for {len(real_layer_map_group)} custom groups')
             if target_group_appearances:
@@ -6818,7 +5929,8 @@ class FindNeuronConnection:
 
         # Mark which source neurons are in paths to targets
         if len(conn_inpath) > 0:
-            source_inpath = conn_inpath.loc[conn_inpath.conn_layer=='0->1','bodyId_pre'].unique()
+            # Polars syntax
+            source_inpath = conn_inpath.filter(pl.col('conn_layer') == '0->1')['bodyId_pre'].unique().to_list()
             if 'isInPath' in self.source_df.columns:
                 self.source_df['isInPath'] = False
             else:
@@ -6873,7 +5985,7 @@ class FindNeuronConnection:
             self._vprint(f'  📁 Recreated output folder: {self.allpath_folder}', level='full')
         
         # Handle the case where no paths were found
-        if conn_inpath.empty:
+        if conn_inpath.is_empty():
             self._vprint('\n⚠️  No paths found - saving minimal output data', level='full')
             
             # Create data_details folder
@@ -6886,7 +5998,7 @@ class FindNeuronConnection:
             self._save_df_to_csv_polars(self.target_df, os.path.join(csv_folder, 'target_neurons.csv'))
             
             # Create empty connection files
-            empty_conn = pd.DataFrame(columns=['bodyId_pre', 'bodyId_post', 'weight', 'type_pre', 'type_post'])
+            empty_conn = pl.DataFrame(schema={'bodyId_pre': pl.Utf8, 'bodyId_post': pl.Utf8, 'weight': pl.Int64, 'type_pre': pl.Utf8, 'type_post': pl.Utf8})
             self._save_df_to_csv_polars(empty_conn, os.path.join(csv_folder, 'connection_info_bodyId.csv'))
             self._save_df_to_csv_polars(empty_conn, os.path.join(csv_folder, 'connection_type.csv'))
             
@@ -6897,71 +6009,104 @@ class FindNeuronConnection:
         # Update types for source and target neurons in conn_inpath using self.source_df and self.target_df
         # This ensures that even if enrichment failed (e.g. FAFB), we at least have types for start/end of paths
         
-        # Create mapping from bodyId to type
-        body_to_type = {}
-        if 'bodyId' in self.source_df.columns and 'type' in self.source_df.columns:
-            for idx, row in self.source_df.iterrows():
-                body_to_type[str(row['bodyId'])] = row['type']
+        # Create mapping DataFrame
+        source_map = pl.from_pandas(self.source_df[['bodyId', 'type']]) if isinstance(self.source_df, pd.DataFrame) else self.source_df.select(['bodyId', 'type'])
+        target_map = pl.from_pandas(self.target_df[['bodyId', 'type']]) if isinstance(self.target_df, pd.DataFrame) else self.target_df.select(['bodyId', 'type'])
         
-        if 'bodyId' in self.target_df.columns and 'type' in self.target_df.columns:
-            for idx, row in self.target_df.iterrows():
-                body_to_type[str(row['bodyId'])] = row['type']
-                
-        # Apply mapping to conn_inpath
-        # conn_inpath has bodyId_pre, bodyId_post, type_pre, type_post
-        if body_to_type:
-            self._vprint(f'  Updating types for {len(body_to_type)} source/target neurons in connection table...', level='full')
+        # Ensure bodyId is string
+        source_map = source_map.with_columns(pl.col('bodyId').cast(pl.Utf8))
+        target_map = target_map.with_columns(pl.col('bodyId').cast(pl.Utf8))
+        
+        type_map_df = pl.concat([source_map, target_map]).unique()
+        
+        if not type_map_df.is_empty():
+            self._vprint(f'  Updating types for {len(type_map_df)} source/target neurons in connection table...', level='full')
+            
             # Update type_pre
-            conn_inpath['type_pre'] = conn_inpath.apply(
-                lambda row: body_to_type.get(str(row['bodyId_pre']), row['type_pre']), axis=1
-            )
+            conn_inpath = conn_inpath.join(type_map_df.rename({'bodyId': 'bodyId_pre', 'type': 'type_new'}), on='bodyId_pre', how='left')
+            conn_inpath = conn_inpath.with_columns(pl.col('type_new').fill_null(pl.col('type_pre')).alias('type_pre')).drop('type_new')
             
             # Update type_post
-            conn_inpath['type_post'] = conn_inpath.apply(
-                lambda row: body_to_type.get(str(row['bodyId_post']), row['type_post']), axis=1
-            )
+            conn_inpath = conn_inpath.join(type_map_df.rename({'bodyId': 'bodyId_post', 'type': 'type_new'}), on='bodyId_post', how='left')
+            conn_inpath = conn_inpath.with_columns(pl.col('type_new').fill_null(pl.col('type_post')).alias('type_post')).drop('type_new')
+
+        # Regenerate conn_types and conn_groups from updated conn_inpath to ensure types are correct
+        # This fixes the issue where types might be missing in the initial pass but recovered via source/target mapping
+        if not conn_inpath.is_empty():
+            self._vprint('  Regenerating type-level connections from updated bodyId data...', level='full')
+            conn_types_list_new = []
+            conn_groups_list_new = []
             
-            # Note: We do NOT re-aggregate conn_types here to preserve layer information.
-            # Instead, we will generate a global type aggregation for the matrix below.
+            # Get unique layers
+            layers = conn_inpath['conn_layer'].unique().to_list()
+            
+            for layer in layers:
+                # Filter for this layer
+                layer_conn = conn_inpath.filter(pl.col('conn_layer') == layer)
+                
+                # Get neurons for this layer for accurate ratio calculation
+                bodyIds_in_layer = pl.concat([layer_conn['bodyId_pre'], layer_conn['bodyId_post']]).unique()
+                
+                neurons_in_layer_df_pd = self._fetch_neurons_local_or_api(bodyIds_in_layer.to_list(), columns=['bodyId', 'type', 'post'])
+                neurons_in_layer_df = pl.from_pandas(neurons_in_layer_df_pd)
+                
+                # Enrich
+                _, layer_conn_type, layer_conn_group = EnrichConnectionTablePolars(
+                    layer_conn.drop('conn_layer'), 
+                    dataset=self.dataset,
+                    script_path=self.script_path,
+                    target_neurons_df=neurons_in_layer_df,
+                    label_mapper=self.label_mapper
+                )
+                
+                # Add conn_layer back
+                if not layer_conn_type.is_empty():
+                    layer_conn_type = layer_conn_type.with_columns(pl.lit(layer).alias('conn_layer'))
+                    conn_types_list_new.append(layer_conn_type)
+                
+                if layer_conn_group is not None and not layer_conn_group.is_empty():
+                    layer_conn_group = layer_conn_group.with_columns(pl.lit(layer).alias('conn_layer'))
+                    conn_groups_list_new.append(layer_conn_group)
+            
+            if conn_types_list_new:
+                conn_types = pl.concat(conn_types_list_new)
+                conn_types = conn_types.sort(['conn_layer','traversal_probability','weight'], descending=[False,True,True])
+            
+            if conn_groups_list_new:
+                conn_groups = pl.concat(conn_groups_list_new)
+            else:
+                conn_groups = pl.DataFrame()
 
         # Generate global type-level aggregation for matrix generation (avoids duplicates from layers)
         self._vprint('  Generating global type-level matrix...', level='full')
         # Use conn_inpath (which has all edges). Deduplicate by bodyId pair to avoid double counting physical edges.
-        conn_inpath_global = conn_inpath.drop_duplicates(subset=['bodyId_pre', 'bodyId_post'])
+        conn_inpath_global = conn_inpath.unique(subset=['bodyId_pre', 'bodyId_post'])
         
         # Fetch all neurons involved for accurate post counts
-        all_bodyIds = np.unique(np.concatenate([conn_inpath_global['bodyId_pre'].unique(), conn_inpath_global['bodyId_post'].unique()]))
-        
-        # Add progress bar for neuron fetching if large
-        # if len(all_bodyIds) > 1000 and self.verbose_mode in ['simple', 'full']:
-        #      self._vprint(f'  Fetching info for {len(all_bodyIds):,} unique neurons...', level='full')
+        all_bodyIds = pl.concat([conn_inpath_global['bodyId_pre'], conn_inpath_global['bodyId_post']]).unique()
         
         # Use tqdm for fetching if large
+        all_neurons_df = None
         if len(all_bodyIds) > 5000 and self.verbose_mode in ['simple', 'full']:
             # Split into chunks to show progress
             chunk_size = 5000
-            chunks = [all_bodyIds[i:i + chunk_size] for i in range(0, len(all_bodyIds), chunk_size)]
+            all_bodyIds_list = all_bodyIds.to_list()
+            chunks = [all_bodyIds_list[i:i + chunk_size] for i in range(0, len(all_bodyIds_list), chunk_size)]
             
             all_neurons_list = []
-            # for chunk in tqdm(chunks, desc="Fetching neuron info", unit="chunk"):
             for chunk in chunks:
-                chunk_df = self._fetch_neurons_local_or_api(chunk.tolist(), columns=['bodyId', 'type', 'post'])
-                all_neurons_list.append(chunk_df)
+                chunk_df = self._fetch_neurons_local_or_api(chunk, columns=['bodyId', 'type', 'post'])
+                all_neurons_list.append(pl.from_pandas(chunk_df))
             
             if all_neurons_list:
-                all_neurons_df = pd.concat(all_neurons_list, ignore_index=True)
+                all_neurons_df = pl.concat(all_neurons_list)
             else:
-                all_neurons_df = pd.DataFrame()
+                all_neurons_df = pl.DataFrame()
         else:
-            all_neurons_df = self._fetch_neurons_local_or_api(all_bodyIds.tolist(), columns=['bodyId', 'type', 'post'])
+            all_neurons_df_pd = self._fetch_neurons_local_or_api(all_bodyIds.to_list(), columns=['bodyId', 'type', 'post'])
+            all_neurons_df = pl.from_pandas(all_neurons_df_pd)
         
-        # self._vprint('  Enriching connection table...', level='full')
-        
-        # Wrap EnrichConnectionTable with a simple progress indicator if possible
-        # Since it's a single function call, we can't easily add a progress bar inside without modifying statvis.py
-        # But we can print a message before it starts (already done)
-        
-        _, conn_types_global, _ = sv.EnrichConnectionTable(
+        _, conn_types_global, _ = EnrichConnectionTablePolars(
             conn_inpath_global, 
             traversal_probability_threshold=self.min_traversal_probability,
             dataset=self.dataset,
@@ -7010,7 +6155,7 @@ class FindNeuronConnection:
             # print("    - connection_type.csv", flush=True)
             self._save_df_to_csv_polars(conn_types, os.path.join(csv_folder, 'connection_type.csv'), index=True)
             
-            if conn_groups is not None and not conn_groups.empty:
+            if conn_groups is not None and not conn_groups.is_empty():
                 # print("    - connection_custom_groups.csv", flush=True)
                 self._save_df_to_csv_polars(conn_groups, os.path.join(csv_folder, 'connection_custom_groups.csv'), index=True)
             
@@ -7029,11 +6174,19 @@ class FindNeuronConnection:
                 self.source_df.to_excel(writer,sheet_name='source_neurons')
                 self.target_df.to_excel(writer,sheet_name='target_neurons')
                 totalweight_df.to_excel(writer,sheet_name='total_weight_layer')
-                conn_types.to_excel(writer,sheet_name='connection_type')
+                
+                if isinstance(conn_types, pl.DataFrame):
+                    conn_types.to_pandas().to_excel(writer,sheet_name='connection_type')
+                else:
+                    conn_types.to_excel(writer,sheet_name='connection_type')
                 
                 # Add custom group sheet if custom grouping was used
-                if conn_groups is not None and not conn_groups.empty:
-                    conn_groups.to_excel(writer,sheet_name='connection_custom_groups')
+                is_groups_empty = conn_groups.is_empty() if isinstance(conn_groups, pl.DataFrame) else conn_groups.empty
+                if conn_groups is not None and not is_groups_empty:
+                    if isinstance(conn_groups, pl.DataFrame):
+                        conn_groups.to_pandas().to_excel(writer,sheet_name='connection_custom_groups')
+                    else:
+                        conn_groups.to_excel(writer,sheet_name='connection_custom_groups')
                 
                 # Save matrices (use global aggregation)
                 self._save_matrices_to_excel(conn_types_global, writer, level='type')
@@ -7072,7 +6225,10 @@ class FindNeuronConnection:
                     worksheet.set_column('B:B', 30, writer.book.add_format({'font_name': 'Arial', 'font_size': 11, 'align': 'left'}))
                     
                     # Save bodyId-level connection info
-                    conn_inpath.to_excel(writer,sheet_name='connection_info_bodyId')
+                    if isinstance(conn_inpath, pl.DataFrame):
+                        conn_inpath.to_pandas().to_excel(writer,sheet_name='connection_info_bodyId')
+                    else:
+                        conn_inpath.to_excel(writer,sheet_name='connection_info_bodyId')
                     self._save_matrices_to_excel(conn_inpath_global, writer, level='bodyId')
                 self._vprint(f'  ✓ Saved to: {output_bodyid_excel}', level='full')
         else:
@@ -7080,14 +6236,21 @@ class FindNeuronConnection:
         
         self._vprint(f'  ✓ Saved connection data', level='full')
         
+        # Release memory for bodyId-level data
+        # Only delete if we won't need it for path enrichment later
+        if not (find_bodyId_path and not self.skip_bodyId):
+            self._vprint('Releasing bodyId-level memory...', level='full')
+            del conn_inpath
+            del conn_inpath_global
+            del edges_in_paths
+            del edges_in_paths_with_layer
+            del neurons_in_paths
+            gc.collect()
+        
         # Build path DataFrames directly from collected paths (OPTIMIZED - no re-pathfinding!)
         self._vprint('\n=== Building path DataFrames from collected paths ===', level='full')
-        if use_parallel:
-            self._vprint(f'Processing {len(all_paths):,} paths found during parallel DFS...', level='full')
-            self._vprint('Note: Path structure already found by DFS, now extracting connection metrics (weights, probabilities, ratios)...', level='full')
-        else:
-            self._vprint(f'Found {path_count:,} paths during sequential DFS', level='full')
-            self._vprint('Note: Now building type/group level summaries...', level='full')
+        self._vprint(f'Found {path_count:,} paths during sequential DFS', level='full')
+        self._vprint('Note: Now building type/group level summaries...', level='full')
         
         # Type-level paths - Use separate DFS on type-level graph (much faster!)
         self._vprint('\nFinding type-level paths using type-level graph...', level='full')
@@ -7144,33 +6307,118 @@ class FindNeuronConnection:
         target_types = list(target_types)
         
         # Find paths using DFS on type graph
-        type_paths = []
-        for source_type in source_types:
-            if source_type not in G_type:
-                continue
-            for target_type in target_types:
-                if target_type not in G_type:
-                    continue
-                # Find all simple paths with length <= max_interlayer + 1
-                for path in G_type.all_simple_paths(source_type, target_type, cutoff=self.max_interlayer + 1):
-                    type_paths.append(path)
+        # type_paths = [] # Removed to save memory
         
-        self._vprint(f'  Found {len(type_paths):,} type-level paths', level='full')
+        # Use optimized pathfinding for type graph as well
+        # Filter sources/targets that are in the graph
+        valid_source_types = [s for s in source_types if s in G_type]
+        valid_target_types = [t for t in target_types if t in G_type]
         
-        # Build DataFrame from type paths
-        path_df_type = sv.build_path_dataframe_from_paths(
-            paths=type_paths,
-            conn_data=conn_types,
-            targets=target_types,
-            real_layer_map=real_layer_map_type if forward_only else None,
-            level='type'
-        )
+        # Convert conn_types to Pandas if it's Polars (statvis expects Pandas)
+        conn_types_pd = conn_types
+        try:
+            import polars as pl
+            if isinstance(conn_types, pl.DataFrame):
+                conn_types_pd = conn_types.to_pandas()
+        except ImportError:
+            pass
+
+        # Prepare output paths for streaming
+        output_path_type_csv = os.path.join(self.allpath_folder, self.source_fname+'_to_'+self.target_fname+'_allpaths_type.csv')
+        details_folder = os.path.join(self.allpath_folder, 'data_details')
+        os.makedirs(details_folder, exist_ok=True)
+        output_path_type_excluded_csv = os.path.join(details_folder, self.source_fname+'_to_'+self.target_fname+'_allpaths_type_excluded.csv')
+        
+        total_type_paths = 0
+        
+        if valid_source_types and valid_target_types:
+            # Use Meet-in-the-middle for type graph too
+            path_gen = G_type.find_paths_meet_in_the_middle(
+                valid_source_types, 
+                valid_target_types, 
+                cutoff=self.max_interlayer + 1,
+                verbose=(self.verbose_mode in ['simple', 'full'])
+            )
+            
+            # Stream directly to CSV to avoid OOM
+            self._vprint(f'  Streaming type-level paths to CSV (Polars)...', level='full')
+            total_type_paths = svp.process_paths_streaming(
+                path_gen,
+                conn_types_pd,
+                target_types,
+                output_path_type_csv,
+                excluded_path=output_path_type_excluded_csv,
+                real_layer_map=real_layer_map_type if forward_only else None,
+                level='type',
+                keyword_in_path_to_remove=self.keyword_in_path_to_remove
+            )
+            
+        self._vprint(f'  Found and saved {total_type_paths:,} type-level paths', level='full')
+
+        # Sort the output file if paths were found
+        if total_type_paths > 0 and os.path.exists(output_path_type_csv):
+            self._vprint(f'  Sorting type-level paths file...', level='full')
+            try:
+                # Read back, sort, and save using Polars
+                df_paths = pl.read_csv(output_path_type_csv)
+                
+                sort_cols = []
+                descending = []
+                
+                # Check for length column
+                if 'length' in df_paths.columns:
+                    sort_cols.append('length')
+                    descending.append(False)
+                elif 'path_length' in df_paths.columns:
+                    sort_cols.append('path_length')
+                    descending.append(False)
+                    
+                # Check for probability column
+                if 'path_prob' in df_paths.columns:
+                    sort_cols.append('path_prob')
+                    descending.append(True)
+                elif 'path_probability' in df_paths.columns:
+                    sort_cols.append('path_probability')
+                    descending.append(True)
+                
+                if sort_cols:
+                    df_paths = df_paths.sort(sort_cols, descending=descending)
+                    df_paths.write_csv(output_path_type_csv)
+                    self._vprint(f'  ✓ Sorted {os.path.basename(output_path_type_csv)}', level='full')
+            except Exception as e:
+                self._vprint(f'  ⚠️ Warning: Failed to sort type-level paths file: {e}', level='full')
+        
+        # Set path_df_type to empty as we've already saved it
+        # This prevents the later code from trying to save it again or use it in memory
+        path_df_type = pd.DataFrame()
+        type_paths_saved_streaming = True
+        
+        # If paths were found, reload them for visualization (HTML generation)
+        # We reload even if showfig=False because VisualizePath generates HTML files
+        if total_type_paths > 0:
+            try:
+                nrows = self.pathN_to_show if self.pathN_to_show > 0 else None
+                self._vprint(f'  Reloading top {nrows if nrows else "all"} paths for visualization...', level='full')
+                path_df_type = pd.read_csv(output_path_type_csv, nrows=nrows)
+                
+                # Convert stringified lists back to lists if needed (though visualization might handle strings)
+                # But VisualizePath expects lists for 'weights', 'probabilities', 'ratios'
+                import ast
+                for col in ['weights', 'probabilities', 'ratios']:
+                    if col in path_df_type.columns:
+                        path_df_type[col] = path_df_type[col].apply(lambda x: ast.literal_eval(x) if isinstance(x, str) else x)
+                        
+            except Exception as e:
+                self._vprint(f'  Warning: Failed to reload paths for visualization: {e}', level='full')
+        
+        # Build DataFrame from type paths (SKIPPED - already done via streaming)
+        # path_df_type = sv.build_path_dataframe_from_paths(...)
         
         # Group-level paths - Use separate DFS on group-level graph (if custom groups exist)
         path_df_group = pd.DataFrame()
         path_df_group_excluded = pd.DataFrame()
         
-        if conn_groups is not None and not conn_groups.empty and 'custom_group' in self.source_df.columns:
+        if conn_groups is not None and not conn_groups.is_empty() and 'custom_group' in self.source_df.columns:
             self._vprint('\nFinding group-level paths using group-level graph...', level='full')
             
             # Build group-level graph from conn_groups
@@ -7231,9 +6479,29 @@ class FindNeuronConnection:
             
             path_df_group = sv.split_path(path_df_group)
             path_df_group, path_df_group_excluded = sv.path_filter(path_df_group, self.keyword_in_path_to_remove)
+            
+            # Sort path_df_group
+            if not path_df_group.empty:
+                sort_cols = []
+                ascending = []
+                if 'length' in path_df_group.columns:
+                    sort_cols.append('length')
+                    ascending.append(True)
+                elif 'path_length' in path_df_group.columns:
+                    sort_cols.append('path_length')
+                    ascending.append(True)
+                if 'path_prob' in path_df_group.columns:
+                    sort_cols.append('path_prob')
+                    ascending.append(False)
+                elif 'path_probability' in path_df_group.columns:
+                    sort_cols.append('path_probability')
+                    ascending.append(False)
+                if sort_cols:
+                    path_df_group = path_df_group.sort_values(by=sort_cols, ascending=ascending)
         
         # Filter out paths with any zero-weight hops
         # This happens when bodyId-level connections exist but type-level aggregation results in 0 weight
+        # Note: If streaming was used (type_paths_saved_streaming=True), this filtering was already done during streaming
         if len(path_df_type) > 0:
             before_filter = len(path_df_type)
             path_df_type = path_df_type[
@@ -7270,12 +6538,12 @@ class FindNeuronConnection:
                 if len(path_df_group) >= EXCEL_ROW_LIMIT * 0.9:
                     self._vprint(f'   ⚠️  Group path data too large for Excel ({len(path_df_group):,} rows), saving as CSV', level='full')
                 output_path_group_csv = os.path.join(self.allpath_folder, self.source_fname+'_to_'+self.target_fname+'_allpaths_group.csv')
-                path_df_group.to_csv(output_path_group_csv, index=False)
+                self._save_df_to_csv_polars(path_df_group, output_path_group_csv)
                 if len(path_df_group_excluded) > 0:
                     # Save excluded paths to data_details folder
                     details_folder = os.path.join(self.allpath_folder, 'data_details')
                     output_path_group_excluded_csv = os.path.join(details_folder, self.source_fname+'_to_'+self.target_fname+'_allpaths_group_excluded.csv')
-                    path_df_group_excluded.to_csv(output_path_group_excluded_csv, index=False)
+                    self._save_df_to_csv_polars(path_df_group_excluded, output_path_group_excluded_csv)
                 self._vprint(f'   ✓ Saved to: {self.allpath_folder}/', level='full')
             else:
                 # Add to Excel file (type-level was saved to Excel, so output_excel_name exists)
@@ -7286,43 +6554,80 @@ class FindNeuronConnection:
                         path_df_group_excluded.to_excel(writer,sheet_name='path_group_excluded')
                 self._vprint('   ✓ path_group sheets saved', level='full')
         
-        self._vprint(f'💾 Saving path_type data (rows: {len(path_df_type):,})...', level='full')
-        # Check if we should save as CSV (matches type-level data format OR path data too large)
-        save_type_as_csv = use_csv or (len(path_df_type) >= EXCEL_ROW_LIMIT * 0.9)
-        
-        if save_type_as_csv:
-            # Save as CSV
-            if len(path_df_type) >= EXCEL_ROW_LIMIT * 0.9:
-                self._vprint(f'   ⚠️  Path data too large for Excel ({len(path_df_type):,} rows), saving as CSV', level='full')
-            output_path_type_csv = os.path.join(self.allpath_folder, self.source_fname+'_to_'+self.target_fname+'_allpaths_type.csv')
-            self._save_df_to_csv_polars(path_df_type, output_path_type_csv)
-            if len(path_df_type_excluded) > 0:
-                # Save excluded paths to data_details folder
-                details_folder = os.path.join(self.allpath_folder, 'data_details')
-                output_path_type_excluded_csv = os.path.join(details_folder, self.source_fname+'_to_'+self.target_fname+'_allpaths_type_excluded.csv')
-                self._save_df_to_csv_polars(path_df_type_excluded, output_path_type_excluded_csv)
-            self._vprint(f'   ✓ Saved to: {self.allpath_folder}/', level='full')
+        # If we streamed type paths, we skip the standard saving block unless path_df_type was populated (e.g. fallback)
+        if 'type_paths_saved_streaming' in locals() and type_paths_saved_streaming:
+            self._vprint(f'  ✓ Type-level paths already saved via streaming', level='full')
         else:
-            # Add to Excel file (type-level was saved to Excel, so output_excel_name exists)
-            output_excel_name = os.path.join(self.allpath_folder, self.source_fname + '_to_' + self.target_fname + '_allpaths_info.xlsx')
-            with pd.ExcelWriter(output_excel_name, mode='a', engine='openpyxl') as writer:
-                path_df_type.to_excel(writer,sheet_name='path_type')
-                path_df_type_excluded.to_excel(writer,sheet_name='path_type_excluded')
-            self._vprint('   ✓ path_type sheets saved', level='full')
+            # Sort path_df_type before saving
+            if not path_df_type.empty:
+                sort_cols = []
+                ascending = []
+                
+                if 'length' in path_df_type.columns:
+                    sort_cols.append('length')
+                    ascending.append(True)
+                elif 'path_length' in path_df_type.columns:
+                    sort_cols.append('path_length')
+                    ascending.append(True)
+                    
+                if 'path_prob' in path_df_type.columns:
+                    sort_cols.append('path_prob')
+                    ascending.append(False)
+                elif 'path_probability' in path_df_type.columns:
+                    sort_cols.append('path_probability')
+                    ascending.append(False)
+                
+                if sort_cols:
+                    path_df_type = path_df_type.sort_values(by=sort_cols, ascending=ascending)
+
+            self._vprint(f'💾 Saving path_type data (rows: {len(path_df_type):,})...', level='full')
+            # Check if we should save as CSV (matches type-level data format OR path data too large)
+            save_type_as_csv = use_csv or (len(path_df_type) >= EXCEL_ROW_LIMIT * 0.9)
+            
+            if save_type_as_csv:
+                # Save as CSV
+                if len(path_df_type) >= EXCEL_ROW_LIMIT * 0.9:
+                    self._vprint(f'   ⚠️  Path data too large for Excel ({len(path_df_type):,} rows), saving as CSV', level='full')
+                output_path_type_csv = os.path.join(self.allpath_folder, self.source_fname+'_to_'+self.target_fname+'_allpaths_type.csv')
+                self._save_df_to_csv_polars(path_df_type, output_path_type_csv)
+                if len(path_df_type_excluded) > 0:
+                    # Save excluded paths to data_details folder
+                    details_folder = os.path.join(self.allpath_folder, 'data_details')
+                    output_path_type_excluded_csv = os.path.join(details_folder, self.source_fname+'_to_'+self.target_fname+'_allpaths_type_excluded.csv')
+                    self._save_df_to_csv_polars(path_df_type_excluded, output_path_type_excluded_csv)
+                self._vprint(f'   ✓ Saved to: {self.allpath_folder}/', level='full')
+            else:
+                # Add to Excel file (type-level was saved to Excel, so output_excel_name exists)
+                output_excel_name = os.path.join(self.allpath_folder, self.source_fname + '_to_' + self.target_fname + '_allpaths_info.xlsx')
+                with pd.ExcelWriter(output_excel_name, mode='a', engine='openpyxl') as writer:
+                    path_df_type.to_excel(writer,sheet_name='path_type')
+                    path_df_type_excluded.to_excel(writer,sheet_name='path_type_excluded')
+                self._vprint('   ✓ path_type sheets saved', level='full')
         
         # BodyId-level paths
         path_df_bodyId = pd.DataFrame()
-        if find_bodyId_path and not self.skip_bodyId:
+        if find_bodyId_path and not self.skip_bodyId and 'conn_inpath' in locals() and 'all_paths' in locals():
             self._vprint('\nEnriching bodyId-level paths with connection metrics...', level='full')
             
             # Create type lookup from connection data
             type_lookup = {}
             if 'type_pre' in conn_inpath.columns:
-                for _, row in conn_inpath[['bodyId_pre', 'type_pre']].drop_duplicates().iterrows():
-                    type_lookup[row['bodyId_pre']] = row['type_pre']
+                if isinstance(conn_inpath, pl.DataFrame):
+                    unique_pre = conn_inpath.select(['bodyId_pre', 'type_pre']).unique()
+                    for row in unique_pre.iter_rows(named=True):
+                        type_lookup[row['bodyId_pre']] = row['type_pre']
+                else:
+                    for _, row in conn_inpath[['bodyId_pre', 'type_pre']].drop_duplicates().iterrows():
+                        type_lookup[row['bodyId_pre']] = row['type_pre']
+            
             if 'type_post' in conn_inpath.columns:
-                for _, row in conn_inpath[['bodyId_post', 'type_post']].drop_duplicates().iterrows():
-                    type_lookup[row['bodyId_post']] = row['type_post']
+                if isinstance(conn_inpath, pl.DataFrame):
+                    unique_post = conn_inpath.select(['bodyId_post', 'type_post']).unique()
+                    for row in unique_post.iter_rows(named=True):
+                        type_lookup[row['bodyId_post']] = row['type_post']
+                else:
+                    for _, row in conn_inpath[['bodyId_post', 'type_post']].drop_duplicates().iterrows():
+                        type_lookup[row['bodyId_post']] = row['type_post']
             
             # Also add source and target info
             for _, row in self.source_df.iterrows():
@@ -7330,15 +6635,44 @@ class FindNeuronConnection:
             for _, row in self.target_df.iterrows():
                 type_lookup[row['bodyId']] = row['type']
 
-            path_df_bodyId = sv.build_path_dataframe_from_paths(
-                paths=all_paths,
-                conn_data=conn_inpath,
-                targets=self.target_df.loc[self.target_df.Checked,'bodyId'].tolist(),
-                real_layer_map=real_layer_map_bodyId if forward_only else None,
-                level='bodyId',
-                type_lookup=type_lookup
-            )
+            if isinstance(conn_inpath, pl.DataFrame):
+                path_df_bodyId = svp.build_path_dataframe_from_paths(
+                    paths=all_paths,
+                    conn_data=conn_inpath,
+                    targets=self.target_df.loc[self.target_df.Checked,'bodyId'].tolist(),
+                    real_layer_map=real_layer_map_bodyId if forward_only else None,
+                    level='bodyId',
+                    type_lookup=type_lookup
+                )
+            else:
+                path_df_bodyId = sv.build_path_dataframe_from_paths(
+                    paths=all_paths,
+                    conn_data=conn_inpath,
+                    targets=self.target_df.loc[self.target_df.Checked,'bodyId'].tolist(),
+                    real_layer_map=real_layer_map_bodyId if forward_only else None,
+                    level='bodyId',
+                    type_lookup=type_lookup
+                )
             
+            # Sort path_df_bodyId
+            if not path_df_bodyId.empty:
+                sort_cols = []
+                ascending = []
+                if 'length' in path_df_bodyId.columns:
+                    sort_cols.append('length')
+                    ascending.append(True)
+                elif 'path_length' in path_df_bodyId.columns:
+                    sort_cols.append('path_length')
+                    ascending.append(True)
+                if 'path_prob' in path_df_bodyId.columns:
+                    sort_cols.append('path_prob')
+                    ascending.append(False)
+                elif 'path_probability' in path_df_bodyId.columns:
+                    sort_cols.append('path_probability')
+                    ascending.append(False)
+                if sort_cols:
+                    path_df_bodyId = path_df_bodyId.sort_values(by=sort_cols, ascending=ascending)
+
             # Save path_bodyId to the bodyId data file
             self._vprint(f'💾 Saving path_bodyId data (rows: {len(path_df_bodyId):,})...', level='full')
             if use_csv:
@@ -7635,1022 +6969,6 @@ class FindNeuronConnection:
         else:
             self._vprint('Done\n', level='full')
     
-    def _get_network_layout(self, G):
-        '''Get network layout based on network_layout parameter'''
-        if self.network_layout == 'layered':
-            # Multipartite layout - nodes arranged in layers
-            pos = nx.multipartite_layout(G, subset_key='layer', align='horizontal')
-        elif self.network_layout == 'distributed':
-            # Spring layout with layer-based initial positions for better distribution
-            # Start with multipartite layout as seed
-            initial_pos = nx.multipartite_layout(G, subset_key='layer', align='horizontal')
-            # Apply spring layout for better clarity
-            pos = nx.spring_layout(G, pos=initial_pos, k=1.5, iterations=50, seed=42)
-        else:
-            raise ValueError(f"network_layout must be 'layered' or 'distributed', got '{self.network_layout}'")
-        return pos
-    
-    def _create_interactive_network(self, conn_types, conn_inpath, neuron_layers, target_type, target_ID,
-                                   forward_only=True, edges_in_path_type=None, edges_in_path_bodyId=None):
-        '''Create interactive network visualizations using NetworkX and Plotly
-        
-        Parameters:
-        -----------
-        forward_only : bool
-            If True, only show edges that appear in valid paths (filtered visualization)
-            If False, show all edges in conn_types/conn_inpath (complete graph)
-        edges_in_path_type : set
-            Set of (layer_idx, type_pre, type_post) tuples from path_type
-        edges_in_path_bodyId : set
-            Set of (layer_idx, bodyId_pre, bodyId_post) tuples from path_bodyId
-        '''
-        
-        if edges_in_path_type is None:
-            edges_in_path_type = set()
-        if edges_in_path_bodyId is None:
-            edges_in_path_bodyId = set()
-        
-        # Network by type
-        self._vprint('Building interactive network by type...', level='full')
-        G_type = nx.DiGraph()
-        
-        # Build a mapping from bodyId to type for layer assignment
-        bodyId_to_type = {}
-        if len(conn_inpath) > 0:
-            for idx in conn_inpath.index:
-                pre_id = conn_inpath.at[idx, 'bodyId_pre']
-                post_id = conn_inpath.at[idx, 'bodyId_post']
-                pre_type = conn_inpath.at[idx, 'type_pre']
-                post_type = conn_inpath.at[idx, 'type_post']
-                bodyId_to_type[pre_id] = pre_type
-                bodyId_to_type[post_id] = post_type
-        
-        # Create type to layer mapping (type can appear in multiple layers, use earliest)
-        type_to_layer = {}
-        for layer_idx, layer in enumerate(neuron_layers):
-            for bodyId in layer:
-                if bodyId in bodyId_to_type:
-                    neuron_type = bodyId_to_type[bodyId]
-                    # Use earliest layer appearance
-                    if neuron_type not in type_to_layer:
-                        type_to_layer[neuron_type] = layer_idx
-        
-        # First, add edges to determine which nodes are actually involved
-        nodes_in_edges = set()
-        for idx in conn_types.index:
-            layer_label = conn_types.at[idx, 'conn_layer']
-            layer_idx = int(layer_label.split('->')[0])
-            source = conn_types.at[idx, 'type_pre']
-            target = conn_types.at[idx, 'type_post']
-            weight = conn_types.at[idx, 'weight']
-            prob = conn_types.at[idx, 'traversal_probability']
-            ratio = conn_types.at[idx, 'connection_ratio'] if 'connection_ratio' in conn_types.columns else 0
-            
-            # If forward_only=True, only consider edges that are in path_type
-            if forward_only and (layer_idx, source, target) not in edges_in_path_type:
-                continue
-            
-            # Track nodes that appear in edges
-            nodes_in_edges.add(source)
-            nodes_in_edges.add(target)
-            G_type.add_edge(source, target, weight=weight, probability=prob, ratio=ratio)
-        
-        # Now add only nodes that are involved in edges (have connections)
-        for neuron_type in nodes_in_edges:
-            if neuron_type in type_to_layer:
-                layer_idx = type_to_layer[neuron_type]
-                is_target = neuron_type in target_type
-                is_source = layer_idx == 0
-                if is_target:
-                    node_cat = 'target'
-                elif is_source:
-                    node_cat = 'source'
-                else:
-                    node_cat = 'intermediate'
-                G_type.add_node(neuron_type, layer=layer_idx, node_type=node_cat)
-        
-        # Create layout based on network_layout parameter
-        print(f'Using "{self.network_layout}" layout...')
-        pos_type = self._get_network_layout(G_type)
-        
-        # Create Cytoscape interactive network
-        print('Creating interactive network...')
-        self._plot_cytoscape_network(
-            G_type, pos_type,
-            title=f'Interactive Network: {self.source_fname} to {self.target_fname} (by type)',
-            filename=os.path.join(self.allpath_folder, f'Network_type_allpaths_snp{self.min_synapse_num}.html'),
-            node_labels=None
-        )
-        
-        # Network by bodyId (only if network is not too large)
-        if len(conn_inpath) < 5000:  # Limit for performance
-            print('Building interactive network by bodyId...')
-            G_bodyId = nx.DiGraph()
-            
-            # First, add edges to determine which nodes are actually involved
-            nodes_in_edges_bodyId = set()
-            for idx in conn_inpath.index:
-                layer_label = conn_inpath.at[idx, 'conn_layer']
-                layer_idx = int(layer_label.split('->')[0])
-                source = conn_inpath.at[idx, 'bodyId_pre']
-                target = conn_inpath.at[idx, 'bodyId_post']
-                weight = conn_inpath.at[idx, 'weight']
-                prob = conn_inpath.at[idx, 'traversal_probability']
-                ratio = conn_inpath.at[idx, 'connection_ratio'] if 'connection_ratio' in conn_inpath.columns else 0
-                
-                # If forward_only=True, only add edges that are in path_bodyId
-                if forward_only and (layer_idx, source, target) not in edges_in_path_bodyId:
-                    continue
-                
-                # Track nodes that appear in edges
-                nodes_in_edges_bodyId.add(source)
-                nodes_in_edges_bodyId.add(target)
-                G_bodyId.add_edge(source, target, weight=weight, probability=prob, ratio=ratio)
-            
-            # Now add only nodes that are involved in edges (have connections)
-            for layer_idx, layer in enumerate(neuron_layers):
-                for bodyId in layer:
-                    if bodyId not in nodes_in_edges_bodyId:
-                        continue  # Skip nodes not involved in any edge
-                    
-                    is_target = bodyId in target_ID
-                    is_source = layer_idx == 0
-                    if is_target:
-                        node_cat = 'target'
-                    elif is_source:
-                        node_cat = 'source'
-                    else:
-                        node_cat = 'intermediate'
-                    G_bodyId.add_node(bodyId, layer=layer_idx, node_type=node_cat)
-            
-            # Create layout based on network_layout parameter
-            pos_bodyId = self._get_network_layout(G_bodyId)
-            
-            # Fetch neuron info for labels (use local dataset if available)
-            all_bodyIds = list(G_bodyId.nodes())
-            node_info_df = self._fetch_neurons_local_or_api(all_bodyIds, columns=['bodyId', 'type'])
-            node_labels = {}
-            for idx in node_info_df.index:
-                bodyId = node_info_df.at[idx, 'bodyId']
-                neuron_type = node_info_df.at[idx, 'type'] if node_info_df.at[idx, 'type'] else 'None'
-                node_labels[bodyId] = f"{neuron_type}_{bodyId}"
-            
-            # Create Cytoscape interactive network
-            print('Creating interactive network...')
-            self._plot_cytoscape_network(
-                G_bodyId, pos_bodyId,
-                title=f'Interactive Network: {self.source_fname} to {self.target_fname} (by bodyId)',
-                filename=os.path.join(self.allpath_folder, f'Network_bodyId_allpaths_snp{self.min_synapse_num}.html'),
-                node_labels=node_labels
-            )
-        else:
-            print(f'Skipping bodyId network (too large: {len(conn_inpath)} connections)')
-    
-    def _plot_interactive_network(self, G, pos, title, filename, color_by='node_type', node_labels=None):
-        '''Helper function to create interactive network plot using Plotly'''
-        
-        # Define color scheme
-        color_map = {
-            'source': 'rgba(60,100,200,0.8)',      # Blue for source
-            'target': 'rgba(120,40,70,0.8)',       # Red for target
-            'intermediate': 'rgba(100,200,100,0.6)' # Green for intermediate
-        }
-        
-        # Create edge traces with arrows
-        edge_traces = []
-        edge_annotations = []
-        
-        for edge in G.edges():
-            x0, y0 = pos[edge[0]]
-            x1, y1 = pos[edge[1]]
-            source_node = edge[0]
-            target_node = edge[1]
-            weight = G.edges[edge].get('weight', 1)
-            prob = G.edges[edge].get('probability', 0)
-            
-            # Edge width based on weight (log scale for better visualization)
-            edge_width = max(0.5, min(5, np.log10(weight + 1) * 2))
-            
-            # Create hover text with direction and weight (improved formatting)
-            hover_text = f'<b>{source_node} → {target_node}</b><br>' \
-                        f'<b>Weight: {weight:,}</b> synapses<br>' \
-                        f'Probability: {prob:.3f}'
-            
-            edge_trace = go.Scatter(
-                x=[x0, x1, None],
-                y=[y0, y1, None],
-                mode='lines',
-                line=dict(width=edge_width, color='rgba(150,150,150,0.5)'),
-                hoverinfo='text',
-                hovertext=hover_text,
-                hoverlabel=dict(
-                    bgcolor='white',
-                    font_size=12,
-                    font_family='Arial'
-                ),
-                showlegend=False
-            )
-            edge_traces.append(edge_trace)
-            
-            # Add arrow annotation at the end of each edge
-            # Calculate arrow position (80% along the edge to avoid overlap with target node)
-            arrow_x = x0 + 0.8 * (x1 - x0)
-            arrow_y = y0 + 0.8 * (y1 - y0)
-            
-            annotation = dict(
-                x=arrow_x,
-                y=arrow_y,
-                ax=x0 + 0.6 * (x1 - x0),
-                ay=y0 + 0.6 * (y1 - y0),
-                xref='x',
-                yref='y',
-                axref='x',
-                ayref='y',
-                showarrow=True,
-                arrowhead=2,
-                arrowsize=1,
-                arrowwidth=max(1, edge_width * 0.5),
-                arrowcolor='rgba(100,100,100,0.5)',
-            )
-            edge_annotations.append(annotation)
-        
-        # Create node trace with draggable markers
-        node_x = []
-        node_y = []
-        node_color = []
-        node_text = []
-        node_size = []
-        node_ids = []  # Store node IDs for reference
-        
-        for node in G.nodes():
-            x, y = pos[node]
-            node_x.append(x)
-            node_y.append(y)
-            node_ids.append(str(node))
-            
-            # Get node attributes
-            node_type = G.nodes[node].get('node_type', 'intermediate')
-            layer = G.nodes[node].get('layer', 0)
-            
-            # Color by category
-            node_color.append(color_map.get(node_type, 'gray'))
-            
-            # Node size based on degree
-            degree = G.degree(node)
-            node_size.append(max(10, min(30, degree * 3)))
-            
-            # Create hover text
-            if node_labels and node in node_labels:
-                label = node_labels[node]
-            else:
-                label = str(node)
-            
-            in_degree = G.in_degree(node)
-            out_degree = G.out_degree(node)
-            hover_text = f'<b>{label}</b><br>' \
-                        f'Layer: {layer}<br>' \
-                        f'Type: {node_type}<br>' \
-                        f'In-degree: {in_degree}<br>' \
-                        f'Out-degree: {out_degree}<br>' \
-                        f'<i>Drag to reposition</i>'
-            node_text.append(hover_text)
-        
-        node_trace = go.Scatter(
-            x=node_x,
-            y=node_y,
-            mode='markers+text',
-            marker=dict(
-                size=node_size,
-                color=node_color,
-                line=dict(width=1, color='white')
-            ),
-            text=node_text,
-            textposition='top center',
-            textfont=dict(size=8, color='rgba(0,0,0,0)'),  # Hidden text labels by default
-            hoverinfo='text',
-            showlegend=False,
-            customdata=node_ids,  # Store node IDs for interaction
-            name='nodes'
-        )
-        
-        # Create legend traces (invisible scatter plots for legend)
-        legend_traces = []
-        for node_type, color in color_map.items():
-            legend_trace = go.Scatter(
-                x=[None],
-                y=[None],
-                mode='markers',
-                marker=dict(size=10, color=color),
-                name=node_type.capitalize(),
-                showlegend=True
-            )
-            legend_traces.append(legend_trace)
-        
-        # Combine all traces
-        fig = go.Figure(data=edge_traces + [node_trace] + legend_traces)
-        
-        # Update layout with interactive features
-        fig.update_layout(
-            title=dict(
-                text=f'{title}<br><sub>Scroll to zoom • Double-click to reset view</sub>',
-                font=dict(size=16)
-            ),
-            showlegend=True,
-            hovermode='closest',
-            margin=dict(b=20, l=5, r=5, t=60),
-            xaxis=dict(
-                showgrid=False, 
-                zeroline=False, 
-                showticklabels=False,
-                fixedrange=False  # Allow zooming and panning
-            ),
-            yaxis=dict(
-                showgrid=False, 
-                zeroline=False, 
-                showticklabels=False,
-                fixedrange=False,  # Allow zooming and panning
-                scaleanchor='x',
-                scaleratio=1
-            ),
-            plot_bgcolor='white',
-            width=1200,
-            height=800,
-            annotations=edge_annotations,  # Add arrow annotations
-            dragmode='select'  # Use select mode for better node interaction
-        )
-        
-        # Configuration for better interactivity
-        config = {
-            'displayModeBar': True,
-            'displaylogo': False,
-            'modeBarButtonsToAdd': ['select2d', 'lasso2d'],
-            'toImageButtonOptions': {
-                'format': 'png',
-                'filename': filename.replace('.html', ''),
-                'height': 800,
-                'width': 1200,
-                'scale': 2
-            },
-            'scrollZoom': True
-        }
-        
-        # Save figure with configuration
-        fig.write_html(filename, auto_open=self.showfig, config=config, include_plotlyjs='cdn')
-        
-        # Add custom JavaScript for node dragging
-        self._add_drag_functionality(filename, node_ids)
-        
-        print(f'Saved interactive network to {filename}')
-        print('  → Interactive features: Pan/zoom with mouse, edges show direction and weight on hover')
-    
-    def _plot_cytoscape_network(self, G, pos, title, filename, node_labels=None):
-        '''Create interactive network using Cytoscape.js for better dragging and interaction'''
-        
-        # Define color scheme
-        color_map = {
-            'source': '#3C64C8',      # Blue for source
-            'target': '#782846',       # Red for target
-            'intermediate': '#64C864'  # Green for intermediate
-        }
-        
-        # Prepare nodes data
-        nodes_data = []
-        for node in G.nodes():
-            node_type = G.nodes[node].get('node_type', 'intermediate')
-            layer = G.nodes[node].get('layer', 0)
-            x, y = pos[node]
-            
-            # Get label
-            if node_labels and node in node_labels:
-                label = node_labels[node]
-            else:
-                label = str(node)
-            
-            # Node size based on degree
-            degree = G.degree(node)
-            node_size = max(20, min(60, degree * 5))
-            
-            nodes_data.append({
-                'data': {
-                    'id': str(node),
-                    'label': label,
-                    'node_type': node_type,
-                    'layer': layer,
-                    'degree': degree
-                },
-                'position': {'x': x * 500, 'y': y * 500},  # Scale positions
-                'classes': node_type
-            })
-        
-        # Prepare edges data
-        edges_data = []
-        for edge in G.edges():
-            source, target = edge
-            weight = G.edges[edge].get('weight', 1)
-            prob = G.edges[edge].get('probability', 0)
-            ratio = G.edges[edge].get('ratio', 0)
-            
-            # Edge width based on weight (log scale)
-            edge_width = max(1, min(10, np.log10(weight + 1) * 3))
-            
-            edges_data.append({
-                'data': {
-                    'id': f'{source}-{target}',
-                    'source': str(source),
-                    'target': str(target),
-                    'weight': int(weight),
-                    'probability': float(prob),
-                    'ratio': float(ratio),
-                    'edge_width': edge_width
-                }
-            })
-        
-        # Create HTML with Cytoscape.js
-        html_content = f'''<!DOCTYPE html>
-<html>
-<head>
-    <meta charset="utf-8">
-    <title>{title}</title>
-    <script src="https://unpkg.com/cytoscape@3.28.1/dist/cytoscape.min.js"></script>
-    <style>
-        body {{
-            font-family: Arial, sans-serif;
-            margin: 0;
-            padding: 0;
-            background-color: #f5f5f5;
-        }}
-        #cy {{
-            width: 100%;
-            height: 100vh;
-            display: block;
-            background-color: white;
-        }}
-        #title {{
-            position: absolute;
-            top: 10px;
-            left: 50%;
-            transform: translateX(-50%);
-            z-index: 1000;
-            background: rgba(255,255,255,0.95);
-            padding: 15px 30px;
-            border-radius: 8px;
-            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
-            font-size: 18px;
-            font-weight: bold;
-            color: #333;
-        }}
-        #controls {{
-            position: absolute;
-            top: 80px;
-            right: 10px;
-            z-index: 1000;
-            background: rgba(255,255,255,0.95);
-            padding: 15px;
-            border-radius: 8px;
-            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
-            width: 200px;
-        }}
-        .control-btn {{
-            width: 100%;
-            padding: 8px;
-            margin: 5px 0;
-            background: #4CAF50;
-            color: white;
-            border: none;
-            border-radius: 4px;
-            cursor: pointer;
-            font-size: 13px;
-        }}
-        .control-btn:hover {{
-            background: #45a049;
-        }}
-        #legend {{
-            position: absolute;
-            top: 80px;
-            left: 10px;
-            z-index: 1000;
-            background: rgba(255,255,255,0.95);
-            padding: 15px;
-            border-radius: 8px;
-            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
-        }}
-        .legend-item {{
-            margin: 8px 0;
-            display: flex;
-            align-items: center;
-        }}
-        .legend-color {{
-            width: 20px;
-            height: 20px;
-            border-radius: 50%;
-            margin-right: 10px;
-            border: 2px solid #333;
-        }}
-        #info {{
-            position: absolute;
-            bottom: 10px;
-            left: 10px;
-            z-index: 1000;
-            background: rgba(255,255,255,0.95);
-            padding: 10px;
-            border-radius: 8px;
-            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
-            font-size: 12px;
-            color: #666;
-        }}
-    </style>
-</head>
-<body>
-    <div id="title">{title}</div>
-    <div id="legend">
-        <div style="font-weight: bold; margin-bottom: 10px;">Node Types</div>
-        <div class="legend-item">
-            <div class="legend-color" style="background-color: {color_map['source']};"></div>
-            <span>Source</span>
-        </div>
-        <div class="legend-item">
-            <div class="legend-color" style="background-color: {color_map['intermediate']};"></div>
-            <span>Intermediate</span>
-        </div>
-        <div class="legend-item">
-            <div class="legend-color" style="background-color: {color_map['target']};"></div>
-            <span>Target</span>
-        </div>
-    </div>
-    <div id="controls">
-        <div style="font-weight: bold; margin-bottom: 10px;">Controls</div>
-        <button class="control-btn" onclick="cy.fit()">Fit to Screen</button>
-        <button class="control-btn" onclick="cy.center()">Center View</button>
-        <button class="control-btn" onclick="resetLayout()">Reset Layout</button>
-        <button class="control-btn" onclick="toggleLabels()">Toggle Labels</button>
-        <button class="control-btn" onclick="showAllNodes()" style="background: #2196F3;">Show All Nodes</button>
-        <button class="control-btn" onclick="exportPNG()">Export PNG</button>
-    </div>
-    <div id="info">
-        💡 <b>Drag nodes</b> to reposition • <b>Scroll</b> to zoom • <b>Drag background</b> to pan<br>
-        <b>Click node + H</b> to hide • <b>Click</b> nodes/edges for details • <b>Double-click</b> to highlight
-    </div>
-    <div id="cy"></div>
-
-    <script>
-        let showLabels = true;
-        
-        const cy = cytoscape({{
-            container: document.getElementById('cy'),
-            
-            elements: {{
-                nodes: {nodes_data},
-                edges: {edges_data}
-            }},
-            
-            style: [
-                {{
-                    selector: 'node',
-                    style: {{
-                        'background-color': 'data(node_type)',
-                        'width': 'mapData(degree, 0, 20, 20, 60)',
-                        'height': 'mapData(degree, 0, 20, 20, 60)',
-                        'label': 'data(label)',
-                        'font-size': '10px',
-                        'text-valign': 'center',
-                        'text-halign': 'center',
-                        'color': '#000',
-                        'text-outline-color': '#fff',
-                        'text-outline-width': 2,
-                        'border-width': 2,
-                        'border-color': '#333',
-                        'cursor': 'grab'
-                    }}
-                }},
-                {{
-                    selector: 'node.source',
-                    style: {{
-                        'background-color': '{color_map['source']}'
-                    }}
-                }},
-                {{
-                    selector: 'node.intermediate',
-                    style: {{
-                        'background-color': '{color_map['intermediate']}'
-                    }}
-                }},
-                {{
-                    selector: 'node.target',
-                    style: {{
-                        'background-color': '{color_map['target']}'
-                    }}
-                }},
-                {{
-                    selector: 'node:selected',
-                    style: {{
-                        'border-width': 4,
-                        'border-color': '#FFA500',
-                        'background-color': '#FFD700'
-                    }}
-                }},
-                {{
-                    selector: 'edge',
-                    style: {{
-                        'width': 'data(edge_width)',
-                        'line-color': '#999',
-                        'target-arrow-color': '#999',
-                        'target-arrow-shape': 'triangle',
-                        'curve-style': 'bezier',
-                        'arrow-scale': 1.5,
-                        'opacity': 0.6
-                    }}
-                }},
-                {{
-                    selector: 'edge:selected',
-                    style: {{
-                        'line-color': '#FFA500',
-                        'target-arrow-color': '#FFA500',
-                        'width': 'calc(data(edge_width) * 1.5)',
-                        'opacity': 1
-                    }}
-                }},
-                {{
-                    selector: '.highlighted',
-                    style: {{
-                        'background-color': '#FFD700',
-                        'line-color': '#FFD700',
-                        'target-arrow-color': '#FFD700',
-                        'opacity': 1
-                    }}
-                }},
-                {{
-                    selector: '.hidden',
-                    style: {{
-                        'display': 'none'
-                    }}
-                }}
-            ],
-            
-            layout: {{
-                name: 'preset'
-            }},
-            
-            minZoom: 0.1,
-            maxZoom: 5,
-            wheelSensitivity: 0.2
-        }});
-        
-        // Make nodes draggable
-        cy.nodes().grabify();
-        
-        // Show tooltips on hover
-        cy.on('mouseover', 'node', function(evt) {{
-            const node = evt.target;
-            const data = node.data();
-            const info = document.getElementById('info');
-            info.innerHTML = `
-                <b>Node:</b> ${{data.label}}<br>
-                <b>Type:</b> ${{data.node_type}}<br>
-                <b>Layer:</b> ${{data.layer}}<br>
-                <b>Degree:</b> ${{data.degree}} (connections)
-            `;
-        }});
-        
-        cy.on('mouseover', 'edge', function(evt) {{
-            const edge = evt.target;
-            const data = edge.data();
-            const info = document.getElementById('info');
-            info.innerHTML = `
-                <b>Connection:</b> ${{edge.source().data('label')}} → ${{edge.target().data('label')}}<br>
-                <b>Weight:</b> ${{data.weight.toLocaleString()}} synapses<br>
-                <b>Probability:</b> ${{data.probability.toFixed(4)}}<br>
-                <b>Ratio:</b> ${{data.ratio.toFixed(4)}}
-            `;
-        }});
-        
-        cy.on('mouseout', 'node, edge', function() {{
-            const hiddenCount = cy.nodes('.hidden').length;
-            if (hiddenCount > 0) {{
-                document.getElementById('info').innerHTML = `
-                    💡 <b>${{hiddenCount}}</b> node(s) hidden • <b>Right-click</b> or press <b>H</b> on selected node to hide<br>
-                    Click <b>Show All Nodes</b> button to restore hidden nodes
-                `;
-            }} else {{
-                document.getElementById('info').innerHTML = `
-                    💡 <b>Drag nodes</b> to reposition • <b>Scroll</b> to zoom • <b>Drag background</b> to pan<br>
-                    <b>Click node + H</b> to hide • <b>Click</b> nodes/edges for details • <b>Double-click</b> to highlight
-                `;
-            }}
-        }});
-        
-        // Double-click to highlight connected nodes
-        cy.on('dblclick', 'node', function(evt) {{
-            const node = evt.target;
-            cy.elements().removeClass('highlighted');
-            node.addClass('highlighted');
-            node.neighborhood().addClass('highlighted');
-        }});
-        
-        // Click background to clear highlights
-        cy.on('tap', function(evt) {{
-            if (evt.target === cy) {{
-                cy.elements().removeClass('highlighted');
-            }}
-        }});
-        
-        // Keyboard shortcut: 'H' to hide selected nodes
-        let selectedNode = null;
-        cy.on('select', 'node', function(evt) {{
-            selectedNode = evt.target;
-        }});
-        
-        cy.on('unselect', 'node', function(evt) {{
-            selectedNode = null;
-        }});
-        
-        document.addEventListener('keydown', function(evt) {{
-            if (evt.key === 'h' || evt.key === 'H') {{
-                if (selectedNode && !selectedNode.hasClass('hidden')) {{
-                    hideNode(selectedNode);
-                }}
-            }}
-        }});
-        
-        // Context menu for right-click hide
-        cy.on('cxttap', 'node', function(evt) {{
-            const node = evt.target;
-            if (!node.hasClass('hidden')) {{
-                hideNode(node);
-            }}
-        }});
-        
-        // Function to hide a node and its connected edges
-        function hideNode(node) {{
-            // Hide the node
-            node.addClass('hidden');
-            
-            // Hide connected edges
-            node.connectedEdges().addClass('hidden');
-            
-            // Update info
-            const hiddenCount = cy.nodes('.hidden').length;
-            document.getElementById('info').innerHTML = `
-                💡 <b>${{hiddenCount}}</b> node(s) hidden • <b>Right-click</b> or press <b>H</b> on selected node to hide<br>
-                Click <b>Show All Nodes</b> button to restore hidden nodes
-            `;
-            
-            // Deselect the node
-            node.unselect();
-        }}
-        
-        // Function to show all hidden nodes
-        function showAllNodes() {{
-            cy.elements('.hidden').removeClass('hidden');
-            document.getElementById('info').innerHTML = `
-                💡 <b>Drag nodes</b> to reposition • <b>Scroll</b> to zoom • <b>Drag background</b> to pan<br>
-                <b>Click node + H</b> to hide • <b>Click</b> nodes/edges for details • <b>Double-click</b> to highlight
-            `;
-        }}
-        
-        // Control functions
-        function resetLayout() {{
-            cy.nodes().positions(function(node) {{
-                return node.data('originalPos') || node.position();
-            }});
-            cy.fit();
-        }}
-        
-        function toggleLabels() {{
-            showLabels = !showLabels;
-            if (showLabels) {{
-                cy.style().selector('node').style({{'label': 'data(label)'}}).update();
-            }} else {{
-                cy.style().selector('node').style({{'label': ''}}).update();
-            }}
-        }}
-        
-        function exportPNG() {{
-            const png = cy.png({{
-                output: 'blob',
-                bg: 'white',
-                full: true,
-                scale: 3
-            }});
-            const url = URL.createObjectURL(png);
-            const link = document.createElement('a');
-            link.href = url;
-            link.download = 'network.png';
-            link.click();
-            URL.revokeObjectURL(url);
-        }}
-        
-        // Initial fit
-        cy.fit();
-    </script>
-</body>
-</html>'''
-        
-        # Write to file
-        with open(filename, 'w', encoding='utf-8') as f:
-            f.write(html_content)
-        
-        print(f'✓ Saved interactive network to {filename}')
-        print('  → Drag nodes to reposition • Hover edges to see weight/ratio/probability • Double-click to highlight')
-    
-    def _add_drag_functionality(self, filename, node_ids):
-        '''Add JavaScript for draggable nodes to the HTML file'''
-        
-        # Read the generated HTML
-        with open(filename, 'r', encoding='utf-8') as f:
-            html_content = f.read()
-        
-        # JavaScript code for dragging nodes
-        drag_script = '''
-<script>
-// Add drag functionality to network nodes
-(function() {
-    // Wait for Plotly to be ready
-    const checkPlotly = setInterval(function() {
-        const plotDiv = document.querySelector('.plotly-graph-div');
-        if (plotDiv && window.Plotly) {
-            clearInterval(checkPlotly);
-            initDragNodes(plotDiv);
-        }
-    }, 100);
-    
-    function initDragNodes(gd) {
-        let isDragging = false;
-        let dragNodeIndex = null;
-        let dragMode = true;  // Start with drag mode ON by default
-        let originalNodeX = [];
-        let originalNodeY = [];
-        
-        // Add button to toggle drag mode
-        const toggleButton = document.createElement('button');
-        toggleButton.innerHTML = '🎯 Node Drag Mode (ON)';
-        toggleButton.style.cssText = 'position: absolute; top: 10px; right: 10px; z-index: 1000; ' +
-                                     'padding: 10px 16px; background: #f44336; color: white; ' +
-                                     'border: none; border-radius: 6px; cursor: pointer; ' +
-                                     'font-size: 13px; font-weight: bold; box-shadow: 0 2px 4px rgba(0,0,0,0.2);';
-        toggleButton.onclick = function() {
-            dragMode = !dragMode;
-            toggleButton.innerHTML = dragMode ? 
-                '🎯 Node Drag Mode (ON)' : '🔄 Node Drag Mode (OFF)';
-            toggleButton.style.background = dragMode ? '#f44336' : '#4CAF50';
-            if (!dragMode) {
-                gd.style.cursor = 'default';
-            }
-        };
-        gd.parentElement.style.position = 'relative';
-        gd.parentElement.appendChild(toggleButton);
-        
-        // Store original positions
-        const nodeTrace = gd.data.find(trace => trace.name === 'nodes');
-        if (nodeTrace) {
-            originalNodeX = [...nodeTrace.x];
-            originalNodeY = [...nodeTrace.y];
-        }
-        
-        // Mouse event handlers
-        gd.on('plotly_click', function(data) {
-            if (!dragMode) return;
-            
-            // Find if clicked on a node
-            for (let i = 0; i < data.points.length; i++) {
-                const point = data.points[i];
-                if (point.data.name === 'nodes') {
-                    dragNodeIndex = point.pointIndex;
-                    isDragging = true;
-                    gd.style.cursor = 'grabbing';
-                    // Store current position
-                    originalNodeX[dragNodeIndex] = nodeTrace.x[dragNodeIndex];
-                    originalNodeY[dragNodeIndex] = nodeTrace.y[dragNodeIndex];
-                    break;
-                }
-            }
-        });
-        
-        gd.addEventListener('mousemove', function(evt) {
-            if (!isDragging || !dragMode || dragNodeIndex === null) return;
-            
-            evt.preventDefault();
-            evt.stopPropagation();
-            
-            // Get mouse position relative to plot
-            const xaxis = gd._fullLayout.xaxis;
-            const yaxis = gd._fullLayout.yaxis;
-            
-            // Get the plot area
-            const plotBbox = gd.getBoundingClientRect();
-            const l = gd._fullLayout.margin.l;
-            const t = gd._fullLayout.margin.t;
-            
-            // Convert pixel coordinates to data coordinates
-            const xPixel = evt.clientX - plotBbox.left - l;
-            const yPixel = evt.clientY - plotBbox.top - t;
-            
-            const xData = xaxis.p2c(xPixel);
-            const yData = yaxis.p2c(yPixel);
-            
-            // Update node position in the data arrays directly
-            const nodeTrace = gd.data.find(trace => trace.name === 'nodes');
-            if (nodeTrace && dragNodeIndex < nodeTrace.x.length) {
-                const oldX = nodeTrace.x[dragNodeIndex];
-                const oldY = nodeTrace.y[dragNodeIndex];
-                
-                // Update node position
-                nodeTrace.x[dragNodeIndex] = xData;
-                nodeTrace.y[dragNodeIndex] = yData;
-                
-                // Update connected edges
-                updateConnectedEdges(gd, dragNodeIndex, oldX, oldY, xData, yData);
-                
-                // Redraw
-                Plotly.redraw(gd);
-            }
-        });
-        
-        gd.addEventListener('mouseup', function() {
-            if (isDragging && dragMode) {
-                isDragging = false;
-                dragNodeIndex = null;
-                gd.style.cursor = 'grab';
-            }
-        });
-        
-        gd.addEventListener('mouseleave', function() {
-            if (isDragging) {
-                isDragging = false;
-                dragNodeIndex = null;
-                gd.style.cursor = dragMode ? 'grab' : 'default';
-            }
-        });
-        
-        // Set initial cursor
-        if (dragMode) {
-            gd.style.cursor = 'grab';
-        }
-        
-        function updateConnectedEdges(gd, nodeIndex, oldX, oldY, newNodeX, newNodeY) {
-            // Get node trace
-            const nodeTrace = gd.data.find(trace => trace.name === 'nodes');
-            if (!nodeTrace) return;
-            
-            // Update all edge traces
-            gd.data.forEach((trace, traceIdx) => {
-                if (trace.mode === 'lines' && trace.x && trace.x.length >= 3) {
-                    // Edge traces have format [x0, x1, null, x0, x1, null, ...]
-                    // Check each edge (every 3 elements)
-                    for (let i = 0; i < trace.x.length; i += 3) {
-                        const x0 = trace.x[i];
-                        const y0 = trace.y[i];
-                        const x1 = trace.x[i + 1];
-                        const y1 = trace.y[i + 1];
-                        
-                        // Check if source node matches (within tolerance)
-                        if (x0 !== null && Math.abs(x0 - oldX) < 0.01 && 
-                            Math.abs(y0 - oldY) < 0.01) {
-                            trace.x[i] = newNodeX;
-                            trace.y[i] = newNodeY;
-                            
-                            // Update arrow annotation if it exists
-                            if (gd.layout.annotations && gd.layout.annotations[Math.floor(i/3)]) {
-                                const ann = gd.layout.annotations[Math.floor(i/3)];
-                                // Recalculate arrow position
-                                ann.ax = newNodeX + 0.6 * (trace.x[i+1] - newNodeX);
-                                ann.ay = newNodeY + 0.6 * (trace.y[i+1] - newNodeY);
-                                ann.x = newNodeX + 0.8 * (trace.x[i+1] - newNodeX);
-                                ann.y = newNodeY + 0.8 * (trace.y[i+1] - newNodeY);
-                            }
-                        }
-                        
-                        // Check if target node matches
-                        if (x1 !== null && Math.abs(x1 - oldX) < 0.01 && 
-                            Math.abs(y1 - oldY) < 0.01) {
-                            trace.x[i + 1] = newNodeX;
-                            trace.y[i + 1] = newNodeY;
-                            
-                            // Update arrow annotation if it exists
-                            if (gd.layout.annotations && gd.layout.annotations[Math.floor(i/3)]) {
-                                const ann = gd.layout.annotations[Math.floor(i/3)];
-                                // Recalculate arrow position
-                                ann.ax = trace.x[i] + 0.6 * (newNodeX - trace.x[i]);
-                                ann.ay = trace.y[i] + 0.6 * (newNodeY - trace.y[i]);
-                                ann.x = trace.x[i] + 0.8 * (newNodeX - trace.x[i]);
-                                ann.y = trace.y[i] + 0.8 * (newNodeY - trace.y[i]);
-                            }
-                        }
-                    }
-                }
-            });
-        }
-    }
-})();
-</script>
-'''
-        
-        # Insert the script before the closing </body> tag
-        html_content = html_content.replace('</body>', f'{drag_script}</body>')
-        
-        # Write back to file
-        with open(filename, 'w', encoding='utf-8') as f:
-            f.write(html_content)
-    
     def ROImat(self, requiredNeurons: list = None, folder_name: str = None, site: str = 'post', break_threshod: int = 1e3, roi_list = None, roi_name = None, roi_kw: list | None = None, roi_kw_exclude: list | None = None):
         """ get the distribution matrix of ROI by the given site of neurons.
         
@@ -8675,7 +6993,7 @@ class FindNeuronConnection:
         # neuron_df,roi_count_df = fetch_neurons(required_criteria) # Fetch neuron info from hemibrain server.
         neuron_df: pd.DataFrame = neuron_df
         neuron_df.sort_values(by='type',inplace=True) # The order of neuron_df will be the order in the distribution matrix.
-        rpath = os.path.join(self.data_folder, '_'.join(['roi_distribution',folder_name,site]))
+        rpath = os.path.join(self.output_dir, '_'.join(['roi_distribution',folder_name,site]))
         if not os.path.exists(rpath): os.makedirs(rpath)
         
         if roi_list is None:
@@ -8783,7 +7101,7 @@ class FindNeuronConnection:
             visualization_threshod (_type_, optional): _description_. Defaults to 1e2. synaptic number threshold for auto-generated roi list
             categories (list, optional): _description_. Defaults to ['type']. other options can be used if info_df is given.
             info_df (pd.DataFrame, optional): _description_. Defaults to pd.DataFrame(). neuron info dataframe, including given categories of classified neurons.
-        """        
+        """
         
         para_dict = {
             'neurons': str(requiredNeurons),
@@ -8801,7 +7119,7 @@ class FindNeuronConnection:
         if folder_name == None or folder_name == '':
             folder_name = auto_name
             para_dict.update({'name': folder_name})
-        rpath = os.path.join(self.data_folder, '_'.join(['synapse_distribution',folder_name,site]))
+        rpath = os.path.join(self.output_dir, '_'.join(['synapse_distribution',folder_name,site]))
         if not os.path.exists(rpath): os.makedirs(rpath)
         
         neuron_info_path = os.path.join(rpath,'neuron_info_'+folder_name+'.xlsx')
@@ -9022,2899 +7340,3 @@ class FindNeuronConnection:
         )
         
         return vp.visualize()
-
-@dataclass
-class VisualizeSkeleton:
-    '''3-D visualize skeleton with synapses and brain roi meshes'''
-    
-    backend: str = 'plotly'
-    '''
-    visualization backend: 'plotly' (default) or 'k3d'
-    'plotly': interactive HTML with plotly (good for small/medium scenes)
-    'k3d': WebGL-based, faster for large scenes, supports binary export
-    '''
-
-    dataset: str = 'hemibrain:v1.2.1'
-    '''dataset to use, default is hemibrain:v1.2.1'''
-
-    client_type: str = 'neuprint'
-    '''client type: 'neuprint' (default) or 'flywire' '''
-
-    client_flywire: object = None
-    '''flywire client instance'''
-
-    server: str = 'https://neuprint.janelia.org'
-    '''the neuprint server to visit'''
-    
-    token: str = None
-    '''neuprint auth token'''
-
-    version: int | None = None
-    '''Materialization version for FlyWire (e.g. 783). If None, uses default/latest.'''
-
-    source_path: str = os.path.dirname(os.path.abspath(__file__))
-    '''absolute path to the src/ directory where coana.py is located'''
-    
-    script_path: str = os.path.dirname(source_path)
-    '''absolute path to the project root directory (parent of src/)'''
-
-    data_folder: str = os.path.join(os.path.expanduser('~'), 'connectome_analysis')
-    '''
-    folder to save all data (subfolders auto-generated based on neuron_layers)
-    Default: ~/connectome_analysis/
-    '''
-    
-    save_folder: str = ''
-    '''
-    folder to save the current data (auto-generated from neuron_layers)
-    # initialized in __post_init__
-    # You can set the "saveas" parameter to customize the folder name'''
-
-    neuron_layers: str | list = ''
-    '''
-    layers of neurons to plot, can be:
-        list of neuron layers: e.g. ['L1', 'L2', 'L3']; or \n
-        str of neuron layers separated by '->': \n
-        e.g. 'L1->L2->L3'. All type, instance (in regular expression), and bodyId are compatible.\n
-    when use list, each layer can be neuron bodyIds, types, instances in regular expressions, or a list of them\n
-    e.g. [['L1_0','L1_1'], ['L2_0','L2_1'], ['L3_0','L3_1']]
-    '''
-
-    custom_layer_names: list = field(default_factory=list)
-
-    min_synapse_num: int = 10
-    '''minimum number of synapses to fetch and plot'''
-
-    saveas: str = None
-    '''filename to save the plot, if an absolute path is given, ignore data_folder'''
-
-    neuron_colors: tuple = bokeh.palettes.Category10[10]
-    '''
-    colors of neuron layers to plot \n
-    list of colors, each item for each layer, i.e., item i for layer i, and item i can be a list of colors for each neuron in layer i, or a single color for all neurons in layer i \n
-    if you want to assign different colors to different neurons in the same layer, the color list should be the same length as the number of neurons in the layer. \n
-    color format: 'red', '#ff0000', (255,0,0), or a dict mapping bodyId to color, {bodyId: color}. \n
-    See https://navis.readthedocs.io/en/latest/source/tutorials/generated/navis.plot3d.html#navis.plot3d for more details.
-    '''
-
-    neuron_alpha: float = 0.3
-    '''alpha of neuron, only works when the radius of neuron exists (show_skeleton_radius=True)'''
-
-    synapse_colors: tuple = bokeh.palettes.Category10[10]
-    '''colors of synapse layers to plot'''
-
-    synapse_size: int | str = 1
-    '''
-    size of synapse\n
-    when synapse_mode='scatter', 1 to 10 is recommended\n
-    when synapse_mode='sphere', 100 is recommended\n
-    can be 'real' to use the real distance between pre- and post-synaptic sites (only for sphere/cone/tetrahedron)\n
-    '''
-
-    synapse_criteria: SynapseCriteria = None
-    '''criteria to filter synapses'''
-
-    synapse_mode: str = 'scatter'
-    '''
-    mode to plot synapses, 'scatter', 'sphere', 'cone', or 'tetrahedron'\n
-    'scatter': plot synapses as scatter points, relative size to the view\n
-    'sphere': plot synapses as spheres, absolute size in the figure \n
-    'cone': plot synapses as cones pointing from pre to post\n
-    'tetrahedron': plot synapses as tetrahedrons pointing from pre to post\n
-    '''
-    
-    synapse_alpha: float = 0.6
-    '''alpha of synapse, only works when synapse_mode='sphere' '''
-
-    mesh_roi: list = field(default_factory=list)
-    '''
-    meshes of brain ROIs to plot\n
-    defaultly use ['LH(R)', 'AL(R)', 'EB'] to mark the position of the brain\n
-    if you want to show the whole brain or hemibrain, see brain_mesh parameter. \n
-    hide all meshes by setting mesh_roi = None \n
-    Available meshes: \n
-    a'L(L) \n
-    a'L(R) \n   
-    AB(L) \n    
-    AB(R) \n    
-    AL(L)_ \n   
-    AL(R) \n    
-    alphaL(L) \n
-    alphaL(R) \n
-    AME(R) \n   
-    AOTU(R) \n  
-    ATL(L) \n   
-    ATL(R) \n   
-    AVLP(R) \n  
-    b'L(L) \n   
-    b'L(R) \n   
-    bL(L) \n    
-    bL(R) \n    
-    BU(L) \n    
-    BU(R) \n    
-    CA(L) \n    
-    CA(R) \n    
-    CAN(R) \n   
-    CRE(L) \n   
-    CRE(R) \n   
-    EB \n       
-    EPA(L) \n   
-    EPA(R) \n
-    FB \n
-    FLA(R) \n
-    gL(L) \n
-    gL(R) \n
-    GNG \n
-    GOR(L) \n
-    GOR(R) \n
-    IB \n
-    ICL(L) \n
-    ICL(R) \n
-    IPS(R) \n
-    LAL(L) \n
-    LAL(R) \n
-    LH(R) \n
-    LO(R) \n
-    LOP(R) \n
-    ME(R) \n
-    NO \n
-    PB \n
-    PED(R) \n
-    PLP(R) \n
-    PRW \n
-    PVLP(R) \n
-    SAD \n
-    SCL(L) \n
-    SCL(R) \n
-    SIP(L) \n
-    SIP(R) \n
-    SLP(R) \n
-    SMP(L) \n
-    SMP(R) \n
-    SPS(L) \n
-    SPS(R) \n
-    VES(L) \n
-    VES(R) \n
-    WED(R) \n
-    '''
-
-    mesh_color: tuple | list = (100, 100, 100, 0.1)
-    '''
-    color of brain meshes, single color or list of colors matching the length of mesh_roi
-    single color: tuple including an alpha channel: (R, G, B, alpha)
-    multiple colors: list of tuples, each tuple including an alpha channel: [(R1, G1, B1, alpha1), (R2, G2, B2, alpha2), ...]
-    '''
-
-    merge_neurons: bool = True
-    '''
-    Whether to merge all neurons of the same type (layer) into a single 3D object.
-    True: Merge neurons into one mesh (tube mode) or trace (line mode).
-          Significantly reduces file size and rendering overhead for large populations.
-    False: Plot each neuron individually (default).
-    '''
-
-    mirror_on_contralateral: bool = False
-    '''
-    Whether to mirror neurons and ROIs to the contralateral hemisphere.
-    True: Mirror neurons and ROIs (e.g. 'ME(R)' -> 'ME(L)') to the other side.
-          Useful for visualizing the full brain structure from hemibrain data.
-    False: Only show the original data (default).
-    '''
-
-    skeleton_mesh_simplification: float = 0.9
-    '''
-    Mesh simplification factor for neuron skeletons (0.0 to 1.0).
-    Only applies when skeleton_mode='tube'.
-    0.0: No simplification (keep all faces).
-    0.8: Remove 80% of faces (keep 20%).
-    Higher values reduce file size but may lose detail.
-    Recommended: 0.5 - 0.9 for large populations.
-    '''
-
-    roi_mesh_simplification: float = 0.95
-    '''
-    Mesh simplification factor for ROI meshes (0.0 to 1.0).
-    0.0: No simplification (keep all faces).
-    0.9: Remove 90% of faces (keep 10%).
-    Higher values reduce file size but may lose detail.
-    Recommended: 0.9 - 0.99 for large ROI meshes.
-    '''
-
-    show_soma: bool = True
-    '''whether to show soma'''
-
-    show_fig: bool = True
-    '''whether to show the figure'''
-
-    skeleton_mode: str = 'tube'
-    '''
-    whether to plot the radius of skeleton or only skeleton lines\n
-    'tube': plot the radius of skeleton\n
-    'line': only plot skeleton lines\n
-    when 'line', the file size will be significantly smaller and the rendering will be faster
-    '''
-
-    show_connectors: bool = False
-    '''whether to fetch and plot the connectors, all pre- and post-synaptic sites of the neurons, for single layer of neurons'''
-
-    skip_synapse: bool = False
-    '''
-    whether to skip synapse fetching and plotting between layers
-    True: skip all synapse operations (faster initialization, smaller file size)
-    False: fetch and plot synapses between layers (default behavior)
-    Note: This only affects inter-layer synapses, not show_connectors (neuron connectors)
-    '''
-
-    use_size_slider: bool = False
-    '''
-    whether to use size slider to adjust the size of synapses\n
-    only works when synapse_mode='scatter'
-    '''
-
-    legend_mode: str = 'normal'
-    '''
-    'normal': show legend for individual neurons\n
-    'merge': merge all neurons in the same layer and show legend for each layer\n
-    '''
-    
-    transforms_dir: str = '~/flybrain-data'
-    '''
-    Directory for brain transform files (used by flybrains package)\n
-    Default: ~/flybrain-data (flybrains default location)\n
-    To use a custom location:\n
-    1. Set this attribute to your preferred path\n
-    2. Ensure the flybrains package uses this path\n
-    Note: Changing this requires setting the FLYBRAINS_DATA environment variable\n
-    before importing flybrains, or manually moving existing transform files.\n
-    '''
-    
-    cache_neurons: bool = False
-    '''
-    Whether to cache fetched neuron skeletons to disk\n
-    True: Save fetched skeletons as individual {bodyId}.pkl files to cache/{dataset}/skeletons/\n
-    False: Fetch from NeuPrint every time (default)\n
-    Cache location: cache/{dataset}/skeletons/{bodyId}.pkl\n
-    Individual files allow better reuse across different neuron layer selections.\n
-    '''
-    
-    cache_synapses: bool = False
-    '''
-    Whether to cache fetched synapse data to disk\n
-    True: Use synapse table from datasets/{dataset}/*_synapse_table.parquet if available\n
-    False: Fetch from NeuPrint every time (default)\n
-    For FlyWire/FAFB: Always uses datasets/{dataset}/flywire_FAFB_v783_synapse_table.parquet\n
-    '''
-    
-    brain_mesh: str = 'none'
-    ''' 
-    Brain/VNC mesh visualization options (dataset-specific):\n
-    - 'none': Only plot meshes specified in mesh_roi parameter\n
-    - 'template': Plot the dataset's native template mesh (EM resolution)\n
-      • hemibrain → JRCFIB2018F (hemibrain only)\n
-      • optic-lobe → JRCFIB2018F (optic lobe region)\n
-      • manc → MANC (male adult nerve cord VNC)\n
-      • male-cns → JRCFIB2022M (full male CNS: brain + VNC)\n
-    - 'whole': Plot standard whole-brain/VNC envelope mesh\n
-      • hemibrain/optic-lobe → JRC2018F (requires transforms)\n
-      • manc → MANC VNC envelope (no transform needed)\n
-      • male-cns → JRCFIB2022M CNS envelope (no transform needed)\n
-    - 'hemi': HEMIBRAIN ONLY - Plot hemisphere mesh (left or right)\n
-      • Only works with hemibrain:v1.2.1 dataset\n
-      • VNC datasets (manc, male-cns) do not support hemisphere mode\n
-      • manc → MANC template (native VNC)\n
-      • male-cns → JRCFIB2022M (native full CNS)\n
-    Note: Some transforms require download (~500MB, one-time)\n
-    See https://github.com/navis-org/navis-flybrains
-    '''
-    
-    brain_mesh_color: str = 'rgba(200, 230, 240, 0.1)'
-    ''' 
-    Color of the brain/VNC mesh, works with brain_mesh = 'template' or 'whole'\n
-    Format: 'rgba(r, g, b, a)' where a=transparency (0=transparent, 1=opaque)\n
-    Example: 'rgba(200, 230, 240, 0.1)' for light blue semi-transparent\n
-    See https://plotly.com/python/discrete-color/
-    '''
-
-    def list_available_rois(self, refresh=False, fetch_online=True):
-        """List all available ROIs for the current dataset.
-        
-        Parameters
-        ----------
-        refresh : bool
-            If True, force refresh from NeuPrint API. If False, use cached data if available.
-        fetch_online : bool
-            If True, attempt to fetch from NeuPrint online database. If False, only use local cache.
-        
-        Returns
-        -------
-        list
-            Sorted list of available ROI names.
-        
-        Examples
-        --------
-        >>> vs = VisualizeSkeleton(dataset='hemibrain:v1.2.1', neuron_layers=['EB'])
-        >>> available_rois = vs.list_available_rois()
-        >>> print(f"Found {len(available_rois)} available ROIs")
-        >>> print(available_rois[:10])  # Show first 10 ROIs
-        
-        >>> # Force refresh from online database
-        >>> fresh_rois = vs.list_available_rois(refresh=True, fetch_online=True)
-        """
-        print(f'\n' + '='*70)
-        print(f'Available ROIs for {self.dataset}')
-        print('='*70)
-        
-        rois = self._get_available_rois(use_cache=not refresh, fetch_online=fetch_online)
-        
-        if rois:
-            print(f'\n📊 Total: {len(rois)} ROIs')
-            print(f'\n🔹 First 30 ROIs:')
-            for i in range(0, min(30, len(rois)), 5):
-                print('  ', ', '.join(rois[i:i+5]))
-            if len(rois) > 30:
-                print(f'  ... and {len(rois) - 30} more')
-            print(f'\n💡 Use these ROI names in the mesh_roi parameter')
-            print('='*70)
-        else:
-            print('⚠️  No ROIs found')
-            print('='*70)
-        
-        return rois
-    
-    def __post_init__(self):
-        # Initialize list to store meshes for export
-        self.exportable_meshes = []
-        
-        # Auto-detect client_type from dataset if not explicitly set to flywire
-        if self.client_type == 'neuprint' and ('flywire' in self.dataset.lower() or 'fafb' in self.dataset.lower()):
-            self.client_type = 'flywire'
-            print(f"Auto-detected client_type='flywire' from dataset '{self.dataset}'")
-
-        # Force disable caching for FlyWire/FAFB
-        if self.client_type == 'flywire' or 'flywire' in self.dataset.lower() or 'fafb' in self.dataset.lower():
-            if self.cache_neurons:
-                print(" Disabling neuron skeleton caching for FlyWire/FAFB (files too large)")
-                self.cache_neurons = False
-            if self.cache_synapses:
-                print(" Disabling synapse caching for FlyWire/FAFB (files too large)")
-                self.cache_synapses = False
-
-        # Auto-detect version from dataset if not provided
-        if self.client_type == 'flywire' and self.version is None:
-            import re
-            # Look for v783 or version 783
-            match = re.search(r'v(\d+)', self.dataset)
-            if match:
-                self.version = int(match.group(1))
-                print(f"Auto-detected version={self.version} from dataset '{self.dataset}'")
-
-        # Initialize client if needed
-        if self.client_type == 'neuprint':
-            import neuprint
-            # Check if global client exists
-            client_exists = False
-            try:
-                if neuprint.default_client() is not None:
-                    client_exists = True
-            except RuntimeError:
-                pass
-
-            if not client_exists:
-                if self.token:
-                    self.client = Client(self.server, dataset=self.dataset, token=self.token)
-                    self.client.fetch_version()
-                    print(f'Client initialized for {self.dataset}')
-                elif os.environ.get('NEUPRINT_APPLICATION_CREDENTIALS'):
-                    # Auto-detect from env
-                    self.client = Client(self.server, dataset=self.dataset)
-                    self.client.fetch_version()
-                    print(f'Client initialized from env for {self.dataset}')
-                else:
-                    # Only warn if we are not using local cache/files exclusively
-                    # But we don't know that yet.
-                    pass
-        
-        # Initialize FlyWire client if needed
-        if self.client_type == 'flywire' and self.client_flywire is None:
-            # FlyWire API fetching removed
-            pass
-
-        # Check FlyWire visualization files
-        if 'flywire' in self.dataset.lower() or 'fafb' in self.dataset.lower():
-            # Ensure data is prepared using the converter
-            dataset_dir = os.path.join(self.script_path, 'datasets', self.dataset)
-            
-            # Use the converter module to ensure data is ready
-            if 'BANC' in self.dataset:
-                success = BANC_file_converter.ensure_banc_data(self.dataset, dataset_dir)
-            else:
-                success = FAFB_file_converter.ensure_flywire_data(self.dataset, dataset_dir)
-
-            if not success:
-                print("\n\033[31mCRITICAL ERROR: FlyWire/BANC data preparation failed.\033[0m")
-                print("Please follow the instructions above to download the required files.")
-                sys.exit(1)
-            
-            try:
-                import fafb_utils
-                # Check for skeleton zip
-                if not os.path.exists(dataset_dir):
-                    dataset_dir = os.path.join(self.script_path, 'datasets', 'flywire_FAFB_v783')
-                
-                if os.path.exists(dataset_dir):
-                    sk_zip = fafb_utils.get_fafb_skeleton_zip(dataset_dir)
-                    if not sk_zip:
-                        print(f'\033[31mWarning: FlyWire skeleton zip not found in {dataset_dir}\033[0m')
-                        if 'BANC' in self.dataset:
-                            print('Skeleton visualization not available for BANC, because the skeleton data not available in flywire codex')
-                        else:
-                            print(f'Please download sk_lod1_783_healed.zip from https://codex.flywire.ai/api/download?dataset=fafb')
-                        print(f'Visualization might fail or be incomplete.')
-                        sys.exit(0)
-            except ImportError:
-                pass
-
-        if self.synapse_mode not in ['scatter', 'sphere', 'cone', 'tetrahedron']:
-            raise ValueError('synapse_mode can only be "scatter", "sphere", "cone", or "tetrahedron"')
-        if self.legend_mode not in ['normal', 'merge']:
-            raise ValueError('legend_mode can only be "normal" or "merge"')
-        if self.skeleton_mode not in ['line','tube']:
-            raise ValueError('skeleton_mode can only be "line" or "tube"')
-        if self.brain_mesh not in ['none', 'whole', 'template']:
-            raise ValueError('brain_mesh must be "none", "template", or "whole"')
-        if self.backend not in ['plotly', 'k3d']:
-            raise ValueError('backend must be "plotly" or "k3d"')
-        
-        # Check brain transforms early if brain_mesh='whole' is requested
-        # Only some datasets require transforms
-        if self.brain_mesh == 'whole':
-            needs_transform = self._dataset_needs_transform()
-            if needs_transform and not self._check_and_download_transforms():
-                self.brain_mesh = 'none'
-                print('⚠️  brain_mesh reset to "none" due to missing transforms')
-        
-        # convert neuron_layers str to list, if is str
-        if type(self.neuron_layers) is str:
-            self.neuron_layers = self.neuron_layers.replace(' ','').split('->')
-            for i,layer in enumerate(self.neuron_layers): # convert bodyId str to int
-                if layer.isnumeric():
-                    self.neuron_layers[i] = int(layer)
-        
-        if self.synapse_mode == 'scatter' and self.synapse_size == 0:
-            self.synapse_size = 2
-        elif self.synapse_mode in ['sphere', 'cone', 'tetrahedron']:
-            # Only check size limit if synapse_size is a number (not 'real')
-            if isinstance(self.synapse_size, (int, float)) and self.synapse_size < 20 and self.brain_mesh != 'whole':
-                self.synapse_size = 20
-                print('\033[33mSynapse size is too small (< 20) for sphere, cone, or tetrahedron mode, automatically reset to 20\033[0m')
-            if self.use_size_slider:
-                self.use_size_slider = False
-                print('\033[33msize slider is only available for synapse_mode="scatter", automatically reset use_size_slider to False\033[0m')
-            
-        if self.mesh_roi == None:
-            self.mesh_roi = []
-        
-        if len(self.neuron_layers) <= len(self.neuron_colors): 
-            self.neuron_colors = self.neuron_colors[:len(self.neuron_layers)]
-            self.synapse_colors = self.synapse_colors[:len(self.neuron_layers)-1]
-
-        # Validate brain_mesh options
-        if self.brain_mesh == 'hemi':
-            if 'hemibrain' not in self.dataset.lower():
-                print('\033[33m⚠️  brain_mesh="hemi" only works with hemibrain:v1.2.1 dataset')
-                print('   VNC datasets (manc, male-cns) do not support hemisphere mode')
-                print('   Automatically switching to brain_mesh="whole"\033[0m')
-                self.brain_mesh = 'whole'
-        
-        if self.skeleton_mode == 'line':
-            self.show_skeleton_radius = False
-            # neuron_alpha is now supported for line mode via opacity
-        elif self.skeleton_mode == 'tube':
-            self.show_skeleton_radius = True
-        
-        # fetch neurons and automatically generate layer names
-        self.neuron_dfs = []
-        self.roi_dfs = []
-        self.layer_criteria = []
-        self.layer_names = []
-        for i in range(len(self.neuron_layers)):
-            print(f'fetching neuron info of layer {i}...')
-            layer_input = self.neuron_layers[i]
-            if not isinstance(layer_input, list):
-                layer_input = [layer_input]
-            ndf, rdf, auto_name, cri = sv.getNeurons(layer_input, dataset=self.dataset)
-            self.neuron_dfs.append(ndf)
-            self.roi_dfs.append(rdf)
-            self.layer_criteria.append(cri)
-            self.layer_names.append(auto_name)
-        print('Fetched neuron layers')
-
-        
-        if self.custom_layer_names:
-            self.layer_names = self.custom_layer_names
-        if self.saveas is None:
-            self.saveas = '_'.join(self.layer_names)
-        
-        # Create timestamped subfolder
-        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        self.save_folder = os.path.join(self.data_folder, 'plot3d_' + self.saveas.split('.')[0] + '_' + timestamp)
-        if not os.path.exists(self.save_folder): os.makedirs(self.save_folder)
-        
-        # Save parameters to text file
-        param_file = os.path.join(self.save_folder, 'parameters.txt')
-        with open(param_file, 'w') as f:
-            f.write(f"Dataset: {self.dataset}\n")
-            f.write(f"Timestamp: {timestamp}\n")
-            f.write(f"Neuron Layers: {self.neuron_layers}\n")
-            f.write(f"Layer Names: {self.layer_names}\n")
-            f.write(f"Min Synapse Num: {self.min_synapse_num}\n")
-            f.write(f"Synapse Mode: {self.synapse_mode}\n")
-            f.write(f"Synapse Size: {self.synapse_size}\n")
-            f.write(f"Skeleton Mode: {self.skeleton_mode}\n")
-            f.write(f"Brain Mesh: {self.brain_mesh}\n")
-            f.write(f"Mesh ROI: {self.mesh_roi}\n")
-            f.write(f"Backend: {self.backend}\n")
-            f.write(f"Client Type: {self.client_type}\n")
-            if self.version:
-                f.write(f"Version: {self.version}\n")
-        
-        if self.backend == 'plotly':
-            self.fig_3d = go.Figure()
-        elif self.backend == 'k3d':
-            try:
-                import k3d
-                self.fig_3d = k3d.plot()
-            except ImportError:
-                print("⚠️  k3d not installed. Please install it with `pip install k3d`")
-                print("   Falling back to plotly backend")
-                self.backend = 'plotly'
-                self.fig_3d = go.Figure()
-        
-        # save neuron dataframes to excel file
-        file_path = os.path.join(self.save_folder, self.saveas+'_neuron_info.xlsx')
-        for i in range(len(self.neuron_layers)):
-            if i == 0:
-                mode = 'w'
-            else:
-                mode = 'a'
-            with pd.ExcelWriter(file_path,mode=mode,engine='openpyxl') as writer:
-                self.neuron_dfs[i].to_excel(writer, sheet_name=f'neuron_df{i}')
-                self.roi_dfs[i].to_excel(writer, sheet_name=f'roi_count_df{i}')
-    
-    def _get_cache_path(self, cache_type):
-        """Get the cache directory for skeletons or synapses
-        
-        Uses project cache/ folder for organized storage:
-        cache/{dataset}/skeletons/ - for individual skeleton .pkl files
-        cache/{dataset}/synapses/ - for synapse cache files
-        
-        For datasets folder resources:
-        datasets/{dataset}/*_synapse_table.parquet - synapse table
-        
-        Example:
-        - cache/hemibrain_v1_2_1/skeletons/{bodyId}.pkl
-        - datasets/flywire_FAFB_v783/flywire_FAFB_v783_synapse_table.parquet
-        """
-        dataset_normalized = self.dataset.replace(':', '_').replace('.', '_')
-        cache_dir = os.path.join(self.script_path, 'cache', dataset_normalized, cache_type)
-        os.makedirs(cache_dir, exist_ok=True)
-        return cache_dir
-    
-    def _get_synapse_table_path(self):
-        """Get path to synapse table in datasets folder.
-        
-        Returns the path to the synapse table parquet file.
-        For FlyWire/FAFB: datasets/flywire_FAFB_v783/flywire_FAFB_v783_synapse_table.parquet
-        For NeuPrint: datasets/{dataset}/{dataset}_synapse_table.parquet
-        
-        Returns:
-            str: Path to synapse table, or None if not found
-        """
-        dataset_normalized = self.dataset.replace(':', '_').replace('.', '_')
-        datasets_dir = os.path.join(self.script_path, 'datasets', dataset_normalized)
-        
-        # Look for synapse table file
-        parquet_file = os.path.join(datasets_dir, f"{dataset_normalized}_synapse_table.parquet")
-        
-        if os.path.exists(parquet_file):
-            return parquet_file
-        
-        # Fallback: try FAFB naming if dataset includes flywire
-        if 'flywire' in self.dataset.lower() or 'fafb' in self.dataset.lower():
-            fafb_dir = os.path.join(self.script_path, 'datasets', 'flywire_FAFB_v783')
-            fafb_file = os.path.join(fafb_dir, 'flywire_FAFB_v783_synapse_table.parquet')
-            if os.path.exists(fafb_file):
-                return fafb_file
-        
-        return None
-    
-    def _load_cached_neurons(self, neuron_df):
-        """Load cached neuron skeletons if available.
-        
-        Loads individual {bodyId}.pkl files from cache/{dataset}/skeletons/
-        
-        Returns:
-            navis.NeuronList or None if no cached neurons found
-        """
-        if not self.cache_neurons:
-            return None
-        
-        cache_dir = self._get_cache_path('skeletons')
-        body_ids = neuron_df['bodyId'].tolist()
-        
-        import pickle
-        neurons = []
-        loaded_ids = []
-        missing_ids = []
-        
-        for bid in body_ids:
-            cache_file = os.path.join(cache_dir, f'{bid}.pkl')
-            if os.path.exists(cache_file):
-                try:
-                    with open(cache_file, 'rb') as f:
-                        neuron = pickle.load(f)
-                    neurons.append(neuron)
-                    loaded_ids.append(bid)
-                except Exception as e:
-                    print(f'  ⚠ Failed to load cached skeleton {bid}: {e}')
-                    missing_ids.append(bid)
-            else:
-                missing_ids.append(bid)
-        
-        if neurons:
-            print(f'  ✓ Loaded {len(neurons)} neurons from cache')
-            if missing_ids:
-                print(f'  ℹ  {len(missing_ids)} neurons not in cache, will fetch')
-            # Return loaded neurons plus info about missing ones
-            return navis.NeuronList(neurons), missing_ids
-        
-        return None, body_ids  # All missing
-    
-    def _save_cached_neurons(self, neuron_df, neuron_vols):
-        """Save neuron skeletons to cache as individual {bodyId}.pkl files.
-        
-        Saves each neuron as a separate file for better reusability.
-        """
-        if not self.cache_neurons:
-            return
-        
-        cache_dir = self._get_cache_path('skeletons')
-        
-        import pickle
-        saved_count = 0
-        
-        # Handle both NeuronList and list of neurons
-        if hasattr(neuron_vols, '__iter__'):
-            for neuron in neuron_vols:
-                try:
-                    # Get bodyId from neuron
-                    bid = getattr(neuron, 'id', None) or getattr(neuron, 'bodyId', None)
-                    if bid is None:
-                        continue
-                    
-                    cache_file = os.path.join(cache_dir, f'{bid}.pkl')
-                    
-                    # Skip if already cached
-                    if os.path.exists(cache_file):
-                        continue
-                    
-                    with open(cache_file, 'wb') as f:
-                        pickle.dump(neuron, f)
-                    saved_count += 1
-                except Exception as e:
-                    print(f'  ⚠ Failed to save skeleton {bid}: {e}')
-        
-        if saved_count > 0:
-            print(f'  💾 Saved {saved_count} new neurons to cache')
-    
-    def plot_skeleton(self):
-        for i in range(len(self.neuron_layers)):
-            print(f'fetching skeletons of layer {i}...')
-            
-            # Try to load from cache first
-            cache_result = self._load_cached_neurons(self.neuron_dfs[i])
-            
-            cached_neurons = None
-            missing_ids = self.neuron_dfs[i]['bodyId'].tolist()  # Default: all missing
-            
-            if cache_result is not None:
-                cached_neurons, missing_ids = cache_result
-            
-            neuron_vols = None
-            
-            # Fetch missing neurons
-            if missing_ids:
-                # Special handling for FAFB local data
-                if 'flywire' in self.dataset.lower() or 'fafb' in self.dataset.lower():
-                    try:
-                        import fafb_utils
-                        project_root = os.path.dirname(os.path.dirname(__file__))
-                        
-                        # Try to find dataset directory by name
-                        data_dir = os.path.join(project_root, "datasets", self.dataset)
-                        if not os.path.exists(data_dir):
-                            data_dir = os.path.join(project_root, "datasets", "flywire_FAFB_v783")
-                        
-                        # Load from Zip
-                        zip_path = fafb_utils.get_fafb_skeleton_zip(data_dir)
-                        
-                        if zip_path:
-                            print(f"  Loading skeletons from Zip: {zip_path}...")
-                            
-                            import zipfile
-                            import io
-                            
-                            neurons = []
-                            with zipfile.ZipFile(zip_path, 'r') as z:
-                                for bid in missing_ids:
-                                    filename = f"{bid}.swc"
-                                    try:
-                                        # Check if file exists in zip
-                                        if filename in z.namelist():
-                                            with z.open(filename) as f:
-                                                # Read content
-                                                content = f.read().decode('utf-8')
-                                                # Parse with navis
-                                                n = navis.read_swc(io.StringIO(content))
-                                                n.units = 'nm' # Explicitly set units for FAFB
-                                                n.id = bid
-                                                n.name = str(bid)
-                                                neurons.append(n)
-                                        else:
-                                            print(f"    Warning: Skeleton {filename} not found in zip")
-                                    except Exception as e:
-                                        print(f"    Error reading {filename}: {e}")
-                            
-                            if neurons:
-                                neuron_vols = navis.NeuronList(neurons)
-                                print(f"  ✓ Loaded {len(neurons)} skeletons from local zip")
-                    except ImportError:
-                        pass
-                    except Exception as e:
-                        print(f"  Warning: Error loading local FAFB skeletons: {e}")
-
-                # Fetch from API if not loaded locally
-                if neuron_vols is None and missing_ids:
-                    if self.client_type == 'flywire' and self.client_flywire:
-                        # Filter neuron_df to only missing IDs
-                        missing_df = self.neuron_dfs[i][self.neuron_dfs[i]['bodyId'].isin(missing_ids)]
-                        neuron_vols = self.client_flywire.fetch_skeletons(self.layer_criteria[i], with_synapses=self.show_connectors)
-                    else:
-                        # Fetch from NeuPrint - filter to missing IDs only
-                        missing_df = self.neuron_dfs[i][self.neuron_dfs[i]['bodyId'].isin(missing_ids)]
-                        if not missing_df.empty:
-                            neuron_vols = neu.fetch_skeletons(missing_df, with_synapses=self.show_connectors)
-                
-                # Save newly fetched neurons to cache
-                if neuron_vols is not None:
-                    self._save_cached_neurons(self.neuron_dfs[i], neuron_vols)
-            
-            # Combine cached and newly fetched neurons
-            if cached_neurons is not None and neuron_vols is not None:
-                # Combine both lists
-                all_neurons = list(cached_neurons) + list(neuron_vols)
-                neuron_vols = navis.NeuronList(all_neurons)
-            elif cached_neurons is not None:
-                neuron_vols = cached_neurons
-            # else neuron_vols is already set from fetch
-
-            # Normalize to NeuronList so downstream len()/iteration works for single TreeNeuron
-            if neuron_vols is not None and not isinstance(neuron_vols, (list, navis.NeuronList)):
-                neuron_vols = navis.NeuronList([neuron_vols])
-            
-            if neuron_vols is None or len(neuron_vols) == 0:
-                print(f'⚠️  Failed to fetch skeletons for layer {i}')
-                continue
-
-            if self.brain_mesh in ['whole', 'template']:
-                template_info = self._get_template_info()
-                print(f'Transforming skeletons of layer {i} to {template_info["mesh_name"]}...', end='')
-                try:
-                    # Ensure float64 coordinates to avoid dtype warnings in navis
-                    if isinstance(neuron_vols, (list, navis.NeuronList)):
-                        for n in neuron_vols:
-                            if hasattr(n, 'nodes') and isinstance(n.nodes, pd.DataFrame):
-                                for col in ['x', 'y', 'z']:
-                                    if col in n.nodes.columns:
-                                        n.nodes[col] = n.nodes[col].astype('float64')
-                                # Print range for first neuron
-                                if n == neuron_vols[0]:
-                                    print(f"  Skeleton coords range (nm): X[{n.nodes.x.min():.1f}, {n.nodes.x.max():.1f}], Y[{n.nodes.y.min():.1f}, {n.nodes.y.max():.1f}], Z[{n.nodes.z.min():.1f}, {n.nodes.z.max():.1f}]")
-                    elif hasattr(neuron_vols, 'nodes') and isinstance(neuron_vols.nodes, pd.DataFrame):
-                         for col in ['x', 'y', 'z']:
-                            if col in neuron_vols.nodes.columns:
-                                neuron_vols.nodes[col] = neuron_vols.nodes[col].astype('float64')
-                         print(f"  Skeleton coords range (nm): X[{neuron_vols.nodes.x.min():.1f}, {neuron_vols.nodes.x.max():.1f}], Y[{neuron_vols.nodes.y.min():.1f}, {neuron_vols.nodes.y.max():.1f}], Z[{neuron_vols.nodes.z.min():.1f}, {neuron_vols.nodes.z.max():.1f}]")
-
-                    neuron_vols = navis.xform_brain(neuron_vols, source=template_info['source'], target=template_info['target'])
-                except Exception as e:
-                    print(f'\n⚠️  Transforming skeletons failed: {e}')
-                    if self._dataset_needs_transform() and not self._check_and_download_transforms():
-                        self.brain_mesh = 'none'
-                    else:
-                        # Retry transformation after download
-                        try:
-                            neuron_vols = navis.xform_brain(neuron_vols, source=template_info['source'], target=template_info['target'])
-                            print('✓ Transformation successful after download')
-                        except Exception as retry_e:
-                            print(f'⚠️  Transformation still failed: {retry_e}')
-                            print('   Setting brain_mesh to "none"')
-                            self.brain_mesh = 'none'
-            
-            # Ensure iterable after potential transforms (navis may return TreeNeuron)
-            if neuron_vols is not None and not isinstance(neuron_vols, (list, navis.NeuronList)):
-                neuron_vols = navis.NeuronList([neuron_vols])
-
-            # Mirror neurons if requested
-            if self.mirror_on_contralateral:
-                print(f'Mirroring {len(neuron_vols)} neurons...', end='')
-                try:
-                    template = None
-                    if self.brain_mesh == 'whole':
-                        template_info = self._get_template_info()
-                        template = template_info['target']
-                    elif self.brain_mesh == 'template':
-                         if 'hemibrain' in self.dataset or 'optic-lobe' in self.dataset:
-                             template = 'JRCFIB2018F'
-                         elif 'male-cns' in self.dataset:
-                             template = 'JRCFIB2022M'
-                    
-                    if template:
-                        mirrored = navis.mirror_brain(neuron_vols, template, mirror_axis='x')
-                        if isinstance(neuron_vols, navis.NeuronList):
-                            neuron_vols = neuron_vols + mirrored
-                        else:
-                            neuron_vols = navis.NeuronList([neuron_vols, mirrored])
-                        print(' (mirrored) ', end='')
-                    else:
-                        print(' (mirror skipped: unknown template) ', end='')
-                except Exception as e:
-                    print(f' (mirror failed: {e})', end='')
-
-            # Simplify individual neurons if requested (and not merging)
-            # If merging is enabled, simplification is handled during the merge process
-            if self.skeleton_mesh_simplification > 0 and self.skeleton_mode == 'tube' and not self.merge_neurons:
-                print(f'Simplifying {len(neuron_vols)} neurons ({self.skeleton_mesh_simplification*100:.0f}%)...', end='')
-                try:
-                    import trimesh
-                    simplified_neurons = []
-                    # Ensure iterable
-                    neurons_to_simplify = neuron_vols if isinstance(neuron_vols, navis.NeuronList) else [neuron_vols]
-                    
-                    for n in neurons_to_simplify:
-                        try:
-                            # Convert to mesh if needed (TreeNeuron -> MeshNeuron)
-                            mesh_n = None
-                            if isinstance(n, navis.TreeNeuron):
-                                # Fix radii if needed
-                                if hasattr(n, 'nodes') and 'radius' in n.nodes.columns:
-                                    invalid_mask = (n.nodes['radius'] <= 0) | (n.nodes['radius'].isna())
-                                    if invalid_mask.any():
-                                        n.nodes.loc[invalid_mask, 'radius'] = 1
-                                elif hasattr(n, 'nodes'):
-                                    n.nodes['radius'] = 1
-                                
-                                # Convert
-                                if hasattr(navis, 'conversion') and hasattr(navis.conversion, 'tree2meshneuron'):
-                                    mesh_n = navis.conversion.tree2meshneuron(n)
-                            elif isinstance(n, navis.MeshNeuron):
-                                mesh_n = n
-                                
-                            # Simplify if we have a mesh neuron
-                            if mesh_n and hasattr(mesh_n, 'trimesh'):
-                                n_faces = len(mesh_n.trimesh.faces)
-                                target_faces = int(n_faces * (1 - self.skeleton_mesh_simplification))
-                                if target_faces < n_faces:
-                                    # simplify_quadratic_decimation returns a new trimesh object
-                                    mesh_n.trimesh = mesh_n.trimesh.simplify_quadratic_decimation(target_faces)
-                                simplified_neurons.append(mesh_n)
-                            else:
-                                # Keep original if conversion failed or not applicable
-                                simplified_neurons.append(n)
-                        except Exception as e:
-                            # print(f'Warning: Failed to simplify neuron {n.id}: {e}')
-                            simplified_neurons.append(n) # Keep original if failed
-                    
-                    neuron_vols = navis.NeuronList(simplified_neurons)
-                    print(' Done')
-                except Exception as e:
-                    print(f' (simplification failed: {e})', end='')
-
-            # Merge neurons if requested (optimization)
-            num_neurons = len(neuron_vols) if isinstance(neuron_vols, (list, navis.NeuronList)) else 1
-            if self.merge_neurons and num_neurons > 1:
-                print(f'Merging {num_neurons} neurons into single object...', end='')
-                try:
-                    if self.skeleton_mode == 'tube':
-                        import trimesh
-                        # navis.conversion is already available via 'import navis' at module level
-                        
-                        # Convert all neurons to meshes
-                        meshes = []
-                        neurons_to_merge = neuron_vols if isinstance(neuron_vols, navis.NeuronList) else [neuron_vols]
-                        
-                        for n in neurons_to_merge:
-                            try:
-                                # Fix missing radii to avoid navis warning
-                                if hasattr(n, 'nodes') and 'radius' in n.nodes.columns:
-                                    # Check for invalid radii (<= 0 or NaN)
-                                    invalid_mask = (n.nodes['radius'] <= 0) | (n.nodes['radius'].isna())
-                                    if invalid_mask.any():
-                                        # Set default radius (e.g. 40 units) for visibility
-                                        n.nodes.loc[invalid_mask, 'radius'] = 1
-                                elif hasattr(n, 'nodes'):
-                                    # If radius column missing entirely, create it
-                                    n.nodes['radius'] = 1
-
-                                # Convert to mesh (TreeNeuron -> MeshNeuron)
-                                # Use navis.conversion.tree2meshneuron if available, or navis.MeshNeuron.from_tree
-                                # Or simply navis.MeshNeuron(n) which might work
-                                # Let's try navis.conversion.tree2meshneuron first as it's explicit
-                                if hasattr(navis, 'conversion') and hasattr(navis.conversion, 'tree2meshneuron'):
-                                    mesh_neuron = navis.conversion.tree2meshneuron(n)
-                                else:
-                                    # Fallback: try to create MeshNeuron directly or use other method
-                                    # navis.MeshNeuron(n) might not work directly for TreeNeuron
-                                    # Try navis.volume.from_object? No.
-                                    # Try n.mesh property?
-                                    # Actually, navis has a function to mesh neurons: navis.mesh_neurons (which failed before)
-                                    # Let's try to use the internal method if possible.
-                                    # Or use navis.TreeNeuron.to_mesh() if it exists? No.
-                                    
-                                    # Let's try a simpler approach:
-                                    # navis.plot3d generates meshes internally.
-                                    # But we want to merge them BEFORE plotting.
-                                    
-                                    # Try: mesh_neuron = navis.MeshNeuron(n) - this might work if n is compatible
-                                    # Or: mesh_neuron = n.convert_to_mesh() - hypothetical
-                                    
-                                    # Let's assume navis.conversion.tree2meshneuron works as per subagent
-                                    # If not, we catch exception.
-                                    mesh_neuron = navis.conversion.tree2meshneuron(n)
-                                
-                                if hasattr(mesh_neuron, 'trimesh'):
-                                    meshes.append(mesh_neuron.trimesh)
-                            except Exception as e:
-                                # print(f'Warning: Failed to mesh neuron {n.id}: {e}')
-                                pass
-                        
-                        if meshes:
-                            # Concatenate meshes
-                            merged_mesh = trimesh.util.concatenate(meshes)
-                            
-                            # Simplify if requested
-                            if self.skeleton_mesh_simplification > 0:
-                                n_faces = len(merged_mesh.faces)
-                                target_faces = int(n_faces * (1 - self.skeleton_mesh_simplification))
-                                if target_faces < n_faces:
-                                    try:
-                                        # Try open3d simplification first (better quality)
-                                        # If open3d not installed, trimesh might fail or use other method
-                                        # trimesh.simplify_quadratic_decimation uses open3d or fast-simplification
-                                        merged_mesh = merged_mesh.simplify_quadratic_decimation(target_faces)
-                                    except Exception as e:
-                                        print(f' (simplification failed: {e})', end='')
-                            
-                            # Convert back to navis object
-                            neuron_vols = navis.MeshNeuron(merged_mesh)
-                            neuron_vols.name = self.layer_names[i]
-                            print(' (merged) ', end='')
-                        else:
-                            print(' (merge failed: no meshes generated) ', end='')
-                    else:
-                        # For line mode, we can merge traces later in plotting?
-                        # Actually, navis.plot3d returns a figure with traces.
-                        # We can merge them there.
-                        print(' (will merge traces in plot) ', end='')
-                except Exception as e:
-                    print(f'⚠️  Merge failed: {e}, plotting individually')
-
-            print('plotting...', end='')
-            
-            if self.backend == 'plotly':
-                fig_layer = navis.plot3d(
-                    neuron_vols,
-                    backend='plotly',
-                    color=self.neuron_colors[i],
-                    alpha=self.neuron_alpha,
-                    soma=self.show_soma if not isinstance(neuron_vols, navis.Volume) else False,
-                    # fig=self.fig_3d,
-                    radius=self.show_skeleton_radius,
-                    connectors=self.show_connectors if not isinstance(neuron_vols, navis.Volume) else False,
-                )
-                fig_traces = fig_layer.data
-                
-                # If merging was requested for line mode, we can optimize here by combining traces
-                if self.merge_neurons and self.skeleton_mode == 'line' and len(fig_traces) > 1:
-                    # Combine all scatter3d traces into one
-                    x_all, y_all, z_all = [], [], []
-                    for trace in fig_traces:
-                        if hasattr(trace, 'x') and trace.x is not None:
-                            x_all.extend(trace.x)
-                            x_all.append(None) # Add break between lines
-                            y_all.extend(trace.y)
-                            y_all.append(None)
-                            z_all.extend(trace.z)
-                            z_all.append(None)
-                    
-                    # Create single merged trace
-                    merged_trace = go.Scatter3d(
-                        x=x_all, y=y_all, z=z_all,
-                        mode='lines',
-                        line=dict(color=self.neuron_colors[i], width=1),
-                        opacity=self.neuron_alpha,
-                        name=self.layer_names[i]
-                    )
-                    fig_traces = [merged_trace]
-
-                for j,trace in enumerate(fig_traces):
-                    # Enforce opacity for lines if not already set or if we want to override
-                    if self.skeleton_mode == 'line':
-                        trace.opacity = self.neuron_alpha
-
-                    if self.legend_mode == 'merge':
-                        if j == 0:
-                            trace.showlegend = True
-                        else:
-                            trace.showlegend = False
-                        trace.name = self.layer_names[i]
-                        trace.hovertemplate = '<b>%{fullData.name}</b><extra></extra>'  # show full name in hover tooltip
-                        trace.legendgroup = self.layer_names[i]
-                        trace.hoverinfo = 'name'
-                        self.fig_3d.add_trace(trace)
-                    elif self.legend_mode == 'normal':
-                        trace.hoverinfo = 'name'
-                        trace.hovertemplate = '<b>%{fullData.name}</b><extra></extra>'
-                        self.fig_3d.add_trace(trace)
-                    else:
-                        raise ValueError(f'legend_mode {self.legend_mode} not supported')
-            
-            elif self.backend == 'k3d':
-                try:
-                    # navis.plot3d with k3d backend returns a k3d.Plot object
-                    temp_plot = navis.plot3d(
-                        neuron_vols,
-                        backend='k3d',
-                        color=self.neuron_colors[i],
-                        alpha=self.neuron_alpha,
-                        soma=self.show_soma if not isinstance(neuron_vols, navis.Volume) else False,
-                        radius=self.show_skeleton_radius,
-                        connectors=self.show_connectors if not isinstance(neuron_vols, navis.Volume) else False,
-                        inline=False
-                    )
-                    
-                    for obj in temp_plot.objects:
-                        if hasattr(obj, 'name'):
-                            obj.name = self.layer_names[i]
-                        self.fig_3d += obj
-                except Exception as e:
-                    print(f'⚠️  k3d plotting failed: {e}')
-
-            print('Done')
-        return 0
-    
-    def _get_synapse_cache_path(self, pre_id, post_id):
-        """Get cache file path for synapses between a specific pre/post neuron pair.
-        
-        Cache structure: cache/{dataset}/synapses/{pre_id}_{post_id}.parquet
-        
-        This caches by neuron pair rather than by layer, because:
-        1. The same synapse data is reusable across different queries
-        2. Layer indices are arbitrary and session-specific
-        3. Avoids duplicate storage of the same synaptic connections
-        """
-        cache_dir = self._get_cache_path('synapses')  # Note: 'synapses' not 'synapse'
-        return os.path.join(cache_dir, f'{pre_id}_{post_id}.parquet')
-    
-    def _load_cached_synapses(self, source_ids, target_ids):
-        """Load cached synapse connections for given source/target neuron pairs.
-        
-        For FlyWire/FAFB datasets, loads from the master synapse table at:
-            datasets/{dataset}/{dataset}_synapse_table.parquet
-        and filters by source_ids and target_ids.
-        
-        For other datasets, loads individual cache files per neuron pair from:
-            cache/{dataset}/synapses/{pre_id}_{post_id}.parquet
-        
-        Args:
-            source_ids: Set/list of source (presynaptic) body IDs
-            target_ids: Set/list of target (postsynaptic) body IDs
-            
-        Returns:
-            Tuple of (cached_df, missing_pairs) where:
-            - cached_df: DataFrame of cached synapses (may be None if nothing cached)
-            - missing_pairs: List of (pre_id, post_id) tuples not found in cache
-        """
-        if not self.cache_synapses:
-            # Return all pairs as missing
-            all_pairs = [(s, t) for s in source_ids for t in target_ids]
-            return None, all_pairs
-        
-        source_ids = set(str(s) for s in source_ids)
-        target_ids = set(str(t) for t in target_ids)
-        
-        # For FlyWire/FAFB, use the master synapse table from datasets folder
-        if 'flywire' in self.dataset.lower() or 'fafb' in self.dataset.lower():
-            synapse_table_path = self._get_synapse_table_path()
-            if os.path.exists(synapse_table_path):
-                try:
-                    # Load master synapse table
-                    synapse_df = pd.read_parquet(synapse_table_path)
-                    print(f'  ✓ Loaded synapse table from {synapse_table_path}')
-                    
-                    # Determine column names (may vary by dataset)
-                    pre_col = 'pre_pt_root_id' if 'pre_pt_root_id' in synapse_df.columns else 'bodyId_pre'
-                    post_col = 'post_pt_root_id' if 'post_pt_root_id' in synapse_df.columns else 'bodyId_post'
-                    
-                    # Convert to string for matching
-                    synapse_df[pre_col] = synapse_df[pre_col].astype(str)
-                    synapse_df[post_col] = synapse_df[post_col].astype(str)
-                    
-                    filtered_df = synapse_df[
-                        (synapse_df[pre_col].isin(source_ids)) & 
-                        (synapse_df[post_col].isin(target_ids))
-                    ]
-                    print(f'  ✓ Filtered to {len(filtered_df)} synapses between {len(source_ids)} sources and {len(target_ids)} targets')
-                    # For FlyWire, master table has all data - no missing pairs
-                    return filtered_df, []
-                except Exception as e:
-                    print(f'  ⚠ Failed to load synapse table: {e}')
-                    all_pairs = [(s, t) for s in source_ids for t in target_ids]
-                    return None, all_pairs
-            else:
-                print(f'  ⚠ Synapse table not found at {synapse_table_path}')
-                all_pairs = [(s, t) for s in source_ids for t in target_ids]
-                return None, all_pairs
-        
-        # For other datasets, load from individual cache files per neuron pair
-        cached_dfs = []
-        missing_pairs = []
-        
-        for pre_id in source_ids:
-            for post_id in target_ids:
-                cache_file = self._get_synapse_cache_path(pre_id, post_id)
-                if os.path.exists(cache_file):
-                    try:
-                        df = pd.read_parquet(cache_file)
-                        if not df.empty:
-                            cached_dfs.append(df)
-                    except Exception as e:
-                        print(f'  ⚠ Cache load failed for {pre_id}→{post_id}: {e}')
-                        missing_pairs.append((pre_id, post_id))
-                else:
-                    missing_pairs.append((pre_id, post_id))
-        
-        if cached_dfs:
-            cached_df = pd.concat(cached_dfs, ignore_index=True)
-            print(f'  ✓ Loaded {len(cached_df)} synapses from cache ({len(cached_dfs)} pairs cached, {len(missing_pairs)} pairs missing)')
-        else:
-            cached_df = None
-            
-        return cached_df, missing_pairs
-    
-    def _save_cached_synapses(self, conn_df):
-        """Save synapse connections to cache, organized by pre/post neuron pairs.
-        
-        Each unique (pre_id, post_id) pair gets its own cache file at:
-            cache/{dataset}/synapses/{pre_id}_{post_id}.parquet
-            
-        This approach ensures:
-        1. Synapses are cached by their actual content (neuron pairs + positions)
-        2. Same synapse data is reusable across different queries/layers
-        3. Incremental caching - only fetch what's not already cached
-        """
-        if not self.cache_synapses:
-            return
-            
-        # Do not cache for FlyWire/FAFB - they use the master synapse table
-        if 'flywire' in self.dataset.lower() or 'fafb' in self.dataset.lower():
-            return
-        
-        if conn_df is None or conn_df.empty:
-            return
-            
-        # Determine column names for pre/post body IDs
-        pre_col = 'bodyId_pre' if 'bodyId_pre' in conn_df.columns else 'pre_pt_root_id'
-        post_col = 'bodyId_post' if 'bodyId_post' in conn_df.columns else 'post_pt_root_id'
-        
-        if pre_col not in conn_df.columns or post_col not in conn_df.columns:
-            print(f'  ⚠ Cannot cache synapses: missing {pre_col} or {post_col} columns')
-            return
-        
-        # Group by pre/post pairs and save each group
-        saved_count = 0
-        for (pre_id, post_id), group_df in conn_df.groupby([pre_col, post_col]):
-            pre_id_str = str(pre_id)
-            post_id_str = str(post_id)
-            cache_file = self._get_synapse_cache_path(pre_id_str, post_id_str)
-            
-            try:
-                group_df.to_parquet(cache_file, index=False)
-                saved_count += 1
-            except Exception as e:
-                print(f'  ⚠ Cache save failed for {pre_id}→{post_id}: {e}')
-        
-        print(f'  💾 Saved synapses to cache ({saved_count} neuron pairs)')
-    
-    def plot_synapses(self):
-        if self.skip_synapse:
-            print('Skipping synapse plotting as requested.')
-            return
-
-        for i in range(len(self.neuron_layers) - 1):
-            source_criteria = self.layer_criteria[i]
-            target_criteria = self.layer_criteria[i + 1]
-            # Use a single file for all synapse layers, consistent with neuron_info.xlsx
-            file_path = os.path.join(self.save_folder, self.saveas + '_synapses.xlsx')
-            conn_df = None
-
-            # --- Begin FlyWire/NeuPrint synapse loading logic ---
-            if self.client_type == 'flywire':
-                # Try loading from local file first
-                # Find dataset folder and synapse file dynamically
-                dataset_normalized = self.dataset.replace(':', '_').replace('.', '_')
-                dataset_dir = os.path.join(self.script_path, 'datasets', dataset_normalized)
-                
-                # Explicitly look for the file generated by FAFB_file_converter
-                parquet_file = os.path.join(dataset_dir, f"{dataset_normalized}_synapse_table.parquet")
-                
-                # Use Parquet if available
-                if os.path.exists(parquet_file):
-                    try:
-                        print(f'  Reading synapses from {parquet_file} (Parquet)...')
-                        source_ids = set(self.neuron_dfs[i]['bodyId'].astype(str))
-                        target_ids = set(self.neuron_dfs[i+1]['bodyId'].astype(str))
-                        
-                        # Read parquet with filters (requires pyarrow)
-                        import pyarrow.parquet as pq
-                        schema = pq.read_schema(parquet_file)
-                        pre_col = next((c for c in schema.names if c.startswith('pre_root_id')), None)
-                        post_col = next((c for c in schema.names if c.startswith('post_root_id')), None)
-                        
-                        if pre_col and post_col:
-                            # Check for coordinate columns
-                            coord_cols = ['pre_x', 'pre_y', 'pre_z', 'post_x', 'post_y', 'post_z']
-                            available_cols = schema.names
-                            missing_coords = [c for c in coord_cols if c not in available_cols]
-                            
-                            if missing_coords:
-                                print(f"  ⚠️ Missing coordinate columns in Parquet: {missing_coords}")
-                                # Try to find alternatives (e.g. x_pre vs pre_x)
-                                alt_map = {
-                                    'pre_x': ['x_pre', 'pre_pt_x'],
-                                    'pre_y': ['y_pre', 'pre_pt_y'],
-                                    'pre_z': ['z_pre', 'pre_pt_z'],
-                                    'post_x': ['x_post', 'post_pt_x'],
-                                    'post_y': ['y_post', 'post_pt_y'],
-                                    'post_z': ['z_post', 'post_pt_z']
-                                }
-                                found_map = {}
-                                for target, alts in alt_map.items():
-                                    if target in available_cols:
-                                        found_map[target] = target
-                                    else:
-                                        for alt in alts:
-                                            if alt in available_cols:
-                                                found_map[target] = alt
-                                                break
-                                
-                                if len(found_map) == 6:
-                                    print("  ✓ Found alternative coordinate columns")
-                                    columns = list(found_map.values()) + [pre_col, post_col]
-                                    df = pd.read_parquet(parquet_file, columns=columns)
-                                    # Rename to standard
-                                    inv_map = {v: k for k, v in found_map.items()}
-                                    df = df.rename(columns=inv_map)
-                                else:
-                                    print("  ❌ Could not resolve all coordinate columns. Skipping.")
-                                    conn_df = None
-                            else:
-                                columns = coord_cols + [pre_col, post_col]
-                                df = pd.read_parquet(parquet_file, columns=columns)
-
-                            if conn_df is None and 'df' in locals():
-                                df[pre_col] = df[pre_col].astype(str)
-                                df[post_col] = df[post_col].astype(str)
-                                
-                                mask = (df[pre_col].isin(source_ids)) & (df[post_col].isin(target_ids))
-                                conn_df = df[mask].copy()
-                                
-                                if not conn_df.empty:
-                                    rename_map = {
-                                        'pre_x': 'x_pre', 'pre_y': 'y_pre', 'pre_z': 'z_pre',
-                                        'post_x': 'x_post', 'post_y': 'y_post', 'post_z': 'z_post',
-                                        pre_col: 'bodyId_pre',
-                                        post_col: 'bodyId_post'
-                                    }
-                                    conn_df = conn_df.rename(columns=rename_map)
-                                    
-                                    # Check coordinate scale
-                                    # If Z > 10000, assume nm and DO NOT scale
-                                    if conn_df['z_pre'].max() > 10000:
-                                        print('  ✓ Detected coordinates in nanometers (no scaling applied)')
-                                    else:
-                                        print('  ✓ Detected coordinates in voxels (scaling 4x4x40)')
-                                        conn_df['x_pre'] = conn_df['x_pre'] * 4
-                                        conn_df['y_pre'] = conn_df['y_pre'] * 4
-                                        conn_df['z_pre'] = conn_df['z_pre'] * 40
-                                        conn_df['x_post'] = conn_df['x_post'] * 4
-                                        conn_df['y_post'] = conn_df['y_post'] * 4
-                                        conn_df['z_post'] = conn_df['z_post'] * 40
-
-                                    print(f'  ✓ Found {len(conn_df)} synapses in Parquet file')
-                                else:
-                                    print('  No matching synapses found in Parquet file')
-                                    conn_df = None
-                        else:
-                            print("  ⚠️ Could not find root_id columns in Parquet schema")
-                            conn_df = None
-                    except Exception as e:
-                        print(f'  ⚠️ Failed to read Parquet file: {e}')
-                        conn_df = None
-                else:
-                    # Fallback or warning
-                    print(f"  ℹ️  Synapse table not found: {parquet_file}")
-                    print("     If you have the raw CSV, please ensure FAFB_file_converter has run successfully.")
-                    conn_df = None
-
-                
-                # Fallback to client if local failed or returned nothing
-                if conn_df is None and self.client_flywire:
-                    print(f"\n  ⚠️  Local synapse file not found for dataset '{self.dataset}'.")
-                    if 'fafb' in self.dataset.lower():
-                        print("  Please download the synapse table from: https://codex.flywire.ai/api/download?dataset=fafb")
-                    print(f"  Save the file to: {dataset_dir}")
-                    print("  Skipping synapse plotting for this layer.")
-                    continue
-            else:
-                # Fetch from NeuPrint - use new caching strategy
-                source_ids = set(self.neuron_dfs[i]['bodyId'].astype(str))
-                target_ids = set(self.neuron_dfs[i+1]['bodyId'].astype(str))
-                
-                # Try to load from cache first
-                cached_df, missing_pairs = self._load_cached_synapses(source_ids, target_ids)
-                
-                if not missing_pairs:
-                    # All data cached
-                    conn_df = cached_df
-                elif cached_df is not None and len(missing_pairs) < len(source_ids) * len(target_ids):
-                    # Partial cache - fetch missing and combine
-                    print(f'  Fetching {len(missing_pairs)} missing neuron pairs from NeuPrint...')
-                    fetched_df = fetch_synapse_connections(
-                        source_criteria=source_criteria,
-                        target_criteria=target_criteria,
-                        min_total_weight=self.min_synapse_num,
-                        synapse_criteria=self.synapse_criteria,
-                    )
-                    if fetched_df is not None and not fetched_df.empty:
-                        conn_df = pd.concat([cached_df, fetched_df], ignore_index=True)
-                        # Save newly fetched data to cache
-                        self._save_cached_synapses(fetched_df)
-                    else:
-                        conn_df = cached_df
-                else:
-                    # No cache - fetch all
-                    conn_df = fetch_synapse_connections(
-                        source_criteria=source_criteria,
-                        target_criteria=target_criteria,
-                        min_total_weight=self.min_synapse_num,
-                        synapse_criteria=self.synapse_criteria,
-                    )
-                    # Save to cache
-                    if conn_df is not None and not conn_df.empty:
-                        self._save_cached_synapses(conn_df)
-        
-            if conn_df is None or conn_df.empty:
-                print('  No synapses found.')
-                continue
-
-            # Check if file exists to determine mode (handle skipped layers)
-            if os.path.exists(file_path):
-                mode = 'a'
-            else:
-                mode = 'w'
-                
-            with pd.ExcelWriter(file_path, mode=mode, engine='openpyxl') as writer:
-                conn_df.to_excel(writer, sheet_name=f'conn_df{i}_{i+1}')
-            
-            print('plotting...', end='')
-            
-            if self.synapse_mode == 'scatter' or self.backend == 'k3d':
-                X = (conn_df['x_pre']+conn_df['x_post'])/2
-                Y = (conn_df['y_pre']+conn_df['y_post'])/2
-                Z = (conn_df['z_pre']+conn_df['z_post'])/2
-                xyz_df = pd.DataFrame({'x':X, 'y':Y, 'z':Z})
-                
-                # Ensure coordinates are float to avoid dtype warnings during transform
-                xyz_df = xyz_df.astype(float)
-
-                # Attach colors to dataframe to preserve order during transform
-                c_val = self.synapse_colors[i]
-                is_color_array = False
-                if isinstance(c_val, (list, np.ndarray)) and len(c_val) == len(xyz_df):
-                     # Check if it's not just a single RGB tuple
-                     if len(xyz_df) != 3 or (isinstance(c_val[0], (str, list, tuple, np.ndarray))):
-                         xyz_df['__color'] = c_val
-                         is_color_array = True
-                
-                if self.brain_mesh in ['whole', 'template']:
-                    template_info = self._get_template_info()
-                    print(f'Transforming synapses of layer {i} -> {i+1}...', end='')
-                    xyz_df = navis.xform_brain(xyz_df, source=template_info['source'], target=template_info['target'])
-                
-                # Retrieve colors
-                if is_color_array and '__color' in xyz_df.columns:
-                    plot_colors = xyz_df['__color'].tolist()
-                else:
-                    plot_colors = self.synapse_colors[i]
-                
-                if self.backend == 'plotly':
-
-                    # Create 3 layers for gradient effect (Outer -> Inner)
-                    # Center: synapse_alpha, Surround: synapse_alpha/10
-                    base_alpha = self.synapse_alpha
-                    outer_alpha = base_alpha / 10.0
-                    layers = 3
-                    
-                    for l in range(layers):
-                        # Calculate size and alpha for this layer
-                        # l=0 (Outer): Size=100%, Alpha=Low
-                        # l=2 (Inner): Size=33%, Alpha=High
-                        
-                        # Size factor: 1.0 -> 0.33
-                        size_factor = (layers - l) / layers 
-                        current_size = self.synapse_size * size_factor
-                        
-                        # Alpha interpolation: outer_alpha -> base_alpha
-                        if layers > 1:
-                            t = l / (layers - 1)
-                            current_alpha = outer_alpha + t * (base_alpha - outer_alpha)
-                        else:
-                            current_alpha = base_alpha
-                            
-                        # Only show legend for the inner-most layer (most representative color)
-                        show_legend = (l == layers - 1)
-                        
-                        sp = go.Scatter3d(
-                            x = xyz_df['x'],
-                            y = xyz_df['y'],
-                            z = xyz_df['z'],
-                            mode = 'markers',
-                            name = f'synapses {i} -> {i+1} ({len(conn_df)})',
-                            hoverinfo = 'name',
-                            hovertemplate = 'x: %{x}<br>y: %{y}<br>z: %{z}<br>name: %{fullData.name}<extra></extra>',
-                            legendgroup = f'synapses {i} -> {i+1} ({len(conn_df)})',
-                            showlegend = show_legend,
-                            marker = dict(
-                                size = current_size,
-                                color = plot_colors,
-                                symbol = 'circle',
-                                opacity = current_alpha
-                            ),
-                        )
-                        self.fig_3d.add_trace(sp)
-                elif self.backend == 'k3d':
-                    try:
-                        import k3d
-                        # import numpy as np # Removed to avoid UnboundLocalError
-                        import matplotlib.colors as mcolors
-                        
-                        # Color conversion helper
-                        def to_int_color(c):
-                            color_int = 0xff0000 # Default red
-                            try:
-                                if isinstance(c, str):
-                                    if not c.startswith('#'):
-                                        c = mcolors.to_hex(c)
-                                    color_int = int(c.replace('#', ''), 16)
-                                elif isinstance(c, (tuple, list, np.ndarray)):
-                                    if len(c) >= 3:
-                                        if isinstance(c[0], float) and c[0] <= 1.0:
-                                            r, g, b = int(c[0]*255), int(c[1]*255), int(c[2]*255)
-                                        else:
-                                            r, g, b = int(c[0]), int(c[1]), int(c[2])
-                                        color_int = (r << 16) + (g << 8) + b
-                                    elif len(c) == 1: # Handle single element array
-                                        return to_int_color(c[0])
-                            except Exception:
-                                pass
-                            return color_int
-
-                        # Determine if we have per-point colors or single color
-                        c_val = plot_colors
-                        colors_to_pass = None
-                        
-                        # Check if c_val is a list/array of colors matching the number of points
-                        # Note: A single RGB tuple (r,g,b) has len 3, but we shouldn't treat it as 3 points if len(xyz_df) != 3
-                        is_array_of_colors = False
-                        if isinstance(c_val, (list, np.ndarray)):
-                            if len(c_val) == len(xyz_df) and len(xyz_df) > 0:
-                                # It matches length, but is it a list of colors or a single RGB tuple?
-                                # If len(xyz_df) == 3, it's ambiguous. Assume RGB tuple if elements are numbers.
-                                first_elem = c_val[0]
-                                if isinstance(first_elem, (str, list, tuple, np.ndarray)):
-                                    is_array_of_colors = True
-                                elif len(xyz_df) != 3: # If not 3 points, it must be array of colors
-                                    is_array_of_colors = True
-                                # If len is 3 and elements are numbers, assume single RGB color (default behavior)
-
-                        if is_array_of_colors:
-                            # Convert each color to int
-                            colors_to_pass = [to_int_color(c) for c in c_val]
-                            # k3d expects uint32 array for per-point colors
-                            colors_to_pass = np.array(colors_to_pass, dtype=np.uint32)
-                        else:
-                            # Single color
-                            colors_to_pass = to_int_color(c_val)
-
-                        pts = k3d.points(
-                            positions=xyz_df[['x', 'y', 'z']].values.astype(np.float32),
-                            point_size=float(self.synapse_size) if self.synapse_mode == 'scatter' else float(self.synapse_size)/10.0,
-                            color=colors_to_pass,
-                            opacity=self.synapse_alpha,
-                            name=f'synapses {i} -> {i+1} ({len(conn_df)})'
-                        )
-                        self.fig_3d += pts
-                    except Exception as e:
-                        print(f'⚠️  k3d synapse plotting failed: {e}')
-            
-            elif self.synapse_mode in ['sphere', 'cone', 'tetrahedron'] and self.backend == 'plotly':
-                pre_coords = conn_df[['x_pre', 'y_pre', 'z_pre']].rename(columns={'x_pre':'x', 'y_pre':'y', 'z_pre':'z'})
-                post_coords = conn_df[['x_post', 'y_post', 'z_post']].rename(columns={'x_post':'x', 'y_post':'y', 'z_post':'z'})
-                
-                if self.brain_mesh in ['whole', 'template']:
-                    template_info = self._get_template_info()
-                    print(f'Transforming synapses of layer {i} -> {i+1}...', end='')
-                    pre_coords = navis.xform_brain(pre_coords, source=template_info['source'], target=template_info['target'])
-                    post_coords = navis.xform_brain(post_coords, source=template_info['source'], target=template_info['target'])
-                
-                # Calculate sizes if 'real'
-                current_size = self.synapse_size
-                if self.synapse_size == 'real':
-                     # Calculate Euclidean distance
-                     diff = pre_coords[['x', 'y', 'z']].values - post_coords[['x', 'y', 'z']].values
-                     dists = np.linalg.norm(diff, axis=1)
-                     current_size = dists
-                
-                mesh = sv.build_synapse_mesh(
-                    pre_coords, 
-                    post_coords, 
-                    mode=self.synapse_mode, 
-                    size=current_size, 
-                    color=self.synapse_colors[i], 
-                    opacity=self.synapse_alpha,
-                    name=f'synapses {i} -> {i+1} ({len(conn_df)})'
-                )
-                mesh.hoverinfo = 'name'
-                mesh.legendgroup = f'synapses {i} -> {i+1} ({len(conn_df)})'
-                mesh.hovertemplate = '<b>%{fullData.name}</b><extra></extra>'
-                mesh.showlegend = False
-                self.fig_3d.add_trace(mesh)
-
-                # Add dummy scatter trace for legend
-                dummy_legend = go.Scatter3d(
-                    x=[None], y=[None], z=[None],
-                    mode='markers',
-                    name=f'synapses {i} -> {i+1} ({len(conn_df)})',
-                    legendgroup=f'synapses {i} -> {i+1} ({len(conn_df)})',
-                    showlegend=True,
-                    marker=dict(
-                        size=10,
-                        color=self.synapse_colors[i],
-                        symbol='circle'
-                    )
-                )
-                self.fig_3d.add_trace(dummy_legend)
-            print('Done')
-        return 0
-    
-    def _get_dataset_mesh_dir(self):
-        """Get dataset-specific mesh directory path.
-        
-        Uses cache/ folder for ROI meshes:
-        - hemibrain:v1.2.1 -> cache/hemibrain_v1_2_1/meshes/
-        - optic-lobe:v1.1 -> cache/optic-lobe_v1_1/meshes/
-        
-        References:
-        - navis mesh handling: https://navis.readthedocs.io/en/latest/source/api.html#navis.Volume
-        - mesh compression: use navis.Volume.to_json() with compression for storage optimization
-        """
-        dataset_normalized = self.dataset.replace(':', '_').replace('.', '_')
-        cache_mesh_dir = os.path.join(self.script_path, 'cache', dataset_normalized, 'meshes')
-        os.makedirs(cache_mesh_dir, exist_ok=True)
-        return cache_mesh_dir
-    
-    def _get_available_rois(self, use_cache=True, fetch_online=True):
-        """Query NeuPrint database for available ROIs in the current dataset.
-        
-        Caches results locally to avoid repeated API calls. Returns a list of ROI names
-        that are available in the NeuPrint database for the current dataset.
-        
-        Parameters
-        ----------
-        use_cache : bool
-            If True, use cached ROI list if available. If False, force refresh from API.
-        fetch_online : bool
-            If True, attempt to fetch from NeuPrint online. If False, only use local cache/meshes.
-        
-        Returns
-        -------
-        list
-            List of available ROI names for the current dataset.
-        
-        References:
-        - NeuPrint ROI documentation: https://neuprint.janelia.org/
-        - navis neuprint interface: https://navis-org.github.io/navis/reference/navis/interfaces/neuprint/
-        - neuprint-python API: https://github.com/connectome-neuprint/neuprint-python
-        """
-        # Cache file path in organized cache/ structure
-        dataset_normalized = self.dataset.replace(':', '_').replace('.', '_')
-        cache_dir = os.path.join(self.script_path, 'cache', dataset_normalized)
-        cache_file = os.path.join(cache_dir, 'available_rois.json')
-        
-        # Try to load from cache first
-        if use_cache and os.path.exists(cache_file):
-            try:
-                import json
-                with open(cache_file, 'r') as f:
-                    cached_data = json.load(f)
-                    print(f'✓ Loaded {len(cached_data)} available ROIs from cache')
-                    return cached_data
-            except Exception as e:
-                print(f'⚠️ Failed to load ROI cache: {e}, fetching from API...')
-        
-        # Fetch from NeuPrint API
-        if fetch_online:
-            # Special handling for FlyWire/FAFB: Do not use API, use local primary_rois or hemibrain cache
-            if 'flywire' in self.dataset.lower() or 'fafb' in self.dataset.lower():
-                print('ℹ️  FlyWire/FAFB dataset detected: Skipping online API fetch for ROIs.')
-                print('   Scanning local ROI meshes...')
-                
-                found_rois = set()
-                
-                # Scan primary_rois
-                primary_dir = os.path.join(self.script_path, 'navis_roi_meshes_json', 'primary_rois')
-                if os.path.exists(primary_dir):
-                    for f in os.listdir(primary_dir):
-                        if f.endswith('.json'):
-                            found_rois.add(f[:-5])
-                            
-                # Scan hemibrain cache
-                hb_cache = os.path.join(self.script_path, 'cache', 'hemibrain_v1_2_1', 'meshes')
-                if os.path.exists(hb_cache):
-                    for f in os.listdir(hb_cache):
-                        if f.endswith('.json'):
-                            found_rois.add(f[:-5])
-                            
-                roi_list = sorted(list(found_rois))
-                print(f'✓ Found {len(roi_list)} available ROIs from local storage')
-                
-                # Cache the results
-                if roi_list:
-                    try:
-                        import json
-                        os.makedirs(cache_dir, exist_ok=True)
-                        with open(cache_file, 'w') as f:
-                            json.dump(roi_list, f, indent=2)
-                    except Exception as e:
-                        print(f'⚠️ Failed to cache ROI list: {e}')
-                        
-                return roi_list
-
-            try:
-                print('📥 Fetching available ROIs from NeuPrint online database...')
-                
-                # Initialize neuprint client using environment variable or global client
-                from neuprint import Client, fetch_meta
-                
-                # Try to get token from environment variable first
-                token = os.environ.get('NEUPRINT_APPLICATION_CREDENTIALS')
-                client = None
-                
-                if token:
-                    # Determine server URL based on dataset
-                    if 'optic' in self.dataset.lower():
-                        server = 'https://neuprint-optic-lobe.janelia.org'
-                        dataset_name = self.dataset.split(':')[0]  # 'optic-lobe'
-                    else:
-                        server = 'https://neuprint.janelia.org'
-                        dataset_name = 'hemibrain:v1.2.1'  # default
-                    
-                    try:
-                        client = Client(server, dataset=dataset_name, token=token)
-                    except Exception as e:
-                        print(f'   Warning: Failed to create client with token: {e}')
-                        print(f'   Attempting to use default/global client...')
-                        client = None
-                
-                # Fetch metadata (will use client if provided, otherwise global)
-                meta = fetch_meta(client=client)
-                
-                roi_list = []
-                # Extract ROI list from meta info
-                if 'roiInfo' in meta:
-                    roi_list = list(meta['roiInfo'].keys())
-                    print(f'   Found {len(roi_list)} ROIs from roiInfo')
-                elif 'primaryRois' in meta:
-                    roi_list = list(meta['primaryRois'])
-                    print(f'   Found {len(roi_list)} primary ROIs')
-                else:
-                    print(f'   Warning: No roiInfo/primaryRois in metadata, falling back to local cache')
-                
-                roi_list = sorted(roi_list)
-                
-                # Cache the results (create directory only when needed)
-                if roi_list:
-                    try:
-                        import json
-                        os.makedirs(cache_dir, exist_ok=True)
-                        with open(cache_file, 'w') as f:
-                            json.dump(roi_list, f, indent=2)
-                        print(f'✓ Cached {len(roi_list)} available ROIs to {cache_file}')
-                    except Exception as e:
-                        print(f'⚠️ Failed to cache ROI list: {e}')
-                
-                return roi_list
-                
-            except Exception as e:
-                print(f'⚠️ Failed to fetch available ROIs from NeuPrint: {e}')
-                print(f'   Tip: Set NEUPRINT_APPLICATION_CREDENTIALS environment variable')
-                print(f'   Using ROIs from local mesh directory instead.')
-        
-        # Fallback: list available meshes from local directory
-        mesh_dir = self._get_dataset_mesh_dir()
-        if os.path.exists(mesh_dir):
-            roi_list = [f.replace('.json', '') for f in os.listdir(mesh_dir) if f.endswith('.json')]
-            roi_list = sorted(roi_list)
-            print(f'✓ Found {len(roi_list)} ROIs in local cache: {mesh_dir}')
-            
-            # Cache the results from local scan
-            if roi_list:
-                try:
-                    import json
-                    os.makedirs(cache_dir, exist_ok=True)
-                    with open(cache_file, 'w') as f:
-                        json.dump(roi_list, f, indent=2)
-                    print(f'✓ Cached {len(roi_list)} available ROIs to {cache_file}')
-                except Exception as e:
-                    print(f'⚠️ Failed to cache ROI list: {e}')
-            
-            return roi_list
-        else:
-            print(f'⚠️ No ROI data available (online fetch failed and no local cache)')
-            return []
-    
-    def _dataset_needs_transform(self):
-        """Check if current dataset needs transforms for 'whole' brain mesh.
-        
-        Returns
-        -------
-        bool
-            True if transforms are required, False if native template is sufficient
-        """
-        dataset_lower = self.dataset.lower()
-        # Hemibrain needs transform to JRC2018F
-        # Optic-lobe and Male CNS need transform to JRCFIB2022M
-        # MANC needs transform to MANC
-        if 'hemibrain' in dataset_lower:
-            return True
-        if 'optic' in dataset_lower or 'male-cns' in dataset_lower or 'malecns' in dataset_lower:
-            return True
-        if 'manc' in dataset_lower:
-            return True
-        if 'flywire' in dataset_lower or 'fafb' in dataset_lower:
-            return True
-        return False
-    
-    def _get_template_info(self):
-        """Get template brain/VNC information for current dataset.
-        
-        Handles transform paths for all NeuPrint datasets:
-        - Brain datasets: hemibrain, optic-lobe
-        - VNC datasets: manc (various versions)
-        - Brain+VNC datasets: male-cns
-        
-        Returns
-        -------
-        dict
-            Dictionary with 'source', 'target', 'template_obj', and 'mesh_name' keys
-            
-        Notes
-        -----
-        Transform paths by dataset:
-        - hemibrain: JRCFIB2018Fraw → JRCFIB2018F → JRCFIB2018Fum → JRC2018F
-        - optic-lobe: JRCFIB2018Fraw → JRCFIB2018F → JRCFIB2018Fum → JRC2018F (same as hemibrain)
-        - manc: MANCraw → MANC (VNC only, no brain transform)
-        - male-cns: JRCFIB2022Mraw → JRCFIB2022M (brain + VNC)
-        
-        Note: optic-lobe uses the same coordinate system as hemibrain because it's
-        a focused reconstruction of the optic lobe region within the hemibrain volume.
-        """
-        dataset_lower = self.dataset.lower()
-        import flybrains
-        
-        # Brain datasets
-        if 'hemibrain' in dataset_lower:
-            return {
-                'source': 'JRCFIB2018Fraw',
-                'target': 'JRC2018F' if self.brain_mesh == 'whole' else 'JRCFIB2018F',
-                'template_obj': flybrains.JRC2018F if self.brain_mesh == 'whole' else flybrains.JRCFIB2018F,
-                'mesh_name': 'JRC2018F (whole brain)' if self.brain_mesh == 'whole' else 'JRCFIB2018F (hemibrain)'
-            }
-        elif 'optic' in dataset_lower:
-            # Optic-lobe dataset is part of the Male CNS (JRCFIB2022M) volume
-            # It is NOT part of the hemibrain (JRCFIB2018F) volume
-            # Stored in JRCFIB2022Mraw coordinates
-            return {
-                'source': 'JRCFIB2022Mraw',
-                'target': 'JRCFIB2022M',  # Male CNS template
-                'template_obj': flybrains.JRCFIB2022M,
-                'mesh_name': 'JRCFIB2022M (Male CNS)'
-            }
-        
-        # VNC datasets
-        elif 'manc' in dataset_lower:
-            # MANC (Male Adult Nerve Cord) - VNC only
-            # For VNC: 'whole' and 'template' both show VNC envelope
-            # 'hemi' is not supported (VNC doesn't have hemispheres like brain)
-            return {
-                'source': 'MANCraw',
-                'target': 'MANC',  # VNC template (no brain transform needed)
-                'template_obj': flybrains.MANC,
-                'mesh_name': 'MANC (VNC envelope)'
-            }
-        
-        # Brain + VNC datasets
-        elif 'male-cns' in dataset_lower or 'malecns' in dataset_lower:
-            # Male CNS (JRCFIB2022M) - Brain + VNC
-            # 'whole' shows full CNS envelope (brain + VNC)
-            # 'hemi' is not supported (use brain_mesh to get brain/vnc separately)
-            return {
-                'source': 'JRCFIB2022Mraw',
-                'target': 'JRCFIB2022M',
-                'template_obj': flybrains.JRCFIB2022M,
-                'mesh_name': 'JRCFIB2022M (male CNS: brain + VNC)'
-            }
-        
-        # FlyWire / FAFB datasets
-        elif 'flywire' in dataset_lower or 'fafb' in dataset_lower:
-            # FlyWire is in FAFB14 space (approx)
-            return {
-                'source': 'FAFB',
-                'target': 'JRC2018F',
-                'template_obj': flybrains.JRC2018F,
-                'mesh_name': 'JRC2018F (whole brain)'
-            }
-        
-        # Fallback to hemibrain for unknown datasets
-        else:
-            print(f'⚠️  Unknown dataset "{self.dataset}", defaulting to hemibrain template')
-            return {
-                'source': 'JRCFIB2018Fraw',
-                'target': 'JRCFIB2018F',
-                'template_obj': flybrains.JRCFIB2018F,
-                'mesh_name': 'JRCFIB2018F (hemibrain)'
-            }
-    
-    def _check_and_download_transforms(self):
-        """Check if flybrains transforms exist locally, prompt user before downloading.
-        
-        Brain transforms are large files (multiple files, ~10GB total uncompressed). 
-        This method checks if the required transforms exist locally before attempting 
-        to download them, and prompts the user for confirmation.
-        
-        Transforms are stored in the default flybrains data directory:
-        ~/flybrain-data/
-        
-        Returns
-        -------
-        bool
-            True if transforms are available (already exist or successfully downloaded),
-            False otherwise.
-        
-        References:
-        - flybrains package: https://github.com/navis-org/navis-flybrains
-        - JRC2018F brain template: https://www.janelia.org/open-science/jrc-2018-brain-templates
-        """
-        try:
-            import flybrains
-            
-            # Get the transform directory from attribute or use default
-            transforms_dir = os.path.expanduser(self.transforms_dir)
-            
-            # Set environment variable if custom path is specified
-            if self.transforms_dir != '~/flybrain-data':
-                os.environ['FLYBRAINS_DATA'] = transforms_dir
-                print(f'Using custom transform directory: {transforms_dir}')
-            
-            # Get dataset-specific template info
-            template_info = self._get_template_info()
-            source = template_info['source']
-            target = template_info['target']
-            
-            # ANSI color codes
-            YELLOW = '\033[93m'
-            RESET = '\033[0m'
-            
-            # Check if the transformation path exists by attempting to find bridging path
-            try:
-                path = navis.transforms.registry.find_bridging_path(source, target)
-                print(f'✓ Brain transforms already available')
-                print(f'  Location: {YELLOW}{transforms_dir}{RESET}')
-                print(f'  Transform path: {" -> ".join([str(p) for p in path])}')
-                return True
-            except (ValueError, KeyError):
-                # Transform path not found, need to download
-                pass
-            
-            # ANSI color codes
-            YELLOW = '\033[93m'
-            RESET = '\033[0m'
-            
-            # Prompt user for download confirmation
-            print('\n' + '='*70)
-            print('⚠️  Brain Transformation Required')
-            print('='*70)
-            print(f'To use brain_mesh="whole" for {self.dataset}, you need brain transforms.')
-            print(f'Transform path needed: {source} → JRCFIB2018F → JRCFIB2018Fum → {target}')
-            print('')
-            print('⚠️  IMPORTANT: flybrains downloads ALL JRC transforms as a bundle:')
-            print('   • JRC2018F_JRCFIB2018F.h5   (~1.29 GB)  ← YOU NEED THIS for hemibrain/optic-lobe')
-            print('   • JRC2018F_FAFB.h5          (~580 MB)   (enables FAFB dataset support)')
-            print('   • JRC2018F_JFRC2013.h5      (~1.39 GB)  (enables JFRC2013 template)')
-            print('   • JRC2018F_FCWB.h5          (~1.29 GB)  (enables FCWB template)')
-            print('   • JRC2018U_JRC2018F.h5      (~717 MB)   (enables unisex template)')
-            print('   • JRC2018U_JRC2018M.h5      (~1.10 GB)  (enables male template)')
-            print('   • JRC2018F_JFRC2010.h5      (~1.65 GB)  (enables legacy template)')
-            print('   • JRCFIB2022M_JRC2018M.h5   (~2.12 GB)  (enables male CNS registration)')
-            print('')
-            print('   Total download: ~10 GB (but only ~1.3 GB used for your dataset)')
-            print('   Download time: ~1-2 hours (cannot download individual files)')
-            print('   Why all files? The flybrains package bundles all transforms together.')
-            print('')
-            print('The transforms will be cached in:')
-            print(f'  {YELLOW}{transforms_dir}/{RESET}')
-            
-            # Save transform path info to file
-            info_file = os.path.join(self.data_folder, 'brain_transforms_info.txt')
-            os.makedirs(self.data_folder, exist_ok=True)
-            with open(info_file, 'w', encoding='utf-8') as f:
-                f.write('Brain Transforms Information\n')
-                f.write('='*70 + '\n\n')
-                f.write(f'Dataset: {self.dataset}\n')
-                f.write(f'Transform path: {source} → JRCFIB2018F → JRCFIB2018Fum → {target}\n\n')
-                f.write('Storage Location:\n')
-                f.write(f'  {transforms_dir}/\n\n')
-                f.write('Transform Files (8 files, ~10 GB total):\n')
-                f.write('  • JRC2018F_JRCFIB2018F.h5   (~1.29 GB)\n')
-                f.write('  • JRC2018F_FAFB.h5          (~580 MB)\n')
-                f.write('  • JRC2018F_JFRC2013.h5      (~1.39 GB)\n')
-                f.write('  • JRC2018F_FCWB.h5          (~1.29 GB)\n')
-                f.write('  • JRC2018U_JRC2018F.h5      (~717 MB)\n')
-                f.write('  • JRC2018U_JRC2018M.h5      (~1.10 GB)\n')
-                f.write('  • JRC2018F_JFRC2010.h5      (~1.65 GB)\n')
-                f.write('  • JRCFIB2022M_JRC2018M.h5   (~2.12 GB)\n\n')
-                f.write('To change the storage location:\n')
-                f.write('  1. Set transforms_dir attribute when creating VisualizeSkeleton\n')
-                f.write('  2. Set FLYBRAINS_DATA environment variable before importing flybrains\n')
-                f.write('  3. Or manually move files to the new location\n\n')
-                f.write('More information:\n')
-                f.write('  https://github.com/navis-org/navis-flybrains\n')
-            print(f'\n📄 Transform info saved to: {info_file}')
-            print('')
-            print('💡 Note: The flybrains.download_jrc_transforms() function downloads')
-            print('   ALL 8 files as a bundle with no selective download option.')
-            print('   This is by design in the flybrains library to provide complete')
-            print('   cross-dataset registration capabilities.')
-            print('')
-            print('For more information, see:')
-            print('  https://github.com/navis-org/navis-flybrains')
-            print('='*70)
-            
-            response = input('Download all transforms now? [y/N]: ').strip().lower()
-            
-            if response in ['y', 'yes']:
-                print('\n📥 Downloading brain transforms...')
-                print('This may take several minutes depending on your connection.')
-                flybrains.download_jrc_transforms()
-                
-                # Re-register transforms after download
-                print('📝 Registering downloaded transforms...')
-                flybrains.register_transforms()
-                
-                # Verify the transform path is now available
-                try:
-                    path = navis.transforms.registry.find_bridging_path(source, target)
-                    print(f'✓ Transforms downloaded and registered successfully!')
-                    print(f'  Location: {YELLOW}{transforms_dir}{RESET}')
-                    print(f'  Transform path: {" -> ".join([str(p) for p in path])}')
-                    
-                    # Update the saved info file with success status
-                    info_file = os.path.join(self.data_folder, 'brain_transforms_info.txt')
-                    with open(info_file, 'a', encoding='utf-8') as f:
-                        f.write(f'\nDownload Status: SUCCESS\n')
-                        f.write(f'Downloaded at: {pd.Timestamp.now()}\n')
-                    return True
-                except (ValueError, KeyError) as e:
-                    print(f'⚠️  Transforms downloaded but bridging path not found: {e}')
-                    print(f'   This may indicate the transforms do not include {source} → {target}')
-                    return False
-            else:
-                print('\n⚠️  Download cancelled. Setting brain_mesh to "none".')
-                return False
-                
-        except ImportError:
-            print('\n⚠️  flybrains package not installed.')
-            print('   Install it with: pip install navis[flybrains]')
-            print('   Setting brain_mesh to "none".')
-            return False
-        except Exception as e:
-            print(f'\n⚠️  Error checking brain transforms: {e}')
-            print('   Setting brain_mesh to "none".')
-            return False
-    
-    def plot_mesh(self):
-        """Plot ROI meshes and brain meshes.
-        
-        Loads ROI meshes from dataset-specific cache directories, with fallback to
-        primary_rois/ for backward compatibility. Supports brain mesh visualization
-        with automatic transform handling.
-        
-        Dataset-specific mesh caching:
-        - hemibrain:v1.2.1 -> navis_roi_meshes_json/hemibrain_v1_2_1/
-        - optic-lobe:v1.1 -> navis_roi_meshes_json/optic-lobe_v1_1/
-        - Fallback: navis_roi_meshes_json/primary_rois/
-        
-        Brain mesh options (dataset-aware):
-        - 'none': Only plot ROI meshes specified in mesh_roi parameter
-        - 'template': Plot native EM template mesh (JRCFIB2018F, MANC, or JRCFIB2022M)
-        - 'whole': Plot standard template mesh (may require transforms for some datasets)
-        
-        Behavior with mesh_roi=[]:
-        - When mesh_roi is an empty list [], no ROI meshes are plotted
-        - But brain_mesh='whole' or 'template' will still plot the brain mesh
-        - This allows showing neurons with only the whole brain outline
-        
-        References:
-        - navis Volume API: https://navis.readthedocs.io/en/latest/source/api.html#navis.Volume
-        - flybrains templates: https://github.com/navis-org/navis-flybrains
-        - mesh optimization: use Volume.simplify() to reduce mesh complexity for faster rendering
-        """
-        # Skip if mesh_roi is None (explicitly disabled)
-        # Note: Empty list [] means "no ROI meshes but maybe brain mesh"
-        if self.mesh_roi is None:
-            return
-        
-        # Check if we have any work to do (ROI meshes or brain mesh)
-        has_roi_meshes = len(self.mesh_roi) > 0
-        has_brain_mesh = self.brain_mesh in ['template', 'whole']
-        
-        if not has_roi_meshes and not has_brain_mesh:
-            return
-        
-        # Ensure available_rois.json exists (generate if missing)
-        # This checks cache first, and if missing, fetches from API or scans local meshes
-        self._get_available_rois(use_cache=True, fetch_online=True)
-        
-        # Get dataset-specific mesh directory
-        mesh_dir = self._get_dataset_mesh_dir()
-        print(f'Using mesh directory: {mesh_dir}')
-        
-        roiunits = []
-        roi_names = []
-        roi_colors = []
-        
-        # Use mesh_roi list directly (no auto-mirroring suffix expansion)
-        final_mesh_roi = self.mesh_roi
-        
-        # Handle colors
-        final_mesh_colors = []
-        for i, roi in enumerate(final_mesh_roi):
-            if isinstance(self.mesh_color, list):
-                if i < len(self.mesh_color):
-                    color = self.mesh_color[i]
-                else:
-                    color = (100, 100, 100, 0.2)
-            else:
-                color = self.mesh_color
-            final_mesh_colors.append(color)
-        
-        for i, roi in enumerate(final_mesh_roi):
-            color = final_mesh_colors[i]
-            source_info = "Dataset Cache"
-            roi_source_space = None # Track the coordinate space of the ROI
-            
-            # Determine if this is FlyWire/FAFB
-            is_flywire = 'flywire' in self.dataset.lower() or 'fafb' in self.dataset.lower()
-
-            # Try dataset-specific directory first
-            mesh_file = os.path.join(mesh_dir, roi + '.json')
-            
-            # Special handling for FlyWire/FAFB
-            if is_flywire:
-                if not os.path.exists(mesh_file):
-                    print(f'📥 ROI mesh "{roi}" not found locally, attempting to download...')
-                    mesh_found = False
-                    
-                    # 1. Try male-cns:v0.9 (NeuPrint)
-                    try:
-                        import navis.interfaces.neuprint as neu
-                        from neuprint import Client
-                        
-                        token = os.environ.get('NEUPRINT_APPLICATION_CREDENTIALS') or self.token
-                        if token:
-                            try:
-                                print(f'   Checking male-cns:v0.9...')
-                                mc_client = Client('https://neuprint.janelia.org', dataset='male-cns:v0.9', token=token)
-                                mesh = neu.fetch_roi(roi, client=mc_client)
-                                if mesh:
-                                    os.makedirs(mesh_dir, exist_ok=True)
-                                    mesh.to_json(mesh_file)
-                                    print(f'   ✓ Found in male-cns:v0.9')
-                                    source_info = "male-cns:v0.9 (Downloaded)"
-                                    roi_source_space = 'JRCFIB2022Mraw' # Use raw coordinates for male-cns ROIs
-                                    mesh_found = True
-                            except Exception as e:
-                                # print(f'   (male-cns check failed: {e})')
-                                pass
-                    except ImportError:
-                        pass
-                    
-                    # 2. Try generic navis fetch (fallback) - REMOVED as it causes errors if navis doesn't have fetch_roi
-                    # if not mesh_found:
-                    #     try:
-                    #         print(f'   Attempting generic navis fetch...')
-                    #         # This tries to use whatever client is default or configured in navis
-                    #         # Usually fetches from Hemibrain if no dataset specified, or checks available clients
-                    #         mesh = navis.fetch_roi(roi)
-                    #         if mesh:
-                    #             os.makedirs(mesh_dir, exist_ok=True)
-                    #             mesh.to_json(mesh_file)
-                    #             print(f'   ✓ Found via navis.fetch_roi')
-                    #             source_info = "navis.fetch_roi"
-                    #             roi_source_space = 'JRCFIB2018F' # Default for Hemibrain ROIs
-                    #             mesh_found = True
-                    #     except Exception as e:
-                    #         print(f'   Warning: Failed to fetch "{roi}" via navis: {e}')
-
-            # Standard logic for non-FlyWire or if file exists
-            # Fallback to primary_rois if not found (only for non-FlyWire or if we want to support it)
-            if not os.path.exists(mesh_file) and not is_flywire:
-                mesh_file_fallback = os.path.join(self.script_path, 'navis_roi_meshes_json', 'primary_rois', roi + '.json')
-                if os.path.exists(mesh_file_fallback):
-                    mesh_file = mesh_file_fallback
-                    source_info = "Primary ROIs (Local)"
-                    roi_source_space = 'JRCFIB2018F'
-                else:
-                    # Try to download from NeuPrint (Hemibrain/Optic Lobe/Male CNS)
-                    print(f'📥 ROI mesh "{roi}" not found locally, attempting to download from NeuPrint...')
-                    source_info = "NeuPrint (Downloaded)"
-                    try:
-                        import navis.interfaces.neuprint as neu
-                        from neuprint import Client
-                        
-                        token = os.environ.get('NEUPRINT_APPLICATION_CREDENTIALS') or self.token
-                        client = None
-                        
-                        if token:
-                            if 'optic' in self.dataset.lower():
-                                server = 'https://neuprint-optic-lobe.janelia.org'
-                                dataset_name = self.dataset.split(':')[0]
-                                roi_source_space = 'JRCFIB2022Mraw' # Optic lobe
-                            elif 'male-cns' in self.dataset.lower() or 'malecns' in self.dataset.lower():
-                                server = 'https://neuprint.janelia.org'
-                                dataset_name = 'male-cns:v0.9' # Default for male-cns
-                                roi_source_space = 'JRCFIB2022Mraw' # Male CNS raw
-                            else:
-                                server = 'https://neuprint.janelia.org'
-                                dataset_name = 'hemibrain:v1.2.1'
-                                roi_source_space = 'JRCFIB2018F'
-                            
-                            try:
-                                client = Client(server, dataset=dataset_name, token=token)
-                            except Exception as e:
-                                print(f'   Warning: Failed to create client: {e}')
-                        
-                        mesh = neu.fetch_roi(roi, client=client)
-                        os.makedirs(mesh_dir, exist_ok=True)
-                        mesh.to_json(mesh_file)
-                        print(f'✓ Downloaded and cached "{roi}" mesh to {mesh_file}')
-                        
-                        # Transform if needed (Hemibrain specific)
-                        if self.brain_mesh in ['whole', 'template']:
-                            template_info = self._get_template_info()
-                            print(f'Transforming brain region {roi}...', end='')
-                            mesh = navis.xform_brain(mesh, source=template_info['source'], target=template_info['target'])
-                            # Note: We don't save the transformed mesh back to cache here to keep cache pure?
-                            # Actually previous code didn't save transformed.
-                    except Exception as e:
-                        print(f'⚠️  Failed to download "{roi}" mesh: {e}')
-            
-            # Load and plot
-            if os.path.exists(mesh_file):
-                try:
-                    mesh = navis.Volume.from_json(mesh_file)
-                    print(f'✓ Loaded "{roi}" from {source_info}')
-                    
-                    # Transform if needed
-                    if self.brain_mesh in ['whole', 'template']:
-                        template_info = self._get_template_info()
-                        target = template_info['target']
-                        
-                        # Determine source for transform
-                        if is_flywire:
-                            # For FlyWire, use the source space of the ROI, not the dataset source (FAFB14)
-                            if roi_source_space:
-                                source = roi_source_space
-                            else:
-                                # If loading from cache (roi_source_space is None), assume it's from male-cns (JRCFIB2022Mraw)
-                                # This fixes the issue where cached meshes were wrongly assumed to be in JRCFIB2018F
-                                source = 'JRCFIB2022Mraw'
-                        else:
-                            source = template_info['source']
-                            
-                        print(f'Transforming brain region {roi} ({source} -> {target})...', end='')
-                        try:
-                            mesh = navis.xform_brain(mesh, source=source, target=target)
-                            print(' Done')
-                        except Exception as e:
-                            print(f' Failed: {e}')
-                    
-                    # Simplify mesh if requested
-                    if self.roi_mesh_simplification > 0:
-                        try:
-                            import trimesh
-                            # Access underlying trimesh object
-                            tm = None
-                            if hasattr(mesh, 'trimesh'):
-                                tm = mesh.trimesh
-                            elif hasattr(mesh, 'mesh'):
-                                tm = mesh.mesh
-                            elif hasattr(mesh, 'vertices') and hasattr(mesh, 'faces'):
-                                # Fallback: create trimesh from vertices/faces
-                                # Note: navis.Volume properties might be numpy arrays
-                                tm = trimesh.Trimesh(vertices=mesh.vertices, faces=mesh.faces)
-                            
-                            if tm:
-                                n_faces = len(tm.faces)
-                                target_faces = int(n_faces * (1 - self.roi_mesh_simplification))
-                                if target_faces < n_faces:
-                                    # simplify_quadratic_decimation returns a new trimesh object
-                                    new_tm = tm.simplify_quadratic_decimation(target_faces)
-                                    
-                                    # Re-instantiate Volume to ensure it's clean and updated
-                                    # Preserving attributes
-                                    old_name = getattr(mesh, 'name', roi)
-                                    old_id = getattr(mesh, 'id', None)
-                                    
-                                    mesh = navis.Volume(new_tm, name=old_name, id=old_id)
-                                    
-                                    print(f' (simplified {self.roi_mesh_simplification*100:.0f}%: {n_faces}->{len(new_tm.faces)} faces)', end='')
-                                else:
-                                    print(f' (simplification skipped: target {target_faces} >= {n_faces} faces)', end='')
-                            else:
-                                # Debug: print available attributes to help diagnose
-                                attrs = [a for a in dir(mesh) if not a.startswith('_')]
-                                print(f' (simplification skipped: could not extract mesh from {type(mesh)}. Available attrs: {attrs[:10]}...)', end='')
-                        except Exception as e:
-                            print(f' (simplification failed: {e})', end='')
-
-                    # Collect for export
-                    try:
-                        tm = None
-                        if hasattr(mesh, 'trimesh'):
-                            tm = mesh.trimesh
-                        elif hasattr(mesh, 'mesh'):
-                            tm = mesh.mesh
-                        elif hasattr(mesh, 'vertices') and hasattr(mesh, 'faces'):
-                            import trimesh
-                            tm = trimesh.Trimesh(vertices=mesh.vertices, faces=mesh.faces)
-                        
-                        if tm:
-                            # Copy and apply color
-                            tm = tm.copy()
-                            rgba = self._to_rgba(color)
-                            tm.visual.face_colors = rgba
-                            self.exportable_meshes.append(tm)
-                        else:
-                            # print(f' (export skip: no mesh in {type(mesh)})', end='')
-                            pass
-                    except Exception as e:
-                        print(f' (export collection failed: {e})', end='')
-
-                    roiunits.append(mesh)
-                    roi_names.append(roi)
-                    roi_colors.append(color)
-
-                    # Mirror logic: SKIP if FlyWire
-                    if not is_flywire:
-                        contralateral_roi = roi.replace('(R)', '(L)')
-                        should_mirror = (
-                            self.mirror_on_contralateral and 
-                            roi.endswith('(R)') and 
-                            contralateral_roi not in final_mesh_roi
-                        )
-                        
-                        if should_mirror:
-                            try:
-                                template = None
-                                if self.brain_mesh == 'whole':
-                                    template_info = self._get_template_info()
-                                    template = template_info['target']
-                                elif self.brain_mesh == 'template':
-                                        if 'hemibrain' in self.dataset or 'optic-lobe' in self.dataset:
-                                            template = 'JRCFIB2018F'
-                                        elif 'male-cns' in self.dataset:
-                                            template = 'JRCFIB2022M'
-                                
-                                if template:
-                                    mirrored_mesh = navis.mirror_brain(mesh, template, mirror_axis='x')
-                                    roiunits.append(mirrored_mesh)
-                                    roi_names.append(contralateral_roi)
-                                    roi_colors.append(color)
-                            except Exception as e:
-                                print(f' (mirror failed: {e})', end='')
-
-                except Exception as e:
-                    print(f'⚠️  Failed to load mesh {roi}: {e}')
-            else:
-                if not is_flywire: # Only warn if we expected to find it (FlyWire might just fail silently if not found)
-                     print(f'⚠️  ROI mesh "{roi}" not found.')
-        
-        # Plot ROI meshes if any were loaded
-        if roiunits:
-            print('plotting mesh of brain regions...')
-            for roi_i in range(len(roiunits)):
-                roiunits[roi_i].color = roi_colors[roi_i]
-                
-                if self.backend == 'plotly':
-                    fig_mesh = navis.plot3d(roiunits[roi_i],backend='plotly')
-                    mesh_traces = fig_mesh.data
-                    for ti, trace in enumerate(mesh_traces):
-                        if self.legend_mode == 'merge':
-                            if ti == 0:
-                                trace.showlegend = True
-                            else:
-                                trace.showlegend = False
-                            trace.legendgroup = 'roi_mesh'
-                        elif self.legend_mode == 'normal':
-                            trace.showlegend = True
-                            trace.legendgroup = roi_names[roi_i]
-                        trace.hovertemplate = '<b>%{fullData.name}</b><extra></extra>'  # show full name in hover tooltip
-                        trace.hoverinfo = 'name'
-                        trace.name = 'brain regions [' + roi_names[roi_i] + '...]'
-                    self.fig_3d.add_traces(mesh_traces)
-                elif self.backend == 'k3d':
-                    try:
-                        temp_plot = navis.plot3d(roiunits[roi_i], backend='k3d', inline=False)
-                        for obj in temp_plot.objects:
-                            obj.name = f'brain regions [{roi_names[roi_i]}...]'
-                            self.fig_3d += obj
-                    except Exception as e:
-                        print(f'⚠️  k3d mesh plotting failed: {e}')
-        elif has_roi_meshes:
-            # Only warn if user specified ROI meshes but none loaded
-            print('⚠️  No valid ROI meshes loaded')
-
-        # Plot brain mesh (whole brain or template) regardless of ROI mesh status
-        if self.brain_mesh in ['template', 'whole']:
-            template_info = self._get_template_info()
-            mesh_display_name = template_info['mesh_name']
-            
-            print(f'Plotting {mesh_display_name} mesh...')
-            try:
-                brain_template = template_info['template_obj']
-                
-                if self.backend == 'plotly':
-                    fig_brain = navis.plot3d(brain_template, backend='plotly')
-                    brain_traces = fig_brain.data
-                    for trace in brain_traces:
-                        trace.showlegend = True
-                        trace.name = mesh_display_name
-                        trace.hoverinfo = 'none'
-                        trace.color = self.brain_mesh_color
-                    self.fig_3d.add_traces(brain_traces)
-                elif self.backend == 'k3d':
-                    temp_plot = navis.plot3d(brain_template, backend='k3d', inline=False)
-                    for obj in temp_plot.objects:
-                        obj.name = mesh_display_name
-                        self.fig_3d += obj
-                        
-                print(f'✓ {mesh_display_name} mesh loaded successfully')
-            except Exception as e:
-                print(f'⚠️  Failed to load {mesh_display_name} mesh: {e}')
-                if self._dataset_needs_transform() and not self._check_and_download_transforms():
-                    print('   Skipping brain/VNC mesh visualization')
-                else:
-                    # Retry after download
-                    try:
-                        brain_template = template_info['template_obj']
-                        if self.backend == 'plotly':
-                            fig_brain = navis.plot3d(brain_template, backend='plotly')
-                            brain_traces = fig_brain.data
-                            for trace in brain_traces:
-                                trace.showlegend = True
-                                trace.name = mesh_display_name
-                                trace.hoverinfo = 'none'
-                                trace.color = self.brain_mesh_color
-                            self.fig_3d.add_traces(brain_traces)
-                        elif self.backend == 'k3d':
-                            temp_plot = navis.plot3d(brain_template, backend='k3d', inline=False)
-                            for obj in temp_plot.objects:
-                                obj.name = mesh_display_name
-                                self.fig_3d += obj
-                        print(f'✓ {mesh_display_name} mesh loaded successfully after download')
-                    except Exception as retry_e:
-                        print(f'⚠️  Still failed to load {mesh_display_name} mesh: {retry_e}')
-                        print('   Skipping brain/VNC mesh visualization')
-        print('Done')
-        return 0
-    
-    def save_figure(self):
-        if self.backend == 'plotly':
-            # add sliders
-            if self.use_size_slider:
-                sliders = [
-                    dict(
-                        active=self.synapse_size,
-                        currentvalue={"prefix": "Synapse Size: "},
-                        pad={"t": 50},
-                        steps=[
-                            dict(
-                                label=str(size),
-                                method="update",
-                                args=[{"marker": {"size": size}}]
-                            )
-                            for size in list(range(0,11))
-                        ],
-                    ),
-                ]
-            else:
-                sliders = []
-            
-            # set layout
-            # Always use frontal view camera regardless of brain_mesh setting
-            # This ensures consistent viewing angle for all visualizations
-            # Standard fly brain orientation: X: Left-Right, Y: Dorsal-Ventral, Z: Anterior-Posterior
-            # Frontal view: Look from Anterior (negative Z direction)
-            scene_camera_parameters = dict(
-                up=dict(x=0, y=-1, z=0),  # Y is up (inverted in some templates)
-                eye=dict(x=0, y=0, z=-2.0),  # Look from front
-                # center=dict(x=0, y=0, z=0), # Let Plotly auto-center
-            )
-            
-            self.fig_3d.update_layout(
-                colorway = self.synapse_colors,
-                sliders=sliders,
-                scene=dict(
-                    dragmode='orbit',
-                    xaxis={'visible':False}, 
-                    yaxis={'visible':False},
-                    zaxis={'visible':False},
-                    # Use 'data' aspectmode to ensure equal axis scaling
-                    # This prevents distortion when no meshes are plotted
-                    aspectmode='data',
-                ),
-                scene_camera=scene_camera_parameters,
-            )
-
-            # save figure
-            self.fig_path = os.path.join(self.save_folder,self.saveas)
-            
-            # Ensure save folder exists
-            if not os.path.exists(self.save_folder):
-                os.makedirs(self.save_folder, exist_ok=True)
-            
-            print(f'saving figure to \033[34m{self.fig_path}.html\033[0m...', end='')
-            
-            # Optimization: use 'cdn' for smaller file size (loads plotly.js from CDN)
-            # This reduces HTML file size significantly compared to 'directory' or including full plotly.js
-            # Fix: Set auto_open=False to prevent hanging, handle opening manually
-            # Reverted 'cdn' to default (embed) as user reported issues with subsequent PNG export
-            self.fig_3d.write_html(
-                self.fig_path+'.html',
-                auto_open=False, 
-                # include_plotlyjs='cdn',  # Reverted to default to avoid potential issues
-                config={'displayModeBar': False}  # Remove toolbar to reduce overhead
-            )
-            
-            if self.show_fig:
-                try:
-                    import webbrowser
-                    webbrowser.open('file://' + os.path.abspath(self.fig_path+'.html'))
-                except Exception as e:
-                    print(f'\n⚠️  Failed to open browser: {e}')
-            
-            print('Done (HTML saved)')
-            
-            # Optimize PNG export: only save if needed, use lower scale for speed
-            try:
-                print('   Exporting static PNG (may take a moment)...', end='', flush=True)
-                
-                # Update layout for static export to remove UI elements
-                # We re-apply the camera parameters to ensure they are used for the static render
-                self.fig_3d.update_layout(
-                    margin=dict(l=0, r=0, b=0, t=0),
-                    sliders=[],      # Remove sliders
-                    updatemenus=[],   # Remove any buttons
-                    scene_camera=scene_camera_parameters # Ensure camera is locked
-                )
-                
-                # Use standard write_image which handles kaleido internally
-                # We use a standard resolution (1200x900) to ensure consistent output
-                self.fig_3d.write_image(self.fig_path+'.png', width=1200, height=900, scale=2)
-                
-                # Verify file
-                if os.path.exists(self.fig_path+'.png'):
-                    size = os.path.getsize(self.fig_path+'.png')
-                    print(f' Done ({size/1024:.1f} KB)')
-                    if size < 15 * 1024: # < 15KB is suspicious for a 3D plot
-                        print('   ⚠️  Warning: Exported PNG seems blank/empty.')
-                        print('       This is a known issue with Kaleido and 3D plots on some systems.')
-                        print('       Please rely on the HTML file for visualization.')
-                else:
-                    print(' Done (File not found)')
-            except Exception as e:
-                print(f'\n   ⚠️  PNG export failed: {e}. Continuing without PNG...')
-            
-        elif self.backend == 'k3d':
-            self.fig_path = os.path.join(self.save_folder,self.saveas)
-            print(f'saving figure to \033[34m{self.fig_path}.html\033[0m...', end='')
-            
-            try:
-                from ipywidgets.embed import embed_minimal_html
-                embed_minimal_html(
-                    self.fig_path+'.html', 
-                    views=[self.fig_3d], 
-                    title=self.saveas
-                )
-                print('Done')
-                
-                if self.show_fig:
-                    print('Note: k3d plots cannot be automatically opened from script. Please open the HTML file manually.')
-                    
-            except ImportError:
-                print('\n⚠️  ipywidgets not installed. Cannot save k3d plot to HTML.')
-                print('   Please install it with `pip install ipywidgets`')
-            except Exception as e:
-                print(f'\n⚠️  Failed to save k3d plot: {e}')
-    
-    def plot_neurons(self):
-        self.plot_skeleton()
-        self.plot_synapses()
-        self.plot_mesh()
-        self.save_figure()
-    
-    def _to_rgba(self, color, alpha=None):
-        """Convert color to uint8 RGBA for trimesh."""
-        import matplotlib.colors as mcolors
-        import numpy as np
-        
-        # Convert to RGBA float (0-1)
-        try:
-            # If alpha is provided, override the alpha channel of the color
-            if alpha is not None:
-                c = mcolors.to_rgba(color, alpha=alpha)
-            else:
-                c = mcolors.to_rgba(color)
-        except:
-            c = (0.5, 0.5, 0.5, 1.0) # Default gray
-            
-        # Convert to uint8 (0-255)
-        return (np.array(c) * 255).astype(np.uint8)
-
-    def export_3d_model(self, filename=None, format='obj'):
-        """
-        Export the built 3D structure (neurons + ROIs) to a 3D model file.
-        
-        Parameters
-        ----------
-        filename : str, optional
-            Output filename. If None, uses self.saveas + '.' + format.
-        format : str, default 'obj'
-            Export format supported by trimesh (e.g., 'obj', 'stl', 'ply', 'glb').
-            Note: 'glb' or 'ply' are recommended for preserving color and transparency.
-            'obj' supports color via .mtl files but transparency support varies by viewer.
-            'stl' does NOT support color or transparency.
-        """
-        if not self.exportable_meshes:
-            print('⚠️  No meshes available for export. Ensure skeleton_mode="tube" and ROIs are loaded.')
-            return
-
-        if filename is None:
-            filename = os.path.join(self.save_folder, f'{self.saveas}.{format}')
-        
-        print(f'Exporting 3D model to {filename}...')
-        try:
-            import trimesh
-            # Concatenate all meshes
-            combined_mesh = trimesh.util.concatenate(self.exportable_meshes)
-            
-            # Export
-            combined_mesh.export(filename)
-            print(f'✓ 3D model exported successfully ({len(combined_mesh.faces)} faces)')
-            
-            if format == 'obj':
-                print('  Note: OBJ export includes a .mtl file for materials. Keep them together.')
-            elif format == 'stl':
-                print('  Warning: STL format does not support color or transparency.')
-        except ImportError:
-            print('⚠️  trimesh not installed. Cannot export 3D model.')
-        except Exception as e:
-            print(f'⚠️  3D model export failed: {e}')
-        
-    def export_video(self, fps=30, rotate_plane=None, view_direction=None, view_distance=None, synapse_size=1, 
-                    html_file=None, use_existing_images=False, parallel_workers=None, **kwargs):
-        '''
-        Export the rotating 3-D object to a video with optimization for speed.
-        
-        Parameters
-        ----------
-        fps : int, default 30
-            Frames per second, also determines rotation step size (30 degrees per second).
-        rotate_plane : str, optional
-            Plane to rotate: 'xy', 'xz', or 'yz'. Auto-detected based on brain_mesh.
-        view_direction : tuple, optional
-            Camera direction: (1, 1), (1, -1), (-1, 1), or (-1, -1). Auto-detected.
-        view_distance : float, optional
-            Relative camera distance from center. Auto-detected based on brain_mesh.
-        synapse_size : int, default 1
-            Size of synapse markers in the video.
-        html_file : str, optional
-            Path to existing HTML file from plot_neurons() to load figure data.
-            If provided, skips plot_neurons() and loads from file (much faster).
-            Example: 'path/to/existing_plot.html'
-        use_existing_images : bool, default False
-            If True, skip image rendering and use existing images in pics_*fps_*plane folder.
-            Useful for regenerating video with different settings from cached images.
-        parallel_workers : int, optional
-            Number of parallel workers for frame rendering. Each worker renders frames
-            independently using ProcessPoolExecutor, which can significantly speed up
-            rendering on multi-core systems. Default: None (sequential rendering).
-            Recommended: Set to number of CPU cores (e.g., 8-12 for modern CPUs).
-            Note: Parallel rendering may use more memory.
-        **kwargs : dict
-            Additional arguments for plotly write_image().
-            - 'scale': Resolution multiplier (default 2 for balance of quality/speed)
-            - 'width', 'height': Specific dimensions in pixels
-            - Lower scale = faster rendering, smaller file
-        
-        Returns
-        -------
-        int
-            0 on success
-        
-        Examples
-        --------
-        # Standard usage after plot_neurons()
-        vs.plot_neurons()
-        vs.export_video(fps=30)
-        
-        # Fast re-export from existing HTML (no re-plotting needed)
-        vs.export_video(fps=30, html_file='connection_data/my_plot/my_plot.html')
-        
-        # Use cached images to regenerate video quickly
-        vs.export_video(fps=30, use_existing_images=True)
-        
-        # High quality but slower
-        vs.export_video(fps=30, scale=4)
-        
-        # Fast preview
-        vs.export_video(fps=15, scale=1, width=800, height=600)
-        
-        # Parallel rendering for speed (uses multiple CPU cores)
-        vs.export_video(fps=30, scale=2, parallel_workers=8)
-        '''
-        # Set default parameters - always use frontal view defaults for consistency
-        # rotate_plane='xz' rotates around the vertical (Y) axis for frontal view
-        if rotate_plane is None:
-            rotate_plane = 'xz'
-        if view_direction is None:
-            view_direction = (1, -1)
-        if view_distance is None:
-            view_distance = 2.2
-        
-        # Set default scale if not specified
-        if kwargs.get('scale') is None and kwargs.get('width') is None and kwargs.get('height') is None:
-            kwargs['scale'] = 2
-        
-        step = 30 / fps
-        
-        # Load figure from existing HTML file if provided (OPTIMIZATION)
-        if html_file is not None:
-            print(f'📂 Loading figure from existing HTML: {html_file}')
-            if not os.path.exists(html_file):
-                raise FileNotFoundError(f'HTML file not found: {html_file}')
-            
-            # Read and parse the HTML file to extract figure data
-            import plotly.io as pio
-            try:
-                fig_loaded = pio.read_html(html_file)
-                fig_traces = fig_loaded.data
-                print(f'✓ Loaded {len(fig_traces)} traces from HTML file')
-            except Exception as e:
-                raise RuntimeError(f'Failed to load figure from HTML: {e}')
-        else:
-            # Use current figure
-            if not hasattr(self, 'fig_path') or not os.path.exists(self.fig_path+'.html'):
-                raise RuntimeError(
-                    'No figure found. Either run plot_neurons() first or provide html_file parameter.'
-                )
-            html_size = os.path.getsize(self.fig_path+'.html') / 1024 / 1024 # in MB
-            if html_size > 100:
-                print(f'⚠️  Figure is large ({html_size:.1f} MB). Rendering may be slow.')
-                print(f'   Consider using lower scale or smaller dimensions in kwargs.')
-            fig_traces = self.fig_3d.data
-        # Configure figure for video export
-        for trace in fig_traces:
-            trace.showlegend = False
-            if hasattr(trace,'marker'):
-                trace.marker.size = synapse_size
-        
-        fig_layout = go.Layout(
-            margin=dict(l=1, r=1, b=1, t=1, pad=0),
-        )
-        fig_new = go.Figure(data=fig_traces, layout=fig_layout)
-        
-        # Set camera parameters - always use frontal view for consistency
-        scene_camera_parameters = dict(
-            up=dict(x=0, y=-1, z=0),
-            eye=dict(x=0, y=0, z=-view_distance),
-        )
-        
-        fig_new.update_layout(
-            sliders=[],  # Remove sliders for cleaner video
-            scene=dict(
-                dragmode='orbit',
-                xaxis={'visible':False}, 
-                yaxis={'visible':False},
-                zaxis={'visible':False},
-            ),
-            scene_camera=scene_camera_parameters,
-        )
-        
-        # Set up image folder
-        pic_folder = os.path.join(self.save_folder, f'pics_{fps}fps_{rotate_plane}')
-        
-        # Calculate rotation steps
-        if step > 0:
-            steps_to_write = np.linspace(0, 360, int(360/step), endpoint=False)
-        elif step < 0:
-            steps_to_write = np.linspace(360, 0, int(360/step), endpoint=False)
-        
-        # OPTIMIZATION: Skip image rendering if use_existing_images=True
-        if use_existing_images and os.path.exists(pic_folder):
-            existing_images = [f for f in os.listdir(pic_folder) if f.endswith('.jpeg')]
-            if len(existing_images) == len(steps_to_write):
-                print(f'✓ Using {len(existing_images)} existing images from {pic_folder}')
-                print(f'  Skipping image rendering (use_existing_images=True)')
-            else:
-                print(f'⚠️  Found {len(existing_images)} images but need {len(steps_to_write)}')
-                print(f'  Re-rendering images...')
-                use_existing_images = False
-        else:
-            use_existing_images = False
-        
-        # Render images if needed
-        if not use_existing_images:
-            if os.path.exists(pic_folder):
-                shutil.rmtree(pic_folder)
-            os.makedirs(pic_folder)
-            
-            print(f'🎬 Rendering {len(steps_to_write)} frames at {fps} fps...')
-            print(f'   Resolution: scale={kwargs.get("scale", "auto")}', end='')
-            if 'width' in kwargs and 'height' in kwargs:
-                print(f', size={kwargs["width"]}x{kwargs["height"]}')
-            else:
-                print()
-            
-            # Ensure dimensions are set to avoid blank images if not provided
-            if 'width' not in kwargs: kwargs['width'] = 1200
-            if 'height' not in kwargs: kwargs['height'] = 900
-            
-            t0 = time.time()
-            
-            # Note: parallel_workers is accepted but not used
-            # Parallel rendering with ProcessPoolExecutor doesn't work reliably with Plotly/Kaleido
-            # on macOS due to the "spawn" multiprocessing method re-executing the entire script.
-            # Sequential rendering is used instead for reliability.
-            if parallel_workers is not None and parallel_workers > 1:
-                print(f'   ⚠️  parallel_workers={parallel_workers} ignored (not supported with Plotly/Kaleido)')
-                print(f'   Using sequential rendering instead...')
-            
-            # Sequential rendering (reliable approach)
-            print(f'   Rendering frames... (First frame may take longer to initialize Kaleido)')
-            
-            for i, deg in enumerate(steps_to_write):
-                rad_i = np.deg2rad(deg)
-                x = view_distance * np.sin(rad_i) * view_direction[0]
-                y = view_distance * np.cos(rad_i) * view_direction[1]
-                
-                if rotate_plane == 'xy':
-                    fig_new.update_layout(scene_camera=dict(eye=dict(x=x, y=y, z=0)))
-                elif rotate_plane == 'yz':
-                    fig_new.update_layout(scene_camera=dict(eye=dict(x=0, y=x, z=y)))
-                elif rotate_plane == 'xz':
-                    fig_new.update_layout(scene_camera=dict(eye=dict(x=x, y=0, z=y)))
-                
-                fig_path = os.path.join(pic_folder, f'deg_{deg:.1f}.jpeg')
-                
-                try:
-                    fig_new.write_image(fig_path, **kwargs)
-                except Exception as e:
-                    print(f'\n⚠️  Frame {i+1} failed: {e}')
-                    if i == 0:
-                        print('   Try reducing "scale" (e.g. scale=1) or using "width"/"height" parameters.')
-                        return 1
-                
-                elapsed = time.time() - t0
-                avg_time = elapsed / (i + 1)
-                remaining = avg_time * (len(steps_to_write) - i - 1)
-                print(f'\r  Frame {i+1}/{len(steps_to_write)} | '
-                      f'Elapsed: {elapsed:.1f}s | '
-                      f'ETA: {remaining:.1f}s | '
-                      f'{avg_time:.2f}s/frame', end='    ')
-            
-            print('\n✓ Image rendering complete')
-        # Generate videos from images
-        print(f'\nGenerating videos...')
-        imglist = os.listdir(pic_folder)
-        img_eg = cv2.imread(os.path.join(pic_folder, imglist[0]))
-        height, width, layers = img_eg.shape
-        
-        print(f'   Video resolution: {width}x{height}')
-
-        # Forward video - OPTIMIZED with faster codec
-        video_dir = os.path.join(self.save_folder, f'{self.saveas}_video_forward.mp4')
-        # Use H.264 codec for better compression and compatibility
-        fourcc = cv2.VideoWriter_fourcc(*'avc1')  # H.264 codec (faster than mp4v)
-        out = cv2.VideoWriter(video_dir, fourcc, fps, frameSize=(width, height))
-        
-        t0 = time.time()
-        for i, deg in enumerate(steps_to_write):
-            img = cv2.imread(os.path.join(pic_folder, f'deg_{deg:.1f}.jpeg'))
-            out.write(img)
-            if (i + 1) % 10 == 0 or i == len(steps_to_write) - 1:
-                print(f'\r  Forward video: {i+1}/{len(steps_to_write)} frames', end='  ')
-        out.release()
-        t1 = time.time()
-        print(f'\n\u2713 Forward video: {video_dir} ({t1-t0:.1f}s)')
-        
-        # Backward video
-        video_dir = os.path.join(self.save_folder, f'{self.saveas}_video_backward.mp4')
-        out = cv2.VideoWriter(video_dir, fourcc, fps, frameSize=(width, height))
-        
-        t0 = time.time()
-        for i, deg in enumerate(steps_to_write[::-1]):
-            img = cv2.imread(os.path.join(pic_folder, f'deg_{deg:.1f}.jpeg'))
-            out.write(img)
-            if (i + 1) % 10 == 0 or i == len(steps_to_write) - 1:
-                print(f'\r  Backward video: {i+1}/{len(steps_to_write)} frames', end='  ')
-        out.release()
-        t1 = time.time()
-        print(f'\n\u2713 Backward video: {video_dir} ({t1-t0:.1f}s)')
-        
-        print(f'\n\u2705 Video export complete!')
-        print(f'   Image cache: {pic_folder}')
-        print(f'   Tip: Use use_existing_images=True to skip re-rendering next time')
-        return 0

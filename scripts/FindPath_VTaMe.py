@@ -16,7 +16,7 @@ if __name__ == '__main__':
     fc = FindNeuronConnection(
         # please provide your own neuprint token, which can be found at https://neuprint.janelia.org/account
         token='',
-        data_folder='/Users/apple/Local/connection_data',
+        output_dir='/Users/apple/Local/connection_data',
         dataset='hemibrain:v1.2.1', 
         sourceNeurons=['PPL103'],  # pd.read_excel('sourceNeurons.xlsx', header=None).iloc[:,0].tolist()
         targetNeurons=vt_neurons,  # pd.read_excel('targetNeurons.xlsx', header=None).iloc[:,0].tolist()

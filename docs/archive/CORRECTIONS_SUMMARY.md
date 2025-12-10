@@ -24,7 +24,7 @@ When implementing the parallel processing feature, I incorrectly assumed the cla
 ```python
 fc = FindNeuronConnection(
     token='',
-    data_folder='/Users/apple/Local/connection_data',
+    output_dir='/Users/apple/Local/connection_data',
     dataset = 'optic-lobe:v1.1', 
     sourceNeurons = ['L3.*_R'],
     targetNeurons = ['l-LNv.*_R'],
@@ -36,7 +36,7 @@ fc = FindNeuronConnection(
 ```python
 fc = FindNeuronConnection(
     token='',
-    data_folder='/Users/apple/Local/connection_data',
+    output_dir='/Users/apple/Local/connection_data',
     dataset='optic-lobe:v1.1',  # Combined dataset and version
     sourceNeurons=['L3.*_R'],
     targetNeurons=['l-LNv.*_R'],

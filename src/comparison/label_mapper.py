@@ -98,7 +98,7 @@ class LabelMapper:
         self._source_reverse: Dict[str, Dict[str, str]] = defaultdict(dict)
         self._target_reverse: Dict[str, Dict[str, str]] = defaultdict(dict)
         self._intermediate_reverse: Dict[str, Dict[str, str]] = defaultdict(dict)
-        
+
         # Handle unified mapping file
         if mapping_file:
             if source_mapping_file is None:
@@ -131,6 +131,13 @@ class LabelMapper:
         
         # Build reverse lookups
         self._build_reverse_lookups()
+
+    @property
+    def is_empty(self) -> bool:
+        """Check if the mapper has any mappings."""
+        return (not self._source_mapping and 
+                not self._target_mapping and 
+                not self._intermediate_mapping)
     
     def merge(self, other: 'LabelMapper') -> None:
         """
@@ -166,7 +173,7 @@ class LabelMapper:
 
     def validate_datasets(self, datasets: List[str], role: str = 'both') -> None:
         """
-        Validate that all requested datasets exist in the mapping.
+        Validate that all required datasets are present in the mapping.
         
         Args:
             datasets: List of dataset names to check
@@ -177,6 +184,9 @@ class LabelMapper:
         """
         missing = []
         
+        # Convert datasets to set for faster lookup
+        datasets_set = set(datasets)
+        
         if role in ['source', 'both']:
             # Check source mapping
             # Get all datasets present in source mapping
@@ -184,8 +194,10 @@ class LabelMapper:
             for label_map in self._source_mapping.values():
                 present_datasets.update(label_map.keys())
             
-            for ds in datasets:
-                if ds not in present_datasets:
+            # Check if all required datasets are present
+            missing_source = datasets_set - present_datasets
+            if missing_source:
+                for ds in missing_source:
                     missing.append(f"{ds} (source)")
                     
         if role in ['target', 'both']:
@@ -194,8 +206,10 @@ class LabelMapper:
             for label_map in self._target_mapping.values():
                 present_datasets.update(label_map.keys())
                 
-            for ds in datasets:
-                if ds not in present_datasets:
+            # Check if all required datasets are present
+            missing_target = datasets_set - present_datasets
+            if missing_target:
+                for ds in missing_target:
                     missing.append(f"{ds} (target)")
         
         if missing:

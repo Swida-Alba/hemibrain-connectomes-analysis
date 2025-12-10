@@ -46,7 +46,7 @@ class FindNeuronConnection:
     script_path: str = os.path.dirname(source_path)
     '''absolute path to the project root directory (parent of src/)'''
     
-    data_folder: str = os.path.join(script_path, 'connection_data')
+    output_dir: str = os.path.join(script_path, 'connection_data')
     '''folder to save all data'''
 ```
 
@@ -61,7 +61,7 @@ class VisualizeSkeleton:
     script_path: str = os.path.dirname(source_path)
     '''absolute path to the project root directory (parent of src/)'''
     
-    data_folder: str = os.path.join(script_path, 'connection_data')
+    output_dir: str = os.path.join(script_path, 'connection_data')
     '''folder to save all data'''
 ```
 
@@ -73,7 +73,7 @@ For a project at: `/path/to/hemibrain-connectomes-analysis-now/`
 |-----------|-------|---------|
 | `source_path` | `/path/to/hemibrain-connectomes-analysis-now/src` | Points to src/ directory |
 | `script_path` | `/path/to/hemibrain-connectomes-analysis-now` | Points to project root |
-| `data_folder` | `/path/to/hemibrain-connectomes-analysis-now/connection_data` | Data storage location |
+| `output_dir` | `/path/to/hemibrain-connectomes-analysis-now/connection_data` | Data storage location |
 | `cache_folder` | `/path/to/hemibrain-connectomes-analysis-now/cache/<dataset>` | Cache storage location |
 
 ## Benefits
@@ -116,7 +116,7 @@ fc = FindNeuronConnection(
 # Access the paths
 print(fc.source_path)  # .../hemibrain-connectomes-analysis-now/src
 print(fc.script_path)  # .../hemibrain-connectomes-analysis-now
-print(fc.data_folder)  # .../hemibrain-connectomes-analysis-now/connection_data
+print(fc.output_dir)  # .../hemibrain-connectomes-analysis-now/connection_data
 ```
 
 ### Directory Structure
@@ -129,7 +129,7 @@ hemibrain-connectomes-analysis-now/         ← script_path
 │   └── vispath.py
 ├── cache/                                   ← script_path/cache
 ├── datasets/                                ← script_path/datasets
-├── connection_data/                         ← data_folder
+├── connection_data/                         ← output_dir
 └── scripts/
     └── FindPath.py
 ```

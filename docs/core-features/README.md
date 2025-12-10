@@ -13,7 +13,6 @@ This directory contains documentation for the core analytical capabilities:
 - **[Path Finding Methods](./PathFinding_Methods.md)**: Comparison of Bidirectional, DP, and DFS algorithms
 - **Custom Groups**: Flexible neuron grouping for custom analysis
 - **Cache System**: High-performance local data storage
-- **Parallel Processing**: Multi-core acceleration
 - **Filtering**: Connection and neuron filtering options
 
 ---
@@ -62,7 +61,6 @@ Detailed comparison of the available pathfinding algorithms in `FindAllPath`.
 - **Optimized Backward Search (DP)**: Best for finding all paths to specific targets.
 - **Memoized DFS**: Good for dense graphs with overlapping paths.
 - **Standard DFS**: Low memory but slow for deep paths.
-- **Parallel Processing**: High-performance mode for large datasets.
 
 **Comparison Table**:
 | Algorithm | Speed | Memory | Best Use Case |
@@ -306,7 +304,7 @@ from findpath import FindNeuronConnection
 fc = FindNeuronConnection(
     token='your_token',
     dataset='hemibrain:v1.2.1',
-    data_folder='/path/to/cache',  # Enable caching
+    output_dir='/path/to/cache',  # Enable caching
     use_cache=True
 )
 ```
@@ -480,7 +478,7 @@ paths = fap.find_all_paths()
 fc = FindNeuronConnection(
     token='token',
     dataset='hemibrain:v1.2.1',
-    data_folder='/path/to/cache',  # Creates cache here
+    output_dir='/path/to/cache',  # Creates cache here
     use_cache=True
 )
 
@@ -540,7 +538,7 @@ filterBy = {
 ## Troubleshooting
 
 ### Cache Issues
-- **Cache not working**: Check `data_folder` path is writable
+- **Cache not working**: Check `output_dir` path is writable
 - **Cache too large**: Normal for complete datasets (~40-60GB for hemibrain)
 - **Cache corrupted**: Delete cache directory and rebuild
 

@@ -16,7 +16,7 @@ if __name__ == '__main__':
     
     fc = FindNeuronConnection(
         token='', 
-        data_folder='/Users/apple/Local/connection_data/_flywire_test',
+        output_dir='/Users/apple/Local/connection_data/_flywire_test',
         dataset=dataset, 
         sourceNeurons=['aMe12'], 
         targetNeurons=['PPL101','PPL103'],
@@ -31,8 +31,6 @@ if __name__ == '__main__':
         keyword_in_path_to_remove=[], # Empty list to keep all paths (FlyWire has many None types)
         network_layout='distributed',
         use_cache=True, 
-        use_parallel=True,
-        n_jobs=-1,
         edgeN_limit=50,
         output_format='csv',
     )
@@ -52,7 +50,7 @@ if __name__ == '__main__':
     # Visualize source and target neurons
     vs = VisualizeSkeleton(
         dataset=dataset,
-        data_folder='/Users/apple/Local/connection_data/_flywire_test',
+        output_dir='/Users/apple/Local/connection_data/_flywire_test',
         neuron_layers=['aMe12', 'KCg-s1',['PPL101', 'PPL103']], # Test with source and target neurons
         # custom_layer_names=[],
         mesh_roi=['ME(R)', 'EB', 'AL(R)', 'ME(L)', 'AL(L)'], # Add ROIs to test loading and mirroring

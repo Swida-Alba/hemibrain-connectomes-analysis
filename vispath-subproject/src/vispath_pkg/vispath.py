@@ -6657,7 +6657,37 @@ class VisualizePath:
             
             # Save original paths
             paths_path = os.path.join(self.output_folder, self.base_filename + '_data_original_paths.csv')
-            self._save_df_to_csv_polars(self.path_df, paths_path, index=False)
+            
+            # Create a copy for saving to avoid modifying the original dataframe
+            df_to_save = self.path_df.copy()
+            
+            # Sort by path length (ascending) and path probability (descending)
+            sort_cols = []
+            ascending_order = []
+            # Check for length column (could be 'length' or 'path_length')
+            if 'length' in df_to_save.columns:
+                sort_cols.append('length')
+                ascending_order.append(True)
+            elif 'path_length' in df_to_save.columns:
+                sort_cols.append('path_length')
+                ascending_order.append(True)
+                
+            # Check for probability column (could be 'path_prob' or 'path_probability')
+            if 'path_prob' in df_to_save.columns:
+                sort_cols.append('path_prob')
+                ascending_order.append(False)
+            elif 'path_probability' in df_to_save.columns:
+                sort_cols.append('path_probability')
+                ascending_order.append(False)
+                
+            if sort_cols:
+                df_to_save = df_to_save.sort_values(sort_cols, ascending=ascending_order)
+            
+            # Drop redundant columns
+            cols_to_drop = ['path_str', 'path_block', 'connection_ratios', 'traversal_probabilities']
+            df_to_save = df_to_save.drop(columns=[c for c in cols_to_drop if c in df_to_save.columns])
+            
+            self._save_df_to_csv_polars(df_to_save, paths_path, index=False)
             created_files.append(paths_path)
             
             # Save matrices

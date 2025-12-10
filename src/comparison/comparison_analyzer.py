@@ -81,6 +81,9 @@ class ComparisonAnalyzer:
         self.label_mapper = label_mapper
         self.verbose = verbose
         
+        # Track if a mapper was explicitly provided
+        has_user_mapper = self.label_mapper is not None or self.parameters.overall_label_mapper is not None
+        
         # Extract and merge LabelMappers from parameters
         if self.label_mapper is None:
             # Initialize unified mapper
@@ -109,7 +112,7 @@ class ComparisonAnalyzer:
         self._resolve_dataset_configs()
         
         # Validate datasets if LabelMapper is provided
-        if self.label_mapper:
+        if has_user_mapper and self.label_mapper:
             # Determine role to validate based on usage in parameters
             role_to_validate = 'both'
             
@@ -360,7 +363,7 @@ class ComparisonAnalyzer:
             conn_df['threshold'] = threshold
             
             # Apply label mapping if available
-            if self.label_mapper:
+            if self.label_mapper and not self.label_mapper.is_empty:
                 self._log(f"Applying label mapping to {dataset_name} results")
                 conn_df = self.label_mapper.apply_to_dataframe(conn_df, dataset_name)
                 
@@ -421,7 +424,7 @@ class ComparisonAnalyzer:
             conn_df['threshold'] = threshold
             
             # Apply label mapping if available
-            if self.label_mapper:
+            if self.label_mapper and not self.label_mapper.is_empty:
                 self._log(f"Applying label mapping to {dataset_name} edge results")
                 conn_df = self.label_mapper.apply_to_dataframe(conn_df, dataset_name)
                 

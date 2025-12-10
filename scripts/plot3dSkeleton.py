@@ -17,7 +17,7 @@ vs = VisualizeSkeleton(
     dataset = 'male-cns:v0.9',
     # dataset = 'hemibrain:v1.2.1',
     token = '',
-    data_folder='/Users/apple/Local/connection_data',
+    output_dir='/Users/apple/Local/connection_data',
     neuron_layers = ['MeVPLo2','aMe12'], # or in the format: 'VA1d_adPN -> LHCENT3 -> MBON01'
     custom_layer_names = [],
     skip_synapse=False,
@@ -33,13 +33,12 @@ vs = VisualizeSkeleton(
     legend_mode = 'normal',
     merge_neurons=True,
     skeleton_mesh_simplification=0.9,
-    roi_mesh_simplification=0.9,
+    roi_mesh_simplification=0.95,
     
     show_fig = True,
     brain_mesh = 'whole',
     cache_neurons=True,
     cache_synapses=True,
-    # backend='k3d',
 )
 
 vs.plot_neurons()

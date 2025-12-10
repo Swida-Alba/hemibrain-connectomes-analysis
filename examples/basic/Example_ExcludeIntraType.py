@@ -105,8 +105,6 @@ if __name__ == '__main__':
         
         # Performance
         use_cache=True,
-        use_parallel=True,
-        n_jobs=-1,
     )
     
     fc_kc_dan.InitializeNeuronInfo()

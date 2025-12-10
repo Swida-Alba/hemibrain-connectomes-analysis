@@ -13,7 +13,7 @@ if __name__ == '__main__':
     fc = FindNeuronConnection(
         # please provide your own neuprint token, which can be found at https://neuprint.janelia.org/account
         token='',
-        data_folder='/Users/apple/Local/connection_data',
+        output_dir='/Users/apple/Local/connection_data',
         # dataset='male-cns:v0.9', 
         # dataset='hemibrain:v1.2.1',
         dataset='optic-lobe:v1.1',
@@ -35,8 +35,6 @@ if __name__ == '__main__':
         keyword_in_path_to_remove=['None'],
         network_layout='distributed',
         use_cache=True,  # Enable caching for faster subsequent runs
-        use_parallel=True,  # Enable parallel processing for pathfinding (4-14x faster for large datasets)
-        n_jobs=-1,  # Use all CPU cores (-1 = auto-detect, or specify number like 4)
         pathN_to_show=30,
         output_format='csv',  # 'xlsx' (default) or 'csv'
     )
