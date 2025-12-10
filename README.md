@@ -13,7 +13,8 @@ A comprehensive Python toolkit for analyzing and visualizing connectome data fro
 - 🎬 **3D Visualization**: Interactive neuron skeleton rendering with rotating video export (navis-based)
 - 🌐 **Interactive Networks**: Cytoscape.js-powered network graphs with hierarchical and force-directed layouts
 - 📊 **Rich Visualizations**: Sankey diagrams, heatmaps with clustering, and connection matrices
-- ⚖️ **Advanced Comparisons**: Cross-dataset and intra-dataset comparisons at multiple threshold levels to reveal robust connectivity patterns.
+- ⚖️ **Advanced Comparisons**: Cross-dataset and intra-dataset comparisons at multiple threshold levels to reveal robust 
+- connectivity patterns.
 - ⚡ **High Performance**: 10-100x speedup with local caching, 4-14x with parallel processing, Polars-accelerated large data operations, Optimized graph algorithms and pathfinding
 - 🎯 **Flexible Filtering**: Multiple filtering modes (synapse count, connection ratio, traversal probability)
 - 💾 **Smart Caching**: Efficient local storage with Polars for memory-efficient consolidation of large caches
