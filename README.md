@@ -6,7 +6,7 @@ A comprehensive Python toolkit for analyzing and visualizing connectome data fro
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 ## ✨ Key Features
-- 🗄️ **Universal Dataset Support**: Seamless compatibility between **NeuPrint datasets** (hemibrain, MANC, etc.) and **FlyWire FAFB/BANC** datasets.
+- 🗄️ **Universal Dataset Support**: Seamless compatibility between **NeuPrint datasets** (hemibrain, male-cns, etc.) and **FlyWire FAFB/BANC** datasets.
 - 🔍 **Cross-Dataset Comparison**: Analyze and compare connectivity patterns across multiple datasets seamlessly
 - 🧬 **Connectivity Analysis**: Connectivity-based homolog finding (inter/intra-dataset) and similarity comparisons.
 - 🔍 **Population-Level Fast Pathfinding**: Comprehensive multi-hop path discovery between neuron populations with forward-only validation
