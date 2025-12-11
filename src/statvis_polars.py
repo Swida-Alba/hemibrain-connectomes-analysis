@@ -170,7 +170,15 @@ def process_batch_polars(paths_batch, df_conn, level='type', keyword_in_path_to_
     # Note: 'path_nodes' is the list. We can keep it if needed, but CSV writing might stringify it.
     # statvis writes 'path' as string "A->B->C".
     
-    return df_final.select(cols_to_keep), excluded.select(cols_to_keep)
+    df_final_selected = df_final.select(cols_to_keep)
+    
+    # Handle excluded DataFrame - ensure it has the same schema even if empty
+    if excluded.is_empty():
+        excluded_selected = df_final_selected.clear()  # Empty DataFrame with same schema
+    else:
+        excluded_selected = excluded.select(cols_to_keep)
+    
+    return df_final_selected, excluded_selected
 
 def process_paths_streaming(path_gen, conn_data, targets, output_path, 
                           excluded_path=None, real_layer_map=None, 

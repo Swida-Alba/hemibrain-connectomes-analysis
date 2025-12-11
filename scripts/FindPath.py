@@ -17,25 +17,25 @@ if __name__ == '__main__':
         token='',
         output_dir='/Users/apple/Local/connection_data',
         # saveas='_name_test1',
-        dataset='male-cns:v0.9', 
-        # dataset='hemibrain:v1.2.1',
+        # dataset='male-cns:v0.9', 
+        dataset='hemibrain:v1.2.1',
         # dataset='optic-lobe:v1.1',
         # dataset='flywire_FAFB_v783',
-        sourceNeurons=['L2'],  # pd.read_excel('sourceNeurons.xlsx', header=None).iloc[:,0].tolist()
+        sourceNeurons=['aMe12'],  # pd.read_excel('sourceNeurons.xlsx', header=None).iloc[:,0].tolist()
         # targetNeurons=['DN.*'],  # pd.read_excel('targetNeurons.xlsx', header=None).iloc[:,0].tolist()
-        targetNeurons=['DN.*'],
+        targetNeurons=['KCg-d'],
         # sourceNeurons = pd.read_excel('sourceNeurons.xlsx', header=None).iloc[:,0].tolist(),
         # targetNeurons = pd.read_excel('targetNeurons.xlsx', header=None).iloc[:,0].tolist(),
         custom_source_name='', # you can specify a custom name for the source neurons, especially when you are using a list of many types of neurons or a list of neurons read from a file
         custom_target_name='',  # you can specify a custom name for the target neurons
         custom_source_group_names=[],
         custom_target_group_names=[],
-        min_synapse_num=20,
+        min_synapse_num=5,
         min_ratio=0.0,
         min_traversal_probability=0,
         filter_by='bodyId',  # 'bodyId' or 'type' level filtering
         showfig=False,
-        max_interlayer=5,
+        max_interlayer=1,
         keyword_in_path_to_remove=['None'],
         network_layout='distributed',
         use_cache=True,  # Enable caching for faster subsequent runs

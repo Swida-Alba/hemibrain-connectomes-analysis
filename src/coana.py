@@ -6644,6 +6644,7 @@ class FindNeuronConnection:
                     level='bodyId',
                     type_lookup=type_lookup
                 )
+                is_polars = True
             else:
                 path_df_bodyId = sv.build_path_dataframe_from_paths(
                     paths=all_paths,
@@ -6653,25 +6654,35 @@ class FindNeuronConnection:
                     level='bodyId',
                     type_lookup=type_lookup
                 )
+                is_polars = False
             
-            # Sort path_df_bodyId
-            if not path_df_bodyId.empty:
+            # Sort path_df_bodyId - handle both Polars and pandas
+            is_empty = path_df_bodyId.is_empty() if is_polars else path_df_bodyId.empty
+            if not is_empty:
                 sort_cols = []
                 ascending = []
-                if 'length' in path_df_bodyId.columns:
+                cols = path_df_bodyId.columns
+                if 'length' in cols:
                     sort_cols.append('length')
                     ascending.append(True)
-                elif 'path_length' in path_df_bodyId.columns:
+                elif 'path_length' in cols:
                     sort_cols.append('path_length')
                     ascending.append(True)
-                if 'path_prob' in path_df_bodyId.columns:
+                if 'path_prob' in cols:
                     sort_cols.append('path_prob')
                     ascending.append(False)
-                elif 'path_probability' in path_df_bodyId.columns:
+                elif 'path_probability' in cols:
                     sort_cols.append('path_probability')
                     ascending.append(False)
                 if sort_cols:
-                    path_df_bodyId = path_df_bodyId.sort_values(by=sort_cols, ascending=ascending)
+                    if is_polars:
+                        # Polars sorting
+                        path_df_bodyId = path_df_bodyId.sort(
+                            by=sort_cols, 
+                            descending=[not asc for asc in ascending]
+                        )
+                    else:
+                        path_df_bodyId = path_df_bodyId.sort_values(by=sort_cols, ascending=ascending)
 
             # Save path_bodyId to the bodyId data file
             self._vprint(f'💾 Saving path_bodyId data (rows: {len(path_df_bodyId):,})...', level='full')
@@ -6875,15 +6886,22 @@ class FindNeuronConnection:
                     self._vprint('creating bodyId-level visualizations...', level='simple', end='', flush=True)
                 else:
                     self._vprint('\nCreating bodyId-level network visualizations...', level='full')
-                # Filter paths if pathN_to_show is specified
-                if self.pathN_to_show > 0 and len(path_df_bodyId) > self.pathN_to_show:
-                    paths_to_visualize_bodyId = path_df_bodyId.head(self.pathN_to_show).copy()
-                    if self.verbose_mode == 'full':
-                        self._vprint(f'  Showing top {self.pathN_to_show} bodyId paths (by traversal_probability) out of {len(path_df_bodyId)} total paths', level='full')
+                
+                # Convert Polars to pandas if necessary for visualization
+                if is_polars:
+                    path_df_bodyId_pd = path_df_bodyId.to_pandas()
                 else:
-                    paths_to_visualize_bodyId = path_df_bodyId.copy()
+                    path_df_bodyId_pd = path_df_bodyId
+                    
+                # Filter paths if pathN_to_show is specified
+                if self.pathN_to_show > 0 and len(path_df_bodyId_pd) > self.pathN_to_show:
+                    paths_to_visualize_bodyId = path_df_bodyId_pd.head(self.pathN_to_show).copy()
                     if self.verbose_mode == 'full':
-                        self._vprint(f'  Showing all {len(path_df_bodyId)} bodyId paths', level='full')
+                        self._vprint(f'  Showing top {self.pathN_to_show} bodyId paths (by traversal_probability) out of {len(path_df_bodyId_pd)} total paths', level='full')
+                else:
+                    paths_to_visualize_bodyId = path_df_bodyId_pd.copy()
+                    if self.verbose_mode == 'full':
+                        self._vprint(f'  Showing all {len(path_df_bodyId_pd)} bodyId paths', level='full')
                 
                 # Ensure path_block column exists and format with types if available
                 # We want format: bodyId_type -> bodyId_type -> ...
