@@ -5,7 +5,11 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime
 import logging
+import warnings
 from contextlib import contextmanager
+
+# Suppress FutureWarning from neuprint about Series.__getitem__
+warnings.filterwarnings("ignore", category=FutureWarning, module="neuprint")
 
 import numpy as np
 import pandas as pd
@@ -46,6 +50,9 @@ class VisualizeSkeleton:
 
     client_flywire: object = None
     '''flywire client instance'''
+
+    client: object = None
+    '''neuprint client instance (optional, to reuse existing client)'''
 
     server: str = 'https://neuprint.janelia.org'
     '''the neuprint server to visit'''
@@ -473,28 +480,33 @@ class VisualizeSkeleton:
         # Initialize client if needed
         if self.client_type == 'neuprint':
             import neuprint
-            # Check if global client exists
-            client_exists = False
-            try:
-                if neuprint.default_client() is not None:
-                    client_exists = True
-            except RuntimeError:
-                pass
-
-            if not client_exists:
-                if self.token:
-                    self.client = Client(self.server, dataset=self.dataset, token=self.token)
-                    self.client.fetch_version()
-                    self._vprint(f'Client initialized for {self.dataset}', level='full')
-                elif os.environ.get('NEUPRINT_APPLICATION_CREDENTIALS'):
-                    # Auto-detect from env
-                    self.client = Client(self.server, dataset=self.dataset)
-                    self.client.fetch_version()
-                    self._vprint(f'Client initialized from env for {self.dataset}', level='full')
-                else:
-                    # Only warn if we are not using local cache/files exclusively
-                    # But we don't know that yet.
+            
+            # Use provided client if available
+            if self.client is not None:
+                self._vprint(f'Using provided client for {self.dataset}', level='full')
+            else:
+                # Check if global client exists
+                client_exists = False
+                try:
+                    if neuprint.default_client() is not None:
+                        client_exists = True
+                except RuntimeError:
                     pass
+
+                if not client_exists:
+                    if self.token:
+                        self.client = Client(self.server, dataset=self.dataset, token=self.token)
+                        self.client.fetch_version()
+                        self._vprint(f'Client initialized for {self.dataset}', level='full')
+                    elif os.environ.get('NEUPRINT_APPLICATION_CREDENTIALS'):
+                        # Auto-detect from env
+                        self.client = Client(self.server, dataset=self.dataset)
+                        self.client.fetch_version()
+                        self._vprint(f'Client initialized from env for {self.dataset}', level='full')
+                    else:
+                        # Only warn if we are not using local cache/files exclusively
+                        # But we don't know that yet.
+                        pass
         
         # Initialize FlyWire client if needed
         if self.client_type == 'flywire' and self.client_flywire is None:
@@ -604,7 +616,7 @@ class VisualizeSkeleton:
             layer_input = self.neuron_layers[i]
             if not isinstance(layer_input, list):
                 layer_input = [layer_input]
-            ndf, rdf, auto_name, cri = sv.getNeurons(layer_input, dataset=self.dataset)
+            ndf, rdf, auto_name, cri = sv.getNeurons(layer_input, dataset=self.dataset, client=self.client)
             self.neuron_dfs.append(ndf)
             self.roi_dfs.append(rdf)
             self.layer_criteria.append(cri)
@@ -865,7 +877,11 @@ class VisualizeSkeleton:
                         # Fetch from NeuPrint - filter to missing IDs only
                         missing_df = self.neuron_dfs[i][self.neuron_dfs[i]['bodyId'].isin(missing_ids)]
                         if not missing_df.empty:
-                            neuron_vols = neu.fetch_skeletons(missing_df, with_synapses=self.show_connectors)
+                            # Pass client explicitly if available
+                            kwargs = {'with_synapses': self.show_connectors}
+                            if self.client:
+                                kwargs['client'] = self.client
+                            neuron_vols = neu.fetch_skeletons(missing_df, **kwargs)
                 
                 # Save newly fetched neurons to cache
                 if neuron_vols is not None:
@@ -1497,6 +1513,7 @@ class VisualizeSkeleton:
                         target_criteria=target_criteria,
                         min_total_weight=self.min_synapse_num,
                         synapse_criteria=self.synapse_criteria,
+                        client=self.client,
                     )
                     if fetched_df is not None and not fetched_df.empty:
                         conn_df = pd.concat([cached_df, fetched_df], ignore_index=True)
@@ -1513,6 +1530,7 @@ class VisualizeSkeleton:
                         target_criteria=target_criteria,
                         min_total_weight=self.min_synapse_num,
                         synapse_criteria=self.synapse_criteria,
+                        client=self.client,
                     )
                     # Save to cache
                     all_pairs = [(s, t) for s in source_ids for t in target_ids]
@@ -1822,25 +1840,27 @@ class VisualizeSkeleton:
                 # Initialize neuprint client using environment variable or global client
                 from neuprint import Client, fetch_meta
                 
-                # Try to get token from environment variable first
-                token = os.environ.get('NEUPRINT_APPLICATION_CREDENTIALS')
-                client = None
+                client = self.client
                 
-                if token:
-                    # Determine server URL based on dataset
-                    if 'optic' in self.dataset.lower():
-                        server = 'https://neuprint-optic-lobe.janelia.org'
-                        dataset_name = self.dataset.split(':')[0]  # 'optic-lobe'
-                    else:
-                        server = 'https://neuprint.janelia.org'
-                        dataset_name = 'hemibrain:v1.2.1'  # default
+                if client is None:
+                    # Try to get token from environment variable first
+                    token = os.environ.get('NEUPRINT_APPLICATION_CREDENTIALS')
                     
-                    try:
-                        client = Client(server, dataset=dataset_name, token=token)
-                    except Exception as e:
-                        self._vprint(f'   Warning: Failed to create client with token: {e}', level='full')
-                        self._vprint(f'   Attempting to use default/global client...', level='full')
-                        client = None
+                    if token:
+                        # Determine server URL based on dataset
+                        if 'optic' in self.dataset.lower():
+                            server = 'https://neuprint-optic-lobe.janelia.org'
+                            dataset_name = self.dataset.split(':')[0]  # 'optic-lobe'
+                        else:
+                            server = 'https://neuprint.janelia.org'
+                            dataset_name = 'hemibrain:v1.2.1'  # default
+                        
+                        try:
+                            client = Client(server, dataset=dataset_name, token=token)
+                        except Exception as e:
+                            self._vprint(f'   Warning: Failed to create client with token: {e}', level='full')
+                            self._vprint(f'   Attempting to use default/global client...', level='full')
+                            client = None
                 
                 # Fetch metadata (will use client if provided, otherwise global)
                 meta = fetch_meta(client=client)
@@ -2311,27 +2331,29 @@ class VisualizeSkeleton:
                         import navis.interfaces.neuprint as neu
                         from neuprint import Client
                         
-                        token = os.environ.get('NEUPRINT_APPLICATION_CREDENTIALS') or self.token
-                        client = None
+                        client = self.client
                         
-                        if token:
-                            if 'optic' in self.dataset.lower():
-                                server = 'https://neuprint-optic-lobe.janelia.org'
-                                dataset_name = self.dataset.split(':')[0]
-                                roi_source_space = 'JRCFIB2022Mraw' # Optic lobe
-                            elif 'male-cns' in self.dataset.lower() or 'malecns' in self.dataset.lower():
-                                server = 'https://neuprint.janelia.org'
-                                dataset_name = 'male-cns:v0.9' # Default for male-cns
-                                roi_source_space = 'JRCFIB2022Mraw' # Male CNS raw
-                            else:
-                                server = 'https://neuprint.janelia.org'
-                                dataset_name = 'hemibrain:v1.2.1'
-                                roi_source_space = 'JRCFIB2018F'
+                        if client is None:
+                            token = os.environ.get('NEUPRINT_APPLICATION_CREDENTIALS') or self.token
                             
-                            try:
-                                client = Client(server, dataset=dataset_name, token=token)
-                            except Exception as e:
-                                self._vprint(f'   Warning: Failed to create client: {e}', level='full')
+                            if token:
+                                if 'optic' in self.dataset.lower():
+                                    server = 'https://neuprint-optic-lobe.janelia.org'
+                                    dataset_name = self.dataset.split(':')[0]
+                                    roi_source_space = 'JRCFIB2022Mraw' # Optic lobe
+                                elif 'male-cns' in self.dataset.lower() or 'malecns' in self.dataset.lower():
+                                    server = 'https://neuprint.janelia.org'
+                                    dataset_name = 'male-cns:v0.9' # Default for male-cns
+                                    roi_source_space = 'JRCFIB2022Mraw' # Male CNS raw
+                                else:
+                                    server = 'https://neuprint.janelia.org'
+                                    dataset_name = 'hemibrain:v1.2.1'
+                                    roi_source_space = 'JRCFIB2018F'
+                                
+                                try:
+                                    client = Client(server, dataset=dataset_name, token=token)
+                                except Exception as e:
+                                    self._vprint(f'   Warning: Failed to create client: {e}', level='full')
                         
                         mesh = neu.fetch_roi(roi, client=client)
                         os.makedirs(mesh_dir, exist_ok=True)

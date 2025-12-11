@@ -129,24 +129,6 @@ def run_comprehensive_comparison():
     #     target_labels=['E cells'],
     # )
     
-    label_map = LabelMapper(
-        source_mapping_dict={
-            'flywire_FAFB_v783': ['aMe12','aMe26','MTe07'],
-            'flywire_BANC_v626': ['aMe12','aMe26','MTe07'],
-            'male-cns:v0.9': ['aMe12','aMe26','MeVPLo2'],
-            'hemibrain:v1.2.1': ['aMe12','aMe26','MeVPLo2'],
-        },
-        source_labels=['aMe12','aMe26','MeVPLo2'],
-        
-        target_mapping_dict={
-            'flywire_FAFB_v783': ['PPL101','PPL103'],
-            'flywire_BANC_v626': ['PPL101','PPL103'],
-            'male-cns:v0.9': ['PPL101','PPL103'],
-            'hemibrain:v1.2.1': ['PPL101','PPL103'],
-        },
-        target_labels=['PPL101','PPL103'],
-    )
-    
     params = ComparisonParameters(
         # Token - empty means load from NEUPRINT_APPLICATION_TOKEN env var
         token='',
@@ -161,18 +143,18 @@ def run_comprehensive_comparison():
         # datasets=['flywire_FAFB_v783', 'flywire_BANC_v626','male-cns:v0.9'],
         # datasets_nickname=['FAFB', 'BANC', 'male-cns'],
         
-        # source_neurons=['aMe12','aMe26'],
+        source_neurons=['aMe12','aMe26'],
         # source_neurons=neurons_network,
         
         # Target neurons - PPL101 dopaminergic neurons
-        # target_neurons=['PPL101','PPL103'],
+        target_neurons=['PPL101','PPL103'],
         # target_neurons=target_map,
-        overall_label_mapper=label_map,
+        # overall_label_mapper=label_map,
         
         max_interlayer=1,
         
         # Multiple thresholds to analyze sensitivity
-        thresholds=[1,3,5,10],
+        thresholds=[1,3,5,10,20],
         
         # Top edges to include in analysis
         top_edges=500,

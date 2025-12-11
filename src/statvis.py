@@ -2,6 +2,10 @@ import os
 import json
 from copy import copy
 from types import SimpleNamespace
+import warnings
+
+# Suppress FutureWarning from neuprint about Series.__getitem__
+warnings.filterwarnings("ignore", category=FutureWarning, module="neuprint")
 
 import bokeh.palettes
 import img2pdf
@@ -366,7 +370,7 @@ def getCriteriaAndName(requiredNeurons):
         fname += '_etc'
     return criteria, fname
 
-def pull_dataset(dataset, save_path=None, omitNoneType=False):
+def pull_dataset(dataset, save_path=None, omitNoneType=False, client=None):
     # requires login to hemibrain dataset
     if save_path is None:
         # Go up from src/ to project root, then into datasets/
@@ -382,7 +386,7 @@ def pull_dataset(dataset, save_path=None, omitNoneType=False):
             os.makedirs(dataset_dir, exist_ok=True)
             save_path = os.path.join(dataset_dir, f"{dataset_normalized}_allneurons")
             
-    neuron_df, roi_count_df = fetch_neurons(None)
+    neuron_df, roi_count_df = fetch_neurons(None, client=client)
     if omitNoneType:
         # delete rows with type is empty
         neuron_df = neuron_df[neuron_df['type'].notna()]
@@ -538,7 +542,7 @@ def getNeurons(requiredNeurons, dataset='hemibrain:v1.2.1', custom_group_names=N
     if requiredNeurons == None:
         criteria = None
         auto_name = 'ALL'
-        neuron_df, roi_count_df = fetch_neurons(criteria)
+        neuron_df, roi_count_df = fetch_neurons(criteria, client=client)
         return neuron_df, roi_count_df, auto_name, criteria
     if type(requiredNeurons) != list:
         requiredNeurons = [requiredNeurons]
@@ -559,13 +563,13 @@ def getNeurons(requiredNeurons, dataset='hemibrain:v1.2.1', custom_group_names=N
         print(f'\033[33mcsv files of dataset "{dataset}" not found, downloading...\033[0m')
         # If using new structure, ensure directory exists before downloading
         if os.path.exists(dataset_dir):
-             pull_dataset(dataset, save_path=dataset_path_body, omitNoneType=False)
+             pull_dataset(dataset, save_path=dataset_path_body, omitNoneType=False, client=client)
         else:
              # If directory doesn't exist, pull_dataset might create files in root or fail if it expects dir
              # Let's assume pull_dataset handles path creation or we should create it
              os.makedirs(dataset_dir, exist_ok=True)
              dataset_path_body = os.path.join(dataset_dir, f"{dataset_normalized}_allneurons")
-             pull_dataset(dataset, save_path=dataset_path_body, omitNoneType=False)
+             pull_dataset(dataset, save_path=dataset_path_body, omitNoneType=False, client=client)
         # After download, clear any stale cache for this dataset
         clear_neuron_cache(dataset_normalized)
 

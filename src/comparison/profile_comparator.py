@@ -2359,6 +2359,39 @@ class HomologFinder:
         self._fnc_cache: Dict[str, Any] = {}
         self._in_progress_bar = False  # Track if we're inside a progress bar context
         self._batch_size = 1000  # Batch size for profile building with intermediate saves
+        
+        # Initialize clients for datasets
+        self.clients = {}
+        
+        # Helper to get or create client
+        def get_client(dataset):
+            if not dataset: return None
+            if dataset in self.clients: return self.clients[dataset]
+            
+            try:
+                from neuprint import Client
+                # Try to use token if provided
+                if self.token:
+                    c = Client('https://neuprint.janelia.org', dataset=dataset, token=self.token)
+                else:
+                    # Try environment or default
+                    c = Client('https://neuprint.janelia.org', dataset=dataset)
+                c.fetch_version()
+                self.clients[dataset] = c
+                return c
+            except Exception as e:
+                if self.verbose:
+                    print(f"[HomologFinder] Warning: Could not initialize client for {dataset}: {e}")
+                return None
+
+        # Initialize clients for source and target
+        if self.source_dataset:
+            get_client(self.source_dataset)
+        if self.target_dataset and self.target_dataset != self.source_dataset:
+            get_client(self.target_dataset)
+            
+        # Set self.client to source client for backward compatibility / default usage
+        self.client = self.clients.get(self.source_dataset) or self.clients.get(self.target_dataset)
     
     def _log(self, msg: str):
         """Print message if verbose. Uses tqdm.write() if inside a progress bar."""
@@ -6400,6 +6433,7 @@ class HomologFinder:
                 sys.path.insert(0, str(src_dir))
             
             from coana import VisualizeSkeleton
+            from neuprint import set_default_client
             
             self._log(f"Generating 3D visualizations for top {top_n} candidates...")
 
@@ -6470,6 +6504,11 @@ class HomologFinder:
                     safe_name = f"{target_type}_{target_bodyid}".replace('/', '_').replace(':', '_').replace('*', '_')
                     
                     try:
+                        # Get correct client for target dataset
+                        target_client = self.clients.get(vis_target_dataset)
+                        if target_client:
+                            set_default_client(target_client)
+                        
                         vs = VisualizeSkeleton(
                             dataset=vis_target_dataset,
                             neuron_layers=layers,
@@ -6481,6 +6520,7 @@ class HomologFinder:
                             legend_mode='normal',
                             merge_neurons=False,
                             verbose='simple',
+                            client=target_client,  # Pass correct client
                         )
                         vs.plot_neurons()
                         
@@ -6535,6 +6575,11 @@ class HomologFinder:
                 safe_name = f"{target_type}".replace('/', '_').replace(':', '_').replace('*', '_')
                 
                 try:
+                    # Get correct client for target dataset
+                    target_client = self.clients.get(vis_target_dataset)
+                    if target_client:
+                        set_default_client(target_client)
+                    
                     vs = VisualizeSkeleton(
                         dataset=vis_target_dataset,
                         neuron_layers=layers,
@@ -6543,6 +6588,7 @@ class HomologFinder:
                         show_fig=False,
                         brain_mesh='whole',
                         verbose='simple',
+                        client=target_client,  # Pass correct client
                     )
                     vs.plot_neurons()
                     
@@ -6583,6 +6629,11 @@ class HomologFinder:
                 safe_name = f"source_{query}".replace('/', '_').replace(':', '_').replace('*', '_')
                 
                 try:
+                    # Get correct client for source dataset
+                    source_client = self.clients.get(vis_source_dataset)
+                    if source_client:
+                        set_default_client(source_client)
+                    
                     vs = VisualizeSkeleton(
                         dataset=vis_source_dataset,
                         neuron_layers=source_layers,
@@ -6593,6 +6644,7 @@ class HomologFinder:
                         legend_mode='normal',  # Show legend for multiple neurons
                         neuron_alpha=0.6 if len(source_layers) == 1 else 0.2,  # Higher alpha for single neuron
                         verbose='simple',
+                        client=source_client,  # Pass correct client
                     )
                     vs.plot_neurons()
                     
