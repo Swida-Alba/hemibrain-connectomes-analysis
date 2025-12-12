@@ -369,15 +369,51 @@ def _generate_summary_section(analyzer, dataset_names: List[str], thresholds: Li
     nicknames_json = json.dumps([nickname_map[d] for d in dataset_names])
     thresholds_json = json.dumps(thresholds)
     
-    # Calculate total weights and avg traversal probability
+    # Create folder to save used data for debugging/verification
+    used_data_dir = os.path.join(analyzer.parameters.full_output_path, 'comparison_report_used_data')
+    os.makedirs(used_data_dir, exist_ok=True)
+    
+    # Calculate total weights, avg edge ratio (connection_ratio), and avg traversal probability
     total_weight_data = []
+    avg_ratio_data = []
     avg_prob_data = []
+    
+    # Pre-load and save ratio data for each threshold
+    ratio_data_cache = {}
+    for t in thresholds:
+        try:
+            ratio_data = analyzer._get_edge_ratio_data_for_threshold(t)
+            if not ratio_data.empty:
+                ratio_data.to_csv(os.path.join(used_data_dir, f'ratio_data_t{t}.csv'))
+                ratio_data_cache[t] = ratio_data
+        except Exception:
+            pass
+    
     for d in dataset_names:
         nick = nickname_map[d]
         for t in thresholds:
             aligned = analyzer.get_aligned_data(t)
             total_w = int(aligned[d].sum()) if not aligned.empty and d in aligned.columns else 0
             total_weight_data.append({'dataset': nick, 'threshold': t, 'weight': total_w})
+            
+            # Get connection_ratio data (edge-level ratio = weight / post-synaptic sites)
+            # Only average over edges that actually exist in this dataset
+            try:
+                ratio_data = ratio_data_cache.get(t, pd.DataFrame())
+                if not ratio_data.empty and d in ratio_data.columns:
+                    dataset_ratios = ratio_data[d]
+                    non_zero_ratios = dataset_ratios[dataset_ratios > 0]
+                    if len(non_zero_ratios) > 0:
+                        avg_ratio = float(non_zero_ratios.mean())
+                    else:
+                        avg_ratio = 0.0
+                    if pd.isna(avg_ratio):
+                        avg_ratio = 0.0
+                else:
+                    avg_ratio = 0.0
+            except Exception:
+                avg_ratio = 0.0
+            avg_ratio_data.append({'dataset': nick, 'threshold': t, 'ratio': avg_ratio})
             
             # Get traversal probability data if available
             # Only average over paths that actually exist in this dataset (ignore 0s from other datasets' paths)
@@ -400,7 +436,14 @@ def _generate_summary_section(analyzer, dataset_names: List[str], thresholds: Li
                 avg_prob = 0.0
             avg_prob_data.append({'dataset': nick, 'threshold': t, 'prob': avg_prob})
     
+    # Save all chart data to files for verification
+    pd.DataFrame(corrected_data).to_csv(os.path.join(used_data_dir, 'edge_count_data.csv'), index=False)
+    pd.DataFrame(total_weight_data).to_csv(os.path.join(used_data_dir, 'total_weight_data.csv'), index=False)
+    pd.DataFrame(avg_ratio_data).to_csv(os.path.join(used_data_dir, 'avg_ratio_data.csv'), index=False)
+    pd.DataFrame(avg_prob_data).to_csv(os.path.join(used_data_dir, 'avg_prob_data.csv'), index=False)
+    
     weight_data_json = json.dumps(total_weight_data)
+    ratio_data_json = json.dumps(avg_ratio_data)
     prob_data_json = json.dumps(avg_prob_data)
     
     html_parts.append(f"""
@@ -467,6 +510,40 @@ def _generate_summary_section(analyzer, dataset_names: List[str], thresholds: Li
                             barmode: 'group',
                             xaxis: {{ title: 'Threshold' }},
                             yaxis: {{ title: 'Total Edge Weight (Synapse Count)', range: [0, maxY * 1.15] }},
+                            legend: {{ orientation: 'h', y: -0.15 }}
+                        }}, {{responsive: true}});
+                    }})();
+                </script>
+                
+                <div class="card">
+                    <h3>Average Connection Ratio Across All Thresholds</h3>
+                    <div id="avgRatioChart" class="chart-container"></div>
+                </div>
+                <script>
+                    (function() {{
+                        const data = {ratio_data_json};
+                        const datasets = {nicknames_json};
+                        const thresholds = {thresholds_json};
+                        const traces = datasets.map(ds => {{
+                            const yVals = thresholds.map(t => {{
+                                const item = data.find(d => d.dataset === ds && d.threshold === t);
+                                return item ? item.ratio : 0;
+                            }});
+                            return {{
+                                name: ds,
+                                x: thresholds.map(t => 'T=' + t),
+                                y: yVals,
+                                type: 'bar',
+                                text: yVals.map(v => v.toFixed(4)),
+                                textposition: 'outside'
+                            }};
+                        }});
+                        const allYVals = traces.flatMap(t => t.y);
+                        const maxY = Math.max(...allYVals);
+                        Plotly.newPlot('avgRatioChart', traces, {{
+                            barmode: 'group',
+                            xaxis: {{ title: 'Threshold' }},
+                            yaxis: {{ title: 'Avg Connection Ratio (w_ij / W_j)', range: [0, maxY * 1.15] }},
                             legend: {{ orientation: 'h', y: -0.15 }}
                         }}, {{responsive: true}});
                     }})();

@@ -3650,6 +3650,76 @@ class ComparisonAnalyzer:
         
         return pd.DataFrame(all_prob_data).T.fillna(0)
 
+    def _get_edge_ratio_data_for_threshold(self, threshold: int) -> pd.DataFrame:
+        """
+        Get edge-level connection_ratio data aligned across datasets for a threshold.
+        
+        Reads from dataset_data/{dataset}/minsyn_{threshold}/connections.csv
+        and extracts connection_ratio values for each edge.
+        connection_ratio = w_ij / W_j (edge weight / total post-synaptic sites)
+        
+        Args:
+            threshold: The threshold level
+            
+        Returns:
+            DataFrame with edge index and dataset columns containing connection_ratio
+        """
+        dataset_names = self.parameters.get_dataset_names()
+        all_ratio_data = {}
+        
+        for dataset_name in dataset_names:
+            safe_name = self.parameters._sanitize_name(dataset_name)
+            dataset_output_path = os.path.join(
+                self.parameters.full_output_path,
+                'dataset_data',
+                safe_name,
+                f'minsyn_{threshold}'
+            )
+            
+            # Try to read connections.csv
+            conn_file = os.path.join(dataset_output_path, 'connections.csv')
+            
+            df = None
+            if os.path.exists(conn_file):
+                try:
+                    df = pd.read_csv(conn_file)
+                except Exception as e:
+                    self._log(f"Warning: Could not read {conn_file}: {e}")
+            
+            if df is None or df.empty or 'connection_ratio' not in df.columns:
+                continue
+            
+            # Determine edge columns
+            if 'std_label_pre' in df.columns and 'std_label_post' in df.columns:
+                pre_col, post_col = 'std_label_pre', 'std_label_post'
+            elif 'type_pre' in df.columns and 'type_post' in df.columns:
+                pre_col, post_col = 'type_pre', 'type_post'
+            else:
+                pre_col, post_col = 'bodyId_pre', 'bodyId_post'
+            
+            # Aggregate by edge - use mean for connection_ratio
+            for _, row in df.iterrows():
+                edge_key = f"{row[pre_col]} -> {row[post_col]}"
+                ratio_val = row['connection_ratio']
+                if pd.notna(ratio_val):
+                    if edge_key not in all_ratio_data:
+                        all_ratio_data[edge_key] = {}
+                    # Store ratio, will be averaged later if multiple edges
+                    if dataset_name not in all_ratio_data[edge_key]:
+                        all_ratio_data[edge_key][dataset_name] = []
+                    all_ratio_data[edge_key][dataset_name].append(ratio_val)
+        
+        if not all_ratio_data:
+            return pd.DataFrame()
+        
+        # Convert lists to averages
+        for edge_key in all_ratio_data:
+            for ds in all_ratio_data[edge_key]:
+                vals = all_ratio_data[edge_key][ds]
+                all_ratio_data[edge_key][ds] = sum(vals) / len(vals) if vals else 0.0
+        
+        return pd.DataFrame(all_ratio_data).T.fillna(0)
+
     def _generate_vispath_visualizations(self, vis_dir: str):
         """
         Generate interactive HTML visualizations using VisualizePath.
