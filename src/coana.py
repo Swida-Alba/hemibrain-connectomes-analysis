@@ -1000,6 +1000,12 @@ class FindNeuronConnection:
                 self._conn_df_cache = pl.DataFrame(schema={'bodyId_pre': pl.Utf8, 'bodyId_post': pl.Utf8, 'weight': pl.Int64, 'roi': pl.Utf8, 'cached_date': pl.Utf8})
                 self._conn_index = {}
                 return self._conn_df_cache
+        
+        # No cache exists - return empty DataFrame
+        self._vprint(f'  ℹ️ No connection cache found. Starting fresh.', level='full')
+        self._conn_df_cache = pl.DataFrame(schema={'bodyId_pre': pl.Utf8, 'bodyId_post': pl.Utf8, 'weight': pl.Int64, 'roi': pl.Utf8, 'cached_date': pl.Utf8})
+        self._conn_index = {}
+        return self._conn_df_cache
 
     def _build_conn_index(self):
         '''
@@ -1429,7 +1435,8 @@ class FindNeuronConnection:
         conn_db = self._load_connection_db()
         neuron_index = self._load_neuron_index()
         
-        if conn_db.is_empty():
+        # Handle None or empty cache gracefully
+        if conn_db is None or (hasattr(conn_db, 'is_empty') and conn_db.is_empty()) or len(conn_db) == 0:
             return pl.DataFrame(), upstream_bodyIds, []
         
         # Build a set of neurons that actually have connections in the cache
