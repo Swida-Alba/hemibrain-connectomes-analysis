@@ -6819,7 +6819,8 @@ class VisualizePath:
                 filename=filename,
                 title=title,
                 color_scale=color_scale,
-                showfig=False  # Don't auto-open each heatmap
+                showfig=False,  # Don't auto-open each heatmap
+                verbose=self.verbose
             )
             
             created_files.append(filename)
@@ -6964,7 +6965,8 @@ class VisualizePath:
             filename=heatmap_file,
             title=title,
             showfig=False,
-            matrices_dict=matrices_dict  # Pass all matrices for metric toggle
+            matrices_dict=matrices_dict,  # Pass all matrices for metric toggle
+            verbose=self.verbose
         )
         
         self._vprint(f"  Heatmap saved: {heatmap_file}")
