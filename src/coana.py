@@ -928,7 +928,12 @@ class FindNeuronConnection:
                 try:
                     self._vprint(f'  ⏳ Reading {csv_path} (this may take a while)...', level='full')
                     # Use Polars to read CSV
-                    df = pl.read_csv(csv_path, dtypes={'pre_root_id': pl.Utf8, 'post_root_id': pl.Utf8, 'bodyId_pre': pl.Utf8, 'bodyId_post': pl.Utf8})
+                    # Don't restrict dtypes on read - this can cause columns to be dropped
+                    # Use infer_schema_length to properly detect column types from more rows
+                    df = pl.read_csv(
+                        csv_path, 
+                        infer_schema_length=10000
+                    )
                     
                     column_map = {
                         'pre_root_id': 'bodyId_pre',
@@ -1626,7 +1631,7 @@ class FindNeuronConnection:
             self._update_neuron_index_after_fetch(new_connections, upstream_bodyIds, downstream_bodyIds)
             return
         
-        # Load existing database
+        # Load existing database (returns Polars DataFrame)
         conn_db = self._load_connection_db()
         
         # Prepare new connections
@@ -1643,15 +1648,19 @@ class FindNeuronConnection:
         
         new_conn['cached_date'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         
+        # Convert to Polars for consistency with conn_db
+        new_conn_pl = pl.from_pandas(new_conn)
+        
         # Merge with existing, removing duplicates (keep existing entries)
-        if not conn_db.empty:
-            self._vprint(f'  ⏳ Merging {len(new_conn):,} connections with existing database...', level='full')
+        # conn_db is a Polars DataFrame, use .is_empty() not .empty
+        if not conn_db.is_empty():
+            self._vprint(f'  ⏳ Merging {len(new_conn_pl):,} connections with existing database...', level='full')
             # Remove any new connections that already exist (based on bodyId_pre, bodyId_post, roi)
             merge_cols = ['bodyId_pre', 'bodyId_post', 'roi']
-            combined = pd.concat([conn_db, new_conn])
-            combined = combined.drop_duplicates(subset=merge_cols, keep='first')
+            combined = pl.concat([conn_db, new_conn_pl], how='diagonal_relaxed')
+            combined = combined.unique(subset=merge_cols, keep='first')
         else:
-            combined = new_conn
+            combined = new_conn_pl
         
         # Save updated database
         self._vprint(f'  ⏳ Saving connection database ({len(combined):,} connections)...', level='full')
@@ -1682,10 +1691,10 @@ class FindNeuronConnection:
             self._vprint(f'  📂 No connections found for {len(upstream_bodyIds)} neurons', level='full')
             return
         
-        # Load existing database
+        # Load existing database (returns Polars DataFrame)
         conn_db = self._load_connection_db()
         
-        # Prepare new connections
+        # Prepare new connections as Polars DataFrame
         new_conn = new_connections[['bodyId_pre', 'bodyId_post', 'weight']].copy()
         
         # Ensure bodyIds are strings
@@ -1699,14 +1708,18 @@ class FindNeuronConnection:
         
         new_conn['cached_date'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         
+        # Convert to Polars for consistency with conn_db
+        new_conn_pl = pl.from_pandas(new_conn)
+        
         # Merge with existing, removing duplicates (keep existing entries)
-        if not conn_db.empty:
-            self._vprint(f'  ⏳ Merging {len(new_conn):,} connections with existing database...', level='full')
+        # conn_db is a Polars DataFrame, use .is_empty() not .empty
+        if not conn_db.is_empty():
+            self._vprint(f'  ⏳ Merging {len(new_conn_pl):,} connections with existing database...', level='full')
             merge_cols = ['bodyId_pre', 'bodyId_post', 'roi']
-            combined = pd.concat([conn_db, new_conn])
-            combined = combined.drop_duplicates(subset=merge_cols, keep='first')
+            combined = pl.concat([conn_db, new_conn_pl], how='diagonal_relaxed')
+            combined = combined.unique(subset=merge_cols, keep='first')
         else:
-            combined = new_conn
+            combined = new_conn_pl
         
         # Save updated database
         self._vprint(f'  ⏳ Saving connection database ({len(combined):,} connections)...', level='full')
@@ -2854,7 +2867,7 @@ class FindNeuronConnection:
         
         # Load connection database (triggers index building)
         conn_db = self._load_connection_db(force_reload=False)
-        connections_loaded = len(conn_db) if conn_db is not None and not conn_db.empty else 0
+        connections_loaded = len(conn_db) if conn_db is not None and not conn_db.is_empty() else 0
         
         # Load neuron index (triggers dict building)
         neuron_index = self._load_neuron_index(force_reload=False)
@@ -3404,19 +3417,22 @@ class FindNeuronConnection:
             all_connections['roi'] = ''
         all_connections['cached_date'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         
-        # Load existing and merge
+        # Load existing and merge (conn_db is Polars DataFrame)
         conn_db = self._load_connection_db()
         
-        if not conn_db.empty:
+        # Convert all_connections to Polars
+        all_conn_pl = pl.from_pandas(all_connections)
+        
+        if not conn_db.is_empty():
             merge_cols = ['bodyId_pre', 'bodyId_post', 'roi']
-            combined = pd.concat([conn_db, all_connections])
-            combined = combined.drop_duplicates(subset=merge_cols, keep='first')
+            combined = pl.concat([conn_db, all_conn_pl], how='diagonal_relaxed')
+            combined = combined.unique(subset=merge_cols, keep='first')
         else:
-            combined = all_connections
+            combined = all_conn_pl
         
         # Save connection database (without rebuilding index - we'll do that at the end)
         db_path = self._get_connection_db_path()
-        combined.to_parquet(db_path, index=False, compression='gzip')
+        combined.write_parquet(db_path, compression='gzip')
         self._conn_df_cache = combined
         
         # Update neuron index for all fetched neurons
@@ -3505,9 +3521,9 @@ class FindNeuronConnection:
         conn_db = self._load_connection_db()
         cached_set = set()
         
-        if conn_db is not None and not conn_db.empty:
+        if conn_db is not None and not conn_db.is_empty():
             if 'bodyId_pre' in conn_db.columns:
-                cached_set.update(conn_db['bodyId_pre'].astype(str).unique())
+                cached_set.update(conn_db['bodyId_pre'].cast(pl.Utf8).unique().to_list())
         
         # Also check neuron_index for neurons with 0 connections
         neuron_index = self._load_neuron_index()
@@ -3704,7 +3720,7 @@ class FindNeuronConnection:
                 
         # Fallback to loading full DB (legacy behavior)
         conn_db = self._load_connection_db()
-        if conn_db is not None and not conn_db.empty:
+        if conn_db is not None and not conn_db.is_empty():
             return len(conn_db)
         return 0
 
@@ -5855,7 +5871,7 @@ class FindNeuronConnection:
         
         # Concatenate all results at once (avoids FutureWarning about empty/NA entries)
         if conn_inpath_list:
-            conn_inpath = pl.concat(conn_inpath_list)
+            conn_inpath = pl.concat(conn_inpath_list, how='diagonal_relaxed')
         else:
             conn_inpath = pl.DataFrame(schema={
                 'conn_layer': pl.Utf8, 'bodyId_pre': pl.Utf8, 'bodyId_post': pl.Utf8, 
@@ -5864,7 +5880,7 @@ class FindNeuronConnection:
             })
 
         if conn_types_list:
-            conn_types = pl.concat(conn_types_list)
+            conn_types = pl.concat(conn_types_list, how='diagonal_relaxed')
         else:
             conn_types = pl.DataFrame(schema={
                 'conn_layer': pl.Utf8, 'type_pre': pl.Utf8, 'type_post': pl.Utf8, 
@@ -5872,7 +5888,7 @@ class FindNeuronConnection:
             })
 
         if conn_groups_list:
-            conn_groups = pl.concat(conn_groups_list)
+            conn_groups = pl.concat(conn_groups_list, how='diagonal_relaxed')
         else:
             conn_groups = pl.DataFrame()
         
