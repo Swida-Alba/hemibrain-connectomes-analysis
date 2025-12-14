@@ -656,9 +656,8 @@ def ensure_flywire_data(dataset_name, dataset_dir):
     if not all_critical_present:
         print("\n" + "="*60)
         print("MISSING CRITICAL FILES")
-        print("Please download missing files to:", downloads_dir)
-        print("See https://codex.flywire.ai/api/download?dataset=fafb")
-        print("="*60 + "\n")
+        print("="*60)
+        print_download_instructions(downloads_dir)
         return False
 
     return True
