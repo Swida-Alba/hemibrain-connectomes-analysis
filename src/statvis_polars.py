@@ -184,12 +184,14 @@ def process_paths_streaming(path_gen, conn_data, targets, output_path,
                           excluded_path=None, real_layer_map=None, 
                           level='type', type_lookup=None, 
                           keyword_in_path_to_remove=None,
-                          batch_size=100000):
+                          batch_size=100000,
+                          verbose=True):
     """
     Stream paths from generator, process in batches using Polars, and write to CSV.
     Returns total count of saved paths.
     """
-    print(f"Optimizing path building: Pre-indexing {len(conn_data)} connections (Polars)...")
+    if verbose:
+        print(f"Optimizing path building: Pre-indexing {len(conn_data)} connections (Polars)...")
     
     # Prepare connection data once
     df_conn = prepare_connection_data(conn_data, level)
@@ -199,10 +201,13 @@ def process_paths_streaming(path_gen, conn_data, targets, output_path,
     total_excluded = 0
     first_batch = True
     
-    # Use tqdm for progress bar
-    try:
-        iterator = tqdm(path_gen, desc=f"Streaming {level}-level paths", unit="path")
-    except ImportError:
+    # Use tqdm for progress bar if verbose
+    if verbose:
+        try:
+            iterator = tqdm(path_gen, desc=f"Streaming {level}-level paths", unit="path")
+        except ImportError:
+            iterator = path_gen
+    else:
         iterator = path_gen
         
     for path in iterator:
@@ -444,19 +449,29 @@ def EnrichConnectionTablePolars(conn_table, traversal_probability_threshold=0, d
         conn_df = conn_df.filter(pl.col('traversal_probability') >= traversal_probability_threshold)
         
     # 2. Aggregation
+    # First deduplicate by bodyId pairs to avoid counting same connection multiple times
+    # This matches the pandas version behavior
+    cols_to_keep = ['bodyId_pre', 'bodyId_post', 'type_pre', 'type_post', 'weight', 'block_probability', 'traversal_probability']
+    if 'custom_group_pre' in conn_df.columns:
+        cols_to_keep.extend(['custom_group_pre', 'custom_group_post'])
+    if 'nt_type' in conn_df.columns:
+        cols_to_keep.append('nt_type')
+    
+    # Keep only existing columns
+    cols_to_keep = [c for c in cols_to_keep if c in conn_df.columns]
+    bodyid_pairs = conn_df.select(cols_to_keep).unique(subset=['bodyId_pre', 'bodyId_post'])
     
     # Function to aggregate
     def aggregate_connections(group_pre_col, group_post_col):
-        # Sum weights
-        agg_df = conn_df.group_by([group_pre_col, group_post_col]).agg([
+        # Sum weights from deduplicated bodyId pairs
+        agg_df = bodyid_pairs.group_by([group_pre_col, group_post_col]).agg([
             pl.col('weight').sum()
         ])
         
         # Calculate Traversal Probability
         if aggregate_method == 'product':
-            # Product of block probabilities
-            # group_by().agg(pl.col('block_probability').product())
-            probs = conn_df.group_by([group_pre_col, group_post_col]).agg(
+            # Product of block probabilities from deduplicated bodyId pairs
+            probs = bodyid_pairs.group_by([group_pre_col, group_post_col]).agg(
                 pl.col('block_probability').product().alias('block_prob_prod')
             )
             agg_df = agg_df.join(probs, on=[group_pre_col, group_post_col], how='left')
@@ -465,9 +480,9 @@ def EnrichConnectionTablePolars(conn_table, traversal_probability_threshold=0, d
             ).drop('block_prob_prod')
             
         else: # average
-            # Weighted average
+            # Weighted average from deduplicated bodyId pairs
             # sum(weight * prob) / sum(weight)
-            temp = conn_df.with_columns(
+            temp = bodyid_pairs.with_columns(
                 (pl.col('weight') * pl.col('traversal_probability')).alias('wt_prob')
             )
             probs = temp.group_by([group_pre_col, group_post_col]).agg([

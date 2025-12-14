@@ -397,7 +397,7 @@ def pull_dataset(dataset, save_path=None, omitNoneType=False, client=None):
     roi_count_df.to_csv(save_path + '_roi_count_df.csv',index=True)
     print('Done!')
 
-def getNeurons(requiredNeurons, dataset='hemibrain:v1.2.1', custom_group_names=None, client=None):
+def getNeurons(requiredNeurons, dataset='hemibrain:v1.2.1', custom_group_names=None, client=None, verbose=True):
     '''get neurons locally from a given dataset
     
     Parameters
@@ -412,6 +412,8 @@ def getNeurons(requiredNeurons, dataset='hemibrain:v1.2.1', custom_group_names=N
         Custom names for groups when using nested lists
     client : object, optional
         Client object (NeuPrint or FlyWire) for direct fetching if local dataset missing
+    verbose : bool, optional
+        Whether to print progress messages (default: True)
         
     Returns
     -------
@@ -443,11 +445,13 @@ def getNeurons(requiredNeurons, dataset='hemibrain:v1.2.1', custom_group_names=N
             if os.path.exists(data_dir):
                 # Use dataset name in message instead of hardcoded "FAFB"
                 dataset_short = dataset.split('_')[1] if '_' in dataset else dataset
-                print(f"Checking local {dataset_short} data in {data_dir}...")
+                if verbose:
+                    print(f"Checking local {dataset_short} data in {data_dir}...")
                 neuron_file, _ = fafb_utils.prepare_fafb_data(data_dir)
                 
                 # Load the full neuron DataFrame
-                print(f"Loading neurons from {neuron_file}...")
+                if verbose:
+                    print(f"Loading neurons from {neuron_file}...")
                 full_neuron_df = pd.read_csv(neuron_file, dtype={'bodyId': str})
                 
                 if requiredNeurons is None:
@@ -600,7 +604,7 @@ def getNeurons(requiredNeurons, dataset='hemibrain:v1.2.1', custom_group_names=N
                     
                     for item in requiredNeuron:
                         group_items.append(str(item).replace('.*', ''))
-                        item_bodyIds = _process_single_neuron(item, ndf_alltypes, bodyId_alltypes)
+                        item_bodyIds = _process_single_neuron(item, ndf_alltypes, bodyId_alltypes, verbose=verbose)
                         group_bodyIds.extend(item_bodyIds)
                     
                     # Generate group name
@@ -620,7 +624,7 @@ def getNeurons(requiredNeurons, dataset='hemibrain:v1.2.1', custom_group_names=N
                     print(f'Custom group "{group_name}": {len(group_bodyIds)} neurons from {len(requiredNeuron)} items')
                 else:
                     # Regular item
-                    item_bodyIds = _process_single_neuron(requiredNeuron, ndf_alltypes, bodyId_alltypes)
+                    item_bodyIds = _process_single_neuron(requiredNeuron, ndf_alltypes, bodyId_alltypes, verbose=verbose)
                     bodyId_list.extend(item_bodyIds)
                     group_names.append(str(requiredNeuron).replace('.*', ''))
             
@@ -646,7 +650,7 @@ def getNeurons(requiredNeurons, dataset='hemibrain:v1.2.1', custom_group_names=N
                     # Get bodyIds for this custom group
                     group_bodyIds = []
                     for item in requiredNeuron:
-                        item_bodyIds = _process_single_neuron(item, ndf_alltypes, bodyId_alltypes)
+                        item_bodyIds = _process_single_neuron(item, ndf_alltypes, bodyId_alltypes, verbose=verbose)
                         group_bodyIds.extend(item_bodyIds)
                     
                     # Assign custom group name
@@ -668,7 +672,7 @@ def getNeurons(requiredNeurons, dataset='hemibrain:v1.2.1', custom_group_names=N
                 elif i == 1:
                     auto_name += '_etc'
                 
-                item_bodyIds = _process_single_neuron(requiredNeuron, ndf_alltypes, bodyId_alltypes)
+                item_bodyIds = _process_single_neuron(requiredNeuron, ndf_alltypes, bodyId_alltypes, verbose=verbose)
                 bodyId_list.extend(item_bodyIds)
             
             neuron_df = ndf_alltypes[ndf_alltypes['bodyId'].isin(bodyId_list)]
@@ -677,8 +681,14 @@ def getNeurons(requiredNeurons, dataset='hemibrain:v1.2.1', custom_group_names=N
     criteria = NC(bodyId=bodyId_list)
     return neuron_df, roi_count_df, auto_name, criteria
 
-def _process_single_neuron(requiredNeuron, ndf_alltypes, bodyId_alltypes):
-    '''Helper function to process a single neuron identifier and return bodyIds'''
+def _process_single_neuron(requiredNeuron, ndf_alltypes, bodyId_alltypes, verbose=True):
+    '''Helper function to process a single neuron identifier and return bodyIds
+    
+    Parameters
+    ----------
+    verbose : bool
+        Whether to print progress messages
+    '''
     bodyId_list = []
     
     # Check if it's a numeric bodyId (int, np.int64, or numeric string)
@@ -699,23 +709,28 @@ def _process_single_neuron(requiredNeuron, ndf_alltypes, bodyId_alltypes):
         if bodyid_value in bodyId_alltypes:
             bodyId_list.append(bodyid_value)
         else:
-            print(f'\033[33mbodyId {bodyid_value} not found, please check your input (skipped)\033[0m')
+            if verbose:
+                print(f'\033[33mbodyId {bodyid_value} not found, please check your input (skipped)\033[0m')
     elif isinstance(requiredNeuron, str) and requiredNeuron.find('.*') != -1:
         # regex of instance
         find_df = ndf_alltypes[ndf_alltypes['instance'].str.match(requiredNeuron, na=False)]
         if len(find_df) > 0:
             bodyId_list = find_df['bodyId'].tolist()
-            print(f'Found {len(find_df)} neurons of instance "{requiredNeuron}"')
+            if verbose:
+                print(f'Found {len(find_df)} neurons of instance "{requiredNeuron}"')
         else:
-            print(f'\033[33minstance "{requiredNeuron}" not found, please check your input (skipped)\033[0m')
+            if verbose:
+                print(f'\033[33minstance "{requiredNeuron}" not found, please check your input (skipped)\033[0m')
     else:
         # type
         find_df = ndf_alltypes[ndf_alltypes['type']==requiredNeuron]
         if len(find_df) > 0:
             bodyId_list = find_df['bodyId'].tolist()
-            print(f'Found {len(find_df)} neurons of type "{requiredNeuron}"')
+            if verbose:
+                print(f'Found {len(find_df)} neurons of type "{requiredNeuron}"')
         else:
-            print(f'\033[33mtype "{requiredNeuron}" not found, please check your input (skipped)\033[0m')
+            if verbose:
+                print(f'\033[33mtype "{requiredNeuron}" not found, please check your input (skipped)\033[0m')
     
     return bodyId_list
 
@@ -1150,7 +1165,7 @@ def VisConnMat(cmat,filename,title='',color_scale=[[0, 'rgb(255,255,255)'], [1, 
     fig.write_html(filename, **write_config)
 
 
-def VisConnMatInteractive(cmat, filename, title='', color_scale=[[0, 'rgb(255,255,255)'], [1, 'rgb(104,55,164)']], showfig=True, fontsize=12, conn_df=None, matrices_dict=None):
+def VisConnMatInteractive(cmat, filename, title='', color_scale=[[0, 'rgb(255,255,255)'], [1, 'rgb(104,55,164)']], showfig=True, fontsize=12, conn_df=None, matrices_dict=None, verbose=True):
     '''Create interactive heatmap with comprehensive controls similar to network visualization
     
     Features:
@@ -1182,6 +1197,8 @@ def VisConnMatInteractive(cmat, filename, title='', color_scale=[[0, 'rgb(255,25
     matrices_dict : dict, optional
         Dictionary with keys 'weight', 'ratio', 'probability' containing different metric matrices
         If provided, enables metric toggle. Otherwise uses cmat as weight matrix only.
+    verbose : bool, optional
+        Whether to print progress messages (default: True)
     '''
     
     # Handle multiple matrices for metric toggle
@@ -1232,7 +1249,8 @@ def VisConnMatInteractive(cmat, filename, title='', color_scale=[[0, 'rgb(255,25
     is_sparse = sparsity_ratio > 0.5  # More than 50% zeros
     
     # Compute hierarchical clustering with multiple methods for row/column ordering
-    print("  Computing hierarchical clustering...")
+    if verbose:
+        print("  Computing hierarchical clustering...")
     from scipy.cluster.hierarchy import linkage, leaves_list
     from scipy.spatial.distance import pdist
     

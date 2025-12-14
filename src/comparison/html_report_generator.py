@@ -787,12 +787,12 @@ def _generate_similarity_section(analyzer, dataset_names: List[str], thresholds:
             <div class="section-content">
                 <p style="margin-bottom: 20px; color: var(--secondary-color);">
                     Pairwise similarity between datasets at each threshold.<br>
-                    <strong>TOPOLOGY METRICS</strong> (binary edge presence):<br>
-                    &nbsp;&nbsp;• <strong>Jaccard</strong> = edge set overlap |A∩B|/|A∪B|<br>
-                    &nbsp;&nbsp;• <strong>GED</strong> = Graph Edit Distance similarity<br>
-                    <strong>MATRIX-BASED METRICS</strong> (uses normalized edge weights):<br>
-                    &nbsp;&nbsp;• <strong>Spearman</strong> = rank correlation of shared edge weights<br>
-                    &nbsp;&nbsp;• <strong>RV Coefficient</strong> = multivariate matrix similarity
+                    <strong>UNION-BASED RANK METRICS</strong> [0, 1] (include all items, 0 for missing):<br>
+                    &nbsp;&nbsp;• <strong>Edge Rank</strong> = Spearman rank correlation on union of edges<br>
+                    &nbsp;&nbsp;• <strong>Path Rank</strong> = Spearman rank correlation on union of paths<br>
+                    <strong>SET-BASED METRICS</strong>:<br>
+                    &nbsp;&nbsp;• <strong>Jaccard</strong> [0, 1] = edge set overlap |A∩B|/|A∪B|<br>
+                    &nbsp;&nbsp;• <strong>Spearman (shared)</strong> [-1, 1] = rank correlation of shared edge weights only (N/A if &lt;3 shared)
                 </p>
 """)
     
@@ -816,7 +816,17 @@ def _generate_similarity_section(analyzer, dataset_names: List[str], thresholds:
             if d not in aligned.columns:
                 aligned[d] = 0
         
-        similarities = metrics.calculate_all_pairwise_similarities(aligned, dataset_names, threshold=1, include_advanced_metrics=True)
+        # Get path data for this threshold (for path rank correlation)
+        path_data = None
+        if hasattr(analyzer, '_get_path_data_for_threshold'):
+            try:
+                path_data = analyzer._get_path_data_for_threshold(threshold)
+            except Exception:
+                pass
+        
+        similarities = metrics.calculate_all_pairwise_similarities(
+            aligned, dataset_names, threshold=1, include_advanced_metrics=True, path_data=path_data
+        )
         
         # Save similarity data to CSV (inside comparison_results folder)
         try:
@@ -824,62 +834,48 @@ def _generate_similarity_section(analyzer, dataset_names: List[str], thresholds:
             if full_output_path:
                 csv_dir = os.path.join(full_output_path, 'similarity_matrices')
                 os.makedirs(csv_dir, exist_ok=True)
-                similarities.to_csv(os.path.join(csv_dir, f'similarity_threshold_{threshold}.csv'), index=False)
+                # Add threshold to the DataFrame before saving
+                similarities_with_threshold = similarities.copy()
+                similarities_with_threshold['threshold'] = threshold
+                similarities_with_threshold.to_csv(os.path.join(csv_dir, f'similarity_threshold_{threshold}.csv'), index=False)
         except Exception:
             pass
         
         n = len(available)
-        # Initialize similarity matrices for 6 metrics (removed frobenius and pearson)
+        # Initialize similarity matrices for 4 key metrics
         jaccard = [[1.0 if i == j else 0.0 for j in range(n)] for i in range(n)]
-        ruzicka = [[1.0 if i == j else 0.0 for j in range(n)] for i in range(n)]
         spearman_sim = [[1.0 if i == j else 0.0 for j in range(n)] for i in range(n)]
-        rv_sim = [[1.0 if i == j else 0.0 for j in range(n)] for i in range(n)]
-        ged_sim = [[1.0 if i == j else 0.0 for j in range(n)] for i in range(n)]
-        kernel_sim = [[1.0 if i == j else 0.0 for j in range(n)] for i in range(n)]
+        edge_rank_sim = [[1.0 if i == j else 0.0 for j in range(n)] for i in range(n)]
+        path_rank_sim = [[1.0 if i == j else 0.0 for j in range(n)] for i in range(n)]
         
         for _, row in similarities.iterrows():
             d1, d2 = row['dataset_1'], row['dataset_2']
             if d1 in available and d2 in available:
                 i1, i2 = available.index(d1), available.index(d2)
                 jac = row.get('jaccard_similarity', 0)
-                ruz = row.get('ruzicka_similarity', 0)
-                # Use new column name: spearman_rank_correlation (was spearman_correlation)
-                spearman_val = row.get('spearman_rank_correlation', 0)
-                rv_val = row.get('rv_coefficient', 0)
-                ged_val = row.get('ged_similarity', 0)
-                kernel_val = row.get('kernel_similarity', 0)
-                # Handle NaN values
+                # Spearman returns raw correlation in [-1, 1], NaN for undefined
+                spearman_val = row.get('spearman_rank_correlation', None)
+                edge_rank_val = row.get('edge_rank_correlation', 0)
+                path_rank_val = row.get('path_rank_correlation', 0)
+                # Handle NaN values - use None for Spearman to show as "N/A"
                 if pd.isna(jac): jac = 0
-                if pd.isna(ruz): ruz = 0
-                if pd.isna(spearman_val): spearman_val = 0
-                if pd.isna(rv_val): rv_val = 0
-                if pd.isna(ged_val): ged_val = 0
-                if pd.isna(kernel_val): kernel_val = 0
+                if pd.isna(edge_rank_val): edge_rank_val = 0
+                if pd.isna(path_rank_val): path_rank_val = 0
+                # Keep spearman_val as None if NaN (will be displayed as "N/A")
+                if pd.isna(spearman_val): spearman_val = None
                 # Fill symmetric matrices
                 jaccard[i1][i2] = jaccard[i2][i1] = jac
-                ruzicka[i1][i2] = ruzicka[i2][i1] = ruz
                 spearman_sim[i1][i2] = spearman_sim[i2][i1] = spearman_val
-                rv_sim[i1][i2] = rv_sim[i2][i1] = rv_val
-                ged_sim[i1][i2] = ged_sim[i2][i1] = ged_val
-                kernel_sim[i1][i2] = kernel_sim[i2][i1] = kernel_val
+                edge_rank_sim[i1][i2] = edge_rank_sim[i2][i1] = edge_rank_val
+                path_rank_sim[i1][i2] = path_rank_sim[i2][i1] = path_rank_val
         
         # Calculate cell size for square cells - smaller to fit 4 in a row
         cell_size = 50
         # Chart size scales with number of datasets but caps for 4-in-row layout
         chart_size = min(n * cell_size + 80, 200)
         
-        # Check if GED is disabled (all non-diagonal values are 0)
-        ged_disabled = True
-        for i in range(n):
-            for j in range(n):
-                if i != j and ged_sim[i][j] != 0:
-                    ged_disabled = False
-                    break
-            if not ged_disabled:
-                break
-        
-        # Determine number of metrics to display (3 if GED disabled, 4 if enabled)
-        num_metrics = 3 if ged_disabled else 4
+        # Always display 4 metrics: Edge Rank, Path Rank, Jaccard, Spearman
+        num_metrics = 4
         max_width_pct = f"{100 // num_metrics}%" if num_metrics <= 4 else "25%"
         
         # Display metrics in a single row with responsive layout
@@ -889,52 +885,38 @@ def _generate_similarity_section(analyzer, dataset_names: List[str], thresholds:
                     
                     <!-- Metrics in one row -->
                     <div style="display: flex; flex-wrap: nowrap; gap: 10px; overflow-x: auto; padding: 8px 0;">
+                        <!-- Edge Rank Correlation (union) -->
+                        <div style="flex: 1; min-width: {chart_size}px; max-width: {max_width_pct}; background: #eff6ff; border-radius: 6px; padding: 8px;">
+                            <h5 style="font-size: 10px; margin: 0 0 4px 0; color: #1e40af; text-align: center;">🔷 Edge Rank</h5>
+                            <div id="edge_rank_{threshold}" style="width: 100%; height: {chart_size}px;"></div>
+                        </div>
+                        <!-- Path Rank Correlation (union) -->
+                        <div style="flex: 1; min-width: {chart_size}px; max-width: {max_width_pct}; background: #eff6ff; border-radius: 6px; padding: 8px;">
+                            <h5 style="font-size: 10px; margin: 0 0 4px 0; color: #1e40af; text-align: center;">🔷 Path Rank</h5>
+                            <div id="path_rank_{threshold}" style="width: 100%; height: {chart_size}px;"></div>
+                        </div>
                         <!-- Jaccard -->
-                        <div style="flex: 1; min-width: {chart_size}px; max-width: {max_width_pct}; background: #eff6ff; border-radius: 6px; padding: 8px;">
-                            <h5 style="font-size: 10px; margin: 0 0 4px 0; color: #1e40af; text-align: center;">🔷 Jaccard</h5>
+                        <div style="flex: 1; min-width: {chart_size}px; max-width: {max_width_pct}; background: #fef3c7; border-radius: 6px; padding: 8px;">
+                            <h5 style="font-size: 10px; margin: 0 0 4px 0; color: #92400e; text-align: center;">🔶 Jaccard</h5>
                             <div id="jaccard_{threshold}" style="width: 100%; height: {chart_size}px;"></div>
-                        </div>""")
-        
-        # Only show GED if not disabled
-        if not ged_disabled:
-            html_parts.append(f"""
-                        <!-- GED -->
-                        <div style="flex: 1; min-width: {chart_size}px; max-width: {max_width_pct}; background: #eff6ff; border-radius: 6px; padding: 8px;">
-                            <h5 style="font-size: 10px; margin: 0 0 4px 0; color: #1e40af; text-align: center;">🔷 GED</h5>
-                            <div id="ged_{threshold}" style="width: 100%; height: {chart_size}px;"></div>
-                        </div>""")
-        
-        html_parts.append(f"""
-                        <!-- Spearman -->
+                        </div>
+                        <!-- Spearman (shared) -->
                         <div style="flex: 1; min-width: {chart_size}px; max-width: {max_width_pct}; background: #fef3c7; border-radius: 6px; padding: 8px;">
                             <h5 style="font-size: 10px; margin: 0 0 4px 0; color: #92400e; text-align: center;">🔶 Spearman</h5>
                             <div id="spearman_{threshold}" style="width: 100%; height: {chart_size}px;"></div>
                         </div>
-                        <!-- RV -->
-                        <div style="flex: 1; min-width: {chart_size}px; max-width: {max_width_pct}; background: #fef3c7; border-radius: 6px; padding: 8px;">
-                            <h5 style="font-size: 10px; margin: 0 0 4px 0; color: #92400e; text-align: center;">🔶 RV Coef</h5>
-                            <div id="rv_{threshold}" style="width: 100%; height: {chart_size}px;"></div>
-                        </div>
-                    </div>""")
-        
-        # Add note about GED being disabled if applicable
-        ged_note = ""
-        if ged_disabled:
-            ged_note = " | ⚠️ GED disabled (too many nodes)"
-        
-        html_parts.append(f"""
+                    </div>
                     <p style="font-size: 0.75em; color: #64748b; margin-top: 8px; text-align: center;">
-                        🔷 Topology-based (binary edge presence) | 🔶 Matrix-based (weight-sensitive){ged_note}
+                        🔷 Union-based (all items, 0 for missing) | 🔶 Set-based (shared items only)
                     </p>
                 </div>
                 <script>
                     (function() {{
                         const labels = {json.dumps(labels)};
                         const jaccard = {json.dumps(jaccard)};
+                        const edgeRankSim = {json.dumps(edge_rank_sim)};
+                        const pathRankSim = {json.dumps(path_rank_sim)};
                         const spearmanSim = {json.dumps(spearman_sim)};
-                        const rvSim = {json.dumps(rv_sim)};
-                        const gedSim = {json.dumps(ged_sim)};
-                        const gedDisabled = {'true' if ged_disabled else 'false'};
                         const layout = {{
                             margin: {{ l: 45, r: 10, t: 10, b: 45 }},
                             xaxis: {{ tickangle: -45, scaleanchor: 'y', constrain: 'domain', tickfont: {{size: 8}} }},
@@ -942,32 +924,42 @@ def _generate_similarity_section(analyzer, dataset_names: List[str], thresholds:
                         }};
                         const makeAnnotations = (data, labels) => data.flatMap((row, i) => 
                             row.map((val, j) => ({{
-                                x: labels[j], y: labels[i], text: val.toFixed(2), showarrow: false,
-                                font: {{ color: val > 0.5 ? 'white' : 'black', size: 10 }}
+                                x: labels[j], y: labels[i], 
+                                text: val === null ? 'N/A' : val.toFixed(2), 
+                                showarrow: false,
+                                font: {{ color: (val === null || val > 0.5) ? 'white' : 'black', size: 10 }}
+                            }})));
+                        // Annotation function for Spearman with [-1, 1] range
+                        const makeSpearmanAnnotations = (data, labels) => data.flatMap((row, i) => 
+                            row.map((val, j) => ({{
+                                x: labels[j], y: labels[i], 
+                                text: val === null ? 'N/A' : val.toFixed(2), 
+                                showarrow: false,
+                                font: {{ color: (val === null || val > 0) ? 'white' : 'black', size: 10 }}
                             }})));
                         // Use consistent green colorscale: higher value = darker green
                         const greenScale = [[0, '#ffffff'], [0.3, '#c6efce'], [0.6, '#22c55e'], [1, '#166534']];
-                        // Topology metrics
+                        // Diverging colorscale for Spearman [-1, 1]: red (negative) -> white (0) -> green (positive)
+                        const divergingScale = [[0, '#dc2626'], [0.5, '#ffffff'], [1, '#166534']];
+                        // Union-based rank metrics (blue background)
+                        Plotly.newPlot('edge_rank_{threshold}', [{{
+                            z: edgeRankSim, x: labels, y: labels, type: 'heatmap',
+                            colorscale: greenScale, zmin: 0, zmax: 1, showscale: false
+                        }}], {{...layout, annotations: makeAnnotations(edgeRankSim, labels)}}, {{responsive: true}});
+                        Plotly.newPlot('path_rank_{threshold}', [{{
+                            z: pathRankSim, x: labels, y: labels, type: 'heatmap',
+                            colorscale: greenScale, zmin: 0, zmax: 1, showscale: false
+                        }}], {{...layout, annotations: makeAnnotations(pathRankSim, labels)}}, {{responsive: true}});
+                        // Set-based metrics (yellow background)
                         Plotly.newPlot('jaccard_{threshold}', [{{
                             z: jaccard, x: labels, y: labels, type: 'heatmap',
                             colorscale: greenScale, zmin: 0, zmax: 1, showscale: false
                         }}], {{...layout, annotations: makeAnnotations(jaccard, labels)}}, {{responsive: true}});
-                        // Only plot GED if not disabled
-                        if (!gedDisabled) {{
-                            Plotly.newPlot('ged_{threshold}', [{{
-                                z: gedSim, x: labels, y: labels, type: 'heatmap',
-                                colorscale: greenScale, zmin: 0, zmax: 1, showscale: false
-                            }}], {{...layout, annotations: makeAnnotations(gedSim, labels)}}, {{responsive: true}});
-                        }}
-                        // Matrix-based metrics
+                        // Spearman uses diverging scale [-1, 1]
                         Plotly.newPlot('spearman_{threshold}', [{{
                             z: spearmanSim, x: labels, y: labels, type: 'heatmap',
-                            colorscale: greenScale, zmin: 0, zmax: 1, showscale: false
-                        }}], {{...layout, annotations: makeAnnotations(spearmanSim, labels)}}, {{responsive: true}});
-                        Plotly.newPlot('rv_{threshold}', [{{
-                            z: rvSim, x: labels, y: labels, type: 'heatmap',
-                            colorscale: greenScale, zmin: 0, zmax: 1, showscale: false
-                        }}], {{...layout, annotations: makeAnnotations(rvSim, labels)}}, {{responsive: true}});
+                            colorscale: divergingScale, zmin: -1, zmax: 1, showscale: false
+                        }}], {{...layout, annotations: makeSpearmanAnnotations(spearmanSim, labels)}}, {{responsive: true}});
                     }})();
                 </script>
 """)
@@ -2784,6 +2776,27 @@ def _generate_conservation_section(analyzer, dataset_names: List[str], threshold
                                     key_findings: Dict, nickname_map: Dict[str, str]) -> str:
     """Generate conservation analysis section with distribution by dataset count."""
     num_datasets = len(dataset_names)
+    
+    # Get path_presence_matrix from comparison_report
+    path_presence_matrix = None
+    if hasattr(analyzer, 'comparison_report') and analyzer.comparison_report:
+        path_presence_matrix = analyzer.comparison_report.get('path_presence_matrix', None)
+    
+    # Generate Plotly JSON
+    plotly_json = "null"
+    try:
+        from .visualizations import ComparisonVisualizer
+        vis = ComparisonVisualizer()
+        plotly_json = vis.plot_conservation_across_thresholds_plotly(
+            analyzer.raw_results,
+            thresholds,
+            align_func=analyzer.get_aligned_data,
+            nickname_map=nickname_map,
+            path_presence_matrix=path_presence_matrix
+        )
+    except Exception as e:
+        print(f"Warning: Could not generate Plotly chart: {e}")
+
     html_parts = []
     html_parts.append(f"""
         <div id="conservation" class="section">
@@ -2792,7 +2805,37 @@ def _generate_conservation_section(analyzer, dataset_names: List[str], threshold
                 <p style="margin-bottom: 20px; color: var(--secondary-color);">
                     Edge and path conservation across all {num_datasets} datasets. Shows distribution by how many datasets each edge/path appears in.
                 </p>
-                <div class="grid grid-2">
+                
+                <!-- Conservation Across Thresholds Plot (Plotly) -->
+                <div id="conservation_plot" style="width:100%; height:950px; margin-bottom: 50px; border: 1px solid var(--border-color); border-radius: 8px; overflow: hidden;"></div>
+                <script>
+                    try {{
+                        var plotData = {plotly_json};
+                        Plotly.newPlot('conservation_plot', plotData.data, plotData.layout);
+                    }} catch (e) {{
+                        console.error("Failed to render Plotly chart:", e);
+                        document.getElementById('conservation_plot').innerHTML = '<p style="text-align:center; padding:20px;">Interactive chart failed to load. See static image below.</p>';
+                    }}
+                </script>
+                
+                <!-- Fallback Static Image -->
+                <div style="text-align: center; margin-bottom: 30px; display: none;" id="conservation_static">
+                    <img src="comparison_visualizations/conservation_across_thresholds.png" 
+                         alt="Conservation Across Thresholds" 
+                         style="max-width: 100%; border: 1px solid var(--border-color); border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.05);"
+                         onerror="this.style.display='none'">
+                </div>
+                <script>
+                    // Show static image if Plotly fails or is missing
+                    if (typeof Plotly === 'undefined' || !document.getElementById('conservation_plot').innerHTML) {{
+                        document.getElementById('conservation_static').style.display = 'block';
+                    }}
+                </script>
+                
+                <!-- Conservation Pie Charts Section -->
+                <div style="clear: both; margin-top: 40px; padding-top: 20px; border-top: 1px solid var(--border-color);">
+                    <h3 style="margin-bottom: 20px; color: var(--text-color);">Conservation Distribution by Threshold</h3>
+                    <div style="display: grid; grid-template-columns: repeat(auto-fill, minmax(380px, 1fr)); gap: 20px;">
 """)
     
     # Color palette for conservation levels (from conserved to unique)
@@ -2823,23 +2866,35 @@ def _generate_conservation_section(analyzer, dataset_names: List[str], threshold
             if count > 0:
                 edge_counts[count] = edge_counts.get(count, 0) + 1
         
-        # Get path data if available
+        # Get path data from path_presence_matrix
         path_counts = {}  # {count: number_of_paths}
         try:
-            # Try to get path data from analyzer
-            if hasattr(analyzer, '_get_path_data_for_threshold'):
-                path_data = analyzer._get_path_data_for_threshold(threshold)
-            elif hasattr(analyzer, 'get_path_data'):
-                path_data = analyzer.get_path_data(threshold)
-            else:
-                path_data = None
+            # Use path_presence_matrix from comparison_report
+            path_presence_matrix = None
+            if hasattr(analyzer, 'comparison_report') and analyzer.comparison_report:
+                path_presence_matrix = analyzer.comparison_report.get('path_presence_matrix', None)
             
-            if path_data is not None and not path_data.empty:
-                for _, row in path_data.iterrows():
-                    count = sum(1 for d in available if d in row.index and row.get(d, 0) > 0)
-                    if count > 0:
-                        path_counts[count] = path_counts.get(count, 0) + 1
-        except:
+            if path_presence_matrix is not None and not path_presence_matrix.empty:
+                # Find columns for this threshold (sanitized names with _t{threshold} suffix)
+                cols_for_threshold = []
+                for d in dataset_names:
+                    safe_name = analyzer.parameters._sanitize_name(d)
+                    col_name = f'{safe_name}_t{threshold}'
+                    if col_name in path_presence_matrix.columns:
+                        cols_for_threshold.append(col_name)
+                
+                if cols_for_threshold:
+                    # Count how many datasets each path appears in at this threshold
+                    for _, row in path_presence_matrix.iterrows():
+                        count = 0
+                        for col in cols_for_threshold:
+                            val = row.get(col, 0)
+                            # Handle both string 'True' and boolean True
+                            if val == 'True' or val == True or (isinstance(val, (int, float)) and val > 0):
+                                count += 1
+                        if count > 0:
+                            path_counts[count] = path_counts.get(count, 0) + 1
+        except Exception as e:
             pass
         
         # Build data for pie charts
@@ -2892,14 +2947,14 @@ def _generate_conservation_section(analyzer, dataset_names: List[str], threshold
         path_colors_json = json.dumps(path_colors)
         
         html_parts.append(f'''
-            <div class="card">
-                <h3>Conservation at Threshold = {threshold}</h3>
-                <div class="grid grid-2">
-                    <div id="cons_edge_{threshold}" style="height: 260px;"></div>
-                    <div id="cons_path_{threshold}" style="height: 260px;"></div>
+            <div class="card" style="min-width: 350px;">
+                <h3 style="font-size: 1rem; margin-bottom: 10px;">Conservation at Threshold = {threshold}</h3>
+                <div style="display: flex; flex-wrap: wrap; gap: 10px; justify-content: center;">
+                    <div id="cons_edge_{threshold}" style="flex: 1; min-width: 160px; max-width: 200px; height: 220px;"></div>
+                    <div id="cons_path_{threshold}" style="flex: 1; min-width: 160px; max-width: 200px; height: 220px;"></div>
                 </div>
-                <div style="text-align: center; color: var(--secondary-color); font-size: 0.85rem; margin-top: 10px;">
-                    Edges: {ce}/{te} conserved ({er:.1f}%) | Paths: {cp}/{tp} conserved ({pr:.1f}%)
+                <div style="text-align: center; color: var(--secondary-color); font-size: 0.8rem; margin-top: 8px;">
+                    Edges: {ce}/{te} ({er:.1f}%) | Paths: {cp}/{tp} ({pr:.1f}%)
                 </div>
             </div>
             <script>
@@ -2916,16 +2971,16 @@ def _generate_conservation_section(analyzer, dataset_names: List[str], threshold
                             values: edgeValues, 
                             labels: edgeLabels,
                             type: 'pie', 
-                            hole: 0.35, 
+                            hole: 0.4, 
                             marker: {{ colors: edgeColors }},
                             textinfo: 'percent',
                             textposition: 'inside',
+                            textfont: {{ size: 10 }},
                             hoverinfo: 'label+value+percent'
                         }}], {{ 
-                            title: {{ text: 'Edges', font: {{ size: 13 }} }}, 
-                            showlegend: true,
-                            legend: {{ font: {{ size: 9 }}, x: 0, y: -0.15, orientation: 'h' }},
-                            margin: {{ t: 40, b: 50, l: 10, r: 10 }} 
+                            title: {{ text: 'Edges', font: {{ size: 12 }} }}, 
+                            showlegend: false,
+                            margin: {{ t: 30, b: 10, l: 10, r: 10 }} 
                         }}, {{responsive: true}});
                     }} else {{
                         document.getElementById('cons_edge_{threshold}').innerHTML = '<p style="text-align:center;color:#999;">No edge data</p>';
@@ -2936,16 +2991,16 @@ def _generate_conservation_section(analyzer, dataset_names: List[str], threshold
                             values: pathValues, 
                             labels: pathLabels,
                             type: 'pie', 
-                            hole: 0.35, 
+                            hole: 0.4, 
                             marker: {{ colors: pathColors }},
                             textinfo: 'percent',
                             textposition: 'inside',
+                            textfont: {{ size: 10 }},
                             hoverinfo: 'label+value+percent'
                         }}], {{ 
-                            title: {{ text: 'Paths', font: {{ size: 13 }} }}, 
-                            showlegend: true,
-                            legend: {{ font: {{ size: 9 }}, x: 0, y: -0.15, orientation: 'h' }},
-                            margin: {{ t: 40, b: 50, l: 10, r: 10 }} 
+                            title: {{ text: 'Paths', font: {{ size: 12 }} }}, 
+                            showlegend: false,
+                            margin: {{ t: 30, b: 10, l: 10, r: 10 }} 
                         }}, {{responsive: true}});
                     }} else {{
                         document.getElementById('cons_path_{threshold}').innerHTML = '<p style="text-align:center;color:#999;">No path data</p>';
@@ -2954,7 +3009,8 @@ def _generate_conservation_section(analyzer, dataset_names: List[str], threshold
             </script>
 ''')
     
-    html_parts.append('</div></div></div>')
+    # Close: grid-2, wrapper div (Conservation Distribution section), section-content, section
+    html_parts.append('</div></div></div></div></div>')
     return ''.join(html_parts)
 
 
@@ -3294,11 +3350,385 @@ def _generate_statistics_section(analyzer, dataset_names: List[str], thresholds:
                         event.target.classList.add('active');
                     }
                 </script>
+""")
+    
+    # Generate Jaccard similarity line plot across thresholds
+    jaccard_plot_html = _generate_jaccard_similarity_plot(analyzer, dataset_names, thresholds, nickname_map)
+    html_parts.append(jaccard_plot_html)
+    
+    # Generate Edge Rank Correlation line plot across thresholds
+    edge_rank_plot_html = _generate_edge_rank_correlation_plot(analyzer, dataset_names, thresholds, nickname_map)
+    html_parts.append(edge_rank_plot_html)
+    
+    # Generate Path Rank Correlation line plot across thresholds
+    path_rank_plot_html = _generate_path_rank_correlation_plot(analyzer, dataset_names, thresholds, nickname_map)
+    html_parts.append(path_rank_plot_html)
+    
+    html_parts.append("""
             </div>
         </div>
 """)
     
     return ''.join(html_parts)
+
+
+def _generate_jaccard_similarity_plot(analyzer, dataset_names: List[str], thresholds: List[int],
+                                       nickname_map: Dict[str, str]) -> str:
+    """Generate a line plot showing Jaccard similarity across thresholds for all dataset pairs."""
+    from itertools import combinations
+    
+    # Collect Jaccard similarities for each pair at each threshold
+    pair_data = {}  # {(d1, d2): {threshold: jaccard}}
+    available_pairs = []
+    
+    for i, d1 in enumerate(dataset_names):
+        for d2 in dataset_names[i+1:]:
+            pair_key = (d1, d2)
+            pair_data[pair_key] = {}
+            available_pairs.append(pair_key)
+    
+    for threshold in thresholds:
+        aligned = analyzer.get_aligned_data(threshold)
+        if aligned.empty:
+            continue
+        
+        available = [d for d in dataset_names if d in aligned.columns]
+        
+        for i, d1 in enumerate(available):
+            for d2 in available[i+1:]:
+                pair_key = (d1, d2)
+                if pair_key not in pair_data:
+                    pair_key = (d2, d1)  # Try reverse
+                
+                c1, c2 = aligned[d1], aligned[d2]
+                s1, s2 = set(aligned.index[c1 > 0]), set(aligned.index[c2 > 0])
+                inter, union = len(s1 & s2), len(s1 | s2)
+                jac = inter / union if union > 0 else 0
+                pair_data[pair_key][threshold] = jac
+    
+    # Build traces for Plotly
+    traces = []
+    colors = ['#3b82f6', '#f97316', '#22c55e', '#ef4444', '#8b5cf6', '#06b6d4', '#ec4899', '#eab308']
+    
+    for idx, pair_key in enumerate(available_pairs):
+        d1, d2 = pair_key
+        n1, n2 = nickname_map.get(d1, d1), nickname_map.get(d2, d2)
+        
+        x_vals = []
+        y_vals = []
+        for t in thresholds:
+            if t in pair_data[pair_key]:
+                x_vals.append(t)
+                y_vals.append(pair_data[pair_key][t])
+        
+        if x_vals:
+            color = colors[idx % len(colors)]
+            traces.append({
+                'x': x_vals,
+                'y': y_vals,
+                'type': 'scatter',
+                'mode': 'lines+markers',
+                'name': f'{n1} vs {n2}',
+                'line': {'color': color, 'width': 2},
+                'marker': {'size': 8}
+            })
+    
+    # Calculate average Jaccard across all pairs
+    avg_x = []
+    avg_y = []
+    for t in thresholds:
+        vals = [pair_data[pk].get(t) for pk in available_pairs if t in pair_data[pk]]
+        vals = [v for v in vals if v is not None]
+        if vals:
+            avg_x.append(t)
+            avg_y.append(sum(vals) / len(vals))
+    
+    if avg_x:
+        traces.append({
+            'x': avg_x,
+            'y': avg_y,
+            'type': 'scatter',
+            'mode': 'lines+markers',
+            'name': 'Average',
+            'line': {'color': '#64748b', 'width': 3, 'dash': 'dash'},
+            'marker': {'size': 10, 'symbol': 'star'}
+        })
+    
+    layout = {
+        'title': {'text': 'Jaccard Similarity Across Thresholds', 'font': {'size': 16}},
+        'xaxis': {'title': 'Threshold', 'type': 'category'},
+        'yaxis': {'title': 'Jaccard Index', 'range': [0, 1]},
+        'legend': {'orientation': 'h', 'y': -0.2, 'x': 0.5, 'xanchor': 'center'},
+        'margin': {'t': 50, 'b': 80, 'l': 60, 'r': 30},
+        'hovermode': 'x unified'
+    }
+    
+    plotly_data = json.dumps({'data': traces, 'layout': layout})
+    
+    return f'''
+        <div class="card" style="margin-top: 30px;">
+            <h3>Jaccard Similarity Trend Across Thresholds</h3>
+            <p style="color: var(--secondary-color); font-size: 0.85rem; margin-bottom: 15px;">
+                How edge overlap between dataset pairs changes with increasing threshold. The dashed line shows the average across all pairs.
+            </p>
+            <div id="jaccard_trend_plot" style="width: 100%; height: 1050px;"></div>
+            <script>
+                (function() {{
+                    try {{
+                        var plotData = {plotly_data};
+                        Plotly.newPlot('jaccard_trend_plot', plotData.data, plotData.layout, {{responsive: true}});
+                    }} catch(e) {{
+                        console.error("Failed to render Jaccard trend plot:", e);
+                        document.getElementById('jaccard_trend_plot').innerHTML = '<p style="text-align:center;color:#999;">Chart failed to load</p>';
+                    }}
+                }})();
+            </script>
+        </div>
+    '''
+
+
+def _generate_edge_rank_correlation_plot(analyzer, dataset_names: List[str], thresholds: List[int],
+                                          nickname_map: Dict[str, str]) -> str:
+    """Generate a line plot showing Edge Rank Correlation across thresholds for all dataset pairs."""
+    from itertools import combinations
+    from .metrics import ComparisonMetrics
+    
+    metrics = ComparisonMetrics()
+    
+    # Collect edge rank correlations for each pair at each threshold
+    pair_data = {}  # {(d1, d2): {threshold: correlation}}
+    available_pairs = []
+    
+    for i, d1 in enumerate(dataset_names):
+        for d2 in dataset_names[i+1:]:
+            pair_key = (d1, d2)
+            pair_data[pair_key] = {}
+            available_pairs.append(pair_key)
+    
+    for threshold in thresholds:
+        aligned = analyzer.get_aligned_data(threshold)
+        if aligned.empty:
+            continue
+        
+        available = [d for d in dataset_names if d in aligned.columns]
+        
+        for i, d1 in enumerate(available):
+            for d2 in available[i+1:]:
+                pair_key = (d1, d2)
+                if pair_key not in pair_data:
+                    pair_key = (d2, d1)  # Try reverse
+                
+                # Get edge weights as Series
+                weights_a = aligned[d1].dropna()
+                weights_b = aligned[d2].dropna()
+                
+                # Calculate edge rank correlation
+                corr = metrics.calculate_edge_list_rank_correlation(weights_a, weights_b)
+                pair_data[pair_key][threshold] = corr
+    
+    # Build traces for Plotly
+    traces = []
+    colors = ['#3b82f6', '#f97316', '#22c55e', '#ef4444', '#8b5cf6', '#06b6d4', '#ec4899', '#eab308']
+    
+    for idx, pair_key in enumerate(available_pairs):
+        d1, d2 = pair_key
+        n1, n2 = nickname_map.get(d1, d1), nickname_map.get(d2, d2)
+        
+        x_vals = []
+        y_vals = []
+        for t in thresholds:
+            if t in pair_data[pair_key]:
+                x_vals.append(t)
+                y_vals.append(pair_data[pair_key][t])
+        
+        if x_vals:
+            color = colors[idx % len(colors)]
+            traces.append({
+                'x': x_vals,
+                'y': y_vals,
+                'type': 'scatter',
+                'mode': 'lines+markers',
+                'name': f'{n1} vs {n2}',
+                'line': {'color': color, 'width': 2},
+                'marker': {'size': 8}
+            })
+    
+    # Calculate average across all pairs
+    avg_x = []
+    avg_y = []
+    for t in thresholds:
+        vals = [pair_data[pk].get(t) for pk in available_pairs if t in pair_data[pk]]
+        vals = [v for v in vals if v is not None]
+        if vals:
+            avg_x.append(t)
+            avg_y.append(sum(vals) / len(vals))
+    
+    if avg_x:
+        traces.append({
+            'x': avg_x,
+            'y': avg_y,
+            'type': 'scatter',
+            'mode': 'lines+markers',
+            'name': 'Average',
+            'line': {'color': '#64748b', 'width': 3, 'dash': 'dash'},
+            'marker': {'size': 10, 'symbol': 'star'}
+        })
+    
+    layout = {
+        'title': {'text': 'Edge Rank Correlation Across Thresholds', 'font': {'size': 16}},
+        'xaxis': {'title': 'Threshold', 'type': 'category'},
+        'yaxis': {'title': 'Edge Rank Correlation', 'range': [0, 1]},
+        'legend': {'orientation': 'h', 'y': -0.2, 'x': 0.5, 'xanchor': 'center'},
+        'margin': {'t': 50, 'b': 80, 'l': 60, 'r': 30},
+        'hovermode': 'x unified'
+    }
+    
+    plotly_data = json.dumps({'data': traces, 'layout': layout})
+    
+    return f'''
+        <div class="card" style="margin-top: 30px;">
+            <h3>Edge Rank Correlation Trend Across Thresholds</h3>
+            <p style="color: var(--secondary-color); font-size: 0.85rem; margin-bottom: 15px;">
+                Compares the ranking of edges by weight (using union of edges). Higher values indicate more similar edge importance rankings. The dashed line shows the average across all pairs.
+            </p>
+            <div id="edge_rank_trend_plot" style="width: 100%; height: 1050px;"></div>
+            <script>
+                (function() {{
+                    try {{
+                        var plotData = {plotly_data};
+                        Plotly.newPlot('edge_rank_trend_plot', plotData.data, plotData.layout, {{responsive: true}});
+                    }} catch(e) {{
+                        console.error("Failed to render Edge Rank Correlation trend plot:", e);
+                        document.getElementById('edge_rank_trend_plot').innerHTML = '<p style="text-align:center;color:#999;">Chart failed to load</p>';
+                    }}
+                }})();
+            </script>
+        </div>
+    '''
+
+
+def _generate_path_rank_correlation_plot(analyzer, dataset_names: List[str], thresholds: List[int],
+                                          nickname_map: Dict[str, str]) -> str:
+    """Generate a line plot showing Path Rank Correlation across thresholds for all dataset pairs."""
+    from itertools import combinations
+    from .metrics import ComparisonMetrics
+    
+    metrics = ComparisonMetrics()
+    
+    # Collect path rank correlations for each pair at each threshold
+    pair_data = {}  # {(d1, d2): {threshold: correlation}}
+    available_pairs = []
+    
+    for i, d1 in enumerate(dataset_names):
+        for d2 in dataset_names[i+1:]:
+            pair_key = (d1, d2)
+            pair_data[pair_key] = {}
+            available_pairs.append(pair_key)
+    
+    for threshold in thresholds:
+        try:
+            path_df = analyzer._get_path_data_for_threshold(threshold)
+        except:
+            continue
+        
+        if path_df is None or path_df.empty:
+            continue
+        
+        available = [d for d in dataset_names if d in path_df.columns]
+        
+        for i, d1 in enumerate(available):
+            for d2 in available[i+1:]:
+                pair_key = (d1, d2)
+                if pair_key not in pair_data:
+                    pair_key = (d2, d1)  # Try reverse
+                
+                # Get path weights as Series
+                paths_a = path_df[d1].dropna()
+                paths_b = path_df[d2].dropna()
+                
+                # Calculate path rank correlation
+                corr = metrics.calculate_path_list_rank_correlation(paths_a, paths_b)
+                pair_data[pair_key][threshold] = corr
+    
+    # Build traces for Plotly
+    traces = []
+    colors = ['#3b82f6', '#f97316', '#22c55e', '#ef4444', '#8b5cf6', '#06b6d4', '#ec4899', '#eab308']
+    
+    for idx, pair_key in enumerate(available_pairs):
+        d1, d2 = pair_key
+        n1, n2 = nickname_map.get(d1, d1), nickname_map.get(d2, d2)
+        
+        x_vals = []
+        y_vals = []
+        for t in thresholds:
+            if t in pair_data[pair_key]:
+                x_vals.append(t)
+                y_vals.append(pair_data[pair_key][t])
+        
+        if x_vals:
+            color = colors[idx % len(colors)]
+            traces.append({
+                'x': x_vals,
+                'y': y_vals,
+                'type': 'scatter',
+                'mode': 'lines+markers',
+                'name': f'{n1} vs {n2}',
+                'line': {'color': color, 'width': 2},
+                'marker': {'size': 8}
+            })
+    
+    # Calculate average across all pairs
+    avg_x = []
+    avg_y = []
+    for t in thresholds:
+        vals = [pair_data[pk].get(t) for pk in available_pairs if t in pair_data[pk]]
+        vals = [v for v in vals if v is not None]
+        if vals:
+            avg_x.append(t)
+            avg_y.append(sum(vals) / len(vals))
+    
+    if avg_x:
+        traces.append({
+            'x': avg_x,
+            'y': avg_y,
+            'type': 'scatter',
+            'mode': 'lines+markers',
+            'name': 'Average',
+            'line': {'color': '#64748b', 'width': 3, 'dash': 'dash'},
+            'marker': {'size': 10, 'symbol': 'star'}
+        })
+    
+    layout = {
+        'title': {'text': 'Path Rank Correlation Across Thresholds', 'font': {'size': 16}},
+        'xaxis': {'title': 'Threshold', 'type': 'category'},
+        'yaxis': {'title': 'Path Rank Correlation', 'range': [0, 1]},
+        'legend': {'orientation': 'h', 'y': -0.2, 'x': 0.5, 'xanchor': 'center'},
+        'margin': {'t': 50, 'b': 80, 'l': 60, 'r': 30},
+        'hovermode': 'x unified'
+    }
+    
+    plotly_data = json.dumps({'data': traces, 'layout': layout})
+    
+    return f'''
+        <div class="card" style="margin-top: 30px;">
+            <h3>Path Rank Correlation Trend Across Thresholds</h3>
+            <p style="color: var(--secondary-color); font-size: 0.85rem; margin-bottom: 15px;">
+                Compares the ranking of multi-hop paths by min_weight (using union of paths). Higher values indicate more similar path importance rankings. The dashed line shows the average across all pairs.
+            </p>
+            <div id="path_rank_trend_plot" style="width: 100%; height: 1050px;"></div>
+            <script>
+                (function() {{
+                    try {{
+                        var plotData = {plotly_data};
+                        Plotly.newPlot('path_rank_trend_plot', plotData.data, plotData.layout, {{responsive: true}});
+                    }} catch(e) {{
+                        console.error("Failed to render Path Rank Correlation trend plot:", e);
+                        document.getElementById('path_rank_trend_plot').innerHTML = '<p style="text-align:center;color:#999;">Chart failed to load</p>';
+                    }}
+                }})();
+            </script>
+        </div>
+    '''
 
 
 def _generate_stats_table(analyzer, dataset_names: List[str], threshold: int,

@@ -97,6 +97,32 @@ logging.getLogger('navis').setLevel(logging.WARNING)
 # ============================================================================
 _FNC_CACHE = {}
 
+# ============================================================================
+# Module-level cache for FindAllPath graph data (bodyId-level)
+# Used by comparison module to skip heavy graph building when running same query at different thresholds
+# Structure: {cache_key: {'threshold': int, 'graph': FastGraph, 'all_connections': list[DataFrame], 
+#             'layer_neurons': list[set], 'targets_found': list, 'source_ID': list, 'target_ID': list}}
+# cache_key = f"{dataset}_{source_hash}_{target_hash}_{max_interlayer}"
+# ============================================================================
+_FINDALLPATH_GRAPH_CACHE = {}
+
+
+def clear_findallpath_cache(dataset: str = None):
+    """
+    Clear the module-level FindAllPath graph cache.
+    
+    Args:
+        dataset: Specific dataset to clear. If None, clears all.
+    """
+    global _FINDALLPATH_GRAPH_CACHE
+    if dataset is None:
+        _FINDALLPATH_GRAPH_CACHE.clear()
+    else:
+        # Clear entries that start with the dataset name
+        keys_to_delete = [k for k in _FINDALLPATH_GRAPH_CACHE if k.startswith(dataset)]
+        for k in keys_to_delete:
+            del _FINDALLPATH_GRAPH_CACHE[k]
+
 
 def clear_fnc_cache(dataset: str = None):
     """
@@ -3806,7 +3832,7 @@ class FindNeuronConnection:
         if self.client_type != 'flywire':
             self._ensure_neuprint_client()
         ''' initialize neuron info '''
-        print('Fetching source and target neurons...')
+        self._vprint('Fetching source and target neurons...', level='simple')
         
         # Determine client to pass
         active_client = self.client_flywire if self.client_type == 'flywire' else self.client_hemibrain
@@ -3814,13 +3840,17 @@ class FindNeuronConnection:
         # Optimization: when max_interlayer=-1 and source==target, fetch only once
         self._source_target_identical = (self.max_interlayer == -1 and self.sourceNeurons == self.targetNeurons)
         
+        # Determine verbose for getNeurons based on verbose_mode
+        neurons_verbose = (self.verbose_mode != 'silent')
+        
         if self._source_target_identical:
-            print('\033[36mOptimization: source==target with max_interlayer=-1, fetching only one set\033[0m')
+            self._vprint('\033[36mOptimization: source==target with max_interlayer=-1, fetching only one set\033[0m', level='simple')
             self.source_df, _, source_fname_auto, self.source_criteria = sv.getNeurons(
                 self.sourceNeurons, 
                 dataset=self.dataset,
                 custom_group_names=self.custom_source_group_names if self.custom_source_group_names else None,
-                client=active_client
+                client=active_client,
+                verbose=neurons_verbose
             )
             # Reuse source data for target
             self.target_df = self.source_df
@@ -3831,18 +3861,20 @@ class FindNeuronConnection:
                 self.sourceNeurons, 
                 dataset=self.dataset,
                 custom_group_names=self.custom_source_group_names if self.custom_source_group_names else None,
-                client=active_client
+                client=active_client,
+                verbose=neurons_verbose
             )
             self.target_df, _, target_fname_auto, self.target_criteria = sv.getNeurons(
                 self.targetNeurons, 
                 dataset=self.dataset,
                 custom_group_names=self.custom_target_group_names if self.custom_target_group_names else None,
-                client=active_client
+                client=active_client,
+                verbose=neurons_verbose
             )
         
         # Apply label mapping if available
         if self.label_mapper and not self.label_mapper.is_empty:
-            print(f'\033[36mApplying label mapping to source/target neurons...\033[0m')
+            self._vprint(f'\033[36mApplying label mapping to source/target neurons...\033[0m', level='simple')
             # Apply to source_df
             if not self.source_df.empty and 'type' in self.source_df.columns:
                 # Create a copy to avoid SettingWithCopyWarning
@@ -3879,7 +3911,7 @@ class FindNeuronConnection:
         
         if self.max_interlayer > 2 or len(self.source_df) > 200:
             self.simple_fetch = False
-            print('\033[33mLarge data detected!!! simple_fetch is set to False, using fetch_adjacencies()\033[0m')
+            self._vprint('\033[33mLarge data detected!!! simple_fetch is set to False, using fetch_adjacencies()\033[0m', level='simple')
 
         if len(self.target_df) > 16383: # 16383 is the maximum number of excel sheet rows
             self.largeTargetSet = True
@@ -3894,9 +3926,9 @@ class FindNeuronConnection:
         else:
             self.target_fname = target_fname_auto
         
-        print('Processing:',self.source_fname,'to',self.target_fname)
-        print(f'Source neurons ({self.source_fname}) in processing: {len(self.source_df)}')
-        print(f'Target neurons ({self.target_fname}) in processing: {len(self.target_df)}')
+        self._vprint(f'Processing: {self.source_fname} to {self.target_fname}', level='simple')
+        self._vprint(f'Source neurons ({self.source_fname}) in processing: {len(self.source_df)}', level='simple')
+        self._vprint(f'Target neurons ({self.target_fname}) in processing: {len(self.target_df)}', level='simple')
         
         if self.saveas:
             if os.path.isabs(self.saveas):
@@ -3912,7 +3944,7 @@ class FindNeuronConnection:
         elif not os.path.isabs(self.save_folder): # if save_folder is not absolute path, save in data_folder with specified relative path and name
             self.save_folder = os.path.join(self.output_dir, self.save_folder)
         if not os.path.exists(self.save_folder): os.makedirs(self.save_folder)
-        print(f'data will be saved in: {self.save_folder}\n')
+        self._vprint(f'data will be saved in: {self.save_folder}\n', level='simple')
         
         # Prepare parameter dictionary (will be saved in method-specific subfolders)
         self.parameter_dict = {
@@ -3940,8 +3972,8 @@ class FindNeuronConnection:
         
         # If max_interlayer == -1, only fetch neurons without connections
         if self.max_interlayer == -1:
-            print('\033[36mmax_interlayer=-1: Neurons fetched (no connections will be queried)\033[0m')
-            print('Use FetchNeuronsOnly() for connectivity profile analysis.')
+            self._vprint('\033[36mmax_interlayer=-1: Neurons fetched (no connections will be queried)\033[0m', level='simple')
+            self._vprint('Use FetchNeuronsOnly() for connectivity profile analysis.', level='simple')
     
     def FetchNeuronsOnly(self) -> tuple:
         '''
@@ -4736,7 +4768,7 @@ class FindNeuronConnection:
             # Create data_details subfolder
             csv_folder = os.path.join(self.path_folder, 'data_details')
             os.makedirs(csv_folder, exist_ok=True)
-            print(f'  💾 Saving data as CSV files to: {csv_folder}')
+            self._vprint(f'  💾 Saving data as CSV files to: {csv_folder}', level='simple')
             self._save_df_to_csv_polars(self.parameter_df, os.path.join(csv_folder, 'parameters.csv'))
             self._save_df_to_csv_polars(self.source_df, os.path.join(csv_folder, 'source_neurons.csv'))
             self._save_df_to_csv_polars(self.target_df, os.path.join(csv_folder, 'target_neurons.csv'))
@@ -5244,7 +5276,8 @@ class FindNeuronConnection:
         
         self._vprint('Done\n')
     
-    def FindAllPath(self, find_bodyId_path=True, forward_only=True, exclude_searched_neurons=None):
+    def FindAllPath(self, find_bodyId_path=True, forward_only=True, exclude_searched_neurons=None, 
+                    use_graph_cache=True):
         '''
         Find all paths between source and target neurons within max_interlayer.
         
@@ -5262,6 +5295,14 @@ class FindNeuronConnection:
             - False: Re-queries neurons → slower, but ensures no connections missed due to filtering
             
             For most use cases, True is recommended (4-14x faster with same results).
+        use_graph_cache : bool, default=True
+            If True, caches the bodyId-level graph at the lowest threshold seen and reuses
+            it for higher thresholds by filtering edges. This significantly speeds up 
+            comparison runs that test multiple thresholds on the same dataset.
+            
+            Cache reuse rules:
+            - If cached_threshold <= current_threshold: Reuse cached graph, filter edges
+            - If cached_threshold > current_threshold: Rebuild from scratch (need more edges)
         exclude_searched_neurons : bool, deprecated
             Deprecated parameter name. Use forward_only instead.
             If provided, it will override forward_only for backward compatibility.
@@ -5342,86 +5383,156 @@ class FindNeuronConnection:
         target_ID = self.target_df['bodyId'].unique()
         target_type = self.target_df['type'].unique()
         
+        # ============================================================================
+        # GRAPH CACHE LOGIC: Check if we can reuse cached graph from lower threshold
+        # ============================================================================
+        global _FINDALLPATH_GRAPH_CACHE
+        
+        # Generate cache key based on query parameters (not threshold)
+        # Threshold is handled separately - we can filter a lower-threshold graph
+        source_hash = hash(tuple(sorted(str(s) for s in source_ID)))
+        target_hash = hash(tuple(sorted(str(t) for t in target_ID)))
+        cache_key = f"{self._dataset_safe}_{source_hash}_{target_hash}_{self.max_interlayer}"
+        
+        cached_data = _FINDALLPATH_GRAPH_CACHE.get(cache_key) if use_graph_cache else None
+        use_cached_graph = False
+        
+        if cached_data is not None:
+            cached_threshold = cached_data.get('threshold', float('inf'))
+            # Can reuse if cached threshold <= current threshold (more edges in cache)
+            if cached_threshold <= self.min_synapse_num:
+                use_cached_graph = True
+                self._vprint(f'\n⚡ Reusing cached graph from threshold={cached_threshold} (current={self.min_synapse_num})', level='simple')
+            else:
+                # Cached threshold is higher - need to rebuild with lower threshold
+                self._vprint(f'\n📊 Cache exists at threshold={cached_threshold}, but need threshold={self.min_synapse_num} - rebuilding', level='full')
+        
+        if use_cached_graph:
+            # ===== FAST PATH: Reuse cached graph and filter by threshold =====
+            all_connections = cached_data['all_connections']
+            layer_neurons = cached_data['layer_neurons']
+            all_neurons_in_network = cached_data['all_neurons_in_network']
+            # Note: targets_found will be recomputed in Phase 2 based on filtered graph
+            
+            # Filter connections by current threshold
+            if self.min_synapse_num > cached_threshold:
+                filtered_connections = []
+                for conn_pl in all_connections:
+                    if not conn_pl.is_empty():
+                        filtered = conn_pl.filter(pl.col('weight') >= self.min_synapse_num)
+                        filtered_connections.append(filtered)
+                    else:
+                        filtered_connections.append(conn_pl)
+                all_connections_filtered = filtered_connections
+                self._vprint(f'  Filtered connections by weight >= {self.min_synapse_num}', level='full')
+            else:
+                all_connections_filtered = all_connections
+            
+            # Skip to Phase 2 - target identification still needed for this threshold
+            # because some targets may become unreachable after filtering
+        else:
+            # ===== STANDARD PATH: Fetch connections and build graph =====
+            all_connections_filtered = None  # Will be set in Phase 1
+        
         # PHASE 1: Fetch all connections in the network up to max_interlayer layers
-        if self.verbose_mode == 'simple':
-            self._vprint(f'\nPhase 1: Fetching all network layers...', level='simple')
-        elif self.verbose_mode == 'full':
-            self._vprint(f'\n=== PHASE 1: Fetching all network layers (0 to {self.max_interlayer + 1}) ===', level='full')
-            if forward_only:
-                self._vprint('Mode: Layer-by-layer querying (query each neuron once - RECOMMENDED)', level='full')
-                self._vprint('Note: Still fetches ALL connections including recurrent/reciprocal ones', level='full')
-            else:
-                self._vprint('Mode: Comprehensive re-querying (re-query all neurons at each layer)', level='full')
-                self._vprint('Note: Slower but ensures no connections missed due to filtering', level='full')
-            self._vprint('', level='full')
-        
-        all_neurons_in_network = set(source_ID)
-        layer_neurons = [set(source_ID)]  # Layer 0: sources
-        all_connections = []
-        
-        for layer_idx in range(self.max_interlayer + 1):
-            # Determine which neurons to fetch based on mode
-            if forward_only:
-                # Only fetch from current layer's neurons (faster, each neuron queried once)
-                neurons_to_fetch = list(layer_neurons[layer_idx])
-            else:
-                # Fetch from ALL neurons discovered so far (slower, comprehensive)
-                neurons_to_fetch = list(all_neurons_in_network)
-            
-            if len(neurons_to_fetch) == 0:
-                self._vprint(f'Layer {layer_idx} is empty, stopping.', level='full')
-                break
-            
-            # Fetch connections (fetch with weight≥1, filter by all criteria together later)
+        if not use_cached_graph:
             if self.verbose_mode == 'simple':
-                self._vprint(f'layer {layer_idx}->{layer_idx+1}: processing...', level='simple', end='', flush=True)
+                self._vprint(f'\nPhase 1: Fetching all network layers...', level='simple')
             elif self.verbose_mode == 'full':
-                self._vprint(f'Layer {layer_idx}->{layer_idx+1}:', level='full')
-            conn_df = self._fetch_connections_with_cache(
-                upstream_bodyIds=neurons_to_fetch,
-                downstream_bodyIds=None,
-                min_weight=self.min_synapse_num,
-                min_conn_ratio=self.min_ratio,
-                min_traversal_prob=self.min_traversal_probability
-            )
-            
-            # Convert to Polars for faster processing
-            if not conn_df.empty:
-                # Ensure string types
-                conn_df['bodyId_pre'] = conn_df['bodyId_pre'].astype(str)
-                conn_df['bodyId_post'] = conn_df['bodyId_post'].astype(str)
-                
-                conn_pl = pl.from_pandas(conn_df)
-                
-                # Add conn_layer column
-                conn_pl = conn_pl.with_columns(pl.lit(f'{layer_idx}->{layer_idx+1}').alias('conn_layer'))
-                
-                all_connections.append(conn_pl)
-                
-                # Collect all downstream neurons for next layer
-                post_neurons = set(conn_pl['bodyId_post'].unique().to_list())
-            else:
-                all_connections.append(pl.DataFrame())
-                post_neurons = set()
-            
-            # Calculate newly discovered neurons
-            next_layer = post_neurons - all_neurons_in_network
-            all_neurons_in_network.update(next_layer)
-            
-            # Add this layer to layer_neurons for target identification
-            # (even if we won't fetch from it in the next iteration)
-            layer_neurons.append(next_layer)
-            
-            if self.verbose_mode == 'simple':
-                self._vprint('Done', level='simple')
-            elif self.verbose_mode == 'full':
+                self._vprint(f'\n=== PHASE 1: Fetching all network layers (0 to {self.max_interlayer + 1}) ===', level='full')
                 if forward_only:
-                    self._vprint(f'Layer {layer_idx}->{layer_idx+1}: {len(post_neurons)} downstream neurons, {len(next_layer)} new, {len(conn_df)} connections', level='full')
+                    self._vprint('Mode: Layer-by-layer querying (query each neuron once - RECOMMENDED)', level='full')
+                    self._vprint('Note: Still fetches ALL connections including recurrent/reciprocal ones', level='full')
                 else:
-                    self._vprint(f'Layer {layer_idx}->{layer_idx+1}: {len(post_neurons)} total downstream, {len(next_layer)} new neurons, {len(conn_df)} connections', level='full')
-        
-        self._vprint(f'\nTotal neurons in network: {len(all_neurons_in_network)}', level='full')
-        self._vprint(f'Total layers fetched: {len(layer_neurons)}', level='full')
+                    self._vprint('Mode: Comprehensive re-querying (re-query all neurons at each layer)', level='full')
+                    self._vprint('Note: Slower but ensures no connections missed due to filtering', level='full')
+                self._vprint('', level='full')
+            
+            all_neurons_in_network = set(source_ID)
+            layer_neurons = [set(source_ID)]  # Layer 0: sources
+            all_connections = []
+            
+            for layer_idx in range(self.max_interlayer + 1):
+                # Determine which neurons to fetch based on mode
+                if forward_only:
+                    # Only fetch from current layer's neurons (faster, each neuron queried once)
+                    neurons_to_fetch = list(layer_neurons[layer_idx])
+                else:
+                    # Fetch from ALL neurons discovered so far (slower, comprehensive)
+                    neurons_to_fetch = list(all_neurons_in_network)
+                
+                if len(neurons_to_fetch) == 0:
+                    self._vprint(f'Layer {layer_idx} is empty, stopping.', level='full')
+                    break
+                
+                # Fetch connections (fetch with weight≥1, filter by all criteria together later)
+                if self.verbose_mode == 'simple':
+                    self._vprint(f'layer {layer_idx}->{layer_idx+1}: processing...', level='simple', end='', flush=True)
+                elif self.verbose_mode == 'full':
+                    self._vprint(f'Layer {layer_idx}->{layer_idx+1}:', level='full')
+                conn_df = self._fetch_connections_with_cache(
+                    upstream_bodyIds=neurons_to_fetch,
+                    downstream_bodyIds=None,
+                    min_weight=self.min_synapse_num,
+                    min_conn_ratio=self.min_ratio,
+                    min_traversal_prob=self.min_traversal_probability
+                )
+                
+                # Convert to Polars for faster processing
+                if not conn_df.empty:
+                    # Ensure string types
+                    conn_df['bodyId_pre'] = conn_df['bodyId_pre'].astype(str)
+                    conn_df['bodyId_post'] = conn_df['bodyId_post'].astype(str)
+                    
+                    conn_pl = pl.from_pandas(conn_df)
+                    
+                    # Add conn_layer column
+                    conn_pl = conn_pl.with_columns(pl.lit(f'{layer_idx}->{layer_idx+1}').alias('conn_layer'))
+                    
+                    all_connections.append(conn_pl)
+                    
+                    # Collect all downstream neurons for next layer
+                    post_neurons = set(conn_pl['bodyId_post'].unique().to_list())
+                else:
+                    all_connections.append(pl.DataFrame())
+                    post_neurons = set()
+                
+                # Calculate newly discovered neurons
+                next_layer = post_neurons - all_neurons_in_network
+                all_neurons_in_network.update(next_layer)
+                
+                # Add this layer to layer_neurons for target identification
+                # (even if we won't fetch from it in the next iteration)
+                layer_neurons.append(next_layer)
+                
+                if self.verbose_mode == 'simple':
+                    self._vprint('Done', level='simple')
+                elif self.verbose_mode == 'full':
+                    if forward_only:
+                        self._vprint(f'Layer {layer_idx}->{layer_idx+1}: {len(post_neurons)} downstream neurons, {len(next_layer)} new, {len(conn_df)} connections', level='full')
+                    else:
+                        self._vprint(f'Layer {layer_idx}->{layer_idx+1}: {len(post_neurons)} total downstream, {len(next_layer)} new neurons, {len(conn_df)} connections', level='full')
+            
+            self._vprint(f'\nTotal neurons in network: {len(all_neurons_in_network)}', level='full')
+            self._vprint(f'Total layers fetched: {len(layer_neurons)}', level='full')
+            
+            # Cache the graph data for future runs at higher thresholds
+            if use_graph_cache:
+                _FINDALLPATH_GRAPH_CACHE[cache_key] = {
+                    'threshold': self.min_synapse_num,
+                    'all_connections': all_connections,
+                    'layer_neurons': layer_neurons,
+                    'all_neurons_in_network': all_neurons_in_network,
+                }
+                self._vprint(f'  💾 Cached graph at threshold={self.min_synapse_num} for future reuse', level='full')
+            
+            # Use the freshly fetched connections
+            all_connections_filtered = all_connections
+        else:
+            # Using cached data - all_connections_filtered was already set above
+            self._vprint(f'Phase 1: Skipped (using cached graph)', level='simple')
+            self._vprint(f'  Cached neurons in network: {len(all_neurons_in_network)}', level='full')
+            self._vprint(f'  Cached layers: {len(layer_neurons)}', level='full')
         
         # PHASE 2: Identify which targets exist in the searched network
         if self.verbose_mode == 'simple':
@@ -5512,7 +5623,7 @@ class FindNeuronConnection:
         # Build a directed graph from all connections
         self._vprint('Building connection graph...', level='full', end=' ')
         G = FastGraph()
-        for conn_df in all_connections:
+        for conn_df in all_connections_filtered:
             G.build_from_dataframe(conn_df, 'bodyId_pre', 'bodyId_post', 'weight')
         self._vprint(f'Done! ({G.number_of_nodes()} nodes, {G.number_of_edges()} edges)', level='full')
         
@@ -5803,7 +5914,10 @@ class FindNeuronConnection:
         total_neurons_iter = sum(len(l) for l in neuron_layers)
         try:
             progress_iter = ((layer_idx, neuron_id) for layer_idx, layer in enumerate(neuron_layers) for neuron_id in layer)
-            for layer_idx, neuron_id in tqdm(progress_iter, total=total_neurons_iter, desc='Updating target real layers', unit='neurons'):
+            # Only show progress bar in non-silent modes
+            if self.verbose_mode != 'silent':
+                progress_iter = tqdm(progress_iter, total=total_neurons_iter, desc='Updating target real layers', unit='neurons')
+            for layer_idx, neuron_id in progress_iter:
                 if neuron_id in targets_found:
                     if neuron_id not in target_appearance_layers:
                         target_appearance_layers[neuron_id] = []
@@ -6004,13 +6118,18 @@ class FindNeuronConnection:
             self._save_df_to_csv_polars(self.source_df, os.path.join(csv_folder, 'source_neurons.csv'))
             self._save_df_to_csv_polars(self.target_df, os.path.join(csv_folder, 'target_neurons.csv'))
             
-            # Create empty connection files
-            empty_conn = pl.DataFrame(schema={'bodyId_pre': pl.Utf8, 'bodyId_post': pl.Utf8, 'weight': pl.Int64, 'type_pre': pl.Utf8, 'type_post': pl.Utf8})
-            self._save_df_to_csv_polars(empty_conn, os.path.join(csv_folder, 'connection_info_bodyId.csv'))
-            self._save_df_to_csv_polars(empty_conn, os.path.join(csv_folder, 'connection_type.csv'))
+            # Save discovered type-level edges even without valid paths
+            # conn_types contains type-level aggregated edges (correctly aggregated at this threshold)
+            if not conn_types.is_empty():
+                self._save_df_to_csv_polars(conn_types, os.path.join(csv_folder, 'connection_type.csv'))
+                self._vprint(f'  ✓ Saved {len(conn_types)} type-level edges to connection_type.csv (no valid paths)', level='full')
+            else:
+                # Create empty connection file
+                empty_conn = pl.DataFrame(schema={'type_pre': pl.Utf8, 'type_post': pl.Utf8, 'weight': pl.Int64, 
+                                                  'conn_layer': pl.Utf8, 'traversal_probability': pl.Float64, 'connection_ratio': pl.Float64})
+                self._save_df_to_csv_polars(empty_conn, os.path.join(csv_folder, 'connection_type.csv'))
             
             self._vprint(f'  ✓ Saved to: {csv_folder}/', level='full')
-            self._vprint('  ✓ Saved connection data', level='full')
             return
         
         # Update types for source and target neurons in conn_inpath using self.source_df and self.target_df
@@ -6139,12 +6258,12 @@ class FindNeuronConnection:
             if self.output_format == 'csv':
                 self._vprint(f'  💾 Saving data as CSV files (output_format="csv")', level='full', flush=True)
             else:
-                print(f'  ⚠️  Data too large for Excel ({len(conn_types):,} rows), saving as CSV', flush=True)
+                self._vprint(f'  ⚠️  Data too large for Excel ({len(conn_types):,} rows), saving as CSV', level='simple', flush=True)
             
             # Create data_details folder
             csv_folder = os.path.join(self.allpath_folder, 'data_details')
             os.makedirs(csv_folder, exist_ok=True)
-            print(f'  💾 Saving data as CSV files to: {csv_folder}', flush=True)
+            self._vprint(f'  💾 Saving data as CSV files to: {csv_folder}', level='simple', flush=True)
             
             # print("    - parameters.csv", flush=True)
             self._save_df_to_csv_polars(self.parameter_df, os.path.join(csv_folder, 'parameters.csv'))
@@ -6357,7 +6476,8 @@ class FindNeuronConnection:
                 excluded_path=output_path_type_excluded_csv,
                 real_layer_map=real_layer_map_type if forward_only else None,
                 level='type',
-                keyword_in_path_to_remove=self.keyword_in_path_to_remove
+                keyword_in_path_to_remove=self.keyword_in_path_to_remove,
+                verbose=(self.verbose_mode != 'silent')
             )
             
         self._vprint(f'  Found and saved {total_type_paths:,} type-level paths', level='full')

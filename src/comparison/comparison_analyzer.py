@@ -28,6 +28,7 @@ from itertools import combinations
 from typing import Dict, List, Optional, Any, Union, Tuple
 import pandas as pd
 import numpy as np
+from tqdm import tqdm
 
 from .dataset_config import DatasetConfig
 from .comparison_parameters import ComparisonParameters
@@ -186,7 +187,8 @@ class ComparisonAnalyzer:
         if level == 'debug':
             return
         prefix = "⚠️ " if level == 'warn' else ""
-        print(f"[Comparison] {prefix}{message}")
+        # Use tqdm.write to avoid interfering with progress bars
+        tqdm.write(f"[Comparison] {prefix}{message}")
     
     def _log_file(self, filepath: str, description: str = "Saved"):
         """Log file save with relative path (prints base dir only once).
@@ -202,15 +204,15 @@ class ComparisonAnalyzer:
         
         # Print base directory once at the start
         if base_dir and not self._output_base_printed:
-            print(f"[Comparison] Output directory: {base_dir}")
+            tqdm.write(f"[Comparison] Output directory: {base_dir}")
             self._output_base_printed = True
         
         # Show only relative path from base dir
         if base_dir and filepath.startswith(base_dir):
             rel_path = os.path.relpath(filepath, base_dir)
-            print(f"[Comparison] {description}: {rel_path}")
+            tqdm.write(f"[Comparison] {description}: {rel_path}")
         else:
-            print(f"[Comparison] {description}: {filepath}")
+            tqdm.write(f"[Comparison] {description}: {filepath}")
     
     def _generate_mode_specific_note(self) -> str:
         """Generate HTML note specific to the comparison mode used."""
@@ -253,7 +255,8 @@ class ComparisonAnalyzer:
     def run_path_analysis(
         self,
         dataset_name: str,
-        threshold: int
+        threshold: int,
+        verbose_mode: str = 'simple'
     ) -> pd.DataFrame:
         """
         Run path analysis for a single dataset at a specific threshold.
@@ -261,6 +264,7 @@ class ComparisonAnalyzer:
         Args:
             dataset_name: Dataset identifier string
             threshold: Weight threshold for path finding
+            verbose_mode: Verbosity level for FindAllPath ('simple', 'full', 'silent')
             
         Returns:
             DataFrame with path analysis results
@@ -269,7 +273,9 @@ class ComparisonAnalyzer:
         # Use absolute import since src is on sys.path
         from coana import FindNeuronConnection
         
-        self._log(f"Running analysis: \033[94m{dataset_name} @ threshold={threshold}\033[0m")
+        # Only log when verbose (not 'silent')
+        if verbose_mode != 'silent':
+            self._log(f"Running analysis: \033[94m{dataset_name} @ threshold={threshold}\033[0m")
         
         # Get dataset config
         config = self._get_dataset_config(dataset_name)
@@ -313,7 +319,7 @@ class ComparisonAnalyzer:
             dataset=dataset_name,
             # Redirect output to comparison folder structure
             saveas=fnc_output_path,  # Absolute path - overrides data_folder
-            verbose_mode='simple',  # Use simplified progress output for comparison runs
+            verbose_mode=verbose_mode,  # Verbosity level for FindAllPath
             skip_bodyId=self.parameters.skip_bodyId,  # Skip bodyId-level processing if requested
             label_mapper=self.label_mapper,  # Pass label mapper for standardization
             pathfinding=self.parameters.pathfinding,  # Pass pathfinding algorithm
@@ -533,7 +539,10 @@ class ComparisonAnalyzer:
                    c.weight AS weight
             """
             
-            result = client.fetch_custom(query)
+            with tqdm(total=1, desc=f"  ⏳ Querying NeuPrint for {dataset_name}",
+                      bar_format='{desc}...', leave=False) as pbar:
+                result = client.fetch_custom(query)
+                pbar.update(1)
             
             if not result.empty:
                 self._log(f"Queried {len(result)} edges from NeuPrint for {dataset_name}")
@@ -551,15 +560,17 @@ class ComparisonAnalyzer:
         target_neurons: List,
         min_weight: int = 1
     ) -> pd.DataFrame:
-        """Query edges from local dataset files."""
+        """Query edges from local dataset files (FlyWire/FAFB/BANC)."""
         import re
         
         # Load local connection data
         safe_name = self.parameters._sanitize_name(dataset_name)
         datasets_folder = self._get_datasets_folder()
         
-        # Try different file patterns
+        # Try different file patterns for connections
         conn_files = [
+            os.path.join(datasets_folder, safe_name, f'{safe_name}_merged_connections.parquet'),
+            os.path.join(datasets_folder, safe_name, f'{safe_name}_merged_connections.csv'),
             os.path.join(datasets_folder, safe_name, f'{safe_name}_connections.parquet'),
             os.path.join(datasets_folder, safe_name, f'{safe_name}_connections.csv'),
             os.path.join(datasets_folder, safe_name, 'connections.parquet'),
@@ -570,10 +581,14 @@ class ComparisonAnalyzer:
         for conn_file in conn_files:
             if os.path.exists(conn_file):
                 try:
-                    if conn_file.endswith('.parquet'):
-                        conn_df = pd.read_parquet(conn_file)
-                    else:
-                        conn_df = pd.read_csv(conn_file)
+                    file_size_mb = os.path.getsize(conn_file) / (1024 * 1024)
+                    with tqdm(total=1, desc=f"  ⏳ Loading connections ({file_size_mb:.1f} MB)", 
+                              bar_format='{desc}', leave=False) as pbar:
+                        if conn_file.endswith('.parquet'):
+                            conn_df = pd.read_parquet(conn_file)
+                        else:
+                            conn_df = pd.read_csv(conn_file)
+                        pbar.update(1)
                     self._log(f"Loaded connections from {conn_file}")
                     break
                 except Exception as e:
@@ -598,6 +613,58 @@ class ComparisonAnalyzer:
         if 'weight' in conn_df.columns:
             conn_df = conn_df[conn_df['weight'] >= min_weight]
         
+        # If type columns don't exist, join with neuron info to get them
+        if 'type_pre' not in conn_df.columns or 'type_post' not in conn_df.columns:
+            # Load neuron info file
+            neuron_files = [
+                os.path.join(datasets_folder, safe_name, f'{safe_name}_allneurons_neuron_df.parquet'),
+                os.path.join(datasets_folder, safe_name, f'{safe_name}_allneurons_neuron_df.csv'),
+                os.path.join(datasets_folder, safe_name, f'{safe_name}_neurons.parquet'),
+                os.path.join(datasets_folder, safe_name, f'{safe_name}_neurons.csv'),
+            ]
+            
+            neuron_df = None
+            for neuron_file in neuron_files:
+                if os.path.exists(neuron_file):
+                    try:
+                        if neuron_file.endswith('.parquet'):
+                            neuron_df = pd.read_parquet(neuron_file)
+                        else:
+                            neuron_df = pd.read_csv(neuron_file)
+                        self._log(f"Loaded neuron info from {neuron_file}")
+                        break
+                    except Exception as e:
+                        self._log(f"Warning: Could not load {neuron_file}: {e}")
+            
+            if neuron_df is not None and not neuron_df.empty:
+                # Identify bodyId and type columns in neuron_df
+                bodyid_col = None
+                type_col = None
+                for col in ['bodyId', 'root_id', 'pt_root_id', 'segment_id']:
+                    if col in neuron_df.columns:
+                        bodyid_col = col
+                        break
+                for col in ['type', 'cell_type', 'hemibrain_type']:
+                    if col in neuron_df.columns:
+                        type_col = col
+                        break
+                
+                if bodyid_col and type_col:
+                    # Create mapping dict for efficiency
+                    type_map = dict(zip(neuron_df[bodyid_col], neuron_df[type_col]))
+                    
+                    # Map types to connections with progress bar
+                    with tqdm(total=2, desc="  ⏳ Mapping bodyId → type", 
+                              bar_format='{desc}: {n}/{total} columns', leave=False) as pbar:
+                        if 'type_pre' not in conn_df.columns:
+                            conn_df['type_pre'] = conn_df['bodyId_pre'].map(type_map)
+                        pbar.update(1)
+                        if 'type_post' not in conn_df.columns:
+                            conn_df['type_post'] = conn_df['bodyId_post'].map(type_map)
+                        pbar.update(1)
+                    
+                    self._log(f"Mapped types for {len(conn_df)} connections")
+        
         # Filter by source/target types if type columns exist
         if 'type_pre' in conn_df.columns and 'type_post' in conn_df.columns:
             def matches_patterns(type_val, patterns):
@@ -614,10 +681,13 @@ class ComparisonAnalyzer:
                 return False
             
             # Keep edges where pre matches source OR post matches target
-            mask = (
-                conn_df['type_pre'].apply(lambda x: matches_patterns(x, source_neurons)) |
-                conn_df['type_post'].apply(lambda x: matches_patterns(x, target_neurons))
-            )
+            with tqdm(total=2, desc="  ⏳ Filtering by source/target types",
+                      bar_format='{desc}: {n}/{total} masks', leave=False) as pbar:
+                mask_pre = conn_df['type_pre'].apply(lambda x: matches_patterns(x, source_neurons))
+                pbar.update(1)
+                mask_post = conn_df['type_post'].apply(lambda x: matches_patterns(x, target_neurons))
+                pbar.update(1)
+            mask = mask_pre | mask_post
             conn_df = conn_df[mask]
         
         self._log(f"Filtered to {len(conn_df)} edges for {dataset_name}")
@@ -648,17 +718,36 @@ class ComparisonAnalyzer:
             return self._run_all_path_analyses(skip_existing)
     
     def _run_all_path_analyses(self, skip_existing: bool = True) -> Dict[str, Dict[int, pd.DataFrame]]:
-        """Run path-based analyses for all datasets and thresholds."""
+        """Run path-based analyses for all datasets and thresholds.
+        
+        Thresholds are processed in ascending order to enable graph caching:
+        the lowest threshold is processed first, its graph is cached, and 
+        higher thresholds reuse the cached graph with edge filtering.
+        """
         dataset_names = self.parameters.get_dataset_names()
+        # Sort thresholds ascending so lowest is processed first (enables graph cache)
+        sorted_thresholds = sorted(self.parameters.thresholds)
+        lowest_threshold = sorted_thresholds[0] if sorted_thresholds else None
         
         for dataset_name in dataset_names:
             if dataset_name not in self.raw_results:
                 self.raw_results[dataset_name] = {}
             
-            for threshold in self.parameters.thresholds:
+            self._log(f"Processing \033[94m{dataset_name}\033[0m ({len(sorted_thresholds)} thresholds)")
+            
+            # Use progress bar for threshold iteration
+            threshold_iter = tqdm(
+                sorted_thresholds, 
+                desc=f"  {dataset_name} thresholds",
+                leave=False,
+                unit="thr"
+            )
+            
+            for threshold in threshold_iter:
+                threshold_iter.set_postfix(threshold=threshold)
+                
                 # Check if already computed
                 if skip_existing and threshold in self.raw_results[dataset_name]:
-                    self._log(f"Skipping \033[94m{dataset_name} @ {threshold}\033[0m (already computed)")
                     continue
                 
                 # Check if cached on disk
@@ -669,7 +758,9 @@ class ComparisonAnalyzer:
                         continue
                 
                 # Run path analysis
-                result_df = self.run_path_analysis(dataset_name, threshold)
+                # Use 'simple' verbose for lowest threshold (builds cache), 'silent' for others (uses cache)
+                verbose = 'simple' if threshold == lowest_threshold else 'silent'
+                result_df = self.run_path_analysis(dataset_name, threshold, verbose_mode=verbose)
                 self.raw_results[dataset_name][threshold] = result_df
                 
                 # Save to disk
@@ -683,106 +774,320 @@ class ComparisonAnalyzer:
         """
         Run edge-based analyses for all datasets and thresholds.
         
-        Edge mode workflow:
-        1. Run FindAllPath() at lowest threshold to get the full graph
-        2. For each higher threshold, filter edges by weight AND verify paths exist
-        3. Store both edge results and path data per threshold
+        Optimized Edge Mode Workflow:
+        1. Run FindAllPath() at LOWEST threshold to get bodyId connections
+        2. Filter bodyId data by ALL thresholds and aggregate ALL to type-level immediately
+        3. Run FindAllPath() for remaining thresholds (only for output consistency, no aggregation)
         
-        This preserves strong edges that might be filtered in path mode
-        due to weak intermediate edges on the path, while also maintaining
-        valid path information for each threshold level.
+        This approach:
+        - Fetches connections only once (at lowest threshold)
+        - Computes all edge aggregations upfront using FastGraph
+        - Runs FindAllPath for other thresholds only to generate path output files
         """
+        from core.fast_graph import FastGraph
+        
         dataset_names = self.parameters.get_dataset_names()
         lowest_threshold = min(self.parameters.thresholds)
-        
-        # Store base data for each dataset (at lowest threshold)
-        base_results_cache = {}
+        sorted_thresholds = sorted(self.parameters.thresholds)
         
         for dataset_name in dataset_names:
             if dataset_name not in self.raw_results:
                 self.raw_results[dataset_name] = {}
             
-            # First, run path analysis at lowest threshold to get base graph
-            base_result = None
+            self._log(f"Edge mode analysis for \033[94m{dataset_name}\033[0m ({len(sorted_thresholds)} thresholds)")
             
-            # Try to load from cache
-            if skip_existing and self.parameters.output_folder:
-                cached = self._try_load_cached(dataset_name, lowest_threshold)
-                if cached is not None:
-                    base_result = cached
-                    self._log(f"Loaded base results from cache for \033[94m{dataset_name} at lowest threshold={lowest_threshold}\033[0m")
+            # ===== Step 1: Run FindAllPath for LOWEST threshold =====
+            self._log(f"Running FindAllPath for {dataset_name} @ threshold={lowest_threshold}")
+            self.run_path_analysis(dataset_name, lowest_threshold, verbose_mode='simple')
             
-            # Run path analysis if not cached
-            if base_result is None:
-                base_result = self.run_path_analysis(dataset_name, lowest_threshold)
-                self._log(f"Built base graph for \033[94m{dataset_name} at threshold={lowest_threshold}\033[0m: {len(base_result)} connections")
+            # ===== Step 2: Get bodyId-level connections =====
+            bodyid_df, label_map = self._get_bodyid_connections_for_dataset(
+                dataset_name, lowest_threshold, skip_existing=True
+            )
             
-            base_results_cache[dataset_name] = base_result
-            self.raw_results[dataset_name][lowest_threshold] = base_result
+            if bodyid_df is None or bodyid_df.empty:
+                self._log(f"Warning: No bodyId connections found for {dataset_name}")
+                for threshold in self.parameters.thresholds:
+                    self.raw_results[dataset_name][threshold] = pd.DataFrame()
+                # Still run FindAllPath for other thresholds for output consistency
+                remaining_thresholds = [t for t in sorted_thresholds if t != lowest_threshold]
+                for threshold in tqdm(remaining_thresholds, desc=f"  {dataset_name} thresholds", leave=False, unit="thr"):
+                    self.run_path_analysis(dataset_name, threshold, verbose_mode='silent')
+                continue
             
-            # Save lowest threshold result
+            self._log(f"Loaded {len(bodyid_df)} bodyId-level connections from threshold={lowest_threshold}")
+            
+            # Get source/target types for path finding
+            source_types = set(self.parameters.get_source_neurons_for_dataset(dataset_name))
+            target_types = set(self.parameters.get_target_neurons_for_dataset(dataset_name))
+            max_layers = self.parameters.max_interlayer + 1
+            
+            # ===== Step 3: Filter and aggregate for ALL thresholds at once =====
+            self._log(f"Aggregating edges for all {len(sorted_thresholds)} thresholds...")
+            for threshold in tqdm(sorted_thresholds, desc=f"  Aggregating", leave=False, unit="thr"):
+                self._process_threshold_aggregation(
+                    dataset_name, threshold, bodyid_df, label_map,
+                    source_types, target_types, max_layers, skip_existing
+                )
+            
+            # ===== Step 4: Run FindAllPath for remaining thresholds (output consistency only) =====
+            remaining_thresholds = [t for t in sorted_thresholds if t != lowest_threshold]
+            if remaining_thresholds:
+                for threshold in tqdm(remaining_thresholds, desc=f"  {dataset_name} thresholds", leave=False, unit="thr"):
+                    self.run_path_analysis(dataset_name, threshold, verbose_mode='silent')
+        
+        self._log(f"Completed edge analysis for {len(dataset_names)} datasets")
+        return self.raw_results
+    
+    def _process_threshold_aggregation(
+        self,
+        dataset_name: str,
+        threshold: int,
+        bodyid_df: pd.DataFrame,
+        label_map: Dict,
+        source_types: set,
+        target_types: set,
+        max_layers: int,
+        skip_existing: bool
+    ):
+        """Process edge aggregation for a single threshold."""
+        # Check if already computed in memory
+        if skip_existing and threshold in self.raw_results[dataset_name]:
+            existing = self.raw_results[dataset_name][threshold]
+            if not existing.empty:
+                self._log(f"  Skipping threshold={threshold} (already computed)")
+                return
+        
+        # Filter bodyId edges by current threshold
+        filtered_df = bodyid_df[bodyid_df['weight'] >= threshold].copy()
+        
+        if filtered_df.empty:
+            self._log(f"  threshold={threshold}: No edges meet threshold")
+            result_df = pd.DataFrame()
+        else:
+            # Aggregate to type-level using FastGraph
+            result_df = self._aggregate_and_find_paths(
+                filtered_df, label_map, source_types, target_types,
+                max_layers, dataset_name, threshold
+            )
+            valid_count = result_df['has_valid_path'].sum() if not result_df.empty and 'has_valid_path' in result_df.columns else 0
+            self._log(f"  threshold={threshold}: {len(result_df)} type edges ({valid_count} with valid paths)")
+        
+        self.raw_results[dataset_name][threshold] = result_df
+        
+        # Save aggregated edge data to edge_mode_data folder
+        if self.parameters.output_folder and not result_df.empty:
+            self._save_edge_mode_result(dataset_name, threshold, result_df)
+    
+    def _get_bodyid_connections_for_dataset(
+        self, 
+        dataset_name: str, 
+        threshold: int,
+        skip_existing: bool = True,
+        run_findallpath: bool = False
+    ) -> Tuple[Optional[pd.DataFrame], Dict]:
+        """
+        Get bodyId-level connections for a dataset at the lowest threshold.
+        
+        Args:
+            dataset_name: Dataset identifier
+            threshold: Threshold level
+            skip_existing: Skip if cached data exists
+            run_findallpath: If True, run FindAllPath to generate data (default False)
+        
+        Returns:
+            Tuple of (bodyId DataFrame, label_map dict mapping bodyId -> type)
+        """
+        # Check for cached bodyId data
+        if self.parameters.output_folder:
+            safe_name = self.parameters._sanitize_name(dataset_name)
+            cache_dir = os.path.join(
+                self.parameters.full_output_path,
+                'dataset_data',
+                safe_name,
+                f'minsyn_{threshold}'
+            )
+            bodyid_file = os.path.join(cache_dir, 'data_details', 'connection_info_bodyId.csv')
+            
+            if skip_existing and os.path.exists(bodyid_file):
+                try:
+                    df = pd.read_csv(bodyid_file)
+                    if not df.empty:
+                        # Build label map from the data
+                        label_map = self._build_label_map_from_df(df)
+                        self._log(f"Loaded cached bodyId data from {bodyid_file}")
+                        return df, label_map
+                except Exception as e:
+                    self._log(f"Warning: Could not load cached bodyId data: {e}")
+        
+        # Only run FindAllPath if explicitly requested (avoids duplicate runs)
+        if run_findallpath:
+            self._log(f"Running FindAllPath for {dataset_name} @ threshold={threshold} to get bodyId connections")
+            self.run_path_analysis(dataset_name, threshold)
+            
+            # Try to load the bodyId file that was generated
             if self.parameters.output_folder:
-                self._save_result(dataset_name, lowest_threshold, base_result)
+                safe_name = self.parameters._sanitize_name(dataset_name)
+                cache_dir = os.path.join(
+                    self.parameters.full_output_path,
+                    'dataset_data',
+                    safe_name,
+                    f'minsyn_{threshold}'
+                )
+                bodyid_file = os.path.join(cache_dir, 'data_details', 'connection_info_bodyId.csv')
+                
+                if os.path.exists(bodyid_file):
+                    try:
+                        df = pd.read_csv(bodyid_file)
+                        if not df.empty:
+                            label_map = self._build_label_map_from_df(df)
+                            return df, label_map
+                    except Exception:
+                        pass
+        
+        # Fallback: query edges directly (this is the fast path when skip_bodyId=True)
+        self._log(f"Querying bodyId edges directly for {dataset_name}")
+        source_neurons = self.parameters.get_source_neurons_for_dataset(dataset_name)
+        target_neurons = self.parameters.get_target_neurons_for_dataset(dataset_name)
+        
+        df = self._query_edges_for_dataset(dataset_name, source_neurons, target_neurons, threshold)
+        if df is not None and not df.empty:
+            label_map = self._build_label_map_from_df(df)
+            return df, label_map
+        
+        return None, {}
+    
+    def _build_label_map_from_df(self, df: pd.DataFrame) -> Dict:
+        """Build bodyId -> type label map from connection DataFrame."""
+        label_map = {}
+        
+        # Check column names
+        pre_id_col = 'bodyId_pre' if 'bodyId_pre' in df.columns else None
+        post_id_col = 'bodyId_post' if 'bodyId_post' in df.columns else None
+        pre_type_col = 'type_pre' if 'type_pre' in df.columns else None
+        post_type_col = 'type_post' if 'type_post' in df.columns else None
+        
+        if pre_id_col and pre_type_col:
+            for _, row in df[[pre_id_col, pre_type_col]].drop_duplicates().iterrows():
+                if pd.notna(row[pre_id_col]) and pd.notna(row[pre_type_col]):
+                    label_map[row[pre_id_col]] = row[pre_type_col]
+        
+        if post_id_col and post_type_col:
+            for _, row in df[[post_id_col, post_type_col]].drop_duplicates().iterrows():
+                if pd.notna(row[post_id_col]) and pd.notna(row[post_type_col]):
+                    label_map[row[post_id_col]] = row[post_type_col]
+        
+        return label_map
+    
+    def _aggregate_and_find_paths(
+        self,
+        bodyid_df: pd.DataFrame,
+        label_map: Dict,
+        source_types: set,
+        target_types: set,
+        max_layers: int,
+        dataset_name: str,
+        threshold: int
+    ) -> pd.DataFrame:
+        """
+        Aggregate bodyId edges to type-level and find valid paths.
+        
+        Args:
+            bodyid_df: DataFrame with bodyId-level connections (already filtered by threshold)
+            label_map: Dict mapping bodyId -> type
+            source_types: Set of source neuron types
+            target_types: Set of target neuron types
+            max_layers: Maximum path length
+            dataset_name: Dataset name for metadata
+            threshold: Current threshold for metadata
             
-            # Now filter for each higher threshold
-            for threshold in self.parameters.thresholds:
-                if threshold == lowest_threshold:
-                    continue  # Already processed
+        Returns:
+            DataFrame with type-level edges and has_valid_path flag
+        """
+        from core.fast_graph import FastGraph
+        
+        # Determine column names
+        pre_id_col = 'bodyId_pre' if 'bodyId_pre' in bodyid_df.columns else 'pre_pt_root_id'
+        post_id_col = 'bodyId_post' if 'bodyId_post' in bodyid_df.columns else 'post_pt_root_id'
+        weight_col = 'weight' if 'weight' in bodyid_df.columns else 'syn_count'
+        
+        # Build bodyId-level graph
+        G_bodyid = FastGraph()
+        G_bodyid.build_from_dataframe(bodyid_df, pre_id_col, post_id_col, weight_col)
+        
+        # Aggregate to type-level graph
+        G_type, edge_df = G_bodyid.aggregate_by_label(label_map, return_edge_df=True)
+        
+        if edge_df.empty:
+            return pd.DataFrame()
+        
+        # Find valid paths at type level
+        # Get all type nodes that are sources or targets
+        graph_source_types = [t for t in source_types if G_type.has_node(t)]
+        graph_target_types = [t for t in target_types if G_type.has_node(t)]
+        
+        # Find all paths
+        valid_edges = set()
+        if graph_source_types and graph_target_types:
+            try:
+                # Use memoized DFS for efficiency
+                paths = list(G_type.find_paths_memoized_dfs(
+                    graph_source_types, graph_target_types, max_layers, 
+                    direction='backward', verbose=False
+                ))
                 
-                # Check if already computed
-                if skip_existing and threshold in self.raw_results[dataset_name]:
-                    self._log(f"Skipping \033[94m{dataset_name} @ {threshold}\033[0m (already computed)")
-                    continue
-                
-                # Check if cached on disk
-                if skip_existing and self.parameters.output_folder:
-                    cached = self._try_load_cached(dataset_name, threshold)
-                    if cached is not None:
-                        self.raw_results[dataset_name][threshold] = cached
-                        continue
-                
-                # Filter edges from base result by weight
-                # AND also run path analysis to find valid paths at this threshold
-                if base_result is not None and not base_result.empty:
-                    # First: filter edges by weight
-                    if 'weight' in base_result.columns:
-                        filtered_edges = base_result[base_result['weight'] >= threshold].copy()
-                    else:
-                        filtered_edges = base_result.copy()
-                    
-                    # Also run path analysis at this threshold to get valid paths
-                    # This captures paths that are valid at this threshold level
-                    path_result = self.run_path_analysis(dataset_name, threshold)
-                    
-                    # Merge: keep all filtered edges, mark which ones have valid paths
-                    if not path_result.empty and not filtered_edges.empty:
-                        # Create edge keys for comparison
-                        if 'type_pre' in filtered_edges.columns and 'type_post' in filtered_edges.columns:
-                            filtered_edges['_edge_key'] = filtered_edges['type_pre'].astype(str) + '->' + filtered_edges['type_post'].astype(str)
-                            path_edges = set(path_result['type_pre'].astype(str) + '->' + path_result['type_post'].astype(str))
-                            filtered_edges['has_valid_path'] = filtered_edges['_edge_key'].isin(path_edges)
-                            filtered_edges = filtered_edges.drop(columns=['_edge_key'])
-                        else:
-                            filtered_edges['has_valid_path'] = True
-                    elif filtered_edges.empty:
-                        filtered_edges = path_result.copy()
-                        filtered_edges['has_valid_path'] = True
-                    else:
-                        filtered_edges['has_valid_path'] = False
-                    
-                    filtered_edges['threshold'] = threshold
-                    result_df = filtered_edges
-                    self._log(f"Edge mode: {len(result_df)} edges at \033[94mthreshold={threshold}\033[0m for \033[94m{dataset_name}\033[0m "
-                             f"({result_df['has_valid_path'].sum() if 'has_valid_path' in result_df.columns else 0} with valid paths)")
-                else:
-                    result_df = pd.DataFrame()
-                    result_df = pd.DataFrame()
-                
-                self.raw_results[dataset_name][threshold] = result_df
-                
-                # Save to disk
-                if self.parameters.output_folder:
-                    self._save_result(dataset_name, threshold, result_df)
+                # Extract edges from paths
+                for path in paths:
+                    for i in range(len(path) - 1):
+                        valid_edges.add((path[i], path[i+1]))
+                        
+                self._log(f"Found {len(paths)} paths, {len(valid_edges)} unique edges in paths", 'debug')
+            except Exception as e:
+                self._log(f"Warning: Path finding failed: {e}")
+        
+        # Add metadata to edge DataFrame
+        edge_df['has_valid_path'] = edge_df.apply(
+            lambda r: (r['type_pre'], r['type_post']) in valid_edges, axis=1
+        )
+        edge_df['dataset'] = dataset_name
+        edge_df['threshold'] = threshold
+        
+        # Compute additional metrics
+        # Get total_post from bodyid_df if available
+        if 'total_post' in bodyid_df.columns:
+            # Aggregate total_post by type_post (take first value since it should be same for all bodyIds of same type)
+            total_post_map = {}
+            if 'type_post' in bodyid_df.columns:
+                for post_type in edge_df['type_post'].unique():
+                    mask = bodyid_df['type_post'] == post_type
+                    if mask.any():
+                        total_post_map[post_type] = bodyid_df.loc[mask, 'total_post'].iloc[0]
+            
+            edge_df['total_post'] = edge_df['type_post'].map(total_post_map)
+            edge_df['connection_ratio'] = edge_df['weight'] / edge_df['total_post'].fillna(1)
+        
+        # Compute traversal probability if possible
+        # traversal_prob = weight / sum(all outgoing weights from pre)
+        outgoing_weights = edge_df.groupby('type_pre')['weight'].sum().to_dict()
+        edge_df['traversal_probability'] = edge_df.apply(
+            lambda r: r['weight'] / outgoing_weights.get(r['type_pre'], 1), axis=1
+        )
+        
+        # Add conn_layer info based on path structure
+        # This requires knowing which types are in which layer
+        # For now, infer from source/target membership
+        def get_conn_layer(row):
+            pre, post = row['type_pre'], row['type_post']
+            if pre in source_types:
+                return '0->1'
+            elif post in target_types:
+                return '1->2'  # Assuming 2-hop max
+            else:
+                return '1->2'  # Default intermediate
+        
+        edge_df['conn_layer'] = edge_df.apply(get_conn_layer, axis=1)
+        
+        return edge_df
         
         self._log(f"Completed edge analysis for {len(dataset_names)} datasets")
         return self.raw_results
@@ -1097,31 +1402,31 @@ class ComparisonAnalyzer:
         
         output_dir = self.parameters.get_dataset_output_path(dataset_name, threshold)
         
-        # First try our own cached connections.csv
-        filepath = os.path.join(output_dir, "connections.csv")
-        if os.path.exists(filepath):
+        # First try our own cached connections_edge.csv (edge mode output)
+        filepath = os.path.join(output_dir, "connections_edge.csv")
+        if os.path.exists(filepath) and os.path.getsize(filepath) > 0:
             try:
                 df = pd.read_csv(filepath)
                 if not df.empty:
                     self._log(f"Loading cached: {dataset_name} @ {threshold}", 'debug')
                     return df
-            except Exception:
-                pass
+            except (pd.errors.EmptyDataError, Exception):
+                pass  # File is empty or corrupted, try other sources
         
         # Also try legacy paths.csv (for backward compatibility)
         filepath = os.path.join(output_dir, "paths.csv")
-        if os.path.exists(filepath):
+        if os.path.exists(filepath) and os.path.getsize(filepath) > 0:
             try:
                 df = pd.read_csv(filepath)
                 if not df.empty:
                     self._log(f"Loading cached: {dataset_name} @ {threshold}", 'debug')
                     return df
-            except Exception:
+            except (pd.errors.EmptyDataError, Exception):
                 pass
         
         # Also try to find the FindNeuronConnection output file (connection_info_bodyId.csv)
         conn_file = os.path.join(output_dir, 'data_details', 'connection_info_bodyId.csv')
-        if os.path.exists(conn_file):
+        if os.path.exists(conn_file) and os.path.getsize(conn_file) > 0:
             try:
                 df = pd.read_csv(conn_file)
                 if not df.empty:
@@ -1131,21 +1436,65 @@ class ComparisonAnalyzer:
                         df['dataset'] = dataset_name
                         df['threshold'] = threshold
                     return df
-            except Exception:
+            except (pd.errors.EmptyDataError, Exception):
+                pass
+        
+        # Also try connection_type.csv (type-level path mode output)
+        conn_type_file = os.path.join(output_dir, 'data_details', 'connection_type.csv')
+        if os.path.exists(conn_type_file) and os.path.getsize(conn_type_file) > 0:
+            try:
+                df = pd.read_csv(conn_type_file)
+                if not df.empty:
+                    self._log(f"Loading cached: {dataset_name} @ {threshold}", 'debug')
+                    # Add dataset info if missing
+                    if 'dataset' not in df.columns:
+                        df['dataset'] = dataset_name
+                        df['threshold'] = threshold
+                    return df
+            except (pd.errors.EmptyDataError, Exception):
                 pass
         
         return None
     
     def _save_result(self, dataset_name: str, threshold: int, df: pd.DataFrame):
-        """Save result to disk."""
+        """Save result to disk (edge mode output)."""
         if not self.parameters.output_folder:
+            return
+        
+        # Don't save empty DataFrames - they cause read errors later
+        if df is None or df.empty:
+            self._log(f"Skipping save for {dataset_name} @ {threshold} (empty result)", 'debug')
             return
         
         dirpath = self.parameters.get_dataset_output_path(dataset_name, threshold)
         os.makedirs(dirpath, exist_ok=True)
         
-        # Save to connections.csv as our own cached version
-        filepath = os.path.join(dirpath, "connections.csv")
+        # Save to connections_edge.csv (edge mode cached version)
+        filepath = os.path.join(dirpath, "connections_edge.csv")
+        df.to_csv(filepath, index=False)
+        self._log_file(filepath)
+    
+    def _save_edge_mode_result(self, dataset_name: str, threshold: int, df: pd.DataFrame):
+        """Save aggregated edge mode result to edge_mode_data folder."""
+        if not self.parameters.output_folder:
+            return
+        
+        # Don't save empty DataFrames
+        if df is None or df.empty:
+            self._log(f"Skipping edge_mode save for {dataset_name} @ {threshold} (empty result)", 'debug')
+            return
+        
+        # Save to: comparison_results_{}/edge_mode_data/{dataset}/connections_edge_{threshold}.csv
+        safe_name = self.parameters._sanitize_name(dataset_name)
+        edge_mode_dir = os.path.join(
+            self.parameters.full_output_path,
+            'edge_mode_data',
+            safe_name
+        )
+        os.makedirs(edge_mode_dir, exist_ok=True)
+        
+        # Save aggregated connections_edge_{threshold}.csv
+        filepath = os.path.join(edge_mode_dir, f"connections_edge_{threshold}.csv")
         df.to_csv(filepath, index=False)
         self._log_file(filepath)
     
@@ -1200,11 +1549,13 @@ class ComparisonAnalyzer:
 
         # Calculate cross-threshold similarities and cache them
         # Pass label_mapper=None because raw_results are already mapped
+        # Pass path_data_func to enable path rank correlation computation
         similarities = self.metrics.calculate_similarity_across_thresholds(
             results=self.raw_results,
             datasets=dataset_names,
             thresholds=self.parameters.thresholds,
-            label_mapper=None
+            label_mapper=None,
+            path_data_func=self._get_path_data_for_threshold
         )
         summary['threshold_similarities'] = similarities
 
@@ -1583,22 +1934,6 @@ class ComparisonAnalyzer:
         
         # === Intra-dataset threshold sensitivity ===
         self._export_intra_dataset_comparisons(comparison_results_dir)
-        
-        # Save comparison summary as JSON
-        if self.comparison_report:
-            import json
-            summary_path = os.path.join(comparison_results_dir, "comparison_summary.json")
-            
-            # Convert non-serializable items
-            summary_export = {}
-            for key, value in self.comparison_report.items():
-                if isinstance(value, pd.DataFrame):
-                    summary_export[key] = value.to_dict(orient='records')
-                else:
-                    summary_export[key] = value
-            
-            with open(summary_path, 'w') as f:
-                json.dump(summary_export, f, indent=2, default=str)
 
         self._log("  Step 3: Generating visualizations...")
         
@@ -1638,7 +1973,7 @@ class ComparisonAnalyzer:
         dataset_names = self.parameters.get_dataset_names()
         
         # Helper for smart labels
-        def generate_smart_labels(groups, user_labels):
+        def generate_smart_labels(groups, user_labels, suffix=""):
             if user_labels:
                 if isinstance(user_labels, list) and len(user_labels) == len(groups):
                     return user_labels
@@ -1651,7 +1986,7 @@ class ComparisonAnalyzer:
                 if len(g) == 1:
                     labels.append(str(g[0]))
                 else:
-                    labels.append(f"Group_{i+1}")
+                    labels.append(f"Group_{i+1}{suffix}")
             return labels
 
         # --- Source Mapping ---
@@ -1664,7 +1999,7 @@ class ComparisonAnalyzer:
         # Priority 2: List in parameters (fallback if no explicit mapping)
         if 'source_mapping' not in output and self.parameters.source_neurons:
             groups = self.parameters.get_source_groups()
-            labels = generate_smart_labels(groups, self.parameters.source_labels)
+            labels = generate_smart_labels(groups, self.parameters.source_labels, suffix="_source")
             
             source_data = {'custom_label': labels}
             for ds in dataset_names:
@@ -1681,7 +2016,7 @@ class ComparisonAnalyzer:
         # Priority 2: List in parameters (fallback)
         if 'target_mapping' not in output and self.parameters.target_neurons:
             groups = self.parameters.get_target_groups()
-            labels = generate_smart_labels(groups, self.parameters.target_labels)
+            labels = generate_smart_labels(groups, self.parameters.target_labels, suffix="_target")
             
             target_data = {'custom_label': labels}
             for ds in dataset_names:
@@ -1739,21 +2074,32 @@ class ComparisonAnalyzer:
         # Collect all motif data for unified export (To-Do List 5 Item 6)
         all_motif_data = []
         
-        for threshold in self.parameters.thresholds:
+        # Use progress bar for threshold exports
+        threshold_iter = tqdm(
+            self.parameters.thresholds,
+            desc="  Exporting matrices",
+            unit="thr",
+            leave=False
+        ) if self.verbose else self.parameters.thresholds
+        
+        for threshold in threshold_iter:
             aligned = self.get_aligned_data(threshold)
             if aligned.empty:
                 continue
             
             # Export presence matrices directly to comparison_results/ (no output_cutoffs subfolder)
-            self._export_presence_matrix(comparison_results_dir, threshold)
+            self._export_presence_matrix(comparison_results_dir, threshold, silent=True)
             
             # Export path presence matrix (multi-hop paths)
-            self._export_path_presence_matrix(comparison_results_dir, threshold)
+            self._export_path_presence_matrix(comparison_results_dir, threshold, silent=True)
             
             # Collect motif analysis data (for unified export)
             motif_data = self._export_motif_analysis(comparison_results_dir, threshold)
             if motif_data:
                 all_motif_data.extend(motif_data)
+        
+        # Log summary after loop
+        self._log(f"Exported edge/path presence matrices for {len(self.parameters.thresholds)} thresholds")
         
         # To-Do List 5 Item 6: Save unified motif_analysis.csv with all thresholds
         if all_motif_data:
@@ -2706,8 +3052,12 @@ class ComparisonAnalyzer:
             index=False
         )
         self._log(f"Saved: path_presence_matrix.csv (unified, {len(path_df)} paths, {len(thresholds)} thresholds)")
+        
+        # Update comparison report with path presence matrix for visualizations
+        if self.comparison_report is not None:
+            self.comparison_report['path_presence_matrix'] = path_df
 
-    def _export_presence_matrix(self, comparison_results_dir: str, threshold: int):
+    def _export_presence_matrix(self, comparison_results_dir: str, threshold: int, silent: bool = False):
         """
         Export edge and path presence matrices showing conservation across datasets.
         
@@ -2720,6 +3070,7 @@ class ComparisonAnalyzer:
         Args:
             comparison_results_dir: Directory to save output files
             threshold: Weight threshold for analysis
+            silent: If True, suppress per-file logging
         """
         dataset_names = self.parameters.get_dataset_names()
         aligned = self.get_aligned_data(threshold)
@@ -2852,7 +3203,8 @@ class ComparisonAnalyzer:
             os.path.join(comparison_results_dir, f"edge_presence_matrix_minsyn_{threshold}.csv"),
             index=False
         )
-        self._log(f"Saved: edge_presence_matrix_minsyn_{threshold}.csv ({len(presence_df)} edges)")
+        if not silent:
+            self._log(f"Saved: edge_presence_matrix_minsyn_{threshold}.csv ({len(presence_df)} edges)")
         
         # Also save a threshold-independent version at the middle threshold
         mid_threshold = self.parameters.thresholds[len(self.parameters.thresholds) // 2]
@@ -2861,7 +3213,8 @@ class ComparisonAnalyzer:
                 os.path.join(comparison_results_dir, "edge_presence_matrix.csv"),
                 index=False
             )
-            self._log("Saved: edge_presence_matrix.csv (default)")
+            if not silent:
+                self._log("Saved: edge_presence_matrix.csv (default)")
     
     def _export_conserved_strong_connections(self, comparison_results_dir: str, threshold: int):
         """
@@ -2980,7 +3333,7 @@ class ComparisonAnalyzer:
             )
             self._log("Saved: conserved_strong_connections.csv (default)")
     
-    def _export_path_presence_matrix(self, comparison_results_dir: str, threshold: int):
+    def _export_path_presence_matrix(self, comparison_results_dir: str, threshold: int, silent: bool = False):
         """
         Export path presence matrix showing multi-hop path conservation across datasets.
         
@@ -2994,6 +3347,7 @@ class ComparisonAnalyzer:
         Args:
             comparison_results_dir: Directory to save output files
             threshold: Weight threshold for analysis
+            silent: If True, suppress per-file logging
         """
         import ast
         
@@ -3025,13 +3379,16 @@ class ComparisonAnalyzer:
                 if os.path.exists(path_file):
                     try:
                         path_df = pd.read_csv(path_file)
-                        self._log(f"Loaded path data from {os.path.basename(path_file)} for {dataset}")
+                        if not silent:
+                            self._log(f"Loaded path data from {os.path.basename(path_file)} for {dataset}")
                         break
                     except Exception as e:
-                        self._log(f"Warning: Could not read {path_file}: {e}")
+                        if not silent:
+                            self._log(f"Warning: Could not read {path_file}: {e}")
             
             if path_df is None or path_df.empty:
-                self._log(f"No path data found for {dataset} at threshold {threshold}")
+                if not silent:
+                    self._log(f"No path data found for {dataset} at threshold {threshold}")
                 continue
             
             # Extract path information from DataFrame
@@ -3111,7 +3468,8 @@ class ComparisonAnalyzer:
                 path_details[path_key]['weights'][safe_name].append(float(weight))
         
         if not path_data:
-            self._log(f"No path data for path presence matrix at threshold {threshold}")
+            if not silent:
+                self._log(f"No path data for path presence matrix at threshold {threshold}")
             return
         
         # Build presence matrix rows
@@ -3221,7 +3579,8 @@ class ComparisonAnalyzer:
             os.path.join(comparison_results_dir, f"path_presence_matrix_minsyn_{threshold}.csv"),
             index=False
         )
-        self._log(f"Saved: path_presence_matrix_minsyn_{threshold}.csv ({len(path_presence_df)} paths)")
+        if not silent:
+            self._log(f"Saved: path_presence_matrix_minsyn_{threshold}.csv ({len(path_presence_df)} paths)")
         
         # Save default version at middle threshold
         mid_threshold = self.parameters.thresholds[len(self.parameters.thresholds) // 2]
@@ -3230,7 +3589,8 @@ class ComparisonAnalyzer:
                 os.path.join(comparison_results_dir, "path_presence_matrix.csv"),
                 index=False
             )
-            self._log("Saved: path_presence_matrix.csv (default)")
+            if not silent:
+                self._log("Saved: path_presence_matrix.csv (default)")
     
     def _export_motif_analysis(self, comparison_results_dir: str, threshold: int):
         """
@@ -3374,6 +3734,11 @@ class ComparisonAnalyzer:
             if pairwise_sim is None:
                 pairwise_sim = pd.DataFrame()
         
+        # Get path presence matrix if available
+        path_presence = pd.DataFrame()
+        if self.comparison_report and 'path_presence_matrix' in self.comparison_report:
+            path_presence = self.comparison_report['path_presence_matrix']
+        
         try:
             visualizer = ComparisonVisualizer(verbose=self.verbose)
             
@@ -3396,7 +3761,9 @@ class ComparisonAnalyzer:
                 ratio_data_func=self._get_ratio_data_for_threshold,
                 prob_data_func=self._get_prob_data_for_threshold,
                 output_base_path=self.parameters.full_output_path,
-                nickname_map=nickname_map
+                nickname_map=nickname_map,
+                path_presence_matrix=path_presence,  # Pass path presence matrix for accurate path counts
+                silent=True  # Suppress per-file messages, show summary instead
             )
             
             self._log_file(vis_dir, "Saved visualizations")
@@ -3654,8 +4021,10 @@ class ComparisonAnalyzer:
         """
         Get edge-level connection_ratio data aligned across datasets for a threshold.
         
-        Reads from dataset_data/{dataset}/minsyn_{threshold}/connections.csv
-        and extracts connection_ratio values for each edge.
+        Reads from:
+        1. dataset_data/{dataset}/minsyn_{threshold}/connections_edge.csv (edge mode)
+        2. dataset_data/{dataset}/minsyn_{threshold}/data_details/connection_type.csv (path mode fallback)
+        
         connection_ratio = w_ij / W_j (edge weight / total post-synaptic sites)
         
         Args:
@@ -3676,15 +4045,31 @@ class ComparisonAnalyzer:
                 f'minsyn_{threshold}'
             )
             
-            # Try to read connections.csv
-            conn_file = os.path.join(dataset_output_path, 'connections.csv')
-            
             df = None
+            
+            # Try to read connections_edge.csv first (edge mode output)
+            conn_file = os.path.join(dataset_output_path, 'connections_edge.csv')
             if os.path.exists(conn_file):
                 try:
-                    df = pd.read_csv(conn_file)
-                except Exception as e:
-                    self._log(f"Warning: Could not read {conn_file}: {e}")
+                    # Check file is not empty before reading
+                    if os.path.getsize(conn_file) > 0:
+                        df = pd.read_csv(conn_file)
+                except pd.errors.EmptyDataError:
+                    pass  # File is empty or has no columns, try fallback
+                except Exception:
+                    pass  # Other errors, try fallback
+            
+            # Fallback to data_details/connection_type.csv (path mode output)
+            if df is None or df.empty or 'connection_ratio' not in df.columns:
+                conn_type_file = os.path.join(dataset_output_path, 'data_details', 'connection_type.csv')
+                if os.path.exists(conn_type_file):
+                    try:
+                        if os.path.getsize(conn_type_file) > 0:
+                            df = pd.read_csv(conn_type_file)
+                    except pd.errors.EmptyDataError:
+                        pass  # File is empty
+                    except Exception:
+                        pass  # Other errors
             
             if df is None or df.empty or 'connection_ratio' not in df.columns:
                 continue
@@ -4510,7 +4895,8 @@ class ComparisonAnalyzer:
                     interactive_matrices, 
                     interactive_path, 
                     title=f"Connectivity Profile Comparison ({timestamp})",
-                    showfig=False
+                    showfig=False,
+                    verbose=self.verbose
                 )
                 self._log(f"Saved interactive heatmap: {interactive_path}")
             except Exception as e:
@@ -4974,17 +5360,49 @@ class ComparisonAnalyzer:
         # Get key findings per threshold and add path stats
         key_findings_per_threshold = self.comparison_report.get('key_findings_per_threshold', {})
         
-        # Add path statistics to key findings
+        # Get path presence matrix for accurate path counts
+        path_presence_matrix = self.comparison_report.get('path_presence_matrix', pd.DataFrame())
+        
+        # Add path statistics to key findings using path presence matrix
         for threshold in thresholds:
-            path_data = self._get_path_data_for_threshold(threshold)
-            if path_data is not None and not path_data.empty:
-                available = [d for d in dataset_names if d in path_data.columns]
-                total_paths = len(path_data)
-                if available:
-                    mask_all = (path_data[available] > 0).all(axis=1)
-                    common_paths = int(mask_all.sum())
-                else:
-                    common_paths = 0
+            if not path_presence_matrix.empty:
+                # Use path presence matrix (sanitized names with _t{threshold} suffix)
+                total_paths = 0
+                common_paths = 0
+                
+                # Find columns for this threshold
+                cols_for_threshold = []
+                for d in dataset_names:
+                    safe_name = self.parameters._sanitize_name(d)
+                    col_name = f'{safe_name}_t{threshold}'
+                    if col_name in path_presence_matrix.columns:
+                        cols_for_threshold.append(col_name)
+                
+                if cols_for_threshold:
+                    # Count paths present in at least one dataset at this threshold
+                    is_any = pd.Series(False, index=path_presence_matrix.index)
+                    for col in cols_for_threshold:
+                        vals = path_presence_matrix[col]
+                        if vals.dtype == object:
+                            is_any |= ((vals == 'True') | (vals == True))
+                        elif vals.dtype == bool:
+                            is_any |= vals
+                        else:
+                            is_any |= (vals > 0)
+                    total_paths = int(is_any.sum())
+                    
+                    # Count common paths (present in ALL datasets at this threshold)
+                    if len(cols_for_threshold) == len(dataset_names):
+                        is_common = pd.Series(True, index=path_presence_matrix.index)
+                        for col in cols_for_threshold:
+                            vals = path_presence_matrix[col]
+                            if vals.dtype == object:
+                                is_common &= ((vals == 'True') | (vals == True))
+                            elif vals.dtype == bool:
+                                is_common &= vals
+                            else:
+                                is_common &= (vals > 0)
+                        common_paths = int(is_common.sum())
                 
                 if threshold in key_findings_per_threshold:
                     key_findings_per_threshold[threshold]['total_paths'] = total_paths

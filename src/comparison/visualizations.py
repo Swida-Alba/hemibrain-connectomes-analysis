@@ -62,9 +62,10 @@ class ComparisonVisualizer:
         self.verbose = verbose
     
     def _vprint(self, *args, **kwargs):
-        """Print only if verbose is True."""
+        """Print only if verbose is True. Uses tqdm.write for progress bar compatibility."""
         if self.verbose:
-            print(*args, **kwargs)
+            from tqdm import tqdm
+            tqdm.write(' '.join(str(a) for a in args))
     
     # =========================================================================
     # Path Count Visualizations
@@ -542,14 +543,14 @@ class ComparisonVisualizer:
             'jaccard': 'jaccard_similarity',
             'weighted_jaccard': 'weighted_jaccard',
             'svd': 'svd_similarity',
-            'ged': 'ged_similarity',
+            'edge_rank': 'edge_rank_correlation',
             'kernel': 'kernel_similarity'
         }
         metric_label_map = {
             'jaccard': 'Jaccard Index',
             'weighted_jaccard': 'Weighted Jaccard',
             'svd': 'SVD Similarity',
-            'ged': 'GED Similarity',
+            'edge_rank': 'Edge Rank Correlation',
             'kernel': 'WL Kernel Similarity'
         }
         
@@ -904,11 +905,13 @@ class ComparisonVisualizer:
             fig: matplotlib Figure
             path: Output path
             dpi: Resolution (default 450 for high quality)
+            silent: If True, suppress "Saved" message
         """
         fig.savefig(path, dpi=dpi, bbox_inches='tight')
         # Print only the filename, not the full path
-        filename = os.path.basename(path)
-        self._vprint(f"Saved: {filename}")
+        if not hasattr(self, '_silent_mode') or not self._silent_mode:
+            filename = os.path.basename(path)
+            self._vprint(f"Saved: {filename}")
     
     def plot_threshold_comparison_subplots(
         self,
@@ -1052,7 +1055,7 @@ class ComparisonVisualizer:
                 x = range(n_datasets)
                 common_bar = ax3.bar(x, [common_count] * n_datasets, color='#2ca02c', label='Common to all', alpha=0.8)
                 unique_bars = ax3.bar(x, unique_counts, bottom=[common_count] * n_datasets, 
-                                     color=colors, alpha=0.6, label='Unique')
+                                     color=colors, alpha=0.8, label='Unique')
                 ax3.set_xticks(x)
                 ax3.set_xticklabels([d[:15] for d in datasets], rotation=45, ha='right', fontsize=7)
                 ax3.set_ylabel('Edges')
@@ -1064,7 +1067,7 @@ class ComparisonVisualizer:
                     from matplotlib.patches import Patch
                     legend_elements = [Patch(facecolor='#2ca02c', alpha=0.8, label='Common to all')]
                     for j, ds in enumerate(datasets):
-                        legend_elements.append(Patch(facecolor=colors[j], alpha=0.6, 
+                        legend_elements.append(Patch(facecolor=colors[j], alpha=0.8, 
                                                     label=f'Unique to {ds[:15]}'))
                     ax3.legend(handles=legend_elements, fontsize=6, loc='upper right', framealpha=0.9)
         
@@ -1077,6 +1080,7 @@ class ComparisonVisualizer:
         thresholds: List[int],
         align_func,
         similarity_func=None,
+        path_data_func=None,
         figsize: Optional[Tuple[int, int]] = None,
         title: str = "Dataset Similarity at Each Threshold",
         show_progress: bool = True
@@ -1085,7 +1089,7 @@ class ComparisonVisualizer:
         Plot similarity matrices for each threshold in a combined subplot figure.
         
         Creates a grid of similarity matrices showing 4 metrics per threshold:
-        - Topology: Jaccard, GED
+        - Topology: Jaccard, Edge Rank Correlation
         - Matrix-based: Spearman Rank, RV Coefficient
         
         Args:
@@ -1093,6 +1097,7 @@ class ComparisonVisualizer:
             thresholds: List of thresholds to include
             align_func: Function to get aligned data at a threshold
             similarity_func: Optional function to get cached similarities (avoids recalculation)
+            path_data_func: Optional function to get path data at a threshold (for path rank)
             figsize: Figure size tuple
             title: Overall figure title
             show_progress: Whether to show progress bar (default True)
@@ -1107,7 +1112,7 @@ class ComparisonVisualizer:
         metrics = ComparisonMetrics()
         
         n_thresholds = len(thresholds)
-        # 4 metrics per threshold: Jaccard, GED, Spearman, RV
+        # 4 metrics per threshold: Jaccard, Edge Rank, Path Rank, Spearman
         n_metrics = 4
         n_cols = n_thresholds
         n_rows = n_metrics
@@ -1120,11 +1125,14 @@ class ComparisonVisualizer:
         datasets = list(results.keys())
         
         # Metric definitions with progress info
+        # Edge Rank: uses union of edges
+        # Path Rank: uses union of paths (multi-hop)
+        # Spearman: uses shared edges only (intersection), returns raw [-1, 1] correlation
         metric_configs = [
-            ('jaccard_similarity', 'Jaccard', 'Greens'),
-            ('ged_similarity', 'GED', 'Greens'),
-            ('spearman_rank_correlation', 'Spearman Rank', 'Oranges'),
-            ('rv_coefficient', 'RV Coefficient', 'Oranges'),
+            ('jaccard_similarity', 'Jaccard', 'Greens', 0, 1),
+            ('edge_rank_correlation', 'Edge Rank (union)', 'Greens', 0, 1),
+            ('path_rank_correlation', 'Path Rank (union)', 'Blues', 0, 1),
+            ('spearman_rank_correlation', 'Spearman (shared)', 'RdYlGn', -1, 1),  # Diverging colormap for [-1, 1]
         ]
         
         # Use progress bar for threshold iteration
@@ -1150,39 +1158,50 @@ class ComparisonVisualizer:
                 available = [d for d in datasets if d in aligned.columns]
                 
                 # Use cached similarities if available, otherwise calculate
+                # Get path data for this threshold
+                path_data_t = None
+                if path_data_func:
+                    try:
+                        path_data_t = path_data_func(threshold)
+                    except:
+                        pass
+                
                 if similarity_func:
                     similarities = similarity_func(threshold)
-                    # Add advanced metrics if not present
-                    if similarities.empty or 'ged_similarity' not in similarities.columns:
+                    # Add advanced metrics if not present (including path_rank_correlation)
+                    if similarities.empty or 'edge_rank_correlation' not in similarities.columns or 'path_rank_correlation' not in similarities.columns:
                         similarities = metrics.calculate_all_pairwise_similarities(
-                            aligned, datasets, threshold=1, include_advanced_metrics=True
+                            aligned, datasets, threshold=1, include_advanced_metrics=True, path_data=path_data_t
                         )
                 else:
                     similarities = metrics.calculate_all_pairwise_similarities(
-                        aligned, datasets, threshold=1, include_advanced_metrics=True
+                        aligned, datasets, threshold=1, include_advanced_metrics=True, path_data=path_data_t
                     )
                 
                 if similarities.empty:
                     continue
                 
-                for row_idx, (metric_col, metric_label, cmap) in enumerate(metric_configs):
+                for row_idx, (metric_col, metric_label, cmap, vmin, vmax) in enumerate(metric_configs):
                     ax = axes[row_idx, col_idx]
                     
-                    # Create similarity matrix
-                    matrix = pd.DataFrame(1.0, index=available, columns=available)
+                    # Create similarity matrix - use NaN for undefined values
+                    # Diagonal is always 1.0 for all metrics
+                    matrix = pd.DataFrame(np.nan, index=available, columns=available)
+                    for d in available:
+                        matrix.loc[d, d] = 1.0
                     
                     for _, row in similarities.iterrows():
                         d1, d2 = row['dataset_1'], row['dataset_2']
                         if d1 in available and d2 in available:
-                            val = row.get(metric_col, 0)
-                            if pd.isna(val):
-                                val = 0
+                            val = row.get(metric_col, np.nan)
                             matrix.loc[d1, d2] = val
                             matrix.loc[d2, d1] = val
                     
                     # Plot heatmap with square cells
+                    # Use custom annotation to show "N/A" for NaN values
+                    annot_matrix = matrix.copy()
                     sns.heatmap(matrix, annot=True, fmt='.2f', cmap=cmap,
-                               vmin=0, vmax=1, ax=ax, cbar=False,
+                               vmin=vmin, vmax=vmax, ax=ax, cbar=False,
                                xticklabels=[d[:12] for d in available],
                                yticklabels=[d[:12] for d in available],
                                square=True, linewidths=0)
@@ -1343,6 +1362,16 @@ class ComparisonVisualizer:
         # Select top paths by mean
         df['mean'] = df.mean(axis=1)
         df = df.nlargest(max_paths, 'mean').drop(columns=['mean'])
+        
+        # Sort columns by dataset then threshold (same as edge heatmap)
+        col_order = []
+        for dataset in datasets:
+            nick = nickname_map.get(dataset, dataset)[:10]
+            for threshold in sorted(thresholds):
+                col = f"{nick}_t{threshold}"
+                if col in df.columns:
+                    col_order.append(col)
+        df = df[[c for c in col_order if c in df.columns]]
         
         # Create heatmap
         fig_height = max(8, len(df) * 0.35)
@@ -1706,7 +1735,9 @@ class ComparisonVisualizer:
         ratio_data_func=None,
         prob_data_func=None,
         output_base_path: str = None,
-        nickname_map: Dict[str, str] = None
+        nickname_map: Dict[str, str] = None,
+        path_presence_matrix: pd.DataFrame = None,
+        silent: bool = False
     ):
         """
         Generate and save all standard plots.
@@ -1725,7 +1756,13 @@ class ComparisonVisualizer:
             prob_data_func: Function to get traversal probability data at a given threshold
             output_base_path: Base path for reading original dataset data
             nickname_map: Dict mapping dataset names to short nicknames for display
+            path_presence_matrix: Optional DataFrame with path presence across datasets and thresholds
+            silent: If True, suppress per-file messages and show summary instead
         """
+        # Track saved files for summary
+        self._silent_mode = silent
+        saved_count = 0
+        
         os.makedirs(output_dir, exist_ok=True)
         datasets = list(results.keys())
         
@@ -1757,10 +1794,7 @@ class ComparisonVisualizer:
         
         # Note: edge_heatmap.png removed (redundant with path/threshold comparison views)
         
-        # Similarity data export (matrix visualization removed - use similarity_per_threshold instead)
-        if not similarities.empty:
-            # Save similarity data for reference
-            similarities.to_csv(os.path.join(vis_data_dir, "similarity_matrix.csv"), index=False)
+        # Note: similarity_matrix.csv is saved with all thresholds in the per-threshold section below
         
         # Similarity matrices per threshold (combined subplot figure)
         # Use cached similarities if available to avoid recalculation
@@ -1769,6 +1803,7 @@ class ComparisonVisualizer:
                 fig = self.plot_similarity_matrix_per_threshold(
                     results, thresholds, align_func,
                     similarity_func=similarity_func,
+                    path_data_func=path_data_func,
                     title="Dataset Similarity at Each Threshold Level"
                 )
                 self.save_figure(fig, os.path.join(output_dir, "similarity_per_threshold.png"))
@@ -1785,7 +1820,16 @@ class ComparisonVisualizer:
                             metrics = ComparisonMetrics()
                             aligned_t = align_func(threshold)
                             if not aligned_t.empty:
-                                sim_t = metrics.calculate_all_pairwise_similarities(aligned_t, datasets, threshold=1)
+                                # Get path data for this threshold
+                                path_data_t = None
+                                if path_data_func:
+                                    try:
+                                        path_data_t = path_data_func(threshold)
+                                    except:
+                                        pass
+                                sim_t = metrics.calculate_all_pairwise_similarities(
+                                    aligned_t, datasets, threshold=1, path_data=path_data_t
+                                )
                         if sim_t is not None and not sim_t.empty:
                             sim_t = sim_t.copy()
                             sim_t['threshold'] = threshold
@@ -1793,9 +1837,11 @@ class ComparisonVisualizer:
                     except:
                         pass
                 if all_sim_data:
-                    pd.concat(all_sim_data, ignore_index=True).to_csv(
-                        os.path.join(vis_data_dir, "similarity_per_threshold.csv"), index=False
-                    )
+                    # Save both individual similarity_matrix.csv (all thresholds combined) 
+                    # and similarity_per_threshold.csv for backward compatibility
+                    combined_sim = pd.concat(all_sim_data, ignore_index=True)
+                    combined_sim.to_csv(os.path.join(vis_data_dir, "similarity_per_threshold.csv"), index=False)
+                    combined_sim.to_csv(os.path.join(vis_data_dir, "similarity_matrix.csv"), index=False)
             except Exception as e:
                 self._vprint(f"Warning: Could not create per-threshold similarity plot: {e}")
         
@@ -1875,6 +1921,11 @@ class ComparisonVisualizer:
             fig = self.plot_weight_scatter(aligned_data, datasets[0], datasets[1])
             self.save_figure(fig, os.path.join(output_dir, "weight_scatter.png"))
             plt.close(fig)
+            
+            # Save weight scatter data
+            if not aligned_data.empty:
+                scatter_data = aligned_data[[datasets[0], datasets[1]]].copy()
+                scatter_data.to_csv(os.path.join(vis_data_dir, "weight_scatter.csv"))
         
         # Merged threshold comparison subplots
         if len(thresholds) > 1:
@@ -1897,6 +1948,37 @@ class ComparisonVisualizer:
                             'max_weight': max(weights) if len(weights) > 0 else 0
                         })
             pd.DataFrame(comparison_data).to_csv(os.path.join(vis_data_dir, "threshold_comparison.csv"), index=False)
+        
+        # Conservation across thresholds plot
+        if len(thresholds) > 1:
+            try:
+                fig, conservation_data = self.plot_conservation_across_thresholds(
+                    results, thresholds, align_func,
+                    nickname_map=nickname_map,
+                    path_presence_matrix=path_presence_matrix
+                )
+                if fig:
+                    self.save_figure(fig, os.path.join(output_dir, "conservation_across_thresholds.png"))
+                    plt.close(fig)
+                
+                # Save conservation data
+                if conservation_data is not None and not conservation_data.empty:
+                    conservation_data.to_csv(os.path.join(vis_data_dir, "conservation_across_thresholds.csv"), index=False)
+                
+                # Also generate Plotly version if possible
+                try:
+                    plotly_json = self.plot_conservation_across_thresholds_plotly(
+                        results, thresholds, align_func,
+                        nickname_map=nickname_map,
+                        path_presence_matrix=path_presence_matrix
+                    )
+                    with open(os.path.join(vis_data_dir, "conservation_across_thresholds.json"), 'w') as f:
+                        f.write(plotly_json)
+                except Exception as e:
+                    self._vprint(f"Warning: Could not create Plotly conservation plot: {e}")
+                    
+            except Exception as e:
+                self._vprint(f"Warning: Could not create conservation plot: {e}")
         
         # Save key_findings_per_threshold data
         if align_func:
@@ -2005,6 +2087,9 @@ class ComparisonVisualizer:
                         )
                         self.save_figure(fig, os.path.join(output_dir, f"edge_heatmap_{threshold}.png"))
                         plt.close(fig)
+                        
+                        # Save edge heatmap data
+                        aligned_t.to_csv(os.path.join(vis_data_dir, f"edge_heatmap_{threshold}.csv"))
                 
                 # All thresholds edge heatmap
                 if len(thresholds) > 1:
@@ -2082,10 +2167,1114 @@ class ComparisonVisualizer:
             except Exception as e:
                 self._vprint(f"Warning: Could not create traversal probability heatmaps: {e}")
         
+        # Generate Jaccard similarity trend plot
+        if align_func and len(thresholds) > 1:
+            try:
+                fig, jaccard_df = self.plot_jaccard_similarity_trend(
+                    align_func, thresholds, datasets,
+                    title="Jaccard Similarity Across Thresholds",
+                    nickname_map=nickname_map
+                )
+                self.save_figure(fig, os.path.join(output_dir, "jaccard_similarity_trend.png"))
+                plt.close(fig)
+                
+                # Save data
+                jaccard_df.to_csv(os.path.join(vis_data_dir, "jaccard_similarity_trend.csv"), index=False)
+            except Exception as e:
+                self._vprint(f"Warning: Could not create Jaccard similarity plot: {e}")
+        
+        # Generate Edge Rank Correlation trend plot
+        if align_func and len(thresholds) > 1:
+            try:
+                fig, edge_rank_df = self.plot_edge_rank_correlation_trend(
+                    align_func, thresholds, datasets,
+                    title="Edge Rank Correlation Across Thresholds",
+                    nickname_map=nickname_map
+                )
+                self.save_figure(fig, os.path.join(output_dir, "edge_rank_correlation_trend.png"))
+                plt.close(fig)
+                
+                # Save data
+                edge_rank_df.to_csv(os.path.join(vis_data_dir, "edge_rank_correlation_trend.csv"), index=False)
+            except Exception as e:
+                self._vprint(f"Warning: Could not create Edge Rank Correlation plot: {e}")
+        
+        # Generate Path Rank Correlation trend plot
+        if path_data_func and len(thresholds) > 1:
+            try:
+                fig, path_rank_df = self.plot_path_rank_correlation_trend(
+                    path_data_func, thresholds, datasets,
+                    title="Path Rank Correlation Across Thresholds",
+                    nickname_map=nickname_map
+                )
+                self.save_figure(fig, os.path.join(output_dir, "path_rank_correlation_trend.png"))
+                plt.close(fig)
+                
+                # Save data
+                path_rank_df.to_csv(os.path.join(vis_data_dir, "path_rank_correlation_trend.csv"), index=False)
+            except Exception as e:
+                self._vprint(f"Warning: Could not create Path Rank Correlation plot: {e}")
+        
         # Note: vis_summary.pdf generation removed - use HTML report instead
         
-        self._vprint(f"All plots saved to: {output_dir}")
-        self._vprint(f"Visualization data saved to: {vis_data_dir}")
+        # Reset silent mode and show summary
+        self._silent_mode = False
+        
+        # Count saved files for summary
+        png_count = len([f for f in os.listdir(output_dir) if f.endswith('.png')])
+        csv_count = len([f for f in os.listdir(vis_data_dir) if f.endswith('.csv')])
+        
+        self._vprint(f"Saved {png_count} plots to: {output_dir}")
+        self._vprint(f"Saved {csv_count} data files to: {vis_data_dir}")
+
+    def plot_conservation_across_thresholds(
+        self,
+        results: Dict[str, Dict[int, pd.DataFrame]],
+        thresholds: List[int],
+        align_func=None,
+        title: str = "Conservation of Edges and Paths Across Thresholds",
+        nickname_map: Dict[str, str] = None,
+        path_presence_matrix: pd.DataFrame = None
+    ) -> Tuple[plt.Figure, pd.DataFrame]:
+        """
+        Plot conservation of edges and paths across thresholds.
+        
+        Shows:
+        - Edge Counts (Linear)
+        - Path Counts (Linear)
+        - Edge Retention Rate (Count_i / Count_{i-1})
+        - Path Retention Rate (Count_i / Count_{i-1})
+        
+        Args:
+            results: Raw analysis results
+            thresholds: List of thresholds
+            align_func: Function to get aligned data (for common edges)
+            title: Plot title
+            nickname_map: Dict mapping dataset names to display names
+            path_presence_matrix: Optional DataFrame with path presence info
+            
+        Returns:
+            Tuple of (matplotlib Figure, DataFrame with plot data)
+        """
+        if not HAS_MATPLOTLIB:
+            return None, None
+            
+        datasets = list(results.keys())
+        if nickname_map is None:
+            nickname_map = {d: d for d in datasets}
+            
+        # Sort thresholds to ensure correct line plotting and rate calculation
+        sorted_thresholds = sorted(thresholds)
+        
+        # Prepare data for export
+        plot_data = []
+            
+        # Create 2x2 subplot grid
+        fig, axes = plt.subplots(2, 2, figsize=(14, 10), sharex=True)
+        ax_edge_count = axes[0, 0]
+        ax_path_count = axes[0, 1]
+        ax_edge_rate = axes[1, 0]
+        ax_path_rate = axes[1, 1]
+        
+        # Colors and markers
+        colors = plt.cm.tab10.colors
+        markers = ['o', 's', '^', 'D', 'v', '<', '>']
+        
+        # Track totals for Overall Rate calculation
+        total_edge_counts = [0] * len(sorted_thresholds)
+        total_path_counts = [0] * len(sorted_thresholds)
+
+        # Plot edges and paths for each dataset
+        for i, dataset in enumerate(datasets):
+            nick = nickname_map.get(dataset, dataset)
+            color = colors[i % len(colors)]
+            marker = markers[i % len(markers)]
+            
+            edge_counts = []
+            path_counts = []
+            
+            for idx, t in enumerate(sorted_thresholds):
+                # Get data for this threshold
+                df = results.get(dataset, {}).get(t, pd.DataFrame())
+                
+                # Edge count (rows in dataframe)
+                e_count = len(df) if not df.empty else 0
+                edge_counts.append(e_count)
+                total_edge_counts[idx] += e_count
+                
+                # Path count
+                p_count = 0
+                if path_presence_matrix is not None and not path_presence_matrix.empty:
+                    # Use path presence matrix if available
+                    # Try original name first, then sanitized name (replace : and . with _)
+                    col_orig = f"{dataset}_t{t}"
+                    dataset_safe = dataset.replace(':', '_').replace('.', '_')
+                    col_safe = f"{dataset_safe}_t{t}"
+                    
+                    col_name = None
+                    if col_orig in path_presence_matrix.columns:
+                        col_name = col_orig
+                    elif col_safe in path_presence_matrix.columns:
+                        col_name = col_safe
+                    
+                    if col_name is not None:
+                        # Check for 'True' string or boolean True
+                        vals = path_presence_matrix[col_name]
+                        if vals.dtype == object:
+                            # Handle both string 'True' and boolean True
+                            p_count = ((vals == 'True') | (vals == True)).sum()
+                        elif vals.dtype == bool:
+                            p_count = vals.sum()
+                        else:
+                            p_count = (vals > 0).sum()
+                    else:
+                        # Fallback if column missing but matrix exists
+                        if not df.empty and 'has_valid_path' in df.columns:
+                            p_count = df['has_valid_path'].sum()
+                        else:
+                            p_count = len(df) if not df.empty else 0
+                else:
+                    # Fallback to edge-based estimation
+                    if not df.empty and 'has_valid_path' in df.columns:
+                        p_count = df['has_valid_path'].sum()
+                    else:
+                        p_count = len(df) if not df.empty else 0
+                
+                path_counts.append(p_count)
+                total_path_counts[idx] += p_count
+            
+            # --- 1. Counts (Linear Scale) ---
+            ax_edge_count.plot(sorted_thresholds, edge_counts, marker=marker, linestyle='-', 
+                             color=color, label=nick, linewidth=2, alpha=0.8)
+            
+            ax_path_count.plot(sorted_thresholds, path_counts, marker=marker, linestyle='--',
+                             color=color, label=nick, linewidth=2, alpha=0.8)
+            
+            # --- 2. Delta Rates (Drop Rate) ---
+            # Delta[i] = (Count[i-1] - Count[i]) / Count[i-1]
+            # Shows the fraction of edges/paths lost at each threshold step
+            # For the first threshold, we can't calculate a rate from previous, so we skip or set to NaN
+            edge_rates = [np.nan] 
+            path_rates = [np.nan]
+            
+            for j in range(1, len(sorted_thresholds)):
+                prev_e = edge_counts[j-1]
+                curr_e = edge_counts[j]
+                rate_e = ((prev_e - curr_e) / prev_e) if prev_e > 0 else 0
+                edge_rates.append(rate_e)
+                
+                prev_p = path_counts[j-1]
+                curr_p = path_counts[j]
+                rate_p = ((prev_p - curr_p) / prev_p) if prev_p > 0 else 0
+                path_rates.append(rate_p)
+                
+            ax_edge_rate.plot(sorted_thresholds, edge_rates, marker=marker, linestyle='-', 
+                            color=color, label=nick, alpha=0.8)
+            ax_path_rate.plot(sorted_thresholds, path_rates, marker=marker, linestyle='--', 
+                            color=color, label=nick, alpha=0.8)
+            
+            # Collect data for export
+            for j, t in enumerate(sorted_thresholds):
+                plot_data.append({
+                    'dataset': dataset,
+                    'threshold': t,
+                    'edge_count': edge_counts[j],
+                    'path_count': path_counts[j],
+                    'edge_retention_rate': edge_rates[j],
+                    'path_retention_rate': path_rates[j]
+                })
+
+        # --- Overall Delta Rates ---
+        overall_edge_rates = [np.nan]
+        overall_path_rates = [np.nan]
+        for j in range(1, len(sorted_thresholds)):
+            prev_e = total_edge_counts[j-1]
+            curr_e = total_edge_counts[j]
+            overall_edge_rates.append(((prev_e - curr_e) / prev_e) if prev_e > 0 else 0)
+            
+            prev_p = total_path_counts[j-1]
+            curr_p = total_path_counts[j]
+            overall_path_rates.append(((prev_p - curr_p) / prev_p) if prev_p > 0 else 0)
+            
+        ax_edge_rate.plot(sorted_thresholds, overall_edge_rates, marker='*', linestyle='-', 
+                        color='black', label="Overall", linewidth=2, markersize=10, alpha=0.5)
+        ax_path_rate.plot(sorted_thresholds, overall_path_rates, marker='*', linestyle='--', 
+                        color='black', label="Overall", linewidth=2, markersize=10, alpha=0.5)
+
+        # --- Common Counts ---
+        common_edge_counts = []
+        common_path_counts = []
+        
+        for t in sorted_thresholds:
+            # Common Edges
+            c_edge = 0
+            if align_func:
+                try:
+                    aligned = align_func(t)
+                    if not aligned.empty:
+                        available_ds = [d for d in datasets if d in aligned.columns]
+                        if available_ds:
+                            is_common = (aligned[available_ds] > 0).all(axis=1)
+                            c_edge = int(is_common.sum())
+                except Exception:
+                    pass
+            common_edge_counts.append(c_edge)
+            
+            # Common Paths
+            common_paths = 0
+            if path_presence_matrix is not None and not path_presence_matrix.empty:
+                # Use path presence matrix
+                # Try to match columns using sanitized names (replace : and . with _)
+                available_cols = []
+                for d in datasets:
+                    col_orig = f"{d}_t{t}"
+                    d_safe = d.replace(':', '_').replace('.', '_')
+                    col_safe = f"{d_safe}_t{t}"
+                    
+                    if col_orig in path_presence_matrix.columns:
+                        available_cols.append(col_orig)
+                    elif col_safe in path_presence_matrix.columns:
+                        available_cols.append(col_safe)
+                
+                if len(available_cols) == len(datasets):
+                    # Check if all are True (handle both string 'True' and boolean True)
+                    is_common = pd.Series(True, index=path_presence_matrix.index)
+                    for col in available_cols:
+                        vals = path_presence_matrix[col]
+                        if vals.dtype == object:
+                            is_common &= ((vals == 'True') | (vals == True))
+                        elif vals.dtype == bool:
+                            is_common &= vals
+                        else:
+                            is_common &= (vals > 0)
+                    common_paths = int(is_common.sum())
+            else:
+                # Fallback to edge intersection
+                path_sets = []
+                for dataset in datasets:
+                    df = results.get(dataset, {}).get(t, pd.DataFrame())
+                    if not df.empty:
+                        if 'has_valid_path' in df.columns:
+                            valid_paths = df[df['has_valid_path'] == True]
+                        else:
+                            valid_paths = df
+                            
+                        if not valid_paths.empty:
+                            pre_col = 'std_label_pre' if 'std_label_pre' in valid_paths.columns else 'type_pre'
+                            post_col = 'std_label_post' if 'std_label_post' in valid_paths.columns else 'type_post'
+                            if pre_col in valid_paths.columns and post_col in valid_paths.columns:
+                                edges = set()
+                                for _, row in valid_paths.iterrows():
+                                    p = str(row[pre_col]).strip()
+                                    q = str(row[post_col]).strip()
+                                    if p and q:
+                                        edges.add((p, q))
+                                path_sets.append(edges)
+                            else:
+                                path_sets.append(set())
+                        else:
+                            path_sets.append(set())
+                    else:
+                        path_sets.append(set())
+                
+                if path_sets:
+                    common_paths = len(set.intersection(*path_sets))
+                else:
+                    common_paths = 0
+            
+            common_path_counts.append(common_paths)
+            
+        ax_edge_count.plot(sorted_thresholds, common_edge_counts, marker='*', linestyle=':', 
+                         color='black', label="Common", linewidth=2, markersize=10, alpha=0.5)
+        
+        ax_path_count.plot(sorted_thresholds, common_path_counts, marker='*', linestyle=':', 
+                         color='black', label="Common", linewidth=2, markersize=10, alpha=0.5)
+            
+        # Add common counts to plot data
+        for j, t in enumerate(sorted_thresholds):
+            plot_data.append({
+                'dataset': 'Common',
+                'threshold': t,
+                'edge_count': common_edge_counts[j],
+                'path_count': common_path_counts[j],
+                'edge_retention_rate': np.nan,
+                'path_retention_rate': np.nan
+            })
+            plot_data.append({
+                'dataset': 'Overall',
+                'threshold': t,
+                'edge_count': total_edge_counts[j],
+                'path_count': total_path_counts[j],
+                'edge_retention_rate': overall_edge_rates[j],
+                'path_retention_rate': overall_path_rates[j]
+            })
+
+        # Formatting
+        for ax in axes.flat:
+            ax.grid(True, which="both", ls="-", alpha=0.2)
+            ax.set_xticks(sorted_thresholds)
+        
+        ax_edge_count.set_title("Edge Counts (Linear)")
+        ax_edge_count.set_ylabel("Count")
+        ax_edge_count.legend()
+        
+        ax_path_count.set_title("Path Counts (Linear)")
+        ax_path_count.set_ylabel("Count")
+        ax_path_count.legend()
+        
+        ax_edge_rate.set_title("Edge Delta Rate ($(N_{t-1} - N_t) / N_{t-1}$)")
+        ax_edge_rate.set_ylabel("Delta Rate")
+        ax_edge_rate.set_xlabel("Threshold")
+        ax_edge_rate.legend()
+        
+        ax_path_rate.set_title("Path Delta Rate ($(N_{t-1} - N_t) / N_{t-1}$)")
+        ax_path_rate.set_ylabel("Delta Rate")
+        ax_path_rate.set_xlabel("Threshold")
+        ax_path_rate.legend()
+        
+        plt.suptitle(title)
+        plt.tight_layout()
+        
+        return fig, pd.DataFrame(plot_data)
+    
+    def plot_jaccard_similarity_trend(
+        self,
+        align_func,
+        thresholds: List[int],
+        datasets: List[str],
+        title: str = "Jaccard Similarity Across Thresholds",
+        nickname_map: Dict[str, str] = None,
+        figsize: Optional[Tuple[int, int]] = None
+    ) -> Tuple[plt.Figure, pd.DataFrame]:
+        """
+        Plot Jaccard similarity trend across thresholds for all dataset pairs.
+        
+        Args:
+            align_func: Function to get aligned data at a threshold
+            thresholds: List of thresholds
+            datasets: List of dataset names
+            title: Plot title
+            nickname_map: Dict mapping dataset names to display names
+            figsize: Figure size tuple
+            
+        Returns:
+            Tuple of (matplotlib Figure, DataFrame with Jaccard data)
+        """
+        if not HAS_MATPLOTLIB:
+            return None, pd.DataFrame()
+        
+        if nickname_map is None:
+            nickname_map = {d: d for d in datasets}
+        
+        sorted_thresholds = sorted(thresholds)
+        
+        # Collect Jaccard similarities for each pair at each threshold
+        from itertools import combinations
+        
+        pair_data = {}  # {(d1, d2): {threshold: jaccard}}
+        all_data = []  # For DataFrame export
+        
+        pairs = list(combinations(datasets, 2))
+        for pair in pairs:
+            pair_data[pair] = {}
+        
+        for threshold in sorted_thresholds:
+            aligned = align_func(threshold)
+            if aligned.empty:
+                continue
+            
+            available = [d for d in datasets if d in aligned.columns]
+            
+            for d1, d2 in combinations(available, 2):
+                pair_key = (d1, d2) if (d1, d2) in pair_data else (d2, d1)
+                
+                c1, c2 = aligned[d1], aligned[d2]
+                s1 = set(aligned.index[c1 > 0])
+                s2 = set(aligned.index[c2 > 0])
+                inter, union = len(s1 & s2), len(s1 | s2)
+                jac = inter / union if union > 0 else 0
+                pair_data[pair_key][threshold] = jac
+                
+                # For export
+                n1 = nickname_map.get(d1, d1)
+                n2 = nickname_map.get(d2, d2)
+                all_data.append({
+                    'threshold': threshold,
+                    'dataset1': n1,
+                    'dataset2': n2,
+                    'jaccard': jac,
+                    'intersection': inter,
+                    'union': union
+                })
+        
+        # Create figure
+        figsize = figsize or (10, 6)
+        fig, ax = plt.subplots(figsize=figsize)
+        
+        colors = plt.cm.tab10.colors
+        markers = ['o', 's', '^', 'D', 'v', '<', '>']
+        
+        for idx, pair_key in enumerate(pairs):
+            d1, d2 = pair_key
+            n1, n2 = nickname_map.get(d1, d1), nickname_map.get(d2, d2)
+            
+            x_vals = []
+            y_vals = []
+            for t in sorted_thresholds:
+                if t in pair_data[pair_key]:
+                    x_vals.append(t)
+                    y_vals.append(pair_data[pair_key][t])
+            
+            if x_vals:
+                color = colors[idx % len(colors)]
+                marker = markers[idx % len(markers)]
+                ax.plot(x_vals, y_vals, marker=marker, color=color, linewidth=2,
+                       markersize=8, label=f'{n1} vs {n2}')
+        
+        # Calculate and plot average
+        avg_x = []
+        avg_y = []
+        for t in sorted_thresholds:
+            vals = [pair_data[pk].get(t) for pk in pairs if t in pair_data.get(pk, {})]
+            vals = [v for v in vals if v is not None]
+            if vals:
+                avg_x.append(t)
+                avg_y.append(sum(vals) / len(vals))
+                
+                # Add average to export data
+                all_data.append({
+                    'threshold': t,
+                    'dataset1': 'Average',
+                    'dataset2': 'Average',
+                    'jaccard': sum(vals) / len(vals),
+                    'intersection': None,
+                    'union': None
+                })
+        
+        if avg_x:
+            ax.plot(avg_x, avg_y, marker='*', color='black', linewidth=3,
+                   markersize=12, linestyle='--', label='Average', alpha=0.7)
+        
+        ax.set_xlabel('Threshold')
+        ax.set_ylabel('Jaccard Index')
+        ax.set_ylim(0, 1)
+        ax.set_title(title)
+        ax.legend(loc='upper right', fontsize=9)
+        ax.grid(True, alpha=0.3)
+        ax.set_xticks(sorted_thresholds)
+        
+        plt.tight_layout()
+        
+        return fig, pd.DataFrame(all_data)
+
+    def plot_edge_rank_correlation_trend(
+        self,
+        align_func,
+        thresholds: List[int],
+        datasets: List[str],
+        title: str = "Edge Rank Correlation Across Thresholds",
+        nickname_map: Dict[str, str] = None,
+        figsize: Optional[Tuple[int, int]] = None
+    ) -> Tuple[plt.Figure, pd.DataFrame]:
+        """
+        Plot edge rank correlation trend across thresholds for all dataset pairs.
+        
+        Uses the union of edges and compares rankings by weight.
+        
+        Args:
+            align_func: Function to get aligned data at a threshold
+            thresholds: List of thresholds
+            datasets: List of dataset names
+            title: Plot title
+            nickname_map: Dict mapping dataset names to display names
+            figsize: Figure size tuple
+            
+        Returns:
+            Tuple of (matplotlib Figure, DataFrame with correlation data)
+        """
+        if not HAS_MATPLOTLIB:
+            return None, pd.DataFrame()
+        
+        if nickname_map is None:
+            nickname_map = {d: d for d in datasets}
+        
+        sorted_thresholds = sorted(thresholds)
+        
+        from itertools import combinations
+        from .metrics import ComparisonMetrics
+        metrics = ComparisonMetrics()
+        
+        pair_data = {}  # {(d1, d2): {threshold: correlation}}
+        all_data = []  # For DataFrame export
+        
+        pairs = list(combinations(datasets, 2))
+        for pair in pairs:
+            pair_data[pair] = {}
+        
+        for threshold in sorted_thresholds:
+            aligned = align_func(threshold)
+            if aligned.empty:
+                continue
+            
+            available = [d for d in datasets if d in aligned.columns]
+            
+            for d1, d2 in combinations(available, 2):
+                pair_key = (d1, d2) if (d1, d2) in pair_data else (d2, d1)
+                
+                # Get edge weights as Series
+                weights_a = aligned[d1].dropna()
+                weights_b = aligned[d2].dropna()
+                
+                # Calculate edge rank correlation
+                corr = metrics.calculate_edge_list_rank_correlation(weights_a, weights_b)
+                pair_data[pair_key][threshold] = corr
+                
+                # For export
+                n1 = nickname_map.get(d1, d1)
+                n2 = nickname_map.get(d2, d2)
+                all_data.append({
+                    'threshold': threshold,
+                    'dataset1': n1,
+                    'dataset2': n2,
+                    'edge_rank_correlation': corr
+                })
+        
+        # Create figure
+        figsize = figsize or (10, 6)
+        fig, ax = plt.subplots(figsize=figsize)
+        
+        colors = plt.cm.tab10.colors
+        markers = ['o', 's', '^', 'D', 'v', '<', '>']
+        
+        for idx, pair_key in enumerate(pairs):
+            d1, d2 = pair_key
+            n1, n2 = nickname_map.get(d1, d1), nickname_map.get(d2, d2)
+            
+            x_vals = []
+            y_vals = []
+            for t in sorted_thresholds:
+                if t in pair_data[pair_key]:
+                    x_vals.append(t)
+                    y_vals.append(pair_data[pair_key][t])
+            
+            if x_vals:
+                color = colors[idx % len(colors)]
+                marker = markers[idx % len(markers)]
+                ax.plot(x_vals, y_vals, marker=marker, color=color, linewidth=2,
+                       markersize=8, label=f'{n1} vs {n2}')
+        
+        # Calculate and plot average
+        avg_x = []
+        avg_y = []
+        for t in sorted_thresholds:
+            vals = [pair_data[pk].get(t) for pk in pairs if t in pair_data.get(pk, {})]
+            vals = [v for v in vals if v is not None]
+            if vals:
+                avg_x.append(t)
+                avg_y.append(sum(vals) / len(vals))
+                
+                all_data.append({
+                    'threshold': t,
+                    'dataset1': 'Average',
+                    'dataset2': 'Average',
+                    'edge_rank_correlation': sum(vals) / len(vals)
+                })
+        
+        if avg_x:
+            ax.plot(avg_x, avg_y, marker='*', color='black', linewidth=3,
+                   markersize=12, linestyle='--', label='Average', alpha=0.7)
+        
+        ax.set_xlabel('Threshold')
+        ax.set_ylabel('Edge Rank Correlation')
+        ax.set_ylim(0, 1)
+        ax.set_title(title)
+        ax.legend(loc='upper right', fontsize=9)
+        ax.grid(True, alpha=0.3)
+        ax.set_xticks(sorted_thresholds)
+        
+        plt.tight_layout()
+        
+        return fig, pd.DataFrame(all_data)
+
+    def plot_path_rank_correlation_trend(
+        self,
+        path_data_func,
+        thresholds: List[int],
+        datasets: List[str],
+        title: str = "Path Rank Correlation Across Thresholds",
+        nickname_map: Dict[str, str] = None,
+        figsize: Optional[Tuple[int, int]] = None
+    ) -> Tuple[plt.Figure, pd.DataFrame]:
+        """
+        Plot path rank correlation trend across thresholds for all dataset pairs.
+        
+        Uses the union of paths and compares rankings by min_weight.
+        
+        Args:
+            path_data_func: Function to get path data (min_weight) at a threshold
+            thresholds: List of thresholds
+            datasets: List of dataset names
+            title: Plot title
+            nickname_map: Dict mapping dataset names to display names
+            figsize: Figure size tuple
+            
+        Returns:
+            Tuple of (matplotlib Figure, DataFrame with correlation data)
+        """
+        if not HAS_MATPLOTLIB:
+            return None, pd.DataFrame()
+        
+        if nickname_map is None:
+            nickname_map = {d: d for d in datasets}
+        
+        sorted_thresholds = sorted(thresholds)
+        
+        from itertools import combinations
+        from .metrics import ComparisonMetrics
+        metrics = ComparisonMetrics()
+        
+        pair_data = {}  # {(d1, d2): {threshold: correlation}}
+        all_data = []  # For DataFrame export
+        
+        pairs = list(combinations(datasets, 2))
+        for pair in pairs:
+            pair_data[pair] = {}
+        
+        for threshold in sorted_thresholds:
+            try:
+                path_df = path_data_func(threshold)
+            except:
+                continue
+            
+            if path_df is None or path_df.empty:
+                continue
+            
+            available = [d for d in datasets if d in path_df.columns]
+            
+            for d1, d2 in combinations(available, 2):
+                pair_key = (d1, d2) if (d1, d2) in pair_data else (d2, d1)
+                
+                # Get path weights as Series
+                paths_a = path_df[d1].dropna()
+                paths_b = path_df[d2].dropna()
+                
+                # Calculate path rank correlation
+                corr = metrics.calculate_path_list_rank_correlation(paths_a, paths_b)
+                pair_data[pair_key][threshold] = corr
+                
+                # For export
+                n1 = nickname_map.get(d1, d1)
+                n2 = nickname_map.get(d2, d2)
+                all_data.append({
+                    'threshold': threshold,
+                    'dataset1': n1,
+                    'dataset2': n2,
+                    'path_rank_correlation': corr
+                })
+        
+        # Create figure
+        figsize = figsize or (10, 6)
+        fig, ax = plt.subplots(figsize=figsize)
+        
+        colors = plt.cm.tab10.colors
+        markers = ['o', 's', '^', 'D', 'v', '<', '>']
+        
+        for idx, pair_key in enumerate(pairs):
+            d1, d2 = pair_key
+            n1, n2 = nickname_map.get(d1, d1), nickname_map.get(d2, d2)
+            
+            x_vals = []
+            y_vals = []
+            for t in sorted_thresholds:
+                if t in pair_data[pair_key]:
+                    x_vals.append(t)
+                    y_vals.append(pair_data[pair_key][t])
+            
+            if x_vals:
+                color = colors[idx % len(colors)]
+                marker = markers[idx % len(markers)]
+                ax.plot(x_vals, y_vals, marker=marker, color=color, linewidth=2,
+                       markersize=8, label=f'{n1} vs {n2}')
+        
+        # Calculate and plot average
+        avg_x = []
+        avg_y = []
+        for t in sorted_thresholds:
+            vals = [pair_data[pk].get(t) for pk in pairs if t in pair_data.get(pk, {})]
+            vals = [v for v in vals if v is not None]
+            if vals:
+                avg_x.append(t)
+                avg_y.append(sum(vals) / len(vals))
+                
+                all_data.append({
+                    'threshold': t,
+                    'dataset1': 'Average',
+                    'dataset2': 'Average',
+                    'path_rank_correlation': sum(vals) / len(vals)
+                })
+        
+        if avg_x:
+            ax.plot(avg_x, avg_y, marker='*', color='black', linewidth=3,
+                   markersize=12, linestyle='--', label='Average', alpha=0.7)
+        
+        ax.set_xlabel('Threshold')
+        ax.set_ylabel('Path Rank Correlation')
+        ax.set_ylim(0, 1)
+        ax.set_title(title)
+        ax.legend(loc='upper right', fontsize=9)
+        ax.grid(True, alpha=0.3)
+        ax.set_xticks(sorted_thresholds)
+        
+        plt.tight_layout()
+        
+        return fig, pd.DataFrame(all_data)
+
+    def plot_conservation_across_thresholds_plotly(
+        self,
+        results: Dict[str, Dict[int, pd.DataFrame]],
+        thresholds: List[int],
+        align_func=None,
+        title: str = "Conservation of Edges and Paths Across Thresholds",
+        nickname_map: Dict[str, str] = None,
+        path_presence_matrix: pd.DataFrame = None
+    ) -> str:
+        """
+        Generate an interactive Plotly JSON for conservation analysis.
+        
+        Args:
+            results: Dictionary of results[dataset][threshold] -> DataFrame
+            thresholds: List of thresholds
+            align_func: Function to get aligned data for "Common" calculation
+            title: Plot title
+            nickname_map: Map of dataset names to display names
+            path_presence_matrix: Optional DataFrame with path presence info
+            
+        Returns:
+            JSON string of the Plotly figure
+        """
+        import plotly.graph_objects as go
+        from plotly.subplots import make_subplots
+        import json
+        
+        datasets = list(results.keys())
+        if nickname_map is None:
+            nickname_map = {d: d for d in datasets}
+            
+        sorted_thresholds = sorted(thresholds)
+        
+        # Create subplots
+        fig = make_subplots(
+            rows=2, cols=2,
+            subplot_titles=("<b>Edge Counts</b> (Linear)", "<b>Path Counts</b> (Linear)", 
+                           "<b>Edge Delta Rate</b> ((N<sub>t-1</sub> - N<sub>t</sub>) / N<sub>t-1</sub>)", "<b>Path Delta Rate</b> ((N<sub>t-1</sub> - N<sub>t</sub>) / N<sub>t-1</sub>)"),
+            vertical_spacing=0.15,
+            horizontal_spacing=0.1,
+            shared_xaxes=True
+        )
+        
+        # Colors and Markers
+        colors = [
+            '#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', 
+            '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf'
+        ]
+        markers = ['circle', 'square', 'diamond', 'triangle-up', 'triangle-down', 'cross', 'x']
+        
+        # Track totals for Overall Rate calculation
+        total_edge_counts = [0] * len(sorted_thresholds)
+        total_path_counts = [0] * len(sorted_thresholds)
+
+        for i, dataset in enumerate(datasets):
+            nick = nickname_map.get(dataset, dataset)
+            color = colors[i % len(colors)]
+            marker_symbol = markers[i % len(markers)]
+            
+            edge_counts = []
+            path_counts = []
+            
+            for idx, t in enumerate(sorted_thresholds):
+                df = results.get(dataset, {}).get(t, pd.DataFrame())
+                
+                # Edge Count
+                e_count = len(df) if not df.empty else 0
+                edge_counts.append(e_count)
+                total_edge_counts[idx] += e_count
+                
+                # Path Count
+                p_count = 0
+                if path_presence_matrix is not None and not path_presence_matrix.empty:
+                    # Use path presence matrix if available
+                    # Try original name first, then sanitized name (replace : and . with _)
+                    col_orig = f"{dataset}_t{t}"
+                    dataset_safe = dataset.replace(':', '_').replace('.', '_')
+                    col_safe = f"{dataset_safe}_t{t}"
+                    
+                    col_name = None
+                    if col_orig in path_presence_matrix.columns:
+                        col_name = col_orig
+                    elif col_safe in path_presence_matrix.columns:
+                        col_name = col_safe
+                    
+                    if col_name is not None:
+                        vals = path_presence_matrix[col_name]
+                        if vals.dtype == object:
+                            # Handle both string 'True' and boolean True
+                            p_count = int(((vals == 'True') | (vals == True)).sum())
+                        elif vals.dtype == bool:
+                            p_count = int(vals.sum())
+                        else:
+                            p_count = int((vals > 0).sum())
+                    else:
+                        # Fallback if column missing but matrix exists
+                        if not df.empty and 'has_valid_path' in df.columns:
+                            p_count = int(df['has_valid_path'].sum())
+                        else:
+                            p_count = len(df) if not df.empty else 0
+                else:
+                    # Fallback
+                    if not df.empty and 'has_valid_path' in df.columns:
+                        p_count = int(df['has_valid_path'].sum())
+                    else:
+                        p_count = len(df) if not df.empty else 0
+                
+                path_counts.append(p_count)
+                total_path_counts[idx] += p_count
+            
+            # Calculate delta rates: (N_{t-1} - N_t) / N_{t-1}
+            edge_rates = [None]
+            path_rates = [None]
+            for j in range(1, len(sorted_thresholds)):
+                prev_e = edge_counts[j-1]
+                curr_e = edge_counts[j]
+                edge_rates.append(((prev_e - curr_e) / prev_e) if prev_e > 0 else 0)
+                
+                prev_p = path_counts[j-1]
+                curr_p = path_counts[j]
+                path_rates.append(((prev_p - curr_p) / prev_p) if prev_p > 0 else 0)
+            
+            # Common hover template
+            hover_template = f"<b>{nick}</b>: %{{y}}<extra></extra>"
+            rate_hover_template = f"<b>{nick}</b>: %{{y:.3f}}<extra></extra>"
+
+            # Add traces
+            # 1. Edge Counts
+            fig.add_trace(
+                go.Scatter(x=sorted_thresholds, y=edge_counts, mode='lines+markers',
+                          name=f"{nick}", line=dict(color=color, width=2),
+                          marker=dict(symbol=marker_symbol, size=8),
+                          opacity=0.6,
+                          legendgroup=nick, showlegend=True,
+                          hovertemplate=hover_template),
+                row=1, col=1
+            )
+            
+            # 2. Path Counts
+            fig.add_trace(
+                go.Scatter(x=sorted_thresholds, y=path_counts, mode='lines+markers',
+                          name=f"{nick} (Paths)", line=dict(color=color, width=2, dash='dash'),
+                          marker=dict(symbol=marker_symbol, size=8),
+                          opacity=0.6,
+                          legendgroup=nick, showlegend=False,
+                          hovertemplate=hover_template),
+                row=1, col=2
+            )
+            
+            # 3. Edge Rates
+            fig.add_trace(
+                go.Scatter(x=sorted_thresholds, y=edge_rates, mode='lines+markers',
+                          name=f"{nick} (Edge Rate)", line=dict(color=color, width=2),
+                          marker=dict(symbol=marker_symbol, size=8),
+                          opacity=0.6,
+                          legendgroup=nick, showlegend=False,
+                          hovertemplate=rate_hover_template),
+                row=2, col=1
+            )
+            
+            # 4. Path Rates
+            fig.add_trace(
+                go.Scatter(x=sorted_thresholds, y=path_rates, mode='lines+markers',
+                          name=f"{nick} (Path Rate)", line=dict(color=color, width=2, dash='dash'),
+                          marker=dict(symbol=marker_symbol, size=8),
+                          opacity=0.6,
+                          legendgroup=nick, showlegend=False,
+                          hovertemplate=rate_hover_template),
+                row=2, col=2
+            )
+
+        # --- Overall Delta Rates ---
+        overall_edge_rates = [None]
+        overall_path_rates = [None]
+        for j in range(1, len(sorted_thresholds)):
+            prev_e = total_edge_counts[j-1]
+            curr_e = total_edge_counts[j]
+            overall_edge_rates.append(((prev_e - curr_e) / prev_e) if prev_e > 0 else 0)
+            
+            prev_p = total_path_counts[j-1]
+            curr_p = total_path_counts[j]
+            overall_path_rates.append(((prev_p - curr_p) / prev_p) if prev_p > 0 else 0)
+            
+        # Add Overall Edge Rate Trace
+        fig.add_trace(
+            go.Scatter(x=sorted_thresholds, y=overall_edge_rates, mode='lines+markers',
+                      name="Overall", line=dict(color='black', width=3, dash='solid'),
+                      marker=dict(symbol='star', size=10, color='black'),
+                      opacity=0.3,
+                      legendgroup="Overall", showlegend=True,
+                      hovertemplate="<b>Overall</b>: %{y:.3f}<extra></extra>"),
+            row=2, col=1
+        )
+        
+        # Add Overall Path Rate Trace
+        fig.add_trace(
+            go.Scatter(x=sorted_thresholds, y=overall_path_rates, mode='lines+markers',
+                      name="Overall", line=dict(color='black', width=3, dash='dash'),
+                      marker=dict(symbol='star', size=10, color='black'),
+                      opacity=0.3,
+                      legendgroup="Overall", showlegend=False,
+                      hovertemplate="<b>Overall</b>: %{y:.3f}<extra></extra>"),
+            row=2, col=2
+        )
+
+        # --- Common Counts ---
+        common_edge_counts = []
+        common_path_counts = []
+        
+        for t in sorted_thresholds:
+            # Common Edges
+            c_edge = 0
+            if align_func:
+                try:
+                    aligned = align_func(t)
+                    if not aligned.empty:
+                        available_ds = [d for d in datasets if d in aligned.columns]
+                        if available_ds:
+                            is_common = (aligned[available_ds] > 0).all(axis=1)
+                            c_edge = int(is_common.sum())
+                except:
+                    pass
+            common_edge_counts.append(c_edge)
+            
+            # Common Paths
+            if path_presence_matrix is not None and not path_presence_matrix.empty:
+                # Use path presence matrix
+                # Build column list with sanitized names
+                available_cols = []
+                for d in datasets:
+                    col_orig = f"{d}_t{t}"
+                    d_safe = d.replace(':', '_').replace('.', '_')
+                    col_safe = f"{d_safe}_t{t}"
+                    
+                    if col_orig in path_presence_matrix.columns:
+                        available_cols.append(col_orig)
+                    elif col_safe in path_presence_matrix.columns:
+                        available_cols.append(col_safe)
+                
+                if len(available_cols) == len(datasets):
+                    is_common = pd.Series(True, index=path_presence_matrix.index)
+                    for col in available_cols:
+                        vals = path_presence_matrix[col]
+                        if vals.dtype == object:
+                            # Handle both string 'True' and boolean True
+                            is_common &= ((vals == 'True') | (vals == True))
+                        elif vals.dtype == bool:
+                            is_common &= vals
+                        else:
+                            is_common &= (vals > 0)
+                    common_path_counts.append(int(is_common.sum()))
+                else:
+                    common_path_counts.append(0)
+            else:
+                # Intersection of edges that are valid paths in all datasets
+                path_sets = []
+                for dataset in datasets:
+                    df = results.get(dataset, {}).get(t, pd.DataFrame())
+                    if not df.empty:
+                        # Filter for valid paths
+                        if 'has_valid_path' in df.columns:
+                            valid_paths = df[df['has_valid_path'] == True]
+                        else:
+                            # If column missing, assume all are valid (e.g. path mode or base threshold)
+                            valid_paths = df
+                        
+                        if not valid_paths.empty:
+                            # Determine columns to use (prefer standardized labels)
+                            pre_col = 'std_label_pre' if 'std_label_pre' in valid_paths.columns else 'type_pre'
+                            post_col = 'std_label_post' if 'std_label_post' in valid_paths.columns else 'type_post'
+                            
+                            if pre_col in valid_paths.columns and post_col in valid_paths.columns:
+                                # Create set of edges (ensure string and strip whitespace)
+                                edges = set()
+                                for _, row in valid_paths.iterrows():
+                                    p = str(row[pre_col]).strip()
+                                    q = str(row[post_col]).strip()
+                                    if p and q:  # Skip empty
+                                        edges.add((p, q))
+                                path_sets.append(edges)
+                            else:
+                                path_sets.append(set())
+                        else:
+                            path_sets.append(set())
+                    else:
+                        path_sets.append(set())
+                
+                if path_sets:
+                    common_paths = set.intersection(*path_sets)
+                    common_path_counts.append(len(common_paths))
+                else:
+                    common_path_counts.append(0)
+            
+        # Add Common Edge Counts Trace
+        fig.add_trace(
+            go.Scatter(x=sorted_thresholds, y=common_edge_counts, mode='lines+markers',
+                      name="Common", line=dict(color='black', width=3, dash='dot'),
+                      marker=dict(symbol='star', size=12, color='black'),
+                      opacity=0.3,
+                      legendgroup="Common", showlegend=True,
+                      hovertemplate="<b>Common (Edges)</b>: %{y}<extra></extra>"),
+            row=1, col=1
+        )
+        
+        # Add Common Path Counts Trace
+        fig.add_trace(
+            go.Scatter(x=sorted_thresholds, y=common_path_counts, mode='lines+markers',
+                      name="Common", line=dict(color='black', width=3, dash='dot'),
+                      marker=dict(symbol='star', size=12, color='black'),
+                      opacity=0.3,
+                      legendgroup="Common", showlegend=False,
+                      hovertemplate="<b>Common (Paths)</b>: %{y}<extra></extra>"),
+            row=1, col=2
+        )
+
+        # Update layout
+        fig.update_layout(
+            title=dict(text=title, x=0.5, xanchor='center', font=dict(size=20)),
+            height=900,
+            width=None,  # Responsive
+            template="plotly_white",
+            legend=dict(
+                orientation="v", 
+                yanchor="top", y=1, 
+                xanchor="left", x=1.02,
+                title=dict(text="Datasets"),
+                bordercolor="Black",
+                borderwidth=1
+            ),
+            margin=dict(l=60, r=150, t=80, b=60),
+            hovermode="x unified"
+        )
+        
+        # Update axes
+        fig.update_xaxes(title_text="Threshold", tickvals=sorted_thresholds, row=2, col=1)
+        fig.update_xaxes(title_text="Threshold", tickvals=sorted_thresholds, row=2, col=2)
+        # Hide x-labels for top row since shared_xaxes=True handles it, but we need to ensure ticks align
+        fig.update_xaxes(tickvals=sorted_thresholds, row=1, col=1)
+        fig.update_xaxes(tickvals=sorted_thresholds, row=1, col=2)
+        
+        fig.update_yaxes(title_text="Count", row=1, col=1, gridcolor='lightgray')
+        fig.update_yaxes(title_text="Count", row=1, col=2, gridcolor='lightgray')
+        fig.update_yaxes(title_text="Delta Rate", row=2, col=1, gridcolor='lightgray')
+        fig.update_yaxes(title_text="Delta Rate", row=2, col=2, gridcolor='lightgray')
+        
+        return json.dumps(fig.to_dict(), cls=None)
 
     def _generate_vis_summary_pdf(self, output_dir: str):
         """

@@ -1,4 +1,5 @@
 from collections import defaultdict, deque
+import pandas as pd
 
 class FastGraph:
     """
@@ -126,6 +127,155 @@ class FastGraph:
             # Ensure target node exists in adj
             if v not in self.adj:
                 self.adj[v] = {}
+
+    def aggregate_by_label(self, label_map: dict, return_edge_df: bool = False):
+        """
+        Aggregate graph nodes by label mapping (e.g., bodyId -> type).
+        
+        Creates a new graph where nodes are labels (e.g., neuron types) and
+        edge weights are the sum of all original edges between nodes with
+        those labels.
+        
+        Args:
+            label_map: Dictionary mapping original node IDs to labels.
+                       e.g., {bodyId1: 'type_A', bodyId2: 'type_A', bodyId3: 'type_B'}
+            return_edge_df: If True, also return a DataFrame with edge details
+                           
+        Returns:
+            FastGraph: New graph with aggregated edges by label
+            (optional) pd.DataFrame: Edge data with columns [label_pre, label_post, weight]
+        
+        Example:
+            >>> G = FastGraph()
+            >>> G.add_edge(1, 10, 5)  # bodyId 1 -> 10, weight 5
+            >>> G.add_edge(2, 10, 3)  # bodyId 2 -> 10, weight 3
+            >>> label_map = {1: 'A', 2: 'A', 10: 'X'}
+            >>> G_type = G.aggregate_by_label(label_map)
+            >>> # G_type now has edge A -> X with weight 8
+        """
+        aggregated = FastGraph()
+        edge_data = []
+        
+        # Aggregate edges by label pairs
+        label_weights = {}  # (label_pre, label_post) -> total_weight
+        
+        for u in self.adj:
+            label_u = label_map.get(u)
+            if label_u is None:
+                continue  # Skip nodes without labels
+                
+            for v, w in self.adj[u].items():
+                label_v = label_map.get(v)
+                if label_v is None:
+                    continue  # Skip nodes without labels
+                
+                key = (label_u, label_v)
+                if key not in label_weights:
+                    label_weights[key] = 0.0
+                label_weights[key] += w
+        
+        # Build aggregated graph
+        for (label_u, label_v), total_w in label_weights.items():
+            aggregated.add_edge(label_u, label_v, total_w)
+            if return_edge_df:
+                edge_data.append({
+                    'type_pre': label_u,
+                    'type_post': label_v,
+                    'weight': total_w
+                })
+        
+        if return_edge_df:
+            import pandas as pd
+            return aggregated, pd.DataFrame(edge_data)
+        return aggregated
+
+    def to_dataframe(self):
+        """
+        Convert graph edges to a pandas DataFrame.
+        
+        Returns:
+            pd.DataFrame with columns [source, target, weight]
+        """
+        import pandas as pd
+        edges = []
+        for u in self.adj:
+            for v, w in self.adj[u].items():
+                edges.append({'source': u, 'target': v, 'weight': w})
+        return pd.DataFrame(edges)
+
+    def filter_by_weight(self, min_weight: float):
+        """
+        Create a new graph with only edges meeting minimum weight threshold.
+        
+        Args:
+            min_weight: Minimum edge weight to include
+            
+        Returns:
+            FastGraph: New graph with filtered edges
+        """
+        filtered = FastGraph()
+        for u in self.adj:
+            for v, w in self.adj[u].items():
+                if w >= min_weight:
+                    filtered.add_edge(u, v, w)
+        return filtered
+
+    @classmethod
+    def from_dataframe_bodyid(cls, df, pre_col='bodyId_pre', post_col='bodyId_post', 
+                               weight_col='weight', type_pre_col='type_pre', 
+                               type_post_col='type_post'):
+        """
+        Build a bodyId-level graph from DataFrame and extract type mapping.
+        
+        Args:
+            df: DataFrame with bodyId-level connection data
+            pre_col: Column name for presynaptic bodyId
+            post_col: Column name for postsynaptic bodyId
+            weight_col: Column name for edge weight
+            type_pre_col: Column name for presynaptic type
+            type_post_col: Column name for postsynaptic type
+            
+        Returns:
+            tuple: (FastGraph, dict) - bodyId graph and bodyId->type mapping
+        """
+        graph = cls()
+        label_map = {}
+        
+        # Check if Polars
+        is_polars = False
+        try:
+            import polars as pl
+            if isinstance(df, pl.DataFrame):
+                is_polars = True
+        except ImportError:
+            pass
+        
+        if is_polars:
+            for row in df.iter_rows(named=True):
+                u = row[pre_col]
+                v = row[post_col]
+                w = row[weight_col]
+                graph.add_edge(u, v, w)
+                
+                # Build label map
+                if type_pre_col in row and row[type_pre_col]:
+                    label_map[u] = row[type_pre_col]
+                if type_post_col in row and row[type_post_col]:
+                    label_map[v] = row[type_post_col]
+        else:
+            for _, row in df.iterrows():
+                u = row[pre_col]
+                v = row[post_col]
+                w = row[weight_col]
+                graph.add_edge(u, v, w)
+                
+                # Build label map
+                if type_pre_col in df.columns and pd.notna(row.get(type_pre_col)):
+                    label_map[u] = row[type_pre_col]
+                if type_post_col in df.columns and pd.notna(row.get(type_post_col)):
+                    label_map[v] = row[type_post_col]
+        
+        return graph, label_map
 
     def all_simple_paths(self, source, target, cutoff):
         """

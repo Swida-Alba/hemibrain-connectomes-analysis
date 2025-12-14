@@ -3,7 +3,7 @@ import json
 import numpy as np
 import pandas as pd
 
-def generate_interactive_heatmap(matrices_dict, filename, title='', showfig=True, fontsize=12):
+def generate_interactive_heatmap(matrices_dict, filename, title='', showfig=True, fontsize=12, verbose=True):
     """
     Create interactive heatmap for comparison metrics.
     
@@ -19,6 +19,8 @@ def generate_interactive_heatmap(matrices_dict, filename, title='', showfig=True
         Whether to open in browser.
     fontsize : int
         Default font size.
+    verbose : bool
+        Whether to print progress messages.
     """
     
     available_metrics = list(matrices_dict.keys())
@@ -44,7 +46,8 @@ def generate_interactive_heatmap(matrices_dict, filename, title='', showfig=True
     is_large = first_df.shape[0] > 100 or first_df.shape[1] > 100
     
     # Clustering logic
-    print("  Computing hierarchical clustering...")
+    if verbose:
+        print("  Computing hierarchical clustering...")
     from scipy.cluster.hierarchy import linkage, leaves_list
     from scipy.spatial.distance import pdist
     

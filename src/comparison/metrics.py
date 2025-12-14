@@ -250,7 +250,8 @@ class ComparisonMetrics:
         aligned_data: pd.DataFrame,
         datasets: List[str],
         threshold: int = 0,
-        include_advanced_metrics: bool = True
+        include_advanced_metrics: bool = True,
+        path_data: Optional[pd.DataFrame] = None
     ) -> pd.DataFrame:
         """
         Calculate pairwise similarity metrics for all dataset combinations.
@@ -263,6 +264,7 @@ class ComparisonMetrics:
             datasets: List of dataset column names
             threshold: Minimum weight to consider edge present
             include_advanced_metrics: Whether to compute SVD, GED, kernel metrics (slower)
+            path_data: Optional DataFrame with path min_weights per dataset (for path rank correlation)
             
         Returns:
             DataFrame with similarity metrics per dataset pair
@@ -314,7 +316,7 @@ class ComparisonMetrics:
             # ---------------------------------------------------------------
             # TOPOLOGY METRICS (binary edge presence, no weights):
             #   - jaccard_similarity (already computed above)
-            #   - ged_similarity (graph edit distance)
+            #   - edge_rank_correlation (sorted edge list rank correlation)
             #   - kernel_similarity (WL graph kernel)
             #
             # WEIGHT-SENSITIVE METRICS (uses normalized weights):
@@ -323,13 +325,19 @@ class ComparisonMetrics:
             #   - rv_coefficient (multivariate matrix similarity)
             # ---------------------------------------------------------------
             if include_advanced_metrics:
-                # TOPOLOGY: Graph edit distance similarity
-                ged_sim = self.calculate_graph_edit_distance_similarity(weights_1, weights_2)
-                row['ged_similarity'] = ged_sim
+                # TOPOLOGY: Edge list rank correlation (union of edges)
+                edge_rank_sim = self.calculate_edge_list_rank_correlation(weights_1, weights_2)
+                row['edge_rank_correlation'] = edge_rank_sim
                 
-                # TOPOLOGY: Weisfeiler-Lehman kernel similarity
-                wl_sim = self.calculate_graph_kernel_similarity(weights_1, weights_2, kernel_type='wl')
-                row['kernel_similarity'] = wl_sim
+                # PATH-LEVEL: Path list rank correlation (union of paths)
+                # Only compute if path_data is provided
+                if path_data is not None and d1 in path_data.columns and d2 in path_data.columns:
+                    paths_1 = path_data[d1].dropna()
+                    paths_2 = path_data[d2].dropna()
+                    path_rank_sim = self.calculate_path_list_rank_correlation(paths_1, paths_2)
+                    row['path_rank_correlation'] = path_rank_sim
+                else:
+                    row['path_rank_correlation'] = np.nan
                 
                 # WEIGHT-SENSITIVE: Spearman rank correlation on SHARED edges only
                 # Uses shared edges (not union) to avoid low coefficients from many 0s
@@ -352,7 +360,8 @@ class ComparisonMetrics:
         datasets: List[str],
         thresholds: List[int],
         label_mapper: Optional[Any] = None,
-        show_progress: bool = True
+        show_progress: bool = True,
+        path_data_func: Optional[callable] = None
     ) -> pd.DataFrame:
         """
         Calculate similarity metrics across all thresholds.
@@ -363,6 +372,8 @@ class ComparisonMetrics:
             thresholds: List of thresholds to analyze
             label_mapper: Optional LabelMapper for standardizing labels
             show_progress: Whether to show progress bar (default True)
+            path_data_func: Optional callable(threshold) -> DataFrame that returns
+                           aligned path data for computing path rank correlation
             
         Returns:
             DataFrame with similarity metrics per threshold per dataset pair
@@ -392,9 +403,17 @@ class ComparisonMetrics:
             if aligned.empty:
                 continue
             
+            # Get path data if available
+            path_data = None
+            if path_data_func is not None:
+                try:
+                    path_data = path_data_func(threshold)
+                except Exception:
+                    pass  # Path data not available
+            
             # Calculate pairwise similarities (include advanced metrics for visualization)
             similarities = self.calculate_all_pairwise_similarities(
-                aligned, datasets, threshold=1, include_advanced_metrics=True
+                aligned, datasets, threshold=1, include_advanced_metrics=True, path_data=path_data
             )
             similarities['threshold'] = threshold
             all_rows.append(similarities)
@@ -1210,7 +1229,11 @@ class ComparisonMetrics:
         Uses SHARED edges (edges present in both graphs) to avoid the problem
         where many 0s in the union dilute the correlation coefficient.
         
-        Formula: (correlation + 1) / 2, mapping [-1,1] to [0,1]
+        Returns raw Spearman correlation in [-1, 1] range:
+        - 1.0 = perfect positive correlation (same ranking)
+        - 0.0 = no correlation
+        - -1.0 = perfect negative correlation (inverse ranking)
+        - NaN = undefined (fewer than 3 shared edges)
         
         This metric answers: "For edges that exist in both graphs, are the
         strongest edges in graph A also the strongest in graph B?"
@@ -1228,7 +1251,7 @@ class ComparisonMetrics:
             use_normalized: If True, normalize weights to proportions (default: True)
             
         Returns:
-            Rank correlation similarity (0 to 1)
+            Rank correlation in [-1, 1], or NaN if undefined
         """
         from scipy.stats import spearmanr
         
@@ -1240,7 +1263,7 @@ class ComparisonMetrics:
                            if weights_a.get(e, 0) > 0 and weights_b.get(e, 0) > 0]
             
             if len(shared_edges) < 3:  # Need at least 3 points for meaningful correlation
-                return 0.5  # Undefined - return neutral
+                return np.nan  # Undefined - return NaN
             
             a_vals = pd.Series([weights_a[e] for e in shared_edges])
             b_vals = pd.Series([weights_b[e] for e in shared_edges])
@@ -1260,14 +1283,14 @@ class ComparisonMetrics:
                 b_vals = b_vals / total_b
         
         if len(a_vals) < 2 or a_vals.std() == 0 or b_vals.std() == 0:
-            return 0.5  # Undefined
+            return np.nan  # Undefined
         
         corr, _ = spearmanr(a_vals, b_vals)
         
         if np.isnan(corr):
-            return 0.5
+            return np.nan
         
-        return (corr + 1.0) / 2.0  # Map [-1, 1] to [0, 1]
+        return corr  # Return raw correlation in [-1, 1]
     
     def calculate_rv_coefficient(
         self,
@@ -1510,114 +1533,102 @@ class ComparisonMetrics:
         
         return adj_a, adj_b
     
-    def calculate_graph_edit_distance_similarity(
+    def calculate_edge_list_rank_correlation(
         self,
         weights_a: pd.Series,
-        weights_b: pd.Series,
-        timeout: float = 5.0,
-        use_approximation: bool = True
+        weights_b: pd.Series
     ) -> float:
         """
-        Calculate graph similarity based on graph edit distance.
+        Calculate rank correlation based on sorted edge lists (uses UNION).
         
-        Uses networkx for graph edit distance computation.
-        Returns a normalized similarity score in [0, 1].
+        This metric compares the ranking of edges by weight between two graphs.
+        Edges are sorted by weight, and Spearman rank correlation is computed
+        on the union of edges (with 0 for missing edges).
+        
+        Inspired by the homolog finder's profile comparator approach.
         
         Args:
-            weights_a: Series of weights indexed by edge
-            weights_b: Series of weights indexed by edge  
-            timeout: Maximum time in seconds for GED computation
-            use_approximation: Use approximate GED for large graphs (default: True)
+            weights_a: Series of weights indexed by edge (e.g., "typeA -> typeB")
+            weights_b: Series of weights indexed by edge
             
         Returns:
-            Similarity score (1 - normalized_edit_distance) in [0, 1]
+            Normalized similarity score in [0, 1], where 1 = identical edge rankings
         """
-        try:
-            import networkx as nx
-        except ImportError:
-            # networkx not available, return NaN
-            return np.nan
+        from scipy.stats import spearmanr
         
-        # Build graphs
-        G_a = self._build_networkx_graph(weights_a)
-        G_b = self._build_networkx_graph(weights_b)
+        # Get union of all edges
+        all_edges = sorted(set(weights_a.index) | set(weights_b.index))
         
-        if G_a.number_of_nodes() == 0 and G_b.number_of_nodes() == 0:
-            return 1.0  # Both empty = identical
+        if len(all_edges) < 3:
+            return 0.5  # Insufficient data for correlation
         
-        if G_a.number_of_nodes() == 0 or G_b.number_of_nodes() == 0:
-            return 0.0  # One empty = completely different
+        # Build weight vectors (0 for missing edges)
+        vec_a = np.array([weights_a.get(e, 0) for e in all_edges], dtype=float)
+        vec_b = np.array([weights_b.get(e, 0) for e in all_edges], dtype=float)
         
-        # For large graphs, use approximation
-        total_nodes = G_a.number_of_nodes() + G_b.number_of_nodes()
-        total_edges = G_a.number_of_edges() + G_b.number_of_edges()
+        # Handle edge cases
+        if vec_a.std() == 0 and vec_b.std() == 0:
+            return 1.0  # Both constant = identical
+        if vec_a.std() == 0 or vec_b.std() == 0:
+            return 0.5  # One constant = undefined
         
-        # Disable GED for very large graphs (too computationally expensive)
-        # Use higher threshold of 200 nodes to allow more comparisons
-        if total_nodes > 200:
-            return np.nan  # Skip GED for large graphs
+        # Compute Spearman rank correlation
+        corr, _ = spearmanr(vec_a, vec_b)
         
-        try:
-            if use_approximation or total_nodes > 20 or total_edges > 30:
-                # Use approximate GED (faster)
-                ged = nx.graph_edit_distance(
-                    G_a, G_b,
-                    node_match=lambda n1, n2: n1.get('label') == n2.get('label'),
-                    edge_match=lambda e1, e2: abs(e1.get('weight', 1) - e2.get('weight', 1)) < 0.1,
-                    timeout=timeout
-                )
-            else:
-                # Exact GED for small graphs
-                ged = nx.graph_edit_distance(
-                    G_a, G_b,
-                    node_match=lambda n1, n2: n1.get('label') == n2.get('label'),
-                    edge_match=lambda e1, e2: abs(e1.get('weight', 1) - e2.get('weight', 1)) < 0.1
-                )
-        except Exception:
-            # Timeout or error - return NaN
-            return np.nan
+        if np.isnan(corr):
+            return 0.5
         
-        if ged is None:
-            return np.nan
-        
-        # Normalize by maximum possible distance
-        # Max distance = sum of all nodes + edges in both graphs
-        max_distance = total_nodes + total_edges
-        
-        if max_distance == 0:
-            return 1.0
-        
-        # Similarity = 1 - normalized distance
-        similarity = 1.0 - (ged / max_distance)
-        return max(0.0, min(1.0, similarity))  # Clamp to [0, 1]
+        # Normalize from [-1, 1] to [0, 1]
+        return (corr + 1.0) / 2.0
     
-    def _build_networkx_graph(
+    def calculate_path_list_rank_correlation(
         self,
-        weights: pd.Series
-    ) -> 'nx.DiGraph': # type: ignore
+        paths_a: pd.Series,
+        paths_b: pd.Series
+    ) -> float:
         """
-        Build networkx directed graph from edge weight series.
+        Calculate rank correlation based on sorted path lists (uses UNION).
+        
+        This metric compares the ranking of paths by min_weight between two graphs.
+        Paths are sorted by weight, and Spearman rank correlation is computed
+        on the union of paths (with 0 for missing paths).
+        
+        Similar to edge_list_rank_correlation but operates on multi-hop paths
+        like "aMe12->KCg-d->PPL103" instead of single edges.
         
         Args:
-            weights: Series indexed by "source -> target" strings
+            paths_a: Series of min_weights indexed by path string (e.g., "A->B->C")
+            paths_b: Series of min_weights indexed by path string
             
         Returns:
-            networkx DiGraph
+            Normalized similarity score in [0, 1], where 1 = identical path rankings
         """
-        import networkx as nx
+        from scipy.stats import spearmanr
         
-        G = nx.DiGraph()
+        # Get union of all paths
+        all_paths = sorted(set(paths_a.index) | set(paths_b.index))
         
-        for edge, weight in weights.items():
-            if ' -> ' in str(edge):
-                parts = str(edge).split(' -> ')
-                if len(parts) == 2:
-                    src, tgt = parts
-                    G.add_node(src, label=src)
-                    G.add_node(tgt, label=tgt)
-                    G.add_edge(src, tgt, weight=weight)
+        if len(all_paths) < 3:
+            return 0.5  # Insufficient data for correlation
         
-        return G
+        # Build weight vectors (0 for missing paths)
+        vec_a = np.array([paths_a.get(p, 0) for p in all_paths], dtype=float)
+        vec_b = np.array([paths_b.get(p, 0) for p in all_paths], dtype=float)
+        
+        # Handle edge cases
+        if vec_a.std() == 0 and vec_b.std() == 0:
+            return 1.0  # Both constant = identical
+        if vec_a.std() == 0 or vec_b.std() == 0:
+            return 0.5  # One constant = undefined
+        
+        # Compute Spearman rank correlation
+        corr, _ = spearmanr(vec_a, vec_b)
+        
+        if np.isnan(corr):
+            return 0.5
+        
+        # Normalize from [-1, 1] to [0, 1]
+        return (corr + 1.0) / 2.0
     
     def calculate_graph_kernel_similarity(
         self,
