@@ -91,12 +91,14 @@ vp.visualize()  # Automatically detects matrix format
 ### Core:
 - numpy>=1.20.0,<2.0.0 (constrained for pandas compatibility)
 - pandas>=1.3.0,<2.0.0
-- networkx>=2.6.0
+- polars>=1.0.0 (efficient DataFrames)
 - plotly>=5.0.0
 - scipy>=1.7.0
 - openpyxl>=3.0.0
 
 **Important:** numpy is constrained to <2.0.0 for binary compatibility with pandas 1.x.
+
+**Note:** NetworkX is no longer required. Graph operations use the built-in `FastGraph` module for improved performance and reduced dependencies.
 
 ### Optional:
 - PyQt5>=5.15.0 (for fast file dialogs)

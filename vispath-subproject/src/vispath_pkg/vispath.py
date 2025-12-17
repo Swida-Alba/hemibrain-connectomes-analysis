@@ -15,7 +15,7 @@ Date: 2025-10-27
 import pandas as pd
 import numpy as np
 import polars as pl
-import networkx as nx
+from .fast_graph_core import FastGraph
 import os
 import json
 import webbrowser
@@ -1971,8 +1971,8 @@ class VisualizePath:
 
         self._vprint(f"Created {len(conn_df)} unique connections from pathways")
         
-        # Build NetworkX graph
-        G = nx.DiGraph()
+        # Build graph using FastGraph (lightweight NetworkX replacement)
+        G = FastGraph()
         
         # Add edges with attributes - only add attributes that exist
         for _, row in conn_df.iterrows():
@@ -3227,16 +3227,16 @@ class VisualizePath:
              top_edges = edges[:self.edgeN_limit]
              
              # Create new graph with top edges
-             G_sub = nx.DiGraph()
+             G_sub = FastGraph()
              
              # Add edges and their nodes
              for u, v, data in top_edges:
                  G_sub.add_edge(u, v, **data)
                  # Copy node attributes
-                 if u in self.G_network.nodes:
-                     G_sub.nodes[u].update(self.G_network.nodes[u])
-                 if v in self.G_network.nodes:
-                     G_sub.nodes[v].update(self.G_network.nodes[v])
+                 if u in self.G_network._node:
+                     G_sub._node[u].update(self.G_network._node[u])
+                 if v in self.G_network._node:
+                     G_sub._node[v].update(self.G_network._node[v])
              
              G_to_plot = G_sub
              self._vprint(f'  Kept {G_to_plot.number_of_edges()} edges')
@@ -3281,8 +3281,8 @@ class VisualizePath:
         self._vprint("\nGenerating empty network HTML template...")
         self._vprint(f"  Filename: {self.base_filename}_network.html")
         
-        # Create an empty NetworkX graph
-        G = nx.DiGraph()
+        # Create an empty FastGraph
+        G = FastGraph()
         
         output_path = os.path.join(self.output_folder, self.base_filename + '_network.html')
         
@@ -3908,7 +3908,7 @@ class VisualizePath:
         </div>
         
         <div class="info">
-            <strong>{len(G.nodes())}</strong> nodes, <strong>{len(G.edges())}</strong> connections | 
+            <strong>{G.number_of_nodes()}</strong> nodes, <strong>{G.number_of_edges()}</strong> connections | 
             Press 'H' to hide nodes, 'E' to hide edges, 'L' to toggle label position | Right-click to hide | 
             <strong>Shift+Click</strong> for multi-selection | Double-click to highlight
         </div>

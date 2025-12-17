@@ -26,7 +26,7 @@ Requires-Dist: numpy<2.0.0,>=1.20.0
 Requires-Dist: pandas<2.0.0,>=1.3.0
 Requires-Dist: scipy>=1.7.0
 Requires-Dist: plotly>=5.0.0
-Requires-Dist: networkx>=2.6.0
+Requires-Dist: polars>=1.0.0
 Requires-Dist: openpyxl>=3.0.0
 Provides-Extra: gui
 Requires-Dist: PyQt5>=5.15.0; extra == "gui"
@@ -100,8 +100,25 @@ vp = VisualizePath(
     showfig=True
 )
 
-# Generate all visualizations
-vp.visualize_all()
+# Generate all visualizations (heatmap + Sankey + network)
+vp.visualize()
+
+# Or generate only specific visualizations
+vp.visualize(plot_heatmap=True, plot_Sankey=False, plot_network=True)
+
+# Connection matrix input example
+import pandas as pd
+import numpy as np
+
+# Create a connection matrix
+matrix = pd.DataFrame(
+    np.random.poisson(3, (5, 5)),
+    index=['A', 'B', 'C', 'D', 'E'],
+    columns=['A', 'B', 'C', 'D', 'E']
+)
+
+vp = VisualizePath(matrix, showfig=True)
+vp.visualize()  # Automatically detects matrix format
 ```
 
 ## Dependencies
@@ -109,21 +126,48 @@ vp.visualize_all()
 ### Core:
 - numpy>=1.20.0,<2.0.0 (constrained for pandas compatibility)
 - pandas>=1.3.0,<2.0.0
-- networkx>=2.6.0
+- polars>=1.0.0 (efficient DataFrames)
 - plotly>=5.0.0
 - scipy>=1.7.0
 - openpyxl>=3.0.0
 
 **Important:** numpy is constrained to <2.0.0 for binary compatibility with pandas 1.x.
 
+**Note:** NetworkX is no longer required. Graph operations use the built-in `FastGraph` module for improved performance and reduced dependencies.
+
 ### Optional:
 - PyQt5>=5.15.0 (for fast file dialogs)
 
 ## Data Formats
 
-VisualizePath supports two input formats:
+VisualizePath supports three input formats:
 
-### 1. Path-based format (Multi-hop paths):
+### 1. Connection Matrix (Numeric matrix):
+
+**Format:**
+- 2D numeric DataFrame with rows as sources and columns as targets
+- Index and column names represent node names
+- Cell values represent connection weights
+- Can be square (NxN) or rectangular (NxM)
+
+**Requirements:**
+- At least 2x2 matrix
+- All values must be numeric
+- Zero or NaN values are treated as no connection
+
+**Example:**
+
+|        | Neuron_1 | Neuron_2 | Neuron_3 |
+|--------|----------|----------|----------|
+| Neuron_A | 10     | 0        | 5        |
+| Neuron_B | 15     | 8        | 0        |
+| Neuron_C | 0      | 12       | 3        |
+
+**Auto-generation:** If index/columns are numeric, node names are auto-generated as `N0`, `N1`, etc.
+
+**Note:** Connection matrices are automatically converted to edge-list format internally.
+
+### 2. Path-based format (Multi-hop paths):
 
 **Required columns:**
 - `path_block` (str): Path as "A -> B -> C -> D" format
@@ -141,7 +185,7 @@ VisualizePath supports two input formats:
 | A -> B -> C    | [10, 5]      | [0.5, 0.3]        | [0.8, 0.6]              |
 | A -> D -> C    | [15, 8]      | [0.6, 0.4]        | [0.9, 0.7]              |
 
-### 2. Edge-list format (Direct connections):
+### 3. Edge-list format (Direct connections):
 
 **Required columns (flexible naming):**
 - Source: `source`, `from`, `pre`, or `*_pre` (e.g., `bodyId_pre`, `type_pre`)
@@ -171,7 +215,7 @@ VisualizePath supports two input formats:
 
 ## Documentation
 
-For full documentation, see the [main project README](../README.md).
+For full documentation, see the [main project README](https://github.com/Swida-Alba/hemibrain-connectomes-analysis).
 
 ## License
 
@@ -179,7 +223,7 @@ MIT License
 
 ## Author
 
-Kang-Rui Leng
+Swida Alba & Copilot
 
 ## Part of
 

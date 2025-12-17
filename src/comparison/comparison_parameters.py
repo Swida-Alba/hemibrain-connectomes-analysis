@@ -205,10 +205,10 @@ class ComparisonParameters:
     pathfinding: str = 'MemoizedDFS'
     """Pathfinding algorithm to use in FindAllPath:
     - 'MemoizedDFS': Meet-in-the-middle DFS - optimized for deep paths (L>=5) (default)
-    - 'Bidirectional': Bidirectional BFS - optimized for shortest paths
-    - 'DP': Backward Reachability (DP) - optimized for pruning dead ends (lowest memory)
-    - 'DFS': Backward Memoized DFS - standard traversal
-    - 'Backtracking': Backward DFS with backtracking - no memoization (lowest memory, slower)
+    - 'Bidirectional': Bidirectional BFS - optimized for shortest paths (high memory)
+    - 'DP': Backward Reachability (DP) - optimized for pruning dead ends (low memory)
+    - 'DFS': Backward Memoized DFS - standard traversal, no memoization (lowest memory, slower)
+    - 'Backtracking': Backward DFS with backtracking
     """
     
     # Output settings

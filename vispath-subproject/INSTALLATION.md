@@ -38,11 +38,13 @@ pip install git+https://github.com/Swida-Alba/hemibrain-connectomes-analysis.git
 **Dependencies (minimal):**
 - numpy >=1.20.0, <2.0.0 (constrained for pandas compatibility)
 - pandas >=1.3.0, <2.0.0
+- polars >=1.0.0 (efficient DataFrames)
 - scipy >=1.7.0
 - plotly >=5.0.0
-- networkx >=2.6.0
 - openpyxl >=3.0.0
 - PyQt5 >=5.15.0 (optional, for GUI dialogs)
+
+**Note:** NetworkX is no longer required. Graph operations use the built-in `FastGraph` module.
 
 ### Option 2: Full Installation (Recommended)
 
@@ -74,6 +76,7 @@ vispath-subproject/
 └── src/
     └── vispath_pkg/
         ├── __init__.py    # Package initialization
+        ├── fast_graph.py  # Lightweight graph module (replaces networkx)
         └── vispath.py     # Symlink to ../../../src/vispath.py
 ```
 

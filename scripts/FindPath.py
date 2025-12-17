@@ -23,7 +23,7 @@ if __name__ == '__main__':
         # dataset='flywire_FAFB_v783',
         sourceNeurons=['aMe12'],  # pd.read_excel('sourceNeurons.xlsx', header=None).iloc[:,0].tolist()
         # targetNeurons=['DN.*'],  # pd.read_excel('targetNeurons.xlsx', header=None).iloc[:,0].tolist()
-        targetNeurons=['KCg-d'],
+        targetNeurons=['PPL101'],
         # sourceNeurons = pd.read_excel('sourceNeurons.xlsx', header=None).iloc[:,0].tolist(),
         # targetNeurons = pd.read_excel('targetNeurons.xlsx', header=None).iloc[:,0].tolist(),
         custom_source_name='', # you can specify a custom name for the source neurons, especially when you are using a list of many types of neurons or a list of neurons read from a file

@@ -346,7 +346,9 @@ class ComparisonAnalyzer:
             
             if os.path.exists(conn_file):
                 try:
-                    conn_df = pd.read_csv(conn_file)
+                    # Use Polars for faster CSV reading
+                    import polars as pl
+                    conn_df = pl.read_csv(conn_file, infer_schema_length=10000).to_pandas()
                     self._log(f"Loaded {len(conn_df)} connections from connection_info_bodyId.csv")
                 except Exception as e:
                     self._log(f"Warning: Could not read connection file: {e}")
@@ -357,7 +359,9 @@ class ComparisonAnalyzer:
                 )
                 if os.path.exists(conn_type_file):
                     try:
-                        conn_df = pd.read_csv(conn_type_file)
+                        # Use Polars for faster CSV reading
+                        import polars as pl
+                        conn_df = pl.read_csv(conn_type_file, infer_schema_length=10000).to_pandas()
                         self._log(f"Loaded {len(conn_df)} connections from connection_type.csv")
                     except Exception as e:
                         self._log(f"Warning: Could not read connection type file: {e}")

@@ -2659,7 +2659,9 @@ class ComparisonVisualizer:
         ax.set_ylabel('Jaccard Index')
         ax.set_ylim(0, 1)
         ax.set_title(title)
-        ax.legend(loc='upper right', fontsize=9)
+        # Only show legend if there are labeled artists
+        if ax.get_legend_handles_labels()[0]:
+            ax.legend(loc='upper right', fontsize=9)
         ax.grid(True, alpha=0.3)
         ax.set_xticks(sorted_thresholds)
         
@@ -2788,7 +2790,9 @@ class ComparisonVisualizer:
         ax.set_ylabel('Edge Rank Correlation')
         ax.set_ylim(0, 1)
         ax.set_title(title)
-        ax.legend(loc='upper right', fontsize=9)
+        # Only show legend if there are labeled artists
+        if ax.get_legend_handles_labels()[0]:
+            ax.legend(loc='upper right', fontsize=9)
         ax.grid(True, alpha=0.3)
         ax.set_xticks(sorted_thresholds)
         
@@ -2921,7 +2925,9 @@ class ComparisonVisualizer:
         ax.set_ylabel('Path Rank Correlation')
         ax.set_ylim(0, 1)
         ax.set_title(title)
-        ax.legend(loc='upper right', fontsize=9)
+        # Only show legend if there are labeled artists
+        if ax.get_legend_handles_labels()[0]:
+            ax.legend(loc='upper right', fontsize=9)
         ax.grid(True, alpha=0.3)
         ax.set_xticks(sorted_thresholds)
         

@@ -1366,26 +1366,50 @@ def _generate_networks_section(analyzer, dataset_names: List[str], thresholds: L
                         document.getElementById('network_by_threshold').style.display = mode === 'threshold' ? 'block' : 'none';
                         document.getElementById('network_by_dataset').style.display = mode === 'dataset' ? 'block' : 'none';
                         
-                        // Re-fit visible networks (must call redraw() first to recalculate canvas dimensions)
+                        // Re-fit ONLY VISIBLE networks (must call redraw() first to recalculate canvas dimensions)
+                        // vis.js cannot render in hidden containers
                         setTimeout(function() {
-                            Object.values(window.allNetworks || {}).forEach(function(netData) {
-                                if (netData && netData.network) {
-                                    netData.network.redraw();
-                                    netData.network.fit({ animation: true });
+                            if (mode === 'threshold') {
+                                // Only redraw the active threshold network
+                                const activeTab = document.querySelector('#network_by_threshold .tab-content.active');
+                                if (activeTab) {
+                                    const threshold = activeTab.id.replace('network_tab_', '');
+                                    if (window.allNetworks && window.allNetworks[threshold]) {
+                                        window.allNetworks[threshold].network.redraw();
+                                        window.allNetworks[threshold].network.fit({ animation: true });
+                                    }
                                 }
-                            });
+                            } else {
+                                // Only redraw the active dataset networks
+                                const activeTab = document.querySelector('#network_by_dataset .tab-content.active');
+                                if (activeTab) {
+                                    const dataset = activeTab.id.replace('network_dataset_tab_', '');
+                                    Object.keys(window.allNetworks || {}).forEach(function(key) {
+                                        if (key.startsWith(dataset + '_')) {
+                                            window.allNetworks[key].network.redraw();
+                                            window.allNetworks[key].network.fit({ animation: true });
+                                        }
+                                    });
+                                }
+                            }
                         }, 100);
                     }
                     
                     // Re-draw and fit networks after page load to handle any initial rendering issues
+                    // IMPORTANT: Only redraw networks that are in VISIBLE containers
+                    // vis.js cannot calculate dimensions for hidden containers (display:none)
                     window.addEventListener('load', function() {
                         setTimeout(function() {
-                            Object.values(window.allNetworks || {}).forEach(function(netData) {
+                            // Only redraw the first/active threshold network on load
+                            // Tab switching handles hidden networks when they become visible
+                            const firstThreshold = window.allThresholds[0];
+                            if (window.allNetworks && window.allNetworks[firstThreshold]) {
+                                const netData = window.allNetworks[firstThreshold];
                                 if (netData && netData.network) {
                                     netData.network.redraw();
                                     netData.network.fit({ animation: true });
                                 }
-                            });
+                            }
                         }, 300);
                     });
                     
@@ -3787,18 +3811,24 @@ def _generate_footer() -> str:
     return """
         <button class="print-btn" onclick="window.print()">🖨️ Print Report</button>
         <script>
-            // Final initialization: ensure all visible networks are properly rendered
+            // Final initialization: ensure visible network is properly rendered
             // This runs after all network scripts have executed
+            // IMPORTANT: Only redraw networks in visible containers
+            // vis.js cannot calculate dimensions for hidden containers (display:none)
             window.addEventListener('load', function() {
                 setTimeout(function() {
-                    // Get all currently visible networks and redraw them
-                    Object.values(window.allNetworks || {}).forEach(function(netData) {
-                        if (netData && netData.network) {
-                            // Force canvas redraw to ensure proper dimensions
-                            netData.network.redraw();
-                            netData.network.fit({ animation: false });
+                    // Only redraw the active/visible network on load
+                    // The first threshold network is visible by default
+                    if (window.allThresholds && window.allThresholds.length > 0) {
+                        const firstThreshold = window.allThresholds[0];
+                        if (window.allNetworks && window.allNetworks[firstThreshold]) {
+                            const netData = window.allNetworks[firstThreshold];
+                            if (netData && netData.network) {
+                                netData.network.redraw();
+                                netData.network.fit({ animation: false });
+                            }
                         }
-                    });
+                    }
                 }, 500);
             });
         </script>
