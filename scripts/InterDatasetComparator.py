@@ -71,89 +71,6 @@ def run_comprehensive_comparison():
     # =========================================================================
     print("\n📋 Step 1: Creating ComparisonParameters...")
     
-    label_map = LabelMapper(
-        # target_mapping_dict={
-        #     'flywire_FAFB_v783': [[720575940619067259,720575940613413791,720575940631973089,720575940642237344,720575940606868828,720575940609174392,720575940610478531,720575940628527095]],
-        #     'flywire_BANC_v626': [[720575941552713626,720575941589129982,720575941645302945,720575941689244824]],
-        #     'male-cns:v0.9': [[15832,16461,16552,17336,16634,17355,17916,18945]],
-        # },
-        # target_labels=['s-LNv'],
-        
-        target_mapping_dict={
-            'flywire_FAFB_v783': [[720575940634984800,720575940627933336,720575940625254636,720575940619074049]],
-            'flywire_BANC_v626': [[720575941671706023,720575941645496264,720575941568371246]],
-            'male-cns:v0.9': [[11901,14633,12254,13531]],
-        },
-        target_labels=['E cells'],
-        
-        # target_mapping_dict={
-        #   'flywire_FAFB_v783': [['l-LNv.*']],
-        #   'flywire_BANC_v626': [['l-LNv.*']],
-        #   'male-cns:v0.9': [['l-LNv.*']],
-        # },
-        # target_labels=['l-LNv'],
-        
-        # target_mapping_dict={
-        #   'flywire_FAFB_v783': [[720575940625254636,720575940619074049]],
-        #   'flywire_BANC_v626': [[720575941568371246]],
-        #   'male-cns:v0.9': [[12254,13531]],
-        # },
-        # target_labels=['5th s-LNv'],
-        
-        # target_mapping_dict={
-        #     'flywire_FAFB_v783': [[720575940634984800,720575940627933336]],
-        #     'flywire_BANC_v626': [[720575941671706023,720575941645496264]],
-        #     'male-cns:v0.9': [[11901,14633]],
-        # },
-        # target_labels=['ITP LNd'],
-        
-        source_mapping_dict={
-            'flywire_FAFB_v783': ['L1','L2','L3'],
-            'flywire_BANC_v626': ['L1','L2','L3'],
-            'male-cns:v0.9': ['L1','L2','L3'],
-        },
-        source_labels=['L1','L2','L3'],
-        
-        intermediate_mapping_file='/Users/apple/Desktop/intermediate_map.csv',
-        
-    )
-    
-    # target_map = LabelMapper(
-    #   target_mapping_dict={
-    #     'flywire_FAFB_v783': [['l-LNv.*']],
-    #     'flywire_BANC_v626': [['l-LNv.*']],
-    #     'male-cns:v0.9': [['l-LNv.*']],
-    #   },
-    #   target_labels=['l-LNv'],
-    # )
-    
-    # target_map = LabelMapper(
-    #   target_mapping_dict={
-    #     'flywire_FAFB_v783': [[720575940625254636,720575940619074049]],
-    #     'flywire_BANC_v626': [[720575941568371246]],
-    #     'male-cns:v0.9': [[12254,13531]],
-    #   },
-    #   target_labels=['5th s-LNv'],
-    # )
-    
-    # target_map = LabelMapper(
-    #   target_mapping_dict={
-    #     'flywire_FAFB_v783': [[720575940634984800,720575940627933336]],
-    #     'flywire_BANC_v626': [[720575941671706023,720575941645496264]],
-    #     'male-cns:v0.9': [[11901,14633]],
-    #   },
-    #   target_labels=['ITP LNd'],
-    # )
-    
-    # target_map = LabelMapper(
-    #     target_mapping_dict={
-    #         'flywire_FAFB_v783': [[720575940634984800,720575940627933336,720575940625254636,720575940619074049]],
-    #         'flywire_BANC_v626': [[720575941671706023,720575941645496264,720575941568371246]],
-    #         'male-cns:v0.9': [[11901,14633,12254,13531]],
-    #     },
-    #     target_labels=['E cells'],
-    # )
-    
     params = ComparisonParameters(
         # Token - empty means load from NEUPRINT_APPLICATION_TOKEN env var
         token='',
@@ -162,19 +79,19 @@ def run_comprehensive_comparison():
         saveas=None,  # Auto-generate timestamp folder
         
         # Datasets to compare
-        # datasets=['male-cns:v0.9', 'flywire_FAFB_v783', 'hemibrain:v1.2.1', 'flywire_BANC_v626'],
-        # datasets_nickname=['MCNS', 'FAFB', 'HEMI', 'BANC',],
+        datasets=['male-cns:v0.9', 'flywire_FAFB_v783', 'hemibrain:v1.2.1', 'flywire_BANC_v626'],
+        datasets_nickname=['MCNS', 'FAFB', 'HEMI', 'BANC',],
         
-        datasets=['flywire_FAFB_v783', 'male-cns:v0.9'],
-        datasets_nickname=['FAFB', 'MCNS'],
+        # datasets=['flywire_FAFB_v783', 'male-cns:v0.9'],
+        # datasets_nickname=['FAFB', 'MCNS'],
         
-        # source_neurons=['aMe.*'],
+        source_neurons=['aMe.*'],
         # source_neurons=neurons_network,
         
         # Target neurons - PPL101 dopaminergic neurons
-        # target_neurons=['PPL101','PPL103'],
+        target_neurons=['PPL101','PPL103'],
         # target_neurons=target_map,
-        overall_label_mapper=label_map,
+        # overall_label_mapper=label_map,
         
         max_interlayer=3,
         
