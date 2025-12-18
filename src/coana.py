@@ -2022,8 +2022,9 @@ class FindNeuronConnection:
             else:
                 ndf_complete = pd.read_csv(dataset_path, header=0, index_col=0, low_memory=False)
             
-            # Ensure bodyId is string for FAFB
-            if is_fafb and 'bodyId' in ndf_complete.columns:
+            # Ensure bodyId is string for all datasets (not just FAFB)
+            # This is critical for matching with cached connections which use string bodyIds
+            if 'bodyId' in ndf_complete.columns:
                 ndf_complete['bodyId'] = ndf_complete['bodyId'].astype(str)
 
             # Filter to only neurons we need
