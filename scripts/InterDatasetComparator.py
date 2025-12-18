@@ -176,7 +176,7 @@ def run_comprehensive_comparison():
         # target_neurons=target_map,
         overall_label_mapper=label_map,
         
-        max_interlayer=4,
+        max_interlayer=3,
         
         # Multiple thresholds to analyze sensitivity
         thresholds=[3, 5, 10, 15, 20],

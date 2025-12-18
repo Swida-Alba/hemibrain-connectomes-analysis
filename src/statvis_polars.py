@@ -5,6 +5,153 @@ import pandas as pd
 import polars as pl
 from tqdm import tqdm
 
+
+def build_bodyid_label_map(label_mapper, dataset: str, neuron_df: pl.DataFrame) -> dict:
+    """
+    Build a comprehensive bodyId → std_label map from label_mapper.
+    
+    This implements the user's 6-step label mapping approach:
+    Step 3: Convert label_mapper's type/bodyId/instance → std_label map 
+            to a complete bodyId → std_label map using the neuron index file.
+    
+    The label_mapper may contain mappings by:
+    - bodyId: Direct bodyId → std_label
+    - type: type_name → std_label (need to expand to all bodyIds of that type)
+    - instance: instance_name → std_label (need to expand to all bodyIds with that instance)
+    
+    Args:
+        label_mapper: LabelMapper object with source/target/intermediate mappings
+        dataset: Dataset name (e.g., 'hemibrain:v1.2.1')
+        neuron_df: Polars DataFrame with neuron index (must have 'bodyId', 'type', optionally 'instance')
+        
+    Returns:
+        Dict[str, str]: Mapping of bodyId → std_label
+    """
+    if label_mapper is None or neuron_df is None or neuron_df.is_empty():
+        return {}
+    
+    bodyid_label_map = {}
+    
+    # Ensure bodyId is string
+    if 'bodyId' in neuron_df.columns:
+        neuron_df = neuron_df.with_columns(pl.col('bodyId').cast(pl.Utf8))
+    else:
+        return {}
+    
+    # Build lookup dictionaries for efficient mapping
+    # type → [bodyIds]
+    type_to_bodyids = {}
+    if 'type' in neuron_df.columns:
+        type_groups = neuron_df.group_by('type').agg(pl.col('bodyId').alias('bodyIds'))
+        for row in type_groups.iter_rows(named=True):
+            if row['type'] is not None:
+                type_to_bodyids[str(row['type'])] = row['bodyIds']
+    
+    # instance → [bodyIds]
+    instance_to_bodyids = {}
+    if 'instance' in neuron_df.columns:
+        instance_groups = neuron_df.group_by('instance').agg(pl.col('bodyId').alias('bodyIds'))
+        for row in instance_groups.iter_rows(named=True):
+            if row['instance'] is not None:
+                instance_to_bodyids[str(row['instance'])] = row['bodyIds']
+    
+    # Helper to normalize dataset name for lookups
+    def sanitize(name: str) -> str:
+        return name.replace(':', '_').replace('.', '_').replace('-', '_')
+    
+    dataset_sanitized = sanitize(dataset)
+    
+    # Process all mappings (source, target, intermediate)
+    all_mappings = []
+    for mapping_dict in [label_mapper._source_mapping, label_mapper._target_mapping, label_mapper._intermediate_mapping]:
+        for std_label, ds_dict in mapping_dict.items():
+            # Try both original and sanitized dataset names
+            neuron_ids = []
+            if dataset in ds_dict:
+                neuron_ids = ds_dict[dataset]
+            elif dataset_sanitized in ds_dict:
+                neuron_ids = ds_dict[dataset_sanitized]
+            
+            for neuron_id in neuron_ids:
+                all_mappings.append((str(neuron_id), std_label))
+    
+    # Process each mapping and expand to bodyIds
+    for neuron_id, std_label in all_mappings:
+        # First, check if neuron_id is a direct bodyId
+        # If it matches a bodyId in the neuron_df, map it directly
+        bodyid_check = neuron_df.filter(pl.col('bodyId') == neuron_id)
+        if not bodyid_check.is_empty():
+            bodyid_label_map[neuron_id] = std_label
+            continue
+        
+        # Check if neuron_id is a type name
+        if neuron_id in type_to_bodyids:
+            for bid in type_to_bodyids[neuron_id]:
+                # Don't overwrite existing mappings (first mapping wins)
+                if bid not in bodyid_label_map:
+                    bodyid_label_map[bid] = std_label
+            continue
+        
+        # Check if neuron_id is an instance name
+        if neuron_id in instance_to_bodyids:
+            for bid in instance_to_bodyids[neuron_id]:
+                if bid not in bodyid_label_map:
+                    bodyid_label_map[bid] = std_label
+            continue
+        
+        # If none of the above, just store the mapping in case it's used directly
+        # This handles cases where the ID might be used elsewhere
+        bodyid_label_map[neuron_id] = std_label
+    
+    return bodyid_label_map
+
+
+def get_classification_map(label_mapper, dataset: str) -> dict:
+    """
+    Build a map from std_label → classification (source/target/intermediate).
+    
+    This implements Step 2 of user's approach: remember the classification
+    of each label (whether it's a source, target, or intermediate neuron group).
+    
+    Args:
+        label_mapper: LabelMapper object
+        dataset: Dataset name
+        
+    Returns:
+        Dict[str, str]: Mapping of std_label → classification
+    """
+    if label_mapper is None:
+        return {}
+    
+    classification_map = {}
+    
+    def sanitize(name: str) -> str:
+        return name.replace(':', '_').replace('.', '_').replace('-', '_')
+    
+    dataset_sanitized = sanitize(dataset)
+    
+    # Process source mappings
+    for std_label, ds_dict in label_mapper._source_mapping.items():
+        if dataset in ds_dict or dataset_sanitized in ds_dict:
+            classification_map[std_label] = 'source'
+    
+    # Process target mappings (may override source if same label)
+    for std_label, ds_dict in label_mapper._target_mapping.items():
+        if dataset in ds_dict or dataset_sanitized in ds_dict:
+            if std_label in classification_map:
+                classification_map[std_label] = 'source+target'
+            else:
+                classification_map[std_label] = 'target'
+    
+    # Process intermediate mappings
+    for std_label, ds_dict in label_mapper._intermediate_mapping.items():
+        if dataset in ds_dict or dataset_sanitized in ds_dict:
+            if std_label not in classification_map:
+                classification_map[std_label] = 'intermediate'
+    
+    return classification_map
+
+
 def prepare_connection_data(conn_data, level='type'):
     """
     Pre-process connection data into a Polars DataFrame optimized for joining.
@@ -47,9 +194,13 @@ def prepare_connection_data(conn_data, level='type'):
     
     return df_agg
 
-def process_batch_polars(paths_batch, df_conn, level='type', keyword_in_path_to_remove=None):
+def process_batch_polars(paths_batch, df_conn, level='type', keyword_in_path_to_remove=None,
+                         type_to_label_map=None):
     """
     Process a batch of paths using Polars.
+    
+    Args:
+        type_to_label_map: Optional dict mapping original type names to standardized labels
     """
     if not paths_batch:
         return pl.DataFrame(), pl.DataFrame()
@@ -126,10 +277,26 @@ def process_batch_polars(paths_batch, df_conn, level='type', keyword_in_path_to_
     df_final = df_results.join(df_paths, on='path_id', how='left')
     
     # Create formatted path string "A->B->C"
-    # Polars list join
-    df_final = df_final.with_columns(
-        pl.col('path_nodes').list.join('->').alias('path')
-    )
+    # Apply type_to_label_map if provided to rename types in output
+    if type_to_label_map:
+        # Map each node in the path list using type_to_label_map dict
+        def map_node(node):
+            return type_to_label_map.get(str(node), str(node))
+        
+        # Apply mapping to path_nodes list
+        df_final = df_final.with_columns(
+            pl.col('path_nodes').list.eval(
+                pl.element().map_elements(map_node, return_dtype=pl.Utf8)
+            ).alias('path_nodes_mapped')
+        )
+        df_final = df_final.with_columns(
+            pl.col('path_nodes_mapped').list.join('->').alias('path')
+        ).drop('path_nodes_mapped')
+    else:
+        # Polars list join without mapping
+        df_final = df_final.with_columns(
+            pl.col('path_nodes').list.join('->').alias('path')
+        )
     
     # Convert list columns to string for CSV compatibility
     # Format as "[w1, w2, w3]" to match original statvis output
@@ -185,13 +352,19 @@ def process_paths_streaming(path_gen, conn_data, targets, output_path,
                           level='type', type_lookup=None, 
                           keyword_in_path_to_remove=None,
                           batch_size=100000,
-                          verbose=True):
+                          verbose=True,
+                          type_to_label_map=None):
     """
     Stream paths from generator, process in batches using Polars, and write to CSV.
     Returns total count of saved paths.
     
     OPTIMIZED: Uses buffered batch collection to reduce file I/O overhead.
     Collects 20 batches (~2M paths) before writing to minimize disk I/O.
+    
+    Args:
+        type_to_label_map: Optional dict mapping original type names to standardized labels.
+                           Types are fetched using original names but output uses mapped labels
+                           for cross-dataset comparison.
     """
     if verbose:
         print(f"Optimizing path building: Pre-indexing {len(conn_data)} connections (Polars)...")
@@ -226,7 +399,8 @@ def process_paths_streaming(path_gen, conn_data, targets, output_path,
         batch.append(path)
         
         if len(batch) >= batch_size:
-            df_batch, df_excl = process_batch_polars(batch, df_conn, level, keyword_in_path_to_remove)
+            df_batch, df_excl = process_batch_polars(batch, df_conn, level, keyword_in_path_to_remove,
+                                                      type_to_label_map=type_to_label_map)
             
             if not df_batch.is_empty():
                 write_buffer.append(df_batch)
@@ -254,7 +428,8 @@ def process_paths_streaming(path_gen, conn_data, targets, output_path,
             
     # Process remaining paths
     if batch:
-        df_batch, df_excl = process_batch_polars(batch, df_conn, level, keyword_in_path_to_remove)
+        df_batch, df_excl = process_batch_polars(batch, df_conn, level, keyword_in_path_to_remove,
+                                                  type_to_label_map=type_to_label_map)
         
         if not df_batch.is_empty():
             write_buffer.append(df_batch)
@@ -300,10 +475,18 @@ def _write_buffer_to_csv(buffer_list, output_path, append=False):
 def EnrichConnectionTablePolars(conn_table, traversal_probability_threshold=0, dataset=None, script_path=None, target_neurons_df=None, aggregate_method='product', label_mapper=None):
     '''Add traversal probability, connection ratio, and layer information to the connection table using Polars
     
+    IMPLEMENTS USER's 6-STEP LABEL MAPPING APPROACH:
+    Step 1: Fetch neurons using original type/bodyId/instance (done by caller)
+    Step 2: Aggregate source/target/intermediate maps from label_mapper
+    Step 3: Convert label_mapper's type/bodyId/instance → std_label to complete bodyId → std_label
+    Step 4: Aggregate bodyId-level graph using std_label from label_mapper  
+    Step 5: Aggregate remaining (unmapped) bodyIds by type
+    Step 6: Mark source and target by the classification map
+    
     Parameters
     ----------
     conn_table : DataFrame
-        Connection table to enrich
+        Connection table to enrich (bodyId-level)
     traversal_probability_threshold : float, optional
         Minimum traversal probability threshold (default: 0)
     dataset : str, optional
@@ -319,14 +502,15 @@ def EnrichConnectionTablePolars(conn_table, traversal_probability_threshold=0, d
         - 'product': compound probability (product of block probs) for paths (default)
         - 'average': weighted average for direct parallel connections
     label_mapper : LabelMapper, optional
-        LabelMapper object to standardize types in the local dataset for accurate ratio calculation.
+        LabelMapper object for cross-dataset comparison.
+        When provided, aggregation uses std_label for mapped neurons and type for unmapped.
     
     Returns
     -------
     conn_df : DataFrame
         Enriched connection table with bodyId-level metrics
     conn_type : DataFrame
-        Type-level aggregation (always based on original type column)
+        Type-level aggregation (or std_label-level if label_mapper provided)
     conn_group : DataFrame or None
         Custom group-level aggregation (only if custom_group columns exist)
     '''
@@ -387,56 +571,48 @@ def EnrichConnectionTablePolars(conn_table, traversal_probability_threshold=0, d
                 ndf_complete = pl.read_csv(dataset_path, infer_schema_length=10000)
                 if 'bodyId' in ndf_complete.columns:
                     ndf_complete = ndf_complete.with_columns(pl.col('bodyId').cast(pl.Utf8))
-            
-            # Apply label mapping to local dataset if provided
-            if label_mapper and 'type' in ndf_complete.columns:
-                # Convert to pandas for label mapping application (LabelMapper is optimized for scalar lookups)
-                ndf_pd = ndf_complete.to_pandas()
-                
-                # Apply mapping to 'type' column
-                # We use get_label which checks all mappings
-                # Note: get_label returns str(original_id) if no mapping found, which preserves unmapped types
-                ndf_pd['type'] = ndf_pd['type'].apply(
-                    lambda x: label_mapper.get_label(dataset, x) if pd.notna(x) else x
-                )
-                
-                # Convert back to Polars
-                ndf_complete = pl.from_pandas(ndf_pd)
-                
-                # Ensure bodyId is string again if lost
-                if 'bodyId' in ndf_complete.columns:
-                    ndf_complete = ndf_complete.with_columns(pl.col('bodyId').cast(pl.Utf8))
-                
-                # Update conn_df types to match mapped types in ndf_complete
-                # This ensures that aggregation uses the standardized labels
-                # Create mapping lookup: bodyId -> mapped_type
-                type_map = ndf_complete.select(['bodyId', 'type']).unique(subset=['bodyId'])
-                
-                # Update type_pre
-                conn_df = conn_df.join(
-                    type_map.rename({'bodyId': 'bodyId_pre', 'type': 'type_pre_mapped'}),
-                    on='bodyId_pre',
-                    how='left'
-                )
-                conn_df = conn_df.with_columns(
-                    pl.col('type_pre_mapped').fill_null(pl.col('type_pre')).alias('type_pre')
-                ).drop('type_pre_mapped')
-                
-                # Update type_post
-                conn_df = conn_df.join(
-                    type_map.rename({'bodyId': 'bodyId_post', 'type': 'type_post_mapped'}),
-                    on='bodyId_post',
-                    how='left'
-                )
-                conn_df = conn_df.with_columns(
-                    pl.col('type_post_mapped').fill_null(pl.col('type_post')).alias('type_post')
-                ).drop('type_post_mapped')
-                
-                # Update custom_group if present (assume it follows type)
-                if 'custom_group_pre' in conn_df.columns:
-                    conn_df = conn_df.with_columns(pl.col('type_pre').alias('custom_group_pre'))
-                if 'custom_group_post' in conn_df.columns:
-                    conn_df = conn_df.with_columns(pl.col('type_post').alias('custom_group_post'))
+    
+    # Step 3: Build complete bodyId → std_label map from label_mapper
+    bodyid_label_map = {}
+    if label_mapper and ndf_complete is not None:
+        bodyid_label_map = build_bodyid_label_map(label_mapper, dataset, ndf_complete)
+    
+    # Apply bodyId → std_label mapping to connection table
+    # For mapped bodyIds: use std_label
+    # For unmapped bodyIds: use original type (Step 5)
+    if bodyid_label_map:
+        # Create a Polars-friendly mapping for vectorized lookup
+        map_df = pl.DataFrame({
+            'bodyId': list(bodyid_label_map.keys()),
+            'std_label': list(bodyid_label_map.values())
+        })
+        
+        # Map pre neurons
+        conn_df = conn_df.join(
+            map_df.rename({'bodyId': 'bodyId_pre', 'std_label': 'std_label_pre'}),
+            on='bodyId_pre',
+            how='left'
+        )
+        # Use std_label if mapped, else fall back to type
+        conn_df = conn_df.with_columns(
+            pl.coalesce([pl.col('std_label_pre'), pl.col('type_pre')]).alias('std_label_pre')
+        )
+        
+        # Map post neurons
+        conn_df = conn_df.join(
+            map_df.rename({'bodyId': 'bodyId_post', 'std_label': 'std_label_post'}),
+            on='bodyId_post',
+            how='left'
+        )
+        conn_df = conn_df.with_columns(
+            pl.coalesce([pl.col('std_label_post'), pl.col('type_post')]).alias('std_label_post')
+        )
+    else:
+        # No label_mapper: std_label = type
+        conn_df = conn_df.with_columns([
+            pl.col('type_pre').alias('std_label_pre'),
+            pl.col('type_post').alias('std_label_post')
+        ])
 
     # 1. Enrich BodyId Level
     # Need to join 'post' count to conn_df
@@ -494,10 +670,10 @@ def EnrichConnectionTablePolars(conn_table, traversal_probability_threshold=0, d
     if traversal_probability_threshold > 0:
         conn_df = conn_df.filter(pl.col('traversal_probability') >= traversal_probability_threshold)
         
-    # 2. Aggregation
+    # 2. Aggregation (Step 4 & 5: Aggregate by std_label for mapped, type for unmapped)
     # First deduplicate by bodyId pairs to avoid counting same connection multiple times
-    # This matches the pandas version behavior
-    cols_to_keep = ['bodyId_pre', 'bodyId_post', 'type_pre', 'type_post', 'weight', 'block_probability', 'traversal_probability']
+    cols_to_keep = ['bodyId_pre', 'bodyId_post', 'type_pre', 'type_post', 
+                    'std_label_pre', 'std_label_post', 'weight', 'block_probability', 'traversal_probability']
     if 'custom_group_pre' in conn_df.columns:
         cols_to_keep.extend(['custom_group_pre', 'custom_group_post'])
     if 'nt_type' in conn_df.columns:
@@ -507,8 +683,23 @@ def EnrichConnectionTablePolars(conn_table, traversal_probability_threshold=0, d
     cols_to_keep = [c for c in cols_to_keep if c in conn_df.columns]
     bodyid_pairs = conn_df.select(cols_to_keep).unique(subset=['bodyId_pre', 'bodyId_post'])
     
+    # Also add std_label to ref_df for total_post calculation
+    ref_df_with_labels = None
+    if ref_df is not None and bodyid_label_map:
+        # Add std_label to ref_df
+        map_df = pl.DataFrame({
+            'bodyId': list(bodyid_label_map.keys()),
+            'std_label': list(bodyid_label_map.values())
+        })
+        ref_df_with_labels = ref_df.join(map_df, on='bodyId', how='left')
+        ref_df_with_labels = ref_df_with_labels.with_columns(
+            pl.coalesce([pl.col('std_label'), pl.col('type')]).alias('std_label')
+        )
+    elif ref_df is not None:
+        ref_df_with_labels = ref_df.with_columns(pl.col('type').alias('std_label'))
+    
     # Function to aggregate
-    def aggregate_connections(group_pre_col, group_post_col):
+    def aggregate_connections(group_pre_col, group_post_col, ref_group_col=None):
         # Sum weights from deduplicated bodyId pairs
         agg_df = bodyid_pairs.group_by([group_pre_col, group_post_col]).agg([
             pl.col('weight').sum()
@@ -542,26 +733,20 @@ def EnrichConnectionTablePolars(conn_table, traversal_probability_threshold=0, d
 
         # Calculate Connection Ratio (Type Level)
         # Need total_post for the group
-        # Get total post counts from ref_df (ndf_complete or target_neurons_df)
-        
         total_post_df = None
-        if ref_df is not None:
-            # Check if group column exists in ref_df
-            # group_post_col might be 'type_post', but in ref_df it is 'type'
-            # or 'custom_group_post' -> 'custom_group'
-            ref_group_col = 'type' if group_post_col == 'type_post' else 'custom_group'
-            
-            if ref_group_col in ref_df.columns:
-                total_post_df = ref_df.group_by(ref_group_col).agg(
-                    pl.col('post').sum().alias('total_post')
-                )
-                # Rename for join
-                total_post_df = total_post_df.rename({ref_group_col: group_post_col})
+        
+        # Use appropriate reference dataframe
+        use_ref = ref_df_with_labels if (ref_group_col == 'std_label' and ref_df_with_labels is not None) else ref_df
+        
+        if use_ref is not None and ref_group_col and ref_group_col in use_ref.columns:
+            total_post_df = use_ref.group_by(ref_group_col).agg(
+                pl.col('post').sum().alias('total_post')
+            )
+            # Rename for join
+            total_post_df = total_post_df.rename({ref_group_col: group_post_col})
         
         if total_post_df is None:
             # Fallback: sum post from connections (less accurate)
-            # Note: this sums post of neurons IN connections, not ALL neurons of that type
-            # But if we don't have ref_df, it's the best we can do
             total_post_df = conn_df.unique(subset=['bodyId_post']).group_by(group_post_col).agg(
                 pl.col('post').sum().alias('total_post')
             )
@@ -576,13 +761,20 @@ def EnrichConnectionTablePolars(conn_table, traversal_probability_threshold=0, d
         
         return agg_df
 
-    # Aggregate Type
-    conn_type = aggregate_connections('type_pre', 'type_post')
+    # Aggregate by std_label (Step 4 & 5)
+    # This uses std_label for mapped neurons and type for unmapped (since std_label = type for unmapped)
+    conn_type = aggregate_connections('std_label_pre', 'std_label_post', ref_group_col='std_label')
+    
+    # Rename std_label columns to type columns for backward compatibility
+    conn_type = conn_type.rename({
+        'std_label_pre': 'type_pre',
+        'std_label_post': 'type_post'
+    })
     
     # Aggregate Group
     conn_group = None
     if 'custom_group_pre' in conn_df.columns:
-        conn_group = aggregate_connections('custom_group_pre', 'custom_group_post')
+        conn_group = aggregate_connections('custom_group_pre', 'custom_group_post', ref_group_col='custom_group')
         
     # Return Polars DataFrames directly
     return conn_df, conn_type, conn_group

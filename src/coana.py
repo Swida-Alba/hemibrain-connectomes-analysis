@@ -6398,55 +6398,74 @@ class FindNeuronConnection:
         self._vprint('\nFinding type-level paths using type-level graph...', level='full')
         
         # Build type-level graph from conn_types
+        # NOTE: conn_types now uses std_label values in type_pre/type_post when label_mapper is provided
+        # (thanks to EnrichConnectionTablePolars implementing the 6-step approach)
         G_type = FastGraph()
         G_type.build_from_dataframe(conn_types, 'type_pre', 'type_post', 'weight')
         
         self._vprint(f'  Type-level graph: {G_type.number_of_nodes()} types, {G_type.number_of_edges()} edges', level='full')
         
-        # Get source and target types (filter out NaN/None values)
-        # Apply label mapping if available to match the mapped types in conn_types
-        source_types = set()
-        for idx, row in self.source_df.iterrows():
-            t = row['type'] if 'type' in row else None
-            b = str(row['bodyId']) if 'bodyId' in row else ''
+        # Build bodyId → std_label map for source/target identification
+        # This is needed because conn_types uses std_labels but source_df/target_df have bodyIds
+        bodyid_to_label = {}
+        if self.label_mapper:
+            # Use the same mapping function that EnrichConnectionTablePolars uses
+            ndf_path = None
+            if self.dataset and self.script_path:
+                dataset_clean = self.dataset.replace(':', '_').replace('.', '_')
+                ndf_path = os.path.join(
+                    self.script_path, 'datasets', dataset_clean,
+                    f"{dataset_clean}_allneurons_neuron_df.csv"
+                )
+                if not os.path.exists(ndf_path):
+                    ndf_path = os.path.join(
+                        self.script_path, 'datasets',
+                        f"{dataset_clean}_allneurons_neuron_df.csv"
+                    )
             
-            if self.label_mapper:
-                # Try mapping bodyId first (most specific)
-                mapped = self.label_mapper.get_label(self.dataset, b)
-                if mapped != b:
-                    t = mapped
-                elif pd.notna(t):
-                    # Try mapping type
-                    mapped_t = self.label_mapper.get_label(self.dataset, str(t))
-                    if mapped_t != str(t):
-                        t = mapped_t
-            
-            if t is not None and (not isinstance(t, float) or not pd.isna(t)):
-                source_types.add(t)
+            if ndf_path and os.path.exists(ndf_path):
+                ndf_complete = pl.read_csv(ndf_path, infer_schema_length=10000)
+                if 'bodyId' in ndf_complete.columns:
+                    ndf_complete = ndf_complete.with_columns(pl.col('bodyId').cast(pl.Utf8))
+                bodyid_to_label = svp.build_bodyid_label_map(self.label_mapper, self.dataset, ndf_complete)
         
-        source_types = list(source_types)
+        # Get source and target labels (mapped or original types)
+        # When label_mapper is provided, conn_types uses std_labels, so we need to match
+        source_labels = set()
+        for idx, row in self.source_df.iterrows():
+            b = str(row['bodyId']) if 'bodyId' in row else ''
+            t = row['type'] if 'type' in row else None
+            
+            # Use std_label if available, else fall back to type
+            if b and b in bodyid_to_label:
+                label = bodyid_to_label[b]
+            elif t is not None and (not isinstance(t, float) or not pd.isna(t)):
+                label = str(t)
+            else:
+                continue
+            source_labels.add(label)
+        
+        source_types = list(source_labels)
 
-        target_types = set()
+        target_labels = set()
         target_rows = self.target_df.loc[self.target_df.Checked]
         for idx, row in target_rows.iterrows():
-            t = row['type'] if 'type' in row else None
             b = str(row['bodyId']) if 'bodyId' in row else ''
+            t = row['type'] if 'type' in row else None
             
-            if self.label_mapper:
-                # Try mapping bodyId first (most specific)
-                mapped = self.label_mapper.get_label(self.dataset, b)
-                if mapped != b:
-                    t = mapped
-                elif pd.notna(t):
-                    # Try mapping type
-                    mapped_t = self.label_mapper.get_label(self.dataset, str(t))
-                    if mapped_t != str(t):
-                        t = mapped_t
-            
-            if t is not None and (not isinstance(t, float) or not pd.isna(t)):
-                target_types.add(t)
+            # Use std_label if available, else fall back to type
+            if b and b in bodyid_to_label:
+                label = bodyid_to_label[b]
+            elif t is not None and (not isinstance(t, float) or not pd.isna(t)):
+                label = str(t)
+            else:
+                continue
+            target_labels.add(label)
         
-        target_types = list(target_types)
+        target_types = list(target_labels)
+        
+        # No need for type_to_label_map anymore - conn_types already uses std_labels
+        # and source/target types are now properly mapped to std_labels
         
         # Find paths using DFS on type graph
         # type_paths = [] # Removed to save memory
@@ -6483,6 +6502,8 @@ class FindNeuronConnection:
             )
             
             # Stream directly to CSV to avoid OOM
+            # NOTE: conn_types already uses std_labels (from EnrichConnectionTablePolars)
+            # so no additional type_to_label_map transformation is needed
             self._vprint(f'  Streaming type-level paths to CSV (Polars)...', level='full')
             total_type_paths = svp.process_paths_streaming(
                 path_gen,
