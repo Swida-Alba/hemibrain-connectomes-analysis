@@ -6431,16 +6431,20 @@ class FindNeuronConnection:
         
         # Get source and target labels (mapped or original types)
         # When label_mapper is provided, conn_types uses std_labels, so we need to match
+        # For untyped neurons, use bodyId as fallback to handle data quality gracefully
         source_labels = set()
         for idx, row in self.source_df.iterrows():
             b = str(row['bodyId']) if 'bodyId' in row else ''
             t = row['type'] if 'type' in row else None
             
-            # Use std_label if available, else fall back to type
+            # Use std_label if available, else fall back to type, else fall back to bodyId
             if b and b in bodyid_to_label:
                 label = bodyid_to_label[b]
-            elif t is not None and (not isinstance(t, float) or not pd.isna(t)):
+            elif t is not None and (not isinstance(t, float) or not pd.isna(t)) and str(t).strip() != '':
                 label = str(t)
+            elif b:
+                # Use bodyId as fallback for untyped neurons
+                label = b
             else:
                 continue
             source_labels.add(label)
@@ -6453,11 +6457,14 @@ class FindNeuronConnection:
             b = str(row['bodyId']) if 'bodyId' in row else ''
             t = row['type'] if 'type' in row else None
             
-            # Use std_label if available, else fall back to type
+            # Use std_label if available, else fall back to type, else fall back to bodyId
             if b and b in bodyid_to_label:
                 label = bodyid_to_label[b]
-            elif t is not None and (not isinstance(t, float) or not pd.isna(t)):
+            elif t is not None and (not isinstance(t, float) or not pd.isna(t)) and str(t).strip() != '':
                 label = str(t)
+            elif b:
+                # Use bodyId as fallback for untyped neurons
+                label = b
             else:
                 continue
             target_labels.add(label)

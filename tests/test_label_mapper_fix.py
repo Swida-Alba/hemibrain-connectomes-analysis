@@ -161,6 +161,42 @@ def test_without_label_mapper():
     return True
 
 
+def test_bodyid_fallback_for_untyped_neurons():
+    """Test that untyped neurons use bodyId as fallback label."""
+    print("\n=== Test: BodyId fallback for untyped neurons ===")
+    
+    # Create connection table with some null/empty types
+    conn_table = pl.DataFrame({
+        'bodyId_pre': ['1', '2', '3', '4'],
+        'bodyId_post': ['5', '6', '7', '8'],
+        'type_pre': ['TypeA', '', None, 'TypeB'],  # bodyIds 2 and 3 have no type
+        'type_post': ['TypeC', 'TypeC', '', 'TypeD'],  # bodyId 7 has no type
+        'weight': [10, 15, 20, 5],
+    })
+    
+    # Run enrichment without label_mapper
+    conn_df, conn_type, conn_group = EnrichConnectionTablePolars(conn_table)
+    
+    print(f"  Input: bodyId 2 has empty type, bodyId 3 has null type, bodyId 7 has empty type")
+    print(f"  conn_type result:")
+    print(conn_type.to_pandas().to_string())
+    
+    type_pre_values = set(conn_type['type_pre'].to_list())
+    type_post_values = set(conn_type['type_post'].to_list())
+    
+    print(f"  type_pre values: {type_pre_values}")
+    print(f"  type_post values: {type_post_values}")
+    
+    # Should use bodyId for untyped neurons
+    assert '2' in type_pre_values or '3' in type_pre_values, "BodyId should be used for untyped neurons"
+    assert '' not in type_pre_values, "Empty string should NOT appear in type_pre"
+    assert '7' in type_post_values, "BodyId 7 should be used for untyped neuron"
+    assert '' not in type_post_values, "Empty string should NOT appear in type_post"
+    
+    print("  ✓ PASSED: BodyId is used as fallback for untyped neurons")
+    return True
+
+
 def main():
     """Run all tests."""
     print("=" * 60)
@@ -183,6 +219,14 @@ def main():
     
     try:
         all_passed &= test_enrich_connection_table_with_label_mapper()
+    except Exception as e:
+        print(f"  ✗ FAILED: {e}")
+        import traceback
+        traceback.print_exc()
+        all_passed = False
+    
+    try:
+        all_passed &= test_bodyid_fallback_for_untyped_neurons()
     except Exception as e:
         print(f"  ✗ FAILED: {e}")
         import traceback

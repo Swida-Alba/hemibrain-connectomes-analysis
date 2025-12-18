@@ -580,6 +580,7 @@ def EnrichConnectionTablePolars(conn_table, traversal_probability_threshold=0, d
     # Apply bodyId → std_label mapping to connection table
     # For mapped bodyIds: use std_label
     # For unmapped bodyIds: use original type (Step 5)
+    # For untyped neurons (empty/null type): use bodyId as fallback
     if bodyid_label_map:
         # Create a Polars-friendly mapping for vectorized lookup
         map_df = pl.DataFrame({
@@ -593,9 +594,13 @@ def EnrichConnectionTablePolars(conn_table, traversal_probability_threshold=0, d
             on='bodyId_pre',
             how='left'
         )
-        # Use std_label if mapped, else fall back to type
+        # Use std_label if mapped, else fall back to type, else fall back to bodyId
         conn_df = conn_df.with_columns(
-            pl.coalesce([pl.col('std_label_pre'), pl.col('type_pre')]).alias('std_label_pre')
+            pl.coalesce([
+                pl.col('std_label_pre'),
+                pl.when(pl.col('type_pre').is_not_null() & (pl.col('type_pre') != '')).then(pl.col('type_pre')).otherwise(None),
+                pl.col('bodyId_pre')
+            ]).alias('std_label_pre')
         )
         
         # Map post neurons
@@ -605,13 +610,23 @@ def EnrichConnectionTablePolars(conn_table, traversal_probability_threshold=0, d
             how='left'
         )
         conn_df = conn_df.with_columns(
-            pl.coalesce([pl.col('std_label_post'), pl.col('type_post')]).alias('std_label_post')
+            pl.coalesce([
+                pl.col('std_label_post'),
+                pl.when(pl.col('type_post').is_not_null() & (pl.col('type_post') != '')).then(pl.col('type_post')).otherwise(None),
+                pl.col('bodyId_post')
+            ]).alias('std_label_post')
         )
     else:
-        # No label_mapper: std_label = type
+        # No label_mapper: std_label = type, or bodyId if type is empty/null
         conn_df = conn_df.with_columns([
-            pl.col('type_pre').alias('std_label_pre'),
-            pl.col('type_post').alias('std_label_post')
+            pl.coalesce([
+                pl.when(pl.col('type_pre').is_not_null() & (pl.col('type_pre') != '')).then(pl.col('type_pre')).otherwise(None),
+                pl.col('bodyId_pre')
+            ]).alias('std_label_pre'),
+            pl.coalesce([
+                pl.when(pl.col('type_post').is_not_null() & (pl.col('type_post') != '')).then(pl.col('type_post')).otherwise(None),
+                pl.col('bodyId_post')
+            ]).alias('std_label_post')
         ])
 
     # 1. Enrich BodyId Level
