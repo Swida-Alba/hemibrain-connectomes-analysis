@@ -224,6 +224,9 @@ class NeuronBridgeFinder:
         Default match algorithm: 'cds', 'pppm', or 'both'. Default: 'cds'
     region : str
         Filter images by anatomical region: 'Brain', 'VNC', or 'All'. Default: 'All'
+    max_images_per_line : int
+        Maximum LM images to process per driver line. Use -1 for unlimited. Default: 10
+        Images are pre-filtered by match_type availability before limiting.
     
     Attributes
     ----------
@@ -255,6 +258,7 @@ class NeuronBridgeFinder:
     neuprint_server: str = 'https://neuprint.janelia.org'
     match_type: str = 'cds'
     region: str = 'All'
+    max_images_per_line: int = 10
     
     # Private fields
     _client: Any = field(init=False, repr=False, default=None)
@@ -453,6 +457,67 @@ class NeuronBridgeFinder:
                     filtered.append(img)
         
         return filtered
+    
+    def _filter_images_by_match_availability(
+        self, 
+        images: List[Any], 
+        match_type: str
+    ) -> List[Any]:
+        """
+        Filter images to only include those with available match results for the specified type.
+        
+        Pre-scans image metadata to check for CDSResults/PPPMResults URLs,
+        skipping images that don't have the required match type data.
+        
+        Parameters
+        ----------
+        images : list
+            List of LM image objects from NeuronBridge API.
+        match_type : str
+            Match algorithm: 'cds', 'pppm', or 'both'.
+            
+        Returns
+        -------
+        list
+            Filtered list of images that have the required match results available.
+        """
+        if match_type == 'both':
+            # For 'both', include images that have either CDS or PPPM
+            filtered = []
+            for img in images:
+                files = getattr(img, 'files', None)
+                if files is None:
+                    continue
+                has_cds = getattr(files, 'CDSResults', None) is not None
+                has_pppm = getattr(files, 'PPPMResults', None) is not None
+                if has_cds or has_pppm:
+                    filtered.append(img)
+            return filtered
+        
+        elif match_type == 'cds':
+            # Only include images with CDS results
+            filtered = []
+            for img in images:
+                files = getattr(img, 'files', None)
+                if files is None:
+                    continue
+                if getattr(files, 'CDSResults', None) is not None:
+                    filtered.append(img)
+            return filtered
+        
+        elif match_type == 'pppm':
+            # Only include images with PPPM results
+            filtered = []
+            for img in images:
+                files = getattr(img, 'files', None)
+                if files is None:
+                    continue
+                if getattr(files, 'PPPMResults', None) is not None:
+                    filtered.append(img)
+            return filtered
+        
+        # Unknown match_type, return all
+        return images
     
     def _classify_line_type(self, line_name: str) -> str:
         """
@@ -2025,6 +2090,18 @@ class NeuronBridgeFinder:
             if not lm_images:
                 self._vprint(f"  ⚠️ No LM images for line '{line_name}' in region '{self.region}'")
                 return []
+            
+            # Filter images by match_type availability (pre-scan to skip unavailable)
+            lm_images = self._filter_images_by_match_availability(lm_images, match_type)
+            if not lm_images:
+                self._vprint(f"  ⚠️ No LM images with {match_type.upper()} results for line '{line_name}'")
+                return []
+            
+            # Apply max_images_per_line limit
+            original_count = len(lm_images)
+            if self.max_images_per_line > 0 and len(lm_images) > self.max_images_per_line:
+                lm_images = lm_images[:self.max_images_per_line]
+                self._vprint(f"  ℹ️  Using {len(lm_images)}/{original_count} images (max_images_per_line={self.max_images_per_line})")
             
             n_images = len(lm_images)
             # Only print verbose message if not in a progress bar context

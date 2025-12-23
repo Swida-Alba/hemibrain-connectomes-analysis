@@ -56,6 +56,10 @@ if __name__ == "__main__":
     # Match algorithm: 'cds' (Color Depth Search), 'pppm', or 'both'
     match_type = 'cds'
     
+    # Maximum LM images to process per line (10 by default, -1 for all)
+    # Images are pre-filtered by match_type availability before limiting
+    max_images_per_line = 10
+    
     # Output directory (set to None for stdout only)
     output_dir = '/Users/apple/Local/connection_data/neuronbridge'
     
@@ -152,8 +156,9 @@ if __name__ == "__main__":
         use_cache=use_cache,
         verbose=verbose,
         separate_splitgal4=separate_splitgal4,
-        match_type=match_type,  # Set default match algorithm
-        region=region            # Set region filter
+        match_type=match_type,                    # Set default match algorithm
+        region=region,                            # Set region filter
+        max_images_per_line=max_images_per_line   # Limit images per line
     )
     
     # Run batch search (with optional image download)

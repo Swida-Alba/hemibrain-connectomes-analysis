@@ -50,6 +50,10 @@ if __name__ == "__main__":
     # Filters out images from non-matching regions
     region = 'Brain'
     
+    # Maximum LM images to process per line (10 by default, -1 for all)
+    # Images are pre-filtered by match_type availability before limiting
+    max_images_per_line = 10
+    
     # Maximum number of matches to return per line (-1 for all matches)
     top_n = -1
     
@@ -75,8 +79,9 @@ if __name__ == "__main__":
         datasets_path=datasets_path,
         use_cache=use_cache,
         verbose=verbose,
-        match_type=match_type,  # Set default match algorithm
-        region=region            # Set region filter
+        match_type=match_type,           # Set default match algorithm
+        region=region,                    # Set region filter
+        max_images_per_line=max_images_per_line  # Limit images per line
     )
     
     # Run batch search (handles parsing, processing, and saving automatically)

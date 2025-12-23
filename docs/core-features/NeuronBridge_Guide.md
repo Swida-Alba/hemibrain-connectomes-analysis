@@ -109,6 +109,7 @@ class NeuronBridgeFinder:
     neuprint_server: str = 'https://neuprint.janelia.org'
     match_type: str = 'cds'
     region: str = 'All'
+    max_images_per_line: int = 10
 ```
 
 | Parameter | Type | Default | Description |
@@ -122,6 +123,7 @@ class NeuronBridgeFinder:
 | `neuprint_server` | `str` | `'https://neuprint.janelia.org'` | **NEW**: NeuPrint server URL. |
 | `match_type` | `str` | `'cds'` | **NEW**: Default match algorithm for all operations: `'cds'` (Color Depth MIP Search), `'pppm'` (Pattern Matching), or `'both'`. Can be overridden at method level. |
 | `region` | `str` | `'All'` | **NEW**: Filter images by anatomical region: `'Brain'`, `'VNC'`, or `'All'`. Filters out images from non-matching regions to reduce processing time and improve specificity. |
+| `max_images_per_line` | `int` | `10` | **NEW**: Maximum LM images to process per driver line. Use `-1` for unlimited. Images are pre-filtered by match_type availability before limiting. |
 
 **Setting up NeuPrint Token** (required for pulling missing datasets):
 
@@ -148,6 +150,26 @@ nbf = NeuronBridgeFinder(region='All')
 
 # Combine with match_type for complete configuration
 nbf = NeuronBridgeFinder(region='Brain', match_type='both')
+```
+
+**Image Limit Configuration** (control API calls per line):
+
+```python
+# Process only top 10 images per line (default, recommended)
+nbf = NeuronBridgeFinder(max_images_per_line=10)
+
+# Process more images for comprehensive results (slower)
+nbf = NeuronBridgeFinder(max_images_per_line=50)
+
+# Process all available images (slowest, for exhaustive searches)
+nbf = NeuronBridgeFinder(max_images_per_line=-1)
+
+# Combine settings for optimized searching
+nbf = NeuronBridgeFinder(
+    region='Brain',
+    match_type='cds',
+    max_images_per_line=20
+)
 ```
 
 **Match Type Configuration** (set default algorithm):
