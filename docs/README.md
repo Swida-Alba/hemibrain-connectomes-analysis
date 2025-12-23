@@ -2,7 +2,28 @@
 
 Welcome to the Hemibrain Connectomes Analysis documentation!
 
-## 🆕 Recent Updates (December 2025) - V4.1
+## 🆕 Recent Updates (December 2025) - V4.3
+
+### 🌉 NeuronBridge & FlyLight Integration (NEW!)
+
+**Comprehensive EM↔LM mapping and FlyLight imagery access:**
+
+- **📖 [NeuronBridge Integration Guide](./core-features/NeuronBridge_Guide.md)** - Complete guide with examples
+  - Bidirectional search: EM body ID → LM driver lines, and vice versa
+  - CDS and PPPM matching with combined ranking
+  - Multi-dataset support (hemibrain, male-cns, FlyWire FAFB/BANC)
+  - Batch processing with automatic result aggregation
+  - Image download integration with FlyLight
+  
+- **📖 [FlyLight Downloader Guide](./core-features/FlyLight_Guide.md)** - Complete guide with examples
+  - Access to Janelia FlyLight S3 bucket and HTTP CDN
+  - Support for R-lines, SS-lines (Split-GAL4), VT lines, and MCFO
+  - Collection filtering (GAL4/LexA, SplitGAL4, MCFO, RawImages)
+  - `simple_mode` for intelligent download volume reduction
+  - Multiple file formats (PNG, H5J, LSM, MP4, JSON)
+
+- **New Scripts**: `NeuronBridge_FindNeuron.py`, `NeuronBridge_FindLines.py`
+- **New Modules**: `src/neuronbridge_finder.py`, `src/flylight_downloader.py`
 
 ### HomologFinder Improvements
 - **Hierarchical ConnectivityStatus**: Profile quality classified into 5 levels (NONE, RARE, INCOMPLETE, INCOMPLETE_EXPANSION, COMPLETE)
@@ -34,6 +55,10 @@ Welcome to the Hemibrain Connectomes Analysis documentation!
 
 Documentation is organized into three main categories:
 
+### 🌉 EM↔LM Integration (NEW!)
+- **[NeuronBridge Guide](./core-features/NeuronBridge_Guide.md)**: Find matching EM neurons ↔ LM driver lines
+- **[FlyLight Guide](./core-features/FlyLight_Guide.md)**: Download FlyLight imagery by driver line
+
 ### 🎨 [Visualizations](./visualizations/)
 Comprehensive guides for all visualization types:
 - **[Heatmap](./visualizations/Heatmap_Guide.md)**: Interactive connection matrices
@@ -43,8 +68,10 @@ Comprehensive guides for all visualization types:
 
 ### 🔧 [Core Features](./core-features/)
 Essential functionality documentation:
-- **✨ Module Calling Tree**: Visual architecture and dependency guide (NEW)
-- **✨ Connectivity Profiler**: 1-hop/2-hop hybrid profile building (NEW)
+- **✨ NeuronBridge Integration**: EM↔LM mapping (NEW)
+- **✨ FlyLight Downloader**: FlyLight imagery access (NEW)
+- **✨ Module Calling Tree**: Visual architecture and dependency guide
+- **✨ Connectivity Profiler**: 1-hop/2-hop hybrid profile building
 - **✨ Homolog Finding**: Find homologous neurons across datasets
 - **✨ Cross-Dataset Comparison**: Compare connectivity across multiple datasets
 - **✨ Connectivity Profile Verification**: Verify neuron types using connectivity fingerprints
@@ -70,6 +97,8 @@ Advanced technical documentation:
 3. Explore [Visualization Overview](./visualizations/README.md)
 
 ### For Researchers
+- **[NeuronBridge Integration](./core-features/NeuronBridge_Guide.md)** - Find driver lines for EM neurons (NEW)
+- **[FlyLight Downloader](./core-features/FlyLight_Guide.md)** - Download LM imagery (NEW)
 - **[Homolog Finding](./core-features/HomologFinding_Guide.md)** - Find homologs across datasets
 - **[Cross-Dataset Comparison](./core-features/CrossDatasetComparison_Guide.md)** - Compare connectivity patterns
 - **[Connectivity Profile Verification](./core-features/ConnectivityProfileVerification_Guide.md)** - Verify neuron types

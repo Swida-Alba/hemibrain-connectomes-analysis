@@ -1,4 +1,4 @@
-# Drosophila Connectome Analysis v4.2
+# Drosophila Connectome Analysis v4.3
 
 A comprehensive Python toolkit for analyzing and visualizing connectome data from **all NeuPrint databases and FlyWire datasets**. Features type-based pathfinding algorithms, interactive network visualizations, 3D neuron morphology rendering with video export, and high-performance caching. Supports hemibrain, optic lobe, FIB, MANC, and other NeuPrint datasets.
 
@@ -6,19 +6,35 @@ A comprehensive Python toolkit for analyzing and visualizing connectome data fro
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 ## ✨ Key Features
-- 🗄️ **Universal Dataset Support**: Seamless compatibility between **NeuPrint datasets** (hemibrain, male-cns, etc.) and **FlyWire FAFB/BANC** datasets.
-- 🔍 **Cross-Dataset Comparison**: Analyze and compare connectivity patterns across multiple datasets seamlessly
-- 🧬 **Connectivity Analysis**: Connectivity-based homolog finding (inter/intra-dataset) and similarity comparisons.
-- 🔍 **Population-Level Fast Pathfinding**: Comprehensive multi-hop path discovery between neuron populations with forward-only validation
-- 🎬 **3D Visualization**: Interactive neuron skeleton rendering with rotating video export (navis-based)
-- 🌐 **Interactive Networks**: Cytoscape.js-powered network graphs with hierarchical and force-directed layouts
-- 📊 **Rich Visualizations**: Sankey diagrams, heatmaps with clustering, and connection matrices
-- ⚖️ **Advanced Comparisons**: Cross-dataset and intra-dataset comparisons at multiple threshold levels to reveal robust 
-- connectivity patterns.
-- ⚡ **High Performance**: 10-100x speedup with local caching, Polars-accelerated large data operations, optimized graph algorithms and pathfinding
-- 🎯 **Flexible Filtering**: Multiple filtering modes (synapse count, connection ratio, traversal probability)
-- 💾 **Smart Caching**: Efficient local storage with Polars for memory-efficient consolidation of large caches
-- 🔧 **Modular Design**: Reorganized src/ layout for better maintainability
+
+### 🔬 EM↔LM Integration (NEW!)
+- **🌉 [NeuronBridge Integration](docs/core-features/NeuronBridge_Guide.md)**: Bidirectional mapping between EM reconstructions and LM driver lines
+  - Find driver lines (GAL4, LexA, Split-GAL4) matching EM body IDs
+  - Find EM neurons matching driver line names
+  - CDS and PPPM matching algorithms with combined ranking
+  - Multi-dataset support (hemibrain, male-cns, FlyWire FAFB/BANC)
+- **📸 [FlyLight Downloader](docs/core-features/FlyLight_Guide.md)**: Direct access to FlyLight imagery from Janelia S3 bucket
+  - Download MIP images, CDM masks, aligned stacks, and metadata
+  - Support for R-lines, SS-lines (Split-GAL4), VT lines, and MCFO
+  - Smart filtering with `simple_mode` to reduce download volume
+  - Collection-based searching (GAL4/LexA, SplitGAL4, MCFO)
+
+### 🗄️ Dataset & Analysis
+- **Universal Dataset Support**: Seamless compatibility between **NeuPrint datasets** (hemibrain, male-cns, etc.) and **FlyWire FAFB/BANC** datasets
+- **Cross-Dataset Comparison**: Analyze and compare connectivity patterns across multiple datasets seamlessly
+- **Connectivity Analysis**: Connectivity-based homolog finding (inter/intra-dataset) and similarity comparisons
+- **Population-Level Fast Pathfinding**: Comprehensive multi-hop path discovery between neuron populations with forward-only validation
+
+### 🎨 Visualization
+- **3D Visualization**: Interactive neuron skeleton rendering with rotating video export (navis-based)
+- **Interactive Networks**: Cytoscape.js-powered network graphs with hierarchical and force-directed layouts
+- **Rich Visualizations**: Sankey diagrams, heatmaps with clustering, and connection matrices
+
+### ⚡ Performance & Tools
+- **High Performance**: 10-100x speedup with local caching, Polars-accelerated large data operations
+- **Flexible Filtering**: Multiple filtering modes (synapse count, connection ratio, traversal probability)
+- **Smart Caching**: Efficient local storage with Polars for memory-efficient consolidation
+- **Modular Design**: Reorganized src/ layout for better maintainability
 
 ---
 
@@ -40,7 +56,9 @@ For comprehensive documentation, see **[docs/README.md](docs/README.md)** - your
 
 ### 🔑 Core Features
 Detailed documentation in **[docs/core-features/](docs/core-features/)** including:
-- **✨ NEW: [Homolog Finding Guide](docs/core-features/HomologFinding_Guide.md)** - Find homologous neurons across datasets using connectivity profiles
+- **✨ NEW: [NeuronBridge Integration](docs/core-features/NeuronBridge_Guide.md)** - Find matching EM neurons ↔ LM driver lines
+- **✨ NEW: [FlyLight Downloader](docs/core-features/FlyLight_Guide.md)** - Download FlyLight imagery by driver line
+- **✨ [Homolog Finding Guide](docs/core-features/HomologFinding_Guide.md)** - Find homologous neurons across datasets using connectivity profiles
 - **✨ [Cross-Dataset Comparison Guide](docs/core-features/CrossDatasetComparison_Guide.md)** - Compare connectivity across hemibrain, male-cns, FlyWire, and more
 - **[LabelMapper Guide](docs/core-features/LabelMapper_Guide.md)** - Standardize neuron identifiers across datasets
 - **Cache System** - 10-100x faster queries with intelligent local storage

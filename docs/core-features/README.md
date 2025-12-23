@@ -5,8 +5,14 @@ Documentation for the fundamental features of the Hemibrain Connectomes Analysis
 ## Overview
 
 This directory contains documentation for the core analytical capabilities:
-- **✨ Module Calling Tree**: Visual architecture and dependency relationships (NEW)
-- **✨ Connectivity Profiler**: 1-hop/2-hop hybrid profile building approach (NEW)
+
+### 🌉 EM↔LM Integration (NEW!)
+- **✨ [NeuronBridge Integration](./NeuronBridge_Guide.md)**: Bidirectional mapping between EM reconstructions and LM driver lines
+- **✨ [FlyLight Downloader](./FlyLight_Guide.md)**: Download FlyLight imagery from Janelia S3 bucket
+
+### 🧬 Connectivity Analysis
+- **✨ Module Calling Tree**: Visual architecture and dependency relationships
+- **✨ Connectivity Profiler**: 1-hop/2-hop hybrid profile building approach
 - **✨ Homolog Finding**: Find homologs across datasets using connectivity profiles
 - **✨ Cross-Dataset Comparison**: Compare connectivity across multiple datasets
 - **✨ Connectivity Profile Verification**: Verify neuron types using connectivity fingerprints
@@ -17,7 +23,81 @@ This directory contains documentation for the core analytical capabilities:
 
 ---
 
-## ✨ Module Calling Tree (NEW)
+## 🌉 NeuronBridge & FlyLight Integration (NEW!)
+
+### [NeuronBridge Integration Guide](./NeuronBridge_Guide.md)
+
+Bidirectional mapping between EM body IDs and LM driver lines using the NeuronBridge API.
+
+**Key Features**:
+- **EM → LM**: Find driver lines (GAL4, LexA, Split-GAL4) matching EM body IDs
+- **LM → EM**: Find EM neurons matching driver line names
+- **Match Types**: CDS (Color Depth Search), PPPM (PatchPerPixMatch), or combined ranking
+- **Multi-Dataset**: Support for hemibrain, male-cns, FlyWire FAFB/BANC
+- **Batch Processing**: Process multiple queries with automatic aggregation
+- **Image Downloads**: Integrated with FlyLight for imagery access
+
+**Quick Example**:
+```python
+from src.neuronbridge_finder import NeuronBridgeFinder
+
+# Initialize with custom settings
+nbf = NeuronBridgeFinder(
+    region='Brain',      # Filter for Brain region only
+    match_type='both'    # Use both CDS and PPPM by default
+)
+
+# Find driver lines for an EM body ID
+lines = nbf.id_to_lines(720575940621039145)  # Uses match_type='both'
+
+# Find EM neurons for a driver line
+neurons = nbf.line_to_neuron('LH173')  # Uses match_type='both', region='Brain'
+
+# Override settings at method level if needed
+results = nbf.find_lines_batch(
+    queries='MBON01,MBON02',
+    dataset='hemibrain:v1.2.1',
+    match_type='cds',  # Override to use CDS only
+    download_images='flylight',
+    simple_mode=True
+)
+
+# VNC-specific search
+nbf_vnc = NeuronBridgeFinder(region='VNC', match_type='pppm')
+vnc_lines = nbf_vnc.id_to_lines(123456789)
+```
+
+### [FlyLight Downloader Guide](./FlyLight_Guide.md)
+
+Direct access to FlyLight imagery from the Janelia S3 bucket and HTTP CDN.
+
+**Key Features**:
+- **Multiple Sources**: S3 bucket for R-lines/SS-lines, HTTP CDN for VT lines
+- **Collection Filtering**: GAL4/LexA, SplitGAL4, MCFO, RawImages
+- **File Types**: PNG, JPG, H5J (3D stacks), LSM (raw confocal), MP4 (videos), JSON (metadata)
+- **Simple Mode**: Intelligent filename filtering to reduce download volume (up to 95% reduction)
+- **Parallel Downloads**: Multi-threaded downloading for efficiency
+
+**Quick Example**:
+```python
+from src.flylight_downloader import FlyLightDownloader, download_flylight_images
+
+# Quick download
+paths = download_flylight_images('SS01015', output_dir='./images', simple_mode=True)
+
+# Advanced usage
+downloader = FlyLightDownloader(
+    collection_category='SplitGAL4',
+    formats=['png', 'jpg'],
+    image_types='mip',
+    simple_mode=True
+)
+files = downloader.get_filtered_files('SS01015')  # 241 → 13 files
+```
+
+---
+
+## ✨ Module Calling Tree
 
 ### [Module Calling Tree](./Module_Calling_Tree.md)
 Visual architecture guide showing how all modules in the project interact.
@@ -72,7 +152,7 @@ Detailed comparison of the available pathfinding algorithms in `FindAllPath`.
 
 ---
 
-## ✨ Connectivity Profiler (NEW)
+## ✨ Connectivity Profiler
 
 ### [Connectivity Profiler Guide](./ConnectivityProfiler_Guide.md)
 Core module for building connectivity profiles using the 1-hop/2-hop hybrid approach.

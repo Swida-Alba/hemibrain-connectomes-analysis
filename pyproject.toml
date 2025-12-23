@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hemibrain-connectomes-analysis"
-version = "4.1.8"
+version = "4.3.0"
 description = "Hemibrain connectome analysis and visualization toolkit with reorganized modular structure"
 readme = {file = "README.md", content-type = "text/markdown"}
 requires-python = ">=3.8"
@@ -50,6 +50,8 @@ dependencies = [
     "neuprint-python==0.4.26",
     "navis==1.5.0",
     "flybrains==0.2.11",
+    "neuronbridge-python>=3.3.0",
+    "boto3>=1.26.0",
     "img2pdf==0.5.1",
 ]
 

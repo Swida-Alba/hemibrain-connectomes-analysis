@@ -132,7 +132,7 @@ def run_comprehensive_comparison():
         # datasets=['flywire_FAFB_v783', 'male-cns:v0.9'],
         # datasets_nickname=['FAFB', 'MCNS'],
         
-        source_neurons=['aMe.*'],
+        source_neurons=['aMe12','aMe26'],
         # source_neurons=neurons_network,
         
         # Target neurons - PPL101 dopaminergic neurons
@@ -140,11 +140,11 @@ def run_comprehensive_comparison():
         # target_neurons=target_map,
         # overall_label_mapper=label_map,
         
-        max_interlayer=1,
+        max_interlayer=2,
         
         # Multiple thresholds to analyze sensitivity
-        thresholds=[3, 5, 10, 15, 20],
-        # thresholds = list(range(1,21)),
+        # thresholds=[3, 5, 10, 15, 20],
+        thresholds = list(range(1,21)),
         
         # Top edges to include in analysis
         top_edges=500,
