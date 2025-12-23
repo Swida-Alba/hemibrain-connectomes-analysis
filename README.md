@@ -763,7 +763,7 @@ cd vispath-subproject
 pip install -e .
 
 # Or directly from GitHub
-pip install git+https://github.com/Swida-Alba/hemibrain-connectomes-analysis.git#subdirectory=vispath-subproject
+pip install git+https://github.com/Swida-Alba/Drosophila-cross-dataset-connectome-analysis.git#subdirectory=vispath-subproject
 ```
 
 **Recommended with conda:**
@@ -1007,10 +1007,10 @@ The verification report includes:
 
 ```bash
 # Create environment with Python 3.11
-conda create -n hemibrain python=3.11 -y
+conda create -n droca python=3.11 -y
 
 # Activate the environment
-conda activate hemibrain
+conda activate droca
 
 # Install dependencies
 pip install -r requirements.txt
@@ -1019,7 +1019,7 @@ pip install -r requirements.txt
 **Or install the package in editable mode:**
 
 ```bash
-conda activate hemibrain
+conda activate droca
 pip install -e .
 ```
 
@@ -1174,8 +1174,8 @@ pip --version
 
 **Option B: Using Git (recommended for developers)**
 ```bash
-git clone https://github.com/Swida-Alba/hemibrain-connectomes-analysis.git
-cd hemibrain-connectomes-analysis
+git clone https://github.com/Swida-Alba/Drosophila-cross-dataset-connectome-analysis.git
+cd Drosophila-cross-dataset-connectome-analysis
 ```
 
 ### Step 3: Install Dependencies
