@@ -38,6 +38,7 @@ Author: Generated for hemibrain-connectomes-analysis project
 
 import os
 import re
+import time
 import warnings
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -310,6 +311,64 @@ class NeuronBridgeFinder:
                     print(msg, end=end)
             else:
                 print(msg, end=end)
+    
+    def _retry_with_backoff(
+        self,
+        func,
+        *args,
+        max_retries: int = 3,
+        initial_delay: float = 1.0,
+        **kwargs
+    ):
+        """
+        Retry a function with exponential backoff for transient network errors.
+        
+        Parameters
+        ----------
+        func : callable
+            Function to retry
+        max_retries : int
+            Maximum number of retry attempts (default: 3)
+        initial_delay : float
+            Initial delay in seconds (default: 1.0)
+        *args, **kwargs
+            Arguments to pass to func
+            
+        Returns
+        -------
+        Any
+            Result from func, or None if all retries failed
+        """
+        last_error = None
+        
+        for attempt in range(max_retries):
+            try:
+                return func(*args, **kwargs)
+            except Exception as e:
+                last_error = e
+                error_str = str(e).lower()
+                
+                # Check if it's a retryable network error
+                is_retryable = any([
+                    'incompleteread' in error_str,
+                    'ssl' in error_str and 'eof' in error_str,
+                    'connection' in error_str and 'broken' in error_str,
+                    'max retries exceeded' in error_str,
+                    'connection reset' in error_str,
+                    'timeout' in error_str
+                ])
+                
+                if not is_retryable or attempt >= max_retries - 1:
+                    # Not retryable or last attempt - give up
+                    raise
+                
+                # Wait with exponential backoff
+                delay = initial_delay * (2 ** attempt)
+                time.sleep(delay)
+        
+        # Should never reach here, but just in case
+        if last_error:
+            raise last_error
     
     def _normalize_dataset_name(self, dataset: str) -> str:
         """
@@ -1850,7 +1909,7 @@ class NeuronBridgeFinder:
             cds_failed = False
             pppm_failed = False
             
-            # Get CDS matches
+            # Get CDS matches with retry logic
             if match_type in ['cds', 'both']:
                 try:
                     # Check if CDSResults URL exists
@@ -1858,7 +1917,12 @@ class NeuronBridgeFinder:
                     if cds_url is None:
                         cds_failed = True
                     else:
-                        cds_matches = self._client.get_cds_matches(em_image)
+                        cds_matches = self._retry_with_backoff(
+                            self._client.get_cds_matches,
+                            em_image,
+                            max_retries=3,
+                            initial_delay=1.0
+                        )
                         for match in cds_matches:
                             if hasattr(match, 'image') and hasattr(match.image, 'type'):
                                 if match.image.type == 'LMImage':
@@ -1871,11 +1935,9 @@ class NeuronBridgeFinder:
                                     })
                 except Exception as e:
                     cds_failed = True
-                    # Only warn if this is a 'cds'-only request
-                    if match_type == 'cds':
-                        self._vprint(f"  ⚠️ Error fetching CDS matches: {e}")
+                    # Suppress individual errors - will be caught by calling method
             
-            # Get PPPM matches
+            # Get PPPM matches with retry logic
             if match_type in ['pppm', 'both']:
                 try:
                     # Check if PPPMResults URL exists
@@ -1883,7 +1945,12 @@ class NeuronBridgeFinder:
                     if pppm_url is None:
                         pppm_failed = True
                     else:
-                        pppm_matches = self._client.get_ppp_matches(em_image)
+                        pppm_matches = self._retry_with_backoff(
+                            self._client.get_ppp_matches,
+                            em_image,
+                            max_retries=3,
+                            initial_delay=1.0
+                        )
                         for match in pppm_matches:
                             if hasattr(match, 'image') and hasattr(match.image, 'type'):
                                 if match.image.type == 'LMImage':
@@ -1896,9 +1963,7 @@ class NeuronBridgeFinder:
                                     })
                 except Exception as e:
                     pppm_failed = True
-                    # Only warn if this is a 'pppm'-only request
-                    if match_type == 'pppm':
-                        self._vprint(f"  ⚠️ Error fetching PPPM matches: {e}")
+                    # Suppress individual errors - will be caught by calling method
             
             # Only warn if both failed when match_type='both'
             if match_type == 'both' and cds_failed and pppm_failed:
@@ -1967,6 +2032,8 @@ class NeuronBridgeFinder:
                 self._vprint(f"  Found {n_images} LM images for '{line_name}'")
             
             all_matches = []
+            cds_errors = 0
+            pppm_errors = 0
             
             # Create progress bar for image processing if we have multiple images and tqdm is available
             # Only show if we're not already in a progress bar context (avoid double nesting)
@@ -1992,10 +2059,15 @@ class NeuronBridgeFinder:
                 cds_failed = False
                 pppm_failed = False
                 
-                # Get CDS matches
+                # Get CDS matches with retry logic
                 if match_type in ['cds', 'both']:
                     try:
-                        cds_matches = self._client.get_cds_matches(lm_image)
+                        cds_matches = self._retry_with_backoff(
+                            self._client.get_cds_matches,
+                            lm_image,
+                            max_retries=3,
+                            initial_delay=1.0
+                        )
                         for match in cds_matches:
                             if hasattr(match, 'image') and hasattr(match.image, 'type'):
                                 if match.image.type == 'EMImage':
@@ -2013,14 +2085,19 @@ class NeuronBridgeFinder:
                                     all_matches.append(match_dict)
                     except Exception as e:
                         cds_failed = True
-                        # Only warn if this is a 'cds'-only request, not 'both'
-                        if match_type == 'cds':
-                            self._vprint(f"  ⚠️ Error fetching CDS matches for LM image: {e}")
+                        cds_errors += 1
+                        # Only warn if this is a 'cds'-only request and verbose
+                        # Suppress individual errors to avoid spam
                 
-                # Get PPPM matches
+                # Get PPPM matches with retry logic
                 if match_type in ['pppm', 'both']:
                     try:
-                        pppm_matches = self._client.get_ppp_matches(lm_image)
+                        pppm_matches = self._retry_with_backoff(
+                            self._client.get_ppp_matches,
+                            lm_image,
+                            max_retries=3,
+                            initial_delay=1.0
+                        )
                         for match in pppm_matches:
                             if hasattr(match, 'image') and hasattr(match.image, 'type'):
                                 if match.image.type == 'EMImage':
@@ -2037,9 +2114,9 @@ class NeuronBridgeFinder:
                                     all_matches.append(match_dict)
                     except Exception as e:
                         pppm_failed = True
-                        # Only warn if this is a 'pppm'-only request, not 'both'
-                        if match_type == 'pppm':
-                            self._vprint(f"  ⚠️ Error fetching PPPM matches for LM image: {e}")
+                        pppm_errors += 1
+                        # Only warn if this is a 'pppm'-only request and verbose
+                        # Suppress individual errors to avoid spam
                 
                 # Only warn if both failed when match_type='both'
                 if match_type == 'both' and cds_failed and pppm_failed:
@@ -2049,6 +2126,15 @@ class NeuronBridgeFinder:
             # Restore loading messages flag after processing images
             if show_image_progress:
                 self._suppress_loading_msgs = False
+            
+            # Report error summary if there were failures
+            if cds_errors > 0 or pppm_errors > 0:
+                error_parts = []
+                if cds_errors > 0:
+                    error_parts.append(f"CDS: {cds_errors}/{n_images}")
+                if pppm_errors > 0:
+                    error_parts.append(f"PPPM: {pppm_errors}/{n_images}")
+                self._vprint(f"  ℹ️  Network errors (retried 3x): {', '.join(error_parts)} images failed")
             
             # Sort results based on match_type
             if match_type == 'both' and all_matches:
