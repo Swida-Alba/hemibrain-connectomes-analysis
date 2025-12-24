@@ -3204,6 +3204,24 @@ class NeuronBridgeFinder:
             
             self._vprint(f"   📊 {dataset}: {len(neuron_layers)} types, {sum(len(l) for l in neuron_layers)} neurons")
             
+            # Verify bodyIds exist in local dataset before attempting visualization
+            # This prevents the "No neurons matching" error from NeuPrint
+            dataset_folder = dataset.replace(':', '_').replace('.', '_')
+            local_neuron_df = self._load_neuron_df_for_dataset(dataset_folder)
+            
+            if local_neuron_df is None or local_neuron_df.empty:
+                self._vprint(f"   ⚠️  Skipping visualization for {dataset}: local dataset not available")
+                continue
+            
+            # Check if at least some bodyIds can be found
+            test_ids = [str(bid) for layer in neuron_layers for bid in layer[:3]]  # Sample bodyIds
+            found_count = local_neuron_df[local_neuron_df['bodyId'].isin(test_ids)].shape[0]
+            
+            if found_count == 0:
+                self._vprint(f"   ⚠️  Skipping visualization for {dataset}: bodyIds not found in local dataset")
+                self._vprint(f"      (This can happen if NeuronBridge matches come from a different dataset version)")
+                continue
+            
             try:
                 # Determine brain_mesh based on dataset
                 brain_mesh = 'whole'
