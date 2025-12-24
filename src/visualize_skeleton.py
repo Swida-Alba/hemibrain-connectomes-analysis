@@ -4,6 +4,7 @@ import shutil
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
+from typing import List
 import logging
 import warnings
 from contextlib import contextmanager
@@ -295,7 +296,7 @@ class VisualizeSkeleton:
 
     legend_mode: str = 'normal'
     '''
-    'normal': show legend for individual neurons\n
+    'normal': show legend for individual neurons, requires `merge_neurons=False`\n
     'merge': merge all neurons in the same layer and show legend for each layer\n
     '''
     
@@ -623,9 +624,12 @@ class VisualizeSkeleton:
             self.layer_names.append(auto_name)
         self._vprint('Fetched neuron layers', level='full')
 
-        
-        if self.custom_layer_names:
+        # Generate smart layer names based on types (if not using custom names)
+        if not self.custom_layer_names:
+            self.layer_names = self._generate_smart_layer_names()
+        else:
             self.layer_names = self.custom_layer_names
+            
         if self.saveas is None:
             self.saveas = '_'.join(self.layer_names)
         
@@ -634,23 +638,53 @@ class VisualizeSkeleton:
         self.save_folder = os.path.join(self.output_dir, 'plot3d_' + self.saveas.split('.')[0] + '_' + timestamp)
         if not os.path.exists(self.save_folder): os.makedirs(self.save_folder)
         
-        # Save parameters to text file
+        # Save parameters to text file with improved formatting
         param_file = os.path.join(self.save_folder, 'parameters.txt')
         with open(param_file, 'w') as f:
-            f.write(f"Dataset: {self.dataset}\\n")
-            f.write(f"Timestamp: {timestamp}\\n")
-            f.write(f"Neuron Layers: {self.neuron_layers}\\n")
-            f.write(f"Layer Names: {self.layer_names}\\n")
-            f.write(f"Min Synapse Num: {self.min_synapse_num}\\n")
-            f.write(f"Synapse Mode: {self.synapse_mode}\\n")
-            f.write(f"Synapse Size: {self.synapse_size}\\n")
-            f.write(f"Skeleton Mode: {self.skeleton_mode}\\n")
-            f.write(f"Brain Mesh: {self.brain_mesh}\\n")
-            f.write(f"Mesh ROI: {self.mesh_roi}\\n")
-            f.write(f"Backend: {self.backend}\\n")
-            f.write(f"Client Type: {self.client_type}\\n")
+            f.write("=" * 60 + "\n")
+            f.write("VisualizeSkeleton Parameters\n")
+            f.write("=" * 60 + "\n\n")
+            
+            # Basic Info
+            f.write("[Basic Info]\n")
+            f.write(f"  Dataset:     {self.dataset}\n")
+            f.write(f"  Timestamp:   {timestamp}\n")
             if self.version:
-                f.write(f"Version: {self.version}\\n")
+                f.write(f"  Version:     {self.version}\n")
+            f.write(f"  Client Type: {self.client_type}\n")
+            f.write("\n")
+            
+            # Layer Info
+            f.write("[Layers]\n")
+            for i, (layer, name) in enumerate(zip(self.neuron_layers, self.layer_names)):
+                n_neurons = len(self.neuron_dfs[i]) if i < len(self.neuron_dfs) and self.neuron_dfs[i] is not None else 0
+                f.write(f"  Layer {i}: {name} ({n_neurons} neurons)\n")
+                # Show first few neuron IDs if available
+                if n_neurons > 0 and 'bodyId' in self.neuron_dfs[i].columns:
+                    body_ids = self.neuron_dfs[i]['bodyId'].tolist()[:5]
+                    ids_str = ', '.join(str(bid) for bid in body_ids)
+                    if n_neurons > 5:
+                        ids_str += f", ... (+{n_neurons - 5} more)"
+                    f.write(f"           IDs: {ids_str}\n")
+            f.write("\n")
+            
+            # Visualization Settings
+            f.write("[Visualization]\n")
+            f.write(f"  Skeleton Mode:   {self.skeleton_mode}\n")
+            f.write(f"  Backend:         {self.backend}\n")
+            f.write(f"  Brain Mesh:      {self.brain_mesh}\n")
+            if self.mesh_roi:
+                f.write(f"  Mesh ROI:        {self.mesh_roi}\n")
+            f.write("\n")
+            
+            # Synapse Settings
+            f.write("[Synapse Settings]\n")
+            f.write(f"  Synapse Mode:    {self.synapse_mode}\n")
+            f.write(f"  Synapse Size:    {self.synapse_size}\n")
+            f.write(f"  Min Synapse Num: {self.min_synapse_num}\n")
+            f.write("\n")
+            
+            f.write("=" * 60 + "\n")
         
         if self.backend == 'plotly':
             self.fig_3d = go.Figure()
@@ -694,6 +728,78 @@ class VisualizeSkeleton:
         os.makedirs(cache_dir, exist_ok=True)
         return cache_dir
     
+    def _generate_smart_layer_names(self) -> List[str]:
+        """Generate smart layer names based on neuron types.
+        
+        For each layer, generates a name in format:
+        - {type} if all neurons in layer are the same type (even if multiple neurons)
+        - {type}_etc if multiple neurons with different types (uses most common type)
+        - {bodyId} if single untyped neuron
+        - {bodyId}_etc if multiple untyped neurons with different IDs
+        
+        This method looks at the neuron_dfs to determine types and counts.
+        
+        Returns:
+            List[str]: Smart layer names for each layer
+        """
+        smart_names = []
+        
+        for i, ndf in enumerate(self.neuron_dfs):
+            if ndf is None or len(ndf) == 0:
+                # Fallback to original auto-generated name
+                smart_names.append(self.layer_names[i] if i < len(self.layer_names) else f"layer_{i}")
+                continue
+            
+            n_neurons = len(ndf)
+            
+            # Get type column (different datasets may use different column names)
+            type_col = None
+            for col in ['type', 'cell_type', 'neuronType']:
+                if col in ndf.columns:
+                    type_col = col
+                    break
+            
+            # Get types from the dataframe
+            if type_col and type_col in ndf.columns:
+                types = ndf[type_col].dropna().unique().tolist()
+                # Filter out empty strings and None
+                types = [t for t in types if t and str(t).strip()]
+            else:
+                types = []
+            
+            if types:
+                # Count unique types
+                n_unique_types = len(types)
+                
+                # Use the most common type as the representative
+                if type_col in ndf.columns:
+                    type_counts = ndf[type_col].value_counts()
+                    primary_type = type_counts.index[0] if len(type_counts) > 0 else types[0]
+                else:
+                    primary_type = types[0]
+                
+                # Only add _etc if there are multiple different types
+                if n_unique_types > 1:
+                    smart_names.append(f"{primary_type}_etc")
+                else:
+                    # All neurons are the same type
+                    smart_names.append(str(primary_type))
+            else:
+                # No type info - use bodyId
+                body_ids = ndf['bodyId'].tolist() if 'bodyId' in ndf.columns else []
+                if body_ids:
+                    first_id = body_ids[0]
+                    # Multiple untyped neurons with different IDs -> _etc
+                    if n_neurons > 1:
+                        smart_names.append(f"{first_id}_etc")
+                    else:
+                        smart_names.append(str(first_id))
+                else:
+                    # Ultimate fallback
+                    smart_names.append(self.layer_names[i] if i < len(self.layer_names) else f"layer_{i}")
+        
+        return smart_names
+
     def _get_synapse_table_path(self):
         """Get path to synapse table in datasets folder.
         

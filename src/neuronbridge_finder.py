@@ -211,7 +211,7 @@ class NeuronBridgeFinder:
         Print progress messages. Default: True
     separate_splitgal4 : bool
         If True, separate results into GAL4/LexA and Split-GAL4 categories.
-        When enabled, download_top_n_img applies separately to each category.
+        When enabled, download_img_for_top_n_lines applies separately to each category.
         Default: False
     neuprint_token : str, optional
         NeuPrint API token for pulling missing datasets. If not provided, will check
@@ -224,8 +224,8 @@ class NeuronBridgeFinder:
         Default match algorithm: 'cds', 'pppm', or 'both'. Default: 'cds'
     region : str
         Filter images by anatomical region: 'Brain', 'VNC', or 'All'. Default: 'All'
-    max_images_per_line : int
-        Maximum LM images to process per driver line. Use -1 for unlimited. Default: 10
+    max_api_images_per_line : int
+        Maximum LM images to process per driver line for API calls. Use -1 for unlimited. Default: 10
         Images are pre-filtered by match_type availability before limiting.
     
     Attributes
@@ -243,7 +243,7 @@ class NeuronBridgeFinder:
     
     # Separate GAL4/LexA from Split-GAL4 lines
     >>> nbf = NeuronBridgeFinder(separate_splitgal4=True)
-    >>> results = nbf.find_lines_batch('MBON01', download_top_n_img=5)  # 5 GAL4 + 5 Split-GAL4
+    >>> results = nbf.find_lines_batch('MBON01', download_img_for_top_n_lines=5)  # 5 GAL4 + 5 Split-GAL4
     
     # With NeuPrint token for pulling missing datasets
     >>> nbf = NeuronBridgeFinder(neuprint_token='your_token_here')
@@ -258,12 +258,14 @@ class NeuronBridgeFinder:
     neuprint_server: str = 'https://neuprint.janelia.org'
     match_type: str = 'cds'
     region: str = 'All'
-    max_images_per_line: int = 10
+    max_api_images_per_line: int = 10
     
     # Private fields
     _client: Any = field(init=False, repr=False, default=None)
     _neuron_dfs: Dict[str, pd.DataFrame] = field(init=False, repr=False, default_factory=dict)
     _suppress_loading_msgs: bool = field(init=False, repr=False, default=False)
+    _batch_mode: bool = field(init=False, repr=False, default=False)
+    _warning_collector: List[str] = field(init=False, repr=False, default_factory=list)
     
     def __post_init__(self):
         """Initialize the finder after dataclass initialization."""
@@ -291,7 +293,7 @@ class NeuronBridgeFinder:
         # Initialize client
         self._init_client()
     
-    def _vprint(self, msg: str, end: str = '\n'):
+    def _vprint(self, msg: str, end: str = '\n', force: bool = False):
         """
         Print message if verbose mode is enabled.
         
@@ -304,8 +306,10 @@ class NeuronBridgeFinder:
             Message to print
         end : str
             String appended after the message (default: newline)
+        force : bool
+            If True, print even in batch mode (default: False)
         """
-        if self.verbose:
+        if self.verbose and (not self._batch_mode or force):
             # Use tqdm.write if available to avoid conflicts with progress bars
             if HAS_TQDM:
                 try:
@@ -315,6 +319,54 @@ class NeuronBridgeFinder:
                     print(msg, end=end)
             else:
                 print(msg, end=end)
+    
+    def _print_warning_summary(self):
+        """Print collected warnings as a summary."""
+        if not self._warning_collector:
+            return
+        
+        from collections import Counter
+        
+        # Group warnings by type
+        server_unreachable = []
+        no_gal4_files = []
+        no_files_at_all = []
+        
+        for warning in self._warning_collector:
+            if "server not accessible" in warning:
+                server_unreachable.append(warning)
+            elif "No files from" in warning:
+                no_gal4_files.append(warning)
+            elif "No images found" in warning:
+                no_files_at_all.append(warning)
+        
+        # Print summary
+        if server_unreachable:
+            # Extract unique servers and line counts
+            server_issues = {}
+            for w in server_unreachable:
+                if "flimg.janelia.org" in w:
+                    line = w.split("for ")[-1].split(":")[0].strip()
+                    server_issues.setdefault("flimg.janelia.org (VT GAL4)", []).append(line)
+            
+            if server_issues:
+                self._vprint("\n⚠️  Server Access Issues:", force=True)
+                for server, lines_affected in server_issues.items():
+                    self._vprint(f"   • {server}: {len(lines_affected)} line(s) unreachable", force=True)
+                    self._vprint(f"     (Attempted MCFO fallback from S3)", force=True)
+        
+        if no_gal4_files:
+            lines = [w.split("for ")[-1].split(",")[0].strip() for w in no_gal4_files]
+            self._vprint(f"\n📋 {len(lines)} line(s) used MCFO fallback (no GAL4/SplitGAL4 images)", force=True)
+        
+        if no_files_at_all:
+            lines = [w.split("for ")[-1].split(" in")[0].strip() for w in no_files_at_all]
+            if lines:
+                self._vprint(f"\n❌ {len(lines)} line(s) had no images in any collection:", force=True)
+                self._vprint(f"   {', '.join(lines[:10])}{'...' if len(lines) > 10 else ''}", force=True)
+        
+        # Clear warnings after printing
+        self._warning_collector.clear()
     
     def _retry_with_backoff(
         self,
@@ -684,13 +736,16 @@ class NeuronBridgeFinder:
         self,
         lines: List[str],
         match_type: str = 'cds',
-        top_n: int = 100
+        top_n: int = 100,
+        similarity_method: str = 'weighted_jaccard'
     ) -> Tuple[pd.DataFrame, Dict[str, set]]:
         """
-        Build a co-labeling matrix showing how often pairs of lines label the same neurons.
+        Build a co-labeling matrix showing how often pairs of lines label the same cell types.
         
-        The matrix M[i,j] represents the Jaccard similarity between lines i and j:
-        J = |A ∩ B| / |A ∪ B|
+        Supports multiple similarity measures:
+        - 'jaccard': Binary Jaccard similarity (presence/absence of types)
+        - 'weighted_jaccard': Jaccard weighted by match scores
+        - 'rank_correlation': Spearman correlation of type rankings based on scores
         
         Parameters
         ----------
@@ -700,19 +755,27 @@ class NeuronBridgeFinder:
             Match algorithm for line_to_neuron.
         top_n : int
             Number of top matches to consider per line.
+        similarity_method : str
+            Similarity method: 'jaccard', 'weighted_jaccard', or 'rank_correlation'.
+            Default: 'weighted_jaccard'
             
         Returns
         -------
         tuple
-            (co_labeling_matrix, line_neuron_sets)
-            - co_labeling_matrix: DataFrame with Jaccard similarities
-            - line_neuron_sets: Dict mapping line names to sets of (bodyId, type) tuples
+            (co_labeling_matrix, line_type_sets)
+            - co_labeling_matrix: DataFrame with similarities based on cell types
+            - line_type_sets: Dict mapping line names to sets of cell type names
         """
         self._vprint(f"\n🔗 Building co-labeling matrix for {len(lines)} lines...")
-        self._vprint(f"   ⏱️  Note: Fetching neurons for each line to build similarity matrix")
+        self._vprint(f"   📊 Similarity method: {similarity_method}")
+        self._vprint(f"   ⏱️  Note: Fetching neurons for each line to build type-based similarity matrix")
         
-        # Collect neuron sets for each line
+        # Collect type sets AND scores for each line
         line_neuron_sets = {}
+        line_type_scores = {}
+        
+        # Enable batch mode to suppress individual cache messages
+        self._batch_mode = True
         
         if HAS_TQDM and self.verbose:
             from tqdm import tqdm as tqdm_progress
@@ -733,41 +796,110 @@ class NeuronBridgeFinder:
                 neurons_df = self.line_to_neuron(line_name, match_type=match_type)
                 if not neurons_df.empty:
                     neurons_top = neurons_df.head(top_n)
-                    # Use (bodyId, type) pairs for more precise matching
-                    neuron_set = set()
+                    # Use cell types for similarity (not bodyIds) - this gives meaningful co-labeling
+                    # Two lines labeling the same cell types are considered similar
+                    type_set = set()
+                    type_scores = {}  # type -> score mapping
                     for _, row in neurons_top.iterrows():
-                        body_id = row.get('bodyId', '')
                         n_type = row.get('type', '')
-                        if body_id:
-                            neuron_set.add((str(body_id), str(n_type).lower()))
-                    line_neuron_sets[line_name] = neuron_set
+                        score = row.get('score', 0.0)
+                        if n_type and str(n_type).lower() not in ['', 'nan', 'none', 'unknown']:
+                            type_key = str(n_type).lower()
+                            type_set.add(type_key)
+                            # Keep the maximum score if type appears multiple times
+                            type_scores[type_key] = max(type_scores.get(type_key, 0.0), float(score))
+                    line_neuron_sets[line_name] = type_set
+                    line_type_scores[line_name] = type_scores
                 else:
                     line_neuron_sets[line_name] = set()
+                    line_type_scores[line_name] = {}
             except Exception as e:
                 line_neuron_sets[line_name] = set()
+                line_type_scores[line_name] = {}
                 if self.verbose:
                     self._vprint(f"   ⚠️ Error getting neurons for {line_name}: {e}")
         
-        # Build Jaccard similarity matrix
-        self._vprint(f"   🔢 Computing Jaccard similarities between {len(lines)} lines...")
+        # Disable batch mode after fetching
+        self._batch_mode = False
+        
+        # Build similarity matrix based on selected method
+        self._vprint(f"   🔢 Computing {similarity_method} similarities between {len(lines)} lines...")
         n = len(lines)
         matrix = np.zeros((n, n))
         
-        for i, line_i in enumerate(lines):
-            set_i = line_neuron_sets.get(line_i, set())
-            for j, line_j in enumerate(lines):
-                if i == j:
-                    matrix[i, j] = 1.0  # Self-similarity is 1
-                elif j > i:  # Only compute upper triangle
-                    set_j = line_neuron_sets.get(line_j, set())
-                    if set_i and set_j:
-                        intersection = len(set_i & set_j)
-                        union = len(set_i | set_j)
-                        jaccard = intersection / union if union > 0 else 0.0
-                    else:
-                        jaccard = 0.0
-                    matrix[i, j] = jaccard
-                    matrix[j, i] = jaccard  # Symmetric
+        if similarity_method == 'jaccard':
+            # Binary Jaccard (original implementation)
+            for i, line_i in enumerate(lines):
+                set_i = line_neuron_sets.get(line_i, set())
+                for j, line_j in enumerate(lines):
+                    if i == j:
+                        matrix[i, j] = 1.0
+                    elif j > i:
+                        set_j = line_neuron_sets.get(line_j, set())
+                        if set_i and set_j:
+                            intersection = len(set_i & set_j)
+                            union = len(set_i | set_j)
+                            jaccard = intersection / union if union > 0 else 0.0
+                        else:
+                            jaccard = 0.0
+                        matrix[i, j] = jaccard
+                        matrix[j, i] = jaccard
+                        
+        elif similarity_method == 'weighted_jaccard':
+            # Weighted Jaccard using match scores
+            for i, line_i in enumerate(lines):
+                scores_i = line_type_scores.get(line_i, {})
+                for j, line_j in enumerate(lines):
+                    if i == j:
+                        matrix[i, j] = 1.0
+                    elif j > i:
+                        scores_j = line_type_scores.get(line_j, {})
+                        if scores_i and scores_j:
+                            all_types = set(scores_i.keys()) | set(scores_j.keys())
+                            intersection_sum = sum(
+                                min(scores_i.get(t, 0.0), scores_j.get(t, 0.0)) 
+                                for t in all_types
+                            )
+                            union_sum = sum(
+                                max(scores_i.get(t, 0.0), scores_j.get(t, 0.0)) 
+                                for t in all_types
+                            )
+                            w_jaccard = intersection_sum / union_sum if union_sum > 0 else 0.0
+                        else:
+                            w_jaccard = 0.0
+                        matrix[i, j] = w_jaccard
+                        matrix[j, i] = w_jaccard
+                        
+        elif similarity_method == 'rank_correlation':
+            # Spearman correlation on overlapping types
+            from scipy.stats import spearmanr
+            for i, line_i in enumerate(lines):
+                scores_i = line_type_scores.get(line_i, {})
+                for j, line_j in enumerate(lines):
+                    if i == j:
+                        matrix[i, j] = 1.0
+                    elif j > i:
+                        scores_j = line_type_scores.get(line_j, {})
+                        if scores_i and scores_j:
+                            # Find types in common
+                            common_types = set(scores_i.keys()) & set(scores_j.keys())
+                            if len(common_types) > 1:
+                                # Get scores for common types
+                                values_i = [scores_i[t] for t in common_types]
+                                values_j = [scores_j[t] for t in common_types]
+                                # Compute Spearman correlation
+                                corr, _ = spearmanr(values_i, values_j)
+                                # Handle NaN (can occur with constant values)
+                                if np.isnan(corr):
+                                    corr = 0.0
+                            else:
+                                corr = 0.0
+                        else:
+                            corr = 0.0
+                        matrix[i, j] = corr
+                        matrix[j, i] = corr
+        else:
+            raise ValueError(f"Unknown similarity method: {similarity_method}")
         
         co_labeling_df = pd.DataFrame(matrix, index=lines, columns=lines)
         
@@ -820,22 +952,25 @@ class NeuronBridgeFinder:
         self,
         co_labeling_matrix: pd.DataFrame,
         output_path: str,
-        title: str = "Co-Labeling Matrix (Jaccard Similarity)",
-        color_scale: str = 'purple'
+        title: str = "Co-Labeling Matrix",
+        color_scale: str = 'purple',
+        filename: str = 'colabeling_matrix.html'
     ) -> str:
         """
-        Visualize co-labeling matrix as a heatmap using CreateHeatmap.
+        Visualize co-labeling matrix as a heatmap using VisConnMatInteractive.
         
         Parameters
         ----------
         co_labeling_matrix : pd.DataFrame
-            Jaccard similarity matrix from _build_colabeling_matrix.
+            Similarity matrix from _build_colabeling_matrix.
         output_path : str
             Directory to save the heatmap HTML file.
         title : str
             Title for the heatmap.
         color_scale : str
             Color scale preset: 'purple', 'green', 'blue', 'orange', 'red'.
+        filename : str
+            Filename for the HTML file. Default: 'colabeling_matrix.html'
             
         Returns
         -------
@@ -843,35 +978,43 @@ class NeuronBridgeFinder:
             Path to the created heatmap file.
         """
         try:
-            from .statvis import CreateHeatmap
+            from vispath_pkg import VisConnMatInteractive
         except ImportError:
             try:
-                from statvis import CreateHeatmap
+                from .statvis import VisConnMatInteractive
             except ImportError:
-                self._vprint("   ⚠️ Could not import CreateHeatmap from statvis")
+                self._vprint("   ⚠️ Could not import VisConnMatInteractive from vispath_pkg or statvis")
                 return ""
         
         # Create output directory if needed
         os.makedirs(output_path, exist_ok=True)
         
-        # Create heatmap
-        hm = CreateHeatmap(output_folder=output_path, showfig=False)
-        hm.add_heatmap(
-            matrix=co_labeling_matrix,
-            name='colabeling_matrix',
+        # Resolve color scale preset to Plotly format
+        color_scales = {
+            'green': [[0, 'rgb(255,255,255)'], [1, 'rgb(14,83,13)']],
+            'purple': [[0, 'rgb(255,255,255)'], [1, 'rgb(104,55,164)']],
+            'orange': [[0, 'rgb(255,255,255)'], [1, 'rgb(204,102,0)']],
+            'blue': [[0, 'rgb(255,255,255)'], [1, 'rgb(31,119,180)']],
+            'red': [[0, 'rgb(255,255,255)'], [1, 'rgb(214,39,40)']],
+        }
+        resolved_color_scale = color_scales.get(color_scale, color_scales['purple'])
+        
+        # Create heatmap file path
+        full_path = os.path.join(output_path, filename)
+        
+        # Create heatmap using VisConnMatInteractive
+        VisConnMatInteractive(
+            co_labeling_matrix,
+            filename=full_path,
             title=title,
-            color_scale=color_scale,
-            interactive=True  # Enable interactive controls
+            color_scale=resolved_color_scale,
+            showfig=False,
+            verbose=self.verbose
         )
         
-        created_files = hm.create_all()
-        
-        if created_files:
-            self._vprint(f"   📊 Created co-labeling heatmap: {created_files[0]}")
-            return created_files[0]
-        
-        return ""
-    
+        self._vprint(f"   📊 Created heatmap: {full_path}")
+        return full_path
+
     def _calculate_mutual_information(
         self,
         lines: List[str],
@@ -911,6 +1054,9 @@ class NeuronBridgeFinder:
         # Normalize queried types
         queried_types_lower = set(t.lower() for t in queried_types if t)
         
+        # Enable batch mode to suppress cache messages
+        self._batch_mode = True
+        
         # Build expression matrix: rows = lines, cols = neuron types
         # Value = 1 if line labels that type, 0 otherwise
         all_types = set()
@@ -949,6 +1095,9 @@ class NeuronBridgeFinder:
             except Exception as e:
                 line_type_sets[line_name] = set()
                 line_type_scores[line_name] = {}
+        
+        # Disable batch mode after fetching
+        self._batch_mode = False
         
         if not all_types:
             self._vprint("   ⚠️ No types found for any line")
@@ -1070,45 +1219,49 @@ class NeuronBridgeFinder:
             Path to the created heatmap file.
         """
         try:
-            from .statvis import CreateHeatmap
+            from vispath_pkg import VisConnMatInteractive
         except ImportError:
             try:
-                from statvis import CreateHeatmap
+                from .statvis import VisConnMatInteractive
             except ImportError:
-                self._vprint("   ⚠️ Could not import CreateHeatmap from statvis")
+                self._vprint("   ⚠️ Could not import VisConnMatInteractive from vispath_pkg or statvis")
                 return ""
         
         os.makedirs(output_path, exist_ok=True)
         
-        # Optionally filter to show only queried types + a sample of others
-        if queried_types and len(expression_df.columns) > 50:
-            queried_lower = [t.lower() for t in queried_types]
-            queried_cols = [c for c in expression_df.columns if c in queried_lower]
-            other_cols = [c for c in expression_df.columns if c not in queried_lower]
-            # Keep queried + top 20 other most common types
-            other_counts = expression_df[other_cols].sum().nlargest(20).index.tolist()
-            cols_to_show = queried_cols + other_counts
-            expression_filtered = expression_df[cols_to_show]
-        else:
-            expression_filtered = expression_df
+        # Filter to show top 100 most commonly labeled types
+        # Calculate how many lines label each type and keep the top 100
+        type_counts = expression_df.sum(axis=0).sort_values(ascending=False)
+        top_100_types = type_counts.head(100).index.tolist()
+        expression_filtered = expression_df[top_100_types]
         
-        # Create heatmap
-        hm = CreateHeatmap(output_folder=output_path, showfig=False)
-        hm.add_heatmap(
-            matrix=expression_filtered,
-            name='expression_matrix',
+        self._vprint(f"   📊 Showing top 100 types (out of {len(expression_df.columns)} total)")
+        
+        # Resolve color scale preset to Plotly format
+        color_scales = {
+            'green': [[0, 'rgb(255,255,255)'], [1, 'rgb(14,83,13)']],
+            'purple': [[0, 'rgb(255,255,255)'], [1, 'rgb(104,55,164)']],
+            'orange': [[0, 'rgb(255,255,255)'], [1, 'rgb(204,102,0)']],
+            'blue': [[0, 'rgb(255,255,255)'], [1, 'rgb(31,119,180)']],
+            'red': [[0, 'rgb(255,255,255)'], [1, 'rgb(214,39,40)']],
+        }
+        resolved_color_scale = color_scales.get(color_scale, color_scales['green'])
+        
+        # Create heatmap file path
+        filename = os.path.join(output_path, 'expression_matrix.html')
+        
+        # Create heatmap using VisConnMatInteractive
+        VisConnMatInteractive(
+            expression_filtered,
+            filename=filename,
             title=title,
-            color_scale=color_scale,
-            interactive=True
+            color_scale=resolved_color_scale,
+            showfig=False,
+            verbose=self.verbose
         )
         
-        created_files = hm.create_all()
-        
-        if created_files:
-            self._vprint(f"   📊 Created expression matrix heatmap: {created_files[0]}")
-            return created_files[0]
-        
-        return ""
+        self._vprint(f"   📊 Created expression matrix heatmap: {filename}")
+        return filename
 
     def _calculate_line_specificity(
         self,
@@ -1204,17 +1357,22 @@ class NeuronBridgeFinder:
         import time
         start_time = time.time()
         
+        # Enable batch mode to suppress individual line_to_neuron messages
+        self._batch_mode = True
+        
         for idx, line_name in enumerate(iterator):
             # Update progress description with current line
             if HAS_TQDM and self.verbose:
                 iterator.set_description(f"   🔬 [{idx+1}/{len(lines_to_process)}] {line_name}")
             try:
-                # Check if cached before calling
-                cache_key = f"{line_name}_{match_type}"
+                # Check if cached before calling (use same cache key format as line_to_neuron)
+                region_key = self.region if self.region else 'all'
+                max_imgs_key = self.max_api_images_per_line if self.max_api_images_per_line > 0 else 'all'
+                cache_key = f"{line_name}_{match_type}_{region_key}_{max_imgs_key}"
                 is_cached = self._load_from_cache('line_to_neuron', cache_key) is not None
                 
                 if HAS_TQDM and self.verbose:
-                    status = "💾cached" if is_cached else "🌐fetching"
+                    status = "💾" if is_cached else "🌐"
                     iterator.set_postfix_str(status)
                 
                 # Get neurons labeled by this line (use cached if available)
@@ -1283,6 +1441,9 @@ class NeuronBridgeFinder:
             except Exception as e:
                 if self.verbose:
                     self._vprint(f"   ⚠️ Error calculating specificity for {line_name}: {e}")
+        
+        # Disable batch mode after processing
+        self._batch_mode = False
         
         # Calculate composite specificity score
         # Combines: type_proportion, entropy (inverted), rank, and weighted proportion
@@ -1677,7 +1838,9 @@ class NeuronBridgeFinder:
         if os.path.exists(cache_path):
             try:
                 df = pd.read_csv(cache_path)
-                self._vprint(f"  ⏩ Loaded from cache: {cache_path}")
+                # Only print cache loads when not in batch mode (verbose individual loads suppressed)
+                if not self._batch_mode:
+                    self._vprint(f"  ⏩ Loaded from cache: {cache_path}")
                 return df
             except Exception:
                 return None
@@ -1691,7 +1854,9 @@ class NeuronBridgeFinder:
         cache_path = self._get_cache_path(cache_type, identifier)
         try:
             df.to_csv(cache_path, index=False)
-            self._vprint(f"  💾 Saved to cache: {cache_path}")
+            # Only print cache saves when not in batch mode
+            if not self._batch_mode:
+                self._vprint(f"  💾 Saved to cache: {cache_path}")
         except Exception as e:
             warnings.warn(f"Failed to save cache: {e}")
     
@@ -2097,11 +2262,11 @@ class NeuronBridgeFinder:
                 self._vprint(f"  ⚠️ No LM images with {match_type.upper()} results for line '{line_name}'")
                 return []
             
-            # Apply max_images_per_line limit
+            # Apply max_api_images_per_line limit
             original_count = len(lm_images)
-            if self.max_images_per_line > 0 and len(lm_images) > self.max_images_per_line:
-                lm_images = lm_images[:self.max_images_per_line]
-                self._vprint(f"  ℹ️  Using {len(lm_images)}/{original_count} images (max_images_per_line={self.max_images_per_line})")
+            if self.max_api_images_per_line > 0 and len(lm_images) > self.max_api_images_per_line:
+                lm_images = lm_images[:self.max_api_images_per_line]
+                self._vprint(f"  ℹ️  Using {len(lm_images)}/{original_count} images (max_api_images_per_line={self.max_api_images_per_line})")
             
             n_images = len(lm_images)
             # Only print verbose message if not in a progress bar context
@@ -2113,8 +2278,7 @@ class NeuronBridgeFinder:
             pppm_errors = 0
             
             # Create progress bar for image processing if we have multiple images and tqdm is available
-            # Only show if we're not already in a progress bar context (avoid double nesting)
-            show_image_progress = HAS_TQDM and self.verbose and n_images > 10
+            show_image_progress = HAS_TQDM and self.verbose and n_images > 1
             
             if show_image_progress:
                 from tqdm import tqdm as tqdm_progress
@@ -2122,12 +2286,11 @@ class NeuronBridgeFinder:
                 self._suppress_loading_msgs = True
                 image_iterator = tqdm_progress(
                     lm_images,
-                    desc=f"     Processing {n_images} images",
+                    desc=f"  🖼️  Processing images",
                     unit="img",
                     leave=False,
-                    bar_format='     {desc}: {percentage:3.0f}%|{bar:20}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]',
-                    ncols=100,
-                    position=1
+                    bar_format='  {desc}: {percentage:3.0f}%|{bar:20}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]',
+                    ncols=90
                 )
             else:
                 image_iterator = lm_images
@@ -2468,9 +2631,11 @@ class NeuronBridgeFinder:
         """
         self._vprint(f"🔍 Searching for lines matching body ID: {body_id}")
         
-        # Check cache (include dataset in key to differentiate results)
+        # Check cache (include all parameters in key)
         ds_key = expected_dataset.replace(':', '_') if expected_dataset else 'any'
-        cache_key = f"{body_id}_{match_type}_{ds_key}"
+        region_key = self.region if self.region else 'all'
+        max_imgs_key = self.max_api_images_per_line if self.max_api_images_per_line > 0 else 'all'
+        cache_key = f"{body_id}_{match_type}_{ds_key}_{region_key}_{max_imgs_key}"
         cached = self._load_from_cache('id_to_lines', cache_key)
         if cached is not None:
             return cached
@@ -2546,49 +2711,105 @@ class NeuronBridgeFinder:
         
         results = {}
         skipped_count = 0
-        for i, body_info in enumerate(body_info_list):
-            body_id = body_info['bodyId']
-            expected_ds = body_info.get('dataset', 'unknown')
-            
-            # Validate body ID against NeuronBridge to ensure dataset match
-            actual_ds = self._validate_body_id_dataset(int(body_id), expected_ds)
-            
-            # Check for dataset mismatch
-            if actual_ds and expected_ds != 'unknown':
-                # Normalize for comparison - extract base dataset name
-                # Handle different naming conventions:
-                # - 'flywire_FAFB_v783' (underscore + version suffix)
-                # - 'flywire_fafb:v783' (colon-separated version)
-                # - 'male-cns:v0.9' -> 'male-cns'
-                # - 'hemibrain:v1.2.1' -> 'hemibrain'
-                expected_base = self._normalize_dataset_name(expected_ds)
-                actual_base = self._normalize_dataset_name(actual_ds)
-                
-                if expected_base != actual_base:
-                    self._vprint(f"  ⏭️  Skipping {body_id}: belongs to {actual_ds}, not {expected_ds} (dataset mismatch)")
-                    skipped_count += 1
-                    continue
-            
-            self._vprint(f"  Processing {i+1}/{len(body_info_list)}: {body_id} ({actual_ds or expected_ds})")
-            try:
-                # Pass expected dataset to get correct EM image
-                lines_df = self.id_to_lines(
-                    int(body_id), 
-                    match_type=match_type,
-                    expected_dataset=expected_ds
-                )
-                # Add source dataset info (use actual dataset from NeuronBridge)
-                if not lines_df.empty:
-                    lines_df = lines_df.copy()
-                    lines_df['source_dataset'] = actual_ds or expected_ds
-                    lines_df['source_bodyId'] = body_id
-                results[body_id] = lines_df
-            except Exception as e:
-                self._vprint(f"    ⚠️ Error processing body ID {body_id}: {e}")
-                results[body_id] = pd.DataFrame()
         
-        if skipped_count > 0:
-            self._vprint(f"  ℹ️  Skipped {skipped_count} body IDs due to dataset mismatch")
+        # Use progress bar for multiple body IDs
+        if HAS_TQDM and self.verbose and len(body_info_list) > 1:
+            from tqdm import tqdm as tqdm_progress
+            
+            # Enable batch mode to suppress individual messages
+            self._batch_mode = True
+            
+            pbar = tqdm_progress(
+                body_info_list,
+                desc=f"  🔄 Processing {len(body_info_list)} neurons",
+                unit="neuron",
+                bar_format='{desc}: {percentage:3.0f}%|{bar:30}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]',
+                ncols=110,
+                position=0,
+                leave=False
+            )
+            
+            for body_info in pbar:
+                body_id = body_info['bodyId']
+                expected_ds = body_info.get('dataset', 'unknown')
+                pbar.set_postfix_str(f"{body_id}")
+                
+                # Validate body ID against NeuronBridge to ensure dataset match
+                actual_ds = self._validate_body_id_dataset(int(body_id), expected_ds)
+                
+                # Check for dataset mismatch
+                if actual_ds and expected_ds != 'unknown':
+                    expected_base = self._normalize_dataset_name(expected_ds)
+                    actual_base = self._normalize_dataset_name(actual_ds)
+                    
+                    if expected_base != actual_base:
+                        skipped_count += 1
+                        continue
+                
+                try:
+                    lines_df = self.id_to_lines(
+                        int(body_id), 
+                        match_type=match_type,
+                        expected_dataset=expected_ds
+                    )
+                    if not lines_df.empty:
+                        lines_df = lines_df.copy()
+                        lines_df['source_dataset'] = actual_ds or expected_ds
+                        lines_df['source_bodyId'] = body_id
+                    results[body_id] = lines_df
+                except Exception as e:
+                    results[body_id] = pd.DataFrame()
+            
+            pbar.close()
+            self._batch_mode = False
+            
+            if skipped_count > 0:
+                self._vprint(f"  ℹ️  Skipped {skipped_count} body IDs due to dataset mismatch")
+        else:
+            # Single neuron or no tqdm - original behavior
+            for i, body_info in enumerate(body_info_list):
+                body_id = body_info['bodyId']
+                expected_ds = body_info.get('dataset', 'unknown')
+                
+                # Validate body ID against NeuronBridge to ensure dataset match
+                actual_ds = self._validate_body_id_dataset(int(body_id), expected_ds)
+                
+                # Check for dataset mismatch
+                if actual_ds and expected_ds != 'unknown':
+                    # Normalize for comparison - extract base dataset name
+                    # Handle different naming conventions:
+                    # - 'flywire_FAFB_v783' (underscore + version suffix)
+                    # - 'flywire_fafb:v783' (colon-separated version)
+                    # - 'male-cns:v0.9' -> 'male-cns'
+                    # - 'hemibrain:v1.2.1' -> 'hemibrain'
+                    expected_base = self._normalize_dataset_name(expected_ds)
+                    actual_base = self._normalize_dataset_name(actual_ds)
+                    
+                    if expected_base != actual_base:
+                        self._vprint(f"  ⏭️  Skipping {body_id}: belongs to {actual_ds}, not {expected_ds} (dataset mismatch)")
+                        skipped_count += 1
+                        continue
+                
+                self._vprint(f"  Processing {i+1}/{len(body_info_list)}: {body_id} ({actual_ds or expected_ds})")
+                try:
+                    # Pass expected dataset to get correct EM image
+                    lines_df = self.id_to_lines(
+                        int(body_id), 
+                        match_type=match_type,
+                        expected_dataset=expected_ds
+                    )
+                    # Add source dataset info (use actual dataset from NeuronBridge)
+                    if not lines_df.empty:
+                        lines_df = lines_df.copy()
+                        lines_df['source_dataset'] = actual_ds or expected_ds
+                        lines_df['source_bodyId'] = body_id
+                    results[body_id] = lines_df
+                except Exception as e:
+                    self._vprint(f"    ⚠️ Error processing body ID {body_id}: {e}")
+                    results[body_id] = pd.DataFrame()
+            
+            if skipped_count > 0:
+                self._vprint(f"  ℹ️  Skipped {skipped_count} body IDs due to dataset mismatch")
         
         return results
     
@@ -2636,8 +2857,10 @@ class NeuronBridgeFinder:
         if not in_progress_context:
             self._vprint(f"🔍 Searching for neurons matching line: {line_name}")
         
-        # Check cache
-        cache_key = f"{line_name}_{match_type}"
+        # Check cache - include all relevant parameters
+        region_key = self.region if self.region else 'all'
+        max_imgs_key = self.max_api_images_per_line if self.max_api_images_per_line > 0 else 'all'
+        cache_key = f"{line_name}_{match_type}_{region_key}_{max_imgs_key}"
         cached = self._load_from_cache('line_to_neuron', cache_key)
         if cached is not None:
             # Indicate cache hit in verbose mode
@@ -2671,7 +2894,7 @@ class NeuronBridgeFinder:
         if top_n > 0 and len(df) > top_n:
             df = df.head(top_n)
         
-        # Cache results (cache full results, not limited)
+        # Cache results
         self._save_to_cache('line_to_neuron', cache_key, df)
         
         self._vprint(f"  ✓ Found {len(df)} matches")
@@ -2727,6 +2950,287 @@ class NeuronBridgeFinder:
         
         return output_path
     
+    def _save_dataset_categorized_files(
+        self,
+        neurons_df: pd.DataFrame,
+        line_name: str,
+        output_path: str,
+        verbose: bool = True
+    ) -> None:
+        """
+        Save dataset-categorized neuron files and type summary files.
+        
+        Creates:
+        - {line}_{dataset}_neurons.csv: Neurons for each dataset
+        - {line}_{dataset}_types.csv: Type summary with labeled_N and typed_N_in_dataset
+        
+        Parameters
+        ----------
+        neurons_df : pd.DataFrame
+            DataFrame with matched neurons (must have 'dataset' column)
+        line_name : str
+            Driver line name
+        output_path : str
+            Output directory path
+        verbose : bool
+            Whether to print progress messages
+        """
+        if 'dataset' not in neurons_df.columns:
+            return
+        
+        # Group by dataset
+        for dataset, ds_df in neurons_df.groupby('dataset'):
+            # Normalize dataset name for filename (replace : with _)
+            ds_filename = dataset.replace(':', '_').replace('.', '_')
+            
+            # Save dataset-specific neurons file
+            ds_neurons_file = os.path.join(output_path, f'{line_name}_{ds_filename}_neurons.csv')
+            ds_df.to_csv(ds_neurons_file, index=False)
+            if verbose:
+                self._vprint(f"   💾 Saved: {ds_neurons_file}")
+            
+            # Create type summary
+            type_summary = self._create_type_summary(ds_df, dataset)
+            if not type_summary.empty:
+                ds_types_file = os.path.join(output_path, f'{line_name}_{ds_filename}_types.csv')
+                type_summary.to_csv(ds_types_file, index=False)
+                if verbose:
+                    self._vprint(f"   💾 Saved: {ds_types_file}")
+    
+    def _create_type_summary(
+        self,
+        neurons_df: pd.DataFrame,
+        dataset: str
+    ) -> pd.DataFrame:
+        """
+        Create a type summary DataFrame with labeled_N and typed_N_in_dataset.
+        
+        Parameters
+        ----------
+        neurons_df : pd.DataFrame
+            DataFrame with matched neurons
+        dataset : str
+            Dataset name for looking up total type counts
+            
+        Returns
+        -------
+        pd.DataFrame
+            Type summary with columns: type, labeled_N, avg_score, typed_N_in_dataset
+        """
+        # Determine type column - use 'type' if available, else use bodyId
+        if 'type' in neurons_df.columns:
+            # For untyped neurons, use bodyId as the "type"
+            neurons_df = neurons_df.copy()
+            neurons_df['type_label'] = neurons_df.apply(
+                lambda row: str(row['bodyId']) if pd.isna(row['type']) or row['type'] == '' else row['type'],
+                axis=1
+            )
+        else:
+            neurons_df = neurons_df.copy()
+            neurons_df['type_label'] = neurons_df['bodyId'].astype(str)
+        
+        # Group by type and calculate statistics
+        score_col = 'score' if 'score' in neurons_df.columns else None
+        
+        if score_col:
+            type_stats = neurons_df.groupby('type_label').agg(
+                labeled_N=('bodyId', 'count'),
+                avg_score=(score_col, 'mean')
+            ).reset_index()
+        else:
+            type_stats = neurons_df.groupby('type_label').agg(
+                labeled_N=('bodyId', 'count')
+            ).reset_index()
+            type_stats['avg_score'] = None
+        
+        type_stats = type_stats.rename(columns={'type_label': 'type'})
+        
+        # Get total count of each type in the dataset
+        type_stats['typed_N_in_dataset'] = type_stats['type'].apply(
+            lambda t: self._get_type_count_in_dataset(t, dataset)
+        )
+        
+        # Sort by avg_score descending (primary), then by labeled_N descending (secondary)
+        # This ensures top-N types are the ones with highest match scores
+        if score_col:
+            type_stats = type_stats.sort_values(['avg_score', 'labeled_N'], ascending=[False, False])
+        else:
+            type_stats = type_stats.sort_values('labeled_N', ascending=False)
+        
+        # Reorder columns
+        cols = ['type', 'labeled_N', 'typed_N_in_dataset']
+        if score_col:
+            cols.insert(2, 'avg_score')
+        type_stats = type_stats[cols]
+        
+        return type_stats
+    
+    def _get_type_count_in_dataset(self, type_name: str, dataset: str) -> int:
+        """
+        Get the total count of a neuron type in the dataset.
+        
+        Uses _load_neuron_df_for_dataset() which will pull the dataset from
+        NeuPrint if not available locally.
+        
+        Parameters
+        ----------
+        type_name : str
+            Neuron type name (or bodyId if untyped)
+        dataset : str
+            Dataset name (e.g., 'hemibrain:v1.2.1' or 'male-cns:v0.9')
+            
+        Returns
+        -------
+        int
+            Total count of the type in the dataset, or 1 if it's a bodyId or lookup fails
+        """
+        # If type_name looks like a bodyId (numeric), return 1
+        if type_name.isdigit():
+            return 1
+        
+        # Try to load the dataset neuron index
+        try:
+            # Convert dataset name to folder format (e.g., 'hemibrain:v1.2.1' -> 'hemibrain_v1_2_1')
+            dataset_folder = self._dataset_name_to_folder(dataset)
+            
+            if dataset_folder is None:
+                # Try direct conversion if mapping fails
+                dataset_folder = dataset.replace(':', '_').replace('.', '_').replace('-', '_')
+            
+            # Use _load_neuron_df_for_dataset which handles loading and pulling if needed
+            neuron_df = self._load_neuron_df_for_dataset(dataset_folder)
+            
+            if neuron_df is not None and 'type' in neuron_df.columns:
+                # Count neurons of this type (case-sensitive match)
+                count = len(neuron_df[neuron_df['type'] == type_name])
+                return count if count > 0 else 1
+        except Exception:
+            pass
+        
+        return 1  # Default if lookup fails
+    
+    def _visualize_top_types(
+        self,
+        combined_df: pd.DataFrame,
+        top_n: int,
+        output_path: str,
+        per_dataset: bool = True,
+        source_line: str = ''
+    ) -> None:
+        """
+        Visualize top N types per dataset using VisualizeSkeleton.
+        
+        Parameters
+        ----------
+        combined_df : pd.DataFrame
+            Combined DataFrame with all matched neurons
+        top_n : int
+            Number of top types to visualize per dataset
+        output_path : str
+            Output directory for visualizations
+        per_dataset : bool
+            If True, create separate visualization per dataset
+        source_line : str
+            Source line name for folder naming
+        """
+        try:
+            from visualize_skeleton import VisualizeSkeleton
+        except ImportError:
+            try:
+                from .visualize_skeleton import VisualizeSkeleton
+            except ImportError:
+                self._vprint("⚠️  VisualizeSkeleton not available for visualization")
+                return
+        
+        if 'dataset' not in combined_df.columns:
+            self._vprint("⚠️  No dataset column for visualization")
+            return
+        
+        self._vprint(f"\n🎨 Visualizing top {top_n} types...")
+        
+        # Process by dataset
+        datasets = combined_df['dataset'].unique()
+        
+        for dataset in datasets:
+            ds_df = combined_df[combined_df['dataset'] == dataset].copy()
+            
+            # Create type label (use bodyId for untyped)
+            if 'type' in ds_df.columns:
+                ds_df['type_label'] = ds_df.apply(
+                    lambda row: str(row['bodyId']) if pd.isna(row['type']) or row['type'] == '' else row['type'],
+                    axis=1
+                )
+            else:
+                ds_df['type_label'] = ds_df['bodyId'].astype(str)
+            
+            # Get top N types by avg_score (not by count)
+            # Group by type and calculate mean score, then sort and take top N
+            score_col = 'score' if 'score' in ds_df.columns else None
+            
+            if score_col:
+                type_stats = ds_df.groupby('type_label').agg(
+                    avg_score=(score_col, 'mean'),
+                    count=('bodyId', 'count')
+                ).reset_index()
+                type_stats = type_stats.sort_values('avg_score', ascending=False).head(top_n)
+                top_types = type_stats['type_label'].tolist()
+            else:
+                # Fallback to count-based if no score column
+                type_counts = ds_df['type_label'].value_counts().head(top_n)
+                top_types = type_counts.index.tolist()
+            
+            if not top_types:
+                continue
+            
+            # Build neuron_layers as nested list (one sublist per type)
+            neuron_layers = []
+            layer_names = []
+            
+            for type_name in top_types:
+                type_neurons = ds_df[ds_df['type_label'] == type_name]['bodyId'].tolist()
+                # Convert to int if possible
+                type_neurons = [int(n) if str(n).isdigit() else n for n in type_neurons]
+                
+                if len(type_neurons) > 0:
+                    neuron_layers.append(type_neurons)
+                    # Create legend name: {type}_etc if multiple, else {type}
+                    if len(type_neurons) > 1:
+                        layer_names.append(f"{type_name}_etc")
+                    else:
+                        layer_names.append(str(type_name))
+            
+            if not neuron_layers:
+                continue
+            
+            self._vprint(f"   📊 {dataset}: {len(neuron_layers)} types, {sum(len(l) for l in neuron_layers)} neurons")
+            
+            try:
+                # Determine brain_mesh based on dataset
+                brain_mesh = 'whole'
+                if 'vnc' in dataset.lower() or 'manc' in dataset.lower():
+                    brain_mesh = 'whole'
+                elif 'cns' in dataset.lower():
+                    brain_mesh = 'whole'
+                
+                vs = VisualizeSkeleton(
+                    dataset=dataset,
+                    output_dir=output_path,
+                    neuron_layers=neuron_layers,
+                    custom_layer_names=layer_names,
+                    skip_synapse=True,
+                    neuron_alpha=0.3,
+                    skeleton_mode='tube',
+                    legend_mode='merge',
+                    brain_mesh=brain_mesh,
+                    cache_neurons=True,
+                    show_fig=False,
+                    verbose='simple'
+                )
+                vs.plot_neurons()
+                self._vprint(f"   ✅ Visualization saved to: {vs.save_folder}")
+            except Exception as e:
+                self._vprint(f"   ⚠️  Visualization failed for {dataset}: {e}")
+    
     # =========================================================================
     # Batch Processing Methods (for simplified script usage)
     # =========================================================================
@@ -2736,7 +3240,9 @@ class NeuronBridgeFinder:
         line_names: Union[str, List[str]],
         top_n: int = -1,
         match_type: Optional[str] = None,
-        output_dir: Optional[str] = None
+        output_dir: Optional[str] = None,
+        visualize_top_n_types: int = 0,
+        visualize_per_dataset: bool = True
     ) -> pd.DataFrame:
         """
         Find EM neurons for multiple driver lines with automatic saving.
@@ -2755,11 +3261,25 @@ class NeuronBridgeFinder:
             If None, uses self.match_type. Default: None
         output_dir : str, optional
             Directory to save results. If provided, saves individual and combined CSVs.
+        visualize_top_n_types : int
+            Visualize top N types per dataset using 3D skeleton visualization.
+            Set to 0 to disable (default). Requires VisualizeSkeleton module.
+        visualize_per_dataset : bool
+            If True (default), create separate visualizations per dataset.
+            If False, combine all datasets in one visualization.
             
         Returns
         -------
         pd.DataFrame
             Combined DataFrame with all results, including 'source_line' column.
+            
+        Output Files
+        ------------
+        When output_dir is specified:
+        - {line}_neurons.csv: All matched neurons for the line
+        - {line}_{dataset}_neurons.csv: Neurons categorized by dataset
+        - {line}_{dataset}_types.csv: Type summary with labeled_N and typed_N_in_dataset
+        - all_neurons.csv: Combined results from all searches
             
         Example
         -------
@@ -2785,61 +3305,143 @@ class NeuronBridgeFinder:
         output_path = None
         if output_dir:
             timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-            output_path = os.path.join(output_dir, f'findneuron_{timestamp}')
+            # Add line names to folder name
+            line_info = '_'.join(lines[:3])  # First 3 lines
+            if len(lines) > 3:
+                line_info += '_etc'
+            # Sanitize folder name (remove special characters)
+            line_info = ''.join(c if c.isalnum() or c in '-_' else '_' for c in line_info)
+            output_path = os.path.join(output_dir, f'findneuron_{line_info}_{timestamp}')
             os.makedirs(output_path, exist_ok=True)
             self._vprint(f"   Output: {output_path}")
         
         # Process each line
         all_results = []
         
-        # Add progress bar for multiple lines
+        # Phase 1: Check cache and identify what needs to be fetched
         if HAS_TQDM and self.verbose and len(lines) > 1:
             from tqdm import tqdm as tqdm_progress
-            line_iterator = tqdm_progress(
+            
+            self._vprint("\n📦 Checking cache...")
+            cached_lines = []
+            uncached_lines = []
+            
+            cache_pbar = tqdm_progress(
                 lines,
-                desc="   🧬 Finding neurons",
+                desc="   💾 Loading cache",
                 unit="line",
-                bar_format='{desc}: {percentage:3.0f}%|{bar:30}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]',
+                bar_format='{desc}: {percentage:3.0f}%|{bar:30}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]',
                 ncols=110,
-                position=0
+                position=0,
+                leave=False
             )
-        else:
-            line_iterator = lines
-        
-        for idx, line_name in enumerate(line_iterator):
-            # Update progress description
-            if HAS_TQDM and self.verbose and len(lines) > 1:
-                line_iterator.set_description(f"   🧬 [{idx+1}/{len(lines)}] {line_name}")
-                
+            
+            for line_name in cache_pbar:
                 # Check cache status
-                cache_key = f"{line_name}_{match_type}"
-                is_cached = self._load_from_cache('line_to_neuron', cache_key) is not None
-                status = "💾cached" if is_cached else "🌐fetching"
-                line_iterator.set_postfix_str(status)
+                region_key = self.region if self.region else 'all'
+                max_imgs_key = self.max_api_images_per_line if self.max_api_images_per_line > 0 else 'all'
+                cache_key = f"{line_name}_{match_type}_{region_key}_{max_imgs_key}"
+                cached_data = self._load_from_cache('line_to_neuron', cache_key)
+                
+                if cached_data is not None:
+                    cached_lines.append((line_name, cached_data))
+                    cache_pbar.set_postfix_str(f"✓ {line_name}")
+                else:
+                    uncached_lines.append(line_name)
             
-            # Show individual processing message only if not using progress bar
-            if not (HAS_TQDM and self.verbose and len(lines) > 1):
-                self._vprint(f"\n📋 Processing: {line_name}")
+            cache_pbar.close()
             
-            try:
-                neurons_df = self.line_to_neuron(
-                    line_name,
-                    top_n=top_n,
-                    match_type=match_type
+            if cached_lines:
+                self._vprint(f"   ✓ Loaded {len(cached_lines)} from cache")
+            if uncached_lines:
+                self._vprint(f"   🌐 Need to fetch {len(uncached_lines)} from API")
+            
+            # Process cached results first
+            for line_name, cached_data in cached_lines:
+                cached_data = cached_data.copy()
+                cached_data['source_line'] = line_name
+                all_results.append(cached_data)
+                
+                # Save individual cached results if output_path specified
+                if output_path:
+                    output_file = os.path.join(output_path, f'{line_name}_neurons.csv')
+                    cached_data.to_csv(output_file, index=False)
+                    
+                    # Save dataset-categorized files
+                    if 'dataset' in cached_data.columns:
+                        self._save_dataset_categorized_files(
+                            cached_data, line_name, output_path, verbose=False
+                        )
+            
+            # Phase 2: Fetch uncached data with progress bar
+            if uncached_lines:
+                self._vprint("\n🌐 Fetching new data...")
+                fetch_pbar = tqdm_progress(
+                    uncached_lines,
+                    desc="   🔄 Fetching",
+                    unit="line",
+                    bar_format='{desc}: {percentage:3.0f}%|{bar:30}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]',
+                    ncols=110,
+                    position=0,
+                    leave=False
                 )
                 
-                if neurons_df.empty:
-                    if not (HAS_TQDM and self.verbose and len(lines) > 1):
+                for line_name in fetch_pbar:
+                    fetch_pbar.set_postfix_str(line_name[:20])
+                    
+                    try:
+                        neurons_df = self.line_to_neuron(
+                            line_name,
+                            top_n=top_n,
+                            match_type=match_type
+                        )
+                        
+                        if neurons_df.empty:
+                            continue
+                        
+                        # Add source line info
+                        neurons_df = neurons_df.copy()
+                        neurons_df['source_line'] = line_name
+                        all_results.append(neurons_df)
+                        
+                        # Save individual results
+                        if output_path:
+                            output_file = os.path.join(output_path, f'{line_name}_neurons.csv')
+                            neurons_df.to_csv(output_file, index=False)
+                            
+                            # Save dataset-categorized files
+                            if 'dataset' in neurons_df.columns:
+                                self._save_dataset_categorized_files(
+                                    neurons_df, line_name, output_path, verbose=False
+                                )
+                        
+                    except Exception as e:
+                        pass  # Silent in progress mode
+                
+                fetch_pbar.close()
+                self._vprint(f"   ✓ Fetched {len(uncached_lines)} from API")
+        
+        else:
+            # Single line or no progress bar - original behavior
+            for idx, line_name in enumerate(lines):
+                self._vprint(f"\n📋 Processing: {line_name}")
+                
+                try:
+                    neurons_df = self.line_to_neuron(
+                        line_name,
+                        top_n=top_n,
+                        match_type=match_type
+                    )
+                    
+                    if neurons_df.empty:
                         self._vprint(f"   ⚠️ No matching neurons found")
-                    continue
-                
-                # Add source line info
-                neurons_df = neurons_df.copy()
-                neurons_df['source_line'] = line_name
-                all_results.append(neurons_df)
-                
-                # Show results only if not using progress bar
-                if not (HAS_TQDM and self.verbose and len(lines) > 1):
+                        continue
+                    
+                    # Add source line info
+                    neurons_df = neurons_df.copy()
+                    neurons_df['source_line'] = line_name
+                    all_results.append(neurons_df)
+                    
                     self._vprint(f"   ✅ Found {len(neurons_df)} matching neurons")
                     
                     # Show dataset distribution
@@ -2847,16 +3449,20 @@ class NeuronBridgeFinder:
                         datasets = neurons_df['dataset'].value_counts()
                         for ds, count in datasets.items():
                             self._vprint(f"      {ds}: {count}")
-                
-                # Save individual results
-                if output_path:
-                    output_file = os.path.join(output_path, f'{line_name}_neurons.csv')
-                    neurons_df.to_csv(output_file, index=False)
-                    if not (HAS_TQDM and self.verbose and len(lines) > 1):
-                        self._vprint(f"   💾 Saved: {output_file}")
                     
-            except Exception as e:
-                if not (HAS_TQDM and self.verbose and len(lines) > 1):
+                    # Save individual results
+                    if output_path:
+                        output_file = os.path.join(output_path, f'{line_name}_neurons.csv')
+                        neurons_df.to_csv(output_file, index=False)
+                        self._vprint(f"   💾 Saved: {output_file}")
+                        
+                        # Save dataset-categorized files
+                        if 'dataset' in neurons_df.columns:
+                            self._save_dataset_categorized_files(
+                                neurons_df, line_name, output_path, verbose=True
+                            )
+                        
+                except Exception as e:
                     self._vprint(f"   ❌ Error: {e}")
         
         # Combine results
@@ -2881,6 +3487,16 @@ class NeuronBridgeFinder:
                 combined_df.to_csv(combined_file, index=False)
                 self._vprint(f"\n💾 Combined results: {combined_file}")
             
+            # Visualize top N types per dataset if requested
+            if visualize_top_n_types > 0 and output_path:
+                self._visualize_top_types(
+                    combined_df=combined_df,
+                    top_n=visualize_top_n_types,
+                    output_path=output_path,
+                    per_dataset=visualize_per_dataset,
+                    source_line=lines[0] if len(lines) == 1 else '_'.join(lines[:3])
+                )
+            
             return combined_df
         
         self._vprint(f"\n⚠️ No neurons found for any of the {len(lines)} line(s)")
@@ -2892,16 +3508,18 @@ class NeuronBridgeFinder:
         dataset: Optional[Union[str, List[str]]] = None,
         match_type: Optional[str] = None,
         output_dir: Optional[str] = None,
-        download_images: Optional[str] = None,
-        download_top_n_img: Optional[int] = 10,
+        download_images: Optional[str] = 'flylight',
+        download_img_for_top_n_lines: Optional[int] = 10,
         image_formats: Union[str, List[str]] = ['png','jpg'],
-        image_types: Union[str, List[str]] = 'mip',
-        max_images_per_line: Optional[int] = 20,
+        image_types: Union[str, List[str]] = 'all',
+        max_download_images_per_line: Optional[int] = 20,
         flylight_category: Optional[Union[str, List[str]]] = ['GAL4/LEXA', 'SplitGAL4'],
         organize_by_region: bool = False,
         simple_mode: bool = False,
         calculate_specificity: bool = True,
-        specificity_top_n: int = 100
+        specificity_top_n: int = 100,
+        pdf_images_per_page: Tuple[int, int] = (5, 3),
+        pdf_landscape: bool = True
     ) -> pd.DataFrame:
         """
         Find driver lines for multiple EM neurons with automatic saving.
@@ -2929,7 +3547,7 @@ class NeuronBridgeFinder:
             - 'flylight': Download images from FlyLight (S3/HTTP CDN)
             - 'both': Download from both sources
             - None/False: No image download (default)
-        download_top_n_img : int, optional
+        download_img_for_top_n_lines : int, optional
             Download images only for top N lines (by aggregate score/rank).
             Default: None (download for all lines)
         image_formats : str or list
@@ -2940,8 +3558,8 @@ class NeuronBridgeFinder:
             Image types to download. For neuronbridge: 'cdm', 'mip'.
             For flylight: 'mip', 'cdm', 'aligned', 'translation', 'metadata', 'all'.
             Default: 'all' (download all available image types)
-        max_images_per_line : int, optional
-            Maximum images to download per line. Default: None (no limit)
+        max_download_images_per_line : int, optional
+            Maximum images to download per line. Default: 20
         flylight_category : str or list, optional
             FlyLight collection category for flylight downloads.
             Options: 'GAL4/LEXA', 'SplitGAL4', 'MCFO', 'RawImages', 'All'.
@@ -2966,12 +3584,17 @@ class NeuronBridgeFinder:
             2. Number of top neuron matches to consider when analyzing each line
             Lines are selected based on their ranking (top N by score).
             Default: 100
+        pdf_images_per_page : tuple of (int, int)
+            (columns, rows) - number of images per page in the PDF summary.
+            Default: (5, 3) = 15 images per page
+        pdf_landscape : bool
+            Use landscape orientation for PDF. Default: True (horizontal A4)
         
         Notes
         -----
         When `separate_splitgal4=True` is set on the NeuronBridgeFinder instance:
         - Results will include a 'line_type' column ('gal4_lexa' or 'split_gal4')
-        - download_top_n_img applies separately to each category
+        - download_img_for_top_n_lines applies separately to each category
         - GAL4/LexA lines: start with VT, R, GMR (e.g., VT037867, R10A06)
         - Split-GAL4 lines: start with SS, LH, MB, IS, OL, LC, etc.
         - Separate CSV files saved: gal4_lexa_lines.csv, split_gal4_lines.csv
@@ -2997,7 +3620,7 @@ class NeuronBridgeFinder:
         >>> results = nbf.find_lines_batch('aMe12,MBON01', dataset='hemibrain:v1.2.1')
         >>> # With NeuronBridge images (top 50 lines only)
         >>> results = nbf.find_lines_batch('aMe12', download_images='neuronbridge', 
-        ...                                 download_top_n_img=50, output_dir='./output')
+        ...                                 download_img_for_top_n_lines=50, output_dir='./output')
         >>> # With FlyLight images
         >>> results = nbf.find_lines_batch('aMe12', download_images='flylight', output_dir='./output')
         >>> # With simple mode (reduced download volume)
@@ -3005,7 +3628,7 @@ class NeuronBridgeFinder:
         ...                                 simple_mode=True, output_dir='./output')
         >>> # Separate GAL4/LexA from Split-GAL4 (set on instance)
         >>> nbf = NeuronBridgeFinder(separate_splitgal4=True)
-        >>> results = nbf.find_lines_batch('MBON01', download_top_n_img=5)  # 5 GAL4 + 5 Split-GAL4
+        >>> results = nbf.find_lines_batch('MBON01', download_img_for_top_n_lines=5)  # 5 GAL4 + 5 Split-GAL4
         """
         # Parse queries
         if isinstance(queries, str):
@@ -3029,70 +3652,200 @@ class NeuronBridgeFinder:
         output_path = None
         if output_dir:
             timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-            output_path = os.path.join(output_dir, f'findlines_{timestamp}')
+            # Add query info to folder name
+            query_info = '_'.join(str(q) for q in query_list[:3])  # First 3 queries
+            if len(query_list) > 3:
+                query_info += '_etc'
+            # Sanitize folder name (remove special characters)
+            query_info = ''.join(c if c.isalnum() or c in '-_' else '_' for c in query_info)
+            output_path = os.path.join(output_dir, f'findlines_{query_info}_{timestamp}')
             os.makedirs(output_path, exist_ok=True)
             self._vprint(f"   Output: {output_path}")
         
         # Process each query
         all_results = []
         
-        for q in query_list:
-            self._vprint(f"\n📋 Processing: {q}")
+        # Phase 1: Check cache and identify what needs to be fetched
+        if HAS_TQDM and self.verbose and len(query_list) > 1:
+            from tqdm import tqdm as tqdm_progress
             
-            try:
-                # Check if query is a body ID (integer)
+            self._vprint("\n📦 Checking cache...")
+            cached_queries = []
+            uncached_queries = []
+            
+            cache_pbar = tqdm_progress(
+                query_list,
+                desc="   💾 Loading cache",
+                unit="query",
+                bar_format='{desc}: {percentage:3.0f}%|{bar:30}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]',
+                ncols=110,
+                position=0,
+                leave=False
+            )
+            
+            for q in cache_pbar:
+                # Determine cache key based on query type
                 try:
                     body_id = int(q)
                     is_body_id = True
-                except (ValueError, TypeError):
-                    body_id = None
-                    is_body_id = False
-                
-                if is_body_id:
-                    # Direct body ID search
-                    lines_df = self.id_to_lines(
-                        body_id,
-                        match_type=match_type
-                    )
-                    if not lines_df.empty:
-                        lines_df = lines_df.copy()
-                        lines_df['source_bodyId'] = body_id
+                    cache_key = f"{body_id}_{match_type}"
+                    cached_data = self._load_from_cache('id_to_lines', cache_key)
                     query_name = str(body_id)
-                else:
-                    # Type/instance search - use neuron_to_lines with dataset parameter
-                    results_dict = self.neuron_to_lines(
-                        q,
-                        dataset=dataset,
-                        match_type=match_type
-                    )
-                    # Combine results from all matching neurons (source_bodyId already added)
-                    if results_dict:
-                        dfs = [df for df in results_dict.values() if not df.empty]
-                        lines_df = pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
-                    else:
-                        lines_df = pd.DataFrame()
+                except (ValueError, TypeError):
+                    is_body_id = False
+                    # For type/instance queries, cache is per bodyId in neuron_to_lines
+                    # We can't easily check cache here, so mark as uncached
+                    cached_data = None
                     query_name = str(q)
                 
-                if lines_df.empty:
-                    self._vprint(f"   ⚠️ No matching lines found")
-                    continue
+                if cached_data is not None and is_body_id:
+                    if not cached_data.empty:
+                        cached_data = cached_data.copy()
+                        cached_data['source_bodyId'] = body_id
+                        cached_data['source_query'] = query_name
+                        cached_queries.append((q, cached_data))
+                        cache_pbar.set_postfix_str(f"✓ {query_name}")
+                    else:
+                        uncached_queries.append(q)
+                else:
+                    uncached_queries.append(q)
+            
+            cache_pbar.close()
+            
+            if cached_queries:
+                self._vprint(f"   ✓ Loaded {len(cached_queries)} from cache")
+            if uncached_queries:
+                self._vprint(f"   🌐 Need to fetch {len(uncached_queries)} from API")
+            
+            # Process cached results
+            for q, cached_data in cached_queries:
+                all_results.append(cached_data)
                 
-                # Add source query info
-                lines_df = lines_df.copy()
-                lines_df['source_query'] = query_name
-                all_results.append(lines_df)
-                
-                self._vprint(f"   ✅ Found {len(lines_df)} matching driver lines")
-                
-                # Save individual results
+                # Save individual cached results
                 if output_path:
+                    query_name = str(q)
                     safe_name = ''.join(c if c.isalnum() or c in '_-' else '_' for c in query_name)
                     output_file = os.path.join(output_path, f'{safe_name}_lines.csv')
-                    lines_df.to_csv(output_file, index=False)
-                    self._vprint(f"   💾 Saved: {output_file}")
+                    cached_data.to_csv(output_file, index=False)
+            
+            # Phase 2: Fetch uncached data
+            if uncached_queries:
+                self._vprint("\n🌐 Fetching new data...")
+                fetch_pbar = tqdm_progress(
+                    uncached_queries,
+                    desc="   🔄 Fetching",
+                    unit="query",
+                    bar_format='{desc}: {percentage:3.0f}%|{bar:30}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]',
+                    ncols=110,
+                    position=0,
+                    leave=False
+                )
+                
+                for q in fetch_pbar:
+                    query_name = str(q)
+                    fetch_pbar.set_postfix_str(query_name[:20])
                     
-            except Exception as e:
-                self._vprint(f"   ❌ Error: {e}")
+                    try:
+                        # Check if query is a body ID (integer)
+                        try:
+                            body_id = int(q)
+                            is_body_id = True
+                        except (ValueError, TypeError):
+                            body_id = None
+                            is_body_id = False
+                        
+                        if is_body_id:
+                            # Direct body ID search
+                            lines_df = self.id_to_lines(body_id, match_type=match_type)
+                            if not lines_df.empty:
+                                lines_df = lines_df.copy()
+                                lines_df['source_bodyId'] = body_id
+                            query_name = str(body_id)
+                        else:
+                            # Type/instance search
+                            results_dict = self.neuron_to_lines(
+                                q, dataset=dataset, match_type=match_type
+                            )
+                            if results_dict:
+                                dfs = [df for df in results_dict.values() if not df.empty]
+                                lines_df = pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
+                            else:
+                                lines_df = pd.DataFrame()
+                            query_name = str(q)
+                        
+                        if lines_df.empty:
+                            continue
+                        
+                        # Add source query info
+                        lines_df = lines_df.copy()
+                        lines_df['source_query'] = query_name
+                        all_results.append(lines_df)
+                        
+                        # Save individual results
+                        if output_path:
+                            safe_name = ''.join(c if c.isalnum() or c in '_-' else '_' for c in query_name)
+                            output_file = os.path.join(output_path, f'{safe_name}_lines.csv')
+                            lines_df.to_csv(output_file, index=False)
+                        
+                    except Exception as e:
+                        pass  # Silent in progress mode
+                
+                fetch_pbar.close()
+                self._vprint(f"   ✓ Fetched {len(uncached_queries)} from API")
+        
+        else:
+            # Single query or no progress bar - original behavior
+            for q in query_list:
+                self._vprint(f"\n📋 Processing: {q}")
+                
+                try:
+                    # Check if query is a body ID (integer)
+                    try:
+                        body_id = int(q)
+                        is_body_id = True
+                    except (ValueError, TypeError):
+                        body_id = None
+                        is_body_id = False
+                    
+                    if is_body_id:
+                        # Direct body ID search
+                        lines_df = self.id_to_lines(body_id, match_type=match_type)
+                        if not lines_df.empty:
+                            lines_df = lines_df.copy()
+                            lines_df['source_bodyId'] = body_id
+                        query_name = str(body_id)
+                    else:
+                        # Type/instance search
+                        results_dict = self.neuron_to_lines(
+                            q, dataset=dataset, match_type=match_type
+                        )
+                        if results_dict:
+                            dfs = [df for df in results_dict.values() if not df.empty]
+                            lines_df = pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
+                        else:
+                            lines_df = pd.DataFrame()
+                        query_name = str(q)
+                    
+                    if lines_df.empty:
+                        self._vprint(f"   ⚠️ No matching lines found")
+                        continue
+                    
+                    # Add source query info
+                    lines_df = lines_df.copy()
+                    lines_df['source_query'] = query_name
+                    all_results.append(lines_df)
+                    
+                    self._vprint(f"   ✅ Found {len(lines_df)} matching driver lines")
+                    
+                    # Save individual results
+                    if output_path:
+                        safe_name = ''.join(c if c.isalnum() or c in '_-' else '_' for c in query_name)
+                        output_file = os.path.join(output_path, f'{safe_name}_lines.csv')
+                        lines_df.to_csv(output_file, index=False)
+                        self._vprint(f"   💾 Saved: {output_file}")
+                        
+                except Exception as e:
+                    self._vprint(f"   ❌ Error: {e}")
         
         # Combine results
         if all_results:
@@ -3179,14 +3932,44 @@ class NeuronBridgeFinder:
                         colabel_top_n = min(specificity_top_n or 50, len(line_stats))
                         colabel_lines = line_stats['line'].head(colabel_top_n).tolist()
                         
-                        self._vprint(f"\n🔗 Building co-labeling matrix for top {colabel_top_n} lines...")
+                        self._vprint(f"\n🔗 Building co-labeling matrices for top {colabel_top_n} lines...")
                         
-                        # Build co-labeling matrix
-                        co_labeling_matrix, _ = self._build_colabeling_matrix(
-                            lines=colabel_lines,
-                            match_type=match_type,
-                            top_n=specificity_top_n
-                        )
+                        # Build similarity matrices
+                        similarity_methods = ['jaccard', 'weighted_jaccard']
+                        matrices = {}
+                        
+                        for method in similarity_methods:
+                            self._vprint(f"\n   📊 Computing {method} similarity...")
+                            matrix, _ = self._build_colabeling_matrix(
+                                lines=colabel_lines,
+                                match_type=match_type,
+                                top_n=specificity_top_n,
+                                similarity_method=method
+                            )
+                            matrices[method] = matrix
+                            
+                            # Save matrix CSV
+                            csv_filename = f'colabeling_matrix_{method}.csv'
+                            csv_path = os.path.join(output_path, csv_filename)
+                            matrix.to_csv(csv_path)
+                            self._vprint(f"   💾 Saved: {csv_filename}")
+                            
+                            # Create visualization
+                            method_titles = {
+                                'jaccard': 'Co-Labeling Matrix (Binary Jaccard)',
+                                'weighted_jaccard': 'Co-Labeling Matrix (Weighted Jaccard)'
+                            }
+                            html_filename = f'colabeling_matrix_{method}.html'
+                            self.visualize_colabeling_matrix(
+                                co_labeling_matrix=matrix,
+                                output_path=output_path,
+                                title=f"{method_titles[method]} - Top {colabel_top_n} Lines",
+                                color_scale='purple',
+                                filename=html_filename
+                            )
+                        
+                        # Use weighted Jaccard for sparsity calculations (most informative)
+                        co_labeling_matrix = matrices['weighted_jaccard']
                         
                         # Calculate sparsity metrics
                         sparsity_scores = self._calculate_colabeling_sparsity(co_labeling_matrix)
@@ -3197,19 +3980,7 @@ class NeuronBridgeFinder:
                             line_stats.loc[mask, 'colabel_sparsity'] = scores['colabel_sparsity']
                             line_stats.loc[mask, 'n_colabeling_lines'] = scores['n_colabeling_lines']
                             line_stats.loc[mask, 'mean_colabel_similarity'] = scores['mean_colabel_similarity']
-                        
-                        # Save co-labeling matrix CSV
-                        colabel_csv = os.path.join(output_path, 'colabeling_matrix.csv')
-                        co_labeling_matrix.to_csv(colabel_csv)
-                        self._vprint(f"   💾 Co-labeling matrix: {colabel_csv}")
-                        
-                        # Visualize as heatmap
-                        self.visualize_colabeling_matrix(
-                            co_labeling_matrix=co_labeling_matrix,
-                            output_path=output_path,
-                            title=f"Co-Labeling Matrix (Jaccard Similarity) - Top {colabel_top_n} Lines",
-                            color_scale='purple'
-                        )
+
                         
                         # Calculate mutual information
                         self._vprint(f"\n📐 Calculating mutual information...")
@@ -3302,9 +4073,9 @@ class NeuronBridgeFinder:
                             gal4_lines = [l for l in all_lines if self._classify_line_type(l) == 'gal4_lexa']
                             split_lines = [l for l in all_lines if self._classify_line_type(l) == 'split_gal4']
                             
-                            if download_top_n_img is not None and download_top_n_img > 0:
-                                gal4_lines = gal4_lines[:download_top_n_img]
-                                split_lines = split_lines[:download_top_n_img]
+                            if download_img_for_top_n_lines is not None and download_img_for_top_n_lines > 0:
+                                gal4_lines = gal4_lines[:download_img_for_top_n_lines]
+                                split_lines = split_lines[:download_img_for_top_n_lines]
                                 self._vprint(f"\n🖼️  Downloading images (separate mode):")
                                 self._vprint(f"      GAL4/LexA: top {len(gal4_lines)} lines")
                                 self._vprint(f"      Split-GAL4: top {len(split_lines)} lines")
@@ -3316,8 +4087,8 @@ class NeuronBridgeFinder:
                             download_lines = gal4_lines + split_lines
                         else:
                             # Normal mode: just apply top_n limit to all lines
-                            if download_top_n_img is not None and download_top_n_img > 0:
-                                download_lines = all_lines[:download_top_n_img]
+                            if download_img_for_top_n_lines is not None and download_img_for_top_n_lines > 0:
+                                download_lines = all_lines[:download_img_for_top_n_lines]
                                 self._vprint(f"\n🖼️  Downloading images for top {len(download_lines)} lines...")
                             else:
                                 download_lines = all_lines
@@ -3336,24 +4107,44 @@ class NeuronBridgeFinder:
                                 output_dir=nb_dir,
                                 formats=image_formats,
                                 image_types=image_types,
-                                max_files=max_images_per_line,
+                                max_files=max_download_images_per_line,
                                 verbose=self.verbose
                             )
                         
                         # Download from FlyLight
                         if download_source in ('flylight', 'both'):
                             fl_dir = os.path.join(images_dir, 'flylight') if download_source == 'both' else images_dir
-                            self._download_flylight_images_with_category(
+                            flylight_files, lines_without_flylight = self._download_flylight_images_with_category(
                                 lines=download_lines,
                                 output_dir=fl_dir,
                                 formats=image_formats,
                                 image_types=image_types,
-                                max_files=max_images_per_line,
+                                max_files=max_download_images_per_line,
                                 category=flylight_category,
                                 organize_by_region=organize_by_region,
                                 simple_mode=simple_mode,
                                 verbose=self.verbose
                             )
+                            
+                            # Report lines without any FlyLight images
+                            if lines_without_flylight:
+                                self._vprint(f"\n⚠️  Note: No FlyLight images found for {len(lines_without_flylight)} line(s):")
+                                self._vprint(f"   {', '.join(lines_without_flylight)}")
+                                self._vprint("   (tried all categories including MCFO fallback)")
+                            
+                            # Generate PDF summary if images were downloaded
+                            images_dir = os.path.join(output_path, 'images')
+                            if os.path.exists(images_dir):
+                                self._vprint(f"\n📄 Generating PDF summary...")
+                                pdf_path = create_image_pdf(
+                                    images_dir=images_dir,
+                                    output_pdf=os.path.join(output_path, 'images_summary.pdf'),
+                                    images_per_page=pdf_images_per_page,
+                                    landscape=pdf_landscape,
+                                    verbose=self.verbose
+                                )
+                                if pdf_path:
+                                    self._vprint(f"   ✅ PDF saved: {pdf_path}")
             
             return combined_df
         
@@ -3622,38 +4413,98 @@ class NeuronBridgeFinder:
             verbose=verbose
         )
     
-    def _parse_region_from_filename(self, filename: str) -> str:
+    def _parse_region_from_filename(self, filename: str, full_key: str = None) -> str:
         """
-        Parse anatomical region from FlyLight filename.
+        Parse anatomical region from FlyLight filename or file key path.
         
         FlyLight filename format: {line}-{date}_{sample}-{sex}-{mag}-{region}-{driver}-...
         Example: SS01015-20131220_31_C3-f-20x-brain-Split_GAL4-JRC2018_Unisex_20x_HR-CDM_1.png
         
+        VT GAL4 files have region in the key path:
+        Example: VT GAL4/VT037867/brain/filename.jpg
+        
+        Brain regions include: brain, central, dorsal, optic, protocerebrum, etc.
+        VNC regions include: vnc, ventral_nerve_cord, metathoracic, prothoracic, mesothoracic
+        
         Returns 'Brain', 'VNC', or 'Other' based on the region field.
         """
-        # Split by '-' and try to find region field
+        # First check the full key path for region (VT GAL4 files)
+        if full_key:
+            key_lower = full_key.lower()
+            # Check for /brain/ or /vnc/ in the path
+            if '/brain/' in key_lower:
+                return 'Brain'
+            if '/vnc/' in key_lower:
+                return 'VNC'
+        
+        # Split by '-' and try to find region field (MCFO and other formats)
         parts = filename.split('-')
         
-        # Region is typically the 5th field (index 4) after line, date, sex, mag
-        # But some files have extra parts, so search for known regions
+        # VNC-specific keywords (check first to avoid confusion with 'ventral')
+        vnc_keywords = ['vnc', 'ventral_nerve_cord', 'metathoracic', 'prothoracic', 'mesothoracic']
+        
+        # Brain-specific keywords
+        brain_keywords = ['brain', 'central', 'dorsal', 'optic', 'protocerebrum', 
+                         'left_optic_lobe', 'right_optic_lobe', 'left_dorsal', 'right_dorsal',
+                         'ventral']  # 'ventral' alone (without nerve_cord) means brain ventral
+        
+        # Search for VNC keywords first (more specific)
         for part in parts:
             part_lower = part.lower()
-            if 'brain' in part_lower:
-                return 'Brain'
-            elif 'ventral_nerve_cord' in part_lower or 'vnc' in part_lower:
-                return 'VNC'
-            elif 'dorsal' in part_lower or 'thorax' in part_lower or 'optic' in part_lower:
-                return 'Other'
+            for keyword in vnc_keywords:
+                if keyword in part_lower:
+                    return 'VNC'
         
-        # Fallback: try position-based parsing
-        if len(parts) >= 5:
-            region_field = parts[4].lower()
-            if 'brain' in region_field:
-                return 'Brain'
-            elif 'ventral' in region_field or 'vnc' in region_field:
-                return 'VNC'
+        # Then search for brain keywords
+        for part in parts:
+            part_lower = part.lower()
+            for keyword in brain_keywords:
+                if keyword in part_lower:
+                    return 'Brain'
         
         return 'Other'
+    
+    def _filter_flylight_files_by_region(self, files: List[Any]) -> List[Any]:
+        """
+        Filter FlyLight files based on anatomical region setting.
+        
+        Uses filename and key path parsing to determine region (Brain/VNC).
+        Only filters when self.region is 'Brain' or 'VNC'.
+        
+        Parameters
+        ----------
+        files : list
+            List of FlyLightFile objects.
+            
+        Returns
+        -------
+        list
+            Filtered list of files matching the region criteria.
+        """
+        if self.region == 'All' or not self.region:
+            return files
+        
+        filtered = []
+        for file in files:
+            # Get full key and filename
+            full_key = file.key if hasattr(file, 'key') else ''
+            filename = full_key.split('/')[-1] if full_key else ''
+            if not filename and hasattr(file, 'url'):
+                filename = file.url.split('/')[-1]
+            
+            if not filename:
+                # If we can't determine filename, include by default
+                filtered.append(file)
+                continue
+            
+            # Parse region from filename and full key path
+            file_region = self._parse_region_from_filename(filename, full_key)
+            
+            # Include if matches the desired region
+            if file_region == self.region:
+                filtered.append(file)
+        
+        return filtered
     
     def _reorganize_files_by_region(
         self,
@@ -3738,17 +4589,80 @@ class NeuronBridgeFinder:
         organize_by_region: bool = False,
         simple_mode: bool = False,
         verbose: bool = False
-    ) -> List[str]:
+    ) -> Tuple[List[str], List[str]]:
         """
-        Download images from FlyLight with optional category filtering.
+        Download images from FlyLight with sequential category searching.
+        
+        This method searches FlyLight collections in priority order, collecting
+        images from each category sequentially until ``max_files`` is reached
+        for each line. If a line has no images in the specified categories,
+        it automatically falls back to searching 'MCFO' collection.
+        
+        **Category Search Order:**
+        
+        Categories are searched in the order specified in the ``category`` parameter.
+        For example, if ``category=['GAL4/LEXA', 'SplitGAL4']``:
+        
+        1. First, search 'GAL4/LEXA' collection
+        2. If not enough files, search 'SplitGAL4' collection
+        3. If still no files found, fallback to 'MCFO' collection
+        
+        This sequential approach ensures:
+        - Preferred collections are prioritized
+        - ``max_files`` limit is respected across all categories
+        - Lines without images in primary categories get MCFO fallback
         
         Parameters
         ----------
+        lines : list of str
+            List of driver line names to download images for.
+        output_dir : str
+            Directory to save downloaded images.
+        formats : str or list of str
+            File formats to download: 'png', 'jpg', 'h5j', 'mp4', 'all'.
+        image_types : str or list of str
+            Image types: 'mip', 'cdm', 'aligned', 'translation', 'all'.
+        max_files : int, optional
+            Maximum images to download per line. Images are collected from
+            categories in order until this limit is reached.
+        category : str, list of str, or None
+            FlyLight collection category(s) to search, in priority order.
+            Options: 'GAL4/LEXA', 'SplitGAL4', 'MCFO', 'RawImages', 'All'.
+            If a list, categories are searched sequentially in the given order.
+            If None, searches all collections.
+            
+            **Fallback behavior:** If no images are found for a line in the
+            specified categories, 'MCFO' is automatically added as a fallback
+            (unless already included or category is 'All'/None).
+        organize_by_region : bool
+            If True, organize images into Brain/VNC subfolders.
         simple_mode : bool
             If True, apply filename filtering to reduce download volume:
-            - Split-GAL4 collections: only files with '20x' AND 'multichannel' in filename
+            - Split-GAL4 collections: only files with '20x' AND 'multichannel'
             - GAL4/LexA collections: only files with 'total' in filename
-            Default: False
+            - MCFO: all files kept (no filtering)
+            
+        Returns
+        -------
+        tuple of (list, list)
+            - downloaded_files: List of downloaded file paths
+            - lines_without_files: List of line names that had no FlyLight
+              files available even after MCFO fallback
+              
+        Examples
+        --------
+        >>> # Search GAL4/LEXA first, then SplitGAL4, with MCFO fallback
+        >>> files, missing = finder._download_flylight_images_with_category(
+        ...     lines=['SS00731', 'VT000770'],
+        ...     output_dir='./images',
+        ...     formats=['png', 'jpg'],
+        ...     image_types='mip',
+        ...     max_files=10,
+        ...     category=['GAL4/LEXA', 'SplitGAL4'],  # Priority order
+        ...     simple_mode=True
+        ... )
+        >>> # SS00731 might get images from SplitGAL4
+        >>> # VT000770 might get images from MCFO fallback
         """
         try:
             from flylight_downloader import FlyLightDownloader
@@ -3759,7 +4673,7 @@ class NeuronBridgeFinder:
             except ImportError:
                 if verbose:
                     print("❌ flylight_downloader module not available")
-                return []
+                return [], lines
         
         def apply_simple_mode_filter(files, collection_name: str):
             """Filter files based on simple_mode rules."""
@@ -3788,56 +4702,169 @@ class NeuronBridgeFinder:
             
             return filtered
         
+        def verify_vt_file_accessible(file) -> tuple:
+            """Check if a VT file URL is accessible (HEAD request).
+            
+            Returns:
+                tuple: (is_accessible: bool, error_msg: str or None)
+            """
+            if file.source != 'http':
+                return True, None  # S3 files don't need verification
+            try:
+                import urllib.request
+                req = urllib.request.Request(file.url, method='HEAD')
+                with urllib.request.urlopen(req, timeout=5) as resp:
+                    return resp.status == 200, None
+            except Exception as e:
+                # Extract server from URL
+                import urllib.parse
+                parsed = urllib.parse.urlparse(file.url)
+                server = parsed.netloc
+                error_msg = f"{server} unreachable: {type(e).__name__}"
+                return False, error_msg
+        
+        def get_files_for_line_sequential(line_name: str, categories: List[str], 
+                                          downloader_kwargs: dict, max_files_limit: int,
+                                          verify_vt: bool = True) -> List:
+            """
+            Get files for a line by searching categories sequentially until max_files reached.
+            
+            Parameters
+            ----------
+            line_name : str
+                The driver line name.
+            categories : list of str
+                Categories to search in priority order.
+            downloader_kwargs : dict
+                Base kwargs for FlyLightDownloader.
+            max_files_limit : int
+                Maximum files to collect.
+                
+            Returns
+            -------
+            list
+                List of FlyLightFile objects, up to max_files_limit.
+            """
+            collected_files = []
+            
+            for cat in categories:
+                if len(collected_files) >= max_files_limit:
+                    break
+                    
+                try:
+                    # Create downloader for this category
+                    dl = FlyLightDownloader(
+                        output_dir=downloader_kwargs.get('output_dir', output_dir),
+                        collection_category=cat,
+                        formats=downloader_kwargs.get('formats', formats),
+                        image_types=downloader_kwargs.get('image_types', image_types),
+                        verbose=False
+                    )
+                    
+                    files = dl.get_filtered_files(line_name)
+                    if files:
+                        collection = files[0].collection if files else cat
+                        files = apply_simple_mode_filter(files, collection)
+                        
+                        # Apply region filter (important for MCFO fallback)
+                        files = self._filter_flylight_files_by_region(files)
+                        
+                        # For VT GAL4 files (HTTP source), verify the server is accessible
+                        # This catches cases where flimg.janelia.org is down
+                        if verify_vt and files and files[0].source == 'http':
+                            is_accessible, error_msg = verify_vt_file_accessible(files[0])
+                            if not is_accessible:
+                                # Server down - collect warning and skip files for MCFO fallback
+                                collection_name = files[0].collection or cat
+                                warning_msg = f"⚠️  {collection_name} server not accessible for {line_name}: {error_msg}"
+                                self._warning_collector.append(warning_msg)
+                                continue
+                        
+                        # Add files up to the limit
+                        remaining = max_files_limit - len(collected_files)
+                        collected_files.extend(files[:remaining])
+                except Exception:
+                    continue
+            
+            return collected_files
+        
         downloaded = []
+        
+        # Normalize category to list
+        if category is None:
+            categories = ['All']
+        elif isinstance(category, str):
+            categories = [category]
+        else:
+            categories = list(category)
+        
+        # Check if MCFO fallback is needed (not already included and not searching all)
+        categories_lower = [c.lower() for c in categories]
+        needs_mcfo_fallback = ('mcfo' not in categories_lower and 
+                               'all' not in categories_lower)
         
         # Separate VT lines from other lines (they need different format settings)
         vt_lines = [l for l in lines if l.upper().startswith('VT')]
         other_lines = [l for l in lines if not l.upper().startswith('VT')]
         
-        # Phase 1: Scan all lines to count total files
+        # Phase 1: Scan all lines to count total files (with sequential category search)
         if verbose:
+            cat_str = ' → '.join(categories)
+            if needs_mcfo_fallback:
+                cat_str += ' → MCFO (fallback)'
             if simple_mode:
-                print(f"📊 Scanning {len(lines)} lines to count files (simple mode: filtering filenames)...")
+                print(f"📊 Scanning {len(lines)} lines (simple mode, categories: {cat_str})...")
             else:
-                print(f"📊 Scanning {len(lines)} lines to count files...")
+                print(f"📊 Scanning {len(lines)} lines (categories: {cat_str})...")
         
         line_files_map = {}  # line_name -> list of FlyLightFile
         total_file_count = 0
+        max_files_limit = max_files if max_files else 999999
         
         # Create a scanning progress bar
         scan_pbar = None
         if HAS_TQDM and verbose:
             scan_pbar = tqdm(total=len(lines), desc="  Scanning", unit="line", leave=False)
         
-        # Create downloaders for scanning
-        if other_lines:
-            downloader = FlyLightDownloader(
-                output_dir=output_dir,
-                collection_category=category,
-                formats=formats,
-                image_types=image_types,
-                verbose=False
-            )
-            
-            for line_name in other_lines:
-                try:
-                    files = downloader.get_filtered_files(line_name)
-                    # Apply simple_mode filtering based on collection
-                    if files:
-                        # Get collection from first file (all files same line share collection)
-                        collection = files[0].collection if files else ''
-                        files = apply_simple_mode_filter(files, collection)
-                    if max_files:
-                        files = files[:max_files]
-                    line_files_map[line_name] = files
-                    total_file_count += len(files)
-                except Exception:
-                    line_files_map[line_name] = []
+        # Scan other lines (non-VT)
+        for line_name in other_lines:
+            try:
+                # Sequential category search
+                files = get_files_for_line_sequential(
+                    line_name, 
+                    categories,
+                    {'formats': formats, 'image_types': image_types},
+                    max_files_limit
+                )
                 
-                if scan_pbar:
-                    scan_pbar.set_postfix(files=total_file_count, refresh=False)
-                    scan_pbar.update(1)
+                # MCFO fallback if no files found and fallback is enabled
+                if not files and needs_mcfo_fallback:
+                    warning_msg = f"ℹ️  No files from {', '.join(categories)} for {line_name}, trying MCFO fallback..."
+                    self._warning_collector.append(warning_msg)
+                    
+                    files = get_files_for_line_sequential(
+                        line_name,
+                        ['MCFO'],
+                        {'formats': formats, 'image_types': image_types},
+                        max_files_limit
+                    )
+                    # Only print success message if no progress bar (otherwise it interrupts the bar)
+                    if files and verbose and not scan_pbar:
+                        print(f"  ✓ Found {len(files)} MCFO images for {line_name}")
+                    elif not files:
+                        warning_msg = f"⚠️  No images found for {line_name} in any collection (including MCFO)"
+                        self._warning_collector.append(warning_msg)
+                
+                line_files_map[line_name] = files
+                total_file_count += len(files)
+            except Exception:
+                line_files_map[line_name] = []
+            
+            if scan_pbar:
+                scan_pbar.set_postfix(files=total_file_count, refresh=False)
+                scan_pbar.update(1)
         
+        # Scan VT lines (need different format settings)
         if vt_lines:
             vt_formats = formats
             if isinstance(vt_formats, str):
@@ -3845,22 +4872,34 @@ class NeuronBridgeFinder:
             if 'png' in vt_formats and 'jpg' not in vt_formats:
                 vt_formats = list(vt_formats) + ['jpg']
             
-            downloader_vt = FlyLightDownloader(
-                output_dir=output_dir,
-                formats=vt_formats,
-                image_types='all',
-                verbose=False
-            )
-            
             for line_name in vt_lines:
                 try:
-                    files = downloader_vt.get_filtered_files(line_name)
-                    # VT lines: apply simple_mode filter (usually GAL4 category)
-                    if files:
-                        collection = files[0].collection if files else 'GAL4'
-                        files = apply_simple_mode_filter(files, collection)
-                    if max_files:
-                        files = files[:max_files]
+                    # Sequential category search for VT lines
+                    files = get_files_for_line_sequential(
+                        line_name,
+                        categories,
+                        {'formats': vt_formats, 'image_types': 'all'},
+                        max_files_limit
+                    )
+                    
+                    # MCFO fallback if no files found
+                    if not files and needs_mcfo_fallback:
+                        warning_msg = f"ℹ️  No files from {', '.join(categories)} for {line_name}, trying MCFO fallback..."
+                        self._warning_collector.append(warning_msg)
+                        
+                        files = get_files_for_line_sequential(
+                            line_name,
+                            ['MCFO'],
+                            {'formats': vt_formats, 'image_types': 'all'},
+                            max_files_limit
+                        )
+                        # Only print success message if no progress bar (otherwise it interrupts the bar)
+                        if files and verbose and not scan_pbar:
+                            print(f"  ✓ Found {len(files)} MCFO images for {line_name}")
+                        elif not files:
+                            warning_msg = f"⚠️  No images found for {line_name} in any collection (including MCFO)"
+                            self._warning_collector.append(warning_msg)
+                    
                     line_files_map[line_name] = files
                     total_file_count += len(files)
                 except Exception:
@@ -3873,16 +4912,22 @@ class NeuronBridgeFinder:
         if scan_pbar:
             scan_pbar.close()
         
+        # Track lines without any FlyLight files
+        lines_without_files = [l for l, f in line_files_map.items() if not f]
+        
         if total_file_count == 0:
             if verbose:
-                print("  ⚠️ No files found for any lines")
-            return []
+                print("  ⚠️ No files found for any lines (tried all categories including MCFO)")
+            return [], lines
         
         lines_with_files = len([l for l, f in line_files_map.items() if f])
         if verbose:
             print(f"  📦 Found {total_file_count} files across {lines_with_files} lines")
+            if lines_without_files:
+                print(f"  ⚠️ No files for: {', '.join(lines_without_files[:5])}{'...' if len(lines_without_files) > 5 else ''}")
         
         # Phase 2: Download with combined progress bar
+        downloaded = []
         files_downloaded = [0]  # Use list to allow modification in callback
         current_line = ['']  # Track current line for progress display
         
@@ -3904,66 +4949,49 @@ class NeuronBridgeFinder:
                 # Fallback without tqdm
                 print(f"  [{files_downloaded[0]}/{total_file_count}] {line_name}: {file_path.name if hasattr(file_path, 'name') else file_path}")
         
-        # Download S3 lines
-        if other_lines:
-            downloader = FlyLightDownloader(
-                output_dir=output_dir,
-                collection_category=category,
-                formats=formats,
-                image_types=image_types,
-                verbose=False
-            )
-            
-            for line_name in other_lines:
-                if line_name in line_files_map and line_files_map[line_name]:
-                    try:
-                        dl_files = downloader.download(
-                            line_name=line_name,
-                            max_files=max_files,
-                            on_file_downloaded=on_file_downloaded,
-                            flat_structure=True,
-                            files=line_files_map[line_name]  # Use pre-filtered files
-                        )
-                        downloaded.extend([str(f) for f in dl_files])
-                    except Exception as e:
-                        if verbose and not pbar:
-                            print(f"  ❌ {line_name}: {e}")
-        
-        # Download VT lines
-        if vt_lines:
-            vt_formats = formats
-            if isinstance(vt_formats, str):
-                vt_formats = [vt_formats]
-            if 'png' in vt_formats and 'jpg' not in vt_formats:
-                vt_formats = list(vt_formats) + ['jpg']
-            
-            downloader_vt = FlyLightDownloader(
-                output_dir=output_dir,
-                formats=vt_formats,
-                image_types='all',
-                verbose=False
-            )
-            
-            for line_name in vt_lines:
-                if line_name in line_files_map and line_files_map[line_name]:
-                    try:
-                        dl_files = downloader_vt.download(
-                            line_name=line_name,
-                            max_files=max_files,
-                            on_file_downloaded=on_file_downloaded,
-                            flat_structure=True,
-                            files=line_files_map[line_name]  # Use pre-filtered files
-                        )
-                        downloaded.extend([str(f) for f in dl_files])
-                    except Exception as e:
-                        if verbose and not pbar:
-                            print(f"  ❌ {line_name}: {e}")
+        # Download all lines using pre-scanned files
+        for line_name in lines:
+            if line_name in line_files_map and line_files_map[line_name]:
+                try:
+                    # Determine the correct formats for this line
+                    line_formats = formats
+                    line_image_types = image_types
+                    if line_name.upper().startswith('VT'):
+                        if isinstance(line_formats, str):
+                            line_formats = [line_formats]
+                        if 'png' in line_formats and 'jpg' not in line_formats:
+                            line_formats = list(line_formats) + ['jpg']
+                        line_image_types = 'all'
+                    
+                    # Create downloader (category doesn't matter since we're using pre-scanned files)
+                    downloader = FlyLightDownloader(
+                        output_dir=output_dir,
+                        formats=line_formats,
+                        image_types=line_image_types,
+                        verbose=False
+                    )
+                    
+                    dl_files = downloader.download(
+                        line_name=line_name,
+                        max_files=max_files,
+                        on_file_downloaded=on_file_downloaded,
+                        flat_structure=True,
+                        files=line_files_map[line_name]  # Use pre-filtered files
+                    )
+                    downloaded.extend([str(f) for f in dl_files])
+                except Exception as e:
+                    if verbose and not pbar:
+                        print(f"  ❌ {line_name}: {e}")
         
         if pbar:
             pbar.close()
         
         if verbose:
             print(f"  ✅ Downloaded {len(downloaded)}/{total_file_count} files")
+        
+        # Print warning summary
+        if verbose:
+            self._print_warning_summary()
         
         # Reorganize files by anatomical region if requested
         if organize_by_region and downloaded:
@@ -3975,7 +5003,7 @@ class NeuronBridgeFinder:
                 verbose=verbose
             )
         
-        return downloaded
+        return downloaded, lines_without_files
     
     def find_lines_batch_with_images(
         self,
@@ -3988,7 +5016,7 @@ class NeuronBridgeFinder:
         image_source: str = 'neuronbridge',
         image_formats: Union[str, List[str]] = 'png',
         image_types: Union[str, List[str]] = 'cdm',
-        max_images_per_line: Optional[int] = 5
+        max_download_images_per_line: Optional[int] = 5
     ) -> pd.DataFrame:
         """
         Find driver lines with optional image download.
@@ -4016,7 +5044,7 @@ class NeuronBridgeFinder:
             File formats for images. Default: 'png'
         image_types : str or list
             Image types to download. Default: 'cdm'
-        max_images_per_line : int, optional
+        max_download_images_per_line : int, optional
             Maximum images to download per line. Default: 5
             
         Returns
@@ -4048,8 +5076,242 @@ class NeuronBridgeFinder:
             download_images=dl_source,
             image_formats=image_formats,
             image_types=image_types,
-            max_images_per_line=max_images_per_line
+            max_download_images_per_line=max_download_images_per_line
         )
+
+
+def create_image_pdf(
+    images_dir: str,
+    output_pdf: Optional[str] = None,
+    images_per_page: Tuple[int, int] = (5, 3),
+    page_size: str = 'A4',
+    landscape: bool = True,
+    title_font_size: int = 14,
+    margin: float = 0.5,
+    verbose: bool = True
+) -> Optional[str]:
+    """
+    Create a PDF file from downloaded images, organized by line name.
+    
+    Each page shows images for one driver line with the line name as title.
+    Images are arranged in a grid (default 5 columns x 3 rows = 15 images per page).
+    If a line has more images than fit on one page, additional pages are created.
+    
+    Parameters
+    ----------
+    images_dir : str
+        Directory containing images, organized by line name subdirectories.
+        Expected structure: images_dir/LineName/*.png (or .jpg)
+    output_pdf : str, optional
+        Path for output PDF file. If None, saves to images_dir/images_summary.pdf
+    images_per_page : tuple of (int, int)
+        (columns, rows) - number of images per page. Default: (5, 3) = 15 images
+    page_size : str
+        Page size: 'A4', 'Letter', etc. Default: 'A4'
+    landscape : bool
+        Use landscape orientation. Default: True (horizontal A4)
+    title_font_size : int
+        Font size for line name title. Default: 14
+    margin : float
+        Page margin in inches. Default: 0.5
+    verbose : bool
+        Print progress messages. Default: True
+        
+    Returns
+    -------
+    str or None
+        Path to the created PDF file, or None if creation failed.
+        
+    Example
+    -------
+    >>> create_image_pdf(
+    ...     images_dir='/path/to/images',
+    ...     output_pdf='/path/to/summary.pdf',
+    ...     images_per_page=(5, 3),
+    ...     landscape=True
+    ... )
+    """
+    try:
+        from reportlab.lib.pagesizes import A4, letter, landscape as rl_landscape
+        from reportlab.lib.units import inch
+        from reportlab.pdfgen import canvas
+        from reportlab.lib.utils import ImageReader
+        from PIL import Image
+        HAS_REPORTLAB = True
+    except ImportError:
+        HAS_REPORTLAB = False
+        
+    if not HAS_REPORTLAB:
+        if verbose:
+            print("⚠️  PDF generation requires reportlab and Pillow.")
+            print("   Install with: pip install reportlab Pillow")
+        return None
+    
+    from pathlib import Path
+    
+    images_path = Path(images_dir)
+    if not images_path.exists():
+        if verbose:
+            print(f"⚠️  Images directory not found: {images_dir}")
+        return None
+    
+    # Find all line directories with images
+    line_images = {}
+    image_extensions = {'.png', '.jpg', '.jpeg'}
+    
+    for item in sorted(images_path.iterdir()):
+        if item.is_dir():
+            # Line name subdirectory
+            line_name = item.name
+            images = sorted([
+                f for f in item.iterdir()
+                if f.suffix.lower() in image_extensions
+            ])
+            if images:
+                line_images[line_name] = images
+        elif item.suffix.lower() in image_extensions:
+            # Images directly in the images folder (no subdirectory)
+            # Group by line name prefix (before first '-')
+            line_name = item.stem.split('-')[0] if '-' in item.stem else 'Unknown'
+            if line_name not in line_images:
+                line_images[line_name] = []
+            line_images[line_name].append(item)
+    
+    if not line_images:
+        if verbose:
+            print(f"⚠️  No images found in: {images_dir}")
+        return None
+    
+    # Sort images within each line
+    for line_name in line_images:
+        line_images[line_name] = sorted(line_images[line_name])
+    
+    # Set output path
+    if output_pdf is None:
+        output_pdf = images_path / 'images_summary.pdf'
+    output_pdf = Path(output_pdf)
+    
+    # Page setup
+    if page_size.upper() == 'A4':
+        base_size = A4
+    else:
+        base_size = letter
+    
+    if landscape:
+        page_width, page_height = rl_landscape(base_size)
+    else:
+        page_width, page_height = base_size
+    
+    cols, rows = images_per_page
+    margin_pts = margin * inch
+    
+    # Calculate available space for images
+    usable_width = page_width - 2 * margin_pts
+    usable_height = page_height - 2 * margin_pts - 30  # 30 pts for title
+    
+    # Calculate cell size
+    cell_width = usable_width / cols
+    cell_height = usable_height / rows
+    
+    # Create PDF
+    c = canvas.Canvas(str(output_pdf), pagesize=(page_width, page_height))
+    
+    total_pages = 0
+    total_images = 0
+    
+    if verbose:
+        print(f"📄 Creating PDF from {len(line_images)} lines...")
+    
+    for line_name, images in sorted(line_images.items()):
+        # Calculate how many pages needed for this line
+        images_per_full_page = cols * rows
+        num_pages = (len(images) + images_per_full_page - 1) // images_per_full_page
+        
+        for page_idx in range(num_pages):
+            # Draw title
+            c.setFont("Helvetica-Bold", title_font_size)
+            title = line_name
+            if num_pages > 1:
+                title += f" ({page_idx + 1}/{num_pages})"
+            c.drawCentredString(page_width / 2, page_height - margin_pts - 5, title)
+            
+            # Get images for this page
+            start_idx = page_idx * images_per_full_page
+            end_idx = min(start_idx + images_per_full_page, len(images))
+            page_images = images[start_idx:end_idx]
+            
+            # Calculate optimal layout for this page
+            num_images = len(page_images)
+            if num_images < images_per_full_page:
+                # Auto-arrange for fewer images
+                # Try to fill rows as much as possible
+                actual_rows = (num_images + cols - 1) // cols
+                if actual_rows < rows:
+                    # Recalculate cell height to use more space
+                    actual_cell_height = usable_height / actual_rows
+                else:
+                    actual_cell_height = cell_height
+            else:
+                actual_rows = rows
+                actual_cell_height = cell_height
+            
+            # Draw images
+            for i, img_path in enumerate(page_images):
+                row = i // cols
+                col = i % cols
+                
+                # Calculate position (top-left corner of cell)
+                x = margin_pts + col * cell_width
+                y = page_height - margin_pts - 25 - (row + 1) * actual_cell_height
+                
+                try:
+                    # Open image to get dimensions
+                    with Image.open(img_path) as img:
+                        img_width, img_height = img.size
+                        
+                        # Calculate scaling to fit in cell with padding
+                        padding = 5  # pixels padding
+                        max_width = cell_width - 2 * padding
+                        max_height = actual_cell_height - 2 * padding
+                        
+                        scale_w = max_width / img_width
+                        scale_h = max_height / img_height
+                        scale = min(scale_w, scale_h)
+                        
+                        draw_width = img_width * scale
+                        draw_height = img_height * scale
+                        
+                        # Center in cell
+                        draw_x = x + (cell_width - draw_width) / 2
+                        draw_y = y + (actual_cell_height - draw_height) / 2
+                        
+                        # Draw the image
+                        c.drawImage(
+                            str(img_path),
+                            draw_x, draw_y,
+                            width=draw_width,
+                            height=draw_height,
+                            preserveAspectRatio=True
+                        )
+                        total_images += 1
+                        
+                except Exception as e:
+                    # Skip problematic images
+                    if verbose:
+                        print(f"   ⚠️  Could not process: {img_path.name} - {e}")
+            
+            # Add new page
+            c.showPage()
+            total_pages += 1
+    
+    # Save PDF
+    c.save()
+    
+    if verbose:
+        print(f"✅ Created PDF: {output_pdf}")
+        print(f"   {total_pages} pages, {total_images} images from {len(line_images)} lines")
+    
+    return str(output_pdf)
 
 
 # Convenience function for quick usage

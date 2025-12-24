@@ -24,6 +24,7 @@ Author: Hemibrain Connectomes Analysis Project
 """
 
 import sys
+import time
 from pathlib import Path
 
 # Add repo src/ to path
@@ -32,6 +33,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent / 'src'))
 from neuronbridge_finder import NeuronBridgeFinder
 
 if __name__ == "__main__":
+    t0 = time.time()
     # ==========================================================================
     # CONFIGURATION - Edit these parameters
     # ==========================================================================
@@ -50,9 +52,9 @@ if __name__ == "__main__":
     # Filters out images from non-matching regions
     region = 'Brain'
     
-    # Maximum LM images to process per line (10 by default, -1 for all)
+    # Maximum LM images to process per line for API calls (10 by default, -1 for all)
     # Images are pre-filtered by match_type availability before limiting
-    max_images_per_line = 10
+    max_api_images_per_line = -1
     
     # Maximum number of matches to return per line (-1 for all matches)
     top_n = -1
@@ -69,6 +71,17 @@ if __name__ == "__main__":
     # Verbose output
     verbose = True
     
+    # ==========================================================================
+    # VISUALIZATION - 3D skeleton visualization options
+    # ==========================================================================
+    
+    # Visualize top N types per dataset using 3D skeleton (0 = disabled)
+    # This creates interactive HTML visualizations showing the top N neuron types
+    visualize_top_n_types = 10
+    
+    # Create separate visualization per dataset (True) or combined (False)
+    visualize_per_dataset = True
+    
     
     # ==========================================================================
     # EXECUTION - No need to edit below this line
@@ -81,7 +94,7 @@ if __name__ == "__main__":
         verbose=verbose,
         match_type=match_type,           # Set default match algorithm
         region=region,                    # Set region filter
-        max_images_per_line=max_images_per_line  # Limit images per line
+        max_api_images_per_line=max_api_images_per_line  # Limit images per line for API
     )
     
     # Run batch search (handles parsing, processing, and saving automatically)
@@ -90,7 +103,9 @@ if __name__ == "__main__":
         line_names=lines,
         top_n=top_n,
         # match_type=match_type,  # Can override here if needed
-        output_dir=output_dir
+        output_dir=output_dir,
+        visualize_top_n_types=visualize_top_n_types,
+        visualize_per_dataset=visualize_per_dataset
     )
     
     # Display summary
@@ -117,3 +132,6 @@ if __name__ == "__main__":
         print(results[display_cols].head(10).to_string(index=False))
     
     print("\n✅ Done!")
+    t1 = time.time()
+    elapsed = t1 - t0
+    print(f"⏱️ Elapsed time: {elapsed/60:.2f} minutes\n")

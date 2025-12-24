@@ -2,12 +2,13 @@
 FlyLight Downloader Module
 
 This module provides programmatic access to FlyLight imagery data from multiple sources:
-    1. S3 bucket (janelia-flylight-imagery): Gen1 MCFO, Split-GAL4 lines
-    2. HTTP CDN (flimg.janelia.org): VT GAL4 lines and older collections
+    1. S3 bucket (janelia-flylight-imagery): Gen1 MCFO, Split-GAL4 lines (R-lines)
+    2. HTTP CDN (flimg.janelia.org): VT GAL4 lines (standard expression patterns)
+    3. Gen1 MCFO CDN (gen1mcfo.janelia.org): VT MCFO lines (sparse labeling clones)
 
 Key Features:
     - Search by driver line name (e.g., 'R10A06', 'VT037867', 'SS00731')
-    - Automatic source detection (S3 for R-lines, HTTP for VT lines)
+    - Automatic source detection (S3 for R-lines, HTTP CDN for VT lines)
     - Filter by file format: png, jpg, h5j, lsm, mp4, json, or all
     - Filter by image type: mip, cdm, aligned, unaligned, translation, signals, etc.
     - Filter by collection: Gen1 GAL4, Gen1 MCFO, Split-GAL4, VT GAL4, etc.
@@ -16,7 +17,7 @@ Key Features:
 
 Data Sources:
 
-1. S3 Bucket (janelia-flylight-imagery/):
+1. S3 Bucket (janelia-flylight-imagery/) - R-lines:
     ├── Annotator Gen1 MCFO/
     │   ├── R10A06/
     │   │   ├── R10A06-...-metadata.json
@@ -28,10 +29,24 @@ Data Sources:
     │   └── ...
     └── ...
 
-2. HTTP CDN (flimg.janelia.org) - VT Lines:
+2. HTTP CDN (flimg.janelia.org) - VT GAL4 Lines:
     ├── projections/  - JPEG projection images
     ├── translations/ - MP4 fly-through movies
     └── (LSM stacks via CGI download)
+
+3. Gen1 MCFO for VT Lines (discovered via gen1mcfo.janelia.org):
+    VT lines with MCFO data are hosted in the S3 bucket under 'Gen1 MCFO'
+    and 'Annotator Gen1 MCFO' collections, but are not easily discoverable
+    via direct S3 listing. This module parses the gen1mcfo.janelia.org viewer
+    page to find all available S3-hosted MCFO images for VT lines.
+
+**VT Line Search Order:**
+When searching for VT line images, this module searches in priority order:
+    1. VT GAL4 (flimg.janelia.org) - Standard expression patterns
+    2. VT MCFO (S3 via gen1mcfo.janelia.org) - Sparse labeling clones (included automatically)
+
+This ensures that lines like VT000770, which have no GAL4 images but have
+MCFO data, will still return results.
 
 File Types:
     - *-metadata.json: Specimen metadata
@@ -76,6 +91,12 @@ FLYLIGHT_REGION = 'us-east-1'
 VT_CDN_BASE = 'https://flimg.janelia.org/flylight-image/external-data/adult/secdata'
 VT_VIEW_CGI = 'https://flweb.janelia.org/cgi-bin/view_flew_imagery.cgi'
 VT_DOWNLOAD_CGI = 'https://flweb.janelia.org/cgi-bin/download.cgi'
+
+# Gen1 MCFO configuration (for VT lines MCFO data)
+# VT lines have MCFO data at gen1mcfo.janelia.org, not in the S3 bucket
+GEN1_MCFO_VIEW_CGI = 'https://gen1mcfo.janelia.org/cgi-bin/view_gen1mcfo_imagery.cgi'
+GEN1_MCFO_SEARCH_CGI = 'https://gen1mcfo.janelia.org/cgi-bin/gen1mcfo.cgi'
+GEN1_MCFO_CDN_BASE = 'https://gen1mcfo.janelia.org/imagery'
 
 # Known collections in the S3 bucket (top-level folders)
 # Note: VT GAL4 lines are NOT in this S3 bucket - they use the HTTP CDN above
@@ -507,6 +528,81 @@ class FlyLightDownloader:
         
         return files
     
+    def _get_vt_mcfo_files(self, line_name: str) -> List[FlyLightFile]:
+        """
+        Get MCFO images for a VT line from gen1mcfo.janelia.org.
+        
+        VT lines have MCFO (Multi-Color Flip-Out) data that is viewable at
+        gen1mcfo.janelia.org. The actual images are hosted in the S3 bucket
+        (janelia-flylight-imagery) under 'Gen1 MCFO' and 'Annotator Gen1 MCFO'
+        collections, but for VT lines, the images may not be discoverable via
+        direct S3 listing. This method parses the gen1mcfo viewer page to find
+        all available S3 image URLs.
+        
+        Args:
+            line_name: VT line name (e.g., 'VT000770')
+            
+        Returns:
+            List of FlyLightFile objects from the Gen1 MCFO collection on S3
+        """
+        files = []
+        url = f"{GEN1_MCFO_VIEW_CGI}?line={line_name}"
+        
+        try:
+            with urllib.request.urlopen(url, timeout=30) as response:
+                html = response.read().decode('utf-8')
+        except Exception as e:
+            self._log(f"   ⚠️ Error fetching Gen1 MCFO page for {line_name}: {e}")
+            return files
+        
+        # Parse S3 image URLs from the page
+        # Gen1 MCFO images are hosted on S3: https://s3.amazonaws.com/janelia-flylight-imagery/...
+        # Pattern: src="https://s3.amazonaws.com/janelia-flylight-imagery/Gen1+MCFO/VT000770/..."
+        # Also: "Annotator+Gen1+MCFO" collection
+        
+        # Find all S3 image URLs (PNG and JPG)
+        s3_pattern = re.compile(
+            r'https://s3\.amazonaws\.com/janelia-flylight-imagery/'
+            r'((?:Gen1\+MCFO|Annotator\+Gen1\+MCFO)/[^"\'?]+\.(?:png|jpg))',
+            re.IGNORECASE
+        )
+        
+        matches = s3_pattern.findall(html)
+        seen_keys = set()
+        
+        for key in matches:
+            # Normalize key (URL decode the + signs)
+            key = key.replace('+', ' ')
+            
+            # Skip duplicates
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+            
+            # Extract filename and collection
+            parts = key.split('/')
+            collection = parts[0] if parts else 'Gen1 MCFO'
+            filename = parts[-1] if parts else key
+            
+            # Skip thumbnails and query-string variants
+            if 'thumbnail' in filename.lower() or '_thumb' in filename.lower():
+                continue
+            
+            files.append(FlyLightFile(
+                key=key,
+                size=0,
+                last_modified='',
+                collection=collection,
+                line_name=line_name,
+                source='s3',  # These are S3-hosted files
+                http_url=f"https://s3.amazonaws.com/janelia-flylight-imagery/{key.replace(' ', '+')}"
+            ))
+        
+        if files:
+            self._log(f"   📦 Found {len(files)} Gen1 MCFO images for {line_name}")
+        
+        return files
+    
     def _verify_vt_file_exists(self, file: FlyLightFile) -> bool:
         """Check if a VT file URL is accessible."""
         try:
@@ -516,20 +612,43 @@ class FlyLightDownloader:
         except:
             return False
     
-    def list_vt_files(self, line_name: str, verify: bool = False) -> List[FlyLightFile]:
+    def list_vt_files(
+        self, 
+        line_name: str, 
+        verify: bool = False,
+        include_mcfo: bool = True
+    ) -> List[FlyLightFile]:
         """
         List available files for a VT line.
         
+        VT lines have images from two sources:
+        1. GAL4 images from flimg.janelia.org (standard projections)
+        2. MCFO (Multi-Color Flip-Out) images from gen1mcfo.janelia.org
+        
+        The search order follows the FlyLight category priority:
+        1. GAL4/LEXA - Standard expression patterns (flimg.janelia.org)
+        2. MCFO - Sparse labeling clones (gen1mcfo.janelia.org)
+        
         Args:
-            line_name: VT line name (e.g., 'VT037867')
+            line_name: VT line name (e.g., 'VT037867', 'VT000770')
             verify: If True, verify each URL exists (slower but accurate)
+            include_mcfo: If True, also search Gen1 MCFO collection (default: True)
             
         Returns:
-            List of FlyLightFile objects
+            List of FlyLightFile objects from both GAL4 and MCFO sources
         """
         self._log(f"🔍 Searching VT line files for '{line_name}'...")
         
+        # 1. Get standard VT GAL4 files from flimg.janelia.org
         files = self._get_vt_files(line_name)
+        self._log(f"   Found {len(files)} GAL4 files from flimg.janelia.org")
+        
+        # 2. Get MCFO files from gen1mcfo.janelia.org
+        if include_mcfo:
+            mcfo_files = self._get_vt_mcfo_files(line_name)
+            if mcfo_files:
+                self._log(f"   Found {len(mcfo_files)} MCFO files from gen1mcfo.janelia.org")
+                files.extend(mcfo_files)
         
         if verify:
             self._log("   Verifying file URLs (this may take a moment)...")
@@ -540,7 +659,7 @@ class FlyLightDownloader:
             files = verified_files
             self._log(f"   Found {len(files)} verified files")
         else:
-            self._log(f"   Found {len(files)} potential files (use verify=True to confirm)")
+            self._log(f"   Found {len(files)} total potential files (use verify=True to confirm)")
         
         return files
 
@@ -614,9 +733,15 @@ class FlyLightDownloader:
             last_modified = content.find('s3:LastModified', ns).text
             
             # Extract collection and line name from key
+            # Handle structure: Collection/LineName/... or Collection/CDM/LineName/...
             parts = key.split('/')
             collection = parts[0] if len(parts) > 1 else ''
-            line_name = parts[1] if len(parts) > 2 else ''
+            
+            # Check for CDM subfolder structure (Gen1/CDM/R21B12/...)
+            if len(parts) > 2 and parts[1].upper() == 'CDM':
+                line_name = parts[2] if len(parts) > 3 else ''
+            else:
+                line_name = parts[1] if len(parts) > 2 else ''
             
             files.append(FlyLightFile(
                 key=key,
@@ -647,7 +772,12 @@ class FlyLightDownloader:
                     key = obj['Key']
                     parts = key.split('/')
                     collection = parts[0] if len(parts) > 1 else ''
-                    line_name = parts[1] if len(parts) > 2 else ''
+                    
+                    # Check for CDM subfolder structure (Gen1/CDM/R21B12/...)
+                    if len(parts) > 2 and parts[1].upper() == 'CDM':
+                        line_name = parts[2] if len(parts) > 3 else ''
+                    else:
+                        line_name = parts[1] if len(parts) > 2 else ''
                     
                     files.append(FlyLightFile(
                         key=key,
@@ -685,12 +815,53 @@ class FlyLightDownloader:
         # Check if this is a VT line - use HTTP CDN
         if self._is_vt_line(line_name) and self.include_vt_lines:
             self._log(f"   Detected VT line - searching HTTP CDN...")
-            all_files = self.list_vt_files(line_name, verify=False)
+            
+            # Determine whether to include MCFO based on collection category
+            # MCFO should be included if:
+            # - No specific category is set (default: search all)
+            # - Category is 'All' or 'MCFO'
+            # - Category list includes 'MCFO' or 'All'
+            include_mcfo = True  # Default: include MCFO
+            include_gal4 = True  # Default: include GAL4
+            
+            if self.collection_category:
+                categories = self.collection_category if isinstance(self.collection_category, list) else [self.collection_category]
+                categories_normalized = [c.upper().replace('-', '').replace('_', '').replace(' ', '').replace('/', '') for c in categories]
+                
+                # Check if MCFO should be included
+                mcfo_keywords = {'MCFO', 'ALL'}
+                include_mcfo = any(c in mcfo_keywords for c in categories_normalized)
+                
+                # Check if GAL4/LEXA should be included
+                gal4_keywords = {'GAL4LEXA', 'GAL4', 'LEXA', 'ALL'}
+                include_gal4 = any(c in gal4_keywords for c in categories_normalized)
+            
+            # Get VT files based on category
+            if include_gal4 and include_mcfo:
+                # Get both GAL4 and MCFO
+                all_files = self.list_vt_files(line_name, verify=False, include_mcfo=True)
+            elif include_gal4:
+                # GAL4 only - skip MCFO
+                self._log(f"   Category filter: GAL4/LEXA only (no MCFO)")
+                all_files = self._get_vt_files(line_name)
+                self._log(f"   Found {len(all_files)} GAL4 files from flimg.janelia.org")
+            elif include_mcfo:
+                # MCFO only - skip GAL4
+                self._log(f"   Category filter: MCFO only (no GAL4)")
+                all_files = self._get_vt_mcfo_files(line_name)
+                self._log(f"   Found {len(all_files)} MCFO files from gen1mcfo.janelia.org")
+            else:
+                # No matching category - return empty
+                self._log(f"   ⚠️ No matching VT collections for category")
+                all_files = []
         else:
             # Search S3 bucket for R-lines, Split-GAL4, etc.
             collections_to_search = self._resolved_collections or FLYLIGHT_COLLECTIONS
             
-            for collection in collections_to_search:
+            # MCFO collections that commonly overlap - always search both
+            mcfo_collections = {'Annotator Gen1 MCFO', 'Gen1 MCFO'}
+            
+            for i, collection in enumerate(collections_to_search):
                 self._log(f"   Searching {collection}...")
                 
                 # Try direct path first: Collection/LineName/
@@ -712,8 +883,13 @@ class FlyLightDownloader:
                 
                 all_files.extend(files)
                 
-                # Early exit if files found (most lines are in one collection)
+                # Early exit logic - skip remaining collections if we have files,
+                # BUT always check both MCFO collections since they commonly overlap
                 if all_files and len(collections_to_search) > 3:
+                    # Check if the next collection is also MCFO
+                    next_collections = [c for c in collections_to_search[i+1:] if c in mcfo_collections]
+                    if next_collections:
+                        continue  # Keep searching MCFO collections
                     self._log(f"   ✓ Found files in {collection}, skipping remaining collections")
                     break
         

@@ -2478,9 +2478,8 @@ def VisConnMatInteractive(cmat, filename, title='', color_scale=[[0, 'rgb(255,25
                 layout.margin.b = 120;
             }}
             
-            // Update trace and layout
-            Plotly.restyle('heatmap', trace);
-            Plotly.relayout('heatmap', layout);
+            // Create or update the heatmap using Plotly.react (handles both creation and updates)
+            Plotly.react('heatmap', [trace], layout);
         }}
         
         function toggleClustering(mode) {{
@@ -2841,9 +2840,8 @@ def VisConnMatInteractive(cmat, filename, title='', color_scale=[[0, 'rgb(255,25
                 layout.margin.b = 120;
             }}
             
-            // Update trace and layout
-            Plotly.restyle('heatmap', trace);
-            Plotly.relayout('heatmap', layout);
+            // Create or update the heatmap using Plotly.react (handles both creation and updates)
+            Plotly.react('heatmap', [trace], layout);
         }}
         
         function toggleCellValues() {{

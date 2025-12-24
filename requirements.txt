@@ -47,6 +47,7 @@ flybrains==0.2.11          # Drosophila brain templates and meshes
 # -----------------------------------------------------------------------------
 neuronbridge-python>=3.3.0 # NeuronBridge API for EM-LM matching
 boto3>=1.26.0              # AWS S3 access for FlyLight imagery downloads
+reportlab>=4.0.0           # PDF generation for image summaries
 
 # Document Processing
 # -----------------------------------------------------------------------------

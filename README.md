@@ -7,6 +7,17 @@ A comprehensive Python toolkit for analyzing and visualizing connectome data fro
 
 ## ✨ Key Features
 
+### 🗄️ Dataset & Analysis
+- **Universal Dataset Support**: Seamless compatibility between **NeuPrint datasets** (hemibrain, male-cns, etc.) and **FlyWire FAFB/BANC** datasets
+- **Cross-Dataset Comparison**: Analyze and compare connectivity patterns across multiple datasets seamlessly
+- **Connectivity Analysis**: Connectivity-based homolog finding (inter/intra-dataset) and similarity comparisons
+- **Population-Level Fast Pathfinding**: Comprehensive multi-hop path discovery between neuron populations with forward-only validation
+
+### 🎨 Visualization
+- **3D Visualization**: Interactive neuron skeleton rendering with rotating video export (navis-based)
+- **Interactive Networks**: Cytoscape.js-powered network graphs with hierarchical and force-directed layouts
+- **Rich Visualizations**: Sankey diagrams, heatmaps with clustering, and connection matrices
+
 ### 🔬 EM↔LM Integration (NEW!)
 - **🌉 [NeuronBridge Integration](docs/core-features/NeuronBridge_Guide.md)**: Bidirectional mapping between EM reconstructions and LM driver lines
   - Find driver lines (GAL4, LexA, Split-GAL4) matching EM body IDs
@@ -19,16 +30,6 @@ A comprehensive Python toolkit for analyzing and visualizing connectome data fro
   - Smart filtering with `simple_mode` to reduce download volume
   - Collection-based searching (GAL4/LexA, SplitGAL4, MCFO)
 
-### 🗄️ Dataset & Analysis
-- **Universal Dataset Support**: Seamless compatibility between **NeuPrint datasets** (hemibrain, male-cns, etc.) and **FlyWire FAFB/BANC** datasets
-- **Cross-Dataset Comparison**: Analyze and compare connectivity patterns across multiple datasets seamlessly
-- **Connectivity Analysis**: Connectivity-based homolog finding (inter/intra-dataset) and similarity comparisons
-- **Population-Level Fast Pathfinding**: Comprehensive multi-hop path discovery between neuron populations with forward-only validation
-
-### 🎨 Visualization
-- **3D Visualization**: Interactive neuron skeleton rendering with rotating video export (navis-based)
-- **Interactive Networks**: Cytoscape.js-powered network graphs with hierarchical and force-directed layouts
-- **Rich Visualizations**: Sankey diagrams, heatmaps with clustering, and connection matrices
 
 ### ⚡ Performance & Tools
 - **High Performance**: 10-100x speedup with local caching, Polars-accelerated large data operations

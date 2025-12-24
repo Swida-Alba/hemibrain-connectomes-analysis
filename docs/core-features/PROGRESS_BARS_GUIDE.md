@@ -30,6 +30,23 @@ nbf = NeuronBridgeFinder(verbose=True)
 nbf_quiet = NeuronBridgeFinder(verbose=False)
 ```
 
+## Batch Mode & Warning Summary (v4.3.2+)
+
+During batch operations, verbose output is automatically compressed:
+
+- **Cache messages suppressed**: Load/save cache messages are hidden during batch loops
+- **Warnings collected**: Non-critical warnings are collected and summarized at the end
+- **Progress bar active**: Success messages (e.g., "✓ Found X images") are hidden when progress bar is running
+
+**Warning Summary Output** (printed after batch completion):
+```
+⚠️  Warnings encountered during processing:
+   • VT lines: VT037867 not found in FlyLight Gen1-GAL4 collection (2 occurrences)
+   • VT lines: VT001234 not found in FlyLight Gen1-GAL4 collection
+```
+
+Warnings are grouped by category and deduplicated with occurrence counts, keeping the output clean and actionable.
+
 ## What Gets Progress Bars?
 
 ### 1. Specificity Calculation
