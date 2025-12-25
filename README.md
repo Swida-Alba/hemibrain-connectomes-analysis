@@ -1002,6 +1002,8 @@ The verification report includes:
 
 ## Installation: For users who can prepare the python environments by themselves
 
+> 📖 **For detailed installation instructions** including platform-specific notes, troubleshooting, and optional dependencies, see **[docs/INSTALLATION.md](docs/INSTALLATION.md)**.
+
 ### Recommended: Using Conda Environment
 
 **Create a new conda environment for better isolation:**
@@ -1026,8 +1028,16 @@ pip install -e .
 
 ### Quick Install (Without Conda)
 
+**Linux/macOS:**
 ```bash
 pip install -r requirements.txt
+```
+
+**Windows:**
+```bash
+# If neuronbridge-python fails due to memray dependency, use this:
+pip install -r requirements.txt 2>nul || echo Continuing...
+pip install neuronbridge-python --no-deps
 ```
 
 This will install all necessary dependencies including:
@@ -1035,9 +1045,11 @@ This will install all necessary dependencies including:
 - Visualization: plotly, matplotlib, seaborn, networkx
 - Data processing: openpyxl, xlrd
 - **PyQt5**: For fast, responsive GUI file dialogs (recommended)
-- Neuroscience: neuprint-python, navis
+- Neuroscience: neuprint-python, navis, neuronbridge-python
 
 **Important:** numpy is constrained to <2.0.0 for binary compatibility with pandas 1.x.
+
+> 📖 For more details, see [docs/INSTALLATION.md](docs/INSTALLATION.md#neuronbridge-installation-windows-troubleshooting)
 
 ### Alternative Installation Methods
 

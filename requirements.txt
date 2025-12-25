@@ -31,7 +31,9 @@ tqdm==4.66.5               # Progress bars
 requests==2.32.3           # HTTP requests
 Jinja2==3.1.4              # HTML templating
 pillow==11.0.0             # Image processing
-polars==1.34.0              # Memory-efficient DataFrames for large cache operations
+polars==1.34.0             # Memory-efficient DataFrames for large cache operations
+pydantic>=2.9.1,<3.0.0     # Data validation (required for NeuronBridge API)
+python-rapidjson>=1.20     # Fast JSON parsing (required for NeuronBridge API)
 
 # GUI Backends (for file picker and sheet selection dialogs)
 # -----------------------------------------------------------------------------
@@ -45,7 +47,6 @@ flybrains==0.2.11          # Drosophila brain templates and meshes
 
 # NeuronBridge & FlyLight Integration (v4.3.0)
 # -----------------------------------------------------------------------------
-neuronbridge-python>=3.3.0 # NeuronBridge API for EM-LM matching
 boto3>=1.26.0              # AWS S3 access for FlyLight imagery downloads
 reportlab>=4.0.0           # PDF generation for image summaries
 
@@ -78,10 +79,23 @@ open3d==0.19.0             # 3D mesh processing and simplification
 # ipykernel==6.0.0
 # notebook==6.4.0
 
-# Installation
+# NeuronBridge API (EM↔LM Integration)
 # -----------------------------------------------------------------------------
-# Standard installation:
+# NOTE: On Windows, this may fail due to memray dependency (Linux/macOS only).
+# See Troubleshooting section in docs/INSTALLATION.md for the workaround.
+neuronbridge-python>=3.3.0  # NeuronBridge API for EM-LM matching
+
+# =============================================================================
+# Installation
+# =============================================================================
+# Standard installation (just using the package):
 #   pip install -r requirements.txt
 #
-# Development installation:
+# Development installation (modifying the source code):
 #   pip install -e .
+#
+# The -e flag means "editable" - changes to source files take effect immediately
+# without needing to reinstall. Use this if you're developing/modifying the code.
+#
+# Windows Users: If neuronbridge-python fails to install, see:
+#   docs/INSTALLATION.md#neuronbridge-installation-windows-troubleshooting

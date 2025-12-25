@@ -150,9 +150,61 @@ pip install -r requirements.txt
 ```bash
 # Install from requirements.txt
 pip install -r requirements.txt
+pip install neuronbridge-python --no-deps
 ```
 
 **Note:** Make sure Python was installed with tkinter support (should be default).
+
+## NeuronBridge Installation (Windows Troubleshooting)
+
+The `neuronbridge-python` package is included in requirements.txt and works directly on **Linux and macOS**. However, **Windows users may encounter installation errors** due to the `memray` dependency.
+
+### The Issue
+
+The `neuronbridge-python` package on PyPI includes `memray` as a dependency:
+- **`memray`**: A memory profiler that only supports **Linux and macOS** (no Windows support)
+
+This causes `pip install` to fail on Windows with an error like:
+```
+ERROR: Could not find a version that satisfies the requirement memray
+```
+
+However, **the core NeuronBridge API does not actually require memray**. It's only used for internal validation scripts at Janelia, not the public API.
+
+### Solution for Windows Users
+
+If `neuronbridge-python` fails to install, use this workaround:
+
+```bash
+# Step 1: Install all other dependencies (ignore the neuronbridge error)
+pip install -r requirements.txt 2>nul || echo Continuing...
+
+# Step 2: Install neuronbridge-python without its problematic dependencies
+pip install neuronbridge-python --no-deps
+```
+
+The core NeuronBridge API only needs: `pydantic`, `python-rapidjson`, `pillow`, `requests` — all already installed via requirements.txt.
+
+### Affected Features
+
+If `neuronbridge-python` is not installed, the following features will be unavailable:
+- `NeuronBridgeFinder` class in `src/neuronbridge_finder.py`
+- Scripts: `NeuronBridge_FindNeuron.py`, `NeuronBridge_FindLines.py`
+- EM-to-LM line matching functionality
+
+**All other features of hemibrain-connectomes-analysis work normally without NeuronBridge.**
+
+### Verification
+
+Test your NeuronBridge installation:
+
+```python
+# Quick test
+python -c "from neuronbridge.client import Client; print('✓ NeuronBridge API works')"
+
+# Full test
+python -c "from neuronbridge.client import Client; c = Client(); print(f'✓ NeuronBridge v{c.version}')"
+```
 
 ## Verification
 
