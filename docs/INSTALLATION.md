@@ -12,9 +12,19 @@ conda create -n hemibrain python=3.11 -y
 
 # Activate the environment
 conda activate hemibrain
+```
 
-# Install dependencies
+**Install dependencies (platform-specific):**
+
+**Linux/macOS:**
+```bash
 pip install -r requirements.txt
+```
+
+**Windows:**
+```bash
+pip install -r requirements-windows.txt
+pip install neuronbridge-python --no-deps
 ```
 
 **Or install the package in editable mode:**
@@ -24,13 +34,25 @@ conda activate hemibrain
 pip install -e .
 ```
 
-### Option 1: Using requirements.txt
+### Option 1: Using requirements files
 
+**Linux/macOS:**
 ```bash
 pip install -r requirements.txt
 ```
 
+**Windows:**
+```bash
+# Step 1: Install all dependencies from Windows-specific requirements
+pip install -r requirements-windows.txt
+
+# Step 2: Install neuronbridge-python without its dependencies
+pip install neuronbridge-python --no-deps
+```
+
 This will install all necessary dependencies including PyQt5 for fast GUI dialogs.
+
+> **Note for Windows users:** The `requirements-windows.txt` file is specifically designed to handle the `memray` incompatibility issue. It includes all the same packages as `requirements.txt` but excludes `neuronbridge-python` (which will be installed separately without dependencies in Step 2).
 
 ### Option 2: Using pip install (Modern Python)
 
@@ -137,7 +159,7 @@ pip install -r requirements.txt
 ### Linux (Ubuntu/Debian)
 
 ```bash
-# Install system dependencies first
+# Install system dependencies first (if needed)
 sudo apt-get update
 sudo apt-get install python3-pip python3-dev python3-tk
 
@@ -145,45 +167,69 @@ sudo apt-get install python3-pip python3-dev python3-tk
 pip install -r requirements.txt
 ```
 
+**Note:** Most Linux distributions include these dependencies by default.
+
 ### Windows
 
+**Windows requires a two-step installation process** to handle the `neuronbridge-python` package:
+
 ```bash
-# Install from requirements.txt
-pip install -r requirements.txt
+# Step 1: Install all dependencies from Windows-specific requirements
+pip install -r requirements-windows.txt
+
+# Step 2: Install neuronbridge-python without its dependencies
 pip install neuronbridge-python --no-deps
 ```
 
-**Note:** Make sure Python was installed with tkinter support (should be default).
+**Why this is necessary:**
+- The `neuronbridge-python` package on PyPI lists `memray` as a dependency
+- `memray` is a memory profiler that only supports Linux and macOS (no Windows builds)
+- However, `memray` is **not actually required** for the NeuronBridge API—it's only used for internal development
+- The `requirements-windows.txt` file includes all necessary dependencies (`pydantic`, `python-rapidjson`, `ray[default]`) that `neuronbridge-python` needs to function
+- Installing with `--no-deps` skips the `memray` requirement while keeping full functionality
 
-## NeuronBridge Installation (Windows Troubleshooting)
+**What's included in requirements-windows.txt:**
+- All core packages (same as requirements.txt)
+- NeuronBridge dependencies: `pydantic~=2.9.1`, `python-rapidjson~=1.20`, `ray[default]~=2.39.0`
+- **Excludes:** `neuronbridge-python` itself (installed separately in Step 2)
 
-The `neuronbridge-python` package is included in requirements.txt and works directly on **Linux and macOS**. However, **Windows users may encounter installation errors** due to the `memray` dependency.
+**Note:** Make sure Python was installed with tkinter support (should be default on Windows).
 
-### The Issue
+## NeuronBridge Installation
+
+The `neuronbridge-python` package is included in requirements.txt and works directly on **Linux and macOS**. However, **Windows users must use the special `requirements-windows.txt` file** due to platform compatibility issues.
+
+### The Issue (Windows Only)
 
 The `neuronbridge-python` package on PyPI includes `memray` as a dependency:
 - **`memray`**: A memory profiler that only supports **Linux and macOS** (no Windows support)
 
-This causes `pip install` to fail on Windows with an error like:
+This causes `pip install -r requirements.txt` to fail on Windows with an error like:
 ```
 ERROR: Could not find a version that satisfies the requirement memray
 ```
 
 However, **the core NeuronBridge API does not actually require memray**. It's only used for internal validation scripts at Janelia, not the public API.
 
-### Solution for Windows Users
+### Solution: Use requirements-windows.txt
 
-If `neuronbridge-python` fails to install, use this workaround:
+**The `requirements-windows.txt` file is the recommended solution for Windows users:**
 
 ```bash
-# Step 1: Install all other dependencies (ignore the neuronbridge error)
-pip install -r requirements.txt 2>nul || echo Continuing...
+# Step 1: Install all dependencies from Windows-specific requirements
+pip install -r requirements-windows.txt
 
 # Step 2: Install neuronbridge-python without its problematic dependencies
 pip install neuronbridge-python --no-deps
 ```
 
-The core NeuronBridge API only needs: `pydantic`, `python-rapidjson`, `pillow`, `requests` — all already installed via requirements.txt.
+**What requirements-windows.txt provides:**
+- All the same core packages as `requirements.txt`
+- Explicit versions of NeuronBridge dependencies: `pydantic~=2.9.1`, `python-rapidjson~=1.20`, `ray[default]~=2.39.0`
+- Comments and documentation explaining the Windows-specific setup
+- Excludes `neuronbridge-python` itself (which is installed separately in Step 2 without dependencies)
+
+The core NeuronBridge API only needs: `pydantic`, `python-rapidjson`, and `ray[default]` — all included in requirements-windows.txt.
 
 ### Affected Features
 

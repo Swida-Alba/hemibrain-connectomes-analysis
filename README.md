@@ -1,4 +1,4 @@
-# Drosophila Connectome Analysis v4.3.1
+# Drosophila Connectome Analysis v4.3.2
 
 A comprehensive Python toolkit for analyzing and visualizing connectome data from **all NeuPrint databases and FlyWire datasets**. Features type-based pathfinding algorithms, interactive network visualizations, 3D neuron morphology rendering with video export, and high-performance caching. Supports hemibrain, optic lobe, FIB, MANC, and other NeuPrint datasets.
 
@@ -1016,7 +1016,12 @@ conda create -n droca python=3.11 -y
 conda activate droca
 
 # Install dependencies
+# Linux/macOS:
 pip install -r requirements.txt
+
+# Windows:
+pip install -r requirements-windows.txt
+pip install neuronbridge-python --no-deps
 ```
 
 **Or install the package in editable mode:**
@@ -1035,10 +1040,12 @@ pip install -r requirements.txt
 
 **Windows:**
 ```bash
-# If neuronbridge-python fails due to memray dependency, use this:
-pip install -r requirements.txt 2>nul || echo Continuing...
+# Windows users: Use the Windows-specific requirements file
+pip install -r requirements-windows.txt
 pip install neuronbridge-python --no-deps
 ```
+
+> 💡 **Why Windows needs special handling:** The `neuronbridge-python` package on PyPI includes `memray` (a memory profiler) as a dependency, which only supports Linux/macOS. The `requirements-windows.txt` file excludes `memray` while including all other necessary dependencies. The two-step installation ensures NeuronBridge works properly on Windows.
 
 This will install all necessary dependencies including:
 - Core packages: numpy (<2.0.0), pandas (<2.0.0), scipy
