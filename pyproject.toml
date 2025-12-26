@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hemibrain-connectomes-analysis"
-version = "4.3.1"
+version = "4.3.3"
 description = "Hemibrain connectome analysis and visualization toolkit with reorganized modular structure"
 readme = {file = "README.md", content-type = "text/markdown"}
 requires-python = ">=3.8"
