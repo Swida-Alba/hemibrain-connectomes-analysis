@@ -1280,7 +1280,8 @@ class NeuronBridgeFinder:
         output_path : str, optional
             If provided, save per-line neuron details CSVs to this directory.
         min_score : float
-            Minimum score threshold for individual neurons. Default: 0.0 (no filter).
+            Score threshold for visualization marker only. Does NOT filter data.
+            Expression matrix includes ALL neurons. Default: 0.0.
         min_type_avg_score : float
             Minimum average score threshold for types. Default: 0.0 (no filter).
             
@@ -1296,7 +1297,7 @@ class NeuronBridgeFinder:
         """
         self._vprint(f"\n📊 Calculating mutual information for {len(lines)} lines...")
         if min_score > 0:
-            self._vprint(f"   📊 Min neuron score filter: {min_score:,.0f}")
+            self._vprint(f"   📊 Min neuron score (visualization threshold): {min_score:,.0f}")
         if min_type_avg_score > 0:
             self._vprint(f"   📊 Min type avg score filter: {min_type_avg_score:,.0f}")
         self._vprint(f"   ⏱️  Note: Fetching neuron types for each line (may take time)")
@@ -1336,29 +1337,16 @@ class NeuronBridgeFinder:
             try:
                 neurons_df = self.line_to_neuron(line_name, match_type=match_type, top_n=top_n)
                 if not neurons_df.empty:
-                    # Store unfiltered data before applying any filters
-                    neurons_df_unfiltered = neurons_df.copy()
+                    # NO min_score filtering for expression matrix - include ALL data
+                    # min_score is only used for visualization (labeling distribution plots)
                     
-                    # Apply min_score filter if specified (for visualization/analysis)
-                    if min_score > 0:
-                        neurons_df = neurons_df[neurons_df['score'] >= min_score]
-                    
-                    if neurons_df.empty:
-                        line_type_sets[line_name] = set()
-                        line_prefixed_type_scores[line_name] = {}
-                        line_neurons_dict[line_name] = pd.DataFrame()
-                        # Still store unfiltered data for saving
-                        line_neurons_dict[line_name] = neurons_df_unfiltered.copy()
-                        line_neurons_dict[line_name]['_filtered'] = False  # Mark all as not filtered (below threshold)
-                        continue
-                    
-                    # Get lowercase types for MI calculation
+                    # Get lowercase types for MI calculation (from ALL neurons)
                     types = neurons_df['type'].fillna('Unknown').unique()
                     types_lower = set(t.lower() for t in types)
                     line_type_sets[line_name] = types_lower
                     
                     # Build prefixed type scores: {ABBREV}_{type} with original case
-                    # Use FILTERED data for expression matrix (respects min_score)
+                    # Use ALL data for expression matrix (no min_score filter)
                     line_prefixed_scores = {}
                     for dataset in neurons_df['dataset'].dropna().unique():
                         ds_df = neurons_df[neurons_df['dataset'] == dataset]
@@ -1377,16 +1365,15 @@ class NeuronBridgeFinder:
                                 max_score
                             )
                     
-                    # Build labeling_info from UNFILTERED data (to match individual line files)
-                    # This ensures labeling_info contains all neurons, not just those above min_score
-                    for dataset in neurons_df_unfiltered['dataset'].dropna().unique():
-                        ds_df = neurons_df_unfiltered[neurons_df_unfiltered['dataset'] == dataset]
+                    # Build labeling_info from ALL data (same as expression matrix)
+                    for dataset in neurons_df['dataset'].dropna().unique():
+                        ds_df = neurons_df[neurons_df['dataset'] == dataset]
                         ds_abbrev = DATASET_ABBREVIATIONS.get(dataset, dataset[:4].upper())
                         
                         for type_name, type_df in ds_df.groupby(ds_df['type'].fillna('Unknown')):
                             max_score = type_df['score'].max()
                             
-                            # Store for labeling_info (unfiltered)
+                            # Store for labeling_info
                             key = (type_name, dataset)
                             if key not in labeling_info_data:
                                 labeling_info_data[key] = {}
@@ -1397,9 +1384,9 @@ class NeuronBridgeFinder:
                     
                     line_prefixed_type_scores[line_name] = line_prefixed_scores
                     
-                    # Store unfiltered neurons DataFrame with filter marker column
-                    # This preserves all data for saving while visualization uses filtered data
-                    neurons_to_store = neurons_df_unfiltered.copy()
+                    # Store neurons DataFrame with visualization marker column
+                    # _passes_min_score is used by visualization functions only
+                    neurons_to_store = neurons_df.copy()
                     neurons_to_store['_passes_min_score'] = neurons_to_store['score'] >= (min_score if min_score > 0 else 0)
                     line_neurons_dict[line_name] = neurons_to_store
                 else:
