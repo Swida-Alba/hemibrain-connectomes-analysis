@@ -1283,7 +1283,9 @@ class NeuronBridgeFinder:
             Score threshold for visualization marker only. Does NOT filter data.
             Expression matrix includes ALL neurons. Default: 0.0.
         min_type_avg_score : float
-            Minimum average score threshold for types. Default: 0.0 (no filter).
+            NOT USED in this function. Kept for API compatibility.
+            Type filtering is done in _build_colabeling_matrix for similarity calculations.
+            Expression matrix includes ALL types regardless of this parameter.
             
         Returns
         -------
@@ -1298,8 +1300,7 @@ class NeuronBridgeFinder:
         self._vprint(f"\n📊 Calculating mutual information for {len(lines)} lines...")
         if min_score > 0:
             self._vprint(f"   📊 Min neuron score (visualization threshold): {min_score:,.0f}")
-        if min_type_avg_score > 0:
-            self._vprint(f"   📊 Min type avg score filter: {min_type_avg_score:,.0f}")
+        # Note: min_type_avg_score is NOT used here - filtering happens in _build_colabeling_matrix
         self._vprint(f"   ⏱️  Note: Fetching neuron types for each line (may take time)")
         
         # Normalize queried types for comparison (but keep original case)
@@ -1405,47 +1406,9 @@ class NeuronBridgeFinder:
             self._vprint("   ⚠️ No types found for any line")
             return pd.DataFrame(), pd.DataFrame(), line_neurons_dict, pd.DataFrame()
         
-        # Apply min_type_avg_score filter: remove types with low average scores
-        if min_type_avg_score > 0:
-            # Collect type average scores
-            prefixed_types_to_keep = set()
-            for prefixed_type in all_prefixed_types:
-                scores = [
-                    line_prefixed_type_scores.get(line, {}).get(prefixed_type, 0.0) 
-                    for line in lines
-                ]
-                nonzero_scores = [s for s in scores if s > 0]
-                if nonzero_scores:
-                    avg_score = sum(nonzero_scores) / len(nonzero_scores)
-                    if avg_score >= min_type_avg_score:
-                        prefixed_types_to_keep.add(prefixed_type)
-            
-            filtered_count = len(all_prefixed_types) - len(prefixed_types_to_keep)
-            if filtered_count > 0:
-                self._vprint(f"   📊 Filtered {filtered_count} types with avg score < {min_type_avg_score:,.0f}")
-                self._vprint(f"   📊 Keeping {len(prefixed_types_to_keep)} high-confidence types")
-                all_prefixed_types = prefixed_types_to_keep
-                
-                # Update line_type_sets to only include kept types
-                for line in lines:
-                    kept_types_lower = set()
-                    for prefixed_type in line_prefixed_type_scores.get(line, {}):
-                        if prefixed_type in prefixed_types_to_keep:
-                            # Extract type name from prefixed type (e.g., "MCNS_dm4" -> "dm4")
-                            type_name = '_'.join(prefixed_type.split('_')[1:])
-                            kept_types_lower.add(type_name.lower())
-                    line_type_sets[line] = kept_types_lower
-                
-                # Also filter labeling_info_data
-                labeling_info_data = {
-                    key: scores for key, scores in labeling_info_data.items()
-                    if any(f"{DATASET_ABBREVIATIONS.get(key[1], key[1][:4].upper())}_{key[0]}" in prefixed_types_to_keep
-                           for _ in [1])
-                }
-        
-        if not all_prefixed_types:
-            self._vprint("   ⚠️ No types remaining after score filter")
-            return pd.DataFrame(), pd.DataFrame(), line_neurons_dict, pd.DataFrame()
+        # NOTE: min_type_avg_score filtering is NOT applied here
+        # Expression matrix includes ALL types regardless of score
+        # Type filtering for similarity/clustering is done in _build_colabeling_matrix
         
         # Create score-based expression matrix with prefixed types (case-sensitive)
         # Value = max match score if line labels that type, 0 otherwise
@@ -5676,8 +5639,8 @@ class NeuronBridgeFinder:
         visualize_top_n: int = 0,
         generate_individual_profiles: bool = False,
         pdf_images_per_page: Tuple[int, int] = (3, 2),
-        min_score: float = 30000.0,
-        min_type_avg_score: float = 20000.0
+        min_score: float = 10000.0,
+        min_type_avg_score: float = 10000.0
     ) -> Dict[str, Any]:
         """
         Analyze co-labeling patterns among given driver lines.
