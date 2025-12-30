@@ -5716,11 +5716,13 @@ class NeuronBridgeFinder:
         pdf_images_per_page : tuple
             (columns, rows) for PDF layout. Default: (3, 2)
         min_score : float
-            Minimum score threshold for individual neurons. Default: 40000.0
-            Only neurons with score >= min_score are included in analysis.
+            Score threshold for visualization marker only (labeling distribution plots).
+            Does NOT filter data in expression matrix - all neurons are included.
+            Default: 30000.0
         min_type_avg_score : float
-            Minimum average score threshold for types. Default: 30000.0
-            Only types with average score >= min_type_avg_score across lines are included.
+            Minimum average score threshold for types in similarity matrix. Default: 20000.0
+            Types with average score < threshold may be excluded from clustering.
+            Note: Expression matrix includes ALL types regardless of this threshold.
             
         Returns
         -------
@@ -7134,6 +7136,7 @@ class NeuronBridgeFinder:
                                     output_pdf=os.path.join(output_path, 'images_summary.pdf'),
                                     images_per_page=pdf_images_per_page,
                                     landscape=pdf_landscape,
+                                    line_order=download_lines,  # Preserve ranking order
                                     verbose=self.verbose
                                 )
                                 if pdf_path:
@@ -8081,6 +8084,7 @@ def create_image_pdf(
     landscape: bool = True,
     title_font_size: int = 14,
     margin: float = 0.5,
+    line_order: Optional[List[str]] = None,
     verbose: bool = True
 ) -> Optional[str]:
     """
@@ -8107,6 +8111,11 @@ def create_image_pdf(
         Font size for line name title. Default: 14
     margin : float
         Page margin in inches. Default: 0.5
+    line_order : list of str, optional
+        Ordered list of line names for page ordering. Lines are sorted in this order,
+        preserving the ranking used to select top-N lines (e.g., by weighted_score).
+        Lines not in this list are appended at the end alphabetically.
+        If None, lines are sorted alphabetically.
     verbose : bool
         Print progress messages. Default: True
         
@@ -8179,6 +8188,22 @@ def create_image_pdf(
     for line_name in line_images:
         line_images[line_name] = sorted(line_images[line_name])
     
+    # Determine line ordering for PDF pages
+    if line_order:
+        # Use provided order (preserves ranking like weighted_score)
+        # Lines in line_order come first in that order, others appended alphabetically
+        ordered_lines = []
+        remaining_lines = set(line_images.keys())
+        for line in line_order:
+            if line in remaining_lines:
+                ordered_lines.append(line)
+                remaining_lines.remove(line)
+        # Append any remaining lines alphabetically
+        ordered_lines.extend(sorted(remaining_lines))
+    else:
+        # Default: alphabetical order
+        ordered_lines = sorted(line_images.keys())
+    
     # Set output path
     if output_pdf is None:
         output_pdf = images_path / 'images_summary.pdf'
@@ -8213,9 +8238,13 @@ def create_image_pdf(
     total_images = 0
     
     if verbose:
-        print(f"📄 Creating PDF from {len(line_images)} lines...")
+        if line_order:
+            print(f"📄 Creating PDF from {len(line_images)} lines (ordered by ranking)...")
+        else:
+            print(f"📄 Creating PDF from {len(line_images)} lines (alphabetical order)...")
     
-    for line_name, images in sorted(line_images.items()):
+    for line_name in ordered_lines:
+        images = line_images[line_name]
         # Calculate how many pages needed for this line
         images_per_full_page = cols * rows
         num_pages = (len(images) + images_per_full_page - 1) // images_per_full_page

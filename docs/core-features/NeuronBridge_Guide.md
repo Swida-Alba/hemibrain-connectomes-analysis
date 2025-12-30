@@ -312,6 +312,8 @@ results = nbf.analyze_colabeling(
 | `lines` | `str` or `list` | Required | Driver lines to analyze (at least 2 required) |
 | `match_type` | `str` | `'cds'` | Match algorithm for neuron lookup |
 | `top_n_neurons` | `int` | `-1` | Top N neurons to consider per line (-1 = all) |
+| `min_score` | `float` | `0.0` | Visualization threshold only (does NOT filter expression matrix) |
+| `min_type_avg_score` | `float` | `0.0` | Minimum type average score for similarity matrix |
 | `similarity_methods` | `list` | `['jaccard', 'weighted_jaccard']` | Similarity methods for co-labeling |
 | `output_dir` | `str` | `None` | Output directory for results |
 | `generate_report` | `bool` | `True` | Generate HTML analysis report |
@@ -543,7 +545,7 @@ output/findlines_aMe12_20241223_123456/
 ├── gal4_lexa_lines.csv        # GAL4/LexA lines (if separate_splitgal4=True)
 ├── split_gal4_lines.csv       # Split-GAL4 lines (if separate_splitgal4=True)
 ├── top_types_heatmap.png      # Heatmap of top N types by avg_score (v4.3.2+)
-├── images_summary.pdf         # PDF summary of downloaded images
+├── images_summary.pdf         # PDF summary (pages ordered by weighted_score ranking)
 └── images/                    # Downloaded images
     └── {line_name}/
         └── *.png, *.jpg

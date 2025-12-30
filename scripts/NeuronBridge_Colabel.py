@@ -127,16 +127,16 @@ if __name__ == "__main__":
     # SCORE FILTERING - Filter low-confidence neurons and types
     # ==========================================================================
     
-    # Minimum score threshold for individual neurons
-    # Only neurons with score >= min_score are included in analysis
-    # Default: 40000 (filters weak image matches)
-    # Set to 0 to include all neurons
+    # Minimum score threshold for VISUALIZATION only
+    # This does NOT filter data from expression matrix - all neurons are included
+    # Only affects labeling distribution plots (highlighting high-confidence matches)
+    # Default: 30000. Set to 0 to disable visualization threshold
     min_score = 30000
     
-    # Minimum average score threshold for types
-    # Only types with average score >= min_type_avg_score (across lines) are included
-    # Default: 30000 (filters types with only weak matches)
-    # Set to 0 to include all types
+    # Minimum average score threshold for types in SIMILARITY matrix (clustering)
+    # Types with average score < threshold may be excluded from clustering
+    # Note: Expression matrix includes ALL types regardless of this threshold
+    # Default: 30000. Set to 0 to include all types in clustering
     min_type_avg_score = 30000
     
     # ==========================================================================
@@ -155,9 +155,6 @@ if __name__ == "__main__":
     # Anatomical region filter: 'Brain', 'VNC', or 'All'
     region = 'Brain'
     
-    # Maximum LM images to process per line for API calls (10 by default, -1 for all)
-    max_api_images_per_line = -1
-    
     # ==========================================================================
     # EXECUTION - No need to edit below this line
     # ==========================================================================
@@ -169,7 +166,6 @@ if __name__ == "__main__":
         verbose=verbose,
         match_type=match_type,
         region=region,
-        max_api_images_per_line=max_api_images_per_line
     )
     
     # Run co-labeling analysis

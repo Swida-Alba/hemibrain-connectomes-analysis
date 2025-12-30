@@ -28,7 +28,7 @@ Output Files:
     - gal4_lexa_summary.csv: GAL4/LexA lines only, SORTED BY weighted_score
     - split_gal4_summary.csv: Split-GAL4 lines only, SORTED BY weighted_score
     - images/: Downloaded images (if download_images enabled)
-    - images_summary.pdf: PDF summary of downloaded images
+    - images_summary.pdf: PDF summary of downloaded images (pages ordered by weighted_score ranking)
 
 Output Columns in *_summary.csv (sorted by weighted_score descending):
     Core columns:
