@@ -80,11 +80,11 @@ if __name__ == "__main__":
         'VT061931',
         'SS01015',
         'SS55729',
-        # 'IS29143',
-        # 'IS51401',
-        # 'IS55703',
-        # 'IS55729',
-        # 'IS74039',
+        'IS29143',
+        'IS51401',
+        'IS55703',
+        'IS55729',
+        'IS74039',
     ]
     
     # Match algorithm: 'cds' (Color Depth Search), 'pppm', or 'both'
@@ -131,13 +131,13 @@ if __name__ == "__main__":
     # This does NOT filter data from expression matrix - all neurons are included
     # Only affects labeling distribution plots (highlighting high-confidence matches)
     # Default: 30000. Set to 0 to disable visualization threshold
-    min_score = 30000
+    min_score = 10000
     
     # Minimum average score threshold for types in SIMILARITY matrix (clustering)
     # Types with average score < threshold may be excluded from clustering
     # Note: Expression matrix includes ALL types regardless of this threshold
     # Default: 30000. Set to 0 to include all types in clustering
-    min_type_avg_score = 30000
+    min_type_avg_score = 10000
     
     # ==========================================================================
     # ADVANCED OPTIONS

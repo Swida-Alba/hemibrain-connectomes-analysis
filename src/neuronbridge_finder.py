@@ -5639,7 +5639,7 @@ class NeuronBridgeFinder:
         visualize_top_n: int = 0,
         generate_individual_profiles: bool = False,
         pdf_images_per_page: Tuple[int, int] = (3, 2),
-        min_score: float = 10000.0,
+        min_score: float = 20000.0,
         min_type_avg_score: float = 10000.0
     ) -> Dict[str, Any]:
         """

@@ -334,10 +334,12 @@ lines = [
 |-----------|-------------|-------------|
 | `lines` | List of driver lines to analyze | Use top 10-20 from FindLines |
 | `min_score` | Visualization threshold (does NOT filter expression matrix data) | 30000-40000 |
-| `min_type_avg_score` | Minimum type average score | 30000 |
+| `min_type_avg_score` | Type filtering for similarity matrix/clustering ONLY | 30000 |
 | `visualize_top_n` | 3D visualization of top N types | 10-20 |
 
-> **Note**: `min_score` only affects visualization (labeling distribution plots). The expression matrix includes ALL neurons regardless of score to preserve data integrity.
+> **Note**: Both `min_score` and `min_type_avg_score` do NOT filter the expression matrix. The expression matrix includes ALL neurons and types regardless of scores. These thresholds only affect:
+> - `min_score`: Labeling distribution plot highlighting
+> - `min_type_avg_score`: Similarity matrix calculations (for clustering)
 
 ---
 

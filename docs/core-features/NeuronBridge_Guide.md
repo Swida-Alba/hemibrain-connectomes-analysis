@@ -313,7 +313,7 @@ results = nbf.analyze_colabeling(
 | `match_type` | `str` | `'cds'` | Match algorithm for neuron lookup |
 | `top_n_neurons` | `int` | `-1` | Top N neurons to consider per line (-1 = all) |
 | `min_score` | `float` | `0.0` | Visualization threshold only (does NOT filter expression matrix) |
-| `min_type_avg_score` | `float` | `0.0` | Minimum type average score for similarity matrix |
+| `min_type_avg_score` | `float` | `0.0` | Type filtering for similarity matrix/clustering ONLY (does NOT filter expression matrix) |
 | `similarity_methods` | `list` | `['jaccard', 'weighted_jaccard']` | Similarity methods for co-labeling |
 | `output_dir` | `str` | `None` | Output directory for results |
 | `generate_report` | `bool` | `True` | Generate HTML analysis report |
