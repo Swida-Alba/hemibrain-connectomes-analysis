@@ -307,7 +307,7 @@ When neuron names differ across datasets (e.g., `aMe12` in hemibrain vs `aMe12_R
 
 Create a CSV file `mappings.csv`:
 ```csv
-std_label,hemibrain:v1.2.1,male-cns:v0.9,flywire_FAFB_v783
+custom_label,hemibrain:v1.2.1,male-cns:v0.9,flywire_FAFB_v783
 aMe12,aMe12,aMe12,720575940610453042
 PPL101,PPL101,PPL101,720575940621886666
 ```
@@ -317,8 +317,9 @@ Then use it in your script:
 ```python
 from comparison import ComparisonParameters, ComparisonAnalyzer, LabelMapper
 
-# Initialize LabelMapper with the mapping file
-mapper = LabelMapper(mapping_file='mappings.csv')
+# Initialize LabelMapper with a unified JSON mapping file
+# Note: ONLY JSON format is supported for overall_mapping_json
+mapper = LabelMapper(overall_mapping_json='mappings.json')
 
 params = ComparisonParameters(
     datasets=['hemibrain:v1.2.1', 'male-cns:v0.9', 'flywire_FAFB_v783'],
@@ -400,7 +401,7 @@ params = ComparisonParameters(
 Alternatively, you can pass the mapper to `overall_label_mapper` and use simple lists for source/target neurons (referencing standardized labels).
 
 ```python
-mapper = LabelMapper(mapping_file='mappings.csv')
+mapper = LabelMapper(overall_mapping_json='mappings.json')
 
 params = ComparisonParameters(
     datasets=['hemibrain:v1.2.1', 'male-cns:v0.9'],

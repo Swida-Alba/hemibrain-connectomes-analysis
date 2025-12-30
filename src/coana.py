@@ -269,7 +269,10 @@ class FindNeuronConnection:
                 print(f"Warning: Could not create nt_type matrix: {e}")
 
     def _save_df_to_csv_polars(self, df, path, index=False):
-        """Save DataFrame to CSV using Polars for speed"""
+        """Save DataFrame to CSV using Polars for speed.
+        
+        Uses UTF-8 encoding for cross-platform compatibility (Windows/macOS/Linux).
+        """
         import polars as pl
         if df is None:
             return
@@ -278,7 +281,7 @@ class FindNeuronConnection:
         
         if is_polars:
             if df.is_empty():
-                with open(path, 'w') as f:
+                with open(path, 'w', encoding='utf-8') as f:
                     f.write(','.join(df.columns) + '\n')
                 return
             
@@ -290,7 +293,7 @@ class FindNeuronConnection:
         else:
             if df.empty:
                 # Create empty file if dataframe is empty, to match pandas behavior
-                with open(path, 'w') as f:
+                with open(path, 'w', encoding='utf-8') as f:
                     if df is not None:
                         f.write(','.join(df.columns) + '\n')
                 return
@@ -308,9 +311,38 @@ class FindNeuronConnection:
             except Exception as e:
                 # Fallback to Pandas if Polars fails (e.g. object types)
                 try:
-                    df.to_csv(path, index=index)
+                    df.to_csv(path, index=index, encoding='utf-8')
                 except Exception as e2:
                     print(f"  Error saving CSV (Polars: {e}, Pandas: {e2})", flush=True)
+
+    def _read_csv(self, filepath: str, **kwargs) -> 'pd.DataFrame':
+        """Read CSV with polars (faster) and convert to pandas.
+        
+        Uses polars for faster reads when available, falls back to pandas.
+        Ensures cross-platform compatibility with UTF-8 encoding.
+        
+        Args:
+            filepath: Path to CSV file
+            **kwargs: Additional arguments passed to pandas read_csv
+            
+        Returns:
+            pandas DataFrame
+        """
+        import pandas as pd
+        try:
+            import polars as pl
+            # Check for pandas-specific args that polars doesn't support
+            pandas_only_args = {'index_col', 'low_memory', 'dtype'}
+            if any(k in kwargs for k in pandas_only_args):
+                # Use pandas directly for complex reads
+                return pd.read_csv(filepath, encoding='utf-8', **kwargs)
+            # Use polars for simple reads
+            return pl.read_csv(filepath, infer_schema_length=10000).to_pandas()
+        except ImportError:
+            return pd.read_csv(filepath, encoding='utf-8', **kwargs)
+        except Exception:
+            # Fallback for polars issues
+            return pd.read_csv(filepath, encoding='utf-8', **kwargs)
 
     def _save_matrices_to_csv(self, df, folder, level='bodyId'):
         """Generate and save connection matrices to CSV using Polars for speed"""
@@ -1325,7 +1357,7 @@ class FindNeuronConnection:
             if os.path.exists(csv_path):
                 try:
                     self._vprint(f'  ⏳ Reading {csv_path}...', level='full')
-                    df = pd.read_csv(csv_path, dtype={'bodyId': str})
+                    df = self._read_csv(csv_path, dtype={'bodyId': str})
                     
                     if 'instance' not in df.columns:
                         df['instance'] = df['name'] if 'name' in df.columns else ''
@@ -1570,9 +1602,9 @@ class FindNeuronConnection:
                 is_fafb = 'fafb' in self.dataset.lower() or 'flywire' in self.dataset.lower()
                 
                 if is_fafb:
-                    ndf_complete = pd.read_csv(dataset_path, header=0, index_col=None, dtype={'bodyId': str}, low_memory=False)
+                    ndf_complete = self._read_csv(dataset_path, header=0, index_col=None, dtype={'bodyId': str}, low_memory=False)
                 else:
-                    ndf_complete = pd.read_csv(dataset_path, header=0, index_col=0, low_memory=False)
+                    ndf_complete = self._read_csv(dataset_path, header=0, index_col=0, low_memory=False)
                 
                 # Ensure bodyId is string
                 if 'bodyId' in ndf_complete.columns:
@@ -1788,9 +1820,9 @@ class FindNeuronConnection:
             is_fafb = 'fafb' in self.dataset.lower() or 'flywire' in self.dataset.lower()
             
             if is_fafb:
-                ndf_complete = pd.read_csv(dataset_path, header=0, index_col=None, dtype={'bodyId': str}, low_memory=False)
+                ndf_complete = self._read_csv(dataset_path, header=0, index_col=None, dtype={'bodyId': str}, low_memory=False)
             else:
-                ndf_complete = pd.read_csv(dataset_path, header=0, index_col=0, low_memory=False)
+                ndf_complete = self._read_csv(dataset_path, header=0, index_col=0, low_memory=False)
 
             # Ensure bodyId is string in local dataset
             if 'bodyId' in ndf_complete.columns:
@@ -1904,9 +1936,9 @@ class FindNeuronConnection:
         elif os.path.exists(dataset_path):
             is_fafb = 'fafb' in self.dataset.lower() or 'flywire' in self.dataset.lower()
             if is_fafb:
-                ndf_complete = pd.read_csv(dataset_path, header=0, index_col=None, dtype={'bodyId': str}, low_memory=False)
+                ndf_complete = self._read_csv(dataset_path, header=0, index_col=None, dtype={'bodyId': str}, low_memory=False)
             else:
-                ndf_complete = pd.read_csv(dataset_path, header=0, index_col=0, low_memory=False)
+                ndf_complete = self._read_csv(dataset_path, header=0, index_col=0, low_memory=False)
             if 'bodyId' in ndf_complete.columns:
                 ndf_complete['bodyId'] = ndf_complete['bodyId'].astype(str)
         else:
@@ -2018,9 +2050,9 @@ class FindNeuronConnection:
             is_fafb = 'fafb' in self.dataset.lower() or 'flywire' in self.dataset.lower()
             
             if is_fafb:
-                ndf_complete = pd.read_csv(dataset_path, header=0, index_col=None, dtype={'bodyId': str}, low_memory=False)
+                ndf_complete = self._read_csv(dataset_path, header=0, index_col=None, dtype={'bodyId': str}, low_memory=False)
             else:
-                ndf_complete = pd.read_csv(dataset_path, header=0, index_col=0, low_memory=False)
+                ndf_complete = self._read_csv(dataset_path, header=0, index_col=0, low_memory=False)
             
             # Ensure bodyId is string for all datasets (not just FAFB)
             # This is critical for matching with cached connections which use string bodyIds
@@ -2209,9 +2241,9 @@ class FindNeuronConnection:
             is_fafb = 'fafb' in self.dataset.lower() or 'flywire' in self.dataset.lower()
             
             if is_fafb:
-                ndf_complete = pd.read_csv(dataset_path, header=0, index_col=None, dtype={'bodyId': str}, low_memory=False)
+                ndf_complete = self._read_csv(dataset_path, header=0, index_col=None, dtype={'bodyId': str}, low_memory=False)
             else:
-                ndf_complete = pd.read_csv(dataset_path, header=0, index_col=0, low_memory=False)
+                ndf_complete = self._read_csv(dataset_path, header=0, index_col=0, low_memory=False)
             
             # Ensure bodyId is string for FAFB
             if is_fafb:
@@ -2301,9 +2333,9 @@ class FindNeuronConnection:
             is_fafb = 'fafb' in self.dataset.lower() or 'flywire' in self.dataset.lower()
             
             if is_fafb:
-                ndf_complete = pd.read_csv(dataset_path, header=0, index_col=None, dtype={'bodyId': str}, low_memory=False)
+                ndf_complete = self._read_csv(dataset_path, header=0, index_col=None, dtype={'bodyId': str}, low_memory=False)
             else:
-                ndf_complete = pd.read_csv(dataset_path, header=0, index_col=0, low_memory=False)
+                ndf_complete = self._read_csv(dataset_path, header=0, index_col=0, low_memory=False)
             
             # Ensure bodyId is string for FAFB
             if is_fafb:
@@ -2441,7 +2473,7 @@ class FindNeuronConnection:
                         # Load connections
                         # Optimization: Load once if possible, but here we load on demand
                         # Use string for IDs
-                        full_conn = pd.read_csv(conn_file, dtype={'pre_root_id': str, 'post_root_id': str})
+                        full_conn = self._read_csv(conn_file, dtype={'pre_root_id': str, 'post_root_id': str})
                         full_conn = full_conn.rename(columns={
                             'pre_root_id': 'bodyId_pre',
                             'post_root_id': 'bodyId_post',
@@ -3114,7 +3146,7 @@ class FindNeuronConnection:
                         if os.path.exists(parquet_path):
                             ndf = pd.read_parquet(parquet_path)
                         elif os.path.exists(csv_path):
-                            ndf = pd.read_csv(csv_path, index_col=0, low_memory=False)
+                            ndf = self._read_csv(csv_path, index_col=0, low_memory=False)
                         
                         if ndf is not None and 'type' in ndf.columns:
                             type_neurons = ndf[ndf['type'] == ntype]
@@ -3328,7 +3360,7 @@ class FindNeuronConnection:
                     
                     # Load and filter - use cached full_conn if available
                     if not hasattr(self, '_bulk_conn_cache') or self._bulk_conn_cache is None:
-                        self._bulk_conn_cache = pd.read_csv(
+                        self._bulk_conn_cache = self._read_csv(
                             conn_file, 
                             dtype={'pre_root_id': str, 'post_root_id': str}
                         )
@@ -3493,9 +3525,9 @@ class FindNeuronConnection:
             try:
                 is_fafb = 'fafb' in self.dataset.lower() or 'flywire' in self.dataset.lower()
                 if is_fafb:
-                    ndf = pd.read_csv(csv_path, dtype={'bodyId': str}, low_memory=False)
+                    ndf = self._read_csv(csv_path, dtype={'bodyId': str}, low_memory=False)
                 else:
-                    ndf = pd.read_csv(csv_path, index_col=0, low_memory=False)
+                    ndf = self._read_csv(csv_path, index_col=0, low_memory=False)
             except Exception:
                 pass
         
@@ -4114,21 +4146,21 @@ class FindNeuronConnection:
         
         # Save source neurons
         source_path = os.path.join(output_dir, f'{filename_prefix}_source_neurons.csv')
-        self.source_df.to_csv(source_path, index=False)
+        self._save_df_to_csv_polars(self.source_df, source_path)
         
         # Save target neurons
         target_path = os.path.join(output_dir, f'{filename_prefix}_target_neurons.csv')
         if hasattr(self, '_source_target_identical') and self._source_target_identical:
             # When source==target, just copy the reference
-            self.target_df.to_csv(target_path, index=False)
+            self._save_df_to_csv_polars(self.target_df, target_path)
             print(f'Target neurons: same as source (saved separately)')
         else:
-            self.target_df.to_csv(target_path, index=False)
+            self._save_df_to_csv_polars(self.target_df, target_path)
         
         # Save parameters
         params_path = os.path.join(output_dir, f'{filename_prefix}_parameters.csv')
         if hasattr(self, 'parameter_df'):
-            self.parameter_df.to_csv(params_path, index=False)
+            self._save_df_to_csv_polars(self.parameter_df, params_path)
         
         print(f'\n=== SaveNeuronInfo ===')
         print(f'Output directory: {output_dir}')
@@ -5049,7 +5081,7 @@ class FindNeuronConnection:
                 # Save as CSV if connection data was saved as CSV
                 # Save in parent folder with unified naming
                 output_path_csv = os.path.join(self.path_folder, self.source_fname+'_to_'+self.target_fname+'_path_bodyId.csv')
-                path_df_bodyId.to_csv(output_path_csv, index=False)
+                self._save_df_to_csv_polars(path_df_bodyId, output_path_csv)
                 print(f'   ✓ Saved to: {output_path_csv}')
             else:
                 # Add to the bodyId Excel file if it was created
@@ -5061,7 +5093,7 @@ class FindNeuronConnection:
                     print(f'   ⚠️  path_bodyId too large ({len(path_df_bodyId):,} rows), saving as separate CSV')
                     # Save in parent folder with unified naming
                     output_path_csv = os.path.join(self.path_folder, self.source_fname+'_to_'+self.target_fname+'_path_bodyId.csv')
-                    path_df_bodyId.to_csv(output_path_csv, index=False)
+                    self._save_df_to_csv_polars(path_df_bodyId, output_path_csv)
                     print(f'   ✓ Saved to: {output_path_csv}')
         
         # save interlayer info to excel
@@ -5100,9 +5132,9 @@ class FindNeuronConnection:
         if use_local_dataset:
             self._vprint(f'   Using local dataset: {os.path.basename(dataset_path)}', level='full')
             if 'flywire' in self.dataset.lower() or 'fafb' in self.dataset.lower():
-                ndf_complete = pd.read_csv(dataset_path, header=0, index_col=None, dtype={'bodyId': str}, low_memory=False)
+                ndf_complete = self._read_csv(dataset_path, header=0, index_col=None, dtype={'bodyId': str}, low_memory=False)
             else:
-                ndf_complete = pd.read_csv(dataset_path, header=0, index_col=0, low_memory=False)
+                ndf_complete = self._read_csv(dataset_path, header=0, index_col=0, low_memory=False)
         else:
             if 'flywire' in self.dataset.lower() or 'fafb' in self.dataset.lower():
                 self._vprint(f'   ⚠️  Local dataset not found for FlyWire/FAFB. Skipping interlayer info fetch (NeuPrint API not supported for this dataset).', level='full')
@@ -5159,7 +5191,7 @@ class FindNeuronConnection:
             # Save each layer as CSV in bodyId subfolder
             for i in range(len(interlayers)):
                 layer_csv = os.path.join(bodyid_folder, f'layer_{i+1}.csv')
-                interlayers[i].to_csv(layer_csv, index=False)
+                self._save_df_to_csv_polars(interlayers[i], layer_csv)
         else:
             # Save to bodyId Excel file
             with pd.ExcelWriter(output_bodyid_excel, mode='a', engine='openpyxl') as writer:
@@ -6571,7 +6603,7 @@ class FindNeuronConnection:
             try:
                 nrows = self.pathN_to_show if self.pathN_to_show > 0 else None
                 self._vprint(f'  Reloading top {nrows if nrows else "all"} paths for visualization...', level='full')
-                path_df_type = pd.read_csv(output_path_type_csv, nrows=nrows)
+                path_df_type = self._read_csv(output_path_type_csv, nrows=nrows)
                 
                 # Convert stringified lists back to lists if needed (though visualization might handle strings)
                 # But VisualizePath expects lists for 'weights', 'probabilities', 'ratios'
@@ -6918,9 +6950,9 @@ class FindNeuronConnection:
             if use_local_dataset:
                 self._vprint(f'   Using local dataset: {os.path.basename(dataset_path)}', level='full')
                 if 'flywire' in self.dataset.lower() or 'fafb' in self.dataset.lower():
-                    ndf_complete = pd.read_csv(dataset_path, header=0, index_col=None, dtype={'bodyId': str}, low_memory=False)
+                    ndf_complete = self._read_csv(dataset_path, header=0, index_col=None, dtype={'bodyId': str}, low_memory=False)
                 else:
-                    ndf_complete = pd.read_csv(dataset_path, header=0, index_col=0, low_memory=False)
+                    ndf_complete = self._read_csv(dataset_path, header=0, index_col=0, low_memory=False)
             else:
                 if 'flywire' in self.dataset.lower() or 'fafb' in self.dataset.lower():
                     self._vprint(f'   ⚠️  Local dataset not found for FlyWire/FAFB. Skipping interlayer info fetch.', level='full')
@@ -6972,7 +7004,7 @@ class FindNeuronConnection:
                 # Save each layer as CSV in bodyId subfolder
                 for i in range(len(interlayers)):
                     layer_csv = os.path.join(bodyid_folder, f'layer_{i+1}.csv')
-                    interlayers[i].to_csv(layer_csv, index=False)
+                    self._save_df_to_csv_polars(interlayers[i], layer_csv)
             else:
                 # Save to bodyId Excel file
                 with pd.ExcelWriter(output_bodyid_excel, mode='a', engine='openpyxl') as writer:

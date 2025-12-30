@@ -214,6 +214,55 @@ class ComparisonAnalyzer:
         else:
             tqdm.write(f"[Comparison] {description}: {filepath}")
     
+    def _save_csv(self, df: pd.DataFrame, filepath: str, index: bool = False):
+        """Save DataFrame to CSV with UTF-8 encoding for cross-platform compatibility.
+        
+        Uses polars for faster writes when available, falls back to pandas.
+        Ensures Windows/macOS/Linux compatibility with explicit UTF-8 encoding.
+        
+        Args:
+            df: DataFrame to save
+            filepath: Output file path
+            index: Whether to include row index (default: False)
+        """
+        if df is None or (hasattr(df, 'empty') and df.empty):
+            return
+        
+        try:
+            import polars as pl
+            # Convert pandas to polars and write - faster for large files
+            pl_df = pl.from_pandas(df)
+            pl_df.write_csv(filepath)
+        except ImportError:
+            # Fallback to pandas with explicit UTF-8 encoding
+            df.to_csv(filepath, index=index, encoding='utf-8')
+        except Exception:
+            # Fallback for any polars conversion issues
+            df.to_csv(filepath, index=index, encoding='utf-8')
+    
+    def _read_csv(self, filepath: str, **kwargs) -> pd.DataFrame:
+        """Read CSV with polars (faster) and convert to pandas.
+        
+        Uses polars for faster reads when available, falls back to pandas.
+        Ensures cross-platform compatibility.
+        
+        Args:
+            filepath: Path to CSV file
+            **kwargs: Additional arguments passed to pandas read_csv
+            
+        Returns:
+            pandas DataFrame
+        """
+        try:
+            import polars as pl
+            # Use polars for faster reading, then convert to pandas
+            return pl.read_csv(filepath, infer_schema_length=10000).to_pandas()
+        except ImportError:
+            return pd.read_csv(filepath, encoding='utf-8', **kwargs)
+        except Exception:
+            # Fallback for polars issues (schema inference, etc.)
+            return pd.read_csv(filepath, encoding='utf-8', **kwargs)
+
     def _generate_mode_specific_note(self) -> str:
         """Generate HTML note specific to the comparison mode used."""
         mode = getattr(self.parameters, 'comparison_mode', 'path')
@@ -591,7 +640,7 @@ class ComparisonAnalyzer:
                         if conn_file.endswith('.parquet'):
                             conn_df = pd.read_parquet(conn_file)
                         else:
-                            conn_df = pd.read_csv(conn_file)
+                            conn_df = self._read_csv(conn_file)
                         pbar.update(1)
                     self._log(f"Loaded connections from {conn_file}")
                     break
@@ -634,7 +683,7 @@ class ComparisonAnalyzer:
                         if neuron_file.endswith('.parquet'):
                             neuron_df = pd.read_parquet(neuron_file)
                         else:
-                            neuron_df = pd.read_csv(neuron_file)
+                            neuron_df = self._read_csv(neuron_file)
                         self._log(f"Loaded neuron info from {neuron_file}")
                         break
                     except Exception as e:
@@ -915,7 +964,7 @@ class ComparisonAnalyzer:
             
             if skip_existing and os.path.exists(bodyid_file):
                 try:
-                    df = pd.read_csv(bodyid_file)
+                    df = self._read_csv(bodyid_file)
                     if not df.empty:
                         # Build label map from the data
                         label_map = self._build_label_map_from_df(df)
@@ -942,7 +991,7 @@ class ComparisonAnalyzer:
                 
                 if os.path.exists(bodyid_file):
                     try:
-                        df = pd.read_csv(bodyid_file)
+                        df = self._read_csv(bodyid_file)
                         if not df.empty:
                             label_map = self._build_label_map_from_df(df)
                             return df, label_map
@@ -1223,7 +1272,7 @@ class ComparisonAnalyzer:
                 pass
         if neuron_df is None and os.path.exists(neuron_file):
             try:
-                neuron_df = pd.read_csv(neuron_file)
+                neuron_df = self._read_csv(neuron_file)
             except:
                 pass
         
@@ -1259,7 +1308,7 @@ class ComparisonAnalyzer:
         
         if os.path.exists(roi_file):
             try:
-                roi_df = pd.read_csv(roi_file)
+                roi_df = self._read_csv(roi_file)
                 # Get ROI columns (usually all except bodyId)
                 roi_cols = [c for c in roi_df.columns if c not in ['bodyId', 'Unnamed: 0']]
                 rois = roi_cols
@@ -1410,7 +1459,7 @@ class ComparisonAnalyzer:
         filepath = os.path.join(output_dir, "connections_edge.csv")
         if os.path.exists(filepath) and os.path.getsize(filepath) > 0:
             try:
-                df = pd.read_csv(filepath)
+                df = self._read_csv(filepath)
                 if not df.empty:
                     self._log(f"Loading cached: {dataset_name} @ {threshold}", 'debug')
                     return df
@@ -1421,7 +1470,7 @@ class ComparisonAnalyzer:
         filepath = os.path.join(output_dir, "paths.csv")
         if os.path.exists(filepath) and os.path.getsize(filepath) > 0:
             try:
-                df = pd.read_csv(filepath)
+                df = self._read_csv(filepath)
                 if not df.empty:
                     self._log(f"Loading cached: {dataset_name} @ {threshold}", 'debug')
                     return df
@@ -1432,7 +1481,7 @@ class ComparisonAnalyzer:
         conn_file = os.path.join(output_dir, 'data_details', 'connection_info_bodyId.csv')
         if os.path.exists(conn_file) and os.path.getsize(conn_file) > 0:
             try:
-                df = pd.read_csv(conn_file)
+                df = self._read_csv(conn_file)
                 if not df.empty:
                     self._log(f"Loading cached: {dataset_name} @ {threshold}", 'debug')
                     # Add dataset info if missing
@@ -1447,7 +1496,7 @@ class ComparisonAnalyzer:
         conn_type_file = os.path.join(output_dir, 'data_details', 'connection_type.csv')
         if os.path.exists(conn_type_file) and os.path.getsize(conn_type_file) > 0:
             try:
-                df = pd.read_csv(conn_type_file)
+                df = self._read_csv(conn_type_file)
                 if not df.empty:
                     self._log(f"Loading cached: {dataset_name} @ {threshold}", 'debug')
                     # Add dataset info if missing
@@ -1475,7 +1524,7 @@ class ComparisonAnalyzer:
         
         # Save to connections_edge.csv (edge mode cached version)
         filepath = os.path.join(dirpath, "connections_edge.csv")
-        df.to_csv(filepath, index=False)
+        self._save_csv(df, filepath)
         self._log_file(filepath)
     
     def _save_edge_mode_result(self, dataset_name: str, threshold: int, df: pd.DataFrame):
@@ -1499,7 +1548,7 @@ class ComparisonAnalyzer:
         
         # Save aggregated connections_edge_{threshold}.csv
         filepath = os.path.join(edge_mode_dir, f"connections_edge_{threshold}.csv")
-        df.to_csv(filepath, index=False)
+        self._save_csv(df, filepath)
         self._log_file(filepath)
     
     # =========================================================================
@@ -2062,10 +2111,7 @@ class ComparisonAnalyzer:
         
         if path_counts:
             path_count_df = pd.DataFrame(path_counts)
-            path_count_df.to_csv(
-                os.path.join(comparison_results_dir, "path_count_comparison.csv"),
-                index=False
-            )
+            self._save_csv(path_count_df, os.path.join(comparison_results_dir, "path_count_comparison.csv"))
             self._log("Saved: path_count_comparison.csv")
         
         # 2. Common and unique connections at each threshold
@@ -2111,70 +2157,82 @@ class ComparisonAnalyzer:
             # Reorder columns: dataset, threshold first
             cols = ['dataset', 'threshold'] + [c for c in motif_df.columns if c not in ['dataset', 'threshold']]
             motif_df = motif_df[cols]
-            motif_df.to_csv(
-                os.path.join(comparison_results_dir, "motif_analysis.csv"),
-                index=False
-            )
+            self._save_csv(motif_df, os.path.join(comparison_results_dir, "motif_analysis.csv"))
             self._log(f"Saved: motif_analysis.csv (unified, {len(motif_df)} rows)")
         
         # 3. Edge weight comparison matrix - includes all datasets, thresholds, with presence/difference cols
-        edge_weights = []
+        # Use vectorized operations for performance
+        all_threshold_dfs = []
+        
         for threshold in self.parameters.thresholds:
             aligned = self.get_aligned_data(threshold)
             if aligned.empty:
                 continue
             
             available = [d for d in dataset_names if d in aligned.columns]
+            safe_names = {d: self.parameters._sanitize_name(d) for d in available}
             
-            for edge_key, row in aligned.iterrows():
-                # Parse source/target from edge key
-                if ' -> ' in str(edge_key):
-                    parts = str(edge_key).split(' -> ')
-                    source = parts[0]
-                    target = parts[1] if len(parts) > 1 else ''
+            # Build threshold dataframe using vectorized operations
+            # Ensure index is a flat string index (not MultiIndex)
+            if isinstance(aligned.index, pd.MultiIndex):
+                edge_keys = pd.Series([f"{idx[0]} -> {idx[1]}" for idx in aligned.index], index=aligned.index)
+            else:
+                edge_keys = aligned.index.astype(str)
+            
+            # Parse edge keys vectorized with defensive handling
+            try:
+                split_keys = edge_keys.str.split(' -> ', n=1, expand=True)
+                if isinstance(split_keys, pd.DataFrame):
+                    source_col = split_keys[0].fillna(edge_keys)
+                    target_col = split_keys[1].fillna('') if 1 in split_keys.columns else pd.Series('', index=aligned.index)
                 else:
-                    source = str(edge_key)
-                    target = ''
-                
-                edge_data = {
-                    'edge_key': edge_key,
-                    'source': source,
-                    'target': target,
-                    'threshold': threshold
-                }
-                
-                # Add weight per dataset
-                weights = []
-                for dataset in available:
-                    safe_name = self.parameters._sanitize_name(dataset)
-                    weight = row[dataset]
-                    edge_data[f'weight_{safe_name}'] = weight
-                    if weight > 0:
-                        weights.append(weight)
-                
-                # Add computed columns
-                edge_data['presence_count'] = sum(1 for d in available if row[d] > 0)
-                edge_data['total_datasets'] = len(available)
-                
-                if len(weights) > 0:
-                    edge_data['max_weight'] = max(weights)
-                    edge_data['avg_weight'] = round(np.mean(weights), 2)
-                    if len(weights) > 1:
-                        edge_data['weight_diff'] = max(weights) - min(weights)
-                        edge_data['weight_ratio'] = round(max(weights) / min(weights), 2) if min(weights) > 0 else ''
-                    else:
-                        edge_data['weight_diff'] = 0
-                        edge_data['weight_ratio'] = 1.0
-                else:
-                    edge_data['max_weight'] = 0
-                    edge_data['avg_weight'] = 0
-                    edge_data['weight_diff'] = 0
-                    edge_data['weight_ratio'] = ''
-                
-                edge_weights.append(edge_data)
+                    source_col = edge_keys
+                    target_col = pd.Series('', index=aligned.index)
+            except Exception:
+                source_col = edge_keys
+                target_col = pd.Series('', index=aligned.index)
+            
+            threshold_df = pd.DataFrame({
+                'edge_key': edge_keys,
+                'source': source_col.values,
+                'target': target_col.values,
+                'threshold': threshold,
+            }, index=aligned.index)
+            
+            # Add weight columns for each dataset
+            for dataset in available:
+                safe_name = safe_names[dataset]
+                threshold_df[f'weight_{safe_name}'] = aligned[dataset]
+            
+            # Calculate presence count vectorized
+            threshold_df['presence_count'] = (aligned[available] > 0).sum(axis=1)
+            threshold_df['total_datasets'] = len(available)
+            
+            # Calculate statistics vectorized
+            weight_values = aligned[available].copy()
+            weight_values = weight_values.replace(0, np.nan)  # Exclude zeros from stats
+            
+            threshold_df['max_weight'] = weight_values.max(axis=1).fillna(0)
+            threshold_df['avg_weight'] = weight_values.mean(axis=1).round(2).fillna(0)
+            
+            # Weight diff and ratio (only meaningful when >1 dataset has the edge)
+            has_multiple = weight_values.notna().sum(axis=1) > 1
+            max_vals = weight_values.max(axis=1)
+            min_vals = weight_values.min(axis=1)
+            
+            threshold_df['weight_diff'] = (max_vals - min_vals).where(has_multiple, 0).fillna(0)
+            
+            # Weight ratio - avoid division by zero
+            ratio = (max_vals / min_vals).round(2)
+            threshold_df['weight_ratio'] = ratio.where(has_multiple & (min_vals > 0), '')
+            # Handle cases where min is 0 but has_multiple is True
+            threshold_df.loc[has_multiple & (min_vals == 0), 'weight_ratio'] = ''
+            threshold_df.loc[~has_multiple, 'weight_ratio'] = 1.0
+            
+            all_threshold_dfs.append(threshold_df.reset_index(drop=True))
         
-        if edge_weights:
-            edge_weight_df = pd.DataFrame(edge_weights)
+        if all_threshold_dfs:
+            edge_weight_df = pd.concat(all_threshold_dfs, ignore_index=True)
             # Order columns logically
             col_order = ['edge_key', 'source', 'target', 'threshold', 'presence_count', 'total_datasets']
             # Add weight columns
@@ -2187,10 +2245,7 @@ class ComparisonAnalyzer:
             col_order = [c for c in col_order if c in edge_weight_df.columns]
             edge_weight_df = edge_weight_df[col_order]
             
-            edge_weight_df.to_csv(
-                os.path.join(comparison_results_dir, "edge_weight_comparison.csv"),
-                index=False
-            )
+            self._save_csv(edge_weight_df, os.path.join(comparison_results_dir, "edge_weight_comparison.csv"))
             self._log(f"Saved: edge_weight_comparison.csv ({len(edge_weight_df)} edges)")
         
         # 4. Top edges comparison
@@ -2271,10 +2326,7 @@ class ComparisonAnalyzer:
         
         if sensitivity_data:
             sensitivity_df = pd.DataFrame(sensitivity_data)
-            sensitivity_df.to_csv(
-                os.path.join(comparison_results_dir, "threshold_sensitivity.csv"),
-                index=False
-            )
+            self._save_csv(sensitivity_df, os.path.join(comparison_results_dir, "threshold_sensitivity.csv"))
             self._log("Saved: threshold_sensitivity.csv")
     
     def _export_top_edges_comparison(self, comparison_results_dir: str):
@@ -2292,19 +2344,13 @@ class ComparisonAnalyzer:
         # Get top edges per dataset
         top_edges = self.metrics.get_top_edges_per_dataset(aligned, dataset_names, top_n)
         if not top_edges.empty:
-            top_edges.to_csv(
-                os.path.join(comparison_results_dir, "top_edges_comparison.csv"),
-                index=False
-            )
+            self._save_csv(top_edges, os.path.join(comparison_results_dir, "top_edges_comparison.csv"))
             self._log("Saved: top_edges_comparison.csv")
         
         # Get overlap statistics
         overlap = self.metrics.compare_top_edges_overlap(aligned, dataset_names, top_n)
         if not overlap.empty:
-            overlap.to_csv(
-                os.path.join(comparison_results_dir, "top_edges_overlap.csv"),
-                index=False
-            )
+            self._save_csv(overlap, os.path.join(comparison_results_dir, "top_edges_overlap.csv"))
             self._log("Saved: top_edges_overlap.csv")
     
     def _export_degree_distribution(self, comparison_results_dir: str):
@@ -2344,10 +2390,7 @@ class ComparisonAnalyzer:
             # Reorder columns: threshold first
             cols = ['threshold'] + [c for c in unified_out.columns if c != 'threshold']
             unified_out = unified_out[cols]
-            unified_out.to_csv(
-                os.path.join(comparison_results_dir, "degree_out.csv"),
-                index=False
-            )
+            self._save_csv(unified_out, os.path.join(comparison_results_dir, "degree_out.csv"))
             self._log("Saved: degree_out.csv (unified across thresholds)")
         
         # Save unified in-degree data (renamed from in_degree_distribution.csv)
@@ -2356,10 +2399,7 @@ class ComparisonAnalyzer:
             # Reorder columns: threshold first
             cols = ['threshold'] + [c for c in unified_in.columns if c != 'threshold']
             unified_in = unified_in[cols]
-            unified_in.to_csv(
-                os.path.join(comparison_results_dir, "degree_in.csv"),
-                index=False
-            )
+            self._save_csv(unified_in, os.path.join(comparison_results_dir, "degree_in.csv"))
             self._log("Saved: degree_in.csv (unified across thresholds)")
         
         # Save degree statistics summary for ALL thresholds
@@ -2383,10 +2423,7 @@ class ComparisonAnalyzer:
             # Reorder columns: threshold first
             cols = ['threshold'] + [c for c in unified_stats.columns if c != 'threshold']
             unified_stats = unified_stats[cols]
-            unified_stats.to_csv(
-                os.path.join(comparison_results_dir, "degree_statistics.csv"),
-                index=False
-            )
+            self._save_csv(unified_stats, os.path.join(comparison_results_dir, "degree_statistics.csv"))
             self._log("Saved: degree_statistics.csv (all thresholds)")
     
     def _export_metadata_comparison(self, comparison_results_dir: str):
@@ -2399,18 +2436,12 @@ class ComparisonAnalyzer:
             metadata_df = self.generate_metadata_comparison_table()
             if not metadata_df.empty:
                 # Save to comparison_results folder
-                metadata_df.to_csv(
-                    os.path.join(comparison_results_dir, "dataset_metadata_comparison.csv"),
-                    index=False
-                )
+                self._save_csv(metadata_df, os.path.join(comparison_results_dir, "dataset_metadata_comparison.csv"))
                 self._log("Saved: dataset_metadata_comparison.csv")
                 
                 # Also save to the main output folder
                 out_dir = os.path.dirname(comparison_results_dir)
-                metadata_df.to_csv(
-                    os.path.join(out_dir, "dataset_metadata_comparison.csv"),
-                    index=False
-                )
+                self._save_csv(metadata_df, os.path.join(out_dir, "dataset_metadata_comparison.csv"))
         except Exception as e:
             self._log(f"Warning: Failed to export metadata comparison: {e}")
     
@@ -2467,10 +2498,7 @@ class ComparisonAnalyzer:
         
         if unified_edges:
             unified_df = pd.DataFrame(unified_edges)
-            unified_df.to_csv(
-                os.path.join(comparison_results_dir, "unified_edge_comparison.csv"),
-                index=False
-            )
+            self._save_csv(unified_df, os.path.join(comparison_results_dir, "unified_edge_comparison.csv"))
             self._log(f"Saved: unified_edge_comparison.csv ({len(unified_df)} entries)")
         
         # 2. Unified summary per dataset per threshold
@@ -2521,10 +2549,7 @@ class ComparisonAnalyzer:
         
         if summary_data:
             summary_df = pd.DataFrame(summary_data)
-            summary_df.to_csv(
-                os.path.join(comparison_results_dir, "unified_summary.csv"),
-                index=False
-            )
+            self._save_csv(summary_df, os.path.join(comparison_results_dir, "unified_summary.csv"))
             self._log(f"Saved: unified_summary.csv ({len(summary_df)} entries)")
         
         # 3. Export unified presence matrix with all thresholds as columns
@@ -2655,10 +2680,7 @@ class ComparisonAnalyzer:
             presence_df = presence_df.sort_values(['conserved_at_lowest', 'edge_key'], ascending=[False, True])
         
         # Save
-        presence_df.to_csv(
-            os.path.join(comparison_results_dir, "edge_presence_matrix.csv"),
-            index=False
-        )
+        self._save_csv(presence_df, os.path.join(comparison_results_dir, "edge_presence_matrix.csv"))
         self._log(f"Saved: edge_presence_matrix.csv (unified, {len(presence_df)} edges, {len(thresholds)} thresholds)")
 
     def _export_merged_unique_connections(self, comparison_results_dir: str):
@@ -2729,10 +2751,7 @@ class ComparisonAnalyzer:
             if merged_unique:
                 merged_df = pd.DataFrame(merged_unique)
                 merged_df = merged_df.sort_values(['threshold', 'weight'], ascending=[True, False])
-                merged_df.to_csv(
-                    os.path.join(comparison_results_dir, f"unique_to_{safe_name}.csv"),
-                    index=False
-                )
+                self._save_csv(merged_df, os.path.join(comparison_results_dir, f"unique_to_{safe_name}.csv"))
                 self._log(f"Saved: unique_to_{safe_name}.csv ({len(merged_df)} unique edges)")
 
     def _export_neuron_counts_comparison(self, comparison_results_dir: str):
@@ -2772,7 +2791,7 @@ class ComparisonAnalyzer:
             # Load source neurons
             if os.path.exists(source_file):
                 try:
-                    source_df = pd.read_csv(source_file, dtype={'bodyId': str})
+                    source_df = self._read_csv(source_file, dtype={'bodyId': str})
                     source_count = len(source_df)
                     
                     # Count by type
@@ -2797,7 +2816,7 @@ class ComparisonAnalyzer:
             # Load target neurons
             if os.path.exists(target_file):
                 try:
-                    target_df = pd.read_csv(target_file, dtype={'bodyId': str})
+                    target_df = self._read_csv(target_file, dtype={'bodyId': str})
                     target_count = len(target_df)
                     
                     # Count by type
@@ -2832,10 +2851,7 @@ class ComparisonAnalyzer:
         # Save summary CSV
         if summary_data:
             summary_df = pd.DataFrame(summary_data)
-            summary_df.to_csv(
-                os.path.join(comparison_results_dir, "neuron_counts_summary.csv"),
-                index=False
-            )
+            self._save_csv(summary_df, os.path.join(comparison_results_dir, "neuron_counts_summary.csv"))
             self._log(f"Saved: neuron_counts_summary.csv ({len(summary_df)} datasets)")
         
         # Save type counts CSV (presence matrix style)
@@ -2849,10 +2865,7 @@ class ComparisonAnalyzer:
             type_df = pd.DataFrame(type_rows)
             # Sort by type name
             type_df = type_df.sort_values('type')
-            type_df.to_csv(
-                os.path.join(comparison_results_dir, "neuron_counts_by_type.csv"),
-                index=False
-            )
+            self._save_csv(type_df, os.path.join(comparison_results_dir, "neuron_counts_by_type.csv"))
             self._log(f"Saved: neuron_counts_by_type.csv ({len(type_df)} types)")
             
             # Store for HTML report
@@ -2868,10 +2881,7 @@ class ComparisonAnalyzer:
             
             group_df = pd.DataFrame(group_rows)
             group_df = group_df.sort_values('custom_group')
-            group_df.to_csv(
-                os.path.join(comparison_results_dir, "neuron_counts_by_group.csv"),
-                index=False
-            )
+            self._save_csv(group_df, os.path.join(comparison_results_dir, "neuron_counts_by_group.csv"))
             self._log(f"Saved: neuron_counts_by_group.csv ({len(group_df)} groups)")
             
             # Store for HTML report
@@ -2919,7 +2929,7 @@ class ComparisonAnalyzer:
                 for path_file in path_files_to_try:
                     if os.path.exists(path_file):
                         try:
-                            path_df = pd.read_csv(path_file)
+                            path_df = self._read_csv(path_file)
                             break
                         except:
                             continue
@@ -3051,10 +3061,7 @@ class ComparisonAnalyzer:
             path_df = path_df.sort_values(['conserved_at_lowest', 'path_key'], ascending=[False, True])
         
         # Save
-        path_df.to_csv(
-            os.path.join(comparison_results_dir, "path_presence_matrix.csv"),
-            index=False
-        )
+        self._save_csv(path_df, os.path.join(comparison_results_dir, "path_presence_matrix.csv"))
         self._log(f"Saved: path_presence_matrix.csv (unified, {len(path_df)} paths, {len(thresholds)} thresholds)")
         
         # Update comparison report with path presence matrix for visualizations
@@ -3112,66 +3119,79 @@ class ComparisonAnalyzer:
         if matrix_df.empty:
             return
         
-        # Build presence matrix
-        rows = []
+        # Build presence matrix using vectorized operations (much faster than iterrows)
         available = [d for d in dataset_names if d in matrix_df.columns]
         
-        for edge_key, row in matrix_df.iterrows():
-            # Parse edge key
-            if ' -> ' in str(edge_key):
-                parts = str(edge_key).split(' -> ')
-                source_type = parts[0]
-                target_type = parts[1] if len(parts) > 1 else ''
-            else:
-                source_type = str(edge_key)
-                target_type = ''
-            
-            edge_data = {
-                'edge_key': edge_key,
-                'source_type': source_type,
-                'target_type': target_type,
-            }
-            
-            # Calculate presence and weights
-            weights = []
-            conservation_count = 0
-            
-            for dataset in available:
-                safe_name = self.parameters._sanitize_name(dataset)
-                weight = row[dataset]
-                is_present = weight > 0
-                
-                # Presence marker (True/0 for CSV readability)
-                edge_data[safe_name] = True if is_present else 0
-                # Weight column
-                edge_data[f'weight_{safe_name}'] = weight if is_present else ''
-                
-                if is_present:
-                    conservation_count += 1
-                    weights.append(weight)
-            
-            edge_data['conservation_count'] = conservation_count
-            
-            # Calculate statistics
-            if weights:
-                edge_data['max_weight'] = max(weights)
-                edge_data['avg_weight'] = np.mean(weights)
-                if len(weights) > 1:
-                    edge_data['weight_cv'] = round(np.std(weights) / np.mean(weights), 3)
-                else:
-                    edge_data['weight_cv'] = ''
-            else:
-                edge_data['max_weight'] = ''
-                edge_data['avg_weight'] = ''
-                edge_data['weight_cv'] = ''
-            
-            rows.append(edge_data)
+        # Ensure index is a flat string index (not MultiIndex)
+        if isinstance(matrix_df.index, pd.MultiIndex):
+            # Convert MultiIndex to string format "source -> target"
+            edge_keys = pd.Series([f"{idx[0]} -> {idx[1]}" for idx in matrix_df.index], index=matrix_df.index)
+        else:
+            edge_keys = matrix_df.index.astype(str)
         
-        if not rows:
+        # Parse edge keys to source/target using vectorized string operations
+        # Use try/except to handle edge cases where split returns unexpected types
+        try:
+            split_keys = edge_keys.str.split(' -> ', n=1, expand=True)
+            # Ensure split_keys is a DataFrame with at least 2 columns
+            if isinstance(split_keys, pd.DataFrame):
+                source_types = split_keys[0].fillna(edge_keys)
+                target_types = split_keys[1].fillna('') if 1 in split_keys.columns else pd.Series('', index=matrix_df.index)
+            else:
+                # Fallback: split didn't return DataFrame (edge case)
+                source_types = edge_keys
+                target_types = pd.Series('', index=matrix_df.index)
+        except Exception:
+            # Ultimate fallback
+            source_types = edge_keys
+            target_types = pd.Series('', index=matrix_df.index)
+        
+        # Start building the presence DataFrame
+        presence_df = pd.DataFrame({
+            'edge_key': edge_keys,
+            'source_type': source_types.values,
+            'target_type': target_types.values,
+        }, index=matrix_df.index)
+        
+        # Build safe name mapping
+        safe_names = {d: self.parameters._sanitize_name(d) for d in available}
+        
+        # Add presence markers and weight columns for each dataset (vectorized)
+        for dataset in available:
+            safe_name = safe_names[dataset]
+            weights = matrix_df[dataset]
+            is_present = weights > 0
+            
+            # Presence marker (True/0 for CSV readability)
+            presence_df[safe_name] = is_present.map({True: True, False: 0})
+            
+            # Weight column (show weight if present, else empty string)
+            presence_df[f'weight_{safe_name}'] = weights.where(is_present, '')
+        
+        # Calculate conservation count (number of datasets with edge > 0)
+        presence_cols = [safe_names[d] for d in available]
+        # Convert True/0 to 1/0 for counting
+        presence_df['conservation_count'] = (matrix_df[available] > 0).sum(axis=1)
+        
+        # Calculate statistics (vectorized)
+        weight_values = matrix_df[available].copy()
+        # Replace 0 with NaN for statistics (so we only consider present edges)
+        weight_values = weight_values.replace(0, np.nan)
+        
+        presence_df['max_weight'] = weight_values.max(axis=1)
+        presence_df['avg_weight'] = weight_values.mean(axis=1)
+        
+        # Calculate CV only where we have more than 1 present dataset
+        has_multiple = (weight_values.notna().sum(axis=1) > 1)
+        cv_values = weight_values.std(axis=1) / weight_values.mean(axis=1)
+        presence_df['weight_cv'] = cv_values.round(3).where(has_multiple, '')
+        
+        # Replace NaN with empty string for display
+        presence_df['max_weight'] = presence_df['max_weight'].fillna('')
+        presence_df['avg_weight'] = presence_df['avg_weight'].fillna('')
+        
+        if presence_df.empty:
             return
-        
-        # Create DataFrame and reorder columns
-        presence_df = pd.DataFrame(rows)
         
         # Order columns: edge_key, source, target, conservation_count, presence markers, weights, stats
         col_order = ['edge_key', 'source_type', 'target_type', 'conservation_count']
@@ -3203,20 +3223,14 @@ class ComparisonAnalyzer:
         )
         
         # Save edge presence matrix
-        presence_df.to_csv(
-            os.path.join(comparison_results_dir, f"edge_presence_matrix_minsyn_{threshold}.csv"),
-            index=False
-        )
+        self._save_csv(presence_df, os.path.join(comparison_results_dir, f"edge_presence_matrix_minsyn_{threshold}.csv"))
         if not silent:
             self._log(f"Saved: edge_presence_matrix_minsyn_{threshold}.csv ({len(presence_df)} edges)")
         
         # Also save a threshold-independent version at the middle threshold
         mid_threshold = self.parameters.thresholds[len(self.parameters.thresholds) // 2]
         if threshold == mid_threshold:
-            presence_df.to_csv(
-                os.path.join(comparison_results_dir, "edge_presence_matrix.csv"),
-                index=False
-            )
+            self._save_csv(presence_df, os.path.join(comparison_results_dir, "edge_presence_matrix.csv"))
             if not silent:
                 self._log("Saved: edge_presence_matrix.csv (default)")
     
@@ -3322,19 +3336,13 @@ class ComparisonAnalyzer:
         conserved_df = conserved_df.sort_values('conservation_score', ascending=False)
         
         # Save
-        conserved_df.to_csv(
-            os.path.join(comparison_results_dir, f"conserved_strong_connections_minsyn_{threshold}.csv"),
-            index=False
-        )
+        self._save_csv(conserved_df, os.path.join(comparison_results_dir, f"conserved_strong_connections_minsyn_{threshold}.csv"))
         self._log(f"Saved: conserved_strong_connections_minsyn_{threshold}.csv ({len(conserved_df)} edges)")
         
         # Also save default version at middle threshold
         mid_threshold = self.parameters.thresholds[len(self.parameters.thresholds) // 2]
         if threshold == mid_threshold:
-            conserved_df.to_csv(
-                os.path.join(comparison_results_dir, "conserved_strong_connections.csv"),
-                index=False
-            )
+            self._save_csv(conserved_df, os.path.join(comparison_results_dir, "conserved_strong_connections.csv"))
             self._log("Saved: conserved_strong_connections.csv (default)")
     
     def _export_path_presence_matrix(self, comparison_results_dir: str, threshold: int, silent: bool = False):
@@ -3356,6 +3364,9 @@ class ComparisonAnalyzer:
         import ast
         
         dataset_names = self.parameters.get_dataset_names()
+        
+        # Limit paths to prevent hanging on large datasets
+        max_paths_per_dataset = 10000  # Safety limit
         
         # Collect paths from path CSV files (not connection data)
         path_data = {}  # path_key -> {dataset: True/False}
@@ -3382,7 +3393,7 @@ class ComparisonAnalyzer:
             for path_file in path_files_to_try:
                 if os.path.exists(path_file):
                     try:
-                        path_df = pd.read_csv(path_file)
+                        path_df = self._read_csv(path_file)
                         if not silent:
                             self._log(f"Loaded path data from {os.path.basename(path_file)} for {dataset}")
                         break
@@ -3395,13 +3406,34 @@ class ComparisonAnalyzer:
                     self._log(f"No path data found for {dataset} at threshold {threshold}")
                 continue
             
-            # Extract path information from DataFrame
+            # Extract path information from DataFrame using vectorized operations where possible
             # Expected columns: path_str, path, weights, min_weight, length, etc.
-            for _, row in path_df.iterrows():
-                # Get path string (e.g., "aMe12->KCg-d->PPL101")
-                path_str = str(row.get('path', row.get('path_str', '')))
-                if not path_str or path_str == 'nan':
-                    continue
+            
+            # Get path column (try 'path' first, then 'path_str')
+            path_col = 'path' if 'path' in path_df.columns else 'path_str' if 'path_str' in path_df.columns else None
+            if path_col is None:
+                continue
+            
+            # Vectorized: filter out null/empty paths
+            valid_mask = path_df[path_col].notna() & (path_df[path_col].astype(str) != 'nan') & (path_df[path_col].astype(str) != '')
+            valid_paths = path_df[valid_mask].copy()
+            
+            if valid_paths.empty:
+                continue
+            
+            # Limit paths to prevent hanging on large datasets
+            if len(valid_paths) > max_paths_per_dataset:
+                # Sort by min_weight if available and take top paths
+                if 'min_weight' in valid_paths.columns:
+                    valid_paths = valid_paths.nlargest(max_paths_per_dataset, 'min_weight')
+                else:
+                    valid_paths = valid_paths.head(max_paths_per_dataset)
+                if not silent:
+                    self._log(f"  Limiting to top {max_paths_per_dataset} paths for {dataset}")
+            
+            # Process paths - we need to iterate here due to complex parsing, but limit to valid rows only
+            for idx, row in valid_paths.iterrows():
+                path_str = str(row[path_col])
                 
                 # Parse path string to extract nodes
                 # Handle both "A->B->C" and "['A', 'B', 'C']" formats
@@ -3579,20 +3611,14 @@ class ComparisonAnalyzer:
             path_presence_df = path_presence_df.head(max_paths)
         
         # Save
-        path_presence_df.to_csv(
-            os.path.join(comparison_results_dir, f"path_presence_matrix_minsyn_{threshold}.csv"),
-            index=False
-        )
+        self._save_csv(path_presence_df, os.path.join(comparison_results_dir, f"path_presence_matrix_minsyn_{threshold}.csv"))
         if not silent:
             self._log(f"Saved: path_presence_matrix_minsyn_{threshold}.csv ({len(path_presence_df)} paths)")
         
         # Save default version at middle threshold
         mid_threshold = self.parameters.thresholds[len(self.parameters.thresholds) // 2]
         if threshold == mid_threshold:
-            path_presence_df.to_csv(
-                os.path.join(comparison_results_dir, "path_presence_matrix.csv"),
-                index=False
-            )
+            self._save_csv(path_presence_df, os.path.join(comparison_results_dir, "path_presence_matrix.csv"))
             if not silent:
                 self._log("Saved: path_presence_matrix.csv (default)")
     
@@ -3818,7 +3844,7 @@ class ComparisonAnalyzer:
             for path_file in path_files_to_try:
                 if os.path.exists(path_file):
                     try:
-                        df = pd.read_csv(path_file)
+                        df = self._read_csv(path_file)
                         break
                     except Exception as e:
                         self._log(f"Warning: Could not read {path_file}: {e}")
@@ -3872,7 +3898,7 @@ class ComparisonAnalyzer:
             for path_file in path_files_to_try:
                 if os.path.exists(path_file):
                     try:
-                        df = pd.read_csv(path_file)
+                        df = self._read_csv(path_file)
                         break
                     except Exception as e:
                         self._log(f"Warning: Could not read {path_file}: {e}")
@@ -3944,7 +3970,7 @@ class ComparisonAnalyzer:
             for path_file in path_files_to_try:
                 if os.path.exists(path_file):
                     try:
-                        df = pd.read_csv(path_file)
+                        df = self._read_csv(path_file)
                         break
                     except Exception as e:
                         self._log(f"Warning: Could not read {path_file}: {e}")
@@ -4003,7 +4029,7 @@ class ComparisonAnalyzer:
             for path_file in path_files_to_try:
                 if os.path.exists(path_file):
                     try:
-                        df = pd.read_csv(path_file)
+                        df = self._read_csv(path_file)
                         break
                     except Exception as e:
                         self._log(f"Warning: Could not read {path_file}: {e}")
@@ -4057,7 +4083,7 @@ class ComparisonAnalyzer:
                 try:
                     # Check file is not empty before reading
                     if os.path.getsize(conn_file) > 0:
-                        df = pd.read_csv(conn_file)
+                        df = self._read_csv(conn_file)
                 except pd.errors.EmptyDataError:
                     pass  # File is empty or has no columns, try fallback
                 except Exception:
@@ -4069,7 +4095,7 @@ class ComparisonAnalyzer:
                 if os.path.exists(conn_type_file):
                     try:
                         if os.path.getsize(conn_type_file) > 0:
-                            df = pd.read_csv(conn_type_file)
+                            df = self._read_csv(conn_type_file)
                     except pd.errors.EmptyDataError:
                         pass  # File is empty
                     except Exception:
@@ -4593,7 +4619,7 @@ class ComparisonAnalyzer:
         if save_results and not results['results'].empty:
             timestamp = pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')
             filepath = os.path.join(output_dir, f'direct_comparison_{timestamp}.csv')
-            results['results'].to_csv(filepath, index=False)
+            self._save_csv(results['results'], filepath)
             self._log(f"Saved: {filepath}")
             results['output_file'] = filepath
         
@@ -4830,12 +4856,12 @@ class ComparisonAnalyzer:
         # Save all matrices
         for metric, df in matrices.items():
             path = os.path.join(output_dir, f'comparison_matrix_{metric}_{timestamp}.csv')
-            df.to_csv(path, index=False)
+            self._save_csv(df, path)
             
         summary_path = os.path.join(output_dir, f'comparison_summary_{timestamp}.csv')
         pairwise_path = os.path.join(output_dir, f'pairwise_results_{timestamp}.csv')
-        summary_df.to_csv(summary_path, index=False)
-        pairwise_df.to_csv(pairwise_path, index=False)
+        self._save_csv(summary_df, summary_path)
+        self._save_csv(pairwise_df, pairwise_path)
         self._log(f"Saved matrices, summary, and pairwise results to {output_dir}")
 
         report_path = None
@@ -5073,29 +5099,20 @@ class ComparisonAnalyzer:
         if 'bodyid_results' in results and not results['bodyid_results'].empty:
             keep = ['dataset_a', 'dataset_b', 'neuron_type', 'source_bodyId', 'target_bodyId'] + metric_cols
             filtered = _filter_df(results['bodyid_results'], keep)
-            filtered.to_csv(
-                os.path.join(output_dir, 'bodyid_results.csv'),
-                index=False
-            )
+            self._save_csv(filtered, os.path.join(output_dir, 'bodyid_results.csv'))
             self._log("Saved: bodyid_results.csv")
 
         if 'type_summary' in results and not results['type_summary'].empty:
             keep = ['dataset_a', 'dataset_b', 'neuron_type', 'n_source_bodyIds', 'n_target_bodyIds'] + metric_cols
             filtered = _filter_df(results['type_summary'], keep)
-            filtered.to_csv(
-                os.path.join(output_dir, 'type_summary.csv'),
-                index=False
-            )
+            self._save_csv(filtered, os.path.join(output_dir, 'type_summary.csv'))
             self._log("Saved: type_summary.csv")
 
         # Save summary
         if 'summary' in results and not results['summary'].empty:
             keep = ['neuron_type', 'role', 'datasets_found'] + metric_cols
             filtered = _filter_df(results['summary'], keep)
-            filtered.to_csv(
-                os.path.join(output_dir, 'verification_summary.csv'),
-                index=False
-            )
+            self._save_csv(filtered, os.path.join(output_dir, 'verification_summary.csv'))
             self._log("Saved: verification_summary.csv")
         
         # Save by role
@@ -5103,17 +5120,12 @@ class ComparisonAnalyzer:
             if role in results and not results[role].empty:
                 keep = ['neuron_type', 'role', 'datasets_found'] + metric_cols
                 filtered = _filter_df(results[role], keep)
-                filtered.to_csv(
-                    os.path.join(output_dir, f'verification_{role}.csv'),
-                    index=False
-                )
+                self._save_csv(filtered, os.path.join(output_dir, f'verification_{role}.csv'))
                 self._log(f"Saved: verification_{role}.csv")
         
         # Save similarity matrix
         if 'similarity_matrix' in results and not results['similarity_matrix'].empty:
-            results['similarity_matrix'].to_csv(
-                os.path.join(output_dir, 'similarity_matrix.csv')
-            )
+            self._save_csv(results['similarity_matrix'], os.path.join(output_dir, 'similarity_matrix.csv'), index=True)
             self._log("Saved: similarity_matrix.csv")
         
         # Generate partner details if requested
@@ -5264,6 +5276,317 @@ class ComparisonAnalyzer:
             self._log(f"Saved: connectivity_profile_comparison.html")
         except Exception as e:
             self._log(f"Warning: Could not generate HTML report: {e}")
+    
+    # =========================================================================
+    # Conserved Path Visualization
+    # =========================================================================
+    
+    def visualize_conserved_paths(
+        self,
+        threshold: Optional[int] = None,
+        trim_dead_ends: bool = True,
+        output_folder: Optional[str] = None,
+        showfig: bool = False,
+        network_layout: str = 'hierarchical',
+        edge_width_scale: str = 'log',
+        **vispath_kwargs
+    ) -> Optional[str]:
+        """
+        Visualize conserved edges/paths across all datasets using VisualizePath.
+        
+        Creates standalone network visualizations showing only edges that are
+        conserved (present in all datasets), with synapse strengths from each
+        dataset shown in the hover labels.
+        
+        Args:
+            threshold: Weight threshold to use. If None, uses middle threshold.
+            trim_dead_ends: If True, removes nodes that don't connect source to target.
+                          Edges leading to dead-ends are removed.
+            output_folder: Output folder for visualizations. If None, uses
+                          {comparison_output}/comparison_visualizations/conserved_paths/
+            showfig: If True, opens the visualization in browser.
+            network_layout: Layout algorithm ('hierarchical', 'spring', 'circular').
+            edge_width_scale: Edge width scaling ('log', 'linear', 'sqrt', 'none').
+            **vispath_kwargs: Additional keyword arguments for VisualizePath.
+            
+        Returns:
+            Path to the generated HTML file, or None if no conserved edges found.
+            
+        Example:
+            >>> analyzer = ComparisonAnalyzer(params)
+            >>> analyzer.run_comparison()
+            >>> analyzer.visualize_conserved_paths(threshold=5, trim_dead_ends=True)
+        """
+        # Import VisualizePath
+        try:
+            from vispath_pkg import VisualizePath
+        except ImportError:
+            self._log("Warning: vispath_pkg not available. Cannot generate conserved path visualization.")
+            return None
+        
+        # Ensure comparison has been run
+        if not self.raw_results:
+            self._log("Warning: No comparison results. Run run_comparison() first.")
+            return None
+        
+        dataset_names = self.parameters.get_dataset_names()
+        
+        # Determine threshold
+        if threshold is None:
+            threshold = self.parameters.thresholds[len(self.parameters.thresholds) // 2]
+        
+        self._log(f"Generating conserved path visualization @ threshold={threshold}...")
+        
+        # Get aligned data
+        aligned = self.get_aligned_data(threshold)
+        if aligned.empty:
+            self._log("Warning: No aligned data at this threshold.")
+            return None
+        
+        # Find conserved edges (present in ALL datasets)
+        available_ds = [d for d in dataset_names if d in aligned.columns]
+        if not available_ds:
+            self._log("Warning: No datasets with aligned data.")
+            return None
+        
+        # Mask for edges present in all datasets
+        mask_all = (aligned[available_ds] > 0).all(axis=1)
+        conserved_edges = aligned[mask_all].copy()
+        
+        if conserved_edges.empty:
+            self._log("Warning: No conserved edges found at this threshold.")
+            return None
+        
+        self._log(f"  Found {len(conserved_edges)} conserved edges")
+        
+        # Build edge list with weights from each dataset
+        edge_list = []
+        edge_labels = {}  # {(source, target): {dataset: weight, ...}}
+        
+        for edge_key, row in conserved_edges.iterrows():
+            # Parse source/target from edge key
+            if ' -> ' in str(edge_key):
+                parts = str(edge_key).split(' -> ')
+                source = parts[0].strip()
+                target = parts[1].strip() if len(parts) > 1 else ''
+            else:
+                continue
+            
+            # Get weights from all datasets
+            weights = {}
+            avg_weight = 0
+            for dataset in available_ds:
+                weight = row[dataset]
+                if weight > 0:
+                    # Use nickname if available
+                    idx = dataset_names.index(dataset)
+                    nickname = (self.parameters.datasets_nickname[idx] 
+                               if self.parameters.datasets_nickname and idx < len(self.parameters.datasets_nickname)
+                               else self.parameters._sanitize_name(dataset))
+                    weights[nickname] = int(weight)
+                    avg_weight += weight
+            
+            avg_weight = avg_weight / len(available_ds) if available_ds else 0
+            
+            edge_list.append({
+                'source': source,
+                'target': target,
+                'weight': avg_weight  # Use average weight for visualization
+            })
+            edge_labels[(source, target)] = weights
+        
+        if not edge_list:
+            self._log("Warning: No valid edges to visualize.")
+            return None
+        
+        # Convert to DataFrame
+        edges_df = pd.DataFrame(edge_list)
+        
+        # Identify source and target nodes from parameters
+        source_patterns = self.parameters.source_neurons
+        target_patterns = self.parameters.target_neurons
+        
+        # Get all unique nodes
+        all_nodes = set(edges_df['source'].unique()) | set(edges_df['target'].unique())
+        
+        # Classify nodes as source, target, or intermediate
+        import re
+        def matches_patterns(node: str, patterns: list) -> bool:
+            """Check if node matches any pattern."""
+            for pattern in patterns:
+                if isinstance(pattern, str):
+                    # Handle regex patterns
+                    if '.*' in pattern or '*' in pattern:
+                        regex = pattern.replace('.*', '.*').replace('*', '.*')
+                        if re.match(f'^{regex}$', node):
+                            return True
+                    elif node == pattern:
+                        return True
+            return False
+        
+        source_nodes = {n for n in all_nodes if matches_patterns(n, source_patterns)}
+        target_nodes = {n for n in all_nodes if matches_patterns(n, target_patterns)}
+        intermediate_nodes = all_nodes - source_nodes - target_nodes
+        
+        # Trim dead-ends if requested
+        if trim_dead_ends and source_nodes and target_nodes:
+            self._log("  Trimming dead-end nodes...")
+            
+            # Build adjacency for reachability analysis
+            from collections import defaultdict
+            forward_adj = defaultdict(set)  # node -> downstream nodes
+            backward_adj = defaultdict(set)  # node -> upstream nodes
+            
+            for _, row in edges_df.iterrows():
+                forward_adj[row['source']].add(row['target'])
+                backward_adj[row['target']].add(row['source'])
+            
+            # Find nodes reachable from sources (forward)
+            reachable_from_source = set()
+            queue = list(source_nodes)
+            while queue:
+                node = queue.pop(0)
+                if node in reachable_from_source:
+                    continue
+                reachable_from_source.add(node)
+                for next_node in forward_adj[node]:
+                    if next_node not in reachable_from_source:
+                        queue.append(next_node)
+            
+            # Find nodes that can reach targets (backward)
+            can_reach_target = set()
+            queue = list(target_nodes)
+            while queue:
+                node = queue.pop(0)
+                if node in can_reach_target:
+                    continue
+                can_reach_target.add(node)
+                for prev_node in backward_adj[node]:
+                    if prev_node not in can_reach_target:
+                        queue.append(prev_node)
+            
+            # Keep only nodes that are on paths from source to target
+            valid_nodes = reachable_from_source & can_reach_target
+            
+            # Filter edges to only include valid nodes
+            edges_df = edges_df[
+                edges_df['source'].isin(valid_nodes) & 
+                edges_df['target'].isin(valid_nodes)
+            ].copy()
+            
+            # Filter edge labels
+            edge_labels = {
+                k: v for k, v in edge_labels.items() 
+                if k[0] in valid_nodes and k[1] in valid_nodes
+            }
+            
+            removed_count = len(all_nodes) - len(valid_nodes)
+            if removed_count > 0:
+                self._log(f"  Removed {removed_count} dead-end nodes, {len(edges_df)} edges remaining")
+        
+        if edges_df.empty:
+            self._log("Warning: No edges remaining after trimming dead-ends.")
+            return None
+        
+        # Setup output path
+        if output_folder is None:
+            output_folder = os.path.join(
+                self.parameters.full_output_path,
+                "comparison_visualizations",
+                "conserved_paths"
+            )
+        os.makedirs(output_folder, exist_ok=True)
+        
+        base_filename = f"conserved_network_t{threshold}"
+        
+        self._log(f"  Creating VisualizePath visualization with {len(edges_df)} edges...")
+        
+        # Create VisualizePath with conserved edges
+        vp = VisualizePath(
+            path_file=edges_df,
+            output_folder=output_folder,
+            showfig=showfig,
+            network_layout=network_layout,
+            edge_width_scale=edge_width_scale,
+            edge_labels=edge_labels,  # Multi-dataset synapse strengths
+            verbose=self.verbose,
+            **vispath_kwargs
+        )
+        
+        # Override base filename
+        vp.base_filename = base_filename
+        
+        # Build network and create visualization
+        vp.build_network()
+        
+        # Set node types for coloring
+        for node in vp.G_network.nodes():
+            if node in source_nodes:
+                vp.G_network.nodes[node]['node_type'] = 'source'
+            elif node in target_nodes:
+                vp.G_network.nodes[node]['node_type'] = 'target'
+            else:
+                vp.G_network.nodes[node]['node_type'] = 'intermediate'
+        
+        # Generate network visualization
+        output_path = vp.create_network()
+        
+        self._log_file(output_path, "Saved conserved path visualization")
+        
+        return output_path
+    
+    def visualize_conserved_paths_all_thresholds(
+        self,
+        trim_dead_ends: bool = True,
+        output_folder: Optional[str] = None,
+        showfig: bool = False,
+        **vispath_kwargs
+    ) -> List[str]:
+        """
+        Generate conserved path visualizations for all thresholds.
+        
+        Creates a subfolder 'conserved_paths/' containing one network 
+        visualization per threshold, each showing only edges conserved
+        across all datasets with multi-dataset synapse strengths.
+        
+        Args:
+            trim_dead_ends: If True, removes dead-end nodes.
+            output_folder: Output folder for visualizations. If None, uses
+                          {comparison_output}/comparison_visualizations/conserved_paths/
+            showfig: If True, opens visualizations in browser.
+            **vispath_kwargs: Additional keyword arguments for VisualizePath.
+            
+        Returns:
+            List of paths to generated HTML files.
+        """
+        # Set up output folder for all thresholds
+        if output_folder is None:
+            output_folder = os.path.join(
+                self.parameters.full_output_path,
+                "comparison_visualizations",
+                "conserved_paths"
+            )
+        os.makedirs(output_folder, exist_ok=True)
+        
+        self._log(f"Generating conserved path visualizations for {len(self.parameters.thresholds)} thresholds...")
+        
+        output_paths = []
+        
+        for threshold in self.parameters.thresholds:
+            result = self.visualize_conserved_paths(
+                threshold=threshold,
+                trim_dead_ends=trim_dead_ends,
+                output_folder=output_folder,  # Use shared folder
+                showfig=showfig,
+                **vispath_kwargs
+            )
+            if result:
+                output_paths.append(result)
+        
+        if output_paths:
+            self._log(f"  Generated {len(output_paths)} conserved path visualizations in: conserved_paths/")
+        
+        return output_paths
     
     # =========================================================================
     # Utility Methods

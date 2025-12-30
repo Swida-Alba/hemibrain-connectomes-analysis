@@ -36,13 +36,14 @@ Example usage:
 Author: Generated for hemibrain-connectomes-analysis project
 """
 
+import json
 import os
 import re
 import time
 import warnings
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union, TYPE_CHECKING
 
 import numpy as np
 import pandas as pd
@@ -54,6 +55,18 @@ try:
 except ImportError:
     HAS_TQDM = False
     tqdm = None
+
+# Try to import LabelMapper for cross-dataset queries
+try:
+    from comparison.label_mapper import LabelMapper
+    HAS_LABELMAPPER = True
+except ImportError:
+    try:
+        from src.comparison.label_mapper import LabelMapper
+        HAS_LABELMAPPER = True
+    except ImportError:
+        HAS_LABELMAPPER = False
+        LabelMapper = None  # type: ignore
 
 # Try to import neuronbridge
 # Apply patch to fix API compatibility issue with pydantic validation
@@ -182,6 +195,19 @@ LIBRARY_TO_DATASET_NAME = {
     'FlyEM_Optic_Lobe': 'optic-lobe:v1.1',
 }
 
+# Dataset abbreviations for expression matrix type naming
+# Format: {dataset_folder_name: abbreviation}
+DATASET_ABBREVIATIONS = {
+    'hemibrain_v1_2_1': 'HEMI',
+    'hemibrain:v1.2.1': 'HEMI',
+    'male-cns_v0_9': 'MCNS',
+    'male-cns:v0.9': 'MCNS',
+    'flywire_FAFB_v783': 'FAFB',
+    'flywire_BANC_v626': 'BANC',
+    'optic-lobe_v1_1': 'OLOB',
+    'optic-lobe:v1.1': 'OLOB',
+}
+
 
 # Line name prefixes for classification
 # GAL4/LexA lines: typically VT (Vienna Tile), R (Rubin), GMR, etc.
@@ -225,7 +251,7 @@ class NeuronBridgeFinder:
     region : str
         Filter images by anatomical region: 'Brain', 'VNC', or 'All'. Default: 'All'
     max_api_images_per_line : int
-        Maximum LM images to process per driver line for API calls. Use -1 for unlimited. Default: 10
+        Maximum LM images to process per driver line for API calls. Use -1 for unlimited. Default: -1
         Images are pre-filtered by match_type availability before limiting.
     
     Attributes
@@ -258,7 +284,7 @@ class NeuronBridgeFinder:
     neuprint_server: str = 'https://neuprint.janelia.org'
     match_type: str = 'cds'
     region: str = 'All'
-    max_api_images_per_line: int = 10
+    max_api_images_per_line: int = -1
     
     # Private fields
     _client: Any = field(init=False, repr=False, default=None)
@@ -466,6 +492,90 @@ class NeuronBridgeFinder:
         ds = ds.replace('_', '-')
         
         return ds
+    
+    def _save_parameters(
+        self,
+        output_path: str,
+        function_name: str,
+        function_params: Dict[str, Any],
+        filename: str = 'parameters.json'
+    ) -> str:
+        """
+        Save all module-level and function-level parameters to a JSON file.
+        
+        This ensures reproducibility by recording all configuration used
+        to generate the analysis results.
+        
+        Parameters
+        ----------
+        output_path : str
+            Directory to save the parameters file.
+        function_name : str
+            Name of the function being called (e.g., 'analyze_colabeling').
+        function_params : dict
+            Dictionary of function-level parameters.
+        filename : str
+            Output filename. Default: 'parameters.json'
+            
+        Returns
+        -------
+        str
+            Path to the saved parameters file.
+        """
+        import json
+        from datetime import datetime
+        
+        # Collect module-level (instance) parameters
+        module_params = {
+            'datasets_path': self.datasets_path,
+            'use_cache': self.use_cache,
+            'cache_folder': self.cache_folder,
+            'verbose': self.verbose if isinstance(self.verbose, bool) else str(self.verbose),
+            'separate_splitgal4': self.separate_splitgal4,
+            'neuprint_server': self.neuprint_server,
+            'match_type': self.match_type,
+            'region': self.region,
+            'max_api_images_per_line': self.max_api_images_per_line,
+            # Note: neuprint_token is sensitive, store presence only
+            'has_neuprint_token': self.neuprint_token is not None
+        }
+        
+        # Process function params to make them JSON serializable
+        serializable_params = {}
+        for key, value in function_params.items():
+            if isinstance(value, (str, int, float, bool, type(None))):
+                serializable_params[key] = value
+            elif isinstance(value, (list, tuple)):
+                # Handle lists/tuples - convert to list
+                serializable_params[key] = list(value)
+            elif isinstance(value, dict):
+                serializable_params[key] = value
+            elif hasattr(value, 'tolist'):
+                # Handle numpy arrays
+                serializable_params[key] = value.tolist()
+            elif hasattr(value, '__dict__'):
+                # Handle objects with __dict__
+                serializable_params[key] = str(value)
+            else:
+                serializable_params[key] = str(value)
+        
+        # Build complete parameters dict
+        params = {
+            'metadata': {
+                'timestamp': datetime.now().isoformat(),
+                'function': function_name,
+                'neuronbridge_finder_version': '3.1'
+            },
+            'module_params': module_params,
+            'function_params': serializable_params
+        }
+        
+        # Save to JSON file
+        params_path = os.path.join(output_path, filename)
+        with open(params_path, 'w', encoding='utf-8') as f:
+            json.dump(params, f, indent=2, ensure_ascii=False)
+        
+        return params_path
     
     def _filter_images_by_region(self, images: List[Any]) -> List[Any]:
         """
@@ -737,7 +847,9 @@ class NeuronBridgeFinder:
         lines: List[str],
         match_type: str = 'cds',
         top_n: int = 100,
-        similarity_method: str = 'weighted_jaccard'
+        similarity_method: str = 'weighted_jaccard',
+        min_score: float = 0.0,
+        min_type_avg_score: float = 0.0
     ) -> Tuple[pd.DataFrame, Dict[str, set]]:
         """
         Build a co-labeling matrix showing how often pairs of lines label the same cell types.
@@ -758,6 +870,10 @@ class NeuronBridgeFinder:
         similarity_method : str
             Similarity method: 'jaccard', 'weighted_jaccard', or 'rank_correlation'.
             Default: 'weighted_jaccard'
+        min_score : float
+            Minimum score threshold for individual neurons. Default: 0.0 (no filter).
+        min_type_avg_score : float
+            Minimum average score threshold for types (across all lines). Default: 0.0 (no filter).
             
         Returns
         -------
@@ -768,6 +884,10 @@ class NeuronBridgeFinder:
         """
         self._vprint(f"\n🔗 Building co-labeling matrix for {len(lines)} lines...")
         self._vprint(f"   📊 Similarity method: {similarity_method}")
+        if min_score > 0:
+            self._vprint(f"   📊 Min neuron score: {min_score:,.0f}")
+        if min_type_avg_score > 0:
+            self._vprint(f"   📊 Min type avg score: {min_type_avg_score:,.0f}")
         self._vprint(f"   ⏱️  Note: Fetching neurons for each line to build type-based similarity matrix")
         
         # Collect type sets AND scores for each line
@@ -796,6 +916,9 @@ class NeuronBridgeFinder:
                 neurons_df = self.line_to_neuron(line_name, match_type=match_type)
                 if not neurons_df.empty:
                     neurons_top = neurons_df.head(top_n)
+                    # Apply minimum score filter if specified
+                    if min_score > 0:
+                        neurons_top = neurons_top[neurons_top['score'] >= min_score]
                     # Use cell types for similarity (not bodyIds) - this gives meaningful co-labeling
                     # Two lines labeling the same cell types are considered similar
                     type_set = set()
@@ -821,6 +944,35 @@ class NeuronBridgeFinder:
         
         # Disable batch mode after fetching
         self._batch_mode = False
+        
+        # Apply min_type_avg_score filter: remove types with low average scores
+        if min_type_avg_score > 0:
+            # Collect all types and their average scores across lines
+            all_type_scores = {}  # type -> list of scores
+            for line_scores in line_type_scores.values():
+                for type_key, score in line_scores.items():
+                    if type_key not in all_type_scores:
+                        all_type_scores[type_key] = []
+                    all_type_scores[type_key].append(score)
+            
+            # Filter types by average score
+            types_to_keep = set()
+            for type_key, scores in all_type_scores.items():
+                avg_score = sum(scores) / len(scores)
+                if avg_score >= min_type_avg_score:
+                    types_to_keep.add(type_key)
+            
+            # Remove filtered types from line sets and scores
+            removed_types = set(all_type_scores.keys()) - types_to_keep
+            if removed_types:
+                self._vprint(f"   📊 Filtered {len(removed_types)} types with avg score < {min_type_avg_score:,.0f}")
+                self._vprint(f"   📊 Keeping {len(types_to_keep)} high-confidence types")
+                for line_name in line_neuron_sets:
+                    line_neuron_sets[line_name] = line_neuron_sets[line_name] & types_to_keep
+                    line_type_scores[line_name] = {
+                        k: v for k, v in line_type_scores[line_name].items() 
+                        if k in types_to_keep
+                    }
         
         # Build similarity matrix based on selected method
         self._vprint(f"   🔢 Computing {similarity_method} similarities between {len(lines)} lines...")
@@ -948,13 +1100,89 @@ class NeuronBridgeFinder:
         
         return sparsity_scores
     
+    def _sort_expression_matrix(
+        self,
+        expression_df: pd.DataFrame,
+        as_types_rows: bool = True
+    ) -> pd.DataFrame:
+        """
+        Sort expression matrix by co-labeling quality.
+        
+        Sorting criteria (when as_types_rows=True, types as rows):
+        1. Types labeled in ALL lines (no zeros) come first
+        2. Within complete types: sorted by min_score (higher = more consistent)
+        3. Types with partial labeling: sorted by num_nonzero (desc), total_score (desc)
+        
+        Parameters
+        ----------
+        expression_df : pd.DataFrame
+            Expression matrix. If as_types_rows=False, expects Lines × Types format.
+        as_types_rows : bool
+            If True (default), output has types as rows and lines as columns.
+            If False, output has lines as rows and types as columns.
+            
+        Returns
+        -------
+        pd.DataFrame
+            Sorted expression matrix with types as rows (if as_types_rows=True).
+        """
+        # Determine if input needs transposing to get Types × Lines format
+        # When as_types_rows=True (default), we want types as rows (many rows, few columns)
+        # Input from _calculate_mutual_information is Lines × Types (few rows, many columns)
+        # Heuristic: if significantly more columns than rows, it's likely Lines × Types format
+        needs_transpose = (
+            expression_df.index.name == 'line' or 
+            (as_types_rows and len(expression_df.columns) > len(expression_df) * 2)
+        )
+        
+        if needs_transpose:
+            expression_transposed = expression_df.T
+        else:
+            expression_transposed = expression_df.copy()
+        
+        if len(expression_transposed) == 0 or len(expression_transposed.columns) == 0:
+            return expression_transposed if as_types_rows else expression_transposed.T
+        
+        n_lines = len(expression_transposed.columns)
+        
+        # Calculate metrics for each type (row)
+        nonzero_count = (expression_transposed > 0).sum(axis=1)  # Count of non-zero lines
+        total_score = expression_transposed.sum(axis=1)  # Sum of scores
+        min_score = expression_transposed.min(axis=1)  # Minimum score (0 if any line has 0)
+        
+        # Create sorting key:
+        # - Primary: whether labeled in all lines (1 if all, 0 if not) - descending
+        # - Secondary (for complete): minimum score - descending (higher min = more consistent)
+        # - Secondary (for partial): number of non-zero entries - descending
+        # - Tertiary: total score - descending
+        is_complete = (nonzero_count == n_lines).astype(int)
+        
+        # Create a composite sort key (negate for descending sort)
+        sort_df = pd.DataFrame({
+            'is_complete': -is_complete,
+            'min_score': -min_score,
+            'nonzero_count': -nonzero_count,
+            'total_score': -total_score
+        }, index=expression_transposed.index)
+        
+        # Sort by the composite key
+        sorted_index = sort_df.sort_values(['is_complete', 'min_score', 'nonzero_count', 'total_score']).index
+        expression_transposed = expression_transposed.loc[sorted_index]
+        
+        if as_types_rows:
+            return expression_transposed
+        else:
+            return expression_transposed.T
+    
     def visualize_colabeling_matrix(
         self,
         co_labeling_matrix: pd.DataFrame,
         output_path: str,
         title: str = "Co-Labeling Matrix",
         color_scale: str = 'purple',
-        filename: str = 'colabeling_matrix.html'
+        filename: str = 'colabeling_matrix.html',
+        zmin: Optional[float] = 0.0,
+        zmax: Optional[float] = 1.0
     ) -> str:
         """
         Visualize co-labeling matrix as a heatmap using VisConnMatInteractive.
@@ -971,6 +1199,10 @@ class NeuronBridgeFinder:
             Color scale preset: 'purple', 'green', 'blue', 'orange', 'red'.
         filename : str
             Filename for the HTML file. Default: 'colabeling_matrix.html'
+        zmin : float, optional
+            Minimum value for color scale. Default: 0.0
+        zmax : float, optional
+            Maximum value for color scale. Default: 1.0 (for similarity matrices)
             
         Returns
         -------
@@ -1002,12 +1234,14 @@ class NeuronBridgeFinder:
         # Create heatmap file path
         full_path = os.path.join(output_path, filename)
         
-        # Create heatmap using VisConnMatInteractive
+        # Create heatmap using VisConnMatInteractive with fixed color scale range
         VisConnMatInteractive(
             co_labeling_matrix,
             filename=full_path,
             title=title,
             color_scale=resolved_color_scale,
+            zmin=zmin,
+            zmax=zmax,
             showfig=False,
             verbose=self.verbose
         )
@@ -1020,8 +1254,11 @@ class NeuronBridgeFinder:
         lines: List[str],
         queried_types: List[str],
         match_type: str = 'cds',
-        top_n: int = 100
-    ) -> Tuple[pd.DataFrame, pd.DataFrame]:
+        top_n: int = 100,
+        output_path: Optional[str] = None,
+        min_score: float = 0.0,
+        min_type_avg_score: float = 0.0
+    ) -> Tuple[pd.DataFrame, pd.DataFrame, Dict[str, pd.DataFrame]]:
         """
         Calculate mutual information between driver lines and neuron types.
         
@@ -1040,28 +1277,46 @@ class NeuronBridgeFinder:
             Match algorithm for line_to_neuron.
         top_n : int
             Number of top matches to consider per line.
+        output_path : str, optional
+            If provided, save per-line neuron details CSVs to this directory.
+        min_score : float
+            Minimum score threshold for individual neurons. Default: 0.0 (no filter).
+        min_type_avg_score : float
+            Minimum average score threshold for types. Default: 0.0 (no filter).
             
         Returns
         -------
         tuple
-            (mi_df, expression_matrix)
+            (mi_df, expression_matrix, line_neurons_dict, labeling_info)
             - mi_df: DataFrame with MI values per line
-            - expression_matrix: Binary expression matrix (lines × types)
+            - expression_matrix: Score-based expression matrix (lines × types)
+              Types are prefixed with dataset abbreviation: {ABBREV}_{type}
+            - line_neurons_dict: Dict mapping line name to neurons DataFrame
+            - labeling_info: DataFrame with type, dataset, and per-line score columns
         """
         self._vprint(f"\n📊 Calculating mutual information for {len(lines)} lines...")
+        if min_score > 0:
+            self._vprint(f"   📊 Min neuron score filter: {min_score:,.0f}")
+        if min_type_avg_score > 0:
+            self._vprint(f"   📊 Min type avg score filter: {min_type_avg_score:,.0f}")
         self._vprint(f"   ⏱️  Note: Fetching neuron types for each line (may take time)")
         
-        # Normalize queried types
+        # Normalize queried types for comparison (but keep original case)
         queried_types_lower = set(t.lower() for t in queried_types if t)
         
         # Enable batch mode to suppress cache messages
         self._batch_mode = True
         
-        # Build expression matrix: rows = lines, cols = neuron types
-        # Value = 1 if line labels that type, 0 otherwise
-        all_types = set()
-        line_type_sets = {}
-        line_type_scores = {}  # For weighted MI
+        # Build expression matrix: rows = lines, cols = neuron types with dataset prefix
+        # Value = max score if line labels that type, 0 otherwise
+        # Format: {dataset_abbrev}_{type} e.g., HEMI_DM4, MCNS_dm4
+        all_prefixed_types = set()  # Case-sensitive types with dataset prefix
+        line_type_sets = {}  # Lowercase types per line (for MI calculation)
+        line_prefixed_type_scores = {}  # Prefixed type -> score per line
+        line_neurons_dict = {}  # Store neurons DataFrame for each line
+        
+        # For labeling_info: store (type, dataset) -> {line: score}
+        labeling_info_data = {}  # (type, dataset) -> {line: score}
         
         if HAS_TQDM and self.verbose:
             from tqdm import tqdm as tqdm_progress
@@ -1081,53 +1336,190 @@ class NeuronBridgeFinder:
             try:
                 neurons_df = self.line_to_neuron(line_name, match_type=match_type, top_n=top_n)
                 if not neurons_df.empty:
+                    # Store unfiltered data before applying any filters
+                    neurons_df_unfiltered = neurons_df.copy()
+                    
+                    # Apply min_score filter if specified (for visualization/analysis)
+                    if min_score > 0:
+                        neurons_df = neurons_df[neurons_df['score'] >= min_score]
+                    
+                    if neurons_df.empty:
+                        line_type_sets[line_name] = set()
+                        line_prefixed_type_scores[line_name] = {}
+                        line_neurons_dict[line_name] = pd.DataFrame()
+                        # Still store unfiltered data for saving
+                        line_neurons_dict[line_name] = neurons_df_unfiltered.copy()
+                        line_neurons_dict[line_name]['_filtered'] = False  # Mark all as not filtered (below threshold)
+                        continue
+                    
+                    # Get lowercase types for MI calculation
                     types = neurons_df['type'].fillna('Unknown').unique()
                     types_lower = set(t.lower() for t in types)
                     line_type_sets[line_name] = types_lower
-                    all_types.update(types_lower)
                     
-                    # Store scores per type for weighted MI
-                    type_scores = neurons_df.groupby(neurons_df['type'].fillna('Unknown').str.lower())['score'].max().to_dict()
-                    line_type_scores[line_name] = type_scores
+                    # Build prefixed type scores: {ABBREV}_{type} with original case
+                    # Use FILTERED data for expression matrix (respects min_score)
+                    line_prefixed_scores = {}
+                    for dataset in neurons_df['dataset'].dropna().unique():
+                        ds_df = neurons_df[neurons_df['dataset'] == dataset]
+                        # Get dataset abbreviation
+                        ds_abbrev = DATASET_ABBREVIATIONS.get(dataset, dataset[:4].upper())
+                        
+                        # Group by original case type and get max score
+                        for type_name, type_df in ds_df.groupby(ds_df['type'].fillna('Unknown')):
+                            max_score = type_df['score'].max()
+                            prefixed_type = f"{ds_abbrev}_{type_name}"
+                            
+                            # Store for expression matrix
+                            all_prefixed_types.add(prefixed_type)
+                            line_prefixed_scores[prefixed_type] = max(
+                                line_prefixed_scores.get(prefixed_type, 0.0), 
+                                max_score
+                            )
+                    
+                    # Build labeling_info from UNFILTERED data (to match individual line files)
+                    # This ensures labeling_info contains all neurons, not just those above min_score
+                    for dataset in neurons_df_unfiltered['dataset'].dropna().unique():
+                        ds_df = neurons_df_unfiltered[neurons_df_unfiltered['dataset'] == dataset]
+                        ds_abbrev = DATASET_ABBREVIATIONS.get(dataset, dataset[:4].upper())
+                        
+                        for type_name, type_df in ds_df.groupby(ds_df['type'].fillna('Unknown')):
+                            max_score = type_df['score'].max()
+                            
+                            # Store for labeling_info (unfiltered)
+                            key = (type_name, dataset)
+                            if key not in labeling_info_data:
+                                labeling_info_data[key] = {}
+                            labeling_info_data[key][line_name] = max(
+                                labeling_info_data[key].get(line_name, 0.0),
+                                max_score
+                            )
+                    
+                    line_prefixed_type_scores[line_name] = line_prefixed_scores
+                    
+                    # Store unfiltered neurons DataFrame with filter marker column
+                    # This preserves all data for saving while visualization uses filtered data
+                    neurons_to_store = neurons_df_unfiltered.copy()
+                    neurons_to_store['_passes_min_score'] = neurons_to_store['score'] >= (min_score if min_score > 0 else 0)
+                    line_neurons_dict[line_name] = neurons_to_store
                 else:
                     line_type_sets[line_name] = set()
-                    line_type_scores[line_name] = {}
+                    line_prefixed_type_scores[line_name] = {}
+                    line_neurons_dict[line_name] = pd.DataFrame()
             except Exception as e:
                 line_type_sets[line_name] = set()
-                line_type_scores[line_name] = {}
+                line_prefixed_type_scores[line_name] = {}
+                line_neurons_dict[line_name] = pd.DataFrame()
         
         # Disable batch mode after fetching
         self._batch_mode = False
         
-        if not all_types:
+        if not all_prefixed_types:
             self._vprint("   ⚠️ No types found for any line")
-            return pd.DataFrame(), pd.DataFrame()
+            return pd.DataFrame(), pd.DataFrame(), line_neurons_dict, pd.DataFrame()
         
-        # Create binary expression matrix
-        all_types_list = sorted(all_types)
-        expression_matrix = np.zeros((len(lines), len(all_types_list)))
+        # Apply min_type_avg_score filter: remove types with low average scores
+        if min_type_avg_score > 0:
+            # Collect type average scores
+            prefixed_types_to_keep = set()
+            for prefixed_type in all_prefixed_types:
+                scores = [
+                    line_prefixed_type_scores.get(line, {}).get(prefixed_type, 0.0) 
+                    for line in lines
+                ]
+                nonzero_scores = [s for s in scores if s > 0]
+                if nonzero_scores:
+                    avg_score = sum(nonzero_scores) / len(nonzero_scores)
+                    if avg_score >= min_type_avg_score:
+                        prefixed_types_to_keep.add(prefixed_type)
+            
+            filtered_count = len(all_prefixed_types) - len(prefixed_types_to_keep)
+            if filtered_count > 0:
+                self._vprint(f"   📊 Filtered {filtered_count} types with avg score < {min_type_avg_score:,.0f}")
+                self._vprint(f"   📊 Keeping {len(prefixed_types_to_keep)} high-confidence types")
+                all_prefixed_types = prefixed_types_to_keep
+                
+                # Update line_type_sets to only include kept types
+                for line in lines:
+                    kept_types_lower = set()
+                    for prefixed_type in line_prefixed_type_scores.get(line, {}):
+                        if prefixed_type in prefixed_types_to_keep:
+                            # Extract type name from prefixed type (e.g., "MCNS_dm4" -> "dm4")
+                            type_name = '_'.join(prefixed_type.split('_')[1:])
+                            kept_types_lower.add(type_name.lower())
+                    line_type_sets[line] = kept_types_lower
+                
+                # Also filter labeling_info_data
+                labeling_info_data = {
+                    key: scores for key, scores in labeling_info_data.items()
+                    if any(f"{DATASET_ABBREVIATIONS.get(key[1], key[1][:4].upper())}_{key[0]}" in prefixed_types_to_keep
+                           for _ in [1])
+                }
+        
+        if not all_prefixed_types:
+            self._vprint("   ⚠️ No types remaining after score filter")
+            return pd.DataFrame(), pd.DataFrame(), line_neurons_dict, pd.DataFrame()
+        
+        # Create score-based expression matrix with prefixed types (case-sensitive)
+        # Value = max match score if line labels that type, 0 otherwise
+        all_prefixed_types_list = sorted(all_prefixed_types)
+        expression_matrix = np.zeros((len(lines), len(all_prefixed_types_list)))
         
         for i, line in enumerate(lines):
-            for j, ntype in enumerate(all_types_list):
-                if ntype in line_type_sets.get(line, set()):
-                    expression_matrix[i, j] = 1
+            for j, prefixed_type in enumerate(all_prefixed_types_list):
+                score = line_prefixed_type_scores.get(line, {}).get(prefixed_type, 0.0)
+                expression_matrix[i, j] = score
         
         expression_df = pd.DataFrame(
             expression_matrix,
             index=lines,
-            columns=all_types_list
+            columns=all_prefixed_types_list
         )
         
-        # Calculate MI for each line
+        # Create labeling_info DataFrame
+        # Columns: type, dataset, {line1_score}, {line2_score}, ...
+        labeling_rows = []
+        for (type_name, dataset), line_scores in labeling_info_data.items():
+            row = {'type': type_name, 'dataset': dataset}
+            for line in lines:
+                row[line] = line_scores.get(line, 0.0)
+            labeling_rows.append(row)
+        
+        labeling_info = pd.DataFrame(labeling_rows)
+        if not labeling_info.empty:
+            # Sort by max score across lines (descending)
+            score_cols = [col for col in labeling_info.columns if col not in ['type', 'dataset']]
+            labeling_info['_max_score'] = labeling_info[score_cols].max(axis=1)
+            labeling_info['_min_score'] = labeling_info[score_cols].min(axis=1)
+            labeling_info['_nonzero'] = (labeling_info[score_cols] > 0).sum(axis=1)
+            # Sort: all-lines-labeled first (by min_score), then partial (by nonzero, max_score)
+            labeling_info['_is_complete'] = labeling_info['_nonzero'] == len(score_cols)
+            labeling_info = labeling_info.sort_values(
+                ['_is_complete', '_min_score', '_nonzero', '_max_score'],
+                ascending=[False, False, False, False]
+            )
+            labeling_info = labeling_info.drop(columns=['_max_score', '_min_score', '_nonzero', '_is_complete'])
+        
+        # Calculate MI for each line using lowercase types (original logic)
         # MI(L; T) = H(T) - H(T|L)
-        # where H(T) = -Σ p(t) log2(p(t))
-        # and H(T|L=l) = -Σ p(t|l) log2(p(t|l))
+        all_types_lower = set()
+        for types_set in line_type_sets.values():
+            all_types_lower.update(types_set)
+        all_types_lower_list = sorted(all_types_lower)
         
         n_lines = len(lines)
-        n_types = len(all_types_list)
+        n_types = len(all_types_lower_list)
+        
+        # Build binary matrix for MI calculation (based on lowercase types)
+        mi_binary_matrix = np.zeros((len(lines), n_types))
+        for i, line in enumerate(lines):
+            types_in_line = line_type_sets.get(line, set())
+            for j, ntype in enumerate(all_types_lower_list):
+                if ntype in types_in_line:
+                    mi_binary_matrix[i, j] = 1.0
         
         # Marginal probability of each type (across all lines)
-        type_counts = expression_matrix.sum(axis=0)  # How many lines label each type
+        type_counts = mi_binary_matrix.sum(axis=0)  # How many lines label each type
         p_type = type_counts / n_lines  # P(type)
         p_type = np.clip(p_type, 1e-10, 1)  # Avoid log(0)
         
@@ -1153,7 +1545,7 @@ class NeuronBridgeFinder:
             # Conditional entropy H(T|L=l)
             # P(t|L=l) = 1/n_labeled if line labels type t, 0 otherwise
             p_t_given_l = np.zeros(n_types)
-            for j, ntype in enumerate(all_types_list):
+            for j, ntype in enumerate(all_types_lower_list):
                 if ntype in types_labeled:
                     p_t_given_l[j] = 1.0 / n_labeled
             
@@ -1184,10 +1576,11 @@ class NeuronBridgeFinder:
         mi_df = pd.DataFrame(mi_results)
         
         self._vprint(f"   ✓ MI calculated for {len(mi_df)} lines")
-        self._vprint(f"   Total types in analysis: {n_types}")
+        self._vprint(f"   Total prefixed types: {len(all_prefixed_types_list)}")
+        self._vprint(f"   Total unique types (lowercase): {n_types}")
         self._vprint(f"   Type entropy H(T): {H_T:.3f} bits")
         
-        return mi_df, expression_df
+        return mi_df, expression_df, line_neurons_dict, labeling_info
     
     def visualize_expression_matrix(
         self,
@@ -1195,7 +1588,8 @@ class NeuronBridgeFinder:
         output_path: str,
         queried_types: Optional[List[str]] = None,
         title: str = "Line × Type Expression Matrix",
-        color_scale: str = 'green'
+        color_scale: str = 'green',
+        top_n_types: int = 100
     ) -> str:
         """
         Visualize the expression matrix (lines × types) as a heatmap.
@@ -1212,6 +1606,9 @@ class NeuronBridgeFinder:
             Title for the heatmap.
         color_scale : str
             Color scale preset.
+        top_n_types : int
+            Maximum number of types to display (default: 100).
+            Types are sorted by total expression score across all lines.
             
         Returns
         -------
@@ -1229,13 +1626,29 @@ class NeuronBridgeFinder:
         
         os.makedirs(output_path, exist_ok=True)
         
-        # Filter to show top 100 most commonly labeled types
-        # Calculate how many lines label each type and keep the top 100
-        type_counts = expression_df.sum(axis=0).sort_values(ascending=False)
-        top_100_types = type_counts.head(100).index.tolist()
-        expression_filtered = expression_df[top_100_types]
+        # Transpose first to get types as rows
+        # Preserve input order (already sorted by co-labeling quality)
+        expression_transposed = expression_df.T
         
-        self._vprint(f"   📊 Showing top 100 types (out of {len(expression_df.columns)} total)")
+        # Limit to top N types by total expression score
+        total_types = len(expression_transposed)
+        if total_types > top_n_types:
+            # Filter to top N by total score, but preserve quality-based sorting
+            type_totals = expression_transposed.sum(axis=1)
+            top_types = set(type_totals.nlargest(top_n_types).index)
+            # Keep only top types but maintain original order (sorted by quality)
+            expression_transposed = expression_transposed.loc[
+                [idx for idx in expression_transposed.index if idx in top_types]
+            ]
+            # Re-sort by quality (min_score descending within complete/incomplete groups)
+            expression_transposed = self._sort_expression_matrix(
+                expression_transposed.T, as_types_rows=True
+            )
+            self._vprint(f"   📊 Showing top {top_n_types} types (of {total_types} total, filtered by expression score)")
+            # Add filter info to title
+            title = f"{title} [Top {top_n_types} types]"
+        else:
+            self._vprint(f"   📊 Showing all {total_types} types")
         
         # Resolve color scale preset to Plotly format
         color_scales = {
@@ -1250,18 +1663,1084 @@ class NeuronBridgeFinder:
         # Create heatmap file path
         filename = os.path.join(output_path, 'expression_matrix.html')
         
-        # Create heatmap using VisConnMatInteractive
+        # Calculate initial dimensions based on matrix size
+        # For expression matrices: width ~8px per column, height ~20px per row
+        # Minimum: 800x800, Maximum: 2400x4000
+        n_rows = len(expression_transposed)
+        n_cols = len(expression_transposed.columns)
+        init_width = max(800, min(2400, n_cols * 80 + 200))  # 80px per column + margin
+        init_height = max(800, min(4000, n_rows * 20 + 200))  # 20px per row + margin
+        
+        # Create heatmap using VisConnMatInteractive (transposed: types × lines)
         VisConnMatInteractive(
-            expression_filtered,
+            expression_transposed,
             filename=filename,
-            title=title,
+            title=title.replace("Lines × Types", "Types × Lines"),
             color_scale=resolved_color_scale,
             showfig=False,
-            verbose=self.verbose
+            verbose=self.verbose,
+            init_width=init_width,
+            init_height=init_height
         )
         
         self._vprint(f"   📊 Created expression matrix heatmap: {filename}")
         return filename
+
+    def visualize_expression_matrix_merged(
+        self,
+        expression_df: pd.DataFrame,
+        output_path: str,
+        queried_types: Optional[List[str]] = None,
+        title: str = "Line × Type Expression Matrix (Merged)",
+        color_scale: str = 'green',
+        top_n_types: int = 100,
+        aggregation: str = 'max'
+    ) -> str:
+        """
+        Visualize the expression matrix with same neuron types merged across datasets.
+        
+        Types from different datasets (e.g., 'MCNS_aMe12', 'FAFB_aMe12', 'HEMI_aMe12')
+        are merged into a single row (e.g., 'aMe12') using the specified aggregation.
+        
+        Parameters
+        ----------
+        expression_df : pd.DataFrame
+            Expression matrix from _calculate_mutual_information (Lines × Types format).
+            Column names should be prefixed with dataset abbreviation (e.g., 'MCNS_aMe12').
+        output_path : str
+            Directory to save the heatmap HTML file.
+        queried_types : list of str, optional
+            Queried types to highlight in the matrix.
+        title : str
+            Title for the heatmap.
+        color_scale : str
+            Color scale preset.
+        top_n_types : int
+            Maximum number of types to display (default: 100).
+        aggregation : str
+            How to aggregate scores across datasets: 'max' (default), 'mean', 'sum'.
+            
+        Returns
+        -------
+        str
+            Path to the created heatmap file.
+        """
+        try:
+            from vispath_pkg import VisConnMatInteractive
+        except ImportError:
+            try:
+                from .statvis import VisConnMatInteractive
+            except ImportError:
+                self._vprint("   ⚠️ Could not import VisConnMatInteractive from vispath_pkg or statvis")
+                return ""
+        
+        os.makedirs(output_path, exist_ok=True)
+        
+        # Step 1: Extract base type names from prefixed columns
+        # e.g., 'MCNS_aMe12' -> 'aMe12', 'FAFB_Dm4' -> 'Dm4'
+        def extract_base_type(prefixed_type: str) -> str:
+            """Extract base type name from prefixed type (e.g., 'MCNS_aMe12' -> 'aMe12')."""
+            parts = prefixed_type.split('_', 1)
+            if len(parts) > 1:
+                return parts[1]  # Return everything after first underscore
+            return prefixed_type  # Return as-is if no underscore
+        
+        # Build mapping: base_type -> list of prefixed columns
+        base_type_to_columns = {}
+        for col in expression_df.columns:
+            base_type = extract_base_type(col)
+            if base_type not in base_type_to_columns:
+                base_type_to_columns[base_type] = []
+            base_type_to_columns[base_type].append(col)
+        
+        # Step 2: Merge columns by base type using specified aggregation
+        merged_data = {}
+        for base_type, columns in base_type_to_columns.items():
+            subset = expression_df[columns]
+            if aggregation == 'max':
+                merged_data[base_type] = subset.max(axis=1)
+            elif aggregation == 'mean':
+                # Mean of non-zero values only
+                merged_data[base_type] = subset.apply(
+                    lambda row: row[row > 0].mean() if (row > 0).any() else 0.0, axis=1
+                )
+            elif aggregation == 'sum':
+                merged_data[base_type] = subset.sum(axis=1)
+            else:
+                merged_data[base_type] = subset.max(axis=1)  # Default to max
+        
+        merged_df = pd.DataFrame(merged_data)
+        
+        # Log merge statistics
+        original_types = len(expression_df.columns)
+        merged_types = len(merged_df.columns)
+        self._vprint(f"   📊 Merged {original_types} prefixed types → {merged_types} base types (aggregation: {aggregation})")
+        
+        # Step 3: Transpose to get types as rows
+        expression_transposed = merged_df.T
+        
+        # Step 4: Sort by co-labeling quality (same logic as original)
+        n_lines = len(expression_transposed.columns)
+        nonzero_count = (expression_transposed > 0).sum(axis=1)
+        total_score = expression_transposed.sum(axis=1)
+        min_score_col = expression_transposed.min(axis=1)
+        
+        is_complete = (nonzero_count == n_lines).astype(int)
+        sort_df = pd.DataFrame({
+            'is_complete': -is_complete,
+            'min_score': -min_score_col,
+            'nonzero_count': -nonzero_count,
+            'total_score': -total_score
+        }, index=expression_transposed.index)
+        sorted_index = sort_df.sort_values(['is_complete', 'min_score', 'nonzero_count', 'total_score']).index
+        expression_transposed = expression_transposed.loc[sorted_index]
+        
+        # Step 5: Limit to top N types
+        total_types = len(expression_transposed)
+        if total_types > top_n_types:
+            type_totals = expression_transposed.sum(axis=1)
+            top_types = set(type_totals.nlargest(top_n_types).index)
+            expression_transposed = expression_transposed.loc[
+                [idx for idx in expression_transposed.index if idx in top_types]
+            ]
+            # Re-sort after filtering
+            n_lines = len(expression_transposed.columns)
+            nonzero_count = (expression_transposed > 0).sum(axis=1)
+            total_score = expression_transposed.sum(axis=1)
+            min_score_col = expression_transposed.min(axis=1)
+            is_complete = (nonzero_count == n_lines).astype(int)
+            sort_df = pd.DataFrame({
+                'is_complete': -is_complete,
+                'min_score': -min_score_col,
+                'nonzero_count': -nonzero_count,
+                'total_score': -total_score
+            }, index=expression_transposed.index)
+            sorted_index = sort_df.sort_values(['is_complete', 'min_score', 'nonzero_count', 'total_score']).index
+            expression_transposed = expression_transposed.loc[sorted_index]
+            
+            self._vprint(f"   📊 Showing top {top_n_types} merged types (of {total_types} total)")
+            title = f"{title} [Top {top_n_types} types]"
+        else:
+            self._vprint(f"   📊 Showing all {total_types} merged types")
+        
+        # Step 6: Resolve color scale
+        color_scales = {
+            'green': [[0, 'rgb(255,255,255)'], [1, 'rgb(14,83,13)']],
+            'purple': [[0, 'rgb(255,255,255)'], [1, 'rgb(104,55,164)']],
+            'orange': [[0, 'rgb(255,255,255)'], [1, 'rgb(204,102,0)']],
+            'blue': [[0, 'rgb(255,255,255)'], [1, 'rgb(31,119,180)']],
+            'red': [[0, 'rgb(255,255,255)'], [1, 'rgb(214,39,40)']],
+        }
+        resolved_color_scale = color_scales.get(color_scale, color_scales['green'])
+        
+        # Step 7: Create heatmap
+        filename = os.path.join(output_path, 'expression_matrix_merged.html')
+        
+        n_rows = len(expression_transposed)
+        n_cols = len(expression_transposed.columns)
+        init_width = max(800, min(2400, n_cols * 80 + 200))
+        init_height = max(800, min(4000, n_rows * 20 + 200))
+        
+        VisConnMatInteractive(
+            expression_transposed,
+            filename=filename,
+            title=title.replace("Lines × Types", "Types × Lines"),
+            color_scale=resolved_color_scale,
+            showfig=False,
+            verbose=self.verbose,
+            init_width=init_width,
+            init_height=init_height
+        )
+        
+        # Also save the merged CSV
+        csv_filename = os.path.join(output_path, 'expression_matrix_merged.csv')
+        expression_transposed.to_csv(csv_filename)
+        self._vprint(f"   💾 Saved merged expression matrix CSV: {csv_filename}")
+        
+        self._vprint(f"   📊 Created merged expression matrix heatmap: {filename}")
+        return filename
+
+    def visualize_labeling_distribution(
+        self,
+        data: pd.DataFrame,
+        output_path: str,
+        score_column: str = 'score',
+        label_column: str = 'type',
+        title: str = "Labeling Distribution",
+        color: str = '#1f77b4',
+        filename: str = 'labeling_distribution.html',
+        show_threshold: Optional[float] = None,
+        group_by: Optional[str] = None
+    ) -> str:
+        """
+        Visualize labeling distribution as a mountain-shaped histogram.
+        
+        The plot shows scores with highest values in the center, descending
+        symmetrically to both sides (like a mountain/pyramid shape).
+        
+        Parameters
+        ----------
+        data : pd.DataFrame
+            DataFrame with score and label columns.
+        output_path : str
+            Directory to save the HTML file.
+        score_column : str
+            Column name for scores. Default: 'score'
+        label_column : str
+            Column name for labels (types/neurons). Default: 'type'
+        title : str
+            Plot title. Default: "Labeling Distribution"
+        color : str
+            Bar color. Default: '#1f77b4' (Category10 blue)
+        filename : str
+            Output filename. Default: 'labeling_distribution.html'
+        show_threshold : float, optional
+            If provided, draw a horizontal threshold line.
+        group_by : str, optional
+            If provided, group data by this column and create subplots.
+            
+        Returns
+        -------
+        str
+            Path to the created HTML file.
+        """
+        import plotly.graph_objects as go
+        from plotly.subplots import make_subplots
+        
+        os.makedirs(output_path, exist_ok=True)
+        
+        if data.empty or score_column not in data.columns:
+            self._vprint(f"   ⚠️ No data for labeling distribution")
+            return ""
+        
+        # Category10 palette (same as bokeh.palettes.Category10)
+        CATEGORY10 = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd',
+                      '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf']
+        
+        def create_mountain_order(scores, labels):
+            """Rearrange so highest score is in middle, descending to both sides."""
+            sorted_pairs = sorted(zip(scores, labels), key=lambda x: x[0], reverse=True)
+            n = len(sorted_pairs)
+            if n == 0:
+                return [], []
+            
+            result_scores = [0] * n
+            result_labels = [''] * n
+            
+            left = n // 2 - 1 if n % 2 == 0 else n // 2
+            right = n // 2 if n % 2 == 0 else n // 2
+            
+            for i, (score, label) in enumerate(sorted_pairs):
+                if i == 0:
+                    center = n // 2
+                    result_scores[center] = score
+                    result_labels[center] = label
+                elif i % 2 == 1:
+                    result_scores[left] = score
+                    result_labels[left] = label
+                    left -= 1
+                else:
+                    result_scores[right] = score
+                    result_labels[right] = label
+                    right += 1
+            
+            return result_scores, result_labels
+        
+        full_path = os.path.join(output_path, filename)
+        
+        if group_by and group_by in data.columns:
+            groups = data[group_by].dropna().unique()
+            n_groups = len(groups)
+            
+            if n_groups == 0:
+                return ""
+            
+            # Use 2 columns layout
+            n_cols = 2
+            n_rows = (n_groups + n_cols - 1) // n_cols
+            
+            fig = make_subplots(
+                rows=n_rows, cols=n_cols,
+                subplot_titles=[f"{g}" for g in groups],
+                vertical_spacing=0.1,
+                horizontal_spacing=0.08
+            )
+            
+            for idx, group in enumerate(groups):
+                row = idx // n_cols + 1
+                col = idx % n_cols + 1
+                group_data = data[data[group_by] == group].copy()
+                
+                if label_column in group_data.columns:
+                    agg_data = group_data.groupby(label_column)[score_column].max().reset_index()
+                else:
+                    agg_data = group_data[[score_column]].copy()
+                    agg_data[label_column] = range(len(agg_data))
+                
+                scores = agg_data[score_column].tolist()
+                labels = agg_data[label_column].tolist()
+                
+                if len(scores) > 0:
+                    mountain_scores, mountain_labels = create_mountain_order(scores, labels)
+                    
+                    fig.add_trace(
+                        go.Bar(
+                            x=list(range(len(mountain_scores))),
+                            y=mountain_scores,
+                            marker_color=CATEGORY10[idx % len(CATEGORY10)],
+                            name=str(group),
+                            hovertemplate=f'<b>%{{customdata}}</b><br>Score: %{{y:,.0f}}<extra>{group}</extra>',
+                            customdata=mountain_labels,
+                            width=1.0  # No gap between bars
+                        ),
+                        row=row, col=col
+                    )
+                    
+                    if show_threshold:
+                        fig.add_hline(
+                            y=show_threshold, 
+                            line_dash="dash", 
+                            line_color="red",
+                            row=row, col=col
+                        )
+                    
+                    # Clean axis style
+                    fig.update_xaxes(
+                        showticklabels=False, 
+                        showgrid=False, 
+                        zeroline=False,
+                        showline=False,
+                        row=row, col=col
+                    )
+                    fig.update_yaxes(
+                        showgrid=False, 
+                        zeroline=False,
+                        showline=False,
+                        row=row, col=col
+                    )
+            
+            fig.update_layout(
+                title=dict(text=title, x=0.5),
+                height=250 * n_rows,
+                showlegend=False,
+                plot_bgcolor='rgba(0,0,0,0)',
+                paper_bgcolor='rgba(0,0,0,0)',
+                bargap=0
+            )
+        else:
+            if label_column in data.columns:
+                agg_data = data.groupby(label_column)[score_column].max().reset_index()
+            else:
+                agg_data = data[[score_column]].copy()
+                agg_data[label_column] = range(len(agg_data))
+            
+            scores = agg_data[score_column].tolist()
+            labels = agg_data[label_column].tolist()
+            
+            if len(scores) == 0:
+                return ""
+            
+            mountain_scores, mountain_labels = create_mountain_order(scores, labels)
+            
+            fig = go.Figure()
+            
+            fig.add_trace(go.Bar(
+                x=list(range(len(mountain_scores))),
+                y=mountain_scores,
+                marker_color=color,
+                hovertemplate='<b>%{customdata}</b><br>Score: %{y:,.0f}<extra></extra>',
+                customdata=mountain_labels,
+                width=1.0
+            ))
+            
+            if show_threshold:
+                fig.add_hline(
+                    y=show_threshold, 
+                    line_dash="dash", 
+                    line_color="red",
+                    annotation_text=f"Threshold: {show_threshold:,.0f}"
+                )
+            
+            fig.update_layout(
+                title=dict(text=title, x=0.5),
+                xaxis_title="Neurons/Types (sorted by score, highest in center)",
+                yaxis_title="Score",
+                xaxis=dict(showticklabels=False, showgrid=False, zeroline=False, showline=False),
+                yaxis=dict(showgrid=False, zeroline=False, showline=False),
+                height=400,
+                plot_bgcolor='rgba(0,0,0,0)',
+                paper_bgcolor='rgba(0,0,0,0)',
+                bargap=0
+            )
+        
+        fig.write_html(full_path)
+        self._vprint(f"   📊 Created labeling distribution: {full_path}")
+        return full_path
+
+    def visualize_colabeling_distribution(
+        self,
+        line_neurons_dict: Dict[str, pd.DataFrame],
+        output_path: str,
+        min_score: float = 0.0,
+        title: str = "Co-Labeling Score Distribution"
+    ) -> Tuple[str, str]:
+        """
+        Visualize labeling distribution for multiple lines (co-labeling analysis).
+        
+        Creates two multi-panel plots:
+        1. By neuron: individual neuron scores for each line
+        2. By type: aggregated type scores for each line
+        
+        Parameters
+        ----------
+        line_neurons_dict : dict
+            Dictionary mapping line names to neurons DataFrames.
+        output_path : str
+            Directory to save the HTML files.
+        min_score : float
+            Minimum score threshold to highlight. Default: 0.0
+        title : str
+            Plot title.
+            
+        Returns
+        -------
+        tuple of str
+            Paths to the created HTML files (by_neuron, by_type).
+        """
+        import plotly.graph_objects as go
+        from plotly.subplots import make_subplots
+        
+        os.makedirs(output_path, exist_ok=True)
+        
+        if not line_neurons_dict:
+            return "", ""
+        
+        # Filter out empty DataFrames - keep all data for saving
+        valid_lines_all = {k: v for k, v in line_neurons_dict.items() if not v.empty}
+        if not valid_lines_all:
+            return "", ""
+        
+        # Create filtered version for visualization (apply min_score filter if score column exists)
+        valid_lines = {}
+        for k, df in valid_lines_all.items():
+            if min_score > 0 and 'score' in df.columns:
+                # Use _passes_min_score column if available (from _calculate_mutual_information)
+                if '_passes_min_score' in df.columns:
+                    filtered_df = df[df['_passes_min_score']].copy()
+                else:
+                    filtered_df = df[df['score'] >= min_score].copy()
+                if not filtered_df.empty:
+                    valid_lines[k] = filtered_df
+            else:
+                valid_lines[k] = df
+        
+        # If all data was filtered out, use all data for visualization
+        if not valid_lines:
+            valid_lines = valid_lines_all
+        
+        lines = list(valid_lines.keys())
+        n_lines = len(lines)
+        
+        # Category10 palette (same as bokeh.palettes.Category10)
+        CATEGORY10 = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd',
+                      '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf']
+        
+        def create_mountain_order(scores, labels):
+            """Rearrange so highest score is in middle, descending to both sides."""
+            sorted_pairs = sorted(zip(scores, labels), key=lambda x: x[0], reverse=True)
+            n = len(sorted_pairs)
+            if n == 0:
+                return [], []
+            
+            result_scores = [0] * n
+            result_labels = [''] * n
+            
+            left = n // 2 - 1 if n % 2 == 0 else n // 2
+            right = n // 2 if n % 2 == 0 else n // 2
+            
+            for i, (score, label) in enumerate(sorted_pairs):
+                if i == 0:
+                    center = n // 2
+                    result_scores[center] = score
+                    result_labels[center] = label
+                elif i % 2 == 1:
+                    result_scores[left] = score
+                    result_labels[left] = label
+                    left -= 1
+                else:
+                    result_scores[right] = score
+                    result_labels[right] = label
+                    right += 1
+            
+            return result_scores, result_labels
+        
+        def create_distribution_plot(by_type: bool, filename: str) -> str:
+            """Create distribution plot (by neuron or by type).
+            
+            Each line gets its own line-specific mountain shape distribution.
+            
+            Key features:
+            - c_line: count of items above min_score threshold for each line
+            - If c_line < 100, expand to top-100 items (get t_line = score at expansion boundary)
+            - X-axis limited by max(c_line) across all INDIVIDUAL lines (not combined)
+            - Y-axis: 0.9 * t_line to max_score for each subplot
+            - Peak is ALWAYS centered by padding x-axis
+            """
+            # Use 2 columns layout, with combined as last panel
+            n_panels = n_lines + 1  # lines + combined
+            n_cols = 2
+            n_rows = (n_panels + n_cols - 1) // n_cols
+            
+            subplot_titles = [f"{line}" for line in lines]
+            subplot_titles.append("Combined (avg)" if by_type else "All Neurons")
+            
+            fig = make_subplots(
+                rows=n_rows, cols=n_cols,
+                subplot_titles=subplot_titles,
+                vertical_spacing=0.08,
+                horizontal_spacing=0.06
+            )
+            
+            # Expansion target when items above threshold < 100
+            EXPANSION_TARGET = 100
+            
+            # Pre-calculate all data and per-line statistics
+            line_all_data = {}  # Store all data per line (sorted by score desc)
+            line_max_scores = {}  # Store max score per line
+            line_c_values = {}  # c_line: count of items above threshold
+            line_t_values = {}  # t_line: threshold for y-axis (score at expansion boundary)
+            line_display_counts = {}  # Number of items to display per line
+            
+            for line, df in valid_lines.items():
+                # Get corresponding unfiltered data from valid_lines_all
+                df_all = valid_lines_all.get(line, df)
+                
+                if by_type and 'type' in df_all.columns:
+                    type_scores = df_all.groupby('type')['score'].max()
+                    sorted_scores = type_scores.sort_values(ascending=False)
+                    line_all_data[line] = sorted_scores
+                    line_max_scores[line] = sorted_scores.max() if len(sorted_scores) > 0 else 50000
+                    
+                    # Calculate c_line (count above threshold)
+                    c_line = (sorted_scores >= min_score).sum() if min_score > 0 else len(sorted_scores)
+                    line_c_values[line] = c_line
+                    
+                    # Determine display count and t_line
+                    if c_line < EXPANSION_TARGET:
+                        # Expand to top-100 (or all if < 100 items available)
+                        display_count = min(EXPANSION_TARGET, len(sorted_scores))
+                        # t_line is the score at the expansion boundary
+                        if display_count > 0:
+                            t_line = sorted_scores.iloc[display_count - 1] if display_count <= len(sorted_scores) else sorted_scores.iloc[-1]
+                        else:
+                            t_line = min_score if min_score > 0 else 0
+                    else:
+                        # Use only items above threshold
+                        display_count = c_line
+                        t_line = min_score if min_score > 0 else 0
+                    
+                    line_display_counts[line] = display_count
+                    line_t_values[line] = t_line
+                else:
+                    sorted_df = df_all.sort_values('score', ascending=False)
+                    line_all_data[line] = sorted_df
+                    line_max_scores[line] = sorted_df['score'].max() if len(sorted_df) > 0 else 50000
+                    
+                    # Calculate c_line (count above threshold)
+                    c_line = (sorted_df['score'] >= min_score).sum() if min_score > 0 else len(sorted_df)
+                    line_c_values[line] = c_line
+                    
+                    # Determine display count and t_line
+                    if c_line < EXPANSION_TARGET:
+                        display_count = min(EXPANSION_TARGET, len(sorted_df))
+                        if display_count > 0:
+                            t_line = sorted_df['score'].iloc[display_count - 1] if display_count <= len(sorted_df) else sorted_df['score'].iloc[-1]
+                        else:
+                            t_line = min_score if min_score > 0 else 0
+                    else:
+                        display_count = c_line
+                        t_line = min_score if min_score > 0 else 0
+                    
+                    line_display_counts[line] = display_count
+                    line_t_values[line] = t_line
+            
+            # X-axis range is limited by max(c_line) across individual lines
+            # This ensures the combined plot doesn't inflate the x-axis
+            max_c_line = max(line_c_values.values()) if line_c_values else EXPANSION_TARGET
+            # But we need at least the display count to show expanded items
+            max_display_count = max(line_display_counts.values()) if line_display_counts else EXPANSION_TARGET
+            global_x_range = max(max_c_line, max_display_count)
+            
+            # Plot each line with its OWN mountain shape
+            for idx, line in enumerate(lines):
+                row = idx // n_cols + 1
+                col = idx % n_cols + 1
+                
+                display_count = line_display_counts.get(line, EXPANSION_TARGET)
+                t_line = line_t_values.get(line, min_score)
+                
+                if by_type:
+                    # Get type scores for this line (sorted by score desc)
+                    type_scores = line_all_data.get(line, pd.Series(dtype=float))
+                    
+                    # Take display_count items
+                    top_types = type_scores.head(display_count)
+                    
+                    scores = top_types.values.tolist()
+                    type_names = top_types.index.tolist()
+                    
+                    hover_texts = []
+                    for type_name, score in zip(type_names, scores):
+                        if score >= min_score:
+                            hover_texts.append(f"{type_name}<br>Score: {score:,.0f}")
+                        else:
+                            hover_texts.append(f"{type_name}<br>Score: {score:,.0f}<br>(below threshold)")
+                    
+                    mountain_scores, _ = create_mountain_order(scores, type_names)
+                    _, mountain_hovers = create_mountain_order(scores, hover_texts)
+                else:
+                    # Get all neurons for this line (sorted by score desc)
+                    df_all = line_all_data.get(line, pd.DataFrame())
+                    
+                    # Take display_count items
+                    top_neurons = df_all.head(display_count)
+                    
+                    scores = top_neurons['score'].tolist()
+                    if 'bodyId' in top_neurons.columns:
+                        labels = top_neurons['bodyId'].astype(str).tolist()
+                    elif 'type' in top_neurons.columns:
+                        labels = top_neurons['type'].tolist()
+                    else:
+                        labels = [f"neuron_{i}" for i in range(len(scores))]
+                    
+                    hover_texts = []
+                    for _, row_data in top_neurons.iterrows():
+                        body_id = row_data.get('bodyId', 'Unknown')
+                        neuron_type = row_data.get('type', 'Unknown')
+                        dataset = row_data.get('dataset', 'Unknown')
+                        score = row_data.get('score', 0)
+                        suffix = "<br>(below threshold)" if score < min_score else ""
+                        hover_texts.append(f"bodyId: {body_id}<br>Type: {neuron_type}<br>Dataset: {dataset}{suffix}")
+                    
+                    mountain_scores, _ = create_mountain_order(scores, labels)
+                    _, mountain_hovers = create_mountain_order(scores, hover_texts)
+                
+                if len(mountain_scores) > 0:
+                    bar_color = CATEGORY10[idx % len(CATEGORY10)]
+                    
+                    # Center the peak by calculating offset
+                    actual_n_items = len(mountain_scores)
+                    offset = (global_x_range - actual_n_items) // 2
+                    x_positions = [i + offset for i in range(actual_n_items)]
+                    
+                    fig.add_trace(
+                        go.Bar(
+                            x=x_positions,
+                            y=mountain_scores,
+                            marker=dict(
+                                color=bar_color,
+                                line=dict(width=0)
+                            ),
+                            name=line,
+                            hovertemplate=f'<b>%{{customdata}}</b><extra>{line}</extra>',
+                            customdata=mountain_hovers,
+                            width=1.0
+                        ),
+                        row=row, col=col
+                    )
+                    
+                    if min_score > 0:
+                        fig.add_hline(
+                            y=min_score, 
+                            line_dash="dash", 
+                            line_color="red",
+                            row=row, col=col
+                        )
+                    
+                    # Y-axis: 0.9 * t_line to max_score * 1.1
+                    y_min_subplot = t_line * 0.9 if t_line > 0 else 0
+                    y_max_subplot = line_max_scores.get(line, 50000) * 1.1
+                    
+                    fig.update_xaxes(
+                        showticklabels=False, 
+                        showgrid=False, 
+                        zeroline=False,
+                        showline=False,
+                        range=[-0.5, global_x_range - 0.5],
+                        row=row, col=col
+                    )
+                    fig.update_yaxes(
+                        showgrid=False, 
+                        zeroline=False,
+                        showline=False,
+                        range=[y_min_subplot, y_max_subplot],
+                        row=row, col=col
+                    )
+            
+            # Combined plot
+            combined_idx = n_lines
+            combined_row = combined_idx // n_cols + 1
+            combined_col = combined_idx % n_cols + 1
+            
+            if by_type:
+                # Collect all types across all lines with their average scores
+                all_types_scores = {}  # type -> list of scores
+                for line, type_scores in line_all_data.items():
+                    if isinstance(type_scores, pd.Series):
+                        for type_name, score in type_scores.items():
+                            if type_name not in all_types_scores:
+                                all_types_scores[type_name] = []
+                            all_types_scores[type_name].append(score)
+                
+                # Calculate average score per type
+                type_avg_scores = {t: sum(s) / len(s) for t, s in all_types_scores.items()}
+                sorted_types = sorted(type_avg_scores.items(), key=lambda x: x[1], reverse=True)
+                
+                # Combined plot uses global_x_range (based on max(c_line))
+                combined_labels = [t[0] for t in sorted_types[:global_x_range]]
+                combined_scores = [t[1] for t in sorted_types[:global_x_range]]
+                combined_hovers = [f"{t}<br>Avg: {s:,.0f}" for t, s in sorted_types[:global_x_range]]
+                
+                mountain_scores, _ = create_mountain_order(combined_scores, combined_labels)
+                _, mountain_hovers = create_mountain_order(combined_scores, combined_hovers)
+            else:
+                # All neurons from all lines
+                combined_scores = []
+                combined_labels = []
+                combined_hovers = []
+                for line, df_all in line_all_data.items():
+                    if isinstance(df_all, pd.DataFrame):
+                        # Only take items up to display_count for this line
+                        display_count = line_display_counts.get(line, EXPANSION_TARGET)
+                        df_subset = df_all.head(display_count)
+                        combined_scores.extend(df_subset['score'].tolist())
+                        if 'bodyId' in df_subset.columns:
+                            combined_labels.extend(df_subset['bodyId'].astype(str).tolist())
+                        else:
+                            combined_labels.extend([f"{line}_{i}" for i in range(len(df_subset))])
+                        
+                        for _, row_data in df_subset.iterrows():
+                            body_id = row_data.get('bodyId', 'Unknown')
+                            neuron_type = row_data.get('type', 'Unknown')
+                            dataset = row_data.get('dataset', 'Unknown')
+                            combined_hovers.append(f"bodyId: {body_id}<br>Type: {neuron_type}<br>Dataset: {dataset}<br>Line: {line}")
+                
+                # Sort and take top items limited by global_x_range
+                if combined_scores:
+                    sorted_indices = sorted(range(len(combined_scores)), key=lambda i: combined_scores[i], reverse=True)
+                    combined_target = min(global_x_range * n_lines, len(combined_scores))
+                    combined_scores = [combined_scores[i] for i in sorted_indices[:combined_target]]
+                    combined_labels = [combined_labels[i] for i in sorted_indices[:combined_target]]
+                    combined_hovers = [combined_hovers[i] for i in sorted_indices[:combined_target]]
+                
+                mountain_scores, _ = create_mountain_order(combined_scores, combined_labels)
+                _, mountain_hovers = create_mountain_order(combined_scores, combined_hovers)
+            
+            if mountain_scores:
+                # Combined plot y-axis: use min_score * 0.9 as base
+                combined_max = max(mountain_scores) if mountain_scores else 50000
+                y_max_combined = combined_max * 1.1
+                y_min_combined = min_score * 0.9 if min_score > 0 else 0
+                
+                # Center the combined plot
+                actual_combined_items = len(mountain_scores)
+                # Combined plot x-range should match individual plots (global_x_range)
+                offset_combined = (global_x_range - actual_combined_items) // 2 if actual_combined_items < global_x_range else 0
+                x_positions_combined = [i + offset_combined for i in range(actual_combined_items)]
+                
+                fig.add_trace(
+                    go.Bar(
+                        x=x_positions_combined,
+                        y=mountain_scores,
+                        marker=dict(
+                            color='#17becf',
+                            line=dict(width=0)
+                        ),
+                        name='Combined',
+                        hovertemplate='<b>%{customdata}</b><br>Score: %{y:,.0f}<extra>Combined</extra>',
+                        customdata=mountain_hovers,
+                        width=1.0
+                    ),
+                    row=combined_row, col=combined_col
+                )
+                
+                if min_score > 0:
+                    fig.add_hline(
+                        y=min_score, 
+                        line_dash="dash", 
+                        line_color="red",
+                        annotation_text=f"Threshold: {min_score:,.0f}",
+                        row=combined_row, col=combined_col
+                    )
+                
+                # Combined plot x-range matches individual line plots
+                combined_x_max = max(global_x_range, actual_combined_items)
+                
+                fig.update_xaxes(
+                    showticklabels=False, 
+                    showgrid=False, 
+                    zeroline=False,
+                    showline=False,
+                    range=[-0.5, combined_x_max - 0.5],
+                    row=combined_row, col=combined_col
+                )
+                fig.update_yaxes(
+                    showgrid=False, 
+                    zeroline=False,
+                    showline=False,
+                    range=[y_min_combined, y_max_combined],
+                    row=combined_row, col=combined_col
+                )
+            
+            suffix = "by Type" if by_type else "by Neuron"
+            fig.update_layout(
+                title=dict(text=f"{title} ({suffix})", x=0.5),
+                height=250 * n_rows,
+                showlegend=False,
+                plot_bgcolor='rgba(0,0,0,0)',
+                paper_bgcolor='rgba(0,0,0,0)',
+                bargap=0
+            )
+            
+            full_path = os.path.join(output_path, filename)
+            fig.write_html(full_path)
+            return full_path
+        
+        # Create both visualizations
+        path_by_type = create_distribution_plot(by_type=True, filename='labeling_distribution_by_type.html')
+        path_by_neuron = create_distribution_plot(by_type=False, filename='labeling_distribution_by_neuron.html')
+        
+        # Create stacked mountain-shaped histogram
+        path_stacked = self._create_stacked_mountain_plot(
+            line_neurons_dict=valid_lines,
+            output_path=output_path,
+            min_score=min_score,
+            title=title,
+            colors=CATEGORY10
+        )
+        
+        # Save ALL visualization data as CSV (unfiltered, for reproducibility)
+        # Use valid_lines_all which contains all data regardless of min_score filter
+        self._save_distribution_data(
+            line_neurons_dict=valid_lines_all,
+            output_path=output_path
+        )
+        
+        self._vprint(f"   📊 Created labeling distribution (by type): {path_by_type}")
+        self._vprint(f"   📊 Created labeling distribution (by neuron): {path_by_neuron}")
+        self._vprint(f"   📊 Created labeling distribution (stacked): {path_stacked}")
+        
+        return path_by_type, path_by_neuron
+    
+    def _save_distribution_data(
+        self,
+        line_neurons_dict: Dict[str, pd.DataFrame],
+        output_path: str
+    ) -> None:
+        """
+        Save the data used for distribution visualizations as CSV files.
+        
+        Saves two CSV files:
+        1. distribution_data_by_neuron.csv - All neurons with scores per line
+        2. distribution_data_by_type.csv - Aggregated type scores per line
+        
+        Parameters
+        ----------
+        line_neurons_dict : dict
+            Dictionary mapping line names to neurons DataFrames.
+        output_path : str
+            Directory to save the CSV files.
+        """
+        # Save by neuron (all data)
+        all_neurons = []
+        for line, df in line_neurons_dict.items():
+            if not df.empty:
+                df_copy = df.copy()
+                df_copy['source_line'] = line
+                all_neurons.append(df_copy)
+        
+        if all_neurons:
+            combined_neurons = pd.concat(all_neurons, ignore_index=True)
+            neurons_path = os.path.join(output_path, 'distribution_data_by_neuron.csv')
+            combined_neurons.to_csv(neurons_path, index=False)
+        
+        # Save by type (aggregated max score per type per line)
+        type_data = []
+        for line, df in line_neurons_dict.items():
+            if 'type' in df.columns and not df.empty:
+                type_scores = df.groupby('type')['score'].max().reset_index()
+                type_scores['source_line'] = line
+                # Also get dataset info if available
+                if 'dataset' in df.columns:
+                    type_datasets = df.groupby('type')['dataset'].first().reset_index()
+                    type_scores = type_scores.merge(type_datasets, on='type', how='left')
+                type_data.append(type_scores)
+        
+        if type_data:
+            combined_types = pd.concat(type_data, ignore_index=True)
+            types_path = os.path.join(output_path, 'distribution_data_by_type.csv')
+            combined_types.to_csv(types_path, index=False)
+    
+    def _create_stacked_mountain_plot(
+        self,
+        line_neurons_dict: Dict[str, pd.DataFrame],
+        output_path: str,
+        min_score: float = 0.0,
+        title: str = "Co-Labeling Score Distribution",
+        colors: List[str] = None
+    ) -> str:
+        """
+        Create a stacked mountain-shaped histogram showing all lines overlaid.
+        
+        Each line's scores are shown as bars stacked on top of each other,
+        with transparency to see overlapping regions.
+        
+        Parameters
+        ----------
+        line_neurons_dict : dict
+            Dictionary mapping line names to neurons DataFrames.
+        output_path : str
+            Directory to save the HTML file.
+        min_score : float
+            Minimum score threshold to highlight.
+        title : str
+            Plot title.
+        colors : list
+            List of colors to use for each line.
+            
+        Returns
+        -------
+        str
+            Path to the created HTML file.
+        """
+        import plotly.graph_objects as go
+        
+        if colors is None:
+            colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd',
+                      '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf']
+        
+        lines = list(line_neurons_dict.keys())
+        n_lines = len(lines)
+        
+        # Collect all types across all lines with their scores per line
+        all_types_data = {}  # type_name -> {line_name: max_score}
+        
+        for line, df in line_neurons_dict.items():
+            if 'type' in df.columns:
+                type_scores = df.groupby('type')['score'].max()
+                for type_name, score in type_scores.items():
+                    if type_name not in all_types_data:
+                        all_types_data[type_name] = {}
+                    all_types_data[type_name][line] = score
+        
+        if not all_types_data:
+            return ""
+        
+        # Calculate total score for each type (sum across all lines)
+        type_totals = {t: sum(scores.values()) for t, scores in all_types_data.items()}
+        
+        # Sort types by total score (descending) for mountain shape
+        sorted_types = sorted(type_totals.keys(), key=lambda t: type_totals[t], reverse=True)
+        
+        # Create mountain shape (highest in middle)
+        n_types = len(sorted_types)
+        mountain_types = [''] * n_types
+        left = n_types // 2 - 1 if n_types % 2 == 0 else n_types // 2
+        right = n_types // 2 if n_types % 2 == 0 else n_types // 2
+        
+        for i, type_name in enumerate(sorted_types):
+            if i == 0:
+                mountain_types[n_types // 2] = type_name
+            elif i % 2 == 1:
+                mountain_types[left] = type_name
+                left -= 1
+            else:
+                mountain_types[right] = type_name
+                right += 1
+        
+        # Create figure with stacked bars
+        fig = go.Figure()
+        
+        # Add traces for each line (in reverse order so first line is on top visually)
+        for idx, line in enumerate(reversed(lines)):
+            line_idx = len(lines) - 1 - idx
+            scores = []
+            hover_texts = []
+            
+            for type_name in mountain_types:
+                score = all_types_data.get(type_name, {}).get(line, 0)
+                scores.append(score)
+                hover_texts.append(f"{type_name}<br>{line}: {score:,.0f}")
+            
+            # Convert hex color to rgba with alpha
+            hex_color = colors[line_idx % len(colors)]
+            # Parse hex to RGB
+            r = int(hex_color[1:3], 16)
+            g = int(hex_color[3:5], 16)
+            b = int(hex_color[5:7], 16)
+            rgba_color = f'rgba({r}, {g}, {b}, 0.7)'
+            
+            fig.add_trace(
+                go.Bar(
+                    x=list(range(len(mountain_types))),
+                    y=scores,
+                    name=line,
+                    marker=dict(
+                        color=rgba_color,
+                        line=dict(width=0)  # No edge
+                    ),
+                    hovertemplate='<b>%{customdata}</b><extra></extra>',
+                    customdata=hover_texts,
+                    width=1.0
+                )
+            )
+        
+        # Add threshold line if specified
+        if min_score > 0:
+            fig.add_hline(
+                y=min_score,
+                line_dash="dash",
+                line_color="red",
+                annotation_text=f"Threshold: {min_score:,.0f}",
+                annotation_position="top right"
+            )
+        
+        fig.update_layout(
+            title=dict(text=f"{title} (Stacked by Type)", x=0.5),
+            barmode='stack',
+            height=500,
+            showlegend=True,
+            legend=dict(
+                orientation="h",
+                yanchor="bottom",
+                y=1.02,
+                xanchor="center",
+                x=0.5,
+                bgcolor='rgba(255,255,255,0.8)',
+                bordercolor='rgba(0,0,0,0.3)',
+                borderwidth=1
+            ),
+            plot_bgcolor='rgba(0,0,0,0)',
+            paper_bgcolor='rgba(0,0,0,0)',
+            bargap=0,
+            xaxis=dict(
+                showticklabels=False,
+                showgrid=False,
+                zeroline=False,
+                showline=False,
+                title="Types (sorted by total score, mountain-shaped)"
+            ),
+            yaxis=dict(
+                showgrid=False,
+                zeroline=False,
+                showline=False,
+                title="Score"
+            )
+        )
+        
+        full_path = os.path.join(output_path, 'labeling_distribution_stacked.html')
+        fig.write_html(full_path)
+        return full_path
 
     def _calculate_line_specificity(
         self,
@@ -1860,6 +3339,507 @@ class NeuronBridgeFinder:
         except Exception as e:
             warnings.warn(f"Failed to save cache: {e}")
     
+    # =========================================================================
+    # Image-based Cache System (indexed by image_id)
+    # =========================================================================
+    # This cache system stores API results per LM image (lm_sample) and match_type
+    # allowing reuse regardless of region, top_n, or max_api_images_per_line settings
+    #
+    # Line-to-Image Mapping:
+    # - Tracks which images belong to which line (for each region)
+    # - Records cached match types per image
+    # - Does NOT mark lines as "complete" since server images can update
+    # - Always checks online for new images, uses cache for existing ones
+    
+    def _get_image_cache_dir(self) -> str:
+        """Get the directory for image-based cache."""
+        cache_dir = os.path.join(self.cache_folder, 'image_cache')
+        os.makedirs(cache_dir, exist_ok=True)
+        return cache_dir
+    
+    def _get_image_cache_path(self, image_id: str, match_type: str) -> str:
+        """Get cache file path for a specific LM image and match type."""
+        safe_id = str(image_id).replace('/', '_').replace(':', '_')
+        cache_dir = self._get_image_cache_dir()
+        return os.path.join(cache_dir, f"{match_type}_{safe_id}.csv")
+    
+    def _get_line_mapping_path(self) -> str:
+        """Get the path to the line-image mapping file."""
+        cache_dir = self._get_image_cache_dir()
+        return os.path.join(cache_dir, 'line_image_mapping.json')
+    
+    def _load_line_mapping(self) -> Dict[str, Any]:
+        """
+        Load the line-to-image mapping file.
+        
+        Structure:
+        {
+            "lines": {
+                "VT037867": {
+                    "Brain": {
+                        "image_ids": ["123", "456", ...],
+                        "last_checked": "2024-12-29T10:30:00"
+                    },
+                    "VNC": {...}
+                }
+            },
+            "images": {
+                "123": {
+                    "line": "VT037867",
+                    "cached_types": ["cds", "pppm"]
+                }
+            }
+        }
+        """
+        mapping_path = self._get_line_mapping_path()
+        if os.path.exists(mapping_path):
+            try:
+                with open(mapping_path, 'r') as f:
+                    return json.load(f)
+            except Exception:
+                pass
+        return {"lines": {}, "images": {}}
+    
+    def _save_line_mapping(self, mapping: Dict[str, Any]):
+        """Save the line-to-image mapping file."""
+        mapping_path = self._get_line_mapping_path()
+        try:
+            with open(mapping_path, 'w') as f:
+                json.dump(mapping, f, indent=2)
+        except Exception as e:
+            warnings.warn(f"Failed to save line mapping: {e}")
+    
+    def _update_line_mapping(
+        self, 
+        line_name: str, 
+        region: str, 
+        image_ids: List[str],
+        image_id: Optional[str] = None,
+        match_type: Optional[str] = None
+    ):
+        """
+        Update the line-image mapping with new information.
+        
+        Parameters
+        ----------
+        line_name : str
+            The driver line name
+        region : str
+            The anatomical region (Brain, VNC, etc.)
+        image_ids : list
+            List of all image IDs for this line/region (from current API check)
+        image_id : str, optional
+            Specific image ID to update cached_types for
+        match_type : str, optional
+            Match type that was just cached for image_id
+        """
+        mapping = self._load_line_mapping()
+        
+        # Update lines section
+        if line_name not in mapping["lines"]:
+            mapping["lines"][line_name] = {}
+        
+        from datetime import datetime
+        mapping["lines"][line_name][region] = {
+            "image_ids": image_ids,
+            "last_checked": datetime.now().isoformat(),
+            "image_count": len(image_ids)
+        }
+        
+        # Update images section
+        for img_id in image_ids:
+            if img_id not in mapping["images"]:
+                mapping["images"][img_id] = {
+                    "line": line_name,
+                    "cached_types": []
+                }
+            else:
+                # Update line info (in case image is shared)
+                mapping["images"][img_id]["line"] = line_name
+        
+        # Update cached_types for specific image
+        if image_id and match_type:
+            if image_id not in mapping["images"]:
+                mapping["images"][image_id] = {
+                    "line": line_name,
+                    "cached_types": []
+                }
+            if match_type not in mapping["images"][image_id]["cached_types"]:
+                mapping["images"][image_id]["cached_types"].append(match_type)
+        
+        self._save_line_mapping(mapping)
+    
+    def _get_cached_types_for_image(self, image_id: str) -> List[str]:
+        """Get the list of cached match types for an image."""
+        mapping = self._load_line_mapping()
+        if image_id in mapping.get("images", {}):
+            cached = mapping["images"][image_id].get("cached_types", [])
+            if cached:
+                return cached
+        
+        # Fallback: check actual cache files
+        cached_types = []
+        for mt in ['cds', 'pppm', 'both']:
+            cache_path = self._get_image_cache_path(image_id, mt)
+            if os.path.exists(cache_path):
+                cached_types.append(mt)
+        return cached_types
+    
+    def sync_mapping_from_cache_files(self) -> Dict[str, int]:
+        """
+        Sync the line-image mapping with existing cache files.
+        
+        Scans all cache files in image_cache directory and updates the mapping
+        with the cached types for each image.
+        
+        Returns
+        -------
+        dict
+            Statistics: {'images_scanned', 'types_updated'}
+        """
+        stats = {'images_scanned': 0, 'types_updated': 0}
+        
+        cache_dir = self._get_image_cache_dir()
+        mapping = self._load_line_mapping()
+        
+        # Scan all cache files
+        for filename in os.listdir(cache_dir):
+            if not filename.endswith('.csv'):
+                continue
+            
+            # Parse filename: {match_type}_{image_id}.csv
+            parts = filename[:-4].split('_', 1)  # Remove .csv and split
+            if len(parts) != 2:
+                continue
+            
+            match_type, image_id = parts
+            if match_type not in ['cds', 'pppm', 'both']:
+                continue
+            
+            stats['images_scanned'] += 1
+            
+            # Update mapping
+            if image_id not in mapping.get("images", {}):
+                mapping["images"][image_id] = {
+                    "line": "",  # Unknown line
+                    "cached_types": []
+                }
+            
+            if match_type not in mapping["images"][image_id].get("cached_types", []):
+                if "cached_types" not in mapping["images"][image_id]:
+                    mapping["images"][image_id]["cached_types"] = []
+                mapping["images"][image_id]["cached_types"].append(match_type)
+                stats['types_updated'] += 1
+        
+        self._save_line_mapping(mapping)
+        self._vprint(f"✓ Synced mapping: {stats['images_scanned']} files, {stats['types_updated']} types updated")
+        return stats
+    
+    def _load_image_cache(self, image_id: str, match_type: str) -> Optional[pd.DataFrame]:
+        """
+        Load cached matches for a specific LM image.
+        
+        Parameters
+        ----------
+        image_id : str
+            The LM image ID (lm_sample)
+        match_type : str
+            Match algorithm: 'cds' or 'pppm'
+            
+        Returns
+        -------
+        pd.DataFrame or None
+            Cached matches DataFrame, or None if not found
+        """
+        if not self.use_cache:
+            return None
+        
+        cache_path = self._get_image_cache_path(image_id, match_type)
+        if os.path.exists(cache_path):
+            try:
+                return pd.read_csv(cache_path)
+            except Exception:
+                return None
+        return None
+    
+    def _save_image_cache(
+        self, 
+        image_id: str, 
+        match_type: str, 
+        matches: List[Dict[str, Any]],
+        line_name: Optional[str] = None
+    ):
+        """
+        Save matches for a specific LM image to cache.
+        
+        Parameters
+        ----------
+        image_id : str
+            The LM image ID (lm_sample)
+        match_type : str
+            Match algorithm: 'cds', 'pppm', or 'both'
+        matches : list
+            List of match dictionaries
+        line_name : str, optional
+            The line name for updating the mapping
+        """
+        if not self.use_cache or not matches:
+            return
+        
+        cache_path = self._get_image_cache_path(image_id, match_type)
+        try:
+            df = pd.DataFrame(matches)
+            df.to_csv(cache_path, index=False)
+            
+            # Update mapping with cached type info
+            if line_name:
+                mapping = self._load_line_mapping()
+                if image_id not in mapping.get("images", {}):
+                    mapping["images"][image_id] = {
+                        "line": line_name,
+                        "cached_types": []
+                    }
+                if match_type not in mapping["images"][image_id].get("cached_types", []):
+                    mapping["images"][image_id]["cached_types"].append(match_type)
+                self._save_line_mapping(mapping)
+        except Exception as e:
+            warnings.warn(f"Failed to save image cache: {e}")
+    
+    def _fetch_matches_from_api(
+        self,
+        lm_image,
+        match_type: str
+    ) -> List[Dict[str, Any]]:
+        """
+        Fetch matches from API for a single match type (cds or pppm).
+        
+        Parameters
+        ----------
+        lm_image : LMImage
+            The LM image object
+        match_type : str
+            Match algorithm: 'cds' or 'pppm' (not 'both')
+            
+        Returns
+        -------
+        list
+            List of match dictionaries
+        """
+        image_id = getattr(lm_image, 'id', '')
+        matches = []
+        
+        try:
+            if match_type == 'cds':
+                api_matches = self._retry_with_backoff(
+                    self._client.get_cds_matches,
+                    lm_image,
+                    max_retries=3,
+                    initial_delay=1.0
+                )
+            else:  # pppm
+                api_matches = self._retry_with_backoff(
+                    self._client.get_ppp_matches,
+                    lm_image,
+                    max_retries=3,
+                    initial_delay=1.0
+                )
+            
+            for match in api_matches:
+                if hasattr(match, 'image') and hasattr(match.image, 'type'):
+                    if match.image.type == 'EMImage':
+                        body_id = self._extract_body_id(match.image)
+                        match_dict = {
+                            'bodyId': body_id,
+                            'score': getattr(match, 'normalizedScore', 0),
+                            'image_id': getattr(match.image, 'id', ''),
+                            'lm_sample': str(image_id),
+                            'match_type': match_type
+                        }
+                        # Enrich with dataset info
+                        match_dict = self._enrich_match_with_dataset_info(match_dict, match.image)
+                        matches.append(match_dict)
+                        
+        except Exception:
+            pass  # Return empty matches on error
+        
+        return matches
+    
+    def _get_image_matches_cached(
+        self, 
+        lm_image, 
+        match_type: str,
+        line_name: Optional[str] = None
+    ) -> Tuple[List[Dict[str, Any]], bool, bool]:
+        """
+        Get matches for an LM image, using cache if available.
+        
+        Handles 'both' match_type specially:
+        - If 'both' cache exists, use it
+        - If only 'cds' cached, use it and fetch 'pppm', then combine and save as 'both'
+        - If only 'pppm' cached, use it and fetch 'cds', then combine and save as 'both'
+        - If neither cached, fetch both and save as 'both'
+        
+        Parameters
+        ----------
+        lm_image : LMImage
+            The LM image object
+        match_type : str
+            Match algorithm: 'cds', 'pppm', or 'both'
+        line_name : str, optional
+            Line name for mapping updates
+            
+        Returns
+        -------
+        tuple
+            (matches_list, from_cache, partial_cache) 
+            - matches_list: list of match dicts
+            - from_cache: True if ALL data came from cache
+            - partial_cache: True if SOME data came from cache (for 'both')
+        """
+        image_id = getattr(lm_image, 'id', '')
+        if not image_id:
+            return [], False, False
+        
+        image_id_str = str(image_id)
+        
+        # Handle simple cases (cds or pppm)
+        if match_type in ['cds', 'pppm']:
+            cached_df = self._load_image_cache(image_id_str, match_type)
+            if cached_df is not None and not cached_df.empty:
+                return cached_df.to_dict('records'), True, False
+            
+            # Fetch from API
+            matches = self._fetch_matches_from_api(lm_image, match_type)
+            if matches:
+                self._save_image_cache(image_id_str, match_type, matches, line_name)
+            return matches, False, False
+        
+        # Handle 'both' match_type with upgrade logic
+        # Check if 'both' cache already exists
+        both_cache = self._load_image_cache(image_id_str, 'both')
+        if both_cache is not None and not both_cache.empty:
+            return both_cache.to_dict('records'), True, False
+        
+        # Check existing cds and pppm caches
+        cds_cache = self._load_image_cache(image_id_str, 'cds')
+        pppm_cache = self._load_image_cache(image_id_str, 'pppm')
+        
+        cds_matches = []
+        pppm_matches = []
+        cds_from_cache = False
+        pppm_from_cache = False
+        
+        # Get CDS matches (from cache or API)
+        if cds_cache is not None and not cds_cache.empty:
+            cds_matches = cds_cache.to_dict('records')
+            cds_from_cache = True
+        else:
+            cds_matches = self._fetch_matches_from_api(lm_image, 'cds')
+            if cds_matches:
+                self._save_image_cache(image_id_str, 'cds', cds_matches, line_name)
+        
+        # Get PPPM matches (from cache or API)
+        if pppm_cache is not None and not pppm_cache.empty:
+            pppm_matches = pppm_cache.to_dict('records')
+            pppm_from_cache = True
+        else:
+            pppm_matches = self._fetch_matches_from_api(lm_image, 'pppm')
+            if pppm_matches:
+                self._save_image_cache(image_id_str, 'pppm', pppm_matches, line_name)
+        
+        # Combine CDS and PPPM matches
+        all_matches = cds_matches + pppm_matches
+        
+        # Save as 'both' cache for future use
+        if all_matches:
+            self._save_image_cache(image_id_str, 'both', all_matches, line_name)
+        
+        # Determine cache status
+        all_from_cache = cds_from_cache and pppm_from_cache
+        partial_cache = cds_from_cache or pppm_from_cache
+        
+        return all_matches, all_from_cache, partial_cache
+    
+    def migrate_cache_to_image_format(self, dry_run: bool = False) -> Dict[str, int]:
+        """
+        Migrate existing line_to_neuron cache files to new image-based format.
+        
+        Reads existing cache files, extracts per-image results, and saves them
+        to the new image_cache directory.
+        
+        Parameters
+        ----------
+        dry_run : bool
+            If True, only count files without actually migrating
+            
+        Returns
+        -------
+        dict
+            Statistics: {'files_processed', 'images_extracted', 'errors'}
+        """
+        stats = {'files_processed': 0, 'images_extracted': 0, 'errors': 0}
+        
+        # Find all line_to_neuron cache files
+        cache_files = [f for f in os.listdir(self.cache_folder) 
+                       if f.startswith('line_to_neuron_') and f.endswith('.csv')]
+        
+        self._vprint(f"📦 Found {len(cache_files)} line_to_neuron cache files to migrate")
+        
+        for cache_file in cache_files:
+            try:
+                cache_path = os.path.join(self.cache_folder, cache_file)
+                df = pd.read_csv(cache_path)
+                
+                if df.empty or 'lm_sample' not in df.columns:
+                    continue
+                
+                # Extract match_type from the data or filename
+                if 'match_type' in df.columns:
+                    file_match_types = df['match_type'].unique()
+                else:
+                    # Try to extract from filename (e.g., line_to_neuron_VT037867_cds_Brain_5.csv)
+                    parts = cache_file.replace('.csv', '').split('_')
+                    if 'cds' in parts:
+                        file_match_types = ['cds']
+                    elif 'pppm' in parts:
+                        file_match_types = ['pppm']
+                    else:
+                        file_match_types = ['cds']  # Default
+                    df['match_type'] = file_match_types[0]
+                
+                # Group by lm_sample and match_type
+                for (lm_sample, match_type), group_df in df.groupby(['lm_sample', 'match_type']):
+                    if pd.isna(lm_sample):
+                        continue
+                    
+                    image_id = str(int(lm_sample) if isinstance(lm_sample, float) else lm_sample)
+                    
+                    if not dry_run:
+                        # Check if already migrated
+                        existing = self._load_image_cache(image_id, match_type)
+                        if existing is not None:
+                            stats['images_extracted'] += 1
+                            continue
+                        
+                        # Save to image cache
+                        matches = group_df.to_dict('records')
+                        self._save_image_cache(image_id, match_type, matches)
+                    
+                    stats['images_extracted'] += 1
+                
+                stats['files_processed'] += 1
+                
+            except Exception as e:
+                stats['errors'] += 1
+                self._vprint(f"  ⚠️ Error processing {cache_file}: {e}")
+        
+        action = "Would migrate" if dry_run else "Migrated"
+        self._vprint(f"✓ {action} {stats['images_extracted']} images from {stats['files_processed']} files")
+        if stats['errors'] > 0:
+            self._vprint(f"  ⚠️ {stats['errors']} files had errors")
+        
+        return stats
+    
     def _get_em_image_for_dataset(
         self,
         body_id: int,
@@ -2221,6 +4201,12 @@ class NeuronBridgeFinder:
         """
         Get EM matches for an LM line name.
         
+        Uses image-based caching to store results per LM image, allowing reuse
+        regardless of region, top_n, or max_api_images_per_line settings.
+        
+        Always checks online for current images (since server images can update),
+        but uses cached match results when available.
+        
         Parameters
         ----------
         line_name : str
@@ -2241,6 +4227,7 @@ class NeuronBridgeFinder:
             match_type = self.match_type
             
         try:
+            # Always check online for current images (server images can update)
             lm_images = self._client.get_lm_images(line_name)
             if not lm_images:
                 self._vprint(f"  ⚠️ No LM images found for line '{line_name}'")
@@ -2262,6 +4249,11 @@ class NeuronBridgeFinder:
                 self._vprint(f"  ⚠️ No LM images with {match_type.upper()} results for line '{line_name}'")
                 return []
             
+            # Update line-image mapping with current images from server
+            all_image_ids = [str(getattr(img, 'id', '')) for img in lm_images if getattr(img, 'id', '')]
+            if all_image_ids:
+                self._update_line_mapping(line_name, self.region, all_image_ids)
+            
             # Apply max_api_images_per_line limit
             original_count = len(lm_images)
             if self.max_api_images_per_line > 0 and len(lm_images) > self.max_api_images_per_line:
@@ -2274,8 +4266,10 @@ class NeuronBridgeFinder:
                 self._vprint(f"  Found {n_images} LM images for '{line_name}'")
             
             all_matches = []
-            cds_errors = 0
-            pppm_errors = 0
+            cache_hits = 0
+            partial_cache_hits = 0
+            api_fetches = 0
+            errors = 0
             
             # Create progress bar for image processing if we have multiple images and tqdm is available
             show_image_progress = HAS_TQDM and self.verbose and n_images > 1
@@ -2296,85 +4290,36 @@ class NeuronBridgeFinder:
                 image_iterator = lm_images
             
             for img_idx, lm_image in enumerate(image_iterator, 1):
-                cds_failed = False
-                pppm_failed = False
+                # Use the unified _get_image_matches_cached which handles 'both' internally
+                matches, from_cache, partial_cache = self._get_image_matches_cached(
+                    lm_image, match_type, line_name
+                )
                 
-                # Get CDS matches with retry logic
-                if match_type in ['cds', 'both']:
-                    try:
-                        cds_matches = self._retry_with_backoff(
-                            self._client.get_cds_matches,
-                            lm_image,
-                            max_retries=3,
-                            initial_delay=1.0
-                        )
-                        for match in cds_matches:
-                            if hasattr(match, 'image') and hasattr(match.image, 'type'):
-                                if match.image.type == 'EMImage':
-                                    # Extract body ID from publishedName
-                                    body_id = self._extract_body_id(match.image)
-                                    match_dict = {
-                                        'bodyId': body_id,
-                                        'score': getattr(match, 'normalizedScore', 0),
-                                        'image_id': getattr(match.image, 'id', ''),
-                                        'lm_sample': getattr(lm_image, 'id', ''),
-                                        'match_type': 'cds'
-                                    }
-                                    # Enrich with dataset info
-                                    match_dict = self._enrich_match_with_dataset_info(match_dict, match.image)
-                                    all_matches.append(match_dict)
-                    except Exception as e:
-                        cds_failed = True
-                        cds_errors += 1
-                        # Only warn if this is a 'cds'-only request and verbose
-                        # Suppress individual errors to avoid spam
+                if from_cache:
+                    cache_hits += 1
+                elif partial_cache:
+                    partial_cache_hits += 1
+                else:
+                    api_fetches += 1
                 
-                # Get PPPM matches with retry logic
-                if match_type in ['pppm', 'both']:
-                    try:
-                        pppm_matches = self._retry_with_backoff(
-                            self._client.get_ppp_matches,
-                            lm_image,
-                            max_retries=3,
-                            initial_delay=1.0
-                        )
-                        for match in pppm_matches:
-                            if hasattr(match, 'image') and hasattr(match.image, 'type'):
-                                if match.image.type == 'EMImage':
-                                    body_id = self._extract_body_id(match.image)
-                                    match_dict = {
-                                        'bodyId': body_id,
-                                        'score': getattr(match, 'normalizedScore', 0),
-                                        'image_id': getattr(match.image, 'id', ''),
-                                        'lm_sample': getattr(lm_image, 'id', ''),
-                                        'match_type': 'pppm'
-                                    }
-                                    # Enrich with dataset info
-                                    match_dict = self._enrich_match_with_dataset_info(match_dict, match.image)
-                                    all_matches.append(match_dict)
-                    except Exception as e:
-                        pppm_failed = True
-                        pppm_errors += 1
-                        # Only warn if this is a 'pppm'-only request and verbose
-                        # Suppress individual errors to avoid spam
-                
-                # Only warn if both failed when match_type='both'
-                if match_type == 'both' and cds_failed and pppm_failed:
-                    lm_id = getattr(lm_image, 'id', 'unknown')
-                    self._vprint(f"  ⚠️ Both CDS and PPPM matches failed for LM image {lm_id}")
+                if matches:
+                    all_matches.extend(matches)
+                elif not from_cache and not partial_cache:
+                    errors += 1
             
             # Restore loading messages flag after processing images
             if show_image_progress:
                 self._suppress_loading_msgs = False
             
+            # Report cache/API statistics explicitly
+            total_lookups = cache_hits + partial_cache_hits + api_fetches
+            if total_lookups > 0:
+                cache_count = cache_hits + partial_cache_hits
+                self._vprint(f"  📊 Image data: {cache_count}/{total_lookups} from cache, {api_fetches}/{total_lookups} API fetches")
+            
             # Report error summary if there were failures
-            if cds_errors > 0 or pppm_errors > 0:
-                error_parts = []
-                if cds_errors > 0:
-                    error_parts.append(f"CDS: {cds_errors}/{n_images}")
-                if pppm_errors > 0:
-                    error_parts.append(f"PPPM: {pppm_errors}/{n_images}")
-                self._vprint(f"  ℹ️  Network errors (retried 3x): {', '.join(error_parts)} images failed")
+            if errors > 0:
+                self._vprint(f"  ℹ️  {errors}/{n_images} images had no matches")
             
             # Sort results based on match_type
             if match_type == 'both' and all_matches:
@@ -3019,15 +4964,15 @@ class NeuronBridgeFinder:
         """
         # Determine type column - use 'type' if available, else use bodyId
         if 'type' in neurons_df.columns:
-            # For untyped neurons, use bodyId as the "type"
+            # For untyped neurons, use 'unknown_{bodyId}' format
             neurons_df = neurons_df.copy()
             neurons_df['type_label'] = neurons_df.apply(
-                lambda row: str(row['bodyId']) if pd.isna(row['type']) or row['type'] == '' else row['type'],
+                lambda row: f"unknown_{row['bodyId']}" if pd.isna(row['type']) or row['type'] == '' else row['type'],
                 axis=1
             )
         else:
             neurons_df = neurons_df.copy()
-            neurons_df['type_label'] = neurons_df['bodyId'].astype(str)
+            neurons_df['type_label'] = neurons_df['bodyId'].apply(lambda x: f"unknown_{x}")
         
         # Group by type and calculate statistics
         score_col = 'score' if 'score' in neurons_df.columns else None
@@ -3084,8 +5029,8 @@ class NeuronBridgeFinder:
         int
             Total count of the type in the dataset, or 1 if it's a bodyId or lookup fails
         """
-        # If type_name looks like a bodyId (numeric), return 1
-        if type_name.isdigit():
+        # If type_name is unknown_{bodyId} or looks like a bodyId (numeric), return 1
+        if type_name.startswith('unknown_') or type_name.isdigit():
             return 1
         
         # Try to load the dataset neuron index
@@ -3109,29 +5054,76 @@ class NeuronBridgeFinder:
         
         return 1  # Default if lookup fails
     
+    def _get_top_types_fallback(
+        self,
+        ds_df: pd.DataFrame,
+        top_n: int
+    ) -> List[str]:
+        """
+        Fallback method to get top N types by score when labeling_info is not available.
+        
+        Parameters
+        ----------
+        ds_df : pd.DataFrame
+            Dataset-filtered DataFrame with 'type_label' and 'score' columns
+        top_n : int
+            Number of top types to return
+            
+        Returns
+        -------
+        list
+            List of top type names (case-sensitive)
+        """
+        score_col = 'score' if 'score' in ds_df.columns else None
+        
+        if score_col:
+            type_stats = ds_df.groupby('type_label').agg(
+                avg_score=(score_col, 'mean'),
+                count=('bodyId', 'count')
+            ).reset_index()
+            type_stats = type_stats.sort_values('avg_score', ascending=False).head(top_n)
+            return type_stats['type_label'].tolist()
+        else:
+            # Fallback to count-based if no score column
+            type_counts = ds_df['type_label'].value_counts().head(top_n)
+            return type_counts.index.tolist()
+    
     def _visualize_top_types(
         self,
         combined_df: pd.DataFrame,
         top_n: int,
         output_path: str,
         per_dataset: bool = True,
-        source_line: str = ''
+        source_line: str = '',
+        visualize_by: str = 'type',
+        generate_individual_profiles: bool = False,
+        pdf_images_per_page: Tuple[int, int] = (4, 3),
+        labeling_info: Optional[pd.DataFrame] = None,
     ) -> None:
         """
-        Visualize top N types per dataset using VisualizeSkeleton.
+        Visualize top N types/bodyIds per dataset using VisualizeSkeleton.
         
         Parameters
         ----------
         combined_df : pd.DataFrame
             Combined DataFrame with all matched neurons
         top_n : int
-            Number of top types to visualize per dataset
+            Number of top types/bodyIds to visualize per dataset
         output_path : str
             Output directory for visualizations
         per_dataset : bool
             If True, create separate visualization per dataset
         source_line : str
             Source line name for folder naming
+        visualize_by : str
+            How to organize: 'type' (merge) or 'bodyId' (individual)
+        generate_individual_profiles : bool
+            If True, generate individual PNG profiles with PDF summary
+        pdf_images_per_page : tuple
+            (columns, rows) for PDF layout
+        labeling_info : pd.DataFrame, optional
+            DataFrame with case-sensitive types and dataset column for filtering.
+            Columns: type, dataset, {line1_score}, {line2_score}, ...
         """
         try:
             from visualize_skeleton import VisualizeSkeleton
@@ -3146,7 +5138,8 @@ class NeuronBridgeFinder:
             self._vprint("⚠️  No dataset column for visualization")
             return
         
-        self._vprint(f"\n🎨 Visualizing top {top_n} types...")
+        mode_label = 'types' if visualize_by == 'type' else 'bodyIds'
+        self._vprint(f"\n🎨 Visualizing top {top_n} {mode_label}...")
         
         # Process by dataset
         datasets = combined_df['dataset'].unique()
@@ -3154,55 +5147,127 @@ class NeuronBridgeFinder:
         for dataset in datasets:
             ds_df = combined_df[combined_df['dataset'] == dataset].copy()
             
-            # Create type label (use bodyId for untyped)
-            if 'type' in ds_df.columns:
-                ds_df['type_label'] = ds_df.apply(
-                    lambda row: str(row['bodyId']) if pd.isna(row['type']) or row['type'] == '' else row['type'],
-                    axis=1
-                )
-            else:
-                ds_df['type_label'] = ds_df['bodyId'].astype(str)
-            
-            # Get top N types by avg_score (not by count)
-            # Group by type and calculate mean score, then sort and take top N
-            score_col = 'score' if 'score' in ds_df.columns else None
-            
-            if score_col:
-                type_stats = ds_df.groupby('type_label').agg(
-                    avg_score=(score_col, 'mean'),
-                    count=('bodyId', 'count')
-                ).reset_index()
-                type_stats = type_stats.sort_values('avg_score', ascending=False).head(top_n)
-                top_types = type_stats['type_label'].tolist()
-            else:
-                # Fallback to count-based if no score column
-                type_counts = ds_df['type_label'].value_counts().head(top_n)
-                top_types = type_counts.index.tolist()
-            
-            if not top_types:
-                continue
-            
-            # Build neuron_layers as nested list (one sublist per type)
-            neuron_layers = []
-            layer_names = []
-            
-            for type_name in top_types:
-                type_neurons = ds_df[ds_df['type_label'] == type_name]['bodyId'].tolist()
-                # Convert to int if possible
-                type_neurons = [int(n) if str(n).isdigit() else n for n in type_neurons]
+            if visualize_by == 'type':
+                # Group by type
+                # Create type label (use 'unknown_{bodyId}' for untyped)
+                if 'type' in ds_df.columns:
+                    ds_df['type_label'] = ds_df.apply(
+                        lambda row: f"unknown_{row['bodyId']}" if pd.isna(row['type']) or row['type'] == '' else row['type'],
+                        axis=1
+                    )
+                else:
+                    ds_df['type_label'] = ds_df['bodyId'].apply(lambda x: f"unknown_{x}")
                 
-                if len(type_neurons) > 0:
-                    neuron_layers.append(type_neurons)
-                    # Create legend name: {type}_etc if multiple, else {type}
-                    if len(type_neurons) > 1:
-                        layer_names.append(f"{type_name}_etc")
+                # Filter out unknown types for visualization (untyped neurons)
+                ds_df_typed = ds_df[~ds_df['type_label'].str.startswith('unknown_')]
+                if ds_df_typed.empty:
+                    self._vprint(f"   ⚠️  {dataset}: No typed neurons for visualization")
+                    continue
+                ds_df = ds_df_typed
+                
+                # Get top N types using labeling_info if available (case-sensitive, properly sorted)
+                # Otherwise fallback to avg_score
+                if labeling_info is not None and not labeling_info.empty and 'dataset' in labeling_info.columns:
+                    # Filter labeling_info for this dataset
+                    ds_labeling = labeling_info[labeling_info['dataset'] == dataset].copy()
+                    if not ds_labeling.empty:
+                        # labeling_info is already sorted by quality (complete types first, then by min_score)
+                        # Take top N types (case-sensitive)
+                        top_items = ds_labeling['type'].head(top_n).tolist()
+                        self._vprint(f"   📋 Using labeling_info for {dataset}: {len(top_items)} types")
                     else:
-                        layer_names.append(str(type_name))
+                        # Fallback if no labeling info for this dataset
+                        top_items = self._get_top_types_fallback(ds_df, top_n)
+                else:
+                    # Fallback to score-based ranking
+                    top_items = self._get_top_types_fallback(ds_df, top_n)
+                
+                if not top_items:
+                    continue
+                
+                # Build neuron_layers as nested list (one sublist per type)
+                # Use r{rank}_{type}_x{N} format for legend names
+                neuron_layers = []
+                layer_names = []
+                
+                for rank_idx, type_name in enumerate(top_items, start=1):
+                    # Case-sensitive type matching
+                    type_neurons = ds_df[ds_df['type_label'] == type_name]['bodyId'].tolist()
+                    # Convert to int if possible
+                    type_neurons = [int(n) if str(n).isdigit() else n for n in type_neurons]
+                    
+                    if len(type_neurons) > 0:
+                        neuron_layers.append(type_neurons)
+                        # Create legend name: r{rank}_{type}_x{N}
+                        n_neurons = len(type_neurons)
+                        layer_names.append(f"r{rank_idx}_{type_name}_x{n_neurons}")
+                
+                if not neuron_layers:
+                    continue
+                
+                self._vprint(f"   📊 {dataset}: {len(neuron_layers)} types, {sum(len(l) for l in neuron_layers)} neurons")
             
-            if not neuron_layers:
-                continue
-            
-            self._vprint(f"   📊 {dataset}: {len(neuron_layers)} types, {sum(len(l) for l in neuron_layers)} neurons")
+            else:  # visualize_by == 'bodyId'
+                # Get top N bodyIds by score, but group by type for visualization
+                # Each type becomes a layer, but merge_neurons=False shows individual neurons
+                score_col = 'score' if 'score' in ds_df.columns else None
+                
+                # Create type label (use 'unknown_{bodyId}' for untyped)
+                if 'type' in ds_df.columns:
+                    ds_df['type_label'] = ds_df.apply(
+                        lambda row: f"unknown_{row['bodyId']}" if pd.isna(row['type']) or row['type'] == '' else row['type'],
+                        axis=1
+                    )
+                else:
+                    ds_df['type_label'] = ds_df['bodyId'].apply(lambda x: f"unknown_{x}")
+                
+                # Filter out unknown types for visualization (untyped neurons)
+                ds_df_typed = ds_df[~ds_df['type_label'].str.startswith('unknown_')]
+                if ds_df_typed.empty:
+                    self._vprint(f"   ⚠️  {dataset}: No typed neurons for visualization")
+                    continue
+                ds_df = ds_df_typed
+                
+                # Get top N bodyIds by score
+                if score_col:
+                    ds_df_sorted = ds_df.sort_values(score_col, ascending=False).head(top_n)
+                else:
+                    ds_df_sorted = ds_df.head(top_n)
+                
+                # Group the top N bodyIds by type for layer organization
+                # Track the minimum rank (best score position) for each type for sorting
+                type_to_bodyids = {}
+                type_min_rank = {}  # Track minimum rank (best) for each type
+                for rank_idx, (_, row) in enumerate(ds_df_sorted.iterrows(), start=1):
+                    bodyid = row['bodyId']
+                    bodyid_val = int(bodyid) if str(bodyid).isdigit() else bodyid
+                    type_label = row['type_label']
+                    
+                    if type_label not in type_to_bodyids:
+                        type_to_bodyids[type_label] = []
+                        type_min_rank[type_label] = rank_idx  # First occurrence is minimum rank
+                    type_to_bodyids[type_label].append(bodyid_val)
+                
+                # Sort types by their minimum rank (best ranked type first)
+                sorted_types = sorted(type_to_bodyids.keys(), key=lambda t: type_min_rank[t])
+                
+                # Build neuron_layers: one layer per type, containing all bodyIds of that type
+                # Use r{rank}_{type}_x{N} format for legend names
+                neuron_layers = []
+                layer_names = []
+                
+                for type_label in sorted_types:
+                    bodyids = type_to_bodyids[type_label]
+                    neuron_layers.append(bodyids)
+                    # Layer name: r{rank}_{type}_x{N} where rank is the best (min) rank for this type
+                    rank = type_min_rank[type_label]
+                    n_neurons = len(bodyids)
+                    layer_names.append(f"r{rank}_{type_label}_x{n_neurons}")
+                
+                if not neuron_layers:
+                    continue
+                
+                self._vprint(f"   📊 {dataset}: {len(neuron_layers)} types ({sum(len(l) for l in neuron_layers)} bodyIds)")
             
             # Verify bodyIds exist in local dataset before attempting visualization
             # This prevents the "No neurons matching" error from NeuPrint
@@ -3214,7 +5279,22 @@ class NeuronBridgeFinder:
                 continue
             
             # Check if at least some bodyIds can be found
-            test_ids = [str(bid) for layer in neuron_layers for bid in layer[:3]]  # Sample bodyIds
+            # Handle type mismatch: bodyIds from NeuronBridge may be int, but local df may be str or vice versa
+            sample_ids = [bid for layer in neuron_layers for bid in layer[:3]]  # Sample bodyIds
+            
+            # Determine the type of bodyId in the local DataFrame
+            sample_df_bid = local_neuron_df['bodyId'].iloc[0] if len(local_neuron_df) > 0 else None
+            if sample_df_bid is not None:
+                import numpy as np
+                if isinstance(sample_df_bid, (int, np.integer)):
+                    # DataFrame has int bodyIds, convert test_ids to int
+                    test_ids = [int(bid) if isinstance(bid, str) and str(bid).isdigit() else bid for bid in sample_ids]
+                else:
+                    # DataFrame has string bodyIds, convert test_ids to str
+                    test_ids = [str(bid) for bid in sample_ids]
+            else:
+                test_ids = [str(bid) for bid in sample_ids]
+            
             found_count = local_neuron_df[local_neuron_df['bodyId'].isin(test_ids)].shape[0]
             
             if found_count == 0:
@@ -3230,21 +5310,55 @@ class NeuronBridgeFinder:
                 elif 'cns' in dataset.lower():
                     brain_mesh = 'whole'
                 
+                # Set skeleton_mesh_simplification based on dataset
+                # FAFB/FlyWire needs more simplification (0.95) due to larger meshes
+                # Hemibrain and male-cns use 0.9
+                if 'fafb' in dataset.lower() or 'flywire' in dataset.lower():
+                    skeleton_simplification = 0.95
+                else:
+                    skeleton_simplification = 0.9
+                
+                # Set merge_neurons based on visualize_by mode
+                merge_neurons = (visualize_by == 'type')
+                
+                # Determine whether to show VNC mesh based on region
+                # Only show VNC when region is 'VNC' or 'All'
+                show_vnc_mesh = self.region in ('VNC', 'All')
+                
+                # Custom folder name: plot3d_{dataset_folder} (VisualizeSkeleton prepends 'plot3d_')
+                custom_saveas = dataset_folder
+                
                 vs = VisualizeSkeleton(
                     dataset=dataset,
                     output_dir=output_path,
                     neuron_layers=neuron_layers,
                     custom_layer_names=layer_names,
+                    saveas=custom_saveas,
+                    include_timestamp=False,  # No timestamp for cleaner folder names
                     skip_synapse=True,
                     neuron_alpha=0.3,
                     skeleton_mode='tube',
-                    legend_mode='merge',
+                    merge_neurons=merge_neurons,  # True for type, False for bodyId
                     brain_mesh=brain_mesh,
+                    vnc_mesh=show_vnc_mesh,  # Show VNC only when region is 'VNC' or 'All'
+                    skeleton_mesh_simplification=skeleton_simplification,
+                    roi_mesh_simplification=0.95,
                     cache_neurons=True,
                     show_fig=False,
-                    verbose='simple'
+                    verbose='full',  # Full verbose to see simplification logs
                 )
                 vs.plot_neurons()
+                
+                # Generate individual profiles if requested (only front view)
+                if generate_individual_profiles:
+                    vs.plot_individuals(
+                        output_format='png',
+                        views='front',
+                        scale=3,
+                        pdf_images_per_page=pdf_images_per_page,
+                        pdf_title=f"{source_line} - {dataset}"
+                    )
+                
                 self._vprint(f"   ✅ Visualization saved to: {vs.save_folder}")
             except Exception as e:
                 self._vprint(f"   ⚠️  Visualization failed for {dataset}: {e}")
@@ -3259,8 +5373,11 @@ class NeuronBridgeFinder:
         top_n: int = -1,
         match_type: Optional[str] = None,
         output_dir: Optional[str] = None,
-        visualize_top_n_types: int = 0,
-        visualize_per_dataset: bool = True
+        visualize_top_n: int = 0,
+        visualize_by: str = 'type',
+        visualize_per_dataset: bool = True,
+        generate_individual_profiles: bool = False,
+        pdf_images_per_page: Tuple[int, int] = (4, 3),
     ) -> pd.DataFrame:
         """
         Find EM neurons for multiple driver lines with automatic saving.
@@ -3279,12 +5396,22 @@ class NeuronBridgeFinder:
             If None, uses self.match_type. Default: None
         output_dir : str, optional
             Directory to save results. If provided, saves individual and combined CSVs.
-        visualize_top_n_types : int
-            Visualize top N types per dataset using 3D skeleton visualization.
+        visualize_top_n : int
+            Visualize top N types/bodyIds per dataset using 3D skeleton visualization.
             Set to 0 to disable (default). Requires VisualizeSkeleton module.
+        visualize_by : str
+            How to organize visualization: 'type' or 'bodyId'.
+            - 'type': Group neurons by type (merge_neurons=True)
+            - 'bodyId': Show individual neurons (merge_neurons=False)
+            Default: 'type'
         visualize_per_dataset : bool
             If True (default), create separate visualizations per dataset.
             If False, combine all datasets in one visualization.
+        generate_individual_profiles : bool
+            If True, generate individual PNG profiles for each neuron type
+            with a PDF summary. Default: False.
+        pdf_images_per_page : tuple
+            (columns, rows) for PDF layout. Default: (4, 3).
             
         Returns
         -------
@@ -3332,6 +5459,23 @@ class NeuronBridgeFinder:
             output_path = os.path.join(output_dir, f'findneuron_{line_info}_{timestamp}')
             os.makedirs(output_path, exist_ok=True)
             self._vprint(f"   Output: {output_path}")
+            
+            # Save parameters for reproducibility
+            self._save_parameters(
+                output_path=output_path,
+                function_name='find_neurons_batch',
+                function_params={
+                    'line_names': lines,
+                    'top_n': top_n,
+                    'match_type': match_type,
+                    'visualize_top_n': visualize_top_n,
+                    'visualize_by': visualize_by,
+                    'visualize_per_dataset': visualize_per_dataset,
+                    'generate_individual_profiles': generate_individual_profiles,
+                    'pdf_images_per_page': pdf_images_per_page
+                }
+            )
+            self._vprint(f"   💾 Parameters: parameters.json")
         
         # Process each line
         all_results = []
@@ -3504,15 +5648,28 @@ class NeuronBridgeFinder:
                 combined_file = os.path.join(output_path, 'all_neurons.csv')
                 combined_df.to_csv(combined_file, index=False)
                 self._vprint(f"\n💾 Combined results: {combined_file}")
+                
+                # Create labeling distribution visualization
+                self.visualize_labeling_distribution(
+                    data=combined_df,
+                    output_path=output_path,
+                    score_column='score',
+                    label_column='type',
+                    title=f"Labeling Score Distribution ({len(lines)} line(s))",
+                    group_by='source_line' if 'source_line' in combined_df.columns and len(lines) > 1 else None
+                )
             
             # Visualize top N types per dataset if requested
-            if visualize_top_n_types > 0 and output_path:
+            if visualize_top_n > 0 and output_path:
                 self._visualize_top_types(
                     combined_df=combined_df,
-                    top_n=visualize_top_n_types,
+                    top_n=visualize_top_n,
                     output_path=output_path,
                     per_dataset=visualize_per_dataset,
-                    source_line=lines[0] if len(lines) == 1 else '_'.join(lines[:3])
+                    source_line=lines[0] if len(lines) == 1 else '_'.join(lines[:3]),
+                    visualize_by=visualize_by,
+                    generate_individual_profiles=generate_individual_profiles,
+                    pdf_images_per_page=pdf_images_per_page,
                 )
             
             return combined_df
@@ -3520,9 +5677,664 @@ class NeuronBridgeFinder:
         self._vprint(f"\n⚠️ No neurons found for any of the {len(lines)} line(s)")
         return pd.DataFrame()
     
+    def analyze_colabeling(
+        self,
+        lines: Union[str, List[str]],
+        match_type: Optional[str] = None,
+        top_n_neurons: int = -1,
+        similarity_methods: Union[str, List[str]] = ['jaccard', 'weighted_jaccard'],
+        output_dir: Optional[str] = None,
+        generate_report: bool = True,
+        visualize: bool = True,
+        visualize_top_n: int = 0,
+        generate_individual_profiles: bool = False,
+        pdf_images_per_page: Tuple[int, int] = (3, 2),
+        min_score: float = 30000.0,
+        min_type_avg_score: float = 20000.0
+    ) -> Dict[str, Any]:
+        """
+        Analyze co-labeling patterns among given driver lines.
+        
+        This method performs a comprehensive co-labeling analysis to understand
+        how different driver lines overlap in their neuron labeling patterns.
+        
+        Parameters
+        ----------
+        lines : str or list of str
+            Driver line names to analyze. Can be:
+            - Single line: 'LH173'
+            - Multiple as string: 'LH173,VT037867,SS00731'
+            - Multiple as list: ['LH173', 'VT037867', 'SS00731']
+        match_type : str, optional
+            Match algorithm: 'cds', 'pppm', or 'both'.
+            If None, uses self.match_type. Default: None
+        top_n_neurons : int
+            Number of top neuron matches to consider per line. Default: -1 (all)
+        similarity_methods : str or list of str
+            Similarity method(s) for co-labeling matrix:
+            - 'jaccard': Binary Jaccard similarity (presence/absence of types)
+            - 'weighted_jaccard': Jaccard weighted by match scores
+            - 'rank_correlation': Spearman correlation of type rankings
+            Default: ['jaccard', 'weighted_jaccard']
+        output_dir : str, optional
+            Directory to save results. If None, returns results without saving.
+        generate_report : bool
+            Generate a comprehensive HTML/text report. Default: True
+        visualize : bool
+            Generate heatmap visualizations. Default: True
+        visualize_top_n : int
+            Visualize top N types per dataset using 3D skeleton. Default: 0 (disabled)
+        generate_individual_profiles : bool
+            Generate individual PNG profiles with PDF summary. Default: False
+        pdf_images_per_page : tuple
+            (columns, rows) for PDF layout. Default: (3, 2)
+        min_score : float
+            Minimum score threshold for individual neurons. Default: 40000.0
+            Only neurons with score >= min_score are included in analysis.
+        min_type_avg_score : float
+            Minimum average score threshold for types. Default: 30000.0
+            Only types with average score >= min_type_avg_score across lines are included.
+            
+        Returns
+        -------
+        dict
+            Dictionary containing:
+            - 'expression_matrix': pd.DataFrame - Type × Line expression matrix (scores)
+              Types are prefixed with dataset abbreviation: {ABBREV}_{type}
+              (HEMI=hemibrain, MCNS=male-cns, FAFB=FlyWire FAFB)
+            - 'labeling_info': pd.DataFrame - Case-sensitive types with dataset column
+            - 'colabeling_matrices': Dict[str, pd.DataFrame] - Similarity matrices per method
+            - 'line_neurons': Dict[str, pd.DataFrame] - Neurons per line with scores
+            - 'line_summary': pd.DataFrame - Summary stats per line
+            - 'report_path': str - Path to generated report (if generate_report=True)
+            
+        Output Files (when output_dir is provided)
+        ------------------------------------------
+        - expression_matrix.csv: Type × Line matrix with match scores
+          (types prefixed with dataset abbreviation: HEMI_, MCNS_, FAFB_)
+        - labeling_info.csv: Case-sensitive types with dataset column for per-dataset filtering
+        - expression_matrix.html: Interactive heatmap visualization
+        - colabeling_matrix_{method}.csv: Line × Line similarity matrix
+        - colabeling_matrix_{method}.html: Interactive heatmap
+        - line_labeled_neurons/{line}_neurons.csv: Per-line neuron details
+        - line_summary.csv: Summary statistics per line
+        - colabeling_report.html: Comprehensive analysis report
+        
+        Example
+        -------
+        >>> nbf = NeuronBridgeFinder()
+        >>> results = nbf.analyze_colabeling(
+        ...     lines=['LH173', 'VT037867', 'SS00731'],
+        ...     output_dir='./colabel_analysis'
+        ... )
+        >>> print(results['line_summary'])
+        """
+        from datetime import datetime
+        
+        # Parse lines input
+        if isinstance(lines, str):
+            line_list = [l.strip() for l in lines.split(',') if l.strip()]
+        else:
+            line_list = list(lines)
+        
+        if len(line_list) < 2:
+            self._vprint("❌ At least 2 lines are required for co-labeling analysis")
+            return {}
+        
+        # Use class-level match_type if not specified
+        if match_type is None:
+            match_type = self.match_type
+            
+        # Normalize similarity_methods
+        if isinstance(similarity_methods, str):
+            similarity_methods = [similarity_methods]
+        
+        self._vprint(f"\n{'='*60}")
+        self._vprint(f"🔬 Co-Labeling Analysis")
+        self._vprint('='*60)
+        self._vprint(f"   Lines: {len(line_list)}")
+        self._vprint(f"   Match type: {match_type}")
+        self._vprint(f"   Top neurons per line: {top_n_neurons}")
+        self._vprint(f"   Similarity methods: {', '.join(similarity_methods)}")
+        self._vprint(f"   Min neuron score: {min_score:,.0f}")
+        self._vprint(f"   Min type avg score: {min_type_avg_score:,.0f}")
+        
+        # Create output directory if needed
+        output_path = None
+        if output_dir:
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            # Create subfolder
+            lines_info = '_'.join(line_list[:3])
+            if len(line_list) > 3:
+                lines_info += f'_etc{len(line_list)}'
+            # Sanitize folder name
+            lines_info = ''.join(c if c.isalnum() or c in '-_' else '_' for c in lines_info)
+            output_path = os.path.join(output_dir, f'colabel_{lines_info}_{timestamp}')
+            os.makedirs(output_path, exist_ok=True)
+            self._vprint(f"   Output: {output_path}")
+            
+            # Save parameters for reproducibility
+            self._save_parameters(
+                output_path=output_path,
+                function_name='analyze_colabeling',
+                function_params={
+                    'lines': line_list,
+                    'match_type': match_type,
+                    'top_n_neurons': top_n_neurons,
+                    'similarity_methods': similarity_methods,
+                    'generate_report': generate_report,
+                    'visualize': visualize,
+                    'visualize_top_n': visualize_top_n,
+                    'generate_individual_profiles': generate_individual_profiles,
+                    'pdf_images_per_page': pdf_images_per_page,
+                    'min_score': min_score,
+                    'min_type_avg_score': min_type_avg_score
+                }
+            )
+            self._vprint(f"   💾 Parameters: parameters.json")
+        
+        results = {
+            'expression_matrix': None,
+            'labeling_info': None,
+            'colabeling_matrices': {},
+            'line_neurons': {},
+            'line_summary': None,
+            'report_path': None
+        }
+        
+        # Step 1: Fetch neurons for each line and build expression matrix
+        self._vprint(f"\n📊 Step 1: Fetching neurons and building expression matrix...")
+        
+        # Use _calculate_mutual_information which already does what we need
+        mi_df, expression_df, line_neurons_dict, labeling_info = self._calculate_mutual_information(
+            lines=line_list,
+            queried_types=[],  # No specific queried types for pure co-labeling
+            match_type=match_type,
+            top_n=top_n_neurons,
+            output_path=output_path,
+            min_score=min_score,
+            min_type_avg_score=min_type_avg_score
+        )
+        
+        results['line_neurons'] = line_neurons_dict
+        results['labeling_info'] = labeling_info
+        
+        if expression_df.empty:
+            self._vprint("   ⚠️ No expression data found for any lines")
+            return results
+        
+        # Sort expression matrix by co-labeling quality using shared helper
+        expression_transposed = self._sort_expression_matrix(expression_df, as_types_rows=True)
+        
+        n_lines = len(expression_transposed.columns)
+        nonzero_count = (expression_transposed > 0).sum(axis=1)
+        n_complete = (nonzero_count == n_lines).sum()
+        self._vprint(f"   Sorted {len(expression_transposed)} types: {n_complete} in all lines, {len(expression_transposed) - n_complete} partial")
+        
+        results['expression_matrix'] = expression_transposed
+        
+        # Combine all line neurons into a single DataFrame for dataset splitting and visualization
+        combined_neurons_df = pd.DataFrame()
+        if line_neurons_dict:
+            dfs = []
+            for line_name, neurons_df in line_neurons_dict.items():
+                if not neurons_df.empty:
+                    neurons_copy = neurons_df.copy()
+                    neurons_copy['source_line'] = line_name
+                    dfs.append(neurons_copy)
+            if dfs:
+                combined_neurons_df = pd.concat(dfs, ignore_index=True)
+        
+        # Save expression matrix, labeling_info, and per-line neuron details
+        if output_path:
+            expr_csv = os.path.join(output_path, 'expression_matrix.csv')
+            expression_transposed.to_csv(expr_csv)
+            self._vprint(f"   💾 Expression matrix: {expr_csv}")
+            
+            # Save labeling_info.csv (case-sensitive types with dataset column)
+            if not labeling_info.empty:
+                labeling_csv = os.path.join(output_path, 'labeling_info.csv')
+                labeling_info.to_csv(labeling_csv, index=False)
+                self._vprint(f"   💾 Labeling info: {labeling_csv}")
+            
+            # Save per-line neuron details (simple version, split by dataset below)
+            if line_neurons_dict:
+                neurons_dir = os.path.join(output_path, 'line_labeled_neurons')
+                os.makedirs(neurons_dir, exist_ok=True)
+                
+                for line_name, neurons_df in line_neurons_dict.items():
+                    if not neurons_df.empty:
+                        safe_name = line_name.replace('/', '_').replace('\\', '_')
+                        # Save the combined line neurons file
+                        neurons_csv = os.path.join(neurons_dir, f'{safe_name}_neurons.csv')
+                        neurons_df.to_csv(neurons_csv, index=False)
+                        
+                        # Split by dataset and save dataset-specific files with type summaries
+                        self._save_dataset_categorized_files(neurons_df, safe_name, neurons_dir, verbose=False)
+                
+                self._vprint(f"   💾 Line neurons: {neurons_dir}/ ({len(line_neurons_dict)} lines, split by dataset)")
+        
+        # Step 2: Build co-labeling matrices
+        self._vprint(f"\n📊 Step 2: Building co-labeling matrices...")
+        
+        for method in similarity_methods:
+            self._vprint(f"   Computing {method} similarity...")
+            
+            matrix, line_type_sets = self._build_colabeling_matrix(
+                lines=line_list,
+                match_type=match_type,
+                top_n=top_n_neurons,
+                similarity_method=method,
+                min_score=min_score,
+                min_type_avg_score=min_type_avg_score
+            )
+            
+            results['colabeling_matrices'][method] = matrix
+            
+            # Save matrix CSV
+            if output_path:
+                csv_filename = f'colabeling_matrix_{method}.csv'
+                csv_path = os.path.join(output_path, csv_filename)
+                matrix.to_csv(csv_path)
+                self._vprint(f"   💾 {csv_filename}")
+                
+                # Create visualization
+                if visualize:
+                    method_titles = {
+                        'jaccard': 'Co-Labeling Matrix (Binary Jaccard)',
+                        'weighted_jaccard': 'Co-Labeling Matrix (Weighted Jaccard)',
+                        'rank_correlation': 'Co-Labeling Matrix (Rank Correlation)'
+                    }
+                    title = method_titles.get(method, f'Co-Labeling Matrix ({method})')
+                    html_filename = f'colabeling_matrix_{method}.html'
+                    self.visualize_colabeling_matrix(
+                        co_labeling_matrix=matrix,
+                        output_path=output_path,
+                        title=title,
+                        color_scale='purple',
+                        filename=html_filename
+                    )
+        
+        # Visualize expression matrix (use already sorted expression_transposed.T to get Lines × Types)
+        if output_path and visualize:
+            # Pass the sorted matrix (transpose back to Lines × Types format expected by visualize_expression_matrix)
+            self.visualize_expression_matrix(
+                expression_df=expression_transposed.T,
+                output_path=output_path,
+                queried_types=[],
+                title=f"Expression Matrix ({len(line_list)} Lines × Types)"
+            )
+            
+            # Create merged dataset version (same types across datasets combined)
+            self.visualize_expression_matrix_merged(
+                expression_df=expression_transposed.T,
+                output_path=output_path,
+                queried_types=[],
+                title=f"Expression Matrix ({len(line_list)} Lines × Types) - Merged Datasets",
+                aggregation='max'  # Use max score across datasets for same type
+            )
+            
+            # Visualize labeling distribution (mountain-shaped histogram)
+            self.visualize_colabeling_distribution(
+                line_neurons_dict=line_neurons_dict,
+                output_path=output_path,
+                min_score=min_score,
+                title=f"Labeling Score Distribution ({len(line_list)} Lines)"
+            )
+        
+        # Step 3: Calculate line summary statistics
+        self._vprint(f"\n📊 Step 3: Computing line statistics...")
+        
+        line_summary_data = []
+        
+        # Get the primary similarity matrix (weighted_jaccard if available)
+        primary_matrix = results['colabeling_matrices'].get(
+            'weighted_jaccard', 
+            results['colabeling_matrices'].get('jaccard', pd.DataFrame())
+        )
+        
+        # Calculate sparsity metrics
+        sparsity_scores = {}
+        if not primary_matrix.empty:
+            sparsity_scores = self._calculate_colabeling_sparsity(primary_matrix)
+        
+        for line_name in line_list:
+            neurons_df = line_neurons_dict.get(line_name, pd.DataFrame())
+            
+            # Basic stats
+            n_neurons = len(neurons_df)
+            n_types = neurons_df['type'].nunique() if not neurons_df.empty else 0
+            
+            # Score statistics
+            mean_score = neurons_df['score'].mean() if not neurons_df.empty else 0.0
+            max_score = neurons_df['score'].max() if not neurons_df.empty else 0.0
+            
+            # Type distribution
+            top_types = []
+            if not neurons_df.empty:
+                type_counts = neurons_df.groupby('type').size().sort_values(ascending=False)
+                top_types = type_counts.head(5).index.tolist()
+            
+            # Sparsity metrics
+            sparsity_data = sparsity_scores.get(line_name, {})
+            
+            line_summary_data.append({
+                'line': line_name,
+                'n_neurons': n_neurons,
+                'n_types': n_types,
+                'mean_score': round(mean_score, 4),
+                'max_score': round(max_score, 4),
+                'top_types': ', '.join(top_types[:5]),
+                'colabel_sparsity': round(sparsity_data.get('colabel_sparsity', 0), 4),
+                'n_colabeling_lines': sparsity_data.get('n_colabeling_lines', 0),
+                'mean_colabel_similarity': round(sparsity_data.get('mean_colabel_similarity', 0), 4)
+            })
+        
+        line_summary = pd.DataFrame(line_summary_data)
+        results['line_summary'] = line_summary
+        
+        # Save line summary
+        if output_path:
+            summary_csv = os.path.join(output_path, 'line_summary.csv')
+            line_summary.to_csv(summary_csv, index=False)
+            self._vprint(f"   💾 Line summary: {summary_csv}")
+        
+        # Step 4: Generate comprehensive report
+        if generate_report and output_path:
+            self._vprint(f"\n📝 Step 4: Generating analysis report...")
+            report_path = self._generate_colabeling_report(
+                results=results,
+                line_list=line_list,
+                match_type=match_type,
+                top_n_neurons=top_n_neurons,
+                output_path=output_path
+            )
+            results['report_path'] = report_path
+        
+        # Step 5: Visualize top N types per dataset (3D skeleton)
+        if visualize_top_n > 0 and output_path and not combined_neurons_df.empty:
+            self._vprint(f"\n🎨 Step 5: Visualizing top {visualize_top_n} types per dataset...")
+            
+            # Create a source_line label for folder naming
+            lines_label = '_'.join(line_list[:3])
+            if len(line_list) > 3:
+                lines_label += f'_etc{len(line_list)}'
+            
+            self._visualize_top_types(
+                combined_df=combined_neurons_df,
+                top_n=visualize_top_n,
+                output_path=output_path,
+                per_dataset=True,
+                source_line=lines_label,
+                visualize_by='type',  # Default to type-based visualization
+                generate_individual_profiles=generate_individual_profiles,
+                pdf_images_per_page=pdf_images_per_page,
+                labeling_info=labeling_info,  # Pass case-sensitive type info for per-dataset filtering
+            )
+        
+        # Summary
+        self._vprint(f"\n{'='*60}")
+        self._vprint(f"✅ Co-Labeling Analysis Complete!")
+        self._vprint('='*60)
+        self._vprint(f"   Lines analyzed: {len(line_list)}")
+        self._vprint(f"   Total unique types: {len(expression_transposed)}")
+        self._vprint(f"   Output: {output_path}")
+        
+        return results
+    
+    def _generate_colabeling_report(
+        self,
+        results: Dict[str, Any],
+        line_list: List[str],
+        match_type: str,
+        top_n_neurons: int,
+        output_path: str
+    ) -> str:
+        """Generate a comprehensive HTML report for co-labeling analysis."""
+        from datetime import datetime
+        
+        report_path = os.path.join(output_path, 'colabeling_report.html')
+        
+        expression_matrix = results.get('expression_matrix', pd.DataFrame())
+        line_summary = results.get('line_summary', pd.DataFrame())
+        colabeling_matrices = results.get('colabeling_matrices', {})
+        
+        # Get top co-labeling pairs
+        top_pairs = []
+        if 'weighted_jaccard' in colabeling_matrices:
+            matrix = colabeling_matrices['weighted_jaccard']
+            for i, line_i in enumerate(matrix.index):
+                for j, line_j in enumerate(matrix.columns):
+                    if i < j:  # Only upper triangle
+                        similarity = matrix.iloc[i, j]
+                        if similarity > 0.1:  # Only significant pairs
+                            top_pairs.append({
+                                'line1': line_i,
+                                'line2': line_j,
+                                'similarity': similarity
+                            })
+            top_pairs = sorted(top_pairs, key=lambda x: x['similarity'], reverse=True)[:20]
+        
+        # Find most specific lines (high sparsity)
+        most_specific = []
+        if not line_summary.empty:
+            sorted_by_sparsity = line_summary.sort_values('colabel_sparsity', ascending=False)
+            most_specific = sorted_by_sparsity.head(10).to_dict('records')
+        
+        # Build HTML report
+        html_content = f'''<!DOCTYPE html>
+<html>
+<head>
+    <title>Co-Labeling Analysis Report</title>
+    <style>
+        body {{ font-family: Arial, sans-serif; margin: 40px; background-color: #f5f5f5; }}
+        .container {{ max-width: 1200px; margin: 0 auto; background: white; padding: 30px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }}
+        h1 {{ color: #2c3e50; border-bottom: 3px solid #3498db; padding-bottom: 10px; }}
+        h2 {{ color: #34495e; margin-top: 30px; }}
+        h3 {{ color: #7f8c8d; }}
+        .summary-box {{ background: #ecf0f1; padding: 20px; border-radius: 8px; margin: 20px 0; }}
+        .metric {{ display: inline-block; margin: 10px 20px 10px 0; }}
+        .metric-value {{ font-size: 24px; font-weight: bold; color: #2980b9; }}
+        .metric-label {{ font-size: 14px; color: #7f8c8d; }}
+        table {{ border-collapse: collapse; width: 100%; margin: 15px 0; }}
+        th, td {{ border: 1px solid #ddd; padding: 10px; text-align: left; }}
+        th {{ background-color: #3498db; color: white; }}
+        tr:nth-child(even) {{ background-color: #f9f9f9; }}
+        tr:hover {{ background-color: #e8f4fc; }}
+        .highlight {{ background-color: #fff3cd; }}
+        .file-link {{ color: #3498db; text-decoration: none; }}
+        .file-link:hover {{ text-decoration: underline; }}
+        .pair-card {{ background: #e8f6f3; padding: 15px; margin: 10px 0; border-radius: 8px; border-left: 4px solid #1abc9c; }}
+        .similarity-bar {{ height: 20px; background: #3498db; border-radius: 4px; }}
+        .timestamp {{ color: #95a5a6; font-size: 12px; }}
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🔬 Co-Labeling Analysis Report</h1>
+        <p class="timestamp">Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
+        
+        <div class="summary-box">
+            <div class="metric">
+                <div class="metric-value">{len(line_list)}</div>
+                <div class="metric-label">Lines Analyzed</div>
+            </div>
+            <div class="metric">
+                <div class="metric-value">{len(expression_matrix)}</div>
+                <div class="metric-label">Unique Types</div>
+            </div>
+            <div class="metric">
+                <div class="metric-value">{match_type.upper()}</div>
+                <div class="metric-label">Match Type</div>
+            </div>
+            <div class="metric">
+                <div class="metric-value">{top_n_neurons}</div>
+                <div class="metric-label">Top N Neurons/Line</div>
+            </div>
+        </div>
+        
+        <h2>📊 Line Summary</h2>
+        <table>
+            <tr>
+                <th>Line</th>
+                <th>Neurons</th>
+                <th>Types</th>
+                <th>Mean Score</th>
+                <th>Max Score</th>
+                <th>Sparsity</th>
+                <th>Top Types</th>
+            </tr>
+'''
+        
+        for _, row in line_summary.iterrows():
+            html_content += f'''
+            <tr>
+                <td><strong>{row['line']}</strong></td>
+                <td>{row['n_neurons']}</td>
+                <td>{row['n_types']}</td>
+                <td>{row['mean_score']:.3f}</td>
+                <td>{row['max_score']:.3f}</td>
+                <td>{row['colabel_sparsity']:.3f}</td>
+                <td>{row['top_types']}</td>
+            </tr>
+'''
+        
+        html_content += '''
+        </table>
+        
+        <h2>🔗 Top Co-Labeling Pairs</h2>
+        <p>Lines with highest overlap in labeled neuron types (weighted Jaccard similarity &gt; 0.1):</p>
+'''
+        
+        if top_pairs:
+            for pair in top_pairs[:10]:
+                bar_width = int(pair['similarity'] * 100)
+                html_content += f'''
+        <div class="pair-card">
+            <strong>{pair['line1']}</strong> ↔ <strong>{pair['line2']}</strong>
+            <div style="margin-top: 8px;">
+                <div class="similarity-bar" style="width: {bar_width}%;"></div>
+            </div>
+            <small>Similarity: {pair['similarity']:.3f}</small>
+        </div>
+'''
+        else:
+            html_content += '<p><em>No significant co-labeling pairs found (all similarities ≤ 0.1)</em></p>'
+        
+        html_content += '''
+        <h2>🎯 Most Specific Lines</h2>
+        <p>Lines with highest sparsity (most unique labeling patterns):</p>
+        <table>
+            <tr>
+                <th>Rank</th>
+                <th>Line</th>
+                <th>Sparsity</th>
+                <th>Co-labeling Lines</th>
+                <th>Types Labeled</th>
+            </tr>
+'''
+        
+        for i, line_data in enumerate(most_specific[:10], 1):
+            html_content += f'''
+            <tr>
+                <td>{i}</td>
+                <td><strong>{line_data['line']}</strong></td>
+                <td>{line_data['colabel_sparsity']:.3f}</td>
+                <td>{line_data['n_colabeling_lines']}</td>
+                <td>{line_data['n_types']}</td>
+            </tr>
+'''
+        
+        html_content += '''
+        </table>
+        
+        <h2>� Visualizations</h2>
+        
+        <h3>Expression Matrix Heatmap</h3>
+        <p>Interactive heatmap showing which neuron types each line labels. Types prefixed with dataset abbreviations (HEMI_, MCNS_, FAFB_).</p>
+        <iframe src="expression_matrix.html" width="100%" height="700" frameborder="0" style="border: 1px solid #ddd; border-radius: 8px;"></iframe>
+        
+        <h3>Expression Matrix (Merged Datasets)</h3>
+        <p>Same expression matrix but with types merged across datasets. Same neuron types from different datasets (e.g., MCNS_aMe12, FAFB_aMe12) are combined into a single row (aMe12) using max score.</p>
+        <iframe src="expression_matrix_merged.html" width="100%" height="700" frameborder="0" style="border: 1px solid #ddd; border-radius: 8px;"></iframe>
+        
+        <h3>Co-Labeling Similarity Matrix</h3>
+        <p>Pairwise similarity between lines based on their labeled neuron types (weighted Jaccard).</p>
+        <iframe src="colabeling_matrix_weighted_jaccard.html" width="100%" height="700" frameborder="0" style="border: 1px solid #ddd; border-radius: 8px;"></iframe>
+        
+        <h3>Labeling Distribution (by Type)</h3>
+        <p>Score distribution for each line aggregated by neuron type. Mountain-shaped with highest scores in center.</p>
+        <iframe src="labeling_distribution_by_type.html" width="100%" height="800" frameborder="0" style="border: 1px solid #ddd; border-radius: 8px;"></iframe>
+        
+        <h3>Labeling Distribution (by Neuron)</h3>
+        <p>Score distribution for each line showing individual neuron scores.</p>
+        <iframe src="labeling_distribution_by_neuron.html" width="100%" height="800" frameborder="0" style="border: 1px solid #ddd; border-radius: 8px;"></iframe>
+        
+        <h3>Stacked Labeling Distribution</h3>
+        <p>All lines overlaid to show comparative labeling patterns.</p>
+        <iframe src="labeling_distribution_stacked.html" width="100%" height="600" frameborder="0" style="border: 1px solid #ddd; border-radius: 8px;"></iframe>
+        
+        <h2>📁 Output Files</h2>
+        <ul>
+            <li><a class="file-link" href="expression_matrix.csv">expression_matrix.csv</a> - Type × Line score matrix (types prefixed with dataset: HEMI_, MCNS_, FAFB_)</li>
+            <li><a class="file-link" href="expression_matrix_merged.csv">expression_matrix_merged.csv</a> - Type × Line score matrix with types merged across datasets</li>
+            <li><a class="file-link" href="labeling_info.csv">labeling_info.csv</a> - Case-sensitive type × Line matrix with dataset column</li>
+            <li><a class="file-link" href="expression_matrix.html">expression_matrix.html</a> - Interactive heatmap (per-dataset types)</li>
+            <li><a class="file-link" href="expression_matrix_merged.html">expression_matrix_merged.html</a> - Interactive heatmap (merged types)</li>
+            <li><a class="file-link" href="colabeling_matrix_weighted_jaccard.csv">colabeling_matrix_weighted_jaccard.csv</a> - Line similarity matrix</li>
+            <li><a class="file-link" href="colabeling_matrix_weighted_jaccard.html">colabeling_matrix_weighted_jaccard.html</a> - Interactive heatmap</li>
+            <li><a class="file-link" href="labeling_distribution_by_type.html">labeling_distribution_by_type.html</a> - Score distribution by type</li>
+            <li><a class="file-link" href="labeling_distribution_by_neuron.html">labeling_distribution_by_neuron.html</a> - Score distribution by neuron</li>
+            <li><a class="file-link" href="labeling_distribution_stacked.html">labeling_distribution_stacked.html</a> - Stacked distribution</li>
+            <li><a class="file-link" href="distribution_data_by_neuron.csv">distribution_data_by_neuron.csv</a> - Raw neuron data (unfiltered)</li>
+            <li><a class="file-link" href="distribution_data_by_type.csv">distribution_data_by_type.csv</a> - Aggregated type data (unfiltered)</li>
+            <li><a class="file-link" href="line_labeled_neurons/">line_labeled_neurons/</a> - Per-line neuron details</li>
+            <li><a class="file-link" href="line_summary.csv">line_summary.csv</a> - Summary statistics</li>
+            <li><a class="file-link" href="parameters.json">parameters.json</a> - Analysis parameters for reproducibility</li>
+        </ul>
+        
+        <h2>📖 Interpretation Guide</h2>
+        <h3>Expression Matrix</h3>
+        <p>Shows which neuron types each line labels, with values representing NeuronBridge match scores. 
+        Types are prefixed with dataset abbreviations (HEMI=hemibrain, MCNS=male-cns, FAFB=FlyWire FAFB).
+        Higher scores indicate stronger morphological matches.</p>
+        
+        <h3>Expression Matrix (Merged)</h3>
+        <p>Same data as the expression matrix but with types merged across datasets. For example, 
+        MCNS_aMe12 and FAFB_aMe12 are combined into a single "aMe12" row. The merged score uses the 
+        maximum value across all datasets. This view is useful when you care about neuron type identity 
+        regardless of which EM dataset it comes from.</p>
+        
+        <h3>Labeling Info</h3>
+        <p>Provides case-sensitive neuron types with their source dataset. Use this file for per-dataset
+        filtering and to identify which neurons from each dataset match a given driver line.</p>
+        
+        <h3>Co-Labeling Matrix</h3>
+        <p>Shows pairwise similarity between lines based on their labeled neuron types:</p>
+        <ul>
+            <li><strong>Weighted Jaccard:</strong> Accounts for match scores - lines labeling the same types with similar scores have higher similarity</li>
+            <li><strong>Binary Jaccard:</strong> Simple overlap - what proportion of types are labeled by both lines</li>
+        </ul>
+        
+        <h3>Sparsity</h3>
+        <p>Measures how unique a line's labeling pattern is. High sparsity (close to 1.0) means the line labels types 
+        that few other lines label - useful for identifying highly specific driver lines.</p>
+        
+    </div>
+</body>
+</html>
+'''
+        
+        with open(report_path, 'w') as f:
+            f.write(html_content)
+        
+        self._vprint(f"   📝 Report: {report_path}")
+        
+        return report_path
+
     def find_lines_batch(
         self,
-        queries: Union[str, int, List],
+        queries: Union[str, int, List, 'LabelMapper'],
         dataset: Optional[Union[str, List[str]]] = None,
         match_type: Optional[str] = None,
         output_dir: Optional[str] = None,
@@ -3534,9 +6346,7 @@ class NeuronBridgeFinder:
         flylight_category: Optional[Union[str, List[str]]] = ['GAL4/LEXA', 'SplitGAL4'],
         organize_by_region: bool = False,
         simple_mode: bool = False,
-        calculate_specificity: bool = True,
-        specificity_top_n: int = 100,
-        pdf_images_per_page: Tuple[int, int] = (5, 3),
+        pdf_images_per_page: Tuple[int, int] = (3, 2),
         pdf_landscape: bool = True
     ) -> pd.DataFrame:
         """
@@ -3548,12 +6358,19 @@ class NeuronBridgeFinder:
         
         Parameters
         ----------
-        queries : str, int, or list
-            Neuron query(s). Can be bodyId, type, instance, or comma-separated string.
+        queries : str, int, list, or LabelMapper
+            Neuron query(s). Can be:
+            - bodyId (int)
+            - type/instance name (str)
+            - comma-separated string of names/ids
+            - list of queries
+            - LabelMapper object for cross-dataset unified naming (extracts queries
+              for each dataset from source_mapping or target_mapping)
         dataset : str, list of str, or None
             Dataset(s) for type/instance lookups (e.g., 'hemibrain:v1.2.1').
             Can be a single string or a list of datasets to search multiple.
             Set to None to search ALL available datasets.
+            When using LabelMapper, this is automatically derived from the mapper.
         match_type : str, optional
             Match algorithm: 'cds', 'pppm', or 'both'. 
             If None, uses self.match_type. Default: None
@@ -3590,18 +6407,6 @@ class NeuronBridgeFinder:
             - Split-GAL4 collections: only files with '20x' AND 'multichannel' in filename
             - GAL4/LexA collections: only files with 'total' in filename
             Default: False
-        calculate_specificity : bool
-            If True, calculate specificity metrics for each line by calling line_to_neuron
-            to determine how specific each line is to the queried neuron types.
-            Adds columns: rank_sum, type_proportion, n_queried_types, n_total_types,
-            selectivity, specificity_score. Only works for type/instance queries.
-            Default: True
-        specificity_top_n : int
-            Controls both:
-            1. Maximum number of lines to calculate specificity for (to limit API calls)
-            2. Number of top neuron matches to consider when analyzing each line
-            Lines are selected based on their ranking (top N by score).
-            Default: 100
         pdf_images_per_page : tuple of (int, int)
             (columns, rows) - number of images per page in the PDF summary.
             Default: (5, 3) = 15 images per page
@@ -3617,19 +6422,48 @@ class NeuronBridgeFinder:
         - Split-GAL4 lines: start with SS, LH, MB, IS, OL, LC, etc.
         - Separate CSV files saved: gal4_lexa_lines.csv, split_gal4_lines.csv
         
-        Specificity Metrics (when calculate_specificity=True):
-        - rank_sum: Sum of ranks for queried neuron types (lower = better)
-        - type_proportion: Queried types / Total types labeled (higher = more specific)
-        - selectivity: 1 / n_total_types (higher = labels fewer cell types)
-        - specificity_score: Combined score (type_proportion - 0.3 * normalized_rank_sum)
+        Weighted Score and Multi-Type Query:
+            The weighted_score column prioritizes lines labeling ALL queried neurons:
+            
+            weighted_score = agg_mean_score × (match_count / total_query_neurons)
+            
+            - agg_mean_score: Average NeuronBridge match score
+            - match_count: Number of unique query neurons this line labels
+            - total_query_neurons: Total unique neurons in the query
+            - coverage_ratio: match_count / total_query_neurons
+            
+            All *_summary.csv files are SORTED BY weighted_score (descending).
+            This ensures lines labeling ALL queried types rank highest.
+            
+            ** IMPORTANT: Multi-type query behavior **
+            When querying 'aMe12,MBON01', the program finds lines labeling BOTH types.
+            If you want lines for DIFFERENT neuron groups, query separately:
+            - Query 1: 'aMe12' → best lines for aMe12
+            - Query 2: 'MBON01' → best lines for MBON01
+        
+        Cross-Dataset Scoring (when multiple datasets):
+            When searching across multiple datasets, the results include:
+            - 'cross_dataset_score': Mean of max scores across datasets
+            - 'datasets_labeled': Number of datasets where the line labels the query
+            - 'min_score_per_dataset': Minimum score across all datasets
+        
+        For Specificity/Selectivity Analysis:
+            Use analyze_colabeling() method separately to study how specific each
+            driver line is to your target neuron types. This provides:
+            - Co-labeling matrices showing overlap between lines
+            - Expression matrices showing which types each line labels
+            - Specificity score distributions
             
         Returns
         -------
         pd.DataFrame
             Combined DataFrame with all results, including:
             - 'source_query': original query string
+            - 'source_type': neuron type (for type queries)
             - 'source_bodyId': matching bodyId for type/instance queries
+            - 'source_dataset': source dataset
             - For match_type='both': cds_score, pppm_score, cds_rank, pppm_rank, combined_rank
+            - For multi-dataset: cross_dataset_score, datasets_labeled, min_score_per_dataset
             
         Example
         -------
@@ -3642,19 +6476,80 @@ class NeuronBridgeFinder:
         >>> # With FlyLight images
         >>> results = nbf.find_lines_batch('aMe12', download_images='flylight', output_dir='./output')
         >>> # With simple mode (reduced download volume)
-        >>> results = nbf.find_lines_batch('aMe12', download_images='flylight', 
+        >>> results = nbf.find_lines_batch('aMe12', download_images='flylight',  
         ...                                 simple_mode=True, output_dir='./output')
         >>> # Separate GAL4/LexA from Split-GAL4 (set on instance)
         >>> nbf = NeuronBridgeFinder(separate_splitgal4=True)
         >>> results = nbf.find_lines_batch('MBON01', download_img_for_top_n_lines=5)  # 5 GAL4 + 5 Split-GAL4
+        >>> # With LabelMapper for cross-dataset unified naming
+        >>> from comparison.label_mapper import LabelMapper
+        >>> mapper = LabelMapper(source_mapping_file='my_mappings.json')
+        >>> results = nbf.find_lines_batch(mapper, output_dir='./output')
         """
-        # Parse queries
-        if isinstance(queries, str):
+        # Handle LabelMapper input - expand to dataset-specific queries
+        label_mapper_info = None  # Track LabelMapper for type info
+        if HAS_LABELMAPPER and isinstance(queries, LabelMapper):
+            label_mapper_info = queries  # Keep reference
+            self._vprint("📋 Expanding LabelMapper to cross-dataset queries...")
+            
+            # Build query list from LabelMapper's source or target mappings
+            expanded_queries = []
+            mapper_datasets = set()
+            
+            # Get datasets and standard labels from the mapper
+            for role in ['source', 'target', 'intermediate']:
+                all_labels = queries.get_all_std_labels(role)
+                for std_label in all_labels:
+                    ds_list = queries.get_datasets(role)
+                    for ds in ds_list:
+                        neurons = queries.get_neurons_for_label(std_label, ds, role)
+                        if neurons:
+                            mapper_datasets.add(ds)
+                            # Add as tuples: (neuron_id, dataset, std_label)
+                            for neuron in neurons:
+                                expanded_queries.append({
+                                    'query': neuron,
+                                    'dataset': ds,
+                                    'std_label': std_label
+                                })
+            
+            # Override dataset parameter with mapper datasets if not specified
+            if dataset is None and mapper_datasets:
+                dataset = list(mapper_datasets)
+                self._vprint(f"   Using datasets from LabelMapper: {dataset}")
+            
+            # Build query_list from expanded queries - store metadata for later
+            query_list = []
+            query_metadata = {}  # {query_str: {std_label, dataset}}
+            for eq in expanded_queries:
+                q = eq['query']
+                query_list.append(q)
+                # Store metadata for type info enrichment
+                key = f"{q}_{eq['dataset']}"
+                query_metadata[key] = {
+                    'std_label': eq['std_label'],
+                    'dataset': eq['dataset']
+                }
+            
+            # Remove duplicates while preserving order
+            seen = set()
+            unique_queries = []
+            for q in query_list:
+                if q not in seen:
+                    seen.add(q)
+                    unique_queries.append(q)
+            query_list = unique_queries
+            
+            self._vprint(f"   Expanded to {len(query_list)} unique queries from LabelMapper")
+        elif isinstance(queries, str):
             query_list = [q.strip() for q in queries.split(',') if q.strip()]
+            query_metadata = {}
         elif isinstance(queries, int):
             query_list = [queries]
+            query_metadata = {}
         else:
             query_list = list(queries)
+            query_metadata = {}
         
         # Use class-level match_type if not specified
         if match_type is None:
@@ -3664,7 +6559,12 @@ class NeuronBridgeFinder:
             self._vprint("❌ No queries provided")
             return pd.DataFrame()
         
+        # Determine if multi-dataset search
+        is_multi_dataset = isinstance(dataset, list) and len(dataset) > 1
+        
         self._vprint(f"🔍 Finding lines for {len(query_list)} query(s)")
+        if is_multi_dataset:
+            self._vprint(f"   📊 Multi-dataset mode: {len(dataset)} datasets")
         
         # Create output directory if needed
         output_path = None
@@ -3679,6 +6579,28 @@ class NeuronBridgeFinder:
             output_path = os.path.join(output_dir, f'findlines_{query_info}_{timestamp}')
             os.makedirs(output_path, exist_ok=True)
             self._vprint(f"   Output: {output_path}")
+            
+            # Save parameters for reproducibility
+            self._save_parameters(
+                output_path=output_path,
+                function_name='find_lines_batch',
+                function_params={
+                    'queries': query_list,
+                    'dataset': dataset,
+                    'match_type': match_type,
+                    'download_images': download_images,
+                    'download_img_for_top_n_lines': download_img_for_top_n_lines,
+                    'image_formats': image_formats,
+                    'image_types': image_types,
+                    'max_download_images_per_line': max_download_images_per_line,
+                    'flylight_category': flylight_category,
+                    'organize_by_region': organize_by_region,
+                    'simple_mode': simple_mode,
+                    'pdf_images_per_page': pdf_images_per_page,
+                    'pdf_landscape': pdf_landscape
+                }
+            )
+            self._vprint(f"   💾 Parameters: parameters.json")
         
         # Process each query
         all_results = []
@@ -3739,12 +6661,17 @@ class NeuronBridgeFinder:
             for q, cached_data in cached_queries:
                 all_results.append(cached_data)
                 
-                # Save individual cached results
+                # Save individual cached results (sorted by score descending)
                 if output_path:
                     query_name = str(q)
                     safe_name = ''.join(c if c.isalnum() or c in '_-' else '_' for c in query_name)
                     output_file = os.path.join(output_path, f'{safe_name}_lines.csv')
-                    cached_data.to_csv(output_file, index=False)
+                    # Sort by score descending before saving
+                    if 'score' in cached_data.columns:
+                        cached_data_sorted = cached_data.sort_values('score', ascending=False)
+                    else:
+                        cached_data_sorted = cached_data
+                    cached_data_sorted.to_csv(output_file, index=False)
             
             # Phase 2: Fetch uncached data
             if uncached_queries:
@@ -3799,11 +6726,16 @@ class NeuronBridgeFinder:
                         lines_df['source_query'] = query_name
                         all_results.append(lines_df)
                         
-                        # Save individual results
+                        # Save individual results (sorted by score descending)
                         if output_path:
                             safe_name = ''.join(c if c.isalnum() or c in '_-' else '_' for c in query_name)
                             output_file = os.path.join(output_path, f'{safe_name}_lines.csv')
-                            lines_df.to_csv(output_file, index=False)
+                            # Sort by score descending before saving
+                            if 'score' in lines_df.columns:
+                                lines_df_sorted = lines_df.sort_values('score', ascending=False)
+                            else:
+                                lines_df_sorted = lines_df
+                            lines_df_sorted.to_csv(output_file, index=False)
                         
                     except Exception as e:
                         pass  # Silent in progress mode
@@ -3855,11 +6787,16 @@ class NeuronBridgeFinder:
                     
                     self._vprint(f"   ✅ Found {len(lines_df)} matching driver lines")
                     
-                    # Save individual results
+                    # Save individual results (sorted by score descending)
                     if output_path:
                         safe_name = ''.join(c if c.isalnum() or c in '_-' else '_' for c in query_name)
                         output_file = os.path.join(output_path, f'{safe_name}_lines.csv')
-                        lines_df.to_csv(output_file, index=False)
+                        # Sort by score descending before saving
+                        if 'score' in lines_df.columns:
+                            lines_df_sorted = lines_df.sort_values('score', ascending=False)
+                        else:
+                            lines_df_sorted = lines_df
+                        lines_df_sorted.to_csv(output_file, index=False)
                         self._vprint(f"   💾 Saved: {output_file}")
                         
                 except Exception as e:
@@ -3869,9 +6806,42 @@ class NeuronBridgeFinder:
         if all_results:
             combined_df = pd.concat(all_results, ignore_index=True)
             
+            # Calculate total unique query neurons (bodyIds) for weighted_score normalization
+            total_query_neurons = 0
+            if 'source_bodyId' in combined_df.columns:
+                total_query_neurons = len(set(str(v) for v in combined_df['source_bodyId'].dropna().unique()))
+            
             # Add line_type classification if separate_splitgal4 is enabled
             if self.separate_splitgal4 and 'line' in combined_df.columns:
                 combined_df['line_type'] = combined_df['line'].apply(self._classify_line_type)
+            
+            # Enrich with type information from neuron_df if available
+            if 'source_bodyId' in combined_df.columns and 'source_dataset' in combined_df.columns:
+                # Lookup type info for each bodyId
+                type_cache = {}
+                for _, row in combined_df.iterrows():
+                    body_id = row.get('source_bodyId')
+                    ds = row.get('source_dataset')
+                    if pd.isna(body_id) or pd.isna(ds):
+                        continue
+                    key = (str(body_id), ds)
+                    if key not in type_cache:
+                        ds_folder = self._dataset_name_to_folder(ds)
+                        neuron_df = self._load_neuron_df_for_dataset(ds_folder)
+                        if neuron_df is not None and 'bodyId' in neuron_df.columns and 'type' in neuron_df.columns:
+                            match = neuron_df[neuron_df['bodyId'].astype(str) == str(body_id)]
+                            if not match.empty:
+                                type_cache[key] = match['type'].iloc[0]
+                            else:
+                                type_cache[key] = None
+                        else:
+                            type_cache[key] = None
+                
+                # Add source_type column
+                combined_df['source_type'] = combined_df.apply(
+                    lambda row: type_cache.get((str(row.get('source_bodyId', '')), row.get('source_dataset', '')), ''),
+                    axis=1
+                )
             
             # Aggregate line-level results across bodyIds for ranking
             # For each unique line, compute aggregate score/rank
@@ -3881,164 +6851,178 @@ class NeuronBridgeFinder:
                     agg_dict = {
                         'combined_rank': 'mean',
                         'score': 'max',
-                        'source_bodyId': lambda x: ','.join(str(v) for v in x.unique())
+                        # Use nunique for unique bodyId count instead of count with repeats
+                        'source_bodyId': [
+                            lambda x: len(set(str(v) for v in x.dropna().unique())),  # unique count
+                            lambda x: ','.join(sorted(set(str(v) for v in x.dropna().unique())))  # unique list
+                        ]
                     }
                     if self.separate_splitgal4 and 'line_type' in combined_df.columns:
                         agg_dict['line_type'] = 'first'
+                    if 'source_type' in combined_df.columns:
+                        agg_dict['source_type'] = lambda x: ','.join(sorted(set(str(v) for v in x.dropna().unique() if v)))
                     
                     line_stats = combined_df.groupby('line').agg(agg_dict).reset_index()
+                    # Flatten multi-level columns
+                    line_stats.columns = ['_'.join(col).strip('_') if isinstance(col, tuple) else col 
+                                         for col in line_stats.columns]
                     line_stats = line_stats.rename(columns={
-                        'combined_rank': 'agg_combined_rank',
-                        'score': 'agg_max_score',
-                        'source_bodyId': 'matched_bodyIds'
+                        'combined_rank_mean': 'agg_combined_rank',
+                        'score_max': 'agg_max_score',
+                        'source_bodyId_<lambda_0>': 'match_count',
+                        'source_bodyId_<lambda_1>': 'matched_bodyIds',
+                        'source_type_<lambda>': 'matched_types'
                     })
-                    line_stats = line_stats.sort_values('agg_combined_rank', ascending=True)
+                    
+                    # Calculate weighted_score for 'both' match_type
+                    # weighted_score = agg_max_score * (match_count / total_query_neurons)
+                    if 'match_count' in line_stats.columns and total_query_neurons > 0:
+                        line_stats['coverage_ratio'] = line_stats['match_count'] / total_query_neurons
+                        line_stats['weighted_score'] = line_stats['agg_max_score'] * line_stats['coverage_ratio']
+                        # Sort by weighted_score (higher is better), then by combined_rank (lower is better)
+                        line_stats = line_stats.sort_values(
+                            ['weighted_score', 'agg_combined_rank'], 
+                            ascending=[False, True]
+                        )
+                    else:
+                        line_stats = line_stats.sort_values('agg_combined_rank', ascending=True)
                 else:
                     # For cds/pppm, use mean score (higher is better)
+                    # FIXED: match_count now uses nunique for unique bodyId count
                     agg_dict = {
-                        'score': ['mean', 'max', 'count'],
-                        'source_bodyId': lambda x: ','.join(str(v) for v in x.unique())
+                        'score': ['mean', 'max'],
+                        # Use nunique for unique bodyId count instead of count with repeats
+                        'source_bodyId': [
+                            lambda x: len(set(str(v) for v in x.dropna().unique())),  # unique count
+                            lambda x: ','.join(sorted(set(str(v) for v in x.dropna().unique())))  # unique list
+                        ]
                     }
+                    # Add type aggregation if available
+                    if 'source_type' in combined_df.columns:
+                        agg_dict['source_type'] = lambda x: ','.join(sorted(set(str(v) for v in x.dropna().unique() if v)))
+                    
+                    # Add dataset info for cross-dataset scoring
+                    if 'source_dataset' in combined_df.columns and is_multi_dataset:
+                        agg_dict['source_dataset'] = [
+                            lambda x: len(set(str(v) for v in x.dropna().unique())),  # datasets_labeled
+                            lambda x: ','.join(sorted(set(str(v) for v in x.dropna().unique())))  # dataset list
+                        ]
+                    
                     line_stats = combined_df.groupby('line').agg(agg_dict).reset_index()
-                    line_stats.columns = ['line', 'agg_mean_score', 'agg_max_score', 
-                                          'match_count', 'matched_bodyIds']
+                    # Flatten multi-level columns
+                    new_cols = ['line']
+                    for col in line_stats.columns[1:]:
+                        if isinstance(col, tuple):
+                            new_cols.append(f"{col[0]}_{col[1] if isinstance(col[1], str) else 'agg'}")
+                        else:
+                            new_cols.append(col)
+                    line_stats.columns = new_cols
+                    
+                    # Rename columns properly
+                    rename_map = {
+                        'score_mean': 'agg_mean_score',
+                        'score_max': 'agg_max_score',
+                    }
+                    # Find and rename source_bodyId columns
+                    for col in line_stats.columns:
+                        if 'source_bodyId' in col and 'lambda' in col and '0' in col:
+                            rename_map[col] = 'match_count'
+                        elif 'source_bodyId' in col and 'lambda' in col:
+                            rename_map[col] = 'matched_bodyIds'
+                        elif 'source_type' in col and 'lambda' in col:
+                            rename_map[col] = 'matched_types'
+                        elif 'source_dataset' in col and 'lambda' in col and '0' in col:
+                            rename_map[col] = 'datasets_labeled'
+                        elif 'source_dataset' in col and 'lambda' in col:
+                            rename_map[col] = 'matched_datasets'
+                    
+                    line_stats = line_stats.rename(columns=rename_map)
                     
                     # Add line_type if available
                     if self.separate_splitgal4 and 'line_type' in combined_df.columns:
                         line_type_map = combined_df.groupby('line')['line_type'].first()
                         line_stats['line_type'] = line_stats['line'].map(line_type_map)
                     
-                    line_stats = line_stats.sort_values('agg_mean_score', ascending=False)
+                    # Calculate cross-dataset score if multi-dataset
+                    if is_multi_dataset and 'source_dataset' in combined_df.columns:
+                        # Calculate min score per dataset for each line
+                        # This rewards lines that have good scores across ALL datasets
+                        def calc_min_score_across_datasets(line_name):
+                            line_data = combined_df[combined_df['line'] == line_name]
+                            if 'source_dataset' not in line_data.columns:
+                                return line_data['score'].mean() if 'score' in line_data.columns else 0
+                            
+                            # Get max score per dataset for this line
+                            dataset_scores = line_data.groupby('source_dataset')['score'].max()
+                            if len(dataset_scores) == 0:
+                                return 0
+                            # Return minimum of max scores (worst dataset performance)
+                            return dataset_scores.min()
+                        
+                        def calc_cross_dataset_score(line_name):
+                            """Calculate mean of max scores across datasets."""
+                            line_data = combined_df[combined_df['line'] == line_name]
+                            if 'source_dataset' not in line_data.columns:
+                                return line_data['score'].mean() if 'score' in line_data.columns else 0
+                            
+                            # Get max score per dataset for this line
+                            dataset_scores = line_data.groupby('source_dataset')['score'].max()
+                            if len(dataset_scores) == 0:
+                                return 0
+                            return dataset_scores.mean()
+                        
+                        line_stats['min_score_per_dataset'] = line_stats['line'].apply(calc_min_score_across_datasets)
+                        line_stats['cross_dataset_score'] = line_stats['line'].apply(calc_cross_dataset_score)
+                    
+                    # =================================================================
+                    # WEIGHTED SCORE CALCULATION
+                    # =================================================================
+                    # weighted_score = agg_mean_score * (match_count / total_query_neurons)
+                    # 
+                    # This score prioritizes lines that:
+                    # 1. Have high average matching scores (agg_mean_score)
+                    # 2. Label MORE of the queried neurons (match_count / total_query_neurons)
+                    #
+                    # For multi-type queries, this finds lines that label ALL queried neurons.
+                    # A line labeling all N queried neurons with score S gets weighted_score = S
+                    # A line labeling only 1 of N neurons with score S gets weighted_score = S/N
+                    # =================================================================
+                    if 'match_count' in line_stats.columns and total_query_neurons > 0:
+                        # coverage_ratio = match_count / total_query_neurons
+                        # weighted_score = agg_mean_score * coverage_ratio
+                        line_stats['coverage_ratio'] = line_stats['match_count'] / total_query_neurons
+                        line_stats['weighted_score'] = line_stats['agg_mean_score'] * line_stats['coverage_ratio']
+                        
+                        # Sort by weighted_score (prioritizes lines labeling ALL queried neurons)
+                        line_stats = line_stats.sort_values('weighted_score', ascending=False)
+                        self._vprint(f"   📊 Sorting by weighted_score (agg_mean_score × coverage_ratio)")
+                        self._vprint(f"      Total query neurons: {total_query_neurons}")
+                    elif is_multi_dataset:
+                        # Fallback to min_score_per_dataset for multi-dataset
+                        line_stats = line_stats.sort_values('min_score_per_dataset', ascending=False)
+                        self._vprint(f"   📊 Multi-dataset sorting: by min_score_per_dataset (descending)")
+                    else:
+                        line_stats = line_stats.sort_values('agg_mean_score', ascending=False)
                 
                 # Add aggregated stats back to combined_df
                 merge_cols = ['line', 'matched_bodyIds']
+                if 'matched_types' in line_stats.columns:
+                    merge_cols.append('matched_types')
                 combined_df = combined_df.merge(
                     line_stats[merge_cols], 
                     on='line', 
                     how='left'
                 )
             
-            # Calculate specificity metrics if requested
-            if calculate_specificity and 'line' in combined_df.columns:
-                # Collect queried types from non-bodyId queries
-                queried_types = []
-                for q in query_list:
-                    # Check if this is NOT a bodyId (bodyIds are numeric)
-                    q_str = str(q).strip()
-                    if not q_str.isdigit():
-                        # This is a type/instance query
-                        queried_types.append(q_str)
-                
-                if queried_types:
-                    self._vprint(f"\n📊 Calculating line specificity for {len(queried_types)} queried types...")
-                    
-                    # Calculate specificity on line_stats (limited to top N lines)
-                    line_stats = self._calculate_line_specificity(
-                        line_stats=line_stats,
-                        queried_types=queried_types,
-                        match_type=match_type,
-                        top_n=specificity_top_n,
-                        max_lines=specificity_top_n
-                    )
-                    
-                    n_processed = min(specificity_top_n, len(line_stats)) if specificity_top_n else len(line_stats)
-                    self._vprint(f"   ✅ Added specificity metrics to top {n_processed} of {len(line_stats)} lines")
-                    
-                    # Build and visualize co-labeling matrix if output_path is set
-                    if output_path and len(line_stats) > 1:
-                        # Limit to top N lines for co-labeling analysis
-                        colabel_top_n = min(specificity_top_n or 50, len(line_stats))
-                        colabel_lines = line_stats['line'].head(colabel_top_n).tolist()
-                        
-                        self._vprint(f"\n🔗 Building co-labeling matrices for top {colabel_top_n} lines...")
-                        
-                        # Build similarity matrices
-                        similarity_methods = ['jaccard', 'weighted_jaccard']
-                        matrices = {}
-                        
-                        for method in similarity_methods:
-                            self._vprint(f"\n   📊 Computing {method} similarity...")
-                            matrix, _ = self._build_colabeling_matrix(
-                                lines=colabel_lines,
-                                match_type=match_type,
-                                top_n=specificity_top_n,
-                                similarity_method=method
-                            )
-                            matrices[method] = matrix
-                            
-                            # Save matrix CSV
-                            csv_filename = f'colabeling_matrix_{method}.csv'
-                            csv_path = os.path.join(output_path, csv_filename)
-                            matrix.to_csv(csv_path)
-                            self._vprint(f"   💾 Saved: {csv_filename}")
-                            
-                            # Create visualization
-                            method_titles = {
-                                'jaccard': 'Co-Labeling Matrix (Binary Jaccard)',
-                                'weighted_jaccard': 'Co-Labeling Matrix (Weighted Jaccard)'
-                            }
-                            html_filename = f'colabeling_matrix_{method}.html'
-                            self.visualize_colabeling_matrix(
-                                co_labeling_matrix=matrix,
-                                output_path=output_path,
-                                title=f"{method_titles[method]} - Top {colabel_top_n} Lines",
-                                color_scale='purple',
-                                filename=html_filename
-                            )
-                        
-                        # Use weighted Jaccard for sparsity calculations (most informative)
-                        co_labeling_matrix = matrices['weighted_jaccard']
-                        
-                        # Calculate sparsity metrics
-                        sparsity_scores = self._calculate_colabeling_sparsity(co_labeling_matrix)
-                        
-                        # Add sparsity columns to line_stats
-                        for line_name, scores in sparsity_scores.items():
-                            mask = line_stats['line'] == line_name
-                            line_stats.loc[mask, 'colabel_sparsity'] = scores['colabel_sparsity']
-                            line_stats.loc[mask, 'n_colabeling_lines'] = scores['n_colabeling_lines']
-                            line_stats.loc[mask, 'mean_colabel_similarity'] = scores['mean_colabel_similarity']
-
-                        
-                        # Calculate mutual information
-                        self._vprint(f"\n📐 Calculating mutual information...")
-                        mi_df, expression_df = self._calculate_mutual_information(
-                            lines=colabel_lines,
-                            queried_types=queried_types,
-                            match_type=match_type,
-                            top_n=specificity_top_n
-                        )
-                        
-                        if not mi_df.empty:
-                            # Merge MI columns into line_stats
-                            mi_cols = ['line', 'mutual_information', 'normalized_mi', 'queried_type_coverage']
-                            line_stats = line_stats.merge(mi_df[mi_cols], on='line', how='left')
-                            
-                            # Save MI results
-                            mi_csv = os.path.join(output_path, 'mutual_information.csv')
-                            mi_df.to_csv(mi_csv, index=False)
-                            self._vprint(f"   💾 Mutual information: {mi_csv}")
-                            
-                            # Save and visualize expression matrix
-                            if not expression_df.empty:
-                                expr_csv = os.path.join(output_path, 'expression_matrix.csv')
-                                expression_df.to_csv(expr_csv)
-                                self._vprint(f"   💾 Expression matrix: {expr_csv}")
-                                
-                                # Visualize expression matrix
-                                self.visualize_expression_matrix(
-                                    expression_df=expression_df,
-                                    output_path=output_path,
-                                    queried_types=queried_types,
-                                    title=f"Expression Matrix (Lines × Types) - Top {colabel_top_n} Lines"
-                                )
-                else:
-                    self._vprint(f"\n⚠️ Skipping specificity: No type queries found (all queries are bodyIds)")
-            
-            # Save combined results
+            # Save combined results (sorted by score descending)
             if output_path:
                 combined_file = os.path.join(output_path, 'all_lines.csv')
-                combined_df.to_csv(combined_file, index=False)
+                # Sort by score descending before saving
+                if 'score' in combined_df.columns:
+                    combined_df_sorted = combined_df.sort_values('score', ascending=False)
+                else:
+                    combined_df_sorted = combined_df
+                combined_df_sorted.to_csv(combined_file, index=False)
                 self._vprint(f"\n💾 Combined results: {combined_file}")
                 self._vprint(f"   Total: {len(combined_df)} lines from {len(query_list)} query(s)")
                 
@@ -4058,17 +7042,21 @@ class NeuronBridgeFinder:
                         gal4_lexa_stats = line_stats[line_stats['line_type'] == 'gal4_lexa']
                         split_gal4_stats = line_stats[line_stats['line_type'] == 'split_gal4']
                         
-                        # Save GAL4/LexA files
+                        # Save GAL4/LexA files (sorted by score descending)
                         if not gal4_lexa_combined.empty:
                             gal4_file = os.path.join(output_path, 'gal4_lexa_lines.csv')
+                            if 'score' in gal4_lexa_combined.columns:
+                                gal4_lexa_combined = gal4_lexa_combined.sort_values('score', ascending=False)
                             gal4_lexa_combined.to_csv(gal4_file, index=False)
                             gal4_summary = os.path.join(output_path, 'gal4_lexa_summary.csv')
                             gal4_lexa_stats.to_csv(gal4_summary, index=False)
                             self._vprint(f"   GAL4/LexA: {gal4_file} ({len(gal4_lexa_combined)} matches, {len(gal4_lexa_stats)} unique)")
                         
-                        # Save Split-GAL4 files
+                        # Save Split-GAL4 files (sorted by score descending)
                         if not split_gal4_combined.empty:
                             split_file = os.path.join(output_path, 'split_gal4_lines.csv')
+                            if 'score' in split_gal4_combined.columns:
+                                split_gal4_combined = split_gal4_combined.sort_values('score', ascending=False)
                             split_gal4_combined.to_csv(split_file, index=False)
                             split_summary = os.path.join(output_path, 'split_gal4_summary.csv')
                             split_gal4_stats.to_csv(split_summary, index=False)

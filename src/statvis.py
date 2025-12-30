@@ -31,6 +31,53 @@ from tqdm import tqdm
 # Structure: {dataset: {'neuron_df': DataFrame, 'roi_df': DataFrame}}
 _NEURON_DF_CACHE = {}
 
+# Try to import polars for faster I/O
+try:
+    import polars as pl
+    HAS_POLARS = True
+except ImportError:
+    HAS_POLARS = False
+
+
+def _load_dataframe_fast(file_path: str, dtype_overrides: dict = None) -> pd.DataFrame:
+    """
+    Load a DataFrame using the fastest available method.
+    
+    Priority: parquet > polars CSV > pandas CSV
+    
+    Args:
+        file_path: Path to CSV or parquet file
+        dtype_overrides: Dict of column dtypes (e.g., {'bodyId': str})
+    
+    Returns:
+        pandas DataFrame
+    """
+    # Check for parquet version first
+    parquet_path = file_path.rsplit('.', 1)[0] + '.parquet'
+    if os.path.exists(parquet_path):
+        return pd.read_parquet(parquet_path)
+    
+    if not os.path.exists(file_path):
+        raise FileNotFoundError(f"File not found: {file_path}")
+    
+    # Use polars for CSV if available (3-10x faster)
+    if HAS_POLARS:
+        try:
+            # Polars reads CSV very fast
+            pl_df = pl.read_csv(file_path, infer_schema_length=10000)
+            df = pl_df.to_pandas()
+            # Apply dtype overrides after conversion
+            if dtype_overrides:
+                for col, dtype in dtype_overrides.items():
+                    if col in df.columns:
+                        df[col] = df[col].astype(dtype)
+            return df
+        except Exception:
+            pass  # Fall back to pandas
+    
+    # Fallback to pandas
+    return pd.read_csv(file_path, low_memory=False, dtype=dtype_overrides)
+
 
 def _get_cached_neuron_df(dataset: str, dataset_path_body: str):
     """
@@ -39,7 +86,8 @@ def _get_cached_neuron_df(dataset: str, dataset_path_body: str):
     First call loads from disk and caches in memory.
     Subsequent calls return the cached DataFrame instantly.
     
-    Prefers parquet format if available (faster ~10x), falls back to CSV.
+    Uses polars for fast CSV reading if available, falls back to pandas.
+    Prefers parquet format if available (fastest).
     
     Args:
         dataset: Dataset identifier (normalized, e.g., 'hemibrain_v1_2_1')
@@ -55,23 +103,26 @@ def _get_cached_neuron_df(dataset: str, dataset_path_body: str):
         cached = _NEURON_DF_CACHE[dataset]
         return cached['neuron_df'].copy(), cached['roi_df'].copy()
     
-    # Load from disk - prefer parquet over CSV (faster ~10x)
-    neuron_parquet = dataset_path_body + '_neuron_df.parquet'
-    roi_parquet = dataset_path_body + '_roi_count_df.parquet'
+    # File paths
     neuron_csv = dataset_path_body + '_neuron_df.csv'
     roi_csv = dataset_path_body + '_roi_count_df.csv'
     
-    # Load neuron_df (prefer parquet)
-    if os.path.exists(neuron_parquet):
-        ndf = pd.read_parquet(neuron_parquet)
-    else:
-        ndf = pd.read_csv(neuron_csv, header=0, index_col=0, low_memory=False)
+    # Load using fast loader (handles parquet/polars/pandas priority)
+    ndf = _load_dataframe_fast(neuron_csv)
+    rdf = _load_dataframe_fast(roi_csv)
     
-    # Load roi_count_df (prefer parquet)
-    if os.path.exists(roi_parquet):
-        rdf = pd.read_parquet(roi_parquet)
-    else:
-        rdf = pd.read_csv(roi_csv, header=0, index_col=0, low_memory=False)
+    # Ensure bodyId is int64 for neuprint/navis compatibility
+    # This prevents "No neurons matching the given criteria" errors
+    if 'bodyId' in ndf.columns:
+        try:
+            ndf['bodyId'] = ndf['bodyId'].astype('int64')
+        except (ValueError, TypeError):
+            pass  # Keep original type if conversion fails (e.g., FAFB has large IDs as strings)
+    if 'bodyId' in rdf.columns:
+        try:
+            rdf['bodyId'] = rdf['bodyId'].astype('int64')
+        except (ValueError, TypeError):
+            pass
     
     # Cache in memory
     _NEURON_DF_CACHE[dataset] = {
@@ -445,14 +496,29 @@ def getNeurons(requiredNeurons, dataset='hemibrain:v1.2.1', custom_group_names=N
             if os.path.exists(data_dir):
                 # Use dataset name in message instead of hardcoded "FAFB"
                 dataset_short = dataset.split('_')[1] if '_' in dataset else dataset
-                if verbose:
-                    print(f"Checking local {dataset_short} data in {data_dir}...")
-                neuron_file, _ = fafb_utils.prepare_fafb_data(data_dir)
                 
-                # Load the full neuron DataFrame
-                if verbose:
-                    print(f"Loading neurons from {neuron_file}...")
-                full_neuron_df = pd.read_csv(neuron_file, dtype={'bodyId': str})
+                # Check if already cached
+                cache_key = f"fafb_{dataset}"
+                if cache_key in _NEURON_DF_CACHE:
+                    if verbose:
+                        print(f"Using cached {dataset_short} data...")
+                    full_neuron_df = _NEURON_DF_CACHE[cache_key]['neuron_df'].copy()
+                else:
+                    if verbose:
+                        print(f"Loading {dataset_short} data from {data_dir}...")
+                    neuron_file, _ = fafb_utils.prepare_fafb_data(data_dir)
+                    
+                    # Load using fast loader (polars if available)
+                    full_neuron_df = _load_dataframe_fast(neuron_file, dtype_overrides={'bodyId': str})
+                    
+                    # Ensure bodyId is string
+                    if 'bodyId' in full_neuron_df.columns:
+                        full_neuron_df['bodyId'] = full_neuron_df['bodyId'].astype(str)
+                    
+                    # Cache for future calls
+                    _NEURON_DF_CACHE[cache_key] = {'neuron_df': full_neuron_df}
+                    if verbose:
+                        print(f"  ✓ Loaded {len(full_neuron_df):,} neurons (cached for reuse)")
                 
                 if requiredNeurons is None:
                     return full_neuron_df, pd.DataFrame(), 'ALL_FAFB', None
@@ -491,15 +557,16 @@ def getNeurons(requiredNeurons, dataset='hemibrain:v1.2.1', custom_group_names=N
                     selected_dfs.append(df_by_id)
                     
                 if types:
-                    # Regex matching for types
+                    # Matching for types
                     for t in types:
-                        # Escape regex special characters if it's a literal type
-                        # But allow regex if intended (e.g. "MBON.*")
-                        # For now, assume simple contains or exact match if no regex chars
-                        if any(c in t for c in ['.', '*', '+', '?', '^', '$', '(', ')', '[', ']', '{', '}', '|', '\\']):
-                             df_by_type = full_neuron_df[full_neuron_df['type'].str.match(t, na=False)].copy()
+                        # Only use regex when * is present (e.g., "MBON.*", "DN1*")
+                        # All other characters (+, -, etc.) are treated as literals
+                        if '*' in t:
+                            # User wants regex matching
+                            df_by_type = full_neuron_df[full_neuron_df['type'].str.match(t, na=False)].copy()
                         else:
-                             df_by_type = full_neuron_df[full_neuron_df['type'] == t].copy()
+                            # Exact match - treat +, -, etc. as literal characters
+                            df_by_type = full_neuron_df[full_neuron_df['type'] == t].copy()
                         selected_dfs.append(df_by_type)
                 
                 if selected_dfs:
@@ -636,6 +703,14 @@ def getNeurons(requiredNeurons, dataset='hemibrain:v1.2.1', custom_group_names=N
             else:
                 auto_name = group_names[0] + '_etc'
             
+            # Ensure bodyId_list type matches DataFrame's bodyId column type for .isin() to work
+            if bodyId_list and len(ndf_alltypes) > 0:
+                sample_df_bid = ndf_alltypes['bodyId'].iloc[0]
+                if isinstance(sample_df_bid, (int, np.integer)):
+                    bodyId_list = [int(b) if isinstance(b, str) and str(b).isdigit() else b for b in bodyId_list]
+                else:
+                    bodyId_list = [str(b) for b in bodyId_list]
+            
             # Build neuron_df with custom_group column
             neuron_df = ndf_alltypes[ndf_alltypes['bodyId'].isin(bodyId_list)].copy()
             roi_count_df = rdf_alltypes[rdf_alltypes['bodyId'].isin(bodyId_list)]
@@ -652,6 +727,14 @@ def getNeurons(requiredNeurons, dataset='hemibrain:v1.2.1', custom_group_names=N
                     for item in requiredNeuron:
                         item_bodyIds = _process_single_neuron(item, ndf_alltypes, bodyId_alltypes, verbose=verbose)
                         group_bodyIds.extend(item_bodyIds)
+                    
+                    # Ensure type consistency for .isin() matching
+                    if group_bodyIds and len(ndf_alltypes) > 0:
+                        sample_df_bid = ndf_alltypes['bodyId'].iloc[0]
+                        if isinstance(sample_df_bid, (int, np.integer)):
+                            group_bodyIds = [int(b) if isinstance(b, str) and str(b).isdigit() else b for b in group_bodyIds]
+                        else:
+                            group_bodyIds = [str(b) for b in group_bodyIds]
                     
                     # Assign custom group name
                     if custom_group_names and group_custom_idx < len(custom_group_names):
@@ -674,6 +757,14 @@ def getNeurons(requiredNeurons, dataset='hemibrain:v1.2.1', custom_group_names=N
                 
                 item_bodyIds = _process_single_neuron(requiredNeuron, ndf_alltypes, bodyId_alltypes, verbose=verbose)
                 bodyId_list.extend(item_bodyIds)
+            
+            # Ensure bodyId_list type matches DataFrame's bodyId column type for .isin() to work
+            if bodyId_list and len(ndf_alltypes) > 0:
+                sample_df_bid = ndf_alltypes['bodyId'].iloc[0]
+                if isinstance(sample_df_bid, (int, np.integer)):
+                    bodyId_list = [int(b) if isinstance(b, str) and str(b).isdigit() else b for b in bodyId_list]
+                else:
+                    bodyId_list = [str(b) for b in bodyId_list]
             
             neuron_df = ndf_alltypes[ndf_alltypes['bodyId'].isin(bodyId_list)]
             roi_count_df = rdf_alltypes[rdf_alltypes['bodyId'].isin(bodyId_list)]
@@ -698,19 +789,38 @@ def _process_single_neuron(requiredNeuron, ndf_alltypes, bodyId_alltypes, verbos
     if isinstance(requiredNeuron, (int, np.integer)):
         # Native int or numpy integer types (np.int64, etc.)
         is_bodyid = True
-        bodyid_value = int(requiredNeuron)
+        bodyid_value = requiredNeuron
     elif isinstance(requiredNeuron, str) and requiredNeuron.isdigit():
         # String that looks like a number (e.g., "535898")
         is_bodyid = True
-        bodyid_value = int(requiredNeuron)
+        bodyid_value = requiredNeuron  # Keep as string for matching
     
     if is_bodyid:
-        # bodyId lookup
-        if bodyid_value in bodyId_alltypes:
-            bodyId_list.append(bodyid_value)
+        # bodyId lookup - handle both int and string types in bodyId_alltypes
+        # Convert to both types for comparison since CSV loading may produce either
+        bodyid_int = int(bodyid_value) if isinstance(bodyid_value, str) else bodyid_value
+        bodyid_str = str(bodyid_value)
+        
+        # Check if bodyId_alltypes contains ints or strings
+        if bodyId_alltypes:
+            sample = bodyId_alltypes[0]
+            if isinstance(sample, (int, np.integer)):
+                # List contains ints, use int comparison
+                if bodyid_int in bodyId_alltypes:
+                    bodyId_list.append(bodyid_int)
+                else:
+                    if verbose:
+                        print(f'\033[33mbodyId {bodyid_int} not found, please check your input (skipped)\033[0m')
+            else:
+                # List contains strings, use string comparison
+                if bodyid_str in bodyId_alltypes:
+                    bodyId_list.append(bodyid_str)
+                else:
+                    if verbose:
+                        print(f'\033[33mbodyId {bodyid_str} not found, please check your input (skipped)\033[0m')
         else:
             if verbose:
-                print(f'\033[33mbodyId {bodyid_value} not found, please check your input (skipped)\033[0m')
+                print(f'\033[33mEmpty neuron list, cannot find bodyId {bodyid_value}\033[0m')
     elif isinstance(requiredNeuron, str) and requiredNeuron.find('.*') != -1:
         # regex of instance
         find_df = ndf_alltypes[ndf_alltypes['instance'].str.match(requiredNeuron, na=False)]
@@ -1165,8 +1275,50 @@ def VisConnMat(cmat,filename,title='',color_scale=[[0, 'rgb(255,255,255)'], [1, 
     fig.write_html(filename, **write_config)
 
 
-def VisConnMatInteractive(cmat, filename, title='', color_scale=[[0, 'rgb(255,255,255)'], [1, 'rgb(104,55,164)']], showfig=True, fontsize=12, conn_df=None, matrices_dict=None, verbose=True):
-    '''Create interactive heatmap with comprehensive controls similar to network visualization
+# ============================================================================
+# DEPRECATED: VisConnMatInteractive in statvis.py
+# ============================================================================
+# This function is now maintained in vispath_pkg/vispath.py
+# Use: from vispath_pkg import VisConnMatInteractive
+# The statvis.py version is kept for backwards compatibility but will redirect
+# to vispath_pkg if available.
+# ============================================================================
+
+def VisConnMatInteractive(cmat, filename, title='', color_scale=[[0, 'rgb(255,255,255)'], [1, 'rgb(104,55,164)']], showfig=True, fontsize=12, conn_df=None, matrices_dict=None, verbose=True, zmin=None, zmax=None, init_width=None, init_height=None):
+    '''Create interactive heatmap with comprehensive controls.
+    
+    DEPRECATED: This function is now maintained in vispath_pkg.
+    Please use: from vispath_pkg import VisConnMatInteractive
+    
+    This wrapper will redirect to vispath_pkg if available.
+    '''
+    # Try to use vispath_pkg version first (more up-to-date)
+    try:
+        from vispath_pkg import VisConnMatInteractive as VisPkgVisConnMatInteractive
+        return VisPkgVisConnMatInteractive(
+            cmat=cmat, 
+            filename=filename, 
+            title=title, 
+            color_scale=color_scale, 
+            showfig=showfig, 
+            fontsize=fontsize, 
+            conn_df=conn_df, 
+            matrices_dict=matrices_dict, 
+            verbose=verbose,
+            zmin=zmin,
+            zmax=zmax,
+            init_width=init_width,
+            init_height=init_height
+        )
+    except ImportError:
+        pass  # Fall through to local implementation
+    
+    # Local implementation (kept for backwards compatibility)
+    _VisConnMatInteractive_local(cmat, filename, title, color_scale, showfig, fontsize, conn_df, matrices_dict, verbose, zmin, zmax)
+
+
+def _VisConnMatInteractive_local(cmat, filename, title='', color_scale=[[0, 'rgb(255,255,255)'], [1, 'rgb(104,55,164)']], showfig=True, fontsize=12, conn_df=None, matrices_dict=None, verbose=True, zmin=None, zmax=None):
+    '''[DEPRECATED LOCAL VERSION] Create interactive heatmap with comprehensive controls similar to network visualization
     
     Features:
     - Metric toggle: Switch between weight/ratio/probability (if provided)
@@ -1199,6 +1351,10 @@ def VisConnMatInteractive(cmat, filename, title='', color_scale=[[0, 'rgb(255,25
         If provided, enables metric toggle. Otherwise uses cmat as weight matrix only.
     verbose : bool, optional
         Whether to print progress messages (default: True)
+    zmin : float, optional
+        Minimum value for color scale. If None, auto-computed from data.
+    zmax : float, optional
+        Maximum value for color scale. If None, auto-computed from data.
     '''
     
     # Handle multiple matrices for metric toggle
@@ -2010,9 +2166,9 @@ def VisConnMatInteractive(cmat, filename, title='', color_scale=[[0, 'rgb(255,25
         let currentScale = 'linear';
         let currentColorscale = '{default_colorscale}';
         let currentFontSize = {fontsize};
-        let useAutoRange = true;
-        let customZmin = null;
-        let customZmax = null;
+        let useAutoRange = {json.dumps(zmin is None and zmax is None)};
+        let customZmin = {json.dumps(zmin)};
+        let customZmax = {json.dumps(zmax)};
         let customColorScale = null;  // Store custom color scale
         let use3PointScale = false;
         let currentWidth = 800;
@@ -3851,6 +4007,12 @@ def VisConnMatInteractive(cmat, filename, title='', color_scale=[[0, 'rgb(255,25
         
         // Try to load saved settings on page load
         window.addEventListener('load', () => {{
+            // Initialize custom color range if zmin/zmax were provided
+            if (customZmin !== null && customZmax !== null) {{
+                window.customColorRange = {{min: customZmin, max: customZmax}};
+                console.log('Initialized custom color range from parameters:', window.customColorRange);
+            }}
+            
             const saved = localStorage.getItem(storageKey);
             if (saved) {{
                 loadSettings(false);  // Silent load on initialization

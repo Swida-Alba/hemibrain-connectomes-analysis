@@ -51,7 +51,7 @@ dependencies = [
     "PyQt5==5.15.10",
     "neuprint-python==0.4.26",
     "navis==1.5.0",
-    "flybrains==0.2.11",
+    "flybrains>=0.6.3",
     "boto3>=1.26.0",
     "reportlab>=4.0.0", 
     "img2pdf==0.5.1",

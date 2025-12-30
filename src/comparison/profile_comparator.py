@@ -6517,8 +6517,7 @@ class HomologFinder:
                             show_fig=False,
                             brain_mesh='whole',
                             neuron_alpha=0.6,  # Higher alpha for single neuron
-                            legend_mode='normal',
-                            merge_neurons=False,
+                            merge_neurons=False,  # Show individual neurons (also sets legend to 'normal')
                             verbose='simple',
                             client=target_client,  # Pass correct client
                         )
@@ -6641,7 +6640,7 @@ class HomologFinder:
                         data_folder=str(source_dir),
                         show_fig=False,
                         brain_mesh='whole',
-                        legend_mode='normal',  # Show legend for multiple neurons
+                        merge_neurons=False,  # Show individual neurons (also sets legend to 'normal')
                         neuron_alpha=0.6 if len(source_layers) == 1 else 0.2,  # Higher alpha for single neuron
                         verbose='simple',
                         client=source_client,  # Pass correct client

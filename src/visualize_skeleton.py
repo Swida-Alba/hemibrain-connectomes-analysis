@@ -105,11 +105,51 @@ class VisualizeSkeleton:
 
     custom_layer_names: list = field(default_factory=list)
 
+    layer_map_csv: str = None
+    '''
+    Path to CSV file that defines neuron layers mapping.
+    CSV format: columns 'layer' and 'id_type_instance'
+    - 'layer': custom layer name (neurons with same layer value are grouped together)
+    - 'id_type_instance': neuron identifier (bodyId, type, or instance name)
+    
+    When provided, this overrides `neuron_layers` and `custom_layer_names`.
+    The CSV is parsed to construct layers automatically.
+    
+    Example CSV:
+        layer,id_type_instance
+        DN1p,DN1pA
+        DN1p,DN1pB
+        DN2,DN2
+        l-LNv,l-LNv
+    
+    This creates 3 layers: DN1p (with DN1pA, DN1pB), DN2 (with DN2), l-LNv (with l-LNv)
+    '''
+
+    soma_radius_cap: float = None
+    '''
+    Maximum radius for soma node (in nm) to prevent extrusion artifacts.
+    When set, skeleton nodes near the soma with radius > soma_radius_cap will be capped.
+    Useful for FAFB skeletons where soma detection may create exaggerated radii.
+    Example: soma_radius_cap=2000 caps soma radius to 2 microns
+    None (default): No capping, use original skeleton radii
+    '''
+
+    smooth_skeleton: bool = False
+    '''
+    Whether to apply iterative smoothing to skeleton radii.
+    When True, applies aggressive smoothing to prevent extrusion artifacts from
+    chains of large-radius nodes. Requires soma_radius_cap to be set.
+    False (default): Only apply hard cap without smoothing.
+    '''
+
     min_synapse_num: int = 10
     '''minimum number of synapses to fetch and plot'''
 
     saveas: str = None
     '''filename to save the plot, if an absolute path is given, ignore data_folder'''
+
+    include_timestamp: bool = True
+    '''Whether to include timestamp in the output folder name. Default True for unique folders.'''
 
     neuron_colors: tuple = bokeh.palettes.Category10[10]
     '''
@@ -233,7 +273,8 @@ class VisualizeSkeleton:
     Whether to merge all neurons of the same type (layer) into a single 3D object.
     True: Merge neurons into one mesh (tube mode) or trace (line mode).
           Significantly reduces file size and rendering overhead for large populations.
-    False: Plot each neuron individually (default).
+          Legend shows layer names (e.g., 'MBON14_etc').
+    False: Plot each neuron individually with separate legend entries.
     '''
 
     mirror_on_contralateral: bool = False
@@ -288,17 +329,7 @@ class VisualizeSkeleton:
     Note: This only affects inter-layer synapses, not show_connectors (neuron connectors)
     '''
 
-    use_size_slider: bool = False
-    '''
-    whether to use size slider to adjust the size of synapses\n
-    only works when synapse_mode='scatter'
-    '''
 
-    legend_mode: str = 'normal'
-    '''
-    'normal': show legend for individual neurons, requires `merge_neurons=False`\n
-    'merge': merge all neurons in the same layer and show legend for each layer\n
-    '''
     
     transforms_dir: str = '~/flybrain-data'
     '''
@@ -334,18 +365,13 @@ class VisualizeSkeleton:
     - 'none': Only plot meshes specified in mesh_roi parameter\n
     - 'template': Plot the dataset's native template mesh (EM resolution)\n
       • hemibrain → JRCFIB2018F (hemibrain only)\n
-      • optic-lobe → JRCFIB2018F (optic lobe region)\n
+      • optic-lobe → JRCFIB2022M (part of Male CNS volume)\n
       • manc → MANC (male adult nerve cord VNC)\n
       • male-cns → JRCFIB2022M (full male CNS: brain + VNC)\n
     - 'whole': Plot standard whole-brain/VNC envelope mesh\n
       • hemibrain/optic-lobe → JRC2018F (requires transforms)\n
       • manc → MANC VNC envelope (no transform needed)\n
       • male-cns → JRCFIB2022M CNS envelope (no transform needed)\n
-    - 'hemi': HEMIBRAIN ONLY - Plot hemisphere mesh (left or right)\n
-      • Only works with hemibrain:v1.2.1 dataset\n
-      • VNC datasets (manc, male-cns) do not support hemisphere mode\n
-      • manc → MANC template (native VNC)\n
-      • male-cns → JRCFIB2022M (native full CNS)\n
     Note: Some transforms require download (~500MB, one-time)\n
     See https://github.com/navis-org/navis-flybrains
     '''
@@ -357,9 +383,32 @@ class VisualizeSkeleton:
     Example: 'rgba(200, 230, 240, 0.1)' for light blue semi-transparent\n
     See https://plotly.com/python/discrete-color/
     '''
+    
+    vnc_mesh: bool = False
+    '''
+    Whether to show the VNC (Ventral Nerve Cord) mesh.\n
+    Available for datasets with VNC data (requires flybrains >= 0.6.3):\n
+    - male-cns → JRCFIB2022M.mesh_vnc (VNC portion of male CNS)\n
+    - manc → MANC template (native VNC mesh)\n
+    For other datasets (hemibrain, optic-lobe, flywire), this option is ignored.\n
+    Note: For MANC with brain_mesh='template', the VNC is already shown\n
+    (MANC template IS the VNC). Use vnc_mesh=True with brain_mesh='none'\n
+    to show VNC mesh without the template envelope.\n
+    Default: False\n
+    '''
+    
+    vnc_mesh_color: str = 'rgba(200, 240, 200, 0.1)'
+    '''
+    Color of the VNC mesh, works with vnc_mesh = True\n
+    Format: 'rgba(r, g, b, a)' where a=transparency (0=transparent, 1=opaque)\n
+    Example: 'rgba(200, 240, 200, 0.1)' for light green semi-transparent\n
+    Default: light green to distinguish from brain mesh\n
+    '''
 
     def list_available_rois(self, refresh=False, fetch_online=True):
         """List all available ROIs for the current dataset.
+        
+        Parameters
         
         Parameters
         ----------
@@ -404,10 +453,11 @@ class VisualizeSkeleton:
         
         return rois
     
-    def _vprint(self, msg, level='simple', **kwargs):
+    def _vprint(self, msg, level='simple', use_tqdm=False, **kwargs):
         """
         Print message based on verbosity level.
         level: 'simple' (default) or 'full'
+        use_tqdm: if True, use tqdm.write() to avoid progress bar conflicts
         """
         if not self.verbose:
             return
@@ -417,7 +467,154 @@ class VisualizeSkeleton:
             return
             
         # If verbose is 'full', print everything
-        print(msg, **kwargs)
+        if use_tqdm:
+            from tqdm import tqdm
+            # tqdm.write doesn't support 'end' kwarg, handle it separately
+            end = kwargs.pop('end', '\n')
+            if end != '\n':
+                # For partial lines, just print normally (will be on same line)
+                print(msg, end=end, **kwargs)
+            else:
+                tqdm.write(msg, **kwargs)
+        else:
+            print(msg, **kwargs)
+
+    def _parse_layer_map_csv(self):
+        """
+        Parse layer_map_csv file to construct neuron_layers and custom_layer_names.
+        
+        The CSV must have columns 'layer' and 'id_type_instance'.
+        Rows with the same 'layer' value are grouped together into a single layer.
+        
+        This method overrides self.neuron_layers and self.custom_layer_names.
+        """
+        import pandas as pd
+        
+        csv_path = self.layer_map_csv
+        if not os.path.exists(csv_path):
+            raise FileNotFoundError(f"layer_map_csv not found: {csv_path}")
+        
+        self._vprint(f"Loading layer map from: {csv_path}", level='full')
+        
+        df = pd.read_csv(csv_path)
+        
+        # Validate columns
+        required_cols = ['layer', 'id_type_instance']
+        for col in required_cols:
+            if col not in df.columns:
+                raise ValueError(f"layer_map_csv must have column '{col}'. Found: {list(df.columns)}")
+        
+        # Group by layer name to create neuron_layers
+        layer_groups = df.groupby('layer', sort=False)['id_type_instance'].apply(list).to_dict()
+        
+        # Construct neuron_layers and custom_layer_names
+        self.neuron_layers = []
+        self.custom_layer_names = []
+        
+        for layer_name, identifiers in layer_groups.items():
+            # Convert identifiers: if it looks like a bodyId (all digits), convert to int
+            processed_ids = []
+            for id_val in identifiers:
+                id_str = str(id_val).strip()
+                if id_str.isdigit():
+                    processed_ids.append(int(id_str))
+                else:
+                    processed_ids.append(id_str)
+            
+            # If single item, use it directly; if multiple, keep as list
+            if len(processed_ids) == 1:
+                self.neuron_layers.append(processed_ids[0])
+            else:
+                self.neuron_layers.append(processed_ids)
+            
+            self.custom_layer_names.append(str(layer_name))
+        
+        self._vprint(f"  Loaded {len(self.neuron_layers)} layers from CSV:")
+        for i, (name, neurons) in enumerate(zip(self.custom_layer_names, self.neuron_layers)):
+            n_count = len(neurons) if isinstance(neurons, list) else 1
+            self._vprint(f"    Layer {i}: {name} ({n_count} neurons)")
+
+    def _apply_soma_radius_cap(self, neuron_vols):
+        """
+        Apply radius capping and optional smoothing to skeleton radii.
+        
+        When smooth_skeleton=False (default): Only applies hard cap to radii.
+        When smooth_skeleton=True: Also applies iterative smoothing to prevent
+        extrusion artifacts from chains of large-radius nodes.
+        
+        Parameters
+        ----------
+        neuron_vols : navis.NeuronList
+            List of neurons to process (modified in place)
+        """
+        cap = self.soma_radius_cap
+        total_capped = 0
+        total_smoothed = 0
+        
+        for n in neuron_vols:
+            if not hasattr(n, 'nodes') or not isinstance(n.nodes, pd.DataFrame):
+                continue
+            if 'radius' not in n.nodes.columns:
+                continue
+            
+            nodes = n.nodes
+            radii = nodes['radius'].values.copy().astype(float)
+            original_radii = radii.copy()
+            
+            # Step 1: Hard cap all radii above threshold
+            over_cap = radii > cap
+            if over_cap.any():
+                radii[over_cap] = cap
+                total_capped += over_cap.sum()
+            
+            # Step 2: Optional iterative smoothing (only if smooth_skeleton=True)
+            if self.smooth_skeleton and 'parent_id' in nodes.columns and 'node_id' in nodes.columns:
+                node_ids = nodes['node_id'].values
+                parent_ids = nodes['parent_id'].values
+                id_to_idx = {nid: idx for idx, nid in enumerate(node_ids)}
+                
+                # Build child map
+                children = {idx: [] for idx in range(len(radii))}
+                for idx, pid in enumerate(parent_ids):
+                    if pid in id_to_idx:
+                        children[id_to_idx[pid]].append(idx)
+                
+                # Aggressive smoothing: 20 passes with very strong neighbor influence
+                for pass_num in range(20):
+                    new_radii = radii.copy()
+                    for idx in range(len(radii)):
+                        if radii[idx] <= 0:
+                            continue
+                        
+                        # Collect neighbor radii (parent + children)
+                        neighbors = []
+                        pid = parent_ids[idx]
+                        if pid in id_to_idx:
+                            neighbors.append(radii[id_to_idx[pid]])
+                        for child_idx in children[idx]:
+                            if radii[child_idx] > 0:
+                                neighbors.append(radii[child_idx])
+                        
+                        if neighbors:
+                            # Very strong neighbor influence: 10% self, 90% neighbors
+                            neighbor_avg = np.mean(neighbors)
+                            new_radii[idx] = 0.1 * radii[idx] + 0.9 * neighbor_avg
+                    
+                    radii = new_radii
+                
+                # Count how many were significantly changed
+                total_smoothed += np.sum(np.abs(radii - original_radii) > 1)
+                
+                # Final cap check after smoothing
+                radii = np.minimum(radii, cap)
+            
+            n.nodes['radius'] = radii
+        
+        if total_capped > 0:
+            if self.smooth_skeleton:
+                self._vprint(f"  ✓ Radius capping: capped {total_capped}, smoothed {total_smoothed} nodes (cap={cap:.0f}nm)", level='full')
+            else:
+                self._vprint(f"  ✓ Radius capping: capped {total_capped} nodes (cap={cap:.0f}nm)", level='full')
 
     @contextmanager
     def _suppress_output(self):
@@ -443,7 +640,14 @@ class VisualizeSkeleton:
         elif self.verbose is False:
             self.verbose = False
         
-        # Silence navis and other libraries if verbose is not full
+        # Silence navis INFO messages (like "Use the `.show()` method to plot the figure.")
+        # These are not useful for automated visualization and clutter output
+        try:
+            navis.set_loggers('WARNING')  # Still show warnings but not INFO
+        except Exception:
+            pass  # Ignore if function not available in older versions
+            
+        # Silence navis and other libraries' debug output if verbose is not full
         if self.verbose != 'full':
             logging.getLogger('navis').setLevel(logging.ERROR)
             logging.getLogger('trimesh').setLevel(logging.ERROR)
@@ -460,13 +664,13 @@ class VisualizeSkeleton:
             self.client_type = 'flywire'
             self._vprint(f"Auto-detected client_type='flywire' from dataset '{self.dataset}'", level='full')
 
-        # Force disable caching for FlyWire/FAFB
+        # For FlyWire/FAFB: Enable mesh caching (transformed+meshed), disable raw skeleton caching
         if self.client_type == 'flywire' or 'flywire' in self.dataset.lower() or 'fafb' in self.dataset.lower():
+            # Raw skeleton pkl caching is disabled (files too large and need transformation anyway)
             if self.cache_neurons:
-                self._vprint(" Disabling neuron skeleton caching for FlyWire/FAFB (files too large)", level='full')
-                self.cache_neurons = False
+                self._vprint("  ℹ️  FlyWire/FAFB: Using mesh cache (transformed+meshed) instead of raw skeletons", level='full')
             if self.cache_synapses:
-                self._vprint(" Disabling synapse caching for FlyWire/FAFB (files too large)", level='full')
+                self._vprint("  ℹ️  Disabling synapse caching for FlyWire/FAFB (files too large)", level='full')
                 self.cache_synapses = False
 
         # Auto-detect version from dataset if not provided
@@ -551,8 +755,10 @@ class VisualizeSkeleton:
 
         if self.synapse_mode not in ['scatter', 'sphere', 'cone', 'tetrahedron']:
             raise ValueError('synapse_mode can only be "scatter", "sphere", "cone", or "tetrahedron"')
-        if self.legend_mode not in ['normal', 'merge']:
-            raise ValueError('legend_mode can only be "normal" or "merge"')
+        
+        # Set internal legend_mode based on merge_neurons for backward compatibility
+        self._legend_mode = 'merge' if self.merge_neurons else 'normal'
+        
         if self.skeleton_mode not in ['line','tube']:
             raise ValueError('skeleton_mode can only be "line" or "tube"')
         if self.brain_mesh not in ['none', 'whole', 'template']:
@@ -568,6 +774,10 @@ class VisualizeSkeleton:
                 self.brain_mesh = 'none'
                 self._vprint('⚠️  brain_mesh reset to "none" due to missing transforms', level='full')
         
+        # Parse layer_map_csv if provided (overrides neuron_layers and custom_layer_names)
+        if self.layer_map_csv is not None:
+            self._parse_layer_map_csv()
+        
         # convert neuron_layers str to list, if is str
         if type(self.neuron_layers) is str:
             self.neuron_layers = self.neuron_layers.replace(' ','').split('->')
@@ -582,24 +792,30 @@ class VisualizeSkeleton:
             if isinstance(self.synapse_size, (int, float)) and self.synapse_size < 20 and self.brain_mesh != 'whole':
                 self.synapse_size = 20
                 self._vprint('\033[33mSynapse size is too small (< 20) for sphere, cone, or tetrahedron mode, automatically reset to 20\033[0m', level='full')
-            if self.use_size_slider:
-                self.use_size_slider = False
-                self._vprint('\033[33msize slider is only available for synapse_mode="scatter", automatically reset use_size_slider to False\033[0m', level='full')
             
         if self.mesh_roi == None:
             self.mesh_roi = []
         
-        if len(self.neuron_layers) <= len(self.neuron_colors): 
-            self.neuron_colors = self.neuron_colors[:len(self.neuron_layers)]
-            self.synapse_colors = self.synapse_colors[:len(self.neuron_layers)-1]
-
-        # Validate brain_mesh options
-        if self.brain_mesh == 'hemi':
-            if 'hemibrain' not in self.dataset.lower():
-                self._vprint('\033[33m⚠️  brain_mesh="hemi" only works with hemibrain:v1.2.1 dataset', level='full')
-                self._vprint('   VNC datasets (manc, male-cns) do not support hemisphere mode', level='full')
-                self._vprint('   Automatically switching to brain_mesh="whole"\033[0m', level='full')
-                self.brain_mesh = 'whole'
+        # Ensure enough colors for all layers by cycling if needed
+        n_layers = len(self.neuron_layers)
+        n_colors = len(self.neuron_colors)
+        if n_layers <= n_colors: 
+            self.neuron_colors = self.neuron_colors[:n_layers]
+        else:
+            # Cycle colors to match number of layers
+            extended_colors = list(self.neuron_colors) * ((n_layers // n_colors) + 1)
+            self.neuron_colors = tuple(extended_colors[:n_layers])
+            self._vprint(f'\033[33m⚠️  Warning: {n_layers} layers but only {n_colors} colors available. Colors will be recycled.\033[0m')
+            self._vprint(f'\033[33m   💡 Tip: Use neuron_colors and synapse_colors parameters with custom palettes to specify more colors.\033[0m')
+        
+        # Same for synapse colors (one fewer than neuron layers for connections between layers)
+        n_synapse_colors = len(self.synapse_colors)
+        n_synapse_needed = max(0, n_layers - 1)
+        if n_synapse_needed <= n_synapse_colors:
+            self.synapse_colors = self.synapse_colors[:n_synapse_needed]
+        else:
+            extended_synapse = list(self.synapse_colors) * ((n_synapse_needed // n_synapse_colors) + 1)
+            self.synapse_colors = tuple(extended_synapse[:n_synapse_needed])
         
         if self.skeleton_mode == 'line':
             self.show_skeleton_radius = False
@@ -612,17 +828,53 @@ class VisualizeSkeleton:
         self.roi_dfs = []
         self.layer_criteria = []
         self.layer_names = []
-        for i in range(len(self.neuron_layers)):
-            self._vprint(f'fetching neuron info of layer {i}...', level='full')
+        
+        n_layers = len(self.neuron_layers)
+        self._vprint(f'\n📊 Fetching neuron info for {n_layers} layer(s)...')
+        
+        # Use tqdm for progress bar
+        from tqdm import tqdm
+        layer_iter = tqdm(range(n_layers), desc="Loading layers", disable=self.verbose != 'full')
+        
+        total_neurons = 0
+        for i in layer_iter:
             layer_input = self.neuron_layers[i]
             if not isinstance(layer_input, list):
                 layer_input = [layer_input]
-            ndf, rdf, auto_name, cri = sv.getNeurons(layer_input, dataset=self.dataset, client=self.client)
+            
+            # Update progress bar description
+            layer_desc = str(layer_input[0])[:20] if layer_input else f"layer_{i}"
+            layer_iter.set_description(f"Layer {i}: {layer_desc}")
+            
+            ndf, rdf, auto_name, cri = sv.getNeurons(layer_input, dataset=self.dataset, client=self.client, verbose=False)
             self.neuron_dfs.append(ndf)
             self.roi_dfs.append(rdf)
             self.layer_criteria.append(cri)
             self.layer_names.append(auto_name)
-        self._vprint('Fetched neuron layers', level='full')
+            
+            n_neurons = len(ndf) if ndf is not None else 0
+            total_neurons += n_neurons
+            
+            # Update postfix with neuron count
+            layer_iter.set_postfix(neurons=n_neurons, total=total_neurons)
+        
+        # Print summary
+        self._vprint(f'✓ Loaded {total_neurons:,} neurons across {n_layers} layers')
+        
+        # Show detailed breakdown if full verbose
+        if self.verbose == 'full':
+            self._vprint('\n  Layer summary:')
+            for i, (ndf, name) in enumerate(zip(self.neuron_dfs, self.layer_names)):
+                n = len(ndf) if ndf is not None else 0
+                if n > 0 and 'type' in ndf.columns:
+                    types = ndf['type'].dropna().unique()
+                    n_types = len(types)
+                    type_preview = ', '.join(str(t) for t in types[:3])
+                    if n_types > 3:
+                        type_preview += f' (+{n_types-3} more)'
+                    self._vprint(f'    [{i}] {name}: {n} neurons, {n_types} types ({type_preview})')
+                else:
+                    self._vprint(f'    [{i}] {name}: {n} neurons')
 
         # Generate smart layer names based on types (if not using custom names)
         if not self.custom_layer_names:
@@ -631,11 +883,29 @@ class VisualizeSkeleton:
             self.layer_names = self.custom_layer_names
             
         if self.saveas is None:
-            self.saveas = '_'.join(self.layer_names)
+            # Limit saveas to at most 2 layer names to avoid "file name too long" errors
+            n_layers = len(self.layer_names)
+            if n_layers <= 2:
+                self.saveas = '_'.join(self.layer_names)
+            else:
+                # Use first 2 names + count indicator
+                first_two = '_'.join(self.layer_names[:2])
+                self.saveas = f"{first_two}_etc{n_layers}"
         
-        # Create timestamped subfolder
+        # Ensure saveas doesn't exceed reasonable length (max 80 chars)
+        if len(self.saveas) > 80:
+            # Truncate and add hash for uniqueness
+            import hashlib
+            hash_suffix = hashlib.md5('_'.join(self.layer_names).encode()).hexdigest()[:6]
+            self.saveas = self.saveas[:70] + f"_{hash_suffix}"
+        
+        # Create output subfolder (with or without timestamp based on include_timestamp)
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        self.save_folder = os.path.join(self.output_dir, 'plot3d_' + self.saveas.split('.')[0] + '_' + timestamp)
+        base_folder_name = 'plot3d_' + self.saveas.split('.')[0]
+        if self.include_timestamp:
+            self.save_folder = os.path.join(self.output_dir, base_folder_name + '_' + timestamp)
+        else:
+            self.save_folder = os.path.join(self.output_dir, base_folder_name)
         if not os.path.exists(self.save_folder): os.makedirs(self.save_folder)
         
         # Save parameters to text file with improved formatting
@@ -828,16 +1098,94 @@ class VisualizeSkeleton:
         
         return None
     
-    def _load_cached_neurons(self, neuron_df):
+    def _preload_fafb_skeletons(self, body_ids_filter=None):
+        """Pre-load FAFB skeletons from ZIP file in a single batch.
+        
+        This is much faster than opening the ZIP file for each layer.
+        
+        Parameters
+        ----------
+        body_ids_filter : set, optional
+            If provided, only load these bodyIds from the ZIP.
+            If None, load all bodyIds from self.neuron_dfs.
+        
+        Returns:
+            dict: bodyId -> TreeNeuron mapping
+        """
+        from tqdm import tqdm
+        import sys
+        
+        # Collect all body IDs needed
+        if body_ids_filter is not None:
+            all_body_ids = set(body_ids_filter)
+        else:
+            # Collect from all layers
+            all_body_ids = set()
+            for df in self.neuron_dfs:
+                if df is not None:
+                    all_body_ids.update(df['bodyId'].tolist())
+        
+        if not all_body_ids:
+            return {}
+        
+        skeleton_cache = {}
+        
+        try:
+            import fafb_utils
+            project_root = os.path.dirname(os.path.dirname(__file__))
+            
+            # Try to find dataset directory by name
+            data_dir = os.path.join(project_root, "datasets", self.dataset)
+            if not os.path.exists(data_dir):
+                data_dir = os.path.join(project_root, "datasets", "flywire_FAFB_v783")
+            
+            zip_path = fafb_utils.get_fafb_skeleton_zip(data_dir)
+            
+            if zip_path:
+                import zipfile
+                import io
+                
+                self._vprint(f'  📦 Loading {len(all_body_ids)} skeletons from ZIP...')
+                
+                with zipfile.ZipFile(zip_path, 'r') as z:
+                    zip_files = set(z.namelist())
+                    
+                    # Progress bar for skeleton loading
+                    pbar = tqdm(all_body_ids, desc="  Loading skeletons", 
+                               disable=self.verbose != 'full', leave=False, file=sys.stdout)
+                    
+                    for bid in pbar:
+                        filename = f"{bid}.swc"
+                        try:
+                            if filename in zip_files:
+                                with z.open(filename) as f:
+                                    content = f.read().decode('utf-8')
+                                    n = navis.read_swc(io.StringIO(content))
+                                    n.units = 'nm'
+                                    n.id = bid
+                                    n.name = str(bid)
+                                    skeleton_cache[bid] = n
+                        except Exception:
+                            pass  # Skip errors silently
+                
+                self._vprint(f'  ✓ Loaded {len(skeleton_cache)}/{len(all_body_ids)} skeletons from ZIP')
+        except ImportError:
+            pass
+        except Exception as e:
+            self._vprint(f'  ⚠️  Error pre-loading FAFB skeletons: {e}')
+        
+        return skeleton_cache
+    
+    def _load_cached_neurons(self, neuron_df, transformed_target=None):
         """Load cached neuron skeletons if available.
         
         Loads individual {bodyId}.pkl files from cache/{dataset}/skeletons/
         
         Returns:
-            navis.NeuronList or None if no cached neurons found
+            tuple: (navis.NeuronList or None, list of missing bodyIds)
         """
         if not self.cache_neurons:
-            return None
+            return None, neuron_df['bodyId'].tolist()
         
         cache_dir = self._get_cache_path('skeletons')
         body_ids = neuron_df['bodyId'].tolist()
@@ -907,112 +1255,323 @@ class VisualizeSkeleton:
         if saved_count > 0:
             self._vprint(f'  💾 Saved {saved_count} new neurons to cache', level='full')
     
+    # Cache stores meshes simplified at this fixed level
+    FAFB_MESH_CACHE_SIMPLIFICATION = 0.9
+    
+    def _get_fafb_mesh_cache_key(self):
+        """Generate a cache key based on transform settings.
+        
+        Returns a subfolder name like 'JRC2018F_simp90' for caching purposes.
+        Cache always stores meshes at 0.9 simplification level.
+        """
+        # Get target template
+        template_info = self._get_template_info() if self.brain_mesh in ['whole', 'template'] else None
+        target = template_info['target'] if template_info else 'raw'
+        
+        # Include fixed simplification level in cache key
+        simp_percent = int(self.FAFB_MESH_CACHE_SIMPLIFICATION * 100)
+        return f"{target}_simp{simp_percent}"
+    
+    def _load_cached_fafb_meshes(self, body_ids):
+        """Load transformed and meshed FAFB neurons from cache.
+        
+        Cache contains meshes at 0.9 simplification. Only used when
+        skeleton_mesh_simplification >= 0.9. If simplification > 0.9,
+        additional simplification is applied after loading.
+        
+        Parameters
+        ----------
+        body_ids : list
+            List of bodyIds to load
+            
+        Returns
+        -------
+        tuple: (dict of bodyId -> MeshNeuron, list of missing bodyIds)
+        """
+        if not self.cache_neurons:
+            return {}, body_ids
+        
+        # Only use cache when simplification >= 0.9
+        if self.skeleton_mesh_simplification < self.FAFB_MESH_CACHE_SIMPLIFICATION:
+            return {}, body_ids
+        
+        # Check for flywire/fafb dataset
+        if not ('flywire' in self.dataset.lower() or 'fafb' in self.dataset.lower()):
+            return {}, body_ids
+        
+        import pickle
+        
+        cache_key = self._get_fafb_mesh_cache_key()
+        # Store in skeletons folder as individual simplified meshes
+        cache_dir = os.path.join(self._get_cache_path('skeletons'), cache_key)
+        os.makedirs(cache_dir, exist_ok=True)
+        
+        loaded = {}
+        missing = []
+        
+        for bid in body_ids:
+            cache_file = os.path.join(cache_dir, f'{bid}.pkl')
+            if os.path.exists(cache_file):
+                try:
+                    with open(cache_file, 'rb') as f:
+                        mesh_neuron = pickle.load(f)
+                    loaded[bid] = mesh_neuron
+                except Exception as e:
+                    self._vprint(f'  ⚠ Failed to load cached mesh {bid}: {e}', level='full')
+                    missing.append(bid)
+            else:
+                missing.append(bid)
+        
+        if loaded:
+            self._vprint(f'  ✓ Loaded {len(loaded)} neurons from mesh cache (simp={self.FAFB_MESH_CACHE_SIMPLIFICATION})', level='full')
+        
+        return loaded, missing
+    
+    def _save_cached_fafb_meshes(self, mesh_neurons_dict):
+        """Save transformed and meshed FAFB neurons to cache.
+        
+        Parameters
+        ----------
+        mesh_neurons_dict : dict
+            Dictionary of bodyId -> MeshNeuron to save
+        """
+        if not self.cache_neurons:
+            return
+        
+        # Check for flywire/fafb dataset
+        if not ('flywire' in self.dataset.lower() or 'fafb' in self.dataset.lower()):
+            return
+        
+        import pickle
+        
+        cache_key = self._get_fafb_mesh_cache_key()
+        # Store in skeletons folder as individual simplified meshes
+        cache_dir = os.path.join(self._get_cache_path('skeletons'), cache_key)
+        os.makedirs(cache_dir, exist_ok=True)
+        
+        saved_count = 0
+        for bid, mesh_neuron in mesh_neurons_dict.items():
+            cache_file = os.path.join(cache_dir, f'{bid}.pkl')
+            if os.path.exists(cache_file):
+                continue  # Skip if already cached
+            
+            try:
+                with open(cache_file, 'wb') as f:
+                    pickle.dump(mesh_neuron, f)
+                saved_count += 1
+            except Exception as e:
+                self._vprint(f'  ⚠ Failed to save mesh {bid}: {e}', level='full')
+        
+        if saved_count > 0:
+            self._vprint(f'  💾 Saved {saved_count} new meshes to cache', level='full')
+
     def plot_skeleton(self):
-        for i in range(len(self.neuron_layers)):
-            self._vprint(f'fetching skeletons of layer {i}...', level='full')
+        from tqdm import tqdm
+        import sys
+        
+        n_layers = len(self.neuron_layers)
+        total_skeletons = sum(len(df) if df is not None else 0 for df in self.neuron_dfs)
+        self._vprint(f'\n🔬 Fetching skeletons for {n_layers} layers ({total_skeletons:,} neurons total)...')
+        
+        # For FAFB: Check mesh cache first (transformed + meshed neurons)
+        # Cache stores pre-simplified meshes at FAFB_MESH_CACHE_SIMPLIFICATION (0.9 = keep 10% faces)
+        # 
+        # Cache usage decision:
+        # - If user wants simplification >= 0.9 (keep ≤10% faces): use cache, apply additional simplification if needed
+        # - If user wants simplification < 0.9 (keep >10% faces): bypass cache, load from ZIP and apply user's simplification
+        #
+        # Example scenarios:
+        # - simplification=0.95 (keep 5%): load from cache (10%), simplify to 5% → additional_keep = 0.05/0.1 = 50%
+        # - simplification=0.9 (keep 10%): load from cache (10%), no additional simplification needed
+        # - simplification=0.5 (keep 50%): cannot use cache (only has 10%), load from ZIP and apply 0.5 simplification
+        is_fafb = 'flywire' in self.dataset.lower() or 'fafb' in self.dataset.lower()
+        fafb_mesh_cache = {}  # bodyId -> MeshNeuron (from cache)
+        fafb_mesh_missing = []  # bodyIds that need processing
+        use_fafb_cache = is_fafb and self.cache_neurons and self.skeleton_mesh_simplification >= self.FAFB_MESH_CACHE_SIMPLIFICATION
+        
+        if is_fafb:
+            if use_fafb_cache:
+                self._vprint(f'  ℹ️  FAFB mesh cache enabled (simplification={self.skeleton_mesh_simplification} >= cache level {self.FAFB_MESH_CACHE_SIMPLIFICATION})', level='full')
+            else:
+                self._vprint(f'  ℹ️  FAFB mesh cache bypassed (simplification={self.skeleton_mesh_simplification} < cache level {self.FAFB_MESH_CACHE_SIMPLIFICATION})', level='full')
+        
+        if use_fafb_cache:
+            # Collect all body IDs across layers
+            all_fafb_body_ids = []
+            for df in self.neuron_dfs:
+                if df is not None and 'bodyId' in df.columns:
+                    all_fafb_body_ids.extend(df['bodyId'].tolist())
+            all_fafb_body_ids = list(set(all_fafb_body_ids))
             
-            # Try to load from cache first
-            cache_result = self._load_cached_neurons(self.neuron_dfs[i])
+            # Load from mesh cache
+            fafb_mesh_cache, fafb_mesh_missing = self._load_cached_fafb_meshes(all_fafb_body_ids)
+        
+        # Pre-load all FAFB skeletons from ZIP
+        fafb_skeleton_cache = {}  # bodyId -> TreeNeuron
+        if is_fafb:
+            if use_fafb_cache and fafb_mesh_missing:
+                # Cache is used but some neurons are missing - load only those from ZIP
+                self._vprint(f'  ℹ️  {len(fafb_mesh_missing)} neurons need processing from ZIP')
+                fafb_skeleton_cache = self._preload_fafb_skeletons(body_ids_filter=set(fafb_mesh_missing))
+            elif not use_fafb_cache:
+                # Cache not used (simplification < 0.9 or caching disabled) - load all from ZIP
+                self._vprint(f'  ℹ️  Loading all neurons from ZIP (simplification={self.skeleton_mesh_simplification})')
+                fafb_skeleton_cache = self._preload_fafb_skeletons()
+        
+        # Main progress bar for layers - always show when verbose is enabled
+        layer_pbar = tqdm(range(n_layers), desc="Processing layers", 
+                          disable=not self.verbose, leave=True, file=sys.stdout)
+        
+        for i in layer_pbar:
+            layer_name = self.layer_names[i] if i < len(self.layer_names) else f"layer_{i}"
+            n_in_layer = len(self.neuron_dfs[i]) if self.neuron_dfs[i] is not None else 0
+            layer_pbar.set_postfix_str(f"{layer_name} ({n_in_layer} neurons)")
             
-            cached_neurons = None
-            missing_ids = self.neuron_dfs[i]['bodyId'].tolist()  # Default: all missing
-            
-            if cache_result is not None:
-                cached_neurons, missing_ids = cache_result
+            # Determine if we need transformation
+            needs_transform = self.brain_mesh in ['whole', 'template']
+            template_info = None
+            if needs_transform:
+                template_info = self._get_template_info()
             
             neuron_vols = None
             
-            # Fetch missing neurons
-            if missing_ids:
-                # Special handling for FAFB local data
-                if 'flywire' in self.dataset.lower() or 'fafb' in self.dataset.lower():
-                    try:
-                        import fafb_utils
-                        project_root = os.path.dirname(os.path.dirname(__file__))
-                        
-                        # Try to find dataset directory by name
-                        data_dir = os.path.join(project_root, "datasets", self.dataset)
-                        if not os.path.exists(data_dir):
-                            data_dir = os.path.join(project_root, "datasets", "flywire_FAFB_v783")
-                        
-                        # Load from Zip
-                        zip_path = fafb_utils.get_fafb_skeleton_zip(data_dir)
-                        
-                        if zip_path:
-                            self._vprint(f"  Loading skeletons from Zip: {zip_path}...", level='full')
-                            
-                            import zipfile
-                            import io
-                            
-                            neurons = []
-                            with zipfile.ZipFile(zip_path, 'r') as z:
-                                for bid in missing_ids:
-                                    filename = f"{bid}.swc"
-                                    try:
-                                        # Check if file exists in zip
-                                        if filename in z.namelist():
-                                            with z.open(filename) as f:
-                                                # Read content
-                                                content = f.read().decode('utf-8')
-                                                # Parse with navis
-                                                n = navis.read_swc(io.StringIO(content))
-                                                n.units = 'nm' # Explicitly set units for FAFB
-                                                n.id = bid
-                                                n.name = str(bid)
-                                                neurons.append(n)
-                                        else:
-                                            self._vprint(f"    Warning: Skeleton {filename} not found in zip", level='full')
-                                    except Exception as e:
-                                        self._vprint(f"    Error reading {filename}: {e}", level='full')
-                            
-                            if neurons:
-                                neuron_vols = navis.NeuronList(neurons)
-                                self._vprint(f"  ✓ Loaded {len(neurons)} skeletons from local zip", level='full')
-                    except ImportError:
-                        pass
-                    except Exception as e:
-                        self._vprint(f"  Warning: Error loading local FAFB skeletons: {e}", level='full')
+            # For FAFB with caching: check which neurons already have cached meshes
+            layer_body_ids = self.neuron_dfs[i]['bodyId'].tolist() if self.neuron_dfs[i] is not None else []
+            cached_mesh_neurons = []  # MeshNeurons loaded from cache
+            mesh_missing_ids = layer_body_ids  # IDs that need processing
+            
+            if use_fafb_cache and fafb_mesh_cache:
+                # Separate cached vs missing
+                cached_mesh_neurons = [fafb_mesh_cache[bid] for bid in layer_body_ids if bid in fafb_mesh_cache]
+                mesh_missing_ids = [bid for bid in layer_body_ids if bid not in fafb_mesh_cache]
+                
+                if cached_mesh_neurons:
+                    self._vprint(f'    ✓ {len(cached_mesh_neurons)}/{len(layer_body_ids)} from mesh cache', level='full', use_tqdm=True)
+            
+            # Load from raw cache (for non-FAFB datasets)
+            cache_result = self._load_cached_neurons(self.neuron_dfs[i])
+            cached_neurons, missing_ids = cache_result
+            
+            raw_neuron_vols = None
+            
+            # Fetch missing neurons (only those not in mesh cache for FAFB when cache is used)
+            fetch_ids = mesh_missing_ids if is_fafb else missing_ids
+            if fetch_ids:
+                # Special handling for FAFB local data - use pre-loaded cache
+                if fafb_skeleton_cache:
+                    neurons = []
+                    for bid in fetch_ids:
+                        if bid in fafb_skeleton_cache:
+                            neurons.append(fafb_skeleton_cache[bid])
+                    if neurons:
+                        raw_neuron_vols = navis.NeuronList(neurons)
 
                 # Fetch from API if not loaded locally
-                if neuron_vols is None and missing_ids:
+                if raw_neuron_vols is None and fetch_ids:
                     if self.client_type == 'flywire' and self.client_flywire:
-                        # Filter neuron_df to only missing IDs
-                        missing_df = self.neuron_dfs[i][self.neuron_dfs[i]['bodyId'].isin(missing_ids)]
-                        neuron_vols = self.client_flywire.fetch_skeletons(self.layer_criteria[i], with_synapses=self.show_connectors)
+                        missing_df = self.neuron_dfs[i][self.neuron_dfs[i]['bodyId'].isin(fetch_ids)]
+                        # Retry logic for network errors
+                        max_retries = 3
+                        for attempt in range(max_retries):
+                            try:
+                                raw_neuron_vols = self.client_flywire.fetch_skeletons(self.layer_criteria[i], with_synapses=self.show_connectors)
+                                break  # Success
+                            except Exception as e:
+                                error_msg = str(e)
+                                is_network_error = any(x in error_msg.lower() for x in 
+                                    ['timeout', 'connection', 'network', 'refused', 'reset', 'temporary'])
+                                
+                                if is_network_error and attempt < max_retries - 1:
+                                    import time
+                                    wait_time = (attempt + 1) * 2
+                                    tqdm.write(f'  ⚠️  Network error, retrying in {wait_time}s (attempt {attempt + 1}/{max_retries}): {e}')
+                                    time.sleep(wait_time)
+                                else:
+                                    tqdm.write(f'  ⚠️  FlyWire fetch failed for layer {layer_name}: {e}')
+                                    raw_neuron_vols = None
+                                    break
                     else:
-                        # Fetch from NeuPrint - filter to missing IDs only
-                        missing_df = self.neuron_dfs[i][self.neuron_dfs[i]['bodyId'].isin(missing_ids)]
+                        missing_df = self.neuron_dfs[i][self.neuron_dfs[i]['bodyId'].isin(fetch_ids)].copy()
                         if not missing_df.empty:
-                            # Pass client explicitly if available
-                            kwargs = {'with_synapses': self.show_connectors}
+                            # Ensure bodyId is int64 for neuprint compatibility
+                            # NeuPrint/navis expects bodyId as int, not string
+                            if missing_df['bodyId'].dtype == object or str(missing_df['bodyId'].dtype) == 'string':
+                                try:
+                                    missing_df['bodyId'] = missing_df['bodyId'].astype('int64')
+                                except (ValueError, TypeError):
+                                    pass  # Keep original type if conversion fails
+                            kwargs = {
+                                'with_synapses': self.show_connectors,
+                                'missing_swc': 'warn',  # Skip missing skeletons instead of raising
+                            }
                             if self.client:
                                 kwargs['client'] = self.client
-                            neuron_vols = neu.fetch_skeletons(missing_df, **kwargs)
+                            
+                            # Retry logic for network errors
+                            max_retries = 3
+                            for attempt in range(max_retries):
+                                try:
+                                    raw_neuron_vols = neu.fetch_skeletons(missing_df, **kwargs)
+                                    break  # Success
+                                except Exception as e:
+                                    error_msg = str(e)
+                                    # Check if it's a network/connection error that might be retried
+                                    is_network_error = any(x in error_msg.lower() for x in 
+                                        ['timeout', 'connection', 'network', 'refused', 'reset', 'temporary'])
+                                    
+                                    if is_network_error and attempt < max_retries - 1:
+                                        import time
+                                        wait_time = (attempt + 1) * 2  # 2, 4, 6 seconds
+                                        tqdm.write(f'  ⚠️  Network error, retrying in {wait_time}s (attempt {attempt + 1}/{max_retries}): {e}')
+                                        time.sleep(wait_time)
+                                    else:
+                                        # Handle "No neurons matching the given criteria found!" and other errors
+                                        # This can happen if neurons exist in NeuronBridge but not in NeuPrint (different versions)
+                                        tqdm.write(f'  ⚠️  NeuPrint fetch failed for layer {layer_name}: {e}')
+                                        raw_neuron_vols = None
+                                        break
                 
-                # Save newly fetched neurons to cache
-                if neuron_vols is not None:
-                    self._save_cached_neurons(self.neuron_dfs[i], neuron_vols)
+                # Save to raw cache (for non-FAFB datasets)
+                if raw_neuron_vols is not None and not is_fafb:
+                    self._save_cached_neurons(self.neuron_dfs[i], raw_neuron_vols)
             
             # Combine cached and newly fetched neurons
-            if cached_neurons is not None and neuron_vols is not None:
-                # Combine both lists
-                all_neurons = list(cached_neurons) + list(neuron_vols)
+            if cached_neurons is not None and raw_neuron_vols is not None:
+                all_neurons = list(cached_neurons) + list(raw_neuron_vols)
                 neuron_vols = navis.NeuronList(all_neurons)
             elif cached_neurons is not None:
                 neuron_vols = cached_neurons
-            # else neuron_vols is already set from fetch
+            elif raw_neuron_vols is not None:
+                neuron_vols = raw_neuron_vols
+            else:
+                neuron_vols = None
 
             # Normalize to NeuronList so downstream len()/iteration works for single TreeNeuron
             if neuron_vols is not None and not isinstance(neuron_vols, (list, navis.NeuronList)):
                 neuron_vols = navis.NeuronList([neuron_vols])
             
-            if neuron_vols is None or len(neuron_vols) == 0:
-                self._vprint(f'⚠️  Failed to fetch skeletons for layer {i}', level='full')
-                continue
+            # For FAFB with all meshes cached, we can skip skeleton processing
+            if is_fafb and cached_mesh_neurons and (neuron_vols is None or len(neuron_vols) == 0):
+                # All neurons loaded from mesh cache - neuron_vols stays None/empty
+                # The combine block below will handle adding cached_mesh_neurons with simplification
+                pass
+            elif neuron_vols is None or len(neuron_vols) == 0:
+                if cached_mesh_neurons:
+                    # Partial cache hit - neuron_vols stays None/empty
+                    # The combine block below will handle cached_mesh_neurons
+                    pass
+                else:
+                    tqdm.write(f'  ⚠️  Failed to fetch skeletons for layer {i}: {layer_name}')
+                    continue
 
-            if self.brain_mesh in ['whole', 'template']:
-                template_info = self._get_template_info()
-                self._vprint(f'Transforming skeletons of layer {i} to {template_info["mesh_name"]}...', end='', level='full')
+            # Apply soma radius capping to prevent extrusion artifacts
+            if self.soma_radius_cap is not None and self.skeleton_mode == 'tube':
+                self._apply_soma_radius_cap(neuron_vols)
+
+            # Transform if needed (skip for cached mesh neurons)
+            needs_actual_transform = needs_transform and (not is_fafb or mesh_missing_ids)
+            if needs_actual_transform and neuron_vols is not None:
+                layer_pbar.set_postfix_str(f"{layer_name} (transforming {len(neuron_vols)}...)")
                 try:
                     # Ensure float64 coordinates to avoid dtype warnings in navis
                     if isinstance(neuron_vols, (list, navis.NeuronList)):
@@ -1021,19 +1580,20 @@ class VisualizeSkeleton:
                                 for col in ['x', 'y', 'z']:
                                     if col in n.nodes.columns:
                                         n.nodes[col] = n.nodes[col].astype('float64')
-                                # Print range for first neuron
-                                if n == neuron_vols[0]:
-                                    self._vprint(f"  Skeleton coords range (nm): X[{n.nodes.x.min():.1f}, {n.nodes.x.max():.1f}], Y[{n.nodes.y.min():.1f}, {n.nodes.y.max():.1f}], Z[{n.nodes.z.min():.1f}, {n.nodes.z.max():.1f}]", level='full')
                     elif hasattr(neuron_vols, 'nodes') and isinstance(neuron_vols.nodes, pd.DataFrame):
                          for col in ['x', 'y', 'z']:
                             if col in neuron_vols.nodes.columns:
                                 neuron_vols.nodes[col] = neuron_vols.nodes[col].astype('float64')
-                         self._vprint(f"  Skeleton coords range (nm): X[{neuron_vols.nodes.x.min():.1f}, {neuron_vols.nodes.x.max():.1f}], Y[{neuron_vols.nodes.y.min():.1f}, {neuron_vols.nodes.y.max():.1f}], Z[{neuron_vols.nodes.z.min():.1f}, {neuron_vols.nodes.z.max():.1f}]", level='full')
 
                     with self._suppress_output():
                         neuron_vols = navis.xform_brain(neuron_vols, source=template_info['source'], target=template_info['target'])
+                    
+                    # Ensure iterable after transform
+                    if neuron_vols is not None and not isinstance(neuron_vols, (list, navis.NeuronList)):
+                        neuron_vols = navis.NeuronList([neuron_vols])
+                    
                 except Exception as e:
-                    self._vprint(f'\\n⚠️  Transforming skeletons failed: {e}', level='full')
+                    tqdm.write(f'  ⚠️  Layer {i} transform failed: {e}')
                     if self._dataset_needs_transform() and not self._check_and_download_transforms():
                         self.brain_mesh = 'none'
                     else:
@@ -1041,19 +1601,228 @@ class VisualizeSkeleton:
                         try:
                             with self._suppress_output():
                                 neuron_vols = navis.xform_brain(neuron_vols, source=template_info['source'], target=template_info['target'])
-                            self._vprint('✓ Transformation successful after download', level='full')
+                            if neuron_vols is not None and not isinstance(neuron_vols, (list, navis.NeuronList)):
+                                neuron_vols = navis.NeuronList([neuron_vols])
                         except Exception as retry_e:
-                            self._vprint(f'⚠️  Transformation still failed: {retry_e}', level='full')
-                            self._vprint('   Setting brain_mesh to "none"', level='full')
+                            tqdm.write(f'  ⚠️  Transformation still failed, setting brain_mesh to "none"')
                             self.brain_mesh = 'none'
             
             # Ensure iterable after potential transforms (navis may return TreeNeuron)
             if neuron_vols is not None and not isinstance(neuron_vols, (list, navis.NeuronList)):
                 neuron_vols = navis.NeuronList([neuron_vols])
+            
+            # For FAFB: convert to mesh, apply 0.9 simplification, and cache (only when cache is used)
+            # Cache stores meshes at fixed 0.9 simplification for reuse
+            if use_fafb_cache and mesh_missing_ids and neuron_vols is not None and self.skeleton_mode == 'tube':
+                try:
+                    import trimesh
+                    meshes_to_cache = {}
+                    mesh_neurons_list = []
+                    cache_simp = self.FAFB_MESH_CACHE_SIMPLIFICATION
+                    
+                    for n in neuron_vols:
+                        if hasattr(n, 'id') and n.id in mesh_missing_ids:
+                            # Convert TreeNeuron to MeshNeuron if needed
+                            if isinstance(n, navis.TreeNeuron):
+                                # Fix radii if needed
+                                if hasattr(n, 'nodes') and 'radius' in n.nodes.columns:
+                                    invalid_mask = (n.nodes['radius'] <= 0) | (n.nodes['radius'].isna())
+                                    if invalid_mask.any():
+                                        n.nodes.loc[invalid_mask, 'radius'] = 1
+                                elif hasattr(n, 'nodes'):
+                                    n.nodes['radius'] = 1
+                                # Convert
+                                if hasattr(navis, 'conversion') and hasattr(navis.conversion, 'tree2meshneuron'):
+                                    mesh_n = navis.conversion.tree2meshneuron(n)
+                                else:
+                                    mesh_neurons_list.append(n)
+                                    continue
+                            elif isinstance(n, navis.MeshNeuron):
+                                mesh_n = n
+                            else:
+                                mesh_neurons_list.append(n)
+                                continue
+                            
+                            # Apply fixed 0.9 simplification for caching
+                            if mesh_n and hasattr(mesh_n, 'trimesh'):
+                                n_faces = len(mesh_n.trimesh.faces)
+                                target_faces = int(n_faces * (1 - cache_simp))
+                                if target_faces < n_faces and target_faces > 0:
+                                    try:
+                                        simplified_trimesh = mesh_n.trimesh.simplify_quadric_decimation(target_faces)
+                                        # Create new MeshNeuron with simplified mesh to ensure proper storage
+                                        mesh_n = navis.MeshNeuron(simplified_trimesh)
+                                        mesh_n.id = n.id  # Preserve original ID
+                                        if hasattr(n, 'name'):
+                                            mesh_n.name = n.name
+                                        self._vprint(f'      Simplified {n.id}: {n_faces} -> {len(simplified_trimesh.faces)} faces', level='full', use_tqdm=True)
+                                    except Exception as e:
+                                        self._vprint(f'      ⚠️ Simplification failed for {n.id}: {e}', level='full', use_tqdm=True)
+                            
+                            meshes_to_cache[n.id] = mesh_n
+                            mesh_neurons_list.append(mesh_n)
+                        else:
+                            mesh_neurons_list.append(n)
+                    
+                    # Save 0.9-simplified meshes to cache
+                    if meshes_to_cache:
+                        self._save_cached_fafb_meshes(meshes_to_cache)
+                        self._vprint(f'    ✓ Cached {len(meshes_to_cache)} transformed meshes (simp={cache_simp})', level='full', use_tqdm=True)
+                    
+                    # Apply additional simplification to newly cached neurons if target > 0.9
+                    target_simp = self.skeleton_mesh_simplification
+                    if target_simp > cache_simp and mesh_neurons_list:
+                        remaining_after_cache = 1 - cache_simp
+                        remaining_target = 1 - target_simp
+                        additional_keep_factor = remaining_target / remaining_after_cache
+                        self._vprint(f'    ⚡ Applying additional simplification to new meshes: {target_simp} (keep {additional_keep_factor:.1%})', level='full', use_tqdm=True)
+                        
+                        further_simplified = []
+                        for mesh_n in mesh_neurons_list:
+                            if hasattr(mesh_n, 'trimesh'):
+                                n_faces = len(mesh_n.trimesh.faces)
+                                target_faces = int(n_faces * additional_keep_factor)
+                                if target_faces < n_faces and target_faces > 0:
+                                    try:
+                                        simplified_trimesh = mesh_n.trimesh.simplify_quadric_decimation(target_faces)
+                                        new_mesh = navis.MeshNeuron(simplified_trimesh)
+                                        new_mesh.id = mesh_n.id if hasattr(mesh_n, 'id') else None
+                                        if hasattr(mesh_n, 'name'):
+                                            new_mesh.name = mesh_n.name
+                                        further_simplified.append(new_mesh)
+                                        continue
+                                    except Exception:
+                                        pass
+                            further_simplified.append(mesh_n)
+                        mesh_neurons_list = further_simplified
+                    
+                    # Update neuron_vols with mesh versions
+                    if mesh_neurons_list:
+                        neuron_vols = navis.NeuronList(mesh_neurons_list)
+                except Exception as e:
+                    self._vprint(f'    ⚠️ FAFB mesh caching failed: {e}', level='full')
+            
+            # For FAFB: combine cached + newly processed neurons, then merge by layer if needed
+            # This block handles:
+            # 1. When cache is used (simplification >= 0.9): combine cached + new, apply additional simp if > 0.9
+            # 2. When cache is not used (simplification < 0.9): just process neuron_vols for merging
+            # Set flag to skip generic simplification block below (FAFB is already simplified here)
+            fafb_already_simplified = False
+            if is_fafb and self.skeleton_mode == 'tube':
+                import trimesh
+                
+                all_mesh_neurons = []
+                
+                # Add cached neurons if available
+                if cached_mesh_neurons:
+                    # Apply additional simplification if user wants > 0.9
+                    target_simp = self.skeleton_mesh_simplification
+                    cache_simp = self.FAFB_MESH_CACHE_SIMPLIFICATION
+                    
+                    if target_simp > cache_simp:
+                        # Calculate additional simplification factor
+                        remaining_after_cache = 1 - cache_simp  # e.g., 0.1 for 90%
+                        remaining_target = 1 - target_simp  # e.g., 0.05 for 95%
+                        additional_keep_factor = remaining_target / remaining_after_cache
+                        
+                        self._vprint(f'    ⚡ Applying additional simplification: {target_simp} (keep {additional_keep_factor:.1%} of cached)', level='full', use_tqdm=True)
+                        
+                        simplified_cached = []
+                        for mesh_n in cached_mesh_neurons:
+                            if hasattr(mesh_n, 'trimesh'):
+                                n_faces = len(mesh_n.trimesh.faces)
+                                target_faces = int(n_faces * additional_keep_factor)
+                                if target_faces < n_faces and target_faces > 0:
+                                    try:
+                                        simplified_trimesh = mesh_n.trimesh.simplify_quadric_decimation(target_faces)
+                                        new_mesh = navis.MeshNeuron(simplified_trimesh)
+                                        new_mesh.id = mesh_n.id if hasattr(mesh_n, 'id') else None
+                                        if hasattr(mesh_n, 'name'):
+                                            new_mesh.name = mesh_n.name
+                                        simplified_cached.append(new_mesh)
+                                        continue
+                                    except Exception:
+                                        pass
+                            simplified_cached.append(mesh_n)
+                        cached_mesh_neurons = simplified_cached
+                    
+                    all_mesh_neurons.extend(cached_mesh_neurons)
+                
+                # Add newly processed neurons
+                if neuron_vols is not None and len(neuron_vols) > 0:
+                    neurons_list = list(neuron_vols) if isinstance(neuron_vols, navis.NeuronList) else [neuron_vols]
+                    
+                    # When cache not used (simplification < 0.9), need to convert and simplify here
+                    # This path processes neurons loaded directly from ZIP with user's actual simplification setting
+                    if not use_fafb_cache:
+                        processed_neurons = []
+                        target_simp = self.skeleton_mesh_simplification
+                        
+                        self._vprint(f'    ⚡ Processing {len(neurons_list)} neurons from ZIP (target simplification={target_simp})', level='full', use_tqdm=True)
+                        
+                        for n in neurons_list:
+                            # Convert TreeNeuron to MeshNeuron if needed
+                            if isinstance(n, navis.TreeNeuron):
+                                if hasattr(n, 'nodes') and 'radius' in n.nodes.columns:
+                                    invalid_mask = (n.nodes['radius'] <= 0) | (n.nodes['radius'].isna())
+                                    if invalid_mask.any():
+                                        n.nodes.loc[invalid_mask, 'radius'] = 1
+                                elif hasattr(n, 'nodes'):
+                                    n.nodes['radius'] = 1
+                                if hasattr(navis, 'conversion') and hasattr(navis.conversion, 'tree2meshneuron'):
+                                    mesh_n = navis.conversion.tree2meshneuron(n)
+                                else:
+                                    processed_neurons.append(n)
+                                    continue
+                            elif isinstance(n, navis.MeshNeuron):
+                                mesh_n = n
+                            else:
+                                processed_neurons.append(n)
+                                continue
+                            
+                            # Apply simplification
+                            if target_simp > 0 and mesh_n and hasattr(mesh_n, 'trimesh'):
+                                n_faces = len(mesh_n.trimesh.faces)
+                                target_faces = int(n_faces * (1 - target_simp))
+                                if target_faces < n_faces and target_faces > 0:
+                                    try:
+                                        simplified_trimesh = mesh_n.trimesh.simplify_quadric_decimation(target_faces)
+                                        mesh_n = navis.MeshNeuron(simplified_trimesh)
+                                        mesh_n.id = n.id if hasattr(n, 'id') else None
+                                        if hasattr(n, 'name'):
+                                            mesh_n.name = n.name
+                                    except Exception:
+                                        pass
+                            
+                            processed_neurons.append(mesh_n)
+                        
+                        all_mesh_neurons.extend(processed_neurons)
+                    else:
+                        all_mesh_neurons.extend(neurons_list)
+                
+                # Merge all neurons in this layer if merge_neurons=True
+                if self.merge_neurons and len(all_mesh_neurons) > 1:
+                    try:
+                        meshes = [m.trimesh for m in all_mesh_neurons if hasattr(m, 'trimesh')]
+                        if meshes:
+                            merged_mesh = trimesh.util.concatenate(meshes)
+                            merged_neuron = navis.MeshNeuron(merged_mesh)
+                            merged_neuron.name = layer_name
+                            neuron_vols = navis.NeuronList([merged_neuron])
+                            self._vprint(f'    ⚡ Merged {len(meshes)} meshes for layer: {layer_name}', level='full', use_tqdm=True)
+                        else:
+                            neuron_vols = navis.NeuronList(all_mesh_neurons) if all_mesh_neurons else neuron_vols
+                    except Exception as e:
+                        self._vprint(f'    ⚠️ Merge layer meshes failed: {e}', level='full', use_tqdm=True)
+                        neuron_vols = navis.NeuronList(all_mesh_neurons) if all_mesh_neurons else neuron_vols
+                elif all_mesh_neurons:
+                    neuron_vols = navis.NeuronList(all_mesh_neurons)
+                
+                # Mark FAFB as already simplified to skip generic simplification below
+                fafb_already_simplified = True
 
             # Mirror neurons if requested
             if self.mirror_on_contralateral:
-                self._vprint(f'Mirroring {len(neuron_vols)} neurons...', end='', level='full')
                 try:
                     template = None
                     if self.brain_mesh == 'whole':
@@ -1071,19 +1840,18 @@ class VisualizeSkeleton:
                             neuron_vols = neuron_vols + mirrored
                         else:
                             neuron_vols = navis.NeuronList([neuron_vols, mirrored])
-                        self._vprint(' (mirrored) ', end='', level='full')
-                    else:
-                        self._vprint(' (mirror skipped: unknown template) ', end='', level='full')
                 except Exception as e:
-                    self._vprint(f' (mirror failed: {e})', end='', level='full')
+                    tqdm.write(f'  ⚠️ Mirror failed for layer {i}: {e}')
 
             # Simplify individual neurons if requested (and not merging)
             # If merging is enabled, simplification is handled during the merge process
-            if self.skeleton_mesh_simplification > 0 and self.skeleton_mode == 'tube' and not self.merge_neurons:
-                self._vprint(f'Simplifying {len(neuron_vols)} neurons ({self.skeleton_mesh_simplification*100:.0f}%)...', end='', level='full')
+            # Skip for FAFB - already handled in the FAFB-specific block above
+            if self.skeleton_mesh_simplification > 0 and self.skeleton_mode == 'tube' and not self.merge_neurons and not fafb_already_simplified:
                 try:
                     import trimesh
                     simplified_neurons = []
+                    total_original_faces = 0
+                    total_simplified_faces = 0
                     # Ensure iterable
                     neurons_to_simplify = neuron_vols if isinstance(neuron_vols, navis.NeuronList) else [neuron_vols]
                     
@@ -1109,11 +1877,21 @@ class VisualizeSkeleton:
                             # Simplify if we have a mesh neuron
                             if mesh_n and hasattr(mesh_n, 'trimesh'):
                                 n_faces = len(mesh_n.trimesh.faces)
-                                target_faces = int(n_faces * (1 - self.skeleton_mesh_simplification))
+                                total_original_faces += n_faces
+                                target_faces = max(100, int(n_faces * (1 - self.skeleton_mesh_simplification)))  # Keep at least 100 faces
                                 if target_faces < n_faces:
-                                    # simplify_quadratic_decimation returns a new trimesh object
-                                    mesh_n.trimesh = mesh_n.trimesh.simplify_quadratic_decimation(target_faces)
-                                simplified_neurons.append(mesh_n)
+                                    # simplify_quadric_decimation returns a new trimesh object
+                                    # Create NEW MeshNeuron from simplified trimesh (can't just assign to .trimesh)
+                                    simplified_tm = mesh_n.trimesh.simplify_quadric_decimation(target_faces)
+                                    new_mesh_n = navis.MeshNeuron(simplified_tm)
+                                    new_mesh_n.id = mesh_n.id if hasattr(mesh_n, 'id') else n.id
+                                    if hasattr(mesh_n, 'name'):
+                                        new_mesh_n.name = mesh_n.name
+                                    total_simplified_faces += len(new_mesh_n.trimesh.faces)
+                                    simplified_neurons.append(new_mesh_n)
+                                else:
+                                    total_simplified_faces += n_faces
+                                    simplified_neurons.append(mesh_n)
                             else:
                                 # Keep original if conversion failed or not applicable
                                 simplified_neurons.append(n)
@@ -1122,14 +1900,19 @@ class VisualizeSkeleton:
                             simplified_neurons.append(n) # Keep original if failed
                     
                     neuron_vols = navis.NeuronList(simplified_neurons)
-                    self._vprint(' Done', level='full')
+                    
+                    # Log simplification results
+                    if total_original_faces > 0:
+                        reduction = (1 - total_simplified_faces / total_original_faces) * 100
+                        self._vprint(f'    ✓ Simplified: {total_original_faces:,} → {total_simplified_faces:,} faces ({reduction:.1f}% reduction)', level='full', use_tqdm=True)
                 except Exception as e:
-                    self._vprint(f' (simplification failed: {e})', end='', level='full')
+                    self._vprint(f'    ⚠️ Simplification failed: {e}', level='full', use_tqdm=True)
+                    pass  # Keep original neurons if simplification fails
 
             # Merge neurons if requested (optimization)
             num_neurons = len(neuron_vols) if isinstance(neuron_vols, (list, navis.NeuronList)) else 1
             if self.merge_neurons and num_neurons > 1:
-                self._vprint(f'Merging {num_neurons} neurons into single object...', end='', level='full')
+                layer_pbar.set_postfix_str(f"{layer_name} (meshing {num_neurons}...)")
                 try:
                     if self.skeleton_mode == 'tube':
                         import trimesh
@@ -1196,26 +1979,23 @@ class VisualizeSkeleton:
                                     try:
                                         # Try open3d simplification first (better quality)
                                         # If open3d not installed, trimesh might fail or use other method
-                                        # trimesh.simplify_quadratic_decimation uses open3d or fast-simplification
-                                        merged_mesh = merged_mesh.simplify_quadratic_decimation(target_faces)
-                                    except Exception as e:
-                                        self._vprint(f' (simplification failed: {e})', end='', level='full')
+                                        # trimesh.simplify_quadric_decimation uses open3d or fast-simplification
+                                        merged_mesh = merged_mesh.simplify_quadric_decimation(target_faces)
+                                    except Exception:
+                                        pass  # Skip simplification if it fails
                             
                             # Convert back to navis object
                             neuron_vols = navis.MeshNeuron(merged_mesh)
                             neuron_vols.name = self.layer_names[i]
-                            self._vprint(' (merged) ', end='', level='full')
-                        else:
-                            self._vprint(' (merge failed: no meshes generated) ', end='', level='full')
-                    else:
-                        # For line mode, we can merge traces later in plotting?
-                        # Actually, navis.plot3d returns a figure with traces.
-                        # We can merge them there.
-                        self._vprint(' (will merge traces in plot) ', end='', level='full')
+                    # For line mode, traces are merged later in plotting
                 except Exception as e:
-                    self._vprint(f'⚠️  Merge failed: {e}, plotting individually', level='full')
+                    tqdm.write(f'  ⚠️  Merge failed for layer {i}: {e}')
 
-            self._vprint('plotting...', end='', level='full')
+            # Update status and plot
+            layer_pbar.set_postfix_str(f"{layer_name} (plotting...)")
+            
+            # Determine soma rendering
+            show_soma_here = self.show_soma if not isinstance(neuron_vols, navis.Volume) else False
             
             if self.backend == 'plotly':
                 with self._suppress_output():
@@ -1224,7 +2004,7 @@ class VisualizeSkeleton:
                         backend='plotly',
                         color=self.neuron_colors[i],
                         alpha=self.neuron_alpha,
-                        soma=self.show_soma if not isinstance(neuron_vols, navis.Volume) else False,
+                        soma=show_soma_here,
                         # fig=self.fig_3d,
                         radius=self.show_skeleton_radius,
                         connectors=self.show_connectors if not isinstance(neuron_vols, navis.Volume) else False,
@@ -1259,7 +2039,7 @@ class VisualizeSkeleton:
                     if self.skeleton_mode == 'line':
                         trace.opacity = self.neuron_alpha
 
-                    if self.legend_mode == 'merge':
+                    if self._legend_mode == 'merge':
                         if j == 0:
                             trace.showlegend = True
                         else:
@@ -1269,12 +2049,26 @@ class VisualizeSkeleton:
                         trace.legendgroup = self.layer_names[i]
                         trace.hoverinfo = 'name'
                         self.fig_3d.add_trace(trace)
-                    elif self.legend_mode == 'normal':
+                    elif self._legend_mode == 'normal':
+                        # Get neuron_id from existing trace name (navis sets this to neuron ID)
+                        # or fall back to neuron_vols if available
+                        existing_name = getattr(trace, 'name', None)
+                        if existing_name:
+                            neuron_id = str(existing_name)
+                        elif j < len(neuron_vols):
+                            neuron_id = str(neuron_vols[j].id)
+                        else:
+                            neuron_id = f"neuron_{j}"
+                        # Set trace name to {bodyId}_{layer_name} for proper identification
+                        new_trace_name = f"{neuron_id}_{self.layer_names[i]}"
+                        trace.name = new_trace_name
+                        trace.legendgroup = new_trace_name  # Set legendgroup to match name for consistent identification
+                        trace.showlegend = True  # Ensure trace appears in legend
                         trace.hoverinfo = 'name'
                         trace.hovertemplate = '<b>%{fullData.name}</b><extra></extra>'
                         self.fig_3d.add_trace(trace)
                     else:
-                        raise ValueError(f'legend_mode {self.legend_mode} not supported')
+                        raise ValueError(f'_legend_mode {self._legend_mode} not supported')
             
             elif self.backend == 'k3d':
                 try:
@@ -1285,7 +2079,7 @@ class VisualizeSkeleton:
                             backend='k3d',
                             color=self.neuron_colors[i],
                             alpha=self.neuron_alpha,
-                            soma=self.show_soma if not isinstance(neuron_vols, navis.Volume) else False,
+                            soma=show_soma_here,
                             radius=self.show_skeleton_radius,
                             connectors=self.show_connectors if not isinstance(neuron_vols, navis.Volume) else False,
                             inline=False
@@ -1298,7 +2092,6 @@ class VisualizeSkeleton:
                 except Exception as e:
                     self._vprint(f'⚠️  k3d plotting failed: {e}', level='full')
 
-            self._vprint('Done', level='full')
         return 0
     
     def _get_synapse_cache_path(self, pre_id, post_id):
@@ -2097,7 +2890,6 @@ class VisualizeSkeleton:
         elif 'manc' in dataset_lower:
             # MANC (Male Adult Nerve Cord) - VNC only
             # For VNC: 'whole' and 'template' both show VNC envelope
-            # 'hemi' is not supported (VNC doesn't have hemispheres like brain)
             return {
                 'source': 'MANCraw',
                 'target': 'MANC',  # VNC template (no brain transform needed)
@@ -2109,7 +2901,6 @@ class VisualizeSkeleton:
         elif 'male-cns' in dataset_lower or 'malecns' in dataset_lower:
             # Male CNS (JRCFIB2022M) - Brain + VNC
             # 'whole' shows full CNS envelope (brain + VNC)
-            # 'hemi' is not supported (use brain_mesh to get brain/vnc separately)
             return {
                 'source': 'JRCFIB2022Mraw',
                 'target': 'JRCFIB2022M',
@@ -2136,6 +2927,43 @@ class VisualizeSkeleton:
                 'template_obj': flybrains.JRCFIB2018F,
                 'mesh_name': 'JRCFIB2018F (hemibrain)'
             }
+    
+    def _get_vnc_template_info(self):
+        """Get VNC template information for current dataset.
+        
+        Available for datasets with VNC data (requires flybrains >= 0.6.3):
+        - male-cns: JRCFIB2022M.mesh_vnc (VNC portion of male CNS)
+        - manc: MANC template (native VNC mesh)
+        
+        Returns
+        -------
+        dict or None
+            Dictionary with 'mesh' (trimesh object) and 'mesh_name' keys,
+            or None if VNC mesh is not available for the current dataset.
+        """
+        dataset_lower = self.dataset.lower()
+        import flybrains
+        
+        # Male CNS dataset - VNC mesh available via JRCFIB2022M.mesh_vnc (flybrains >= 0.6.3)
+        if 'male-cns' in dataset_lower or 'malecns' in dataset_lower:
+            if hasattr(flybrains.JRCFIB2022M, 'mesh_vnc'):
+                return {
+                    'mesh': flybrains.JRCFIB2022M.mesh_vnc,
+                    'mesh_name': 'JRCFIB2022M VNC'
+                }
+            else:
+                self._vprint('⚠️  VNC mesh not available (requires flybrains >= 0.6.3, upgrade with: pip install --upgrade flybrains)', level='simple')
+                return None
+        
+        # MANC dataset - VNC only (has proper VNC mesh)
+        elif 'manc' in dataset_lower:
+            return {
+                'mesh': flybrains.MANC.mesh,
+                'mesh_name': 'MANC (VNC)'
+            }
+        
+        # VNC mesh not available for other datasets
+        return None
     
     def _check_and_download_transforms(self):
         """Check if flybrains transforms exist locally, prompt user before downloading.
@@ -2329,11 +3157,12 @@ class VisualizeSkeleton:
         if self.mesh_roi is None:
             return
         
-        # Check if we have any work to do (ROI meshes or brain mesh)
+        # Check if we have any work to do (ROI meshes, brain mesh, or VNC mesh)
         has_roi_meshes = len(self.mesh_roi) > 0
         has_brain_mesh = self.brain_mesh in ['template', 'whole']
+        has_vnc_mesh = self.vnc_mesh
         
-        if not has_roi_meshes and not has_brain_mesh:
+        if not has_roi_meshes and not has_brain_mesh and not has_vnc_mesh:
             return
         
         # Ensure available_rois.json exists (generate if missing)
@@ -2527,8 +3356,8 @@ class VisualizeSkeleton:
                                 n_faces = len(tm.faces)
                                 target_faces = int(n_faces * (1 - self.roi_mesh_simplification))
                                 if target_faces < n_faces:
-                                    # simplify_quadratic_decimation returns a new trimesh object
-                                    new_tm = tm.simplify_quadratic_decimation(target_faces)
+                                    # simplify_quadric_decimation returns a new trimesh object
+                                    new_tm = tm.simplify_quadric_decimation(target_faces)
                                     
                                     # Re-instantiate Volume to ensure it's clean and updated
                                     # Preserving attributes
@@ -2620,13 +3449,13 @@ class VisualizeSkeleton:
                         fig_mesh = navis.plot3d(roiunits[roi_i],backend='plotly')
                     mesh_traces = fig_mesh.data
                     for ti, trace in enumerate(mesh_traces):
-                        if self.legend_mode == 'merge':
+                        if self._legend_mode == 'merge':
                             if ti == 0:
                                 trace.showlegend = True
                             else:
                                 trace.showlegend = False
                             trace.legendgroup = 'roi_mesh'
-                        elif self.legend_mode == 'normal':
+                        elif self._legend_mode == 'normal':
                             trace.showlegend = True
                             trace.legendgroup = roi_names[roi_i]
                         trace.hovertemplate = '<b>%{fullData.name}</b><extra></extra>'  # show full name in hover tooltip
@@ -2651,13 +3480,28 @@ class VisualizeSkeleton:
             template_info = self._get_template_info()
             mesh_display_name = template_info['mesh_name']
             
+            # For male-cns with vnc_mesh=True, use .mesh_brain to avoid VNC duplication
+            # (JRCFIB2022M.mesh contains both brain and VNC, so plotting it with vnc_mesh
+            # would show the VNC twice)
+            dataset_lower = self.dataset.lower()
+            use_brain_only = self.vnc_mesh and ('male-cns' in dataset_lower or 'malecns' in dataset_lower)
+            
+            if use_brain_only:
+                mesh_display_name = 'JRCFIB2022M (brain only)'
+            
             self._vprint(f'Plotting {mesh_display_name} mesh...', level='full')
             try:
-                brain_template = template_info['template_obj']
+                import flybrains
+                
+                # Select appropriate mesh
+                if use_brain_only and hasattr(flybrains.JRCFIB2022M, 'mesh_brain'):
+                    brain_mesh = flybrains.JRCFIB2022M.mesh_brain
+                else:
+                    brain_mesh = template_info['template_obj'].mesh if hasattr(template_info['template_obj'], 'mesh') else template_info['template_obj']
                 
                 if self.backend == 'plotly':
                     with self._suppress_output():
-                        fig_brain = navis.plot3d(brain_template, backend='plotly')
+                        fig_brain = navis.plot3d(brain_mesh, backend='plotly')
                     brain_traces = fig_brain.data
                     for trace in brain_traces:
                         trace.showlegend = True
@@ -2667,7 +3511,7 @@ class VisualizeSkeleton:
                     self.fig_3d.add_traces(brain_traces)
                 elif self.backend == 'k3d':
                     with self._suppress_output():
-                        temp_plot = navis.plot3d(brain_template, backend='k3d', inline=False)
+                        temp_plot = navis.plot3d(brain_mesh, backend='k3d', inline=False)
                     for obj in temp_plot.objects:
                         obj.name = mesh_display_name
                         self.fig_3d += obj
@@ -2678,12 +3522,12 @@ class VisualizeSkeleton:
                 if self._dataset_needs_transform() and not self._check_and_download_transforms():
                     self._vprint('   Skipping brain/VNC mesh visualization', level='full')
                 else:
-                    # Retry after download
+                    # Retry after download - use template object mesh
                     try:
-                        brain_template = template_info['template_obj']
+                        retry_mesh = template_info['template_obj'].mesh if hasattr(template_info['template_obj'], 'mesh') else template_info['template_obj']
                         if self.backend == 'plotly':
                             with self._suppress_output():
-                                fig_brain = navis.plot3d(brain_template, backend='plotly')
+                                fig_brain = navis.plot3d(retry_mesh, backend='plotly')
                             brain_traces = fig_brain.data
                             for trace in brain_traces:
                                 trace.showlegend = True
@@ -2693,7 +3537,7 @@ class VisualizeSkeleton:
                             self.fig_3d.add_traces(brain_traces)
                         elif self.backend == 'k3d':
                             with self._suppress_output():
-                                temp_plot = navis.plot3d(brain_template, backend='k3d', inline=False)
+                                temp_plot = navis.plot3d(retry_mesh, backend='k3d', inline=False)
                             for obj in temp_plot.objects:
                                 obj.name = mesh_display_name
                                 self.fig_3d += obj
@@ -2701,30 +3545,52 @@ class VisualizeSkeleton:
                     except Exception as retry_e:
                         self._vprint(f'⚠️  Still failed to load {mesh_display_name} mesh: {retry_e}', level='full')
                         self._vprint('   Skipping brain/VNC mesh visualization', level='full')
+        
+        # Plot VNC mesh if requested (only for manc and male-cns datasets)
+        if self.vnc_mesh:
+            dataset_lower = self.dataset.lower()
+            
+            # For MANC, the template mesh IS the VNC mesh, so skip if brain_mesh already shows it
+            if 'manc' in dataset_lower and self.brain_mesh in ['template', 'whole']:
+                self._vprint('ℹ️  VNC mesh already shown via brain_mesh (MANC template = VNC)', level='full')
+            else:
+                vnc_info = self._get_vnc_template_info()
+                if vnc_info:
+                    vnc_display_name = vnc_info['mesh_name']
+                    self._vprint(f'Plotting {vnc_display_name} mesh...', level='full')
+                    try:
+                        vnc_mesh = vnc_info['mesh']
+                        
+                        if self.backend == 'plotly':
+                            with self._suppress_output():
+                                fig_vnc = navis.plot3d(vnc_mesh, backend='plotly')
+                            vnc_traces = fig_vnc.data
+                            for trace in vnc_traces:
+                                trace.showlegend = True
+                                trace.name = vnc_display_name
+                                trace.hoverinfo = 'none'
+                                trace.color = self.vnc_mesh_color
+                            self.fig_3d.add_traces(vnc_traces)
+                        elif self.backend == 'k3d':
+                            with self._suppress_output():
+                                temp_plot = navis.plot3d(vnc_mesh, backend='k3d', inline=False)
+                            for obj in temp_plot.objects:
+                                obj.name = vnc_display_name
+                                self.fig_3d += obj
+                        
+                        self._vprint(f'✓ {vnc_display_name} mesh loaded successfully', level='full')
+                    except Exception as e:
+                        self._vprint(f'⚠️  Failed to load VNC mesh: {e}', level='full')
+                else:
+                    self._vprint('⚠️  VNC mesh is only available for manc and male-cns datasets', level='full')
+        
         self._vprint('Done', level='full')
         return 0
     
     def save_figure(self):
         if self.backend == 'plotly':
-            # add sliders
-            if self.use_size_slider:
-                sliders = [
-                    dict(
-                        active=self.synapse_size,
-                        currentvalue={"prefix": "Synapse Size: "},
-                        pad={"t": 50},
-                        steps=[
-                            dict(
-                                label=str(size),
-                                method="update",
-                                args=[{"marker": {"size": size}}]
-                            )
-                            for size in list(range(0,11))
-                        ],
-                    ),
-                ]
-            else:
-                sliders = []
+            # No sliders currently used
+            sliders = []
             
             # set layout
             # Always use frontal view camera regardless of brain_mesh setting
@@ -2781,33 +3647,59 @@ class VisualizeSkeleton:
             
             self._vprint('Done (HTML saved)')
             
-            # Optimize PNG export: only save if needed, use lower scale for speed
+            # Export multiple view angles as PNG
             try:
-                self._vprint('   Exporting static PNG (may take a moment)...', end='', flush=True, level='full')
+                self._vprint('   Exporting static PNGs (multiple views)...')
+                
+                # Create exported_views subfolder
+                views_folder = os.path.join(self.save_folder, 'exported_views')
+                os.makedirs(views_folder, exist_ok=True)
+                
+                # Define camera angles for different views
+                # Based on the default front view: eye=(0, 0, -2), up=(0, -1, 0)
+                # X: Left-Right, Y: Dorsal-Ventral (up), Z: Anterior-Posterior (front-back)
+                view_cameras = {
+                    'front': dict(eye=dict(x=0, y=0, z=-2.5), center=dict(x=0, y=0, z=0), up=dict(x=0, y=-1, z=0)),
+                    'back': dict(eye=dict(x=0, y=0, z=2.5), center=dict(x=0, y=0, z=0), up=dict(x=0, y=-1, z=0)),
+                    'top': dict(eye=dict(x=0, y=-2.5, z=0), center=dict(x=0, y=0, z=0), up=dict(x=0, y=0, z=1)),
+                    'bottom': dict(eye=dict(x=0, y=2.5, z=0), center=dict(x=0, y=0, z=0), up=dict(x=0, y=0, z=-1)),
+                    'left': dict(eye=dict(x=-2.5, y=0, z=0), center=dict(x=0, y=0, z=0), up=dict(x=0, y=-1, z=0)),
+                    'right': dict(eye=dict(x=2.5, y=0, z=0), center=dict(x=0, y=0, z=0), up=dict(x=0, y=-1, z=0)),
+                }
                 
                 # Update layout for static export to remove UI elements
-                # We re-apply the camera parameters to ensure they are used for the static render
                 self.fig_3d.update_layout(
                     margin=dict(l=0, r=0, b=0, t=0),
                     sliders=[],      # Remove sliders
-                    updatemenus=[],   # Remove any buttons
-                    scene_camera=scene_camera_parameters # Ensure camera is locked
+                    updatemenus=[],  # Remove any buttons
                 )
                 
-                # Use standard write_image which handles kaleido internally
-                # We use a standard resolution (1200x900) to ensure consistent output
-                self.fig_3d.write_image(self.fig_path+'.png', width=1200, height=900, scale=2)
+                import shutil
+                front_view_path = None
                 
-                # Verify file
-                if os.path.exists(self.fig_path+'.png'):
-                    size = os.path.getsize(self.fig_path+'.png')
-                    self._vprint(f' Done ({size/1024:.1f} KB)', level='full')
-                    if size < 15 * 1024: # < 15KB is suspicious for a 3D plot
-                        self._vprint('   ⚠️  Warning: Exported PNG seems blank/empty.', level='full')
-                        self._vprint('       This is a known issue with Kaleido and 3D plots on some systems.')
-                        self._vprint('       Please rely on the HTML file for visualization.')
-                else:
-                    self._vprint(' Done (File not found)')
+                for view_name, camera in view_cameras.items():
+                    view_path = os.path.join(views_folder, f"{self.saveas}_{view_name}.png")
+                    self.fig_3d.update_layout(scene_camera=camera)
+                    self.fig_3d.write_image(view_path, width=1200, height=900, scale=3)
+                    
+                    if os.path.exists(view_path):
+                        size = os.path.getsize(view_path)
+                        self._vprint(f'      {view_name}: {size/1024:.1f} KB', level='full')
+                        if size < 15 * 1024:
+                            self._vprint(f'      ⚠️  {view_name} view seems blank/empty', level='full')
+                        
+                        # Save front view path for copying to root
+                        if view_name == 'front':
+                            front_view_path = view_path
+                
+                # Copy front view to root folder without '_front' suffix
+                if front_view_path and os.path.exists(front_view_path):
+                    root_png_path = os.path.join(self.save_folder, f"{self.saveas}.png")
+                    shutil.copy2(front_view_path, root_png_path)
+                    self._vprint(f'   ✓ Copied front view to root: {self.saveas}.png')
+                
+                self._vprint('   ✓ Exported 6 view PNGs to exported_views/ (front, back, top, bottom, left, right)')
+                
             except Exception as e:
                 self._vprint(f'\\n   ⚠️  PNG export failed: {e}. Continuing without PNG...')
             
@@ -2834,11 +3726,575 @@ class VisualizeSkeleton:
                 self._vprint(f'\\n⚠️  Failed to save k3d plot: {e}')
     
     def plot_neurons(self):
+        import time
+        start_time = time.time()
+        
+        self._vprint('\n' + '='*60)
+        self._vprint(f'🧠 VisualizeSkeleton: Plotting {self.dataset}')
+        self._vprint('='*60)
+        
         self.plot_skeleton()
         self.plot_synapses()
         self.plot_mesh()
         self.save_figure()
-    
+        
+        elapsed = time.time() - start_time
+        self._vprint(f'\n✅ Complete! Total time: {elapsed:.1f}s')
+        self._vprint(f'📁 Output: {self.save_folder}')
+        self._vprint('='*60 + '\n')
+
+    def plot_individuals(
+        self,
+        output_format: str | list = 'png',
+        views: str | list = 'front',
+        scale: int = 3,
+        pdf_images_per_page: tuple = (3, 2),
+        pdf_title: str = None,
+        neuron_alpha: float = None,
+    ):
+        """
+        Plot individual neurons/types independently based on the main figure's legend entries.
+        
+        This method should be called AFTER plot_neurons() to ensure all necessary data is available.
+        It iterates through the legend entries in the main figure and generates separate plots
+        for each individual legend item by hiding other neuron traces (efficient, no duplication).
+        
+        When merge_neurons=False: plots individual neurons
+        When merge_neurons=True: plots aggregated neuron types (one per layer)
+        
+        Parameters
+        ----------
+        output_format : str or list, default 'png'
+            Output format(s) for individual plots.
+            Options: 'png', 'html', or list like ['png', 'html']
+        views : str or list, default 'front'
+            View angle(s) for PNG exports.
+            Options: 'front', 'back', 'top', 'bottom', 'left', 'right'
+            Can be a single string or list like ['front', 'top']
+        scale : int, default 3
+            Scale factor for PNG export resolution.
+            Higher values produce larger, higher-quality images.
+        pdf_images_per_page : tuple, default (3, 2)
+            (columns, rows) - number of images per page when generating PDF.
+        pdf_title : str, optional
+            Custom title for PDF pages. If None, uses the layer/neuron name.
+        neuron_alpha : float, optional
+            Opacity for neuron traces in individual plots (0.0-1.0).
+            If None, defaults to 0.8 for better visibility in individual views.
+            
+        Returns
+        -------
+        str or None
+            Path to the output folder containing individual plots,
+            or None if no plots were generated.
+            
+        Example
+        -------
+        >>> vs = VisualizeSkeleton(...)
+        >>> vs.plot_neurons()
+        >>> vs.plot_individuals(output_format=['png', 'html'], views=['front', 'top'])
+        """
+        import copy
+        
+        if not hasattr(self, 'fig_3d') or self.fig_3d is None:
+            self._vprint('⚠️  No figure found. Please run plot_neurons() first.')
+            return None
+            
+        if self.backend != 'plotly':
+            self._vprint('⚠️  plot_individuals() only supports plotly backend.')
+            return None
+        
+        # Normalize inputs
+        if isinstance(output_format, str):
+            output_format = [output_format]
+        if isinstance(views, str):
+            views = [views]
+            
+        # Validate inputs
+        valid_formats = {'png', 'html'}
+        output_format = [f.lower() for f in output_format]
+        for fmt in output_format:
+            if fmt not in valid_formats:
+                self._vprint(f'⚠️  Invalid output format: {fmt}. Use "png" or "html".')
+                return None
+                
+        valid_views = {'front', 'back', 'top', 'bottom', 'left', 'right'}
+        views = [v.lower() for v in views]
+        for view in views:
+            if view not in valid_views:
+                self._vprint(f'⚠️  Invalid view: {view}. Use one of {valid_views}.')
+                return None
+        
+        # Create output directory
+        output_dir = os.path.join(self.save_folder, 'individual_profiles')
+        os.makedirs(output_dir, exist_ok=True)
+        
+        self._vprint(f'\n📊 Generating individual plots...')
+        self._vprint(f'   Output: {output_dir}')
+        
+        # View cameras for PNG export
+        view_cameras = {
+            'front': dict(eye=dict(x=0, y=0, z=-2.5), center=dict(x=0, y=0, z=0), up=dict(x=0, y=-1, z=0)),
+            'back': dict(eye=dict(x=0, y=0, z=2.5), center=dict(x=0, y=0, z=0), up=dict(x=0, y=-1, z=0)),
+            'top': dict(eye=dict(x=0, y=-2.5, z=0), center=dict(x=0, y=0, z=0), up=dict(x=0, y=0, z=1)),
+            'bottom': dict(eye=dict(x=0, y=2.5, z=0), center=dict(x=0, y=0, z=0), up=dict(x=0, y=0, z=-1)),
+            'left': dict(eye=dict(x=-2.5, y=0, z=0), center=dict(x=0, y=0, z=0), up=dict(x=0, y=-1, z=0)),
+            'right': dict(eye=dict(x=2.5, y=0, z=0), center=dict(x=0, y=0, z=0), up=dict(x=0, y=-1, z=0)),
+        }
+        
+        # Get all traces from the main figure
+        all_traces = list(self.fig_3d.data)
+        n_traces = len(all_traces)
+        
+        # Default neuron_alpha for individual plots (higher than main plot for better visibility)
+        individual_alpha = neuron_alpha if neuron_alpha is not None else 0.8
+        
+        # Helper function to modify alpha in RGBA color string
+        def _modify_color_alpha(color_str, new_alpha):
+            """Modify the alpha value in an RGBA color string.
+            
+            navis encodes alpha in the color as RGBA (e.g., 'rgba(255,0,0,0.2)'),
+            not in the opacity attribute. To change effective alpha, we must
+            modify the color string directly.
+            """
+            import re
+            if color_str is None:
+                return None
+            color_str = str(color_str)
+            
+            # Match rgba(r,g,b,a) format
+            rgba_match = re.match(r'rgba?\(([^,]+),\s*([^,]+),\s*([^,]+)(?:,\s*([^)]+))?\)', color_str)
+            if rgba_match:
+                r, g, b = rgba_match.group(1), rgba_match.group(2), rgba_match.group(3)
+                return f'rgba({r},{g},{b},{new_alpha})'
+            
+            # Match rgb(r,g,b) format - add alpha
+            rgb_match = re.match(r'rgb\(([^,]+),\s*([^,]+),\s*([^)]+)\)', color_str)
+            if rgb_match:
+                r, g, b = rgb_match.group(1), rgb_match.group(2), rgb_match.group(3)
+                return f'rgba({r},{g},{b},{new_alpha})'
+            
+            # For other formats (hex, named colors), try matplotlib
+            try:
+                import matplotlib.colors as mcolors
+                rgba = mcolors.to_rgba(color_str)
+                r, g, b = int(rgba[0]*255), int(rgba[1]*255), int(rgba[2]*255)
+                return f'rgba({r},{g},{b},{new_alpha})'
+            except:
+                return color_str  # Return unchanged if can't parse
+        
+        # Store original visibility, opacity, and color states to restore later
+        original_visibility = []
+        original_opacity = []
+        original_colors = []
+        for trace in all_traces:
+            original_visibility.append(getattr(trace, 'visible', True))
+            original_opacity.append(getattr(trace, 'opacity', None))
+            original_colors.append(getattr(trace, 'color', None))
+        
+        # Store original camera and layout settings
+        original_layout = copy.deepcopy(self.fig_3d.layout)
+        
+        # Identify unique legend entries (excluding hidden legends and mesh/synapse traces)
+        legend_entries = {}  # {legend_name: [trace_indices]}
+        background_indices = []  # mesh/synapse traces to always show
+        
+        # Get mesh_roi names for matching
+        mesh_roi_names = [r.lower() for r in self.mesh_roi] if self.mesh_roi else []
+        
+        for idx, trace in enumerate(all_traces):
+            trace_name = getattr(trace, 'name', '')
+            show_legend = getattr(trace, 'showlegend', True)
+            legend_group = getattr(trace, 'legendgroup', None)
+            trace_name_lower = trace_name.lower() if trace_name else ''
+            
+            # Identify mesh/roi traces (keep visible as background)
+            # Include brain regions, standard templates, and user-specified mesh_roi
+            if trace_name and ('brain regions' in trace_name_lower or 
+                              'mesh' in trace_name_lower or
+                              any(template in trace_name for template in ['JRCFIB', 'MANC', 'JRC2018']) or
+                              any(roi_name in trace_name_lower for roi_name in mesh_roi_names)):
+                background_indices.append(idx)
+                continue
+                
+            # Identify synapse traces (keep visible as background)
+            if trace_name and ('synapse' in trace_name_lower or 'pre-syn' in trace_name_lower or 'post-syn' in trace_name_lower):
+                background_indices.append(idx)
+                continue
+            
+            # Use legendgroup as key if available (for merged traces), else use name
+            key = legend_group if legend_group else trace_name
+            if key and show_legend:
+                if key not in legend_entries:
+                    legend_entries[key] = []
+                legend_entries[key].append(idx)
+            elif key and not show_legend and legend_group:
+                # Traces with same legendgroup but showlegend=False
+                if key not in legend_entries:
+                    legend_entries[key] = []
+                legend_entries[key].append(idx)
+        
+        if not legend_entries:
+            self._vprint('⚠️  No legend entries found to plot individually.')
+            return None
+        
+        self._vprint(f'   Found {len(legend_entries)} individual legend entries')
+        
+        # Generate individual plots by hiding/showing traces
+        generated_files = {'png': {}, 'html': []}
+        
+        # No subfolders needed - use flat structure with naming convention
+        
+        from tqdm import tqdm
+        legend_names = list(legend_entries.keys())
+        
+        for legend_name in tqdm(legend_names, desc='Plotting individuals'):
+            trace_indices = legend_entries[legend_name]
+            
+            # Sanitize filename - keep + signs
+            safe_name = "".join(c if c.isalnum() or c in '.+_- ' else '_' for c in str(legend_name))
+            safe_name = safe_name.strip().replace(' ', '_')
+            # Clean up multiple consecutive underscores
+            while '__' in safe_name:
+                safe_name = safe_name.replace('__', '_')
+            # Remove trailing underscores
+            safe_name = safe_name.rstrip('_')
+            
+            # Hide all neuron traces, show only this legend's traces + background
+            # Also apply custom alpha for better individual visibility
+            for idx in range(n_traces):
+                if idx in trace_indices or idx in background_indices:
+                    self.fig_3d.data[idx].visible = True
+                    # Apply custom alpha to neuron traces (not background)
+                    # navis encodes alpha in the color as RGBA, so we must modify the color
+                    if idx in trace_indices:
+                        trace = self.fig_3d.data[idx]
+                        # Modify the color's alpha component (navis stores alpha in RGBA color)
+                        if hasattr(trace, 'color') and trace.color is not None:
+                            trace.color = _modify_color_alpha(trace.color, individual_alpha)
+                        # Also set opacity attribute for non-Mesh3d traces (Scatter3d, etc.)
+                        if hasattr(trace, 'opacity'):
+                            trace.opacity = individual_alpha
+                else:
+                    self.fig_3d.data[idx].visible = False
+            
+            # Update layout for export (no title/legend for cleaner PNG)
+            # Use square output dimensions with scene domain for 10% margins
+            self.fig_3d.update_layout(
+                title=dict(text='', x=0.5),
+                margin=dict(l=0, r=0, b=0, t=0),
+                sliders=[],
+                updatemenus=[],
+                showlegend=False,
+                scene=dict(
+                    domain=dict(x=[0.01, 0.99], y=[0.01, 0.99])  # 1% margin on all sides
+                ),
+            )
+            
+            # Export HTML if requested
+            if 'html' in output_format:
+                # Include view info in filename if multiple views
+                html_filename = f'{safe_name}.html'
+                html_path = os.path.join(output_dir, html_filename)
+                self.fig_3d.write_html(
+                    html_path,
+                    include_plotlyjs='cdn',
+                    full_html=True
+                )
+                generated_files['html'].append(html_path)
+            
+            # Export PNG(s) if requested
+            if 'png' in output_format:
+                if safe_name not in generated_files['png']:
+                    generated_files['png'][safe_name] = []
+                
+                for view_name in views:
+                    camera = view_cameras[view_name]
+                    self.fig_3d.update_layout(scene_camera=camera)
+                    
+                    # Use consistent naming: {view}_{safe_name}.png
+                    # PDFs will organize the same images differently
+                    png_filename = f'{view_name}_{safe_name}.png'
+                    png_path = os.path.join(output_dir, png_filename)
+                    
+                    try:
+                        # Use square dimensions to minimize horizontal margins
+                        # (3D scene maintains aspect ratio, square fills frame better)
+                        self.fig_3d.write_image(png_path, width=900, height=900, scale=scale)
+                        generated_files['png'][safe_name].append((png_path, view_name))
+                    except Exception as e:
+                        self._vprint(f'   ⚠️  PNG export failed for {legend_name} ({view_name}): {e}', level='full')
+        
+        # Restore original figure state (visibility, opacity, and colors)
+        for idx in range(n_traces):
+            self.fig_3d.data[idx].visible = original_visibility[idx]
+            # Restore opacity (even if None, to reset any changes)
+            if hasattr(self.fig_3d.data[idx], 'opacity'):
+                self.fig_3d.data[idx].opacity = original_opacity[idx]
+            # Restore color (which contains alpha in RGBA format for navis traces)
+            if hasattr(self.fig_3d.data[idx], 'color') and original_colors[idx] is not None:
+                self.fig_3d.data[idx].color = original_colors[idx]
+        
+        # Restore original layout (includes resetting scene domain)
+        self.fig_3d.update_layout(original_layout)
+        
+        # Generate PDF summaries if PNG images were created
+        if 'png' in output_format and generated_files['png']:
+            # Save PDFs in parent folder (parallel to individual_profiles/)
+            parent_dir = os.path.dirname(output_dir)
+            base_title = pdf_title or self.saveas
+            
+            # For single view, generate one PDF without suffix (organized by view)
+            # For multiple views, generate both _by_view and _by_name PDFs
+            if len(views) == 1:
+                self._vprint(f'\n📄 Generating PDF summary...')
+                pdf_path = self._create_individual_pdf(
+                    output_dir=parent_dir,
+                    images_dict=generated_files['png'],
+                    images_per_page=pdf_images_per_page,
+                    title=base_title,
+                    organize_by='view',  # Organize by view for single-view PDF
+                    views=views,
+                    pdf_suffix='',
+                )
+                if pdf_path:
+                    self._vprint(f'   ✅ PDF saved: {pdf_path}')
+            else:
+                self._vprint(f'\n📄 Generating PDF summaries...')
+                # Generate PDF organized by view
+                pdf_path_view = self._create_individual_pdf(
+                    output_dir=parent_dir,
+                    images_dict=generated_files['png'],
+                    images_per_page=pdf_images_per_page,
+                    title=base_title,
+                    organize_by='view',
+                    views=views,
+                    pdf_suffix='_by_view',
+                )
+                if pdf_path_view:
+                    self._vprint(f'   ✅ PDF saved: {pdf_path_view}')
+                
+                # Generate PDF organized by name
+                pdf_path_name = self._create_individual_pdf(
+                    output_dir=parent_dir,
+                    images_dict=generated_files['png'],
+                    images_per_page=pdf_images_per_page,
+                    title=base_title,
+                    organize_by='name',
+                    views=views,
+                    pdf_suffix='_by_name',
+                )
+                if pdf_path_name:
+                    self._vprint(f'   ✅ PDF saved: {pdf_path_name}')
+        
+        # Summary
+        n_png = sum(len(v) for v in generated_files['png'].values())
+        n_html = len(generated_files['html'])
+        self._vprint(f'\n✅ Individual plots complete!')
+        self._vprint(f'   PNG files: {n_png}')
+        self._vprint(f'   HTML files: {n_html}')
+        self._vprint(f'   Output folder: {output_dir}')
+        
+        return output_dir
+
+    def _create_individual_pdf(
+        self,
+        output_dir: str,
+        images_dict: dict,
+        images_per_page: tuple = (4, 3),
+        title: str = None,
+        organize_by: str = 'name',
+        views: list = None,
+        pdf_suffix: str = '',
+    ) -> str | None:
+        """
+        Create a PDF summary from individual profile PNG images.
+        
+        Parameters
+        ----------
+        output_dir : str
+            Directory where PDF will be saved.
+        images_dict : dict
+            Dictionary mapping legend names to list of (image_path, view_name) tuples.
+            e.g., {'neuron1': [('/path/front.png', 'front'), ('/path/top.png', 'top')], ...}
+        images_per_page : tuple
+            (columns, rows) - number of images per page.
+        title : str, optional
+            Title for the PDF document.
+        organize_by : str
+            How images are organized: 'name' or 'view'
+        views : list, optional
+            List of view names for organizing by view
+        pdf_suffix : str, optional
+            Suffix to add to PDF filename (e.g., '_by_view', '_by_name')
+            
+        Returns
+        -------
+        str or None
+            Path to created PDF, or None if creation failed.
+        """
+        try:
+            from reportlab.lib.pagesizes import A4, landscape as rl_landscape
+            from reportlab.lib.units import inch
+            from reportlab.pdfgen import canvas
+            from PIL import Image
+        except ImportError:
+            self._vprint('⚠️  PDF generation requires reportlab and Pillow.')
+            self._vprint('   Install with: pip install reportlab Pillow')
+            return None
+        
+        from pathlib import Path
+        
+        # Natural sort function for rank-based names like r1, r2, ..., r10, r11
+        def natural_sort_key(s):
+            """Sort strings containing numbers in natural order (r1, r2, ..., r10, r11)."""
+            import re
+            return [int(c) if c.isdigit() else c.lower() for c in re.split(r'(\d+)', s)]
+        
+        # Organize images based on organize_by option
+        # Group by view when organize_by='view', otherwise by name
+        if organize_by == 'view' and views:
+            # Group images by view, each view gets its own section
+            images_by_category = {}
+            for view_name in views:
+                images_by_category[view_name] = []
+            
+            for legend_name, img_info_list in sorted(images_dict.items(), key=lambda x: natural_sort_key(x[0])):
+                for img_info in img_info_list:
+                    if isinstance(img_info, tuple):
+                        img_path, view_name = img_info
+                    else:
+                        img_path = img_info
+                        view_name = views[0] if views else 'front'
+                    if os.path.exists(img_path) and view_name in images_by_category:
+                        images_by_category[view_name].append((legend_name, img_path, view_name))
+        else:
+            # Group images by name (default) with natural sorting
+            images_by_category = {}
+            for legend_name, img_info_list in sorted(images_dict.items(), key=lambda x: natural_sort_key(x[0])):
+                if legend_name not in images_by_category:
+                    images_by_category[legend_name] = []
+                for img_info in img_info_list:
+                    if isinstance(img_info, tuple):
+                        img_path, view_name = img_info
+                    else:
+                        img_path = img_info
+                        view_name = ''
+                    if os.path.exists(img_path):
+                        images_by_category[legend_name].append((legend_name, img_path, view_name))
+        
+        # Flatten but keep category boundaries for page breaks
+        all_categories = list(images_by_category.keys())
+        
+        if not any(images_by_category.values()):
+            self._vprint('⚠️  No images found for PDF generation.')
+            return None
+        
+        # Output path
+        pdf_path = os.path.join(output_dir, f'individual_profiles_summary{pdf_suffix}.pdf')
+        
+        # Page setup (landscape A4)
+        page_width, page_height = rl_landscape(A4)
+        cols, rows = images_per_page
+        margin = 0.3 * inch  # Reduced from 0.5 to minimize blank space
+        title_height = 20  # Reduced from 25 to minimize blank space
+        
+        # Calculate cell dimensions
+        usable_width = page_width - 2 * margin
+        usable_height = page_height - 2 * margin - title_height
+        cell_width = usable_width / cols
+        cell_height = usable_height / rows
+        
+        # Create PDF
+        c = canvas.Canvas(pdf_path, pagesize=(page_width, page_height))
+        
+        images_per_full_page = cols * rows
+        
+        # Process each category separately (don't mix categories on same page)
+        for category_name in all_categories:
+            category_images = images_by_category[category_name]
+            if not category_images:
+                continue
+            
+            # Calculate pages needed for this category
+            total_pages_for_category = (len(category_images) + images_per_full_page - 1) // images_per_full_page
+            
+            for page_idx in range(total_pages_for_category):
+                # Page title with category info
+                c.setFont("Helvetica-Bold", 14)
+                if organize_by == 'view':
+                    # Use '{view} view' as title when organized by view
+                    page_title = f"{category_name} view"
+                else:
+                    # Use layer_name as title when organized by name
+                    page_title = str(category_name)
+                if total_pages_for_category > 1:
+                    page_title += f" ({page_idx + 1}/{total_pages_for_category})"
+                c.drawCentredString(page_width / 2, page_height - margin - 5, page_title)
+                
+                # Get images for this page from the category
+                start_idx = page_idx * images_per_full_page
+                end_idx = min(start_idx + images_per_full_page, len(category_images))
+                page_images = category_images[start_idx:end_idx]
+                
+                # Draw images
+                for i, (legend_name, img_path, view_name) in enumerate(page_images):
+                    row = i // cols
+                    col = i % cols
+                    
+                    # Calculate position
+                    x = margin + col * cell_width
+                    y = page_height - margin - title_height - (row + 1) * cell_height
+                    
+                    try:
+                        with Image.open(img_path) as img:
+                            img_width, img_height = img.size
+                            
+                            # Calculate scaling - minimize padding between images
+                            padding = 0  # Reduced from 5 to minimize blank space
+                            label_height = 12  # Reduced from 15 to minimize blank space
+                            max_width = cell_width - 2 * padding
+                            max_height = cell_height - 2 * padding - label_height
+                            
+                            scale_w = max_width / img_width
+                            scale_h = max_height / img_height
+                            scale_factor = min(scale_w, scale_h)
+                            
+                            draw_width = img_width * scale_factor
+                            draw_height = img_height * scale_factor
+                            
+                            # Center horizontally in cell, leave space at top for label
+                            draw_x = x + (cell_width - draw_width) / 2
+                            draw_y = y + (cell_height - label_height - draw_height) / 2
+                            
+                            # Draw image
+                            c.drawImage(
+                                img_path,
+                                draw_x, draw_y,
+                                width=draw_width,
+                                height=draw_height,
+                                preserveAspectRatio=True
+                            )
+                            
+                            # Draw label on TOP of image
+                            c.setFont("Helvetica", 12)
+                            label = str(legend_name)
+                            if view_name and organize_by != 'view':
+                                # Only add view suffix if not organizing by view
+                                label += f" ({view_name})"
+                            if len(label) > 30:
+                                label = label[:27] + '...'
+                            label_y = y + cell_height - label_height + 2  # Reduced from 3
+                            c.drawCentredString(x + cell_width / 2, label_y, label)
+                            
+                    except Exception as e:
+                        self._vprint(f'   ⚠️  Could not process: {img_path} - {e}', level='full')
+                
+                c.showPage()
+        
+        c.save()
+        return pdf_path
+
     def _to_rgba(self, color, alpha=None):
         # Convert color to uint8 RGBA for trimesh.
         import matplotlib.colors as mcolors
@@ -2920,72 +4376,106 @@ class VisualizeSkeleton:
             self._vprint(f'⚠️  Export failed: {e}')
             return None
 
-    def export_video(self, fps=30, rotate_plane=None, view_direction=None, view_distance=None, synapse_size=1, 
-                    html_file=None, use_existing_images=False, parallel_workers=None, **kwargs):
+    def export_video(self, fps=30, degree_per_frame=1.0, rotate='horizontal', rotate_plane=None, 
+                    view_direction=None, view_distance=None, synapse_size=1, 
+                    html_file=None, output_dir=None, use_existing_images=True, **kwargs):
         '''
-        Export the rotating 3-D object to a video with optimization for speed.
+        Export a rotating 3D visualization to MP4 video.
+        
+        Can be used in two modes:
+        1. After plot_neurons(): Uses the current figure in memory
+        2. Standalone with html_file: Loads figure from existing HTML file
+        
+        For standalone usage without VisualizeSkeleton initialization, use the
+        module-level function `export_video_from_html()` instead.
         
         Parameters
         ----------
         fps : int, default 30
-            Frames per second, also determines rotation step size (30 degrees per second).
-        rotate_plane : str, optional
-            Plane to rotate: 'xy', 'xz', or 'yz'. Auto-detected based on brain_mesh.
-        view_direction : tuple, optional
-            Camera direction: (1, 1), (1, -1), (-1, 1), or (-1, -1). Auto-detected.
-        view_distance : float, optional
-            Relative camera distance from center. Auto-detected based on brain_mesh.
+            Frames per second for the output video.
+        degree_per_frame : float, default 1.0
+            Rotation angle in degrees per frame. Controls rotation speed.
+            - 1.0 → 360 frames for full rotation (12 sec video at 30 fps)
+            - 2.0 → 180 frames for full rotation (6 sec video at 30 fps)
+            - 0.5 → 720 frames for full rotation (24 sec video at 30 fps)
+        rotate : str, default 'horizontal'
+            Rotation direction:
+            - 'horizontal': Rotate around Y-axis (turntable motion)
+            - 'vertical': Rotate around X-axis (tumbling motion)
+        rotate_plane : str, optional (deprecated)
+            Legacy parameter. Use 'rotate' instead.
+            Plane to rotate: 'xy', 'xz', or 'yz'.
+        view_direction : tuple, optional, default (1, -1)
+            Camera direction multipliers for sin/cos components.
+            Options: (1, 1), (1, -1), (-1, 1), or (-1, -1).
+        view_distance : float, optional, default 2.2
+            Relative camera distance from center (1.0 = close, 3.0 = far).
         synapse_size : int, default 1
-            Size of synapse markers in the video.
+            Size of synapse markers in the video (1-10 recommended).
         html_file : str, optional
-            Path to existing HTML file from plot_neurons() to load figure data.
-            If provided, skips plot_neurons() and loads from file (much faster).
-            Example: 'path/to/existing_plot.html'
-        use_existing_images : bool, default False
-            If True, skip image rendering and use existing images in pics_*fps_*plane folder.
-            Useful for regenerating video with different settings from cached images.
-        parallel_workers : int, optional
-            Number of parallel workers for frame rendering. Each worker renders frames
-            independently using ProcessPoolExecutor, which can significantly speed up
-            rendering on multi-core systems. Default: None (sequential rendering).
-            Recommended: Set to number of CPU cores (e.g., 8-12 for modern CPUs).
-            Note: Parallel rendering may use more memory.
+            Path to existing HTML file to load figure data from.
+            Enables standalone usage without calling plot_neurons() first.
+            Example: '/path/to/my_neurons.html'
+        output_dir : str, optional
+            Directory to save video output. If None and html_file is provided,
+            uses the directory containing the html_file.
+            If None and using plot_neurons(), uses self.save_folder.
+        use_existing_images : bool, default True
+            If True, skip rendering and reuse cached images from previous export.
+            Useful for regenerating video with different fps without re-rendering.
         **kwargs : dict
-            Additional arguments for plotly write_image().
-            - 'scale': Resolution multiplier (default 2 for balance of quality/speed)
-            - 'width', 'height': Specific dimensions in pixels
-            - Lower scale = faster rendering, smaller file
+            Additional arguments for plotly write_image():
+            - scale : int, default 2 - Resolution multiplier
+            - width : int - Video width in pixels (default 1200)
+            - height : int - Video height in pixels (default 900)
         
         Returns
         -------
         int
-            0 on success
+            0 on success, 1 on failure
+        
+        Output Files
+        ------------
+        - {output_dir}/pics_{fps}fps_{rotate_plane}/ : Cached frame images
+        - {output_dir}/{name}_video_forward.mp4 : Forward rotation video
+        - {output_dir}/{name}_video_backward.mp4 : Reverse rotation video
         
         Examples
         --------
-        # Standard usage after plot_neurons()
+        # Mode 1: After plot_neurons()
+        vs = VisualizeSkeleton(dataset='hemibrain:v1.2.1', neuron_layers=['EB'])
         vs.plot_neurons()
-        vs.export_video(fps=30)
+        vs.export_video(fps=30, degree_per_frame=1.0)
         
-        # Fast re-export from existing HTML (no re-plotting needed)
-        vs.export_video(fps=30, html_file='connection_data/my_plot/my_plot.html')
+        # Faster rotation (shorter video)
+        vs.export_video(fps=30, degree_per_frame=2.0)
         
-        # Use cached images to regenerate video quickly
-        vs.export_video(fps=30, use_existing_images=True)
+        # Vertical rotation
+        vs.export_video(fps=30, rotate='vertical')
         
-        # High quality but slower
-        vs.export_video(fps=30, scale=4)
+        # High quality export
+        vs.export_video(fps=30, scale=4, width=1920, height=1080)
         
-        # Fast preview
-        vs.export_video(fps=15, scale=1, width=800, height=600)
+        # Mode 2: From existing HTML file (output to same directory)
+        vs.export_video(html_file='/path/to/existing_plot.html')
         
-        # Parallel rendering for speed (uses multiple CPU cores)
-        vs.export_video(fps=30, scale=2, parallel_workers=8)
+        # Mode 3: Standalone function (no VisualizeSkeleton needed)
+        from visualize_skeleton import export_video_from_html
+        export_video_from_html('/path/to/plot.html', fps=30, degree_per_frame=1.0)
+        
+        # Reuse cached images (fast video regeneration)
+        vs.export_video(fps=60, use_existing_images=True)
         '''
-        # Set default parameters - always use frontal view defaults for consistency
-        # rotate_plane='xz' rotates around the vertical (Y) axis for frontal view
-        if rotate_plane is None:
+        # Handle rotate parameter - overrides rotate_plane
+        if rotate == 'horizontal':
+            rotate_plane = 'xz'  # Rotate around vertical (Y) axis
+        elif rotate == 'vertical':
+            rotate_plane = 'yz'  # Rotate around horizontal (X) axis
+        elif rotate_plane is None:
+            # Default to horizontal rotation if neither specified
             rotate_plane = 'xz'
+        # else: use the explicitly provided rotate_plane
+        
         if view_direction is None:
             view_direction = (1, -1)
         if view_distance is None:
@@ -2995,7 +4485,32 @@ class VisualizeSkeleton:
         if kwargs.get('scale') is None and kwargs.get('width') is None and kwargs.get('height') is None:
             kwargs['scale'] = 2
         
-        step = 30 / fps
+        # Use explicit degree_per_frame instead of calculating from fps
+        step = degree_per_frame
+        
+        # Determine output directory and filename
+        if output_dir is not None:
+            save_folder = output_dir
+            # Extract filename from html_file or use default
+            if html_file is not None:
+                saveas = os.path.splitext(os.path.basename(html_file))[0]
+            else:
+                saveas = 'video_export'
+            os.makedirs(save_folder, exist_ok=True)
+        elif html_file is not None:
+            # Use the directory containing the html_file
+            save_folder = os.path.dirname(os.path.abspath(html_file))
+            saveas = os.path.splitext(os.path.basename(html_file))[0]
+        elif hasattr(self, 'save_folder') and self.save_folder:
+            save_folder = self.save_folder
+            saveas = self.saveas if hasattr(self, 'saveas') and self.saveas else 'video_export'
+        else:
+            raise ValueError(
+                'No output directory specified. Either:\n'
+                '  1. Run plot_neurons() first, or\n'
+                '  2. Provide html_file parameter (output goes to same directory), or\n'
+                '  3. Provide output_dir parameter explicitly'
+            )
         
         # Load figure from existing HTML file if provided (OPTIMIZATION)
         if html_file is not None:
@@ -3051,7 +4566,7 @@ class VisualizeSkeleton:
         )
         
         # Set up image folder
-        pic_folder = os.path.join(self.save_folder, f'pics_{fps}fps_{rotate_plane}')
+        pic_folder = os.path.join(save_folder, f'pics_{fps}fps_{rotate_plane}')
         
         # Calculate rotation steps
         if step > 0:
@@ -3083,7 +4598,7 @@ class VisualizeSkeleton:
             if 'width' in kwargs and 'height' in kwargs:
                 self._vprint(f', size={kwargs["width"]}x{kwargs["height"]}')
             else:
-                self._vprint()
+                self._vprint('')
             
             # Ensure dimensions are set to avoid blank images if not provided
             if 'width' not in kwargs: kwargs['width'] = 1200
@@ -3091,15 +4606,7 @@ class VisualizeSkeleton:
             
             t0 = time.time()
             
-            # Note: parallel_workers is accepted but not used
-            # Parallel rendering with ProcessPoolExecutor doesn't work reliably with Plotly/Kaleido
-            # on macOS due to the "spawn" multiprocessing method re-executing the entire script.
-            # Sequential rendering is used instead for reliability.
-            if parallel_workers is not None and parallel_workers > 1:
-                self._vprint(f'   ⚠️  parallel_workers={parallel_workers} ignored (not supported with Plotly/Kaleido)')
-                self._vprint(f'   Using sequential rendering instead...')
-            
-            # Sequential rendering (reliable approach)
+            # Sequential rendering
             self._vprint(f'   Rendering frames... (First frame may take longer to initialize Kaleido)')
             
             for i, deg in enumerate(steps_to_write):
@@ -3119,7 +4626,7 @@ class VisualizeSkeleton:
                 try:
                     fig_new.write_image(fig_path, **kwargs)
                 except Exception as e:
-                    self._vprint(f'\\n⚠️  Frame {i+1} failed: {e}')
+                    self._vprint(f'\n⚠️  Frame {i+1} failed: {e}')
                     if i == 0:
                         self._vprint('   Try reducing "scale" (e.g. scale=1) or using "width"/"height" parameters.')
                         return 1
@@ -3127,14 +4634,14 @@ class VisualizeSkeleton:
                 elapsed = time.time() - t0
                 avg_time = elapsed / (i + 1)
                 remaining = avg_time * (len(steps_to_write) - i - 1)
-                self._vprint(f'\\r  Frame {i+1}/{len(steps_to_write)} | '
+                print(f'\r  Frame {i+1}/{len(steps_to_write)} | '
                       f'Elapsed: {elapsed:.1f}s | '
                       f'ETA: {remaining:.1f}s | '
-                      f'{avg_time:.2f}s/frame', end='    ')
+                      f'{avg_time:.2f}s/frame', end='    ', flush=True)
             
-            self._vprint('\\n✓ Image rendering complete')
+            print('\n✓ Image rendering complete')
         # Generate videos from images
-        self._vprint(f'\\nGenerating videos...')
+        self._vprint(f'\nGenerating videos...')
         imglist = os.listdir(pic_folder)
         img_eg = cv2.imread(os.path.join(pic_folder, imglist[0]))
         height, width, layers = img_eg.shape
@@ -3142,36 +4649,250 @@ class VisualizeSkeleton:
         self._vprint(f'   Video resolution: {width}x{height}')
 
         # Forward video - OPTIMIZED with faster codec
-        video_dir = os.path.join(self.save_folder, f'{self.saveas}_video_forward.mp4')
+        video_path_forward = os.path.join(save_folder, f'{saveas}_video_forward.mp4')
         # Use H.264 codec for better compression and compatibility
         fourcc = cv2.VideoWriter_fourcc(*'avc1')  # H.264 codec (faster than mp4v)
-        out = cv2.VideoWriter(video_dir, fourcc, fps, frameSize=(width, height))
+        out = cv2.VideoWriter(video_path_forward, fourcc, fps, frameSize=(width, height))
         
         t0 = time.time()
         for i, deg in enumerate(steps_to_write):
             img = cv2.imread(os.path.join(pic_folder, f'deg_{deg:.1f}.jpeg'))
             out.write(img)
             if (i + 1) % 10 == 0 or i == len(steps_to_write) - 1:
-                self._vprint(f'\\r  Forward video: {i+1}/{len(steps_to_write)} frames', end='  ')
+                print(f'\r  Forward video: {i+1}/{len(steps_to_write)} frames', end='  ')
         out.release()
         t1 = time.time()
-        self._vprint(f'\\n\u2713 Forward video: {video_dir} ({t1-t0:.1f}s)')
+        print(f'\n✓ Forward video: {video_path_forward} ({t1-t0:.1f}s)')
         
         # Backward video
-        video_dir = os.path.join(self.save_folder, f'{self.saveas}_video_backward.mp4')
-        out = cv2.VideoWriter(video_dir, fourcc, fps, frameSize=(width, height))
+        video_path_backward = os.path.join(save_folder, f'{saveas}_video_backward.mp4')
+        out = cv2.VideoWriter(video_path_backward, fourcc, fps, frameSize=(width, height))
         
         t0 = time.time()
         for i, deg in enumerate(steps_to_write[::-1]):
             img = cv2.imread(os.path.join(pic_folder, f'deg_{deg:.1f}.jpeg'))
             out.write(img)
             if (i + 1) % 10 == 0 or i == len(steps_to_write) - 1:
-                self._vprint(f'\\r  Backward video: {i+1}/{len(steps_to_write)} frames', end='  ')
+                print(f'\r  Backward video: {i+1}/{len(steps_to_write)} frames', end='  ')
         out.release()
         t1 = time.time()
-        self._vprint(f'\\n\u2713 Backward video: {video_dir} ({t1-t0:.1f}s)')
+        print(f'\n✓ Backward video: {video_path_backward} ({t1-t0:.1f}s)')
         
-        self._vprint(f'\\n\u2705 Video export complete!')
+        print(f'\n✅ Video export complete!')
         self._vprint(f'   Image cache: {pic_folder}')
         self._vprint(f'   Tip: Use use_existing_images=True to skip re-rendering next time')
         return 0
+
+
+def export_video_from_html(html_file, fps=30, degree_per_frame=1.0, rotate='horizontal',
+                           output_dir=None, use_existing_images=True, **kwargs):
+    '''
+    Standalone function to export a rotating video from an existing Plotly HTML file.
+    
+    This function does NOT require VisualizeSkeleton initialization or NeuPrint client.
+    It directly loads the HTML figure and renders the video.
+    
+    Parameters
+    ----------
+    html_file : str
+        Path to existing Plotly HTML file to load figure data from.
+    fps : int, default 30
+        Frames per second for the output video.
+    degree_per_frame : float, default 1.0
+        Rotation angle in degrees per frame.
+        - 1.0 → 360 frames for full rotation (12 sec video at 30 fps)
+        - 2.0 → 180 frames for full rotation (6 sec video at 30 fps)
+    rotate : str, default 'horizontal'
+        Rotation direction: 'horizontal' or 'vertical'.
+    output_dir : str, optional
+        Directory to save video output. If None, uses the directory containing html_file.
+    use_existing_images : bool, default True
+        If True, reuse cached images from previous export if available.
+    **kwargs : dict
+        Additional arguments for plotly write_image():
+        - scale : int, default 2
+        - width : int, default 1200
+        - height : int, default 900
+    
+    Returns
+    -------
+    int
+        0 on success, 1 on failure
+    
+    Examples
+    --------
+    # Basic usage - output to same directory as HTML file
+    from visualize_skeleton import export_video_from_html
+    export_video_from_html('/path/to/my_neurons.html')
+    
+    # Custom settings
+    export_video_from_html(
+        '/path/to/my_neurons.html',
+        fps=60,
+        degree_per_frame=0.5,  # Slower rotation
+        rotate='vertical',
+        scale=4  # Higher quality
+    )
+    
+    # Specify output directory
+    export_video_from_html(
+        '/path/to/my_neurons.html',
+        output_dir='/path/to/output/'
+    )
+    '''
+    import plotly.io as pio
+    import plotly.graph_objects as go
+    import cv2
+    import shutil
+    import time
+    
+    # Validate input
+    if not os.path.exists(html_file):
+        raise FileNotFoundError(f'HTML file not found: {html_file}')
+    
+    # Determine output directory
+    if output_dir is None:
+        save_folder = os.path.dirname(os.path.abspath(html_file))
+    else:
+        save_folder = output_dir
+        os.makedirs(save_folder, exist_ok=True)
+    
+    saveas = os.path.splitext(os.path.basename(html_file))[0]
+    
+    # Handle rotate parameter
+    if rotate == 'horizontal':
+        rotate_plane = 'xz'
+    elif rotate == 'vertical':
+        rotate_plane = 'yz'
+    else:
+        rotate_plane = 'xz'
+    
+    # Set defaults
+    view_direction = kwargs.pop('view_direction', (1, -1))
+    view_distance = kwargs.pop('view_distance', 2.2)
+    synapse_size = kwargs.pop('synapse_size', 1)
+    
+    if kwargs.get('scale') is None and kwargs.get('width') is None and kwargs.get('height') is None:
+        kwargs['scale'] = 2
+    
+    # Load figure from HTML
+    print(f'📂 Loading figure from: {html_file}')
+    try:
+        fig_loaded = pio.read_html(html_file)
+        fig_traces = fig_loaded.data
+        print(f'✓ Loaded {len(fig_traces)} traces from HTML file')
+    except Exception as e:
+        raise RuntimeError(f'Failed to load figure from HTML: {e}')
+    
+    # Configure figure for video
+    for trace in fig_traces:
+        trace.showlegend = False
+        if hasattr(trace, 'marker'):
+            trace.marker.size = synapse_size
+    
+    fig_layout = go.Layout(margin=dict(l=1, r=1, b=1, t=1, pad=0))
+    fig_new = go.Figure(data=fig_traces, layout=fig_layout)
+    
+    fig_new.update_layout(
+        sliders=[],
+        scene=dict(
+            dragmode='orbit',
+            xaxis={'visible': False},
+            yaxis={'visible': False},
+            zaxis={'visible': False},
+        ),
+        scene_camera=dict(
+            up=dict(x=0, y=-1, z=0),
+            eye=dict(x=0, y=0, z=-view_distance),
+        ),
+    )
+    
+    # Set up image folder
+    pic_folder = os.path.join(save_folder, f'pics_{fps}fps_{rotate_plane}')
+    
+    # Calculate rotation steps
+    step = degree_per_frame
+    steps_to_write = np.linspace(0, 360, int(360/step), endpoint=False)
+    
+    # Check for existing images
+    if use_existing_images and os.path.exists(pic_folder):
+        existing_images = [f for f in os.listdir(pic_folder) if f.endswith('.jpeg')]
+        if len(existing_images) == len(steps_to_write):
+            print(f'✓ Using {len(existing_images)} existing images from {pic_folder}')
+        else:
+            print(f'⚠️  Found {len(existing_images)} images but need {len(steps_to_write)}, re-rendering...')
+            use_existing_images = False
+    else:
+        use_existing_images = False
+    
+    # Render images if needed
+    if not use_existing_images:
+        if os.path.exists(pic_folder):
+            shutil.rmtree(pic_folder)
+        os.makedirs(pic_folder)
+        
+        if 'width' not in kwargs:
+            kwargs['width'] = 1200
+        if 'height' not in kwargs:
+            kwargs['height'] = 900
+        
+        print(f'🎬 Rendering {len(steps_to_write)} frames at {fps} fps...')
+        t0 = time.time()
+        
+        for i, deg in enumerate(steps_to_write):
+            rad_i = np.deg2rad(deg)
+            x = view_distance * np.sin(rad_i) * view_direction[0]
+            y = view_distance * np.cos(rad_i) * view_direction[1]
+            
+            if rotate_plane == 'xy':
+                fig_new.update_layout(scene_camera=dict(eye=dict(x=x, y=y, z=0)))
+            elif rotate_plane == 'yz':
+                fig_new.update_layout(scene_camera=dict(eye=dict(x=0, y=x, z=y)))
+            elif rotate_plane == 'xz':
+                fig_new.update_layout(scene_camera=dict(eye=dict(x=x, y=0, z=y)))
+            
+            fig_path = os.path.join(pic_folder, f'deg_{deg:.1f}.jpeg')
+            
+            try:
+                fig_new.write_image(fig_path, **kwargs)
+            except Exception as e:
+                print(f'\n⚠️  Frame {i+1} failed: {e}')
+                if i == 0:
+                    print('   Try reducing "scale" (e.g. scale=1)')
+                    return 1
+            
+            elapsed = time.time() - t0
+            avg_time = elapsed / (i + 1)
+            remaining = avg_time * (len(steps_to_write) - i - 1)
+            print(f'\r  Frame {i+1}/{len(steps_to_write)} | Elapsed: {elapsed:.1f}s | ETA: {remaining:.1f}s', end='  ', flush=True)
+        
+        print('\n✓ Image rendering complete')
+    
+    # Generate videos
+    print(f'\nGenerating videos...')
+    imglist = os.listdir(pic_folder)
+    img_eg = cv2.imread(os.path.join(pic_folder, imglist[0]))
+    height, width, layers = img_eg.shape
+    
+    fourcc = cv2.VideoWriter_fourcc(*'avc1')
+    
+    # Forward video
+    video_path_forward = os.path.join(save_folder, f'{saveas}_video_forward.mp4')
+    out = cv2.VideoWriter(video_path_forward, fourcc, fps, frameSize=(width, height))
+    for deg in steps_to_write:
+        img = cv2.imread(os.path.join(pic_folder, f'deg_{deg:.1f}.jpeg'))
+        out.write(img)
+    out.release()
+    print(f'✓ Forward video: {video_path_forward}')
+    
+    # Backward video
+    video_path_backward = os.path.join(save_folder, f'{saveas}_video_backward.mp4')
+    out = cv2.VideoWriter(video_path_backward, fourcc, fps, frameSize=(width, height))
+    for deg in steps_to_write[::-1]:
+        img = cv2.imread(os.path.join(pic_folder, f'deg_{deg:.1f}.jpeg'))
+        out.write(img)
+    out.release()
+    print(f'✓ Backward video: {video_path_backward}')
+    
+    print(f'\n✅ Video export complete!')
+    return 0

@@ -14,6 +14,7 @@ Welcome to the Hemibrain Connectomes Analysis documentation!
   - Multi-dataset support (hemibrain, male-cns, FlyWire FAFB/BANC)
   - Batch processing with automatic result aggregation
   - Image download integration with FlyLight
+  - **Specificity/Selectivity Analysis**: Use `NeuronBridge_Colabel.py` for detailed line analysis
   
 - **📖 [FlyLight Downloader Guide](./core-features/FlyLight_Guide.md)** - Complete guide with examples
   - Access to Janelia FlyLight S3 bucket and HTTP CDN
@@ -22,7 +23,7 @@ Welcome to the Hemibrain Connectomes Analysis documentation!
   - `simple_mode` for intelligent download volume reduction
   - Multiple file formats (PNG, H5J, LSM, MP4, JSON)
 
-- **New Scripts**: `NeuronBridge_FindNeuron.py`, `NeuronBridge_FindLines.py`
+- **New Scripts**: `NeuronBridge_FindNeuron.py`, `NeuronBridge_FindLines.py`, `NeuronBridge_Colabel.py`
 - **New Modules**: `src/neuronbridge_finder.py`, `src/flylight_downloader.py`
 
 ### HomologFinder Improvements
@@ -57,6 +58,8 @@ Documentation is organized into three main categories:
 
 ### 🌉 EM↔LM Integration (NEW!)
 - **[NeuronBridge Guide](./core-features/NeuronBridge_Guide.md)**: Find matching EM neurons ↔ LM driver lines
+- **[NeuronBridge Workflow Guide](./core-features/NeuronBridge_Workflow.md)**: Complete workflow with calling tree and recommendations ⭐
+- **[NeuronBridge Co-Labeling Analysis](./core-features/NeuronBridge_Guide.md#co-labeling-analysis)**: Analyze specificity, selectivity, and overlap patterns between driver lines
 - **[FlyLight Guide](./core-features/FlyLight_Guide.md)**: Download FlyLight imagery by driver line
 
 ### 🎨 [Visualizations](./visualizations/)
@@ -69,6 +72,7 @@ Comprehensive guides for all visualization types:
 ### 🔧 [Core Features](./core-features/)
 Essential functionality documentation:
 - **✨ NeuronBridge Integration**: EM↔LM mapping (NEW)
+- **✨ [NeuronBridge Workflow](./core-features/NeuronBridge_Workflow.md)**: Complete workflow with calling tree ⭐
 - **✨ FlyLight Downloader**: FlyLight imagery access (NEW)
 - **✨ Module Calling Tree**: Visual architecture and dependency guide
 - **✨ Connectivity Profiler**: 1-hop/2-hop hybrid profile building
@@ -98,6 +102,7 @@ Advanced technical documentation:
 
 ### For Researchers
 - **[NeuronBridge Integration](./core-features/NeuronBridge_Guide.md)** - Find driver lines for EM neurons (NEW)
+- **[NeuronBridge Workflow](./core-features/NeuronBridge_Workflow.md)** - Complete workflow with calling tree ⭐
 - **[FlyLight Downloader](./core-features/FlyLight_Guide.md)** - Download LM imagery (NEW)
 - **[Homolog Finding](./core-features/HomologFinding_Guide.md)** - Find homologs across datasets
 - **[Cross-Dataset Comparison](./core-features/CrossDatasetComparison_Guide.md)** - Compare connectivity patterns

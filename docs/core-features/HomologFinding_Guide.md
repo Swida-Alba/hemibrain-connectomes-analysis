@@ -366,7 +366,7 @@ When `output_dir` is set, results are automatically saved with **both bodyId-lev
 ├── overlaps/                     # Partner overlap details
 └── visualization/                # Skeleton visualizations (if enabled)
     ├── source_neurons/           # All source neurons together
-    │   └── all_sources.html      # Multi-neuron visualization (legend_mode='normal')
+    │   └── all_sources.html      # Multi-neuron visualization (merge_neurons=False)
     ├── bodyid_level/             # Individual bodyId visualizations
     │   ├── {type}_{bodyId}.html  # Each source/target bodyId separately
     │   └── ...                   # neuron_alpha=0.6 for single neurons

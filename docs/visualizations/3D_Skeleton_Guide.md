@@ -100,8 +100,64 @@ vs = VisualizeSkeleton(
 )
 
 vs.plot_neurons()
-vs.export_video(fps=30, rotate_plane='xy')
+
+# Export rotating video
+vs.export_video(fps=30, degree_per_frame=1.0, rotate='horizontal')
 ```
+
+### Video Export
+
+Export rotating 3D visualization to MP4 video:
+
+```python
+# Basic video export (after plot_neurons())
+vs.export_video(fps=30, degree_per_frame=1.0)  # 12 sec video at 30fps
+
+# Faster rotation (shorter video)
+vs.export_video(fps=30, degree_per_frame=2.0)  # 6 sec video
+
+# Vertical rotation (tumbling motion)
+vs.export_video(fps=30, rotate='vertical')
+
+# High quality export
+vs.export_video(fps=30, scale=4, width=1920, height=1080)
+
+# Reuse cached frames (fast regeneration)
+vs.export_video(fps=60, use_existing_images=True)
+```
+
+**Standalone Export (from existing HTML file):**
+
+```python
+from visualize_skeleton import export_video_from_html
+
+# No VisualizeSkeleton initialization needed
+export_video_from_html('/path/to/my_neurons.html', fps=30)
+
+# With options
+export_video_from_html(
+    '/path/to/my_neurons.html',
+    fps=30,
+    degree_per_frame=1.0,
+    rotate='horizontal',
+    scale=4
+)
+```
+
+**Video Export Parameters:**
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `fps` | 30 | Frames per second |
+| `degree_per_frame` | 1.0 | Rotation angle per frame (1.0 → 360 frames) |
+| `rotate` | 'horizontal' | Rotation direction: 'horizontal' or 'vertical' |
+| `scale` | 2 | Resolution multiplier |
+| `use_existing_images` | True | Reuse cached frame images if available |
+
+**Output Files:**
+- `{folder}/pics_{fps}fps_{plane}/` - Cached frame images
+- `{folder}/{name}_video_forward.mp4` - Forward rotation
+- `{folder}/{name}_video_backward.mp4` - Reverse rotation
 
 ### Prerequisites
 

@@ -1,20 +1,24 @@
 # NeuronBridge Integration Guide
 
-The NeuronBridge module provides programmatic access to the [NeuronBridge](https://neuronbridge.janelia.org/) database, enabling bidirectional mapping between electron microscopy (EM) reconstructions and light microscopy (LM) driver lines.
+The NeuronBridge module provides programmatic access to the [NeuronBridge](https://neuronbridge.janelia.org/) database, enabling **bidirectional** mapping between electron microscopy (EM) reconstructions and light microscopy (LM) driver lines.
+
+> 📖 **See also**: [NeuronBridge Workflow Guide](./NeuronBridge_Workflow.md) for step-by-step tutorials and decision trees.
 
 ## Table of Contents
 
 - [Overview](#overview)
+- [Two Directions: EM→LM and LM→EM](#two-directions-emlm-and-lmem)
 - [Installation](#installation)
 - [Quick Start](#quick-start)
 - [NeuronBridgeFinder Class](#neuronbridgefinder-class)
   - [Initialization Parameters](#initialization-parameters)
   - [Line Type Separation](#line-type-separation)
-  - [Line Specificity Metrics](#line-specificity-metrics)
-  - [Mutual Information](#mutual-information)
+  - [Specificity and Selectivity Analysis](#specificity-and-selectivity-analysis)
+  - [Co-Labeling Analysis](#co-labeling-analysis)
   - [Core Methods](#core-methods)
   - [Batch Processing Methods](#batch-processing-methods)
   - [Image Download Methods](#image-download-methods)
+- [3D Skeleton Visualization](#3d-skeleton-visualization)
 - [Match Types](#match-types)
 - [Dataset Support](#dataset-support)
 - [Examples](#examples)
@@ -30,10 +34,29 @@ NeuronBridge is a web application that uses Color Depth MIP (CDM) search to find
 - **LM driver lines** (GAL4, LexA, Split-GAL4) from the FlyLight project
 
 This module wraps the NeuronBridge API to provide:
-- **EM → LM mapping**: Find driver lines matching a given EM body ID
-- **LM → EM mapping**: Find EM neurons matching a driver line name
+- **EM → LM mapping**: Find driver lines matching a given EM body ID (`find_lines_batch`)
+- **LM → EM mapping**: Find EM neurons matching a driver line name (`find_neurons_batch`)
 - **Batch processing**: Process multiple queries with automatic result aggregation
 - **Image downloads**: Download CDM images from NeuronBridge or full imagery from FlyLight
+
+---
+
+## Two Directions: EM→LM and LM→EM
+
+| Direction | Use Case | Script | Key Method |
+|-----------|----------|--------|------------|
+| **EM → LM** | "What driver lines label my EM neurons?" | `NeuronBridge_FindLines.py` | `find_lines_batch()` |
+| **LM → EM** | "What EM neurons does this driver line label?" | `NeuronBridge_FindNeuron.py` | `find_neurons_batch()` |
+
+### Quick Comparison
+
+| Aspect | EM→LM (FindLines) | LM→EM (FindNeuron) |
+|--------|-------------------|---------------------|
+| **Input** | Neuron type/bodyId | Driver line name |
+| **Output** | Ranked driver lines | Matched EM neurons |
+| **Key Metric** | `weighted_score` | `score` per neuron |
+| **Visualization** | FlyLight images | 3D skeletons |
+| **Primary Use** | Design experiments | Validate line coverage |
 
 ---
 
@@ -241,117 +264,128 @@ output/findlines_20241223_123456/
 
 ---
 
-### Line Specificity Metrics
+### Specificity and Selectivity Analysis
 
-**NEW**: Calculate how specific each driver line is to your queried neuron types.
+For detailed analysis of how specific each driver line is to your target neuron types, use the **Co-Labeling Analysis** feature separately via `NeuronBridge_Colabel.py` or the `analyze_colabeling()` method.
 
-```python
-results = nbf.find_lines_batch(
-    queries='MBON01,aMe12,EPG',     # Type queries (not bodyIds)
-    dataset='hemibrain:v1.2.1',
-    calculate_specificity=True,     # Enable specificity calculation
-    specificity_top_n=100,          # Analyze top 100 matches per line
-    output_dir='./output'
-)
-```
+**Why Separate Analysis?**
+- Finding driver lines (`find_lines_batch`) focuses on discovering which lines match your neurons
+- Specificity/selectivity analysis requires querying each line's labeled neurons (API-intensive)
+- Separating these workflows gives you more control and faster results for initial searches
 
-**Specificity Columns** (added to `line_summary.csv`):
+**Recommended Workflow:**
+1. **Find Lines First**: Use `NeuronBridge_FindLines.py` to discover matching driver lines
+2. **Analyze Specificity**: Use `NeuronBridge_Colabel.py` with your top candidate lines for detailed analysis
 
-| Column | Description | Interpretation |
-|--------|-------------|----------------|
-| `rank_sum` | Sum of ranks for queried types in top-N results | Lower = better (queried types appear higher in rankings) |
-| `type_proportion` | Queried types / Total types labeled | Higher = better (line labels fewer other types) |
-| `n_queried_types` | Number of queried types found in top-N | Higher = better coverage |
-| `n_total_types` | Total distinct types labeled by this line | Lower = more selective |
-| `selectivity` | 1 / n_total_types | Higher = more selective |
-| `expression_entropy` | Shannon entropy of type distribution (bits) | Lower = more specific (labels fewer types more strongly) |
-| `normalized_entropy` | Entropy / max_entropy (0-1 scale) | Lower = more specific |
-| `weighted_type_proportion` | Type proportion weighted by match scores | Higher = queried types have stronger matches |
-| `mean_queried_score` | Mean NeuronBridge score for queried types | Higher = stronger expression in queried types |
-| `colabel_sparsity` | 1 - (proportion of co-labeling lines) | Higher = more unique labeling pattern |
-| `n_colabeling_lines` | Number of lines with >10% neuron overlap | Lower = more unique |
-| `mean_colabel_similarity` | Average Jaccard similarity with other lines | Lower = more unique |
-| `specificity_score` | Composite score (0-1) | Higher = more specific to queried types |
-
-**Expression Entropy** ($H = -\sum p_i \log_2(p_i)$):
-- Measures diversity of neuron types labeled by the line
-- A line labeling 10 types equally has entropy ≈ 3.32 bits
-- A line labeling mostly one type has entropy ≈ 0 bits
-- Use `normalized_entropy` (0-1) for easier comparison
-
-**Expression Strength Weighting**:
-- Weights each neuron's contribution by its NeuronBridge match score
-- High-confidence matches count more than low-confidence ones
-- `weighted_type_proportion = Σ(scores for queried types) / Σ(all scores)`
-
-**Co-labeling Matrix & Sparsity**:
-- Builds a Jaccard similarity matrix showing how often pairs of lines label the same neurons
-- `colabel_sparsity` = 1 - (fraction of lines with significant overlap)
-- High sparsity = line labels unique set of neurons not covered by other lines
-- Saves `colabeling_matrix.csv` and interactive heatmap visualization
-
-**Notes**:
-- Requires type/instance queries (not bodyIds) to calculate meaningful specificity
-- Uses `line_to_neuron()` to query NeuronBridge for each line's labeled neurons
-- Automatically falls back to NeuPrint data if local dataset files are missing
-
-**Interpreting Specificity**:
-- A line with high `type_proportion` (e.g., 0.8) and low `normalized_entropy` (e.g., 0.3) is strongly specific to your queried types
-- A line with low `rank_sum` means your queried types consistently appear in top matches
-- A line with high `colabel_sparsity` labels unique neurons not covered by other lines
-- Use `specificity_score` as a combined metric for prioritizing lines
-
-**Output Files** (when `calculate_specificity=True`):
-```
-output/findlines_20241223_123456/
-├── line_summary.csv           # All specificity metrics (incl. entropy, MI)
-├── colabeling_matrix.csv      # Jaccard similarity matrix
-├── colabeling_matrix.html     # Interactive heatmap visualization
-├── mutual_information.csv     # MI values per line
-├── expression_matrix.csv      # Binary lines × types matrix
-└── expression_matrix.html     # Lines × types heatmap
-```
+See [Co-Labeling Analysis](#co-labeling-analysis) section below for complete documentation.
 
 ---
 
-### Mutual Information
+### Co-Labeling Analysis
 
-**Mutual Information** quantifies how much knowing a line's expression pattern tells you about neuron type identity:
+Analyze co-labeling patterns among driver lines to understand how they overlap in their neuron labeling patterns, and assess specificity and selectivity.
 
-$$I(L; T) = H(T) - H(T|L) = \sum_{l,t} p(l,t) \log_2 \frac{p(l,t)}{p(l)p(t)}$$
+**Script**: `scripts/NeuronBridge_Colabel.py`
 
-Where:
-- $H(T)$ = entropy of type distribution (uncertainty about neuron type)
-- $H(T|L)$ = conditional entropy (remaining uncertainty after knowing line expression)
-- $p(l,t)$ = joint probability of line $l$ labeling type $t$
-- $p(l)$, $p(t)$ = marginal probabilities
+```python
+from src.neuronbridge_finder import NeuronBridgeFinder
 
-**New Columns** (added to `line_summary.csv`):
+nbf = NeuronBridgeFinder()
 
-| Column | Description | Interpretation |
-|--------|-------------|----------------|
-| `mutual_information` | MI in bits | Higher = more informative |
-| `normalized_mi` | MI / H(T) (0-1 scale) | Higher = more informative |
-| `queried_type_coverage` | Fraction of queried types labeled | Higher = better coverage |
-
-**Interpretation**:
-- High MI = Line expression is highly informative about neuron type
-- MI = 0 means line expression is independent of neuron type (random labeling)
-- A line with MI = 2 bits reduces type uncertainty by a factor of 4
-- `normalized_mi` of 0.5 means knowing this line halves your uncertainty about type
-
-**Why Useful**:
-- Unlike entropy (which only considers one line), MI considers the relationship between line expression and type identity
-- Captures both specificity (labeling few types) and selectivity (types not labeled by other lines)
-- Use to find the most informative genetic tools for your target cell types
-
-**Output Files** (when `calculate_specificity=True`):
+# Analyze co-labeling between multiple lines
+results = nbf.analyze_colabeling(
+    lines=['LH173', 'VT037867', 'SS00731', 'R10A06'],
+    match_type='cds',
+    top_n_neurons=100,
+    similarity_methods=['jaccard', 'weighted_jaccard'],
+    output_dir='./colabel_analysis',
+    generate_report=True,
+    min_score=30000,
+    min_type_avg_score=30000
+)
 ```
-output/findlines_20241223_123456/
-├── mutual_information.csv    # MI values per line
-├── expression_matrix.csv     # Binary lines × types matrix
-└── expression_matrix.html    # Interactive heatmap visualization
+
+**Parameters**:
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `lines` | `str` or `list` | Required | Driver lines to analyze (at least 2 required) |
+| `match_type` | `str` | `'cds'` | Match algorithm for neuron lookup |
+| `top_n_neurons` | `int` | `-1` | Top N neurons to consider per line (-1 = all) |
+| `similarity_methods` | `list` | `['jaccard', 'weighted_jaccard']` | Similarity methods for co-labeling |
+| `output_dir` | `str` | `None` | Output directory for results |
+| `generate_report` | `bool` | `True` | Generate HTML analysis report |
+| `visualize` | `bool` | `True` | Generate heatmap visualizations |
+
+**Similarity Methods**:
+- `'jaccard'`: Binary Jaccard similarity (|A ∩ B| / |A ∪ B|) based on type presence/absence
+- `'weighted_jaccard'`: Score-weighted Jaccard that accounts for match confidence
+- `'rank_correlation'`: Spearman correlation of type rankings based on scores
+
+**Returns Dictionary**:
+```python
+{
+    'expression_matrix': pd.DataFrame,      # Type × Line score matrix
+    'colabeling_matrices': {                # Similarity matrices per method
+        'jaccard': pd.DataFrame,
+        'weighted_jaccard': pd.DataFrame
+    },
+    'line_neurons': {                       # Per-line neuron details
+        'LH173': pd.DataFrame,
+        'VT037867': pd.DataFrame,
+        ...
+    },
+    'line_summary': pd.DataFrame,           # Summary statistics per line
+    'report_path': str                      # Path to HTML report
+}
 ```
+
+**Line Summary Columns**:
+
+| Column | Description |
+|--------|-------------|
+| `line` | Driver line name |
+| `n_neurons` | Number of neurons matched |
+| `n_types` | Number of unique types labeled |
+| `mean_score` | Mean NeuronBridge match score |
+| `max_score` | Maximum match score |
+| `top_types` | Top 5 labeled types |
+| `colabel_sparsity` | Uniqueness of labeling pattern (0-1, higher = more unique) |
+| `n_colabeling_lines` | Number of lines with significant overlap |
+| `mean_colabel_similarity` | Average similarity with other lines |
+
+**Output Files**:
+```
+output/colabel_LH173_VT037867_SS00731_etc_20241223_123456/
+├── expression_matrix.csv               # Type × Line score matrix (dataset-prefixed types)
+├── expression_matrix.html              # Interactive heatmap (per-dataset)
+├── expression_matrix_merged.csv        # Type × Line matrix (types merged across datasets)
+├── expression_matrix_merged.html       # Interactive heatmap (merged types)
+├── colabeling_matrix_jaccard.csv       # Binary similarity matrix
+├── colabeling_matrix_jaccard.html      # Interactive heatmap
+├── colabeling_matrix_weighted_jaccard.csv   # Weighted similarity
+├── colabeling_matrix_weighted_jaccard.html  # Interactive heatmap
+├── line_summary.csv                    # Summary statistics
+├── colabeling_report.html              # Comprehensive HTML report
+├── labeling_distribution_by_type.html  # Score distribution by type
+├── labeling_distribution_by_neuron.html # Score distribution by neuron
+└── line_labeled_neurons/               # Per-line neuron details
+    ├── LH173_neurons.csv
+    ├── VT037867_neurons.csv
+    └── ...
+```
+
+**Expression Matrix Variants**:
+- **Original** (`expression_matrix.*`): Types prefixed with dataset (e.g., `MCNS_aMe12`, `FAFB_aMe12`)
+- **Merged** (`expression_matrix_merged.*`): Types combined across datasets (e.g., `aMe12` = max of MCNS + FAFB)
+
+**Use Cases**:
+1. **Find complementary lines**: Lines with low co-labeling similarity label different neuron populations
+2. **Identify redundant lines**: Lines with high similarity label similar neurons
+3. **Design experiments**: Choose lines that together cover your target neurons without redundancy
+4. **Assess specificity**: Lines with high sparsity label unique neurons
+
+**Script**: `scripts/NeuronBridge_Colabel.py`
 
 ---
 
@@ -468,8 +502,6 @@ results = nbf.find_lines_batch(
     flylight_category=['GAL4/LEXA', 'SplitGAL4'],
     organize_by_region=False,
     simple_mode=True,
-    calculate_specificity=True,
-    specificity_top_n=100,
     pdf_images_per_page=(5, 3),
     pdf_landscape=True
 )
@@ -489,8 +521,6 @@ results = nbf.find_lines_batch(
 | `flylight_category` | `str` or `list` | `['GAL4/LEXA', 'SplitGAL4']` | FlyLight collection category. MCFO automatically used as fallback. |
 | `organize_by_region` | `bool` | `False` | Organize images into Brain/VNC subfolders. |
 | `simple_mode` | `bool` | `False` | Apply filename filtering to reduce download volume (see [Simple Mode](#simple-mode)). |
-| `calculate_specificity` | `bool` | `True` | Calculate line specificity metrics (see [Line Specificity Metrics](#line-specificity-metrics)). |
-| `specificity_top_n` | `int` | `100` | Number of top lines/matches to analyze for specificity. |
 | `pdf_images_per_page` | `tuple` | `(5, 3)` | (columns, rows) - images per page in PDF summary. |
 | `pdf_landscape` | `bool` | `True` | Use landscape orientation for PDF. |
 
@@ -500,25 +530,72 @@ results = nbf.find_lines_batch(
 - `source_bodyId`: Matching body ID
 - `source_dataset`: Source dataset
 - `matched_bodyIds`: Comma-separated list of all body IDs matching each line
-- When `calculate_specificity=True`: Additional specificity columns in summary
 
 **Output Files** (when `output_dir` is specified):
 ```
 output/findlines_aMe12_20241223_123456/
-├── all_lines.csv              # Combined results
-├── line_summary.csv           # Aggregated statistics per line (+ specificity if enabled)
+├── all_lines.csv              # Combined results (row-level matches)
+├── line_summary.csv           # Aggregated stats per line, SORTED BY weighted_score
+├── gal4_lexa_summary.csv      # GAL4/LexA summary, SORTED BY weighted_score
+├── split_gal4_summary.csv     # Split-GAL4 summary, SORTED BY weighted_score
 ├── {query}_lines.csv          # Individual query results
 ├── {query}_types.csv          # Type-level summary sorted by avg_score (v4.3.2+)
 ├── gal4_lexa_lines.csv        # GAL4/LexA lines (if separate_splitgal4=True)
 ├── split_gal4_lines.csv       # Split-GAL4 lines (if separate_splitgal4=True)
-├── mutual_information.csv     # Line-to-type mutual information
-├── expression_matrix.csv      # Expression matrix
 ├── top_types_heatmap.png      # Heatmap of top N types by avg_score (v4.3.2+)
 ├── images_summary.pdf         # PDF summary of downloaded images
 └── images/                    # Downloaded images
     └── {line_name}/
         └── *.png, *.jpg
 ```
+
+**Line Summary Columns** (`*_summary.csv`):
+
+Summary files are sorted by `weighted_score` descending, prioritizing lines that label MORE of the queried neurons:
+
+| Column | Description |
+|--------|-------------|
+| `line` | Driver line name (e.g., VT000770, SS00001) |
+| `agg_mean_score` | Average NeuronBridge match score across all matched neurons |
+| `agg_max_score` | Maximum NeuronBridge match score for this line |
+| `match_count` | Number of UNIQUE bodyIds labeled by this line |
+| `matched_bodyIds` | Comma-separated list of unique bodyIds |
+| `matched_types` | Comma-separated list of unique neuron types labeled |
+| `coverage_ratio` | match_count / total_query_neurons (fraction of queried neurons labeled) |
+| `weighted_score` | **agg_mean_score × coverage_ratio** (PRIMARY SORTING KEY) |
+| `datasets_labeled` | Number of datasets where this line labels queried neurons |
+| `matched_datasets` | Comma-separated list of matched dataset names |
+| `min_score_per_dataset` | Minimum of max scores across datasets |
+| `cross_dataset_score` | Mean of max scores across datasets |
+| `line_type` | 'gal4_lexa' or 'split_gal4' (when separate_splitgal4=True) |
+
+**Weighted Score Calculation**:
+
+```
+weighted_score = agg_mean_score × (match_count / total_query_neurons)
+```
+
+This scoring prioritizes lines that:
+1. Have high average matching scores (good morphological match)
+2. Label MORE of the queried neurons (high coverage)
+
+**Example**: When querying 'aMe12' across 3 datasets with 15 total neurons:
+- Line A: agg_mean_score=45000, match_count=15 → weighted_score=45000×(15/15)=45000
+- Line B: agg_mean_score=50000, match_count=2 → weighted_score=50000×(2/15)=6666
+
+Line A ranks higher because it labels ALL queried neurons, even though Line B has a higher raw score.
+
+**Multi-Type Query Behavior**:
+
+When querying multiple types together (e.g., 'aMe12,MBON01'), the program finds lines that label ALL queried neuron types. The weighted_score ensures lines labeling more types rank higher.
+
+⚠️ **IMPORTANT**: If you want to find lines labeling DIFFERENT groups separately, DO NOT query them together. Run separate queries instead:
+- Query 1: 'aMe12' → finds best lines for aMe12
+- Query 2: 'MBON01' → finds best lines for MBON01
+
+Querying 'aMe12,MBON01' together finds lines labeling BOTH types.
+
+**💡 Tip**: For specificity/selectivity analysis of found lines, use `NeuronBridge_Colabel.py` with your top candidate lines. See [Co-Labeling Analysis](#co-labeling-analysis) section.
 
 **Type Summary Files** (`{query}_types.csv`):
 
@@ -585,6 +662,109 @@ files = nbf.download_line_images(
 | `formats` | `str` or `list` | `'png'` | File formats. |
 | `image_types` | `str` or `list` | `'cdm'` | Image types. |
 | `max_files` | `int` or `None` | `None` | Maximum files per line. |
+
+---
+
+## 3D Skeleton Visualization
+
+The `find_neurons_batch()` method can generate interactive 3D skeleton visualizations of matched EM neurons.
+
+### Basic Usage
+
+```python
+results = nbf.find_neurons_batch(
+    queries='LH173,SS01015',
+    match_type='cds',
+    output_dir='./output',
+    visualize_top_n=30,           # Visualize top 30 types per dataset
+    visualize_by='bodyId',        # Group by individual neurons
+    generate_individual_profiles=True  # Create per-neuron PNGs + PDF
+)
+```
+
+### Visualization Parameters
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `visualize_top_n` | `int` | `0` | Number of top types/bodyIds to visualize (0 = disabled). |
+| `visualize_by` | `str` | `'type'` | Grouping mode: `'type'` or `'bodyId'`. |
+| `generate_individual_profiles` | `bool` | `False` | Generate per-neuron PNG profiles and PDF summary. |
+| `pdf_images_per_page` | `tuple` | `(3, 2)` | PDF layout as (columns, rows). |
+
+### Grouping Modes
+
+**`visualize_by='type'`** (default):
+- Neurons are merged by type (shows combined morphology)
+- Layer labels: Type names (e.g., `MBON01`, `aMe12`)
+- Good for comparing overall type morphologies
+
+**`visualize_by='bodyId'`**:
+- Individual neurons shown separately, grouped by type
+- Layer labels: `r{rank}_{type}_x{N}` format
+  - `rank`: Type ranking (1 = highest average score)
+  - `type`: Neuron type name
+  - `N`: Number of neurons of this type
+  - Example: `r1_MBON01_x5` (rank 1 type with 5 neurons)
+- Neurons sorted by actual rank, not alphabetically
+
+### Output Files
+
+```
+output/findneurons_20241223_123456/
+├── {line}_neurons.csv         # Matched neurons for each line
+├── all_neurons.csv            # Combined results
+└── plot3d_{dataset}/          # Per-dataset visualization folder
+    ├── {dataset}.html         # Interactive 3D skeleton viewer
+    ├── parameters.txt         # Visualization settings record
+    ├── exported_views/        # Static PNG exports
+    │   ├── {dataset}_front.png
+    │   ├── {dataset}_back.png
+    │   ├── {dataset}_top.png
+    │   ├── {dataset}_bottom.png
+    │   ├── {dataset}_left.png
+    │   └── {dataset}_right.png
+    └── individual_profiles/   # Per-neuron profiles (if enabled)
+        ├── r{rank}_{type}_x{N}.png  # Individual neuron images
+        └── profile_summary.pdf      # Combined PDF with all neurons
+```
+
+### Visualization Features
+
+**Automatic Mesh Simplification**:
+- Large meshes are automatically simplified (95% face reduction)
+- Minimum 100 faces preserved to maintain shape
+- Significantly reduces HTML file size (from 1.5GB to ~50MB)
+- Logging shows simplification progress and results
+
+**Natural Sorting in PDF**:
+- PDF pages sorted naturally: r1, r2, ..., r9, r10 (not r1, r10, r11...)
+- Makes browsing through neurons more intuitive
+
+**Skeleton Modes**:
+- Tube mode (default): Renders radius information for thick neurites
+- Line mode: Used automatically when >50 neurons (faster rendering)
+
+### Example: Visualize Top Matches
+
+```python
+from src.neuronbridge_finder import NeuronBridgeFinder
+
+nbf = NeuronBridgeFinder(verbose=True)
+
+# Find neurons for LH173 and visualize top 20 by bodyId
+results = nbf.find_neurons_batch(
+    queries='LH173',
+    match_type='cds',
+    output_dir='./lh173_analysis',
+    visualize_top_n=20,
+    visualize_by='bodyId',
+    generate_individual_profiles=True,
+    pdf_images_per_page=(4, 3)  # 12 images per page
+)
+
+# Results include neurons grouped by type in 3D viewer
+# Individual profiles saved to plot3d_{dataset}/individual_profiles/
+```
 
 ---
 

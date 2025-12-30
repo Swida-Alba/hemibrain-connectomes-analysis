@@ -14,11 +14,24 @@ Key Features:
     - Multiple lines supported as comma-separated string or list
     - Match algorithms: 'cds' (Color Depth Search), 'pppm', or 'both'
     - Automatic dataset detection and neuron enrichment
+    - 3D skeleton visualization with automatic mesh simplification
+    - PDF summary generation with natural sorting (r1, r2, ..., r10)
     - Results saved to CSV with dataset, type, and instance information
 
 Output Files:
     - {line_name}_neurons.csv: Matched EM neurons with scores and metadata
     - all_neurons.csv: Aggregated results from all searches
+    - plot3d_{dataset}/: 3D visualization folder (if visualize_top_n > 0)
+      - {dataset}.html: Interactive 3D skeleton visualization
+      - exported_views/: PNG exports (front, back, top, bottom, left, right)
+      - individual_profiles/: Per-neuron PNG profiles + PDF summary
+      - parameters.txt: Visualization settings record
+
+Visualization Features:
+    - Neurons grouped by type with r{rank}_{type}_x{N} legend labels
+    - Automatic mesh simplification (95% reduction) for large visualizations
+    - Natural sorting in PDF: r1, r2, ..., r9, r10 (not r1, r10, r11...)
+    - Line or tube skeleton modes based on neuron count (>50 uses line mode)
 
 Author: Hemibrain Connectomes Analysis Project
 """
@@ -46,7 +59,7 @@ if __name__ == "__main__":
     
     # Match algorithm: 'cds' (Color Depth Search), 'pppm', or 'both'
     # Can be set here at class level, or passed to find_neurons_batch()
-    match_type = 'both'
+    match_type = 'cds'
     
     # Anatomical region filter: 'Brain', 'VNC', or 'All'
     # Filters out images from non-matching regions
@@ -60,7 +73,7 @@ if __name__ == "__main__":
     top_n = -1
     
     # Output directory (set to None for stdout only)
-    output_dir = '/Users/apple/Local/connection_data/neuronbridge'
+    output_dir = '/Users/apple/Local/connection_data/neuronbridge_finding'
     
     # Path to datasets folder for neuron enrichment (None = auto-detect)
     datasets_path = None
@@ -75,12 +88,29 @@ if __name__ == "__main__":
     # VISUALIZATION - 3D skeleton visualization options
     # ==========================================================================
     
-    # Visualize top N types per dataset using 3D skeleton (0 = disabled)
-    # This creates interactive HTML visualizations showing the top N neuron types
-    visualize_top_n_types = 10
+    # Visualize top N types/bodyIds per dataset using 3D skeleton (0 = disabled)
+    # This creates interactive HTML visualizations showing the top N neuron types or bodyIds
+    # Output folder: plot3d_{dataset}/ (no timestamp, overwrites previous)
+    visualize_top_n = 50
+    
+    # How to organize visualization: 'type' or 'bodyId'
+    # - 'type': Group neurons by type (merge_neurons=True, shows combined morphology)
+    # - 'bodyId': Show individual neurons grouped by type (merge_neurons=False)
+    #            Legend labels: r{rank}_{type}_x{N} where N is neuron count per type
+    visualize_by = 'type'
     
     # Create separate visualization per dataset (True) or combined (False)
     visualize_per_dataset = True
+    
+    # Generate individual profile PNGs for each neuron type/bodyId
+    # Creates a subfolder 'individual_profiles' with one PNG per type + PDF summary
+    # PDF uses natural sorting: r1, r2, ..., r9, r10 (not r1, r10, r11...)
+    # Only uses front view
+    generate_individual_profiles = True
+    
+    # PDF layout for individual profiles (columns, rows)
+    # Default: (3, 2) = 3 columns x 2 rows = 6 images per page
+    pdf_images_per_page = (3, 2)
     
     
     # ==========================================================================
@@ -104,8 +134,11 @@ if __name__ == "__main__":
         top_n=top_n,
         # match_type=match_type,  # Can override here if needed
         output_dir=output_dir,
-        visualize_top_n_types=visualize_top_n_types,
-        visualize_per_dataset=visualize_per_dataset
+        visualize_top_n=visualize_top_n,
+        visualize_by=visualize_by,
+        visualize_per_dataset=visualize_per_dataset,
+        generate_individual_profiles=generate_individual_profiles,
+        pdf_images_per_page=pdf_images_per_page,
     )
     
     # Display summary

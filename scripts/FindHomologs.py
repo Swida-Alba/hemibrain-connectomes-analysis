@@ -52,7 +52,7 @@ if __name__ == "__main__":
         source_dataset='male-cns:v0.9',
         target_dataset='flywire_FAFB_v783',
         
-        output_dir='/Users/apple/Local/connection_data/HomologFinding/',
+        output_dir='/Users/apple/Local/connection_data/homolog_finding/',
         visualize_skeleton=True,  # Enable to visualize top candidates
         visualize_top_n=5,         # Number of candidates to visualize
         verbose=True,

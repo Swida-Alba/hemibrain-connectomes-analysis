@@ -8,6 +8,7 @@ This directory contains documentation for the core analytical capabilities:
 
 ### 🌉 EM↔LM Integration (NEW!)
 - **✨ [NeuronBridge Integration](./NeuronBridge_Guide.md)**: Bidirectional mapping between EM reconstructions and LM driver lines
+- **✨ [NeuronBridge Workflow Guide](./NeuronBridge_Workflow.md)**: Complete workflow with calling tree and recommendations ⭐
 - **✨ [FlyLight Downloader](./FlyLight_Guide.md)**: Download FlyLight imagery from Janelia S3 bucket
 
 ### 🧬 Connectivity Analysis

@@ -465,8 +465,9 @@ def _write_buffer_to_csv(buffer_list, output_path, append=False):
     
     # Write to CSV using Polars native I/O (faster than Python file handles)
     if append:
-        # For append mode, use file handle (Polars doesn't support append mode directly)
-        with open(output_path, 'a', buffering=1024*1024) as f:  # 1MB buffer
+        # For append mode, use file handle with explicit UTF-8 encoding
+        # This is critical on Windows where default encoding is often cp1252
+        with open(output_path, 'a', encoding='utf-8', buffering=1024*1024) as f:  # 1MB buffer
             df_combined.write_csv(f, include_header=False)
     else:
         # For initial write, use Polars native (faster)

@@ -545,14 +545,30 @@ class FlyLightDownloader:
         Returns:
             List of FlyLightFile objects from the Gen1 MCFO collection on S3
         """
+        import ssl
         files = []
-        url = f"{GEN1_MCFO_VIEW_CGI}?line={line_name}"
         
-        try:
-            with urllib.request.urlopen(url, timeout=30) as response:
-                html = response.read().decode('utf-8')
-        except Exception as e:
-            self._log(f"   ⚠️ Error fetching Gen1 MCFO page for {line_name}: {e}")
+        # Try multiple endpoints - gen1mcfo.janelia.org may have SSL issues
+        # flweb.janelia.org serves the same content and is more reliable
+        endpoints = [
+            f"https://flweb.janelia.org/cgi-bin/view_gen1mcfo_imagery.cgi?line={line_name}",
+            f"{GEN1_MCFO_VIEW_CGI}?line={line_name}",
+        ]
+        
+        html = None
+        for url in endpoints:
+            try:
+                # Use SSL context to avoid SSL handshake errors
+                ctx = ssl.create_default_context()
+                with urllib.request.urlopen(url, timeout=30, context=ctx) as response:
+                    html = response.read().decode('utf-8')
+                break  # Success - stop trying endpoints
+            except Exception as e:
+                self._log(f"   ⚠️ Error fetching MCFO page from {url.split('/')[2]}: {e}")
+                continue
+        
+        if html is None:
+            self._log(f"   ⚠️ Could not fetch Gen1 MCFO page for {line_name} from any endpoint")
             return files
         
         # Parse S3 image URLs from the page

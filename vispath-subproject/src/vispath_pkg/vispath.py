@@ -150,6 +150,7 @@ class VisualizePath:
         edgeN_limit=500,        # NEW: Limit number of edges to show (default 1000)
         output_format='xlsx',   # NEW: Output format for data files ('xlsx' or 'csv')
         verbose=True,           # NEW: Control print output (True=show prints, False=silent)
+        edge_labels=None,       # NEW: Custom edge labels dict {(source, target): {'label_name': value, ...}}
     ):
         """
         Initialize VisualizePath with pathway data and visualization settings.
@@ -307,6 +308,14 @@ class VisualizePath:
             If False, runs silently (no print output).
             Default: True
             
+        edge_labels : dict, optional
+            Custom edge labels for hover tooltips. Dictionary mapping edge tuples
+            to label dictionaries: {(source, target): {'label_name': value, ...}}
+            Each label_name will be shown as a separate line in the hover tooltip.
+            Useful for showing synapse strengths from multiple datasets.
+            Example: {('PPL101', 'aMe12'): {'HEMI': 45, 'MCNS': 32, 'FAFB': 28}}
+            Default: None
+            
         Raises
         ------
         FileNotFoundError
@@ -321,6 +330,9 @@ class VisualizePath:
         
         self.edgeN_limit = edgeN_limit
         self.output_format = output_format
+        
+        # Custom edge labels for multi-dataset synapse info
+        self.edge_labels = edge_labels  # Dict: {(source, target): {label_name: value, ...}}
         
         # Edge width scaling parameters
         self.edge_width_scale = edge_width_scale
@@ -3414,7 +3426,23 @@ class VisualizePath:
                 tooltip_parts.append(f"Ratio: {ratio:.3f}")
             if not np.isnan(prob):
                 tooltip_parts.append(f"Probability: {prob:.3f}")
+            
+            # Add custom edge labels (e.g., multi-dataset synapse strengths)
+            if self.edge_labels and (source, target) in self.edge_labels:
+                custom_labels = self.edge_labels[(source, target)]
+                if isinstance(custom_labels, dict):
+                    for label_name, label_value in custom_labels.items():
+                        if isinstance(label_value, (int, float)):
+                            tooltip_parts.append(f"{label_name}: {label_value:,}")
+                        else:
+                            tooltip_parts.append(f"{label_name}: {label_value}")
+            
             tooltip = "\n".join(tooltip_parts)  # Use actual newline, not escaped
+            
+            # Store custom labels in edge data for JavaScript hover handling
+            custom_labels_json = {}
+            if self.edge_labels and (source, target) in self.edge_labels:
+                custom_labels_json = self.edge_labels[(source, target)]
             
             edges_data.append({
                 'data': {
@@ -3425,7 +3453,8 @@ class VisualizePath:
                     'is_negative': 1 if is_negative else 0,  # Use 1/0 instead of True/False for JavaScript
                     'ratio': ratio if not np.isnan(ratio) else 0,
                     'probability': prob if not np.isnan(prob) else 0,
-                    'tooltip': tooltip
+                    'tooltip': tooltip,
+                    'custom_labels': custom_labels_json  # Store for JS access
                 }
             })
         
@@ -4409,6 +4438,15 @@ class VisualizePath:
                     html += `<br><b>Probability:</b> <span style="color: #4CAF50; font-weight: bold;">${{data.probability.toFixed(4)}} ⬅ Current</span>`;
                 }} else {{
                     html += `<br><b>Probability:</b> ${{data.probability.toFixed(4)}}`;
+                }}
+            }}
+            
+            // Display custom edge labels (e.g., multi-dataset synapse strengths)
+            if (data.custom_labels && typeof data.custom_labels === 'object' && Object.keys(data.custom_labels).length > 0) {{
+                html += `<br><span style="color: #888; font-size: 0.9em;">─────────────</span>`;
+                for (const [labelName, labelValue] of Object.entries(data.custom_labels)) {{
+                    const formattedValue = typeof labelValue === 'number' ? labelValue.toLocaleString() : labelValue;
+                    html += `<br><b>${{labelName}}:</b> ${{formattedValue}}`;
                 }}
             }}
             
@@ -7529,7 +7567,7 @@ def visualize_network(
     return vp.visualize_network()
 
 
-def VisConnMatInteractive(cmat, filename, title='', color_scale=[[0, 'rgb(255,255,255)'], [1, 'rgb(104,55,164)']], showfig=True, fontsize=12, conn_df=None, matrices_dict=None, verbose=True):
+def VisConnMatInteractive(cmat, filename, title='', color_scale=[[0, 'rgb(255,255,255)'], [1, 'rgb(104,55,164)']], showfig=True, fontsize=12, conn_df=None, matrices_dict=None, verbose=True, zmin=None, zmax=None, init_width=None, init_height=None):
     '''Create interactive heatmap with comprehensive controls similar to network visualization
     
     Features:
@@ -7563,6 +7601,14 @@ def VisConnMatInteractive(cmat, filename, title='', color_scale=[[0, 'rgb(255,25
         If provided, enables metric toggle. Otherwise uses cmat as weight matrix only.
     verbose : bool, optional
         Control print output. Default True.
+    zmin : float, optional
+        Minimum value for fixed color scale. If None, uses data range.
+    zmax : float, optional
+        Maximum value for fixed color scale. If None, uses data range.
+    init_width : int, optional
+        Initial width of the heatmap in pixels. If None, auto-calculated based on matrix size.
+    init_height : int, optional
+        Initial height of the heatmap in pixels. If None, auto-calculated based on matrix size.
     '''
     
     # Helper function for verbose printing
@@ -8206,7 +8252,7 @@ def VisConnMatInteractive(cmat, filename, title='', color_scale=[[0, 'rgb(255,25
                             {'🏷️ Hide Text' if not is_large else '🏷️ Show Text'}
                         </button>
                         <button id="toggleCellValuesBtn" onclick="toggleCellValues()" style="flex: 1;">
-                            🔢 Hide Values
+                            🔢 Show Values
                         </button>
                     </div>
                     <div class="slider-control" style="margin-top: 8px;">
@@ -8385,17 +8431,17 @@ def VisConnMatInteractive(cmat, filename, title='', color_scale=[[0, 'rgb(255,25
         let currentScale = 'linear';
         let currentColorscale = '{default_colorscale}';
         let currentFontSize = {fontsize};
-        let useAutoRange = true;
-        let customZmin = null;
-        let customZmax = null;
+        let useAutoRange = {json.dumps(zmin is None and zmax is None)};
+        let customZmin = {json.dumps(zmin)};
+        let customZmax = {json.dumps(zmax)};
         let customColorScale = null;  // Store custom color scale
         let use3PointScale = false;
-        let currentWidth = 800;
-        let currentHeight = 800;
+        let currentWidth = {init_width if init_width else 800};
+        let currentHeight = {init_height if init_height else 800};
         let exportScale = 2;
         let squareCellsLocked = false;  // Track if square cells are locked
         let showLabels = !{json.dumps(is_large)};  // Show labels for small matrices, hide for large
-        let showCellValues = true;  // Track if cell values should be displayed in cells (default: true)
+        let showCellValues = false;  // Track if cell values should be displayed in cells (default: false)
         let cellValueFontSize = 10;  // Font size for cell value annotations
         let ignoredValues = new Set();  // Set of values to ignore when displaying cell values
         let contrastThreshold = 0.5;  // Luminance threshold for contrast color (0-1, default: 0.5)
@@ -10573,6 +10619,12 @@ def VisConnMatInteractive(cmat, filename, title='', color_scale=[[0, 'rgb(255,25
         
         // Try to load saved settings on page load
         window.addEventListener('load', () => {{
+            // Initialize custom color range if zmin/zmax were provided from Python
+            if (customZmin !== null && customZmax !== null) {{
+                window.customColorRange = {{ min: customZmin, max: customZmax }};
+                console.log('Initialized custom color range from Python parameters:', window.customColorRange);
+            }}
+            
             const saved = localStorage.getItem(storageKey);
             if (saved) {{
                 loadSettings(false);  // Silent load on initialization

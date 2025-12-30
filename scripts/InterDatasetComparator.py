@@ -15,6 +15,8 @@ Features demonstrated:
 - Comparison modes: 'path' (path-based) vs 'edge' (edge-based)
 - **NEW**: Direct comparison of specific neurons (direct_comparison)
 - **NEW**: Connectivity profile comparison as SEPARATE step (connectivity_profile_comparison)
+- **NEW**: Standalone conserved path visualization with multi-dataset synapse labels
+- **NEW**: Unified JSON label mapping (source, target, intermediate in one file)
 
 
 Comparison Modes:
@@ -34,6 +36,17 @@ Connectivity Profile Comparison:
   - Uses multiple similarity metrics (Jaccard, Cosine, Rank correlation)
   - Generates confidence scores for type assignments
   Parameters can be configured in ComparisonParameters or passed directly.
+
+Conserved Path Visualization:
+  - Visualizes edges conserved across ALL datasets using VisualizePath module
+  - Trims dead-end nodes that don't connect source to target
+  - Hover labels show synapse strengths from each dataset
+  - Example: analyzer.visualize_conserved_paths(threshold=5, trim_dead_ends=True)
+
+Label Mapping:
+  - Supports unified JSON file containing source, target, and intermediate mappings
+  - Example: LabelMapper(overall_mapping_json='path/to/all_mappings.json')
+  - Also supports separate CSV/JSON files or direct dictionary input
 """
 
 import os
@@ -118,29 +131,55 @@ def run_comprehensive_comparison():
     #     intermediate_mapping_file='/Users/apple/Desktop/intermediate_map.csv',
     # )
     
+    label_map = LabelMapper(
+        source_mapping_dict={
+            'flywire_FAFB_v783': ['CB0890'],
+            'male-cns:v0.9': ['GNG458'],
+        },
+        source_labels=['Foxglove'],
+        target_mapping_dict={
+            'flywire_FAFB_v783': ['LPLC2'],
+            'male-cns:v0.9': ['LPLC2'],
+        },
+        target_labels=['LPLC2'],
+    )
+    
+    # Unified JSON mapping file (contains source, target, and/or intermediate mappings)
+    # Structure:
+    # {
+    #   "source_mapping": { "custom_label": [...], "dataset1": [...], ... },
+    #   "target_mapping": { ... },
+    #   "intermediate_mapping": { ... }
+    # }
+    # label_map = LabelMapper(
+    #   overall_mapping_json='/Users/apple/Local/connection_data/dataset_comparison/comparison_results_20251227_213819_Fdg-LPLC2-5hops/label_map.json'
+    # )
+    
+    # ntk = ['aMe12', 'aMe26', 'KCg-d', 'KCg-m', 'KCab-p', 'PPL101', 'PPL103', 'APL', 'DPM']
     params = ComparisonParameters(
         # Token - empty means load from NEUPRINT_APPLICATION_TOKEN env var
         token='',
         # Output settings
-        output_folder='/Users/apple/Local/connection_data',
+        output_folder='/Users/apple/Local/connection_data/dataset_comparison',
         saveas=None,  # Auto-generate timestamp folder
         
         # Datasets to compare
-        datasets=['male-cns:v0.9', 'flywire_FAFB_v783', 'hemibrain:v1.2.1', 'flywire_BANC_v626'],
-        datasets_nickname=['MCNS', 'FAFB', 'HEMI', 'BANC',],
+        datasets=['male-cns:v0.9', 'flywire_FAFB_v783'],
+        datasets_nickname=['MCNS', 'FAFB'],
         
         # datasets=['flywire_FAFB_v783', 'male-cns:v0.9'],
         # datasets_nickname=['FAFB', 'MCNS'],
         
-        source_neurons=['aMe20'],
-        # source_neurons=neurons_network,
+        # source_neurons=['aMe.*'],
+        source_neurons=label_map,
         
         # Target neurons - PPL101 dopaminergic neurons
-        target_neurons=['PPL101','PPL103'],
+        # target_neurons=['PPL1.*'],
+        target_neurons=label_map,
         # target_neurons=target_map,
         # overall_label_mapper=label_map,
         
-        max_interlayer=1,
+        max_interlayer=2,
         
         # Multiple thresholds to analyze sensitivity
         thresholds=[3, 5, 10, 15, 20],
@@ -158,13 +197,26 @@ def run_comprehensive_comparison():
         
         # Performance Settings (path finding algorithm)
         # -----------------------------------------------------------------
-        pathfinding='MemoizedDFS', # 'MemoizedDFS', 'Bidirectional', 'DP', 'DFS'
+        pathfinding='Bidirectional', # 'MemoizedDFS', 'Bidirectional', 'DP', 'DFS'
     )
     
     analyzer = ComparisonAnalyzer(params, verbose=True)
     results = analyzer.run_comparison()
     analyzer.generate_report()
     analyzer.export_results()
+    
+    ### ====== optional: standalone visualization of conserved paths ======
+    
+    # Visualize conserved edges using VisualizePath with dead-ends trimmed
+    # Hover labels show synapse strengths from all datasets
+    # Generates one network visualization per threshold in conserved_paths/ subfolder
+    analyzer.visualize_conserved_paths_all_thresholds(
+        trim_dead_ends=True,  # Remove nodes not on source→target paths
+        showfig=False,        # Set to True to open in browser
+    )
+    
+    # Or generate for a single threshold:
+    # analyzer.visualize_conserved_paths(threshold=5, trim_dead_ends=True)
     
     ### ====== optional comparison of connectivity profiles ======
     

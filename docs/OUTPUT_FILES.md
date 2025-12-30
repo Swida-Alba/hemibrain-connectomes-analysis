@@ -91,3 +91,53 @@ Outputs are saved in a user-defined output folder (default: `comparison_output/`
     *   `Path_Analysis`: Path conservation stats.
 *   **`interactive_heatmap.html`**: An interactive heatmap visualizing the connection weights across datasets for all neuron pairs.
 *   **`dataset_data/`**: A folder containing the raw `FindNeuronConnection` outputs (see Section 1) for each dataset and threshold analyzed. This allows for deep-diving into individual dataset results.
+
+---
+
+## 5. NeuronBridgeFinder (Co-Labeling Analysis)
+
+The `NeuronBridgeFinder` class (in `src/neuronbridge_finder.py`) performs co-labeling analysis of driver lines via the NeuronBridge API.
+
+### Folder Structure
+Outputs are saved in a timestamped folder: `colabel_{lines}_{timestamp}`.
+
+### Key Output Files
+
+#### Expression Matrices
+*   **`expression_matrix.csv`**: Type × Line score matrix. Types are prefixed with dataset abbreviations (e.g., `MCNS_aMe12`, `FAFB_Dm4`, `HEMI_Unknown`).
+*   **`expression_matrix_merged.csv`**: Same data but with types merged across datasets. Same neuron types from different datasets (e.g., `MCNS_aMe12` and `FAFB_aMe12`) are combined into a single row (`aMe12`) using max score aggregation.
+*   **`expression_matrix.html`**: Interactive heatmap visualization (per-dataset types).
+*   **`expression_matrix_merged.html`**: Interactive heatmap visualization (merged types across datasets).
+
+#### Co-Labeling Matrices
+*   **`colabeling_matrix_jaccard.csv`**: Binary Jaccard similarity matrix between lines.
+*   **`colabeling_matrix_weighted_jaccard.csv`**: Weighted Jaccard similarity matrix (accounts for match scores).
+*   **`colabeling_matrix_jaccard.html`**: Interactive heatmap for binary Jaccard.
+*   **`colabeling_matrix_weighted_jaccard.html`**: Interactive heatmap for weighted Jaccard.
+
+#### Labeling Distribution
+*   **`labeling_distribution_by_type.html`**: Score distribution for each line aggregated by neuron type (mountain-shaped histogram).
+*   **`labeling_distribution_by_neuron.html`**: Score distribution showing individual neuron scores.
+*   **`labeling_distribution_stacked.html`**: All lines overlaid for comparative visualization.
+*   **`distribution_data_by_type.csv`**: Raw data for type-level distribution.
+*   **`distribution_data_by_neuron.csv`**: Raw data for neuron-level distribution.
+
+#### Supporting Data
+*   **`labeling_info.csv`**: Case-sensitive type × Line matrix with dataset column.
+*   **`line_summary.csv`**: Summary statistics per line (neuron count, type count, scores, sparsity).
+*   **`line_labeled_neurons/`**: Per-line neuron details split by dataset.
+*   **`parameters.json`**: Analysis parameters for reproducibility.
+*   **`colabeling_report.html`**: Comprehensive HTML report with embedded visualizations.
+
+### Expression Matrix Columns
+- Row index: Neuron type (with or without dataset prefix)
+- Columns: Driver line names
+- Values: Maximum NeuronBridge match score (0-50000)
+
+### Merged vs Original Expression Matrix
+| Aspect | Original | Merged |
+|--------|----------|--------|
+| Row index | `MCNS_aMe12`, `FAFB_aMe12` | `aMe12` |
+| Purpose | Distinguish dataset source | Type identity only |
+| Aggregation | None | Max score across datasets |
+| Use case | Dataset-specific analysis | Cross-dataset type comparison |

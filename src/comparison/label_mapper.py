@@ -36,13 +36,18 @@ class LabelMapper:
     JSON Format Example:
         {
             "source_mapping": {
-                "std_label": ["aMe12_grp1", "aMe12_grp2"],
+                "custom_label": ["aMe12_grp1", "aMe12_grp2"],
                 "hemibrain:v1.2.1": [["aMe12", "aMe12_R"], ["aMe12_L"]]
-            }
+            },
+            "target_mapping": { ... },
+            "intermediate_mapping": { ... }
         }
     
     Example Usage:
-        >>> # From files
+        >>> # From unified JSON file (contains source, target, and/or intermediate mappings)
+        >>> mapper = LabelMapper(overall_mapping_json='mappings/all_mappings.json')
+
+        >>> # From separate files
         >>> mapper = LabelMapper(
         ...     source_mapping_file='mappings/source_mapping.csv',
         ...     target_mapping_file='mappings/target_mapping.csv'
@@ -65,7 +70,7 @@ class LabelMapper:
         self,
         source_mapping_file: Optional[str] = None,
         target_mapping_file: Optional[str] = None,
-        mapping_file: Optional[str] = None,
+        overall_mapping_json: Optional[str] = None,
         source_mapping_dict: Optional[Dict] = None,
         target_mapping_dict: Optional[Dict] = None,
         intermediate_mapping_dict: Optional[Dict] = None,
@@ -81,7 +86,9 @@ class LabelMapper:
             source_mapping_file: Path to CSV or JSON file for source mappings
             target_mapping_file: Path to CSV or JSON file for target mappings
             intermediate_mapping_file: Path to CSV or JSON file for intermediate mappings
-            mapping_file: Path to JSON file containing source, target, and intermediate mappings
+            overall_mapping_json: Path to a single JSON file containing all mapping information.
+                                 This file should contain 'source_mapping', 'target_mapping', and optionally
+                                 'intermediate_mapping' keys. ONLY JSON format is supported for this parameter.
             source_mapping_dict: Dictionary mapping datasets to source neurons
             target_mapping_dict: Dictionary mapping datasets to target neurons
             intermediate_mapping_dict: Dictionary mapping datasets to intermediate neurons
@@ -100,13 +107,13 @@ class LabelMapper:
         self._intermediate_reverse: Dict[str, Dict[str, str]] = defaultdict(dict)
 
         # Handle unified mapping file
-        if mapping_file:
+        if overall_mapping_json:
             if source_mapping_file is None:
-                source_mapping_file = mapping_file
+                source_mapping_file = overall_mapping_json
             if target_mapping_file is None:
-                target_mapping_file = mapping_file
+                target_mapping_file = overall_mapping_json
             if intermediate_mapping_file is None:
-                intermediate_mapping_file = mapping_file
+                intermediate_mapping_file = overall_mapping_json
         
         # Store file paths for export
         self._source_file = source_mapping_file
@@ -368,11 +375,19 @@ class LabelMapper:
         
         df = pd.read_csv(filepath, dtype=str)
         
-        # Detect format by checking for 'custom_label' column (new format)
-        # or 'std_label' column (legacy format)
+        # Detect format by checking for 'custom_label' or 'std_label' column
+        # Both are supported for backward compatibility
+        label_col = None
         if 'custom_label' in df.columns:
-            self._load_csv_expanded_format(df, role)
+            label_col = 'custom_label'
         elif 'std_label' in df.columns:
+            label_col = 'std_label'
+            
+        if label_col == 'custom_label' or 'std_pattern' in df.columns:
+            # Use expanded format if custom_label is present OR std_pattern is present
+            self._load_csv_expanded_format(df, role)
+        elif label_col == 'std_label':
+            # Use legacy format if only std_label is present
             self._load_csv_legacy_format(df, role)
         else:
             raise ValueError(f"CSV must have 'custom_label' or 'std_label' column. Found: {df.columns.tolist()}")
@@ -387,13 +402,17 @@ class LabelMapper:
             MBON14,MBON14.*_L,MBON14.*_L,MBON14.*_L,Left hemisphere
         
         Rows with the same custom_label are grouped together.
+        Supports both 'custom_label' and 'std_label' for backward compatibility.
         
         Args:
-            df: DataFrame with custom_label column
+            df: DataFrame with custom_label or std_label column
             role: 'source', 'target', or 'intermediate'
         """
-        # Identify dataset columns (exclude custom_label, std_pattern, notes, description, etc.)
-        exclude_cols = {'custom_label', 'std_pattern', 'notes', 'description', 'comment'}
+        # Identify label column (support both for backward compatibility)
+        label_col = 'custom_label' if 'custom_label' in df.columns else 'std_label'
+        
+        # Identify dataset columns (exclude labels, patterns, notes, etc.)
+        exclude_cols = {'custom_label', 'std_label', 'std_pattern', 'notes', 'description', 'comment'}
         dataset_cols = [c for c in df.columns if c.lower() not in exclude_cols]
         
         if role == 'source':
@@ -404,7 +423,7 @@ class LabelMapper:
             mapping = self._intermediate_mapping
         
         for _, row in df.iterrows():
-            custom_label = row.get('custom_label', '')
+            custom_label = row.get(label_col, '')
             
             # Auto-generate label if missing
             if pd.isna(custom_label) or str(custom_label).strip() == '':
@@ -448,11 +467,14 @@ class LabelMapper:
             label1,id1;id2,id3,id4
         
         Args:
-            df: DataFrame with std_label column
+            df: DataFrame with std_label or custom_label column
             role: 'source', 'target', or 'intermediate'
         """
-        # Get dataset columns (all except std_label)
-        dataset_cols = [c for c in df.columns if c != 'std_label']
+        # Identify label column
+        label_col = 'std_label' if 'std_label' in df.columns else 'custom_label'
+        
+        # Get dataset columns (all except label column)
+        dataset_cols = [c for c in df.columns if c != label_col]
         
         if role == 'source':
             mapping = self._source_mapping
@@ -462,7 +484,7 @@ class LabelMapper:
             mapping = self._intermediate_mapping
         
         for _, row in df.iterrows():
-            std_label = row['std_label']
+            std_label = row[label_col]
             
             # Auto-generate label if missing
             if pd.isna(std_label) or str(std_label).strip() == '':

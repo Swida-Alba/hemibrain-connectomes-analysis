@@ -1216,12 +1216,6 @@ class ComparisonVisualizer:
             except Exception as e:
                 self._vprint(f"Warning: Could not create similarity matrix for threshold {threshold}: {e}")
         
-        # Add row labels on the right side
-        fig.text(0.02, 0.88, 'Topology', fontsize=11, fontweight='bold', color='#166534', 
-                 rotation=90, va='center')
-        fig.text(0.02, 0.38, 'Matrix', fontsize=11, fontweight='bold', color='#c2410c',
-                 rotation=90, va='center')
-        
         fig.suptitle(title, fontsize=14, fontweight='bold', y=1.02)
         plt.tight_layout()
         return fig
