@@ -347,14 +347,21 @@ results = nbf.analyze_colabeling(
 | Column | Description |
 |--------|-------------|
 | `line` | Driver line name |
-| `n_neurons` | Number of neurons matched |
+| `n_neurons` | Total number of neurons matched |
 | `n_types` | Number of unique types labeled |
 | `mean_score` | Mean NeuronBridge match score |
-| `max_score` | Maximum match score |
-| `top_types` | Top 5 labeled types |
+| `max_score` | Maximum match score (50000 = perfect match) |
+| `n_neurons_HMS` | Neurons above Half Max Score (score ≥ max_score/2) |
+| `n_types_HMS` | Unique types above Half Max Score |
+| `n_neurons_MS` | Neurons at Max Score (within 0.1% tolerance) |
+| `n_types_MS` | Unique types at Max Score |
+| `Qf` | Quality Factor = max_score / n_types_HMS. Higher = more selective |
 | `colabel_sparsity` | Uniqueness of labeling pattern (0-1, higher = more unique) |
-| `n_colabeling_lines` | Number of lines with significant overlap |
-| `mean_colabel_similarity` | Average similarity with other lines |
+
+**Quality Metrics Explained**:
+- **Half Max Score (HMS)** metrics show how many neurons/types have high-confidence matches (score ≥ 50% of max)
+- **Max Score (MS)** metrics show how many neurons/types achieve the best possible match
+- **Qf (Quality Factor)** indicates line selectivity: a high Qf means high match quality concentrated in few types (more selective), while a low Qf indicates the line labels many types at high confidence (less selective)
 
 **Output Files**:
 ```

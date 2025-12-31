@@ -458,19 +458,37 @@ findneuron_{lines}_{timestamp}/
 
 ```
 colabel_{lines}_{timestamp}/
-├── expression_matrix.csv      # Type × Line scores
-├── expression_matrix.html     # Interactive heatmap
-├── labeling_info.csv          # All labeled types
+├── expression_matrix.csv      # Type × Line scores (dataset-prefixed)
+├── expression_matrix_merged.csv  # Types merged across datasets
+├── expression_matrix*.html    # Interactive heatmaps
+├── labeling_info.csv          # All labeled types with dataset
 ├── colabeling_matrix_*.csv    # Similarity matrices
 ├── colabeling_matrix_*.html   # Interactive heatmaps
 ├── labeling_distribution_*.html  # Mountain plots
-├── line_summary.csv           # Per-line statistics
+├── line_summary.csv           # Per-line statistics (see below)
 ├── colabeling_report.html     # Comprehensive report
 ├── line_labeled_neurons/      # Per-line neuron details
 │   ├── {line}_neurons.csv
 │   └── {line}_{dataset}_types.csv
 └── plot3d_{dataset}/          # 3D visualizations
 ```
+
+### Line Summary Columns (Colabeling)
+
+| Column | Description |
+|--------|-------------|
+| `line` | Driver line name |
+| `n_neurons` | Total neurons matched |
+| `n_types` | Unique types labeled |
+| `max_score` | Maximum match score (50000 = perfect) |
+| `n_neurons_HMS` | Neurons ≥ Half Max Score |
+| `n_types_HMS` | Types ≥ Half Max Score |
+| `n_neurons_MS` | Neurons at Max Score (within 0.1%) |
+| `n_types_MS` | Types at Max Score |
+| `Qf` | Quality Factor = max_score / n_types_HMS |
+| `colabel_sparsity` | Labeling uniqueness (0-1) |
+
+**Interpretation**: Higher `Qf` = more selective line (few high-scoring types). Lower `Qf` = broader labeling (many high-scoring types).
 
 ---
 

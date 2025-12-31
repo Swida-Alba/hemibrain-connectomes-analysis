@@ -130,14 +130,14 @@ if __name__ == "__main__":
     # Minimum score threshold for VISUALIZATION only
     # This does NOT filter data from expression matrix - all neurons are included
     # Only affects labeling distribution plots (highlighting high-confidence matches)
-    # Default: 30000. Set to 0 to disable visualization threshold
-    min_score = 10000
+    # Default: 20000. Set to 0 to disable visualization threshold
+    min_score = 30000
     
     # Minimum average score threshold for types in SIMILARITY matrix (clustering)
     # Types with average score < threshold may be excluded from clustering
     # Note: Expression matrix includes ALL types regardless of this threshold
-    # Default: 30000. Set to 0 to include all types in clustering
-    min_type_avg_score = 10000
+    # Default: 10000. Set to 0 to include all types in clustering
+    min_type_avg_score = 30000
     
     # ==========================================================================
     # ADVANCED OPTIONS

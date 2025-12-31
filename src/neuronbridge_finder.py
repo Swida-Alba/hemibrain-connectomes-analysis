@@ -5961,11 +5961,36 @@ class NeuronBridgeFinder:
             mean_score = neurons_df['score'].mean() if not neurons_df.empty else 0.0
             max_score = neurons_df['score'].max() if not neurons_df.empty else 0.0
             
-            # Type distribution
-            top_types = []
+            # Half-max score threshold
+            half_max_score = max_score / 2.0 if max_score > 0 else 0.0
+            
+            # n_neurons_HMS: neurons with score >= half_max_score
+            n_neurons_HMS = len(neurons_df[neurons_df['score'] >= half_max_score]) if not neurons_df.empty else 0
+            
+            # n_types_HMS: unique types with score >= half_max_score
             if not neurons_df.empty:
-                type_counts = neurons_df.groupby('type').size().sort_values(ascending=False)
-                top_types = type_counts.head(5).index.tolist()
+                hms_neurons = neurons_df[neurons_df['score'] >= half_max_score]
+                n_types_HMS = hms_neurons['type'].nunique() if not hms_neurons.empty else 0
+            else:
+                n_types_HMS = 0
+            
+            # n_neurons_MS: neurons at max score (within 0.1% tolerance)
+            if not neurons_df.empty and max_score > 0:
+                ms_threshold = max_score * 0.999  # Allow 0.1% tolerance
+                n_neurons_MS = len(neurons_df[neurons_df['score'] >= ms_threshold])
+            else:
+                n_neurons_MS = 0
+            
+            # n_types_MS: unique types at max score
+            if not neurons_df.empty and max_score > 0:
+                ms_threshold = max_score * 0.999
+                ms_neurons = neurons_df[neurons_df['score'] >= ms_threshold]
+                n_types_MS = ms_neurons['type'].nunique() if not ms_neurons.empty else 0
+            else:
+                n_types_MS = 0
+            
+            # Qf: Quality factor = max_score / n_types_HMS (higher = more specific/selective)
+            Qf = max_score / n_types_HMS if n_types_HMS > 0 else 0.0
             
             # Sparsity metrics
             sparsity_data = sparsity_scores.get(line_name, {})
@@ -5976,10 +6001,12 @@ class NeuronBridgeFinder:
                 'n_types': n_types,
                 'mean_score': round(mean_score, 4),
                 'max_score': round(max_score, 4),
-                'top_types': ', '.join(top_types[:5]),
+                'n_neurons_HMS': n_neurons_HMS,
+                'n_types_HMS': n_types_HMS,
+                'n_neurons_MS': n_neurons_MS,
+                'n_types_MS': n_types_MS,
+                'Qf': round(Qf, 2),
                 'colabel_sparsity': round(sparsity_data.get('colabel_sparsity', 0), 4),
-                'n_colabeling_lines': sparsity_data.get('n_colabeling_lines', 0),
-                'mean_colabel_similarity': round(sparsity_data.get('mean_colabel_similarity', 0), 4)
             })
         
         line_summary = pd.DataFrame(line_summary_data)
@@ -6126,15 +6153,28 @@ class NeuronBridgeFinder:
         </div>
         
         <h2>📊 Line Summary</h2>
+        <p><strong>Metrics Explanation:</strong></p>
+        <ul>
+            <li><strong>Neurons</strong>: Total number of neurons matched by this line</li>
+            <li><strong>Types</strong>: Total number of unique neuron types labeled</li>
+            <li><strong>Max Score</strong>: Highest NeuronBridge match score (50000 = perfect match)</li>
+            <li><strong>n_HMS</strong>: Neurons/Types above Half Max Score (score ≥ max_score/2)</li>
+            <li><strong>n_MS</strong>: Neurons/Types at Max Score (within 0.1% of max_score)</li>
+            <li><strong>Qf</strong>: Quality Factor = max_score / n_types_HMS. Higher = more selective line. A high Qf means high match quality with few high-scoring types.</li>
+            <li><strong>Sparsity</strong>: 1 - (fraction of lines with similar pattern). Higher = more unique labeling.</li>
+        </ul>
         <table>
             <tr>
                 <th>Line</th>
                 <th>Neurons</th>
                 <th>Types</th>
-                <th>Mean Score</th>
                 <th>Max Score</th>
+                <th>n_neurons_HMS</th>
+                <th>n_types_HMS</th>
+                <th>n_neurons_MS</th>
+                <th>n_types_MS</th>
+                <th>Qf</th>
                 <th>Sparsity</th>
-                <th>Top Types</th>
             </tr>
 '''
         
@@ -6144,10 +6184,13 @@ class NeuronBridgeFinder:
                 <td><strong>{row['line']}</strong></td>
                 <td>{row['n_neurons']}</td>
                 <td>{row['n_types']}</td>
-                <td>{row['mean_score']:.3f}</td>
-                <td>{row['max_score']:.3f}</td>
+                <td>{row['max_score']:.0f}</td>
+                <td>{row['n_neurons_HMS']}</td>
+                <td>{row['n_types_HMS']}</td>
+                <td>{row['n_neurons_MS']}</td>
+                <td>{row['n_types_MS']}</td>
+                <td>{row['Qf']:.0f}</td>
                 <td>{row['colabel_sparsity']:.3f}</td>
-                <td>{row['top_types']}</td>
             </tr>
 '''
         
