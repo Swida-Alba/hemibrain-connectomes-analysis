@@ -49,6 +49,8 @@ flybrains>=0.6.3           # Drosophila brain templates and meshes (0.6.3+ adds 
 # -----------------------------------------------------------------------------
 boto3>=1.26.0              # AWS S3 access for FlyLight imagery downloads
 reportlab>=4.0.0           # PDF generation for image summaries
+python-pptx>=0.6.21        # PowerPoint generation for image summaries
+pymupdf>=1.23.0            # PDF to PPTX conversion
 
 # Document Processing
 # -----------------------------------------------------------------------------

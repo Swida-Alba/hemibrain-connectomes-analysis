@@ -53,7 +53,9 @@ dependencies = [
     "navis==1.5.0",
     "flybrains>=0.6.3",
     "boto3>=1.26.0",
-    "reportlab>=4.0.0", 
+    "reportlab>=4.0.0",
+    "python-pptx>=0.6.21",
+    "pymupdf>=1.23.0",
     "img2pdf==0.5.1",
     # NOTE: neuronbridge-python may fail on Windows due to memray dependency.
     # See docs/INSTALLATION.md for Windows troubleshooting.
