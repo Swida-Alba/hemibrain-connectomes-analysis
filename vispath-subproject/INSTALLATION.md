@@ -140,8 +140,8 @@ python -c "from vispath_pkg.vispath import VisualizePath; print('✓ vispath-sub
 cd ..
 
 # Use existing conda environment or create new one
-conda create -n hemibrain python=3.11 -y
-conda activate hemibrain
+conda create -n droca python=3.11 -y
+conda activate droca
 
 # Install in development mode
 pip install -e .

@@ -99,7 +99,7 @@ if __name__ == "__main__":
     collection_category = None  # None = search all collections
     
     # Output directory for downloaded files
-    output_dir = '/Users/apple/Local/connection_data/flylight'
+    output_dir = '../local_data/connection_data/flylight'
     
     # Maximum number of files to download (None = no limit)
     max_files = 30

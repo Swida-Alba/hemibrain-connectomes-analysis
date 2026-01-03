@@ -93,7 +93,7 @@ The bug appeared when using Cache v4.0 because:
 To verify the fix works:
 ```bash
 cd /Users/apple/Documents/GitHub/hemibrain-connectomes-analysis-now
-conda activate hemibrain
+conda activate droca
 python FindPath_Kun.py
 ```
 

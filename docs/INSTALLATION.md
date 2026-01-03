@@ -8,10 +8,10 @@
 
 ```bash
 # Create environment with Python 3.11
-conda create -n hemibrain python=3.11 -y
+conda create -n droca python=3.11 -y
 
 # Activate the environment
-conda activate hemibrain
+conda activate droca
 ```
 
 **Install dependencies (platform-specific):**
@@ -30,7 +30,7 @@ pip install neuronbridge-python --no-deps
 **Or install the package in editable mode:**
 
 ```bash
-conda activate hemibrain
+conda activate droca
 pip install -e .
 ```
 
@@ -413,8 +413,8 @@ git clone https://github.com/Swida-Alba/hemibrain-connectomes-analysis.git
 cd hemibrain-connectomes-analysis
 
 # Create conda environment (recommended)
-conda create -n hemibrain python=3.11 -y
-conda activate hemibrain
+conda create -n droca python=3.11 -y
+conda activate droca
 
 # Install in editable mode with dev dependencies
 pip install -e ".[dev]"
@@ -452,8 +452,8 @@ COPY . .
 
 **Recommended (with conda):**
 ```bash
-conda create -n hemibrain python=3.11 -y
-conda activate hemibrain
+conda create -n droca python=3.11 -y
+conda activate droca
 pip install -r requirements.txt
 ```
 

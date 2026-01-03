@@ -163,7 +163,7 @@ if __name__ == "__main__":
     match_type = 'cds'
     
     # Output directory (set to None for stdout only)
-    output_dir = '/Users/apple/Local/connection_data/neuronbridge_finding'
+    output_dir = '../local_data/neuronbridge_finding'
     
     # Path to datasets folder for neuron lookup (None = auto-detect)
     datasets_path = None
@@ -184,7 +184,7 @@ if __name__ == "__main__":
     
     # Download images only for top N lines (by aggregate score/rank)
     # Set to None to download for all lines
-    download_img_for_top_n_lines = 10
+    download_img_for_top_n_lines = 20
     
     # Sort by 'max' score or 'completeness' 
     sort_by = 'max'

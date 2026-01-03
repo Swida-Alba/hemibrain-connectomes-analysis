@@ -15,6 +15,8 @@ empty_network/
 cache/
 comparison_output/
 dev/
+scripts_local/
+local_data/
 
 # Deprecated folders (removed November 2025)
 navis_roi_meshes_json/

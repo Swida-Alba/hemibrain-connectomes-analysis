@@ -191,74 +191,26 @@ class VisualizeSkeleton:
 
     mesh_roi: list = field(default_factory=list)
     '''
-    meshes of brain ROIs to plot\n
-    defaultly use ['LH(R)', 'AL(R)', 'EB'] to mark the position of the brain\n
-    if you want to show the whole brain or hemibrain, see brain_mesh parameter. \n
-    hide all meshes by setting mesh_roi = None \n
-    Available meshes: \n
-    a'L(L) \n
-    a'L(R) \n   
-    AB(L) \n    
-    AB(R) \n    
-    AL(L)_ \n   
-    AL(R) \n    
-    alphaL(L) \n
-    alphaL(R) \n
-    AME(R) \n   
-    AOTU(R) \n  
-    ATL(L) \n   
-    ATL(R) \n   
-    AVLP(R) \n  
-    b'L(L) \n   
-    b'L(R) \n   
-    bL(L) \n    
-    bL(R) \n    
-    BU(L) \n    
-    BU(R) \n    
-    CA(L) \n    
-    CA(R) \n    
-    CAN(R) \n   
-    CRE(L) \n   
-    CRE(R) \n   
-    EB \n       
-    EPA(L) \n   
-    EPA(R) \n
-    FB \n
-    FLA(R) \n
-    gL(L) \n
-    gL(R) \n
-    GNG \n
-    GOR(L) \n
-    GOR(R) \n
-    IB \n
-    ICL(L) \n
-    ICL(R) \n
-    IPS(R) \n
-    LAL(L) \n
-    LAL(R) \n
-    LH(R) \n
-    LO(R) \n
-    LOP(R) \n
-    ME(R) \n
-    NO \n
-    PB \n
-    PED(R) \n
-    PLP(R) \n
-    PRW \n
-    PVLP(R) \n
-    SAD \n
-    SCL(L) \n
-    SCL(R) \n
-    SIP(L) \n
-    SIP(R) \n
-    SLP(R) \n
-    SMP(L) \n
-    SMP(R) \n
-    SPS(L) \n
-    SPS(R) \n
-    VES(L) \n
-    VES(R) \n
-    WED(R) \n
+    Meshes of brain ROIs to plot.\n
+    \n
+    **Auto-expansion:** ROI names without (L)/(R) suffix are automatically expanded
+    to include both bilateral variants if available. For example:\n
+    - 'LH' → ['LH(L)', 'LH(R)']\n
+    - 'AL' → ['AL(L)', 'AL(R)']\n
+    - 'EB' → ['EB'] (unpaired, no expansion)\n
+    \n
+    Examples:\n
+    - mesh_roi=['LH', 'AL', 'EB'] → plots LH(L), LH(R), AL(L), AL(R), EB\n
+    - mesh_roi=['LH(R)'] → plots only LH(R) (explicit side, no expansion)\n
+    \n
+    Set mesh_roi=None to hide all ROI meshes.\n
+    Use list_available_rois() to see all available ROIs for current dataset.\n
+    \n
+    Common ROIs (hemibrain):\n
+    - Central brain: EB, FB, PB, NO (unpaired)\n
+    - Bilateral: LH, AL, MB, CA, AOTU, SMP, SLP, CRE, etc.\n
+    \n
+    Use brain_mesh parameter to show whole brain/hemibrain envelope.\n
     '''
 
     mesh_color: tuple | list = (100, 100, 100, 0.1)
@@ -795,6 +747,14 @@ class VisualizeSkeleton:
             
         if self.mesh_roi == None:
             self.mesh_roi = []
+        
+        # Expand ROI names to include bilateral (L/R) variants
+        # e.g., 'LH' -> ['LH(L)', 'LH(R)']
+        if self.mesh_roi:
+            original_rois = list(self.mesh_roi)
+            self.mesh_roi = self._expand_roi_names(self.mesh_roi)
+            if self.mesh_roi != original_rois:
+                self._vprint(f"   🔄 ROI expansion: {original_rois} → {self.mesh_roi}", level='simple')
         
         # Ensure enough colors for all layers by cycling if needed
         n_layers = len(self.neuron_layers)
@@ -2656,6 +2616,99 @@ class VisualizeSkeleton:
         os.makedirs(cache_mesh_dir, exist_ok=True)
         return cache_mesh_dir
     
+    def _expand_roi_names(self, roi_list, available_rois=None):
+        """Expand ROI names to include bilateral (L/R) variants.
+        
+        When a user specifies 'LH', this function will automatically expand it to
+        ['LH(L)', 'LH(R)'] if both exist in the available ROIs. This makes it easier
+        to specify bilateral regions without explicitly naming both sides.
+        
+        Parameters
+        ----------
+        roi_list : list
+            List of ROI names to expand
+        available_rois : list, optional
+            List of available ROI names. If None, will be fetched from cache/API.
+            
+        Returns
+        -------
+        list
+            Expanded list of ROI names with bilateral variants
+            
+        Examples
+        --------
+        >>> _expand_roi_names(['LH', 'EB'])
+        ['LH(L)', 'LH(R)', 'EB']  # EB is not bilateral, so unchanged
+        
+        >>> _expand_roi_names(['LH(R)'])  # Already specific, no expansion
+        ['LH(R)']
+        """
+        if not roi_list:
+            return roi_list
+            
+        # Get available ROIs if not provided
+        if available_rois is None:
+            available_rois = self._get_available_rois(use_cache=True, fetch_online=False)
+        
+        # Create a set for faster lookup
+        available_set = set(available_rois) if available_rois else set()
+        
+        expanded = []
+        seen = set()  # Track seen ROIs to avoid duplicates
+        
+        for roi in roi_list:
+            # Check if ROI already has (L) or (R) suffix
+            if roi.endswith('(L)') or roi.endswith('(R)'):
+                if roi not in seen:
+                    expanded.append(roi)
+                    seen.add(roi)
+                continue
+            
+            # Check if the ROI exists as-is (like 'EB' which is unpaired)
+            if roi in available_set:
+                if roi not in seen:
+                    expanded.append(roi)
+                    seen.add(roi)
+                continue
+                
+            # Try to expand to bilateral variants
+            left_variant = f'{roi}(L)'
+            right_variant = f'{roi}(R)'
+            
+            found_left = left_variant in available_set
+            found_right = right_variant in available_set
+            
+            if found_left and found_right:
+                # Both sides exist, expand to both
+                if left_variant not in seen:
+                    expanded.append(left_variant)
+                    seen.add(left_variant)
+                if right_variant not in seen:
+                    expanded.append(right_variant)
+                    seen.add(right_variant)
+                self._vprint(f"   📍 Expanded '{roi}' → ['{left_variant}', '{right_variant}']", level='full')
+            elif found_left:
+                # Only left exists
+                if left_variant not in seen:
+                    expanded.append(left_variant)
+                    seen.add(left_variant)
+                self._vprint(f"   📍 Expanded '{roi}' → '{left_variant}' (only L available)", level='full')
+            elif found_right:
+                # Only right exists
+                if right_variant not in seen:
+                    expanded.append(right_variant)
+                    seen.add(right_variant)
+                self._vprint(f"   📍 Expanded '{roi}' → '{right_variant}' (only R available)", level='full')
+            else:
+                # No bilateral variants found, keep original (may still work if mesh file exists)
+                if roi not in seen:
+                    expanded.append(roi)
+                    seen.add(roi)
+                if available_set:
+                    self._vprint(f"   ⚠️  ROI '{roi}' not found in available ROIs (will try to load anyway)", level='full')
+        
+        return expanded
+
     def _get_available_rois(self, use_cache=True, fetch_online=True):
         """Query NeuPrint database for available ROIs in the current dataset.
         
@@ -3480,11 +3533,12 @@ class VisualizeSkeleton:
             template_info = self._get_template_info()
             mesh_display_name = template_info['mesh_name']
             
-            # For male-cns with vnc_mesh=True, use .mesh_brain to avoid VNC duplication
-            # (JRCFIB2022M.mesh contains both brain and VNC, so plotting it with vnc_mesh
-            # would show the VNC twice)
+            # For male-cns with brain_mesh='template', always use separate brain mesh
+            # (JRCFIB2022M.mesh contains both brain and VNC merged)
+            # VNC will be added separately only if vnc_mesh=True
             dataset_lower = self.dataset.lower()
-            use_brain_only = self.vnc_mesh and ('male-cns' in dataset_lower or 'malecns' in dataset_lower)
+            is_male_cns = 'male-cns' in dataset_lower or 'malecns' in dataset_lower
+            use_brain_only = is_male_cns and self.brain_mesh == 'template'
             
             if use_brain_only:
                 mesh_display_name = 'JRCFIB2022M (brain only)'

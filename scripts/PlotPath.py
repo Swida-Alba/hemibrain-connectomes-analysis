@@ -97,11 +97,11 @@ if __name__ == '__main__':
     
     # path_file = '/Users/apple/Local/connection_data/aMe12_R_to_PPL103_R/allpaths_L3w10r0_01p0_20251027_213354/aMe12_R_to_PPL103_R_allpaths_info.xlsx'
     # path_file = '/Users/apple/Desktop/_kuntest/test.xlsx'
-    path_file = '/Users/apple/Local/connection_data/aMe5_etc_etc_to_aMe5_etc_etc/direct_L2w1r0_0p0_0_20251116_140724/custom_groups/custom_groups_data.xlsx'
+    path_file = 'load_custom_data.xlsx'
     
     # Create visualizations with custom colors
     vp = VisualizePath(
-        path_file=None,
+        path_file=path_file,
         sheet_name=0,             # or 'path_bodyId' for bodyId-level paths (None = auto-select)
         output_folder=None,                 # None = auto-creates 'selected_paths' folder
         source_color=source_color,          # Custom source node color

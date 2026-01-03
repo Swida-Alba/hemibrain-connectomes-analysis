@@ -73,13 +73,6 @@ if __name__ == "__main__":
         'VT037867',
         'VT037866',
         'SS01015',
-        'SS55729',
-        'VT000770',
-        'VT002049',
-        'VT061931',
-        'IS55729',
-        'IS89488',
-        
     ]
     
     # Match algorithm: 'cds' (Color Depth Search), 'pppm', or 'both'
@@ -98,7 +91,7 @@ if __name__ == "__main__":
     similarity_methods = ['jaccard', 'weighted_jaccard']
     
     # Output directory (set to None for no file output)
-    output_dir = '/Users/apple/Local/connection_data/neuronbridge_finding'
+    output_dir = '../local_data/neuronbridge_finding'
     
     # ==========================================================================
     # 3D SKELETON VISUALIZATION - Visualize top N co-labeled types
@@ -107,7 +100,7 @@ if __name__ == "__main__":
     # Visualize top N types per dataset using 3D skeleton (0 = disabled)
     # This creates interactive HTML visualizations showing the top N neuron types
     # Output folder: plot3d_{dataset}/ (no timestamp, overwrites previous)
-    visualize_top_n = 0
+    visualize_top_n = 5
     
     # Generate individual profile PNGs for each neuron type
     # Creates a subfolder 'individual_profiles' with one PNG per type + PDF summary

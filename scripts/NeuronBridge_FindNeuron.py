@@ -73,7 +73,7 @@ if __name__ == "__main__":
     top_n = -1
     
     # Output directory (set to None for stdout only)
-    output_dir = '/Users/apple/Local/connection_data/neuronbridge_finding'
+    output_dir = '../local_data/neuronbridge_finding'
     
     # Path to datasets folder for neuron enrichment (None = auto-detect)
     datasets_path = None
@@ -91,7 +91,7 @@ if __name__ == "__main__":
     # Visualize top N types/bodyIds per dataset using 3D skeleton (0 = disabled)
     # This creates interactive HTML visualizations showing the top N neuron types or bodyIds
     # Output folder: plot3d_{dataset}/ (no timestamp, overwrites previous)
-    visualize_top_n = 50
+    visualize_top_n = 20
     
     # How to organize visualization: 'type' or 'bodyId'
     # - 'type': Group neurons by type (merge_neurons=True, shows combined morphology)

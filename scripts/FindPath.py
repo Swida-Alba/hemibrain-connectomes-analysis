@@ -15,19 +15,13 @@ if __name__ == '__main__':
     fc = FindNeuronConnection(
         # please provide your own neuprint token, which can be found at https://neuprint.janelia.org/account
         token='',
-        output_dir='/Users/apple/Local/connection_data',
-        # saveas='_name_test1',
+        output_dir='../local_data/connection_data',
         # dataset='male-cns:v0.9', 
         # dataset='hemibrain:v1.2.1',
         # dataset='optic-lobe:v1.1',
         dataset='flywire_FAFB_v783',
         sourceNeurons=['CB0038'],  # pd.read_excel('sourceNeurons.xlsx', header=None).iloc[:,0].tolist()
         targetNeurons=['LPLC2'],
-        # targetNeurons=['DN.*'],  # pd.read_excel('targetNeurons.xlsx', header=None).iloc[:,0].tolist()
-        # targetNeurons=[[11901,14633,12254,13531]],
-        # targetNeurons=[[720575940634984800,720575940627933336,720575940625254636,720575940619074049]],
-        # sourceNeurons = pd.read_excel('sourceNeurons.xlsx', header=None).iloc[:,0].tolist(),
-        # targetNeurons = pd.read_excel('targetNeurons.xlsx', header=None).iloc[:,0].tolist(),
         custom_source_name='Fdg', # you can specify a custom name for the source neurons, especially when you are using a list of many types of neurons or a list of neurons read from a file
         custom_target_name='',  # you can specify a custom name for the target neurons
         custom_source_group_names=[],

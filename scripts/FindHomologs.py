@@ -45,14 +45,11 @@ if __name__ == "__main__":
     finder = HomologFinder(
         token='',
 
-        source='GNG458', # MTe07/MeVPLo2
-        # source_dataset=dataset,
-        # target_dataset=dataset,
-        # source='aMe12',
+        source='VP2_adPN', # MTe07/MeVPLo2
         source_dataset='male-cns:v0.9',
-        target_dataset='flywire_FAFB_v783',
+        target_dataset='male-cns:v0.9',
         
-        output_dir='/Users/apple/Local/connection_data/homolog_finding/',
+        output_dir='../local_data/homolog_finding',
         visualize_skeleton=True,  # Enable to visualize top candidates
         visualize_top_n=5,         # Number of candidates to visualize
         verbose=True,
@@ -63,6 +60,7 @@ if __name__ == "__main__":
     
     # Run using defaults - no arguments needed!
     results1 = finder.find_homologs_fast()
+    
     # results2 = finder.direct_comparison(
     #     neurons_a='aMe12',
     #     neurons_b='aMe12',
