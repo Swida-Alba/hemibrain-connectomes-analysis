@@ -48,6 +48,9 @@ from typing import Any, Dict, List, Optional, Tuple, Union, TYPE_CHECKING
 import numpy as np
 import pandas as pd
 
+if TYPE_CHECKING:
+    from comparison.label_mapper import LabelMapper
+
 # Try to import tqdm for progress bars
 try:
     from tqdm import tqdm
@@ -215,6 +218,12 @@ GAL4_LEXA_PREFIXES = ('VT', 'R', 'GMR')
 # Split-GAL4 lines: SS (Split Screen), LH (Lateral Horn), MB (Mushroom Body), etc.
 SPLIT_GAL4_PREFIXES = ('SS', 'LH', 'MB', 'IS', 'OL', 'LC', 'LLPC', 'LPC', 'JRC_SS', 'BJD_SS')
 
+# Valid input values for validation (case-insensitive)
+VALID_MATCH_TYPES = {'cds', 'pppm', 'both'}
+VALID_REGIONS = {'brain', 'vnc', 'all'}
+VALID_SIMILARITY_METHODS = {'jaccard', 'weighted_jaccard', 'rank_correlation'}
+VALID_SORT_BY = {'completeness', 'max'}
+
 
 @dataclass
 class NeuronBridgeFinder:
@@ -247,9 +256,9 @@ class NeuronBridgeFinder:
     neuprint_server : str
         NeuPrint server URL. Default: 'https://neuprint.janelia.org'
     match_type : str
-        Default match algorithm: 'cds', 'pppm', or 'both'. Default: 'cds'
+        Default match algorithm: 'cds', 'pppm', or 'both' (case-insensitive). Default: 'cds'
     region : str
-        Filter images by anatomical region: 'Brain', 'VNC', or 'All'. Default: 'All'
+        Filter images by anatomical region: 'Brain', 'VNC', or 'All' (case-insensitive). Default: 'All'
     max_api_images_per_line : int
         Maximum LM images to process per driver line for API calls. Use -1 for unlimited. Default: -1
         Images are pre-filtered by match_type availability before limiting.
@@ -300,6 +309,29 @@ class NeuronBridgeFinder:
                 "neuronbridge-python is required. Install with: pip install neuronbridge-python"
             )
         
+        # Validate and normalize match_type (case-insensitive)
+        if isinstance(self.match_type, str):
+            normalized_match_type = self.match_type.lower().strip()
+            if normalized_match_type not in VALID_MATCH_TYPES:
+                raise ValueError(
+                    f"Invalid match_type: '{self.match_type}'. "
+                    f"Must be one of: {', '.join(sorted(VALID_MATCH_TYPES))}"
+                )
+            # Use object.__setattr__ for frozen dataclass compatibility
+            object.__setattr__(self, 'match_type', normalized_match_type)
+        
+        # Validate and normalize region (case-insensitive)
+        if isinstance(self.region, str):
+            normalized_region = self.region.lower().strip()
+            if normalized_region not in VALID_REGIONS:
+                raise ValueError(
+                    f"Invalid region: '{self.region}'. "
+                    f"Must be one of: {', '.join(sorted(VALID_REGIONS))}"
+                )
+            # Store in title case for display consistency (Brain, VNC, All)
+            region_display = {'brain': 'Brain', 'vnc': 'VNC', 'all': 'All'}
+            object.__setattr__(self, 'region', region_display[normalized_region])
+        
         # Set default datasets path
         if self.datasets_path is None:
             module_dir = os.path.dirname(os.path.abspath(__file__))
@@ -345,6 +377,87 @@ class NeuronBridgeFinder:
                     print(msg, end=end)
             else:
                 print(msg, end=end)
+    
+    def _validate_match_type(self, match_type: str) -> str:
+        """
+        Validate and normalize match_type parameter.
+        
+        Parameters
+        ----------
+        match_type : str
+            Match type to validate ('cds', 'pppm', or 'both')
+            
+        Returns
+        -------
+        str
+            Normalized (lowercase) match_type
+            
+        Raises
+        ------
+        ValueError
+            If match_type is not valid
+        """
+        normalized = match_type.lower().strip()
+        if normalized not in VALID_MATCH_TYPES:
+            raise ValueError(
+                f"Invalid match_type: '{match_type}'. "
+                f"Must be one of: {', '.join(sorted(VALID_MATCH_TYPES))}"
+            )
+        return normalized
+    
+    def _validate_similarity_method(self, method: str) -> str:
+        """
+        Validate and normalize similarity_method parameter.
+        
+        Parameters
+        ----------
+        method : str
+            Similarity method to validate
+            
+        Returns
+        -------
+        str
+            Normalized (lowercase) similarity method
+            
+        Raises
+        ------
+        ValueError
+            If method is not valid
+        """
+        normalized = method.lower().strip()
+        if normalized not in VALID_SIMILARITY_METHODS:
+            raise ValueError(
+                f"Invalid similarity_method: '{method}'. "
+                f"Must be one of: {', '.join(sorted(VALID_SIMILARITY_METHODS))}"
+            )
+        return normalized
+    
+    def _validate_sort_by(self, sort_by: str) -> str:
+        """
+        Validate and normalize sort_by parameter.
+        
+        Parameters
+        ----------
+        sort_by : str
+            Sort method: 'completeness' or 'max'
+            
+        Returns
+        -------
+        str
+            Normalized (lowercase) sort_by value
+            
+        Raises
+        ------
+        ValueError
+            If sort_by is not valid
+        """
+        normalized = sort_by.lower().strip()
+        if normalized not in VALID_SORT_BY:
+            raise ValueError(
+                f"Invalid sort_by: '{sort_by}'. "
+                f"Must be one of: {', '.join(sorted(VALID_SORT_BY))}"
+            )
+        return normalized
     
     def _print_warning_summary(self):
         """Print collected warnings as a summary."""
@@ -882,6 +995,10 @@ class NeuronBridgeFinder:
             - co_labeling_matrix: DataFrame with similarities based on cell types
             - line_type_sets: Dict mapping line names to sets of cell type names
         """
+        # Validate inputs using helper methods
+        match_type = self._validate_match_type(match_type)
+        similarity_method = self._validate_similarity_method(similarity_method)
+        
         self._vprint(f"\n🔗 Building co-labeling matrix for {len(lines)} lines...")
         self._vprint(f"   📊 Similarity method: {similarity_method}")
         if min_score > 0:
@@ -1146,27 +1263,32 @@ class NeuronBridgeFinder:
         n_lines = len(expression_transposed.columns)
         
         # Calculate metrics for each type (row)
-        nonzero_count = (expression_transposed > 0).sum(axis=1)  # Count of non-zero lines
-        total_score = expression_transposed.sum(axis=1)  # Sum of scores
-        min_score = expression_transposed.min(axis=1)  # Minimum score (0 if any line has 0)
+        nonzero_count = (expression_transposed > 0).sum(axis=1)
+        is_complete = (nonzero_count == n_lines).astype(int)
         
         # Create sorting key:
         # - Primary: whether labeled in all lines (1 if all, 0 if not) - descending
-        # - Secondary (for complete): minimum score - descending (higher min = more consistent)
-        # - Secondary (for partial): number of non-zero entries - descending
-        # - Tertiary: total score - descending
-        is_complete = (nonzero_count == n_lines).astype(int)
+        # - Secondary: min_score except 0s iteratedly (tuple of sorted non-zero scores) - descending
+        #   This sorts by the smallest non-zero score, then the next smallest, etc.
         
-        # Create a composite sort key (negate for descending sort)
+        # Helper to get sorted non-zeros tuple
+        def get_nonzero_tuple(row):
+            return tuple(sorted(row[row > 0]))
+            
+        nonzero_tuples = expression_transposed.apply(get_nonzero_tuple, axis=1)
+        
+        # Create temp dataframe for sorting
         sort_df = pd.DataFrame({
-            'is_complete': -is_complete,
-            'min_score': -min_score,
-            'nonzero_count': -nonzero_count,
-            'total_score': -total_score
+            'is_complete': is_complete,
+            'nonzero_count': nonzero_count,
+            'nonzero_tuples': nonzero_tuples
         }, index=expression_transposed.index)
         
         # Sort by the composite key
-        sorted_index = sort_df.sort_values(['is_complete', 'min_score', 'nonzero_count', 'total_score']).index
+        sorted_index = sort_df.sort_values(
+            by=['is_complete', 'nonzero_count', 'nonzero_tuples'], 
+            ascending=[False, False, False]
+        ).index
         expression_transposed = expression_transposed.loc[sorted_index]
         
         if as_types_rows:
@@ -1212,10 +1334,22 @@ class NeuronBridgeFinder:
         try:
             from vispath_pkg import VisConnMatInteractive
         except ImportError:
+            # Try to add vispath-subproject/src to path
+            import sys
+            from pathlib import Path
+            
+            # Find repo root (assuming we are in src/)
+            current_file = Path(__file__).resolve()
+            repo_root = current_file.parent.parent
+            vispath_src = repo_root / 'vispath-subproject' / 'src'
+            
+            if vispath_src.exists() and str(vispath_src) not in sys.path:
+                sys.path.append(str(vispath_src))
+            
             try:
-                from .statvis import VisConnMatInteractive
+                from vispath_pkg import VisConnMatInteractive
             except ImportError:
-                self._vprint("   ⚠️ Could not import VisConnMatInteractive from vispath_pkg or statvis")
+                self._vprint("   ⚠️ Could not import VisConnMatInteractive from vispath_pkg")
                 return ""
         
         # Create output directory if needed
@@ -1568,10 +1702,22 @@ class NeuronBridgeFinder:
         try:
             from vispath_pkg import VisConnMatInteractive
         except ImportError:
+            # Try to add vispath-subproject/src to path
+            import sys
+            from pathlib import Path
+            
+            # Find repo root (assuming we are in src/)
+            current_file = Path(__file__).resolve()
+            repo_root = current_file.parent.parent
+            vispath_src = repo_root / 'vispath-subproject' / 'src'
+            
+            if vispath_src.exists() and str(vispath_src) not in sys.path:
+                sys.path.append(str(vispath_src))
+            
             try:
-                from .statvis import VisConnMatInteractive
+                from vispath_pkg import VisConnMatInteractive
             except ImportError:
-                self._vprint("   ⚠️ Could not import VisConnMatInteractive from vispath_pkg or statvis")
+                self._vprint("   ⚠️ Could not import VisConnMatInteractive from vispath_pkg")
                 return ""
         
         os.makedirs(output_path, exist_ok=True)
@@ -1678,10 +1824,22 @@ class NeuronBridgeFinder:
         try:
             from vispath_pkg import VisConnMatInteractive
         except ImportError:
+            # Try to add vispath-subproject/src to path
+            import sys
+            from pathlib import Path
+            
+            # Find repo root (assuming we are in src/)
+            current_file = Path(__file__).resolve()
+            repo_root = current_file.parent.parent
+            vispath_src = repo_root / 'vispath-subproject' / 'src'
+            
+            if vispath_src.exists() and str(vispath_src) not in sys.path:
+                sys.path.append(str(vispath_src))
+            
             try:
-                from .statvis import VisConnMatInteractive
+                from vispath_pkg import VisConnMatInteractive
             except ImportError:
-                self._vprint("   ⚠️ Could not import VisConnMatInteractive from vispath_pkg or statvis")
+                self._vprint("   ⚠️ Could not import VisConnMatInteractive from vispath_pkg")
                 return ""
         
         os.makedirs(output_path, exist_ok=True)
@@ -4524,6 +4682,9 @@ class NeuronBridgeFinder:
         >>> lines = nbf.id_to_lines(636798093)
         >>> print(lines)
         """
+        # Validate and normalize match_type
+        match_type = self._validate_match_type(match_type)
+        
         self._vprint(f"🔍 Searching for lines matching body ID: {body_id}")
         
         # Check cache (include all parameters in key)
@@ -4593,6 +4754,9 @@ class NeuronBridgeFinder:
         >>> for body_id, lines_df in results.items():
         ...     print(f"Body ID {body_id}: {len(lines_df)} matches")
         """
+        # Validate and normalize match_type
+        match_type = self._validate_match_type(match_type)
+        
         self._vprint(f"🔍 Searching for lines matching query: {query}")
         
         # Find matching bodyIds (now returns list of dicts with bodyId and dataset)
@@ -4739,6 +4903,9 @@ class NeuronBridgeFinder:
         >>> neurons = nbf.line_to_neuron('LH173')
         >>> print(neurons)
         """
+        # Validate and normalize match_type
+        match_type = self._validate_match_type(match_type)
+        
         # Only print search message if not in batch/progress mode
         # (check if we're being called from within a progress bar loop)
         import inspect
@@ -5384,6 +5551,10 @@ class NeuronBridgeFinder:
         # Use class-level match_type if not specified
         if match_type is None:
             match_type = self.match_type
+        else:
+            # Validate and normalize match_type using helper
+            match_type = self._validate_match_type(match_type)
+            
         # Parse line names
         if isinstance(line_names, str):
             lines = [ln.strip() for ln in line_names.split(',') if ln.strip()]
@@ -5736,10 +5907,16 @@ class NeuronBridgeFinder:
         # Use class-level match_type if not specified
         if match_type is None:
             match_type = self.match_type
+        else:
+            # Validate and normalize match_type using helper
+            match_type = self._validate_match_type(match_type)
             
         # Normalize similarity_methods
         if isinstance(similarity_methods, str):
             similarity_methods = [similarity_methods]
+        
+        # Validate similarity_methods using helper
+        similarity_methods = [self._validate_similarity_method(m) for m in similarity_methods]
         
         self._vprint(f"\n{'='*60}")
         self._vprint(f"🔬 Co-Labeling Analysis")
@@ -6224,8 +6401,8 @@ class NeuronBridgeFinder:
                 <th>Rank</th>
                 <th>Line</th>
                 <th>Sparsity</th>
-                <th>Co-labeling Lines</th>
-                <th>Types Labeled</th>
+                <th>Quality Factor (Qf)</th>
+                <th>Types (HMS)</th>
             </tr>
 '''
         
@@ -6235,8 +6412,8 @@ class NeuronBridgeFinder:
                 <td>{i}</td>
                 <td><strong>{line_data['line']}</strong></td>
                 <td>{line_data['colabel_sparsity']:.3f}</td>
-                <td>{line_data['n_colabeling_lines']}</td>
-                <td>{line_data['n_types']}</td>
+                <td>{line_data.get('Qf', 0):.2f}</td>
+                <td>{line_data.get('n_types_HMS', 0)}</td>
             </tr>
 '''
         
@@ -6329,9 +6506,10 @@ class NeuronBridgeFinder:
 
     def find_lines_batch(
         self,
-        queries: Union[str, int, List, 'LabelMapper'],
+        queries: Union[str, int, List[Union[str, int]], Any],  # str, int, List, or LabelMapper
         dataset: Optional[Union[str, List[str]]] = None,
         match_type: Optional[str] = None,
+        sort_by: str = 'completeness',
         output_dir: Optional[str] = None,
         download_images: Optional[str] = 'flylight',
         download_img_for_top_n_lines: Optional[int] = 10,
@@ -6369,6 +6547,11 @@ class NeuronBridgeFinder:
         match_type : str, optional
             Match algorithm: 'cds', 'pppm', or 'both'. 
             If None, uses self.match_type. Default: None
+        sort_by : str
+            Sorting method for line summary results (case-insensitive):
+            - 'completeness': Sort by weighted_score (prioritizes lines labeling ALL queried neurons)
+            - 'max': Sort by agg_max_score (prioritizes lines with highest individual match scores)
+            Default: 'completeness'
         output_dir : str, optional
             Directory to save results. If provided, saves individual and combined CSVs.
         download_images : str, optional
@@ -6549,6 +6732,12 @@ class NeuronBridgeFinder:
         # Use class-level match_type if not specified
         if match_type is None:
             match_type = self.match_type
+        else:
+            # Validate and normalize match_type using helper
+            match_type = self._validate_match_type(match_type)
+        
+        # Validate and normalize sort_by
+        sort_by = self._validate_sort_by(sort_by)
         
         if not query_list:
             self._vprint("❌ No queries provided")
@@ -6583,6 +6772,7 @@ class NeuronBridgeFinder:
                     'queries': query_list,
                     'dataset': dataset,
                     'match_type': match_type,
+                    'sort_by': sort_by,
                     'download_images': download_images,
                     'download_img_for_top_n_lines': download_img_for_top_n_lines,
                     'image_formats': image_formats,
@@ -6874,11 +7064,19 @@ class NeuronBridgeFinder:
                     if 'match_count' in line_stats.columns and total_query_neurons > 0:
                         line_stats['coverage_ratio'] = line_stats['match_count'] / total_query_neurons
                         line_stats['weighted_score'] = line_stats['agg_max_score'] * line_stats['coverage_ratio']
-                        # Sort by weighted_score (higher is better), then by combined_rank (lower is better)
-                        line_stats = line_stats.sort_values(
-                            ['weighted_score', 'agg_combined_rank'], 
-                            ascending=[False, True]
-                        )
+                        # Sort based on sort_by parameter
+                        if sort_by == 'completeness':
+                            # Sort by weighted_score (higher is better), then by combined_rank (lower is better)
+                            line_stats = line_stats.sort_values(
+                                ['weighted_score', 'agg_combined_rank'], 
+                                ascending=[False, True]
+                            )
+                        else:  # sort_by == 'max'
+                            # Sort by agg_max_score (higher is better), then by combined_rank (lower is better)
+                            line_stats = line_stats.sort_values(
+                                ['agg_max_score', 'agg_combined_rank'], 
+                                ascending=[False, True]
+                            )
                     else:
                         line_stats = line_stats.sort_values('agg_combined_rank', ascending=True)
                 else:
@@ -6988,16 +7186,25 @@ class NeuronBridgeFinder:
                         line_stats['coverage_ratio'] = line_stats['match_count'] / total_query_neurons
                         line_stats['weighted_score'] = line_stats['agg_mean_score'] * line_stats['coverage_ratio']
                         
-                        # Sort by weighted_score (prioritizes lines labeling ALL queried neurons)
-                        line_stats = line_stats.sort_values('weighted_score', ascending=False)
-                        self._vprint(f"   📊 Sorting by weighted_score (agg_mean_score × coverage_ratio)")
+                        # Sort based on sort_by parameter
+                        if sort_by == 'completeness':
+                            # Sort by weighted_score (prioritizes lines labeling ALL queried neurons)
+                            line_stats = line_stats.sort_values('weighted_score', ascending=False)
+                            self._vprint(f"   📊 Sorting by weighted_score (agg_mean_score × coverage_ratio)")
+                        else:  # sort_by == 'max'
+                            # Sort by agg_max_score (prioritizes lines with highest individual scores)
+                            line_stats = line_stats.sort_values('agg_max_score', ascending=False)
+                            self._vprint(f"   📊 Sorting by agg_max_score (highest individual match scores)")
                         self._vprint(f"      Total query neurons: {total_query_neurons}")
                     elif is_multi_dataset:
                         # Fallback to min_score_per_dataset for multi-dataset
                         line_stats = line_stats.sort_values('min_score_per_dataset', ascending=False)
                         self._vprint(f"   📊 Multi-dataset sorting: by min_score_per_dataset (descending)")
                     else:
-                        line_stats = line_stats.sort_values('agg_mean_score', ascending=False)
+                        if sort_by == 'completeness':
+                            line_stats = line_stats.sort_values('agg_mean_score', ascending=False)
+                        else:  # sort_by == 'max'
+                            line_stats = line_stats.sort_values('agg_max_score', ascending=False)
                 
                 # Add aggregated stats back to combined_df
                 merge_cols = ['line', 'matched_bodyIds']
@@ -7024,6 +7231,20 @@ class NeuronBridgeFinder:
                 # Save line-level aggregate summary
                 if 'line' in combined_df.columns:
                     summary_file = os.path.join(output_path, 'line_summary.csv')
+                    
+                    # Reorder columns: put weighted_score before agg_mean_score
+                    # Desired order: line, match_count, weighted_score, coverage_ratio, agg_mean_score, agg_max_score, ...
+                    cols = list(line_stats.columns)
+                    priority_cols = ['line', 'line_type', 'match_count', 'weighted_score', 'coverage_ratio', 
+                                     'agg_mean_score', 'agg_max_score', 'min_score_per_dataset', 
+                                     'cross_dataset_score', 'datasets_labeled', 'matched_bodyIds', 
+                                     'matched_types', 'matched_datasets']
+                    # Build ordered column list: priority columns first (if they exist), then remaining
+                    ordered_cols = [col for col in priority_cols if col in cols]
+                    remaining_cols = [col for col in cols if col not in ordered_cols]
+                    final_cols = ordered_cols + remaining_cols
+                    line_stats = line_stats[final_cols]
+                    
                     line_stats.to_csv(summary_file, index=False)
                     self._vprint(f"   Summary: {summary_file} ({len(line_stats)} unique lines)")
                     

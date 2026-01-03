@@ -72,19 +72,14 @@ if __name__ == "__main__":
     lines = [
         'VT037867',
         'VT037866',
-        'VT000770',
-        'VT061518',
-        'VT002049',
-        'VT008170',
-        'VT008825',
-        'VT061931',
         'SS01015',
         'SS55729',
-        'IS29143',
-        'IS51401',
-        'IS55703',
+        'VT000770',
+        'VT002049',
+        'VT061931',
         'IS55729',
-        'IS74039',
+        'IS89488',
+        
     ]
     
     # Match algorithm: 'cds' (Color Depth Search), 'pppm', or 'both'
@@ -112,7 +107,7 @@ if __name__ == "__main__":
     # Visualize top N types per dataset using 3D skeleton (0 = disabled)
     # This creates interactive HTML visualizations showing the top N neuron types
     # Output folder: plot3d_{dataset}/ (no timestamp, overwrites previous)
-    visualize_top_n = 20
+    visualize_top_n = 0
     
     # Generate individual profile PNGs for each neuron type
     # Creates a subfolder 'individual_profiles' with one PNG per type + PDF summary
@@ -131,13 +126,13 @@ if __name__ == "__main__":
     # This does NOT filter data from expression matrix - all neurons are included
     # Only affects labeling distribution plots (highlighting high-confidence matches)
     # Default: 20000. Set to 0 to disable visualization threshold
-    min_score = 30000
+    min_score = 20000
     
     # Minimum average score threshold for types in SIMILARITY matrix (clustering)
     # Types with average score < threshold may be excluded from clustering
     # Note: Expression matrix includes ALL types regardless of this threshold
     # Default: 10000. Set to 0 to include all types in clustering
-    min_type_avg_score = 30000
+    min_type_avg_score = 20000
     
     # ==========================================================================
     # ADVANCED OPTIONS
