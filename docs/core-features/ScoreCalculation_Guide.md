@@ -52,7 +52,7 @@ These metrics are calculated for each individual synaptic connection (edge) in t
 
 **Formula**:
 
-$$\text{connection\_ratio}_{ij} = \frac{w_{ij}}{W_j}$$
+$$\mathit{ratio}_{ij} = \frac{w_{ij}}{W_j}$$
 
 Where:
 - $w_{ij}$ = Number of synapses from neuron $i$ to neuron $j$ (weight)
@@ -85,7 +85,7 @@ connection_ratio = 50 / 200 = 0.25 (25%)
 
 **Formula**:
 
-$$p_{ij} = \min\left(1.0, \frac{w_{ij}}{W_j \times 0.3}\right) = \min\left(1.0, \frac{\text{connection\_ratio}_{ij}}{0.3}\right)$$
+$$p_{ij} = \min\left(1.0, \frac{w_{ij}}{W_j \times 0.3}\right) = \min\left(1.0, \frac{\mathit{ratio}_{ij}}{0.3}\right)$$
 
 **The 0.3 Biological Threshold**:
 
@@ -116,7 +116,7 @@ The 0.3 scaling factor represents a **30% input threshold**—connections provid
 
 **Formula**:
 
-$$\text{block\_probability}_{ij} = 1 - \text{traversal\_probability}_{ij}$$
+$$\mathit{block}_{ij} = 1 - \mathit{p}_{ij}$$
 
 **Used in**:
 - [`src/statvis.py`](../../src/statvis.py#L4607-L4609) - Path probability calculations
@@ -134,7 +134,7 @@ When analyzing connections between neuron **types** (populations), individual co
 
 **Formula**:
 
-$$\text{connection\_ratio}_{AB} = \frac{\sum_{i \in A, j \in B} w_{ij}}{\sum_{j \in B} W_j}$$
+$$\mathit{ratio}_{AB} = \frac{\sum_{i \in A, j \in B} w_{ij}}{\sum_{j \in B} W_j}$$
 
 Where:
 - $A$ = Set of neurons of type A (presynaptic population)
@@ -175,7 +175,7 @@ mat_ratio = df.pivot(values='connection_ratio', index='type_pre',
 
 Models signal propagation as requiring ALL individual connections to transmit:
 
-$$p_{AB}^{\text{product}} = 1 - \prod_{i \in A, j \in B} (1 - p_{ij})$$
+$$p_{AB}^{\mathrm{product}} = 1 - \prod_{i \in A, j \in B} (1 - p_{ij})$$
 
 **Implementation** ([`src/statvis.py`](../../src/statvis.py#L4754-L4761)):
 
@@ -191,7 +191,7 @@ conn_type['traversal_probability'] = 1 - conn_traversal['block_probability']
 
 Uses weighted average of individual traversal probabilities:
 
-$$p_{AB}^{\text{average}} = \frac{\sum_{i \in A, j \in B} w_{ij} \cdot p_{ij}}{\sum_{i \in A, j \in B} w_{ij}}$$
+$$p_{AB}^{\mathrm{average}} = \frac{\sum_{i \in A, j \in B} w_{ij} \cdot p_{ij}}{\sum_{i \in A, j \in B} w_{ij}}$$
 
 **Implementation** ([`src/statvis.py`](../../src/statvis.py#L4763-L4768)):
 
@@ -218,7 +218,7 @@ For multi-hop pathways (A → B → C → D), path-level metrics aggregate edge 
 
 **Formula**:
 
-$$P_\text{path} = \prod_{k=1}^{n} p_{k,k+1}$$
+$$P_\mathrm{path} = \prod_{k=1}^{n} p_{k,k+1}$$
 
 Where the path has $n$ edges with individual traversal probabilities $p_{k,k+1}$.
 
@@ -252,7 +252,7 @@ row = {
 
 **Formula**:
 
-$$w_\text{min} = \min_{k=1}^{n} w_{k,k+1}$$
+$$w_\mathrm{min} = \min_{k=1}^{n} w_{k,k+1}$$
 
 **Used for**: Identifying the limiting factor in signal transmission.
 
@@ -300,7 +300,7 @@ These scores are used for EM↔LM mapping via NeuronBridge.
 
 **Formula**:
 
-$$\text{coverage\_ratio} = \frac{\text{match\_count}}{\text{total\_query\_neurons}}$$
+$$\mathit{coverage} = \frac{\mathit{matches}}{\mathit{total}}$$
 
 Where:
 - `match_count` = Number of unique queried neurons this line matches
@@ -328,11 +328,11 @@ line_stats['coverage_ratio'] = line_stats['match_count'] / total_query_neurons
 
 **Formula**:
 
-$$\text{weighted\_score} = \text{agg\_mean\_score} \times \text{coverage\_ratio}$$
+$$\mathit{weighted} = \mathit{mean} \times \mathit{coverage}$$
 
 Or equivalently:
 
-$$\text{weighted\_score} = \text{agg\_mean\_score} \times \frac{\text{match\_count}}{\text{total\_query\_neurons}}$$
+$$\mathit{weighted} = \mathit{mean} \times \frac{\mathit{matches}}{\mathit{total}}$$
 
 **Sorting Modes** (controlled by `sort_by` parameter):
 
@@ -387,10 +387,10 @@ else:  # sort_by == 'max'
 **Formulas**:
 
 1. **Min Score per Dataset**: Worst-case performance across datasets
-   $$\text{min\_score\_per\_dataset} = \min_{d \in \text{datasets}} \max_{n \in d} \text{score}_{n}$$
+   $$\mathit{minScore} = \min_{d \in \mathit{datasets}} \max_{n \in d} score_{n}$$
 
 2. **Cross-Dataset Score**: Average of max scores across datasets
-   $$\text{cross\_dataset\_score} = \frac{1}{|D|} \sum_{d \in D} \max_{n \in d} \text{score}_{n}$$
+   $$\mathit{crossScore} = \frac{1}{|D|} \sum_{d \in D} \max_{n \in d} score_{n}$$
 
 **Used for**: Finding lines that reliably label homologous neurons in multiple connectome datasets.
 
