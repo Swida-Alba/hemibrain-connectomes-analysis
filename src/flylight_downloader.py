@@ -250,6 +250,7 @@ class FlyLightDownloader:
         collection_category: Category to filter ('GAL4', 'SplitGAL4', 'MCFO', 'All')
         formats: File formats to include ('png', 'h5j', 'lsm', 'mp4', 'json', 'all')
         image_types: Image types to include ('mip', 'cdm', 'aligned', etc.)
+        region: Anatomical region filter ('Brain', 'VNC', or 'All')
         max_workers: Number of parallel download threads
         verbose: Print progress messages
         use_boto3: Use boto3 for downloads (faster) if available
@@ -261,6 +262,11 @@ class FlyLightDownloader:
         - 'MCFO': MCFO stochastic labeling collections
         - 'RawImages': Collections with raw LSM confocal data
         - 'All': All available collections
+        
+    Region Filtering:
+        - 'Brain': Only files with brain imagery (excludes VNC)
+        - 'VNC': Only files with ventral nerve cord imagery
+        - 'All': All regions (default)
         
     Simple Mode Filtering:
         When simple_mode=True, applies filename-based filtering to reduce download volume:
@@ -278,13 +284,14 @@ class FlyLightDownloader:
     output_dir: str = './flylight_downloads'
     collections: Optional[List[str]] = None
     collection_category: Optional[Union[str, List[str]]] = None  # 'GAL4/LEXA', 'SplitGAL4', 'MCFO', 'RawImages', 'All'
-    formats: Union[str, List[str]] = 'png'
+    formats: Union[str, List[str]] = field(default_factory=lambda: ['png', 'jpg'])
     image_types: Union[str, List[str]] = 'all'
+    region: str = 'All'  # 'Brain', 'VNC', or 'All' - filter by anatomical region
     max_workers: int = 4
     verbose: bool = True
     use_boto3: bool = True
     include_vt_lines: bool = True  # Also search VT lines via HTTP CDN
-    simple_mode: bool = False  # Apply filename filtering to reduce download volume
+    simple_mode: bool = True  # Apply filename filtering to reduce download volume
     
     # Internal state
     _s3_client: Any = field(default=None, repr=False, init=False)
@@ -380,6 +387,17 @@ class FlyLightDownloader:
     def _is_vt_line(self, line_name: str) -> bool:
         """Check if a line name is a VT line (served from HTTP CDN)."""
         return bool(re.match(r'^VT\d+', line_name, re.IGNORECASE))
+    
+    def _is_r_line(self, line_name: str) -> bool:
+        """Check if a line name is an R-line (GMR collection, served from flweb CGI).
+        
+        R-lines follow the pattern R##X## (e.g., R78H08, R14A01) where:
+        - R = prefix
+        - ## = two digits
+        - X = single letter (A-Z)
+        - ## = two digits
+        """
+        return bool(re.match(r'^R\d{2}[A-Z]\d{2}$', line_name, re.IGNORECASE))
     
     def _parse_vt_page(self, line_name: str) -> tuple[List[VTSampleInfo], str]:
         """
@@ -526,6 +544,78 @@ class FlyLightDownloader:
                 http_url=video_url
             ))
         
+        return files
+    
+    def _get_r_line_files(self, line_name: str) -> List[FlyLightFile]:
+        """
+        Get available files for an R-line from the FlyLight web interface.
+        
+        R-lines (GMR collection) have expression pattern images available at
+        flweb.janelia.org. Unlike VT lines, R-lines use a different naming
+        convention and may have images in multiple formats (GAL4, LexA).
+        
+        Args:
+            line_name: R-line name (e.g., 'R78H08')
+            
+        Returns:
+            List of FlyLightFile objects for available images
+        """
+        url = f"{VT_VIEW_CGI}?line={line_name}"
+        files = []
+        
+        try:
+            with urllib.request.urlopen(url, timeout=30) as response:
+                html = response.read().decode('utf-8')
+        except Exception as e:
+            self._log(f"❌ Error fetching R-line page: {e}")
+            return files
+        
+        # Extract all unique flimg URLs from the page (without query params)
+        # Pattern: https://flimg.janelia.org/flylight-image/external-data/adult/secdata/projections/.../*.jpg
+        url_pattern = re.compile(
+            r'https://flimg\.janelia\.org/flylight-image/external-data/adult/secdata/'
+            r'(projections|translations)/'
+            r'([^/]+)/'  # date or line folder
+            r'([^/]+)/'  # sample folder
+            r'([^"\?\']+\.(jpg|mp4))',  # filename with extension
+            re.IGNORECASE
+        )
+        
+        # Find all matches and deduplicate
+        seen_urls = set()
+        for match in url_pattern.finditer(html):
+            image_type, folder, sample_path, filename, ext = match.groups()
+            # Construct clean URL without query params
+            clean_url = f"https://flimg.janelia.org/flylight-image/external-data/adult/secdata/{image_type}/{folder}/{sample_path}/{filename}"
+            
+            if clean_url in seen_urls:
+                continue
+            seen_urls.add(clean_url)
+            
+            # Determine region from sample path
+            sample_lower = sample_path.lower()
+            if '-fa' in sample_lower and 'b' in sample_lower.split('-fa')[-1][:3]:
+                region = 'brain'
+            elif '-fa' in sample_lower and 'v' in sample_lower.split('-fa')[-1][:3]:
+                region = 'vnc'
+            else:
+                region = 'unknown'
+            
+            # Determine if it's GAL4 or LexA from the path/filename
+            driver = 'LexA' if '_LJ_' in sample_path or '_L_' in filename or 'LexA' in filename else 'GAL4'
+            collection = f'Gen1 {driver}'
+            
+            files.append(FlyLightFile(
+                key=f"{collection}/{line_name}/{region}/{filename}",
+                size=0,  # Unknown until HEAD request
+                last_modified='',
+                collection=collection,
+                line_name=line_name,
+                source='http',
+                http_url=clean_url
+            ))
+        
+        self._log(f"   Found {len(files)} files from flweb.janelia.org")
         return files
     
     def _get_vt_mcfo_files(self, line_name: str) -> List[FlyLightFile]:
@@ -706,7 +796,7 @@ class FlyLightDownloader:
         return patterns
     
     def _matches_filters(self, file: FlyLightFile) -> bool:
-        """Check if a file matches the format and image type filters."""
+        """Check if a file matches the format, image type, and region filters."""
         # Check format
         extensions = self._get_format_extensions()
         if not any(file.filename.lower().endswith(ext) for ext in extensions):
@@ -716,6 +806,35 @@ class FlyLightDownloader:
         patterns = self._get_image_type_patterns()
         if not any(p.search(file.filename) for p in patterns):
             return False
+        
+        # Check region filter
+        if self.region and self.region.lower() != 'all':
+            filename_lower = file.filename.lower()
+            key_lower = file.key.lower() if file.key else ''
+            region_lower = self.region.lower()
+            
+            # Detect region from filename or key patterns
+            # S3 files: '-brain-' or '-ventral_nerve_cord-' or '-vnc-'
+            # R-line/VT files: 'fA01b' or 'fA00b' (brain), 'fA01v' or 'fA00v' (VNC)
+            combined = filename_lower + ' ' + key_lower
+            is_brain = ('-brain-' in combined or 
+                       '_brain' in combined or
+                       'fa01b' in combined or 
+                       'fa00b' in combined)
+            is_vnc = ('-ventral_nerve_cord-' in combined or 
+                      '-vnc-' in combined or 
+                      '_vnc' in combined or
+                      'fa01v' in combined or
+                      'fa00v' in combined)
+            
+            if region_lower == 'brain':
+                # Only brain files, or files without clear region (e.g., VT GAL4 projections)
+                if is_vnc:
+                    return False
+            elif region_lower == 'vnc':
+                # Only VNC files
+                if is_brain or (not is_vnc and not is_brain):
+                    return False
         
         return True
     
@@ -870,8 +989,33 @@ class FlyLightDownloader:
                 # No matching category - return empty
                 self._log(f"   ⚠️ No matching VT collections for category")
                 all_files = []
+        # Check if this is an R-line - use HTTP viewer for expression patterns
+        elif self._is_r_line(line_name):
+            self._log(f"   Detected R-line (GMR collection) - searching flweb.janelia.org...")
+            
+            # Get expression pattern images from flweb.janelia.org
+            http_files = self._get_r_line_files(line_name)
+            all_files.extend(http_files)
+            
+            # Also search S3 for CDM images (Color Depth MIPs) from Gen1 collection
+            self._log(f"   Also searching S3 for CDM images...")
+            collections_to_search = self._resolved_collections or FLYLIGHT_COLLECTIONS
+            for collection in collections_to_search:
+                if 'Gen1' in collection:  # Only search Gen1 collections for R-lines
+                    self._log(f"   Searching {collection}...")
+                    
+                    # Try CDM path: Collection/CDM/LineName/
+                    prefix_cdm = f"{collection}/CDM/{line_name}/"
+                    if self._s3_client:
+                        files = self._list_bucket_boto3(prefix_cdm)
+                    else:
+                        files = self._list_bucket_http(prefix_cdm)
+                    
+                    if files:
+                        all_files.extend(files)
+                        self._log(f"   Found {len(files)} CDM files in {collection}")
         else:
-            # Search S3 bucket for R-lines, Split-GAL4, etc.
+            # Search S3 bucket for Split-GAL4, SS-lines, etc.
             collections_to_search = self._resolved_collections or FLYLIGHT_COLLECTIONS
             
             # MCFO collections that commonly overlap - always search both
@@ -959,10 +1103,13 @@ class FlyLightDownloader:
             elif coll_lower.startswith('vt') or 'vt gal4' in coll_lower:
                 if 'total' in filename_lower:
                     filtered.append(f)
-            # Gen1 R-lines: keep CDM files (they don't have 'total' files)
+            # Gen1 R-lines (from HTTP or S3): keep 'total' and CDM files
             elif 'gen1' in coll_lower and 'mcfo' not in coll_lower:
-                # Gen1 CDM images - keep them all (they're already filtered)
-                if 'cdm' in filename_lower or 'mip' in filename_lower:
+                # HTTP images: keep 'total' (projection and pattern projection)
+                if 'total' in filename_lower:
+                    filtered.append(f)
+                # S3 CDM images - keep them all (they're already filtered)
+                elif 'cdm' in filename_lower or 'mip' in filename_lower:
                     filtered.append(f)
             else:
                 # For other collections (MCFO, etc.), keep all files
@@ -973,28 +1120,58 @@ class FlyLightDownloader:
         
         return filtered
     
-    def get_filtered_files(self, line_name: str, apply_simple_mode: Optional[bool] = None) -> List[FlyLightFile]:
+    def get_filtered_files(self, line_name: Union[str, List[str]], apply_simple_mode: Optional[bool] = None, max_files_per_line: Optional[int] = None) -> List[FlyLightFile]:
         """
         Get files matching the configured format and image type filters.
         
         Args:
-            line_name: Driver line name
+            line_name: Driver line name(s). Can be:
+                - Single string: 'R10A06'
+                - Comma-separated: 'R10A06,VT037867'
+                - List: ['R10A06', 'VT037867']
             apply_simple_mode: Override class simple_mode setting. If None, uses class setting.
+            max_files_per_line: Maximum number of files per line. Applied after simple_mode filtering.
             
         Returns:
             List of FlyLightFile objects matching filters
         """
-        all_files = self.list_files(line_name)
-        filtered = [f for f in all_files if self._matches_filters(f)]
+        # Normalize input to list of line names
+        if isinstance(line_name, str):
+            if ',' in line_name:
+                line_names = [name.strip() for name in line_name.split(',')]
+            else:
+                line_names = [line_name]
+        else:
+            line_names = line_name
         
-        self._log(f"   {len(filtered)} files match format/type filters")
+        # Collect files from all lines
+        all_filtered = []
+        for name in line_names:
+            all_files = self.list_files(name)
+            filtered = [f for f in all_files if self._matches_filters(f)]
+            self._log(f"   {len(filtered)} files match format/type filters for '{name}'")
+            all_filtered.extend(filtered)
         
         # Apply simple_mode filtering if enabled
         use_simple = apply_simple_mode if apply_simple_mode is not None else self.simple_mode
         if use_simple:
-            filtered = self.apply_simple_mode_filter(filtered)
+            all_filtered = self.apply_simple_mode_filter(all_filtered)
         
-        return filtered
+        # Apply max_files_per_line limit if specified
+        if max_files_per_line:
+            # Group files by line name and limit each group
+            from collections import defaultdict
+            files_by_line = defaultdict(list)
+            for f in all_filtered:
+                files_by_line[f.line_name].append(f)
+            
+            # Limit each line and reassemble
+            limited_files = []
+            for line, files in files_by_line.items():
+                limited_files.extend(files[:max_files_per_line])
+            all_filtered = limited_files
+        
+        return all_filtered
     
     def _download_file_http(self, file: FlyLightFile, local_path: Path) -> bool:
         """Download a file using HTTP."""
@@ -1055,39 +1232,70 @@ class FlyLightDownloader:
     
     def download(
         self,
-        line_name: str,
+        line_name: Union[str, List[str]],
         output_dir: Optional[str] = None,
         max_files: Optional[int] = None,
         dry_run: bool = False,
         on_file_downloaded: Optional[Callable[[Path, str], None]] = None,
         flat_structure: bool = False,
-        files: Optional[List] = None
+        files: Optional[List] = None,
+        generate_summary: Union[bool, str, List[str]] = None,
+        summary_images_per_page: tuple = (3, 2),
+        add_timestamp: bool = True,
     ) -> List[Path]:
         """
-        Download files for a driver line.
+        Download files for driver line(s).
         
         Args:
-            line_name: Driver line name (e.g., 'R10A06')
+            line_name: Driver line name(s). Can be:
+                - Single string: 'R10A06'
+                - Comma-separated: 'R10A06,VT037867'
+                - List: ['R10A06', 'VT037867']
+                Output folder naming:
+                - 1 line: {line_name}_{timestamp}
+                - 2-3 lines: {line1}_{line2}_{line3}_{timestamp}
+                - 4+ lines: {line1}_{line2}_{line3}_etc{N}_{timestamp}
             output_dir: Override output directory (optional)
-            max_files: Maximum number of files to download (optional)
+            max_files: Maximum number of files to download **per line** (optional).
+                When downloading multiple lines, this limit applies to each line separately.
             dry_run: If True, only list files without downloading
             on_file_downloaded: Optional callback called after each file download
                                Signature: callback(file_path, line_name)
             flat_structure: If True, save to {line_name}/{filename} instead of preserving S3 key structure
             files: Optional pre-filtered list of FlyLightFile objects. If provided, skips get_filtered_files() call.
+            generate_summary: Generate image summary after download.
+                Options: 'pdf', 'pptx', ['pdf', 'pptx'], False/None to disable
+            summary_images_per_page: (columns, rows) for summary layout. Default: (5, 3)
+            add_timestamp: If True, add timestamp to output folder name. Default: False
             
         Returns:
             List of paths to downloaded files
         """
+        # Normalize line_name input
+        if isinstance(line_name, str):
+            if ',' in line_name:
+                line_names = [name.strip() for name in line_name.split(',')]
+            else:
+                line_names = [line_name]
+        else:
+            line_names = line_name
+        
+        # Create combined name for folder if multiple lines
+        # Use _etc{N} format if more than 3 lines to avoid long names
+        if len(line_names) == 1:
+            combined_name = line_names[0]
+        elif len(line_names) <= 3:
+            combined_name = '_'.join(line_names)
+        else:
+            combined_name = '_'.join(line_names[:3]) + f'_etc{len(line_names)}'
+        
         if files is None:
-            files = self.get_filtered_files(line_name)
+            # Pass max_files as per-line limit
+            files = self.get_filtered_files(line_name, max_files_per_line=max_files)
         
         if not files:
-            self._log(f"⚠️  No files found for '{line_name}' matching filters")
+            self._log(f"⚠️  No files found for '{combined_name}' matching filters")
             return []
-        
-        if max_files:
-            files = files[:max_files]
         
         # Calculate total size
         total_size = sum(f.size for f in files)
@@ -1099,8 +1307,16 @@ class FlyLightDownloader:
                 self._log(f"   {f.filename} ({f.size_mb:.1f} MB)")
             return []
         
-        # Download files
-        output_path = Path(output_dir or self.output_dir)
+        # Create output path with optional timestamp
+        from datetime import datetime
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        
+        if add_timestamp:
+            output_path = Path(output_dir or self.output_dir) / f"{combined_name}_{timestamp}"
+        else:
+            output_path = Path(output_dir or self.output_dir)
+        
+        output_path.mkdir(parents=True, exist_ok=True)
         downloaded = []
         
         if self.max_workers > 1 and len(files) > 1:
@@ -1116,7 +1332,7 @@ class FlyLightDownloader:
                     if result:
                         downloaded.append(result)
                         if on_file_downloaded:
-                            on_file_downloaded(result, line_name)
+                            on_file_downloaded(result, combined_name)
         else:
             # Sequential download
             for f in files:
@@ -1124,11 +1340,104 @@ class FlyLightDownloader:
                 if result:
                     downloaded.append(result)
                     if on_file_downloaded:
-                        on_file_downloaded(result, line_name)
+                        on_file_downloaded(result, combined_name)
         
         self._log(f"\n✅ Downloaded {len(downloaded)}/{len(files)} files")
         
+        # Generate summary if requested
+        if generate_summary and downloaded:
+            self._generate_image_summary(
+                downloaded_files=downloaded,
+                output_dir=output_path,
+                line_name=combined_name,
+                timestamp=timestamp,
+                generate_summary=generate_summary,
+                images_per_page=summary_images_per_page
+            )
+        
         return downloaded
+    
+    def _generate_image_summary(
+        self,
+        downloaded_files: List[Path],
+        output_dir: Path,
+        line_name: str,
+        timestamp: str,
+        generate_summary: Union[bool, str, List[str]],
+        images_per_page: tuple = (5, 3)
+    ) -> None:
+        """
+        Generate PDF/PPTX image summary from downloaded files.
+        
+        Args:
+            downloaded_files: List of downloaded file paths
+            output_dir: Output directory for summary files
+            line_name: Driver line name for summary title
+            timestamp: Timestamp string for filename
+            generate_summary: Format(s) to generate: 'pdf', 'pptx', ['pdf', 'pptx']
+            images_per_page: (columns, rows) layout for summary
+        """
+        # Filter image files only
+        image_files = [f for f in downloaded_files if f.suffix.lower() in ['.png', '.jpg', '.jpeg']]
+        
+        if not image_files:
+            self._log(f"⚠️  No image files to summarize")
+            return
+        
+        self._log(f"\n📊 Generating image summary ({len(image_files)} images)...")
+        
+        # Normalize generate_summary to list
+        if isinstance(generate_summary, str):
+            formats = [generate_summary]
+        elif isinstance(generate_summary, list):
+            formats = generate_summary
+        elif generate_summary is True:
+            formats = ['pdf', 'pptx']
+        else:
+            return
+        
+        summary_title = f"{line_name} - {timestamp}"
+        
+        for fmt in formats:
+            if fmt.lower() == 'pdf':
+                try:
+                    from neuronbridge_finder import create_image_pdf
+                    pdf_path = output_dir / f"{line_name}_{timestamp}_summary.pdf"
+                    create_image_pdf(
+                        images_dir=str(output_dir),
+                        output_pdf=str(pdf_path),
+                        images_per_page=images_per_page,
+                        title_font_size=24,
+                        margin=0.3,
+                        verbose=self.verbose
+                    )
+                    self._log(f"   ✅ PDF summary: {pdf_path.name}")
+                except ImportError:
+                    self._log(f"   ⚠️  PDF generation requires neuronbridge_finder module")
+                except Exception as e:
+                    self._log(f"   ⚠️  PDF generation failed: {e}")
+            
+            elif fmt.lower() == 'pptx':
+                try:
+                    from visualize_skeleton import img2pptx
+                    pptx_path = output_dir / f"{line_name}_{timestamp}_summary.pptx"
+                    # Use directory path with subfolder grouping to separate lines on different pages
+                    # This matches the PDF behavior where each line starts on a new page
+                    img2pptx(
+                        input_path=str(output_dir),
+                        output_pptx=str(pptx_path),
+                        images_per_slide=images_per_page,
+                        slide_title="{subfolder}",  # Use line name as title
+                        label_fontsize=20,
+                        title_fontsize=24,
+                        include_subfolders=True,
+                        group_by_subfolder=True,
+                    )
+                    self._log(f"   ✅ PPTX summary: {pptx_path.name}")
+                except ImportError:
+                    self._log(f"   ⚠️  PPTX generation requires visualize_skeleton module")
+                except Exception as e:
+                    self._log(f"   ⚠️  PPTX generation failed: {e}")
     
     def get_metadata(self, line_name: str) -> List[Dict[str, Any]]:
         """

@@ -63,4 +63,6 @@ vs.export_video(
     degree_per_frame=1.0, 
     rotate='vertical', 
     scale=3,
+    export_gif=True,      # Enable GIF export (default: True)
+    gif_scale=0.2,        # GIF resolution scale (default: 0.2)
 )

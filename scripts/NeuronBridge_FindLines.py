@@ -229,6 +229,14 @@ if __name__ == "__main__":
     # If False: all lines treated together (default)
     separate_splitgal4 = True
     
+    # Summary format for image aggregation
+    # Options:
+    #   - 'pdf' or ['pdf']: Generate PDF only
+    #   - 'pptx' or ['pptx']: Generate PPTX only
+    #   - ['pdf', 'pptx']: Generate both formats
+    #   - False or None: Disable generation
+    summary_format = ['pdf', 'pptx']
+    
     # ==========================================================================
     # EXECUTION - No need to edit below this line
     # ==========================================================================
@@ -255,6 +263,7 @@ if __name__ == "__main__":
         max_download_images_per_line=max_download_images_per_line,
         flylight_category=flylight_category,
         simple_mode=simple_mode,
+        summary_format=summary_format,
     )
     
     # Display summary

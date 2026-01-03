@@ -3805,6 +3805,7 @@ class VisualizeSkeleton:
         pdf_images_per_page: tuple = (3, 2),
         pdf_title: str = None,
         neuron_alpha: float = None,
+        summary_format: str | list = 'pdf',
     ):
         """
         Plot individual neurons/types independently based on the main figure's legend entries.
@@ -3829,12 +3830,15 @@ class VisualizeSkeleton:
             Scale factor for PNG export resolution.
             Higher values produce larger, higher-quality images.
         pdf_images_per_page : tuple, default (3, 2)
-            (columns, rows) - number of images per page when generating PDF.
+            (columns, rows) - number of images per page when generating PDF/PPTX.
         pdf_title : str, optional
-            Custom title for PDF pages. If None, uses the layer/neuron name.
+            Custom title for PDF/PPTX pages. If None, uses the layer/neuron name.
         neuron_alpha : float, optional
             Opacity for neuron traces in individual plots (0.0-1.0).
             If None, defaults to 0.8 for better visibility in individual views.
+        summary_format : str or list, default 'pdf'
+            Format(s) for summary file generation.
+            Options: 'pdf', 'pptx', or list like ['pdf', 'pptx']
             
         Returns
         -------
@@ -3847,6 +3851,7 @@ class VisualizeSkeleton:
         >>> vs = VisualizeSkeleton(...)
         >>> vs.plot_neurons()
         >>> vs.plot_individuals(output_format=['png', 'html'], views=['front', 'top'])
+        >>> vs.plot_individuals(summary_format=['pdf', 'pptx'])  # Generate both PDF and PPTX
         """
         import copy
         
@@ -4092,54 +4097,105 @@ class VisualizeSkeleton:
         # Restore original layout (includes resetting scene domain)
         self.fig_3d.update_layout(original_layout)
         
-        # Generate PDF summaries if PNG images were created
+        # Normalize summary_format
+        if isinstance(summary_format, str):
+            summary_format = [summary_format.lower()]
+        else:
+            summary_format = [f.lower() for f in summary_format]
+        
+        # Generate PDF/PPTX summaries if PNG images were created
         if 'png' in output_format and generated_files['png']:
-            # Save PDFs in parent folder (parallel to individual_profiles/)
+            # Save summaries in parent folder (parallel to individual_profiles/)
             parent_dir = os.path.dirname(output_dir)
             base_title = pdf_title or self.saveas
             
-            # For single view, generate one PDF without suffix (organized by view)
-            # For multiple views, generate both _by_view and _by_name PDFs
-            if len(views) == 1:
-                self._vprint(f'\n📄 Generating PDF summary...')
-                pdf_path = self._create_individual_pdf(
-                    output_dir=parent_dir,
-                    images_dict=generated_files['png'],
-                    images_per_page=pdf_images_per_page,
-                    title=base_title,
-                    organize_by='view',  # Organize by view for single-view PDF
-                    views=views,
-                    pdf_suffix='',
-                )
-                if pdf_path:
-                    self._vprint(f'   ✅ PDF saved: {pdf_path}')
-            else:
-                self._vprint(f'\n📄 Generating PDF summaries...')
-                # Generate PDF organized by view
-                pdf_path_view = self._create_individual_pdf(
-                    output_dir=parent_dir,
-                    images_dict=generated_files['png'],
-                    images_per_page=pdf_images_per_page,
-                    title=base_title,
-                    organize_by='view',
-                    views=views,
-                    pdf_suffix='_by_view',
-                )
-                if pdf_path_view:
-                    self._vprint(f'   ✅ PDF saved: {pdf_path_view}')
-                
-                # Generate PDF organized by name
-                pdf_path_name = self._create_individual_pdf(
-                    output_dir=parent_dir,
-                    images_dict=generated_files['png'],
-                    images_per_page=pdf_images_per_page,
-                    title=base_title,
-                    organize_by='name',
-                    views=views,
-                    pdf_suffix='_by_name',
-                )
-                if pdf_path_name:
-                    self._vprint(f'   ✅ PDF saved: {pdf_path_name}')
+            # Generate PDF if requested
+            if 'pdf' in summary_format:
+                # For single view, generate one PDF without suffix (organized by view)
+                # For multiple views, generate both _by_view and _by_name PDFs
+                if len(views) == 1:
+                    self._vprint(f'\n📄 Generating PDF summary...')
+                    pdf_path = self._create_individual_pdf(
+                        output_dir=parent_dir,
+                        images_dict=generated_files['png'],
+                        images_per_page=pdf_images_per_page,
+                        title=base_title,
+                        organize_by='view',  # Organize by view for single-view PDF
+                        views=views,
+                        pdf_suffix='',
+                    )
+                    if pdf_path:
+                        self._vprint(f'   ✅ PDF saved: {pdf_path}')
+                else:
+                    self._vprint(f'\n📄 Generating PDF summaries...')
+                    # Generate PDF organized by view
+                    pdf_path_view = self._create_individual_pdf(
+                        output_dir=parent_dir,
+                        images_dict=generated_files['png'],
+                        images_per_page=pdf_images_per_page,
+                        title=base_title,
+                        organize_by='view',
+                        views=views,
+                        pdf_suffix='_by_view',
+                    )
+                    if pdf_path_view:
+                        self._vprint(f'   ✅ PDF saved: {pdf_path_view}')
+                    
+                    # Generate PDF organized by name
+                    pdf_path_name = self._create_individual_pdf(
+                        output_dir=parent_dir,
+                        images_dict=generated_files['png'],
+                        images_per_page=pdf_images_per_page,
+                        title=base_title,
+                        organize_by='name',
+                        views=views,
+                        pdf_suffix='_by_name',
+                    )
+                    if pdf_path_name:
+                        self._vprint(f'   ✅ PDF saved: {pdf_path_name}')
+            
+            # Generate PPTX if requested
+            if 'pptx' in summary_format:
+                if len(views) == 1:
+                    self._vprint(f'\n📊 Generating PPTX summary...')
+                    pptx_path = self._create_individual_pptx(
+                        output_dir=parent_dir,
+                        images_dict=generated_files['png'],
+                        images_per_page=pdf_images_per_page,
+                        title=base_title,
+                        organize_by='view',
+                        views=views,
+                        pptx_suffix='',
+                    )
+                    if pptx_path:
+                        self._vprint(f'   ✅ PPTX saved: {pptx_path}')
+                else:
+                    self._vprint(f'\n📊 Generating PPTX summaries...')
+                    # Generate PPTX organized by view
+                    pptx_path_view = self._create_individual_pptx(
+                        output_dir=parent_dir,
+                        images_dict=generated_files['png'],
+                        images_per_page=pdf_images_per_page,
+                        title=base_title,
+                        organize_by='view',
+                        views=views,
+                        pptx_suffix='_by_view',
+                    )
+                    if pptx_path_view:
+                        self._vprint(f'   ✅ PPTX saved: {pptx_path_view}')
+                    
+                    # Generate PPTX organized by name
+                    pptx_path_name = self._create_individual_pptx(
+                        output_dir=parent_dir,
+                        images_dict=generated_files['png'],
+                        images_per_page=pdf_images_per_page,
+                        title=base_title,
+                        organize_by='name',
+                        views=views,
+                        pptx_suffix='_by_name',
+                    )
+                    if pptx_path_name:
+                        self._vprint(f'   ✅ PPTX saved: {pptx_path_name}')
         
         # Summary
         n_png = sum(len(v) for v in generated_files['png'].values())
@@ -4349,6 +4405,228 @@ class VisualizeSkeleton:
         c.save()
         return pdf_path
 
+    def _create_individual_pptx(
+        self,
+        output_dir: str,
+        images_dict: dict,
+        images_per_page: tuple = (4, 3),
+        title: str = None,
+        organize_by: str = 'name',
+        views: list = None,
+        pptx_suffix: str = '',
+        label_fontsize: int = 20,
+        title_fontsize: int = 24,
+        font_color: tuple = (0, 0, 0),
+    ) -> str | None:
+        """
+        Create a PPTX summary from individual profile PNG images.
+        
+        Parameters
+        ----------
+        output_dir : str
+            Directory where PPTX will be saved.
+        images_dict : dict
+            Dictionary mapping legend names to list of (image_path, view_name) tuples.
+            e.g., {'neuron1': [('/path/front.png', 'front'), ('/path/top.png', 'top')], ...}
+        images_per_page : tuple
+            (columns, rows) - number of images per slide.
+        title : str, optional
+            Title for the PPTX document.
+        organize_by : str
+            How images are organized: 'name' or 'view'
+        views : list, optional
+            List of view names for organizing by view
+        pptx_suffix : str, optional
+            Suffix to add to PPTX filename (e.g., '_by_view', '_by_name')
+        label_fontsize : int, default 20
+            Font size for image labels in points.
+        title_fontsize : int, default 24
+            Font size for slide titles in points.
+            
+        Returns
+        -------
+        str or None
+            Path to created PPTX, or None if creation failed.
+        """
+        try:
+            from pptx import Presentation
+            from pptx.util import Inches, Pt
+            from pptx.enum.text import PP_ALIGN
+        except ImportError:
+            self._vprint('⚠️  PPTX generation requires python-pptx.')
+            self._vprint('   Install with: pip install python-pptx')
+            return None
+        
+        from PIL import Image
+        
+        # Natural sort function for rank-based names like r1, r2, ..., r10, r11
+        def natural_sort_key(s):
+            """Sort strings containing numbers in natural order (r1, r2, ..., r10, r11)."""
+            import re
+            return [int(c) if c.isdigit() else c.lower() for c in re.split(r'(\d+)', s)]
+        
+        # Organize images based on organize_by option
+        if organize_by == 'view' and views:
+            images_by_category = {}
+            for view_name in views:
+                images_by_category[view_name] = []
+            
+            for legend_name, img_info_list in sorted(images_dict.items(), key=lambda x: natural_sort_key(x[0])):
+                for img_info in img_info_list:
+                    if isinstance(img_info, tuple):
+                        img_path, view_name = img_info
+                    else:
+                        img_path = img_info
+                        view_name = views[0] if views else 'front'
+                    if os.path.exists(img_path) and view_name in images_by_category:
+                        images_by_category[view_name].append((legend_name, img_path, view_name))
+        else:
+            images_by_category = {}
+            for legend_name, img_info_list in sorted(images_dict.items(), key=lambda x: natural_sort_key(x[0])):
+                if legend_name not in images_by_category:
+                    images_by_category[legend_name] = []
+                for img_info in img_info_list:
+                    if isinstance(img_info, tuple):
+                        img_path, view_name = img_info
+                    else:
+                        img_path = img_info
+                        view_name = ''
+                    if os.path.exists(img_path):
+                        images_by_category[legend_name].append((legend_name, img_path, view_name))
+        
+        all_categories = list(images_by_category.keys())
+        
+        if not any(images_by_category.values()):
+            self._vprint('⚠️  No images found for PPTX generation.')
+            return None
+        
+        # Output path
+        pptx_path = os.path.join(output_dir, f'individual_profiles_summary{pptx_suffix}.pptx')
+        
+        # Slide setup (widescreen 16:9)
+        slide_width, slide_height = 13.333, 7.5
+        cols, rows = images_per_page
+        margin = 0.3  # inches
+        title_height_inches = 0.5
+        label_height_inches = (label_fontsize / 72) * 1.5
+        
+        # Create presentation
+        prs = Presentation()
+        prs.slide_width = Inches(slide_width)
+        prs.slide_height = Inches(slide_height)
+        blank_layout = prs.slide_layouts[6]  # Blank slide
+        
+        # Calculate cell dimensions
+        usable_width = slide_width - 2 * margin
+        usable_height = slide_height - margin - title_height_inches - margin
+        cell_width = usable_width / cols
+        cell_height = usable_height / rows
+        
+        images_per_full_page = cols * rows
+        
+        # Process each category separately
+        for category_name in all_categories:
+            category_images = images_by_category[category_name]
+            if not category_images:
+                continue
+            
+            total_pages_for_category = (len(category_images) + images_per_full_page - 1) // images_per_full_page
+            
+            for page_idx in range(total_pages_for_category):
+                slide = prs.slides.add_slide(blank_layout)
+                
+                # Build title
+                if organize_by == 'view':
+                    slide_title = f"{category_name} view"
+                else:
+                    slide_title = str(category_name)
+                if total_pages_for_category > 1:
+                    slide_title += f" ({page_idx + 1}/{total_pages_for_category})"
+                
+                # Add title
+                txBox = slide.shapes.add_textbox(
+                    Inches(margin),
+                    Inches(margin / 2),
+                    Inches(slide_width - 2 * margin),
+                    Inches(title_height_inches)
+                )
+                tf = txBox.text_frame
+                p = tf.paragraphs[0]
+                p.text = slide_title
+                p.font.size = Pt(title_fontsize)
+                p.font.bold = True
+                p.alignment = PP_ALIGN.CENTER
+                
+                # Get images for this page
+                start_idx = page_idx * images_per_full_page
+                end_idx = min(start_idx + images_per_full_page, len(category_images))
+                page_images = category_images[start_idx:end_idx]
+                
+                content_top = margin + title_height_inches
+                
+                for i, (legend_name, img_path, view_name) in enumerate(page_images):
+                    row = i // cols
+                    col = i % cols
+                    
+                    cell_left = margin + col * cell_width
+                    cell_top = content_top + row * cell_height
+                    
+                    try:
+                        with Image.open(img_path) as img:
+                            img_width, img_height = img.size
+                            
+                            # Calculate scaling
+                            max_width = cell_width - 0.1
+                            max_height = cell_height - label_height_inches - 0.1
+                            
+                            scale_w = max_width / (img_width / 96)
+                            scale_h = max_height / (img_height / 96)
+                            scale_factor = min(scale_w, scale_h)
+                            
+                            final_width = (img_width / 96) * scale_factor
+                            final_height = (img_height / 96) * scale_factor
+                            
+                            # Center image in cell
+                            img_left = cell_left + (cell_width - final_width) / 2
+                            img_top = cell_top + (cell_height - label_height_inches - final_height) / 2
+                            
+                            # Add image
+                            slide.shapes.add_picture(
+                                img_path,
+                                Inches(img_left),
+                                Inches(img_top),
+                                Inches(final_width),
+                                Inches(final_height)
+                            )
+                            
+                            # Add label
+                            label = str(legend_name)
+                            if view_name and organize_by != 'view':
+                                label += f" ({view_name})"
+                            max_chars = int(cell_width * 8)
+                            if len(label) > max_chars:
+                                label = label[:max_chars-3] + '...'
+                            
+                            txBox = slide.shapes.add_textbox(
+                                Inches(cell_left),
+                                Inches(cell_top + cell_height - label_height_inches),
+                                Inches(cell_width),
+                                Inches(label_height_inches)
+                            )
+                            tf = txBox.text_frame
+                            p = tf.paragraphs[0]
+                            p.text = label
+                            p.font.size = Pt(label_fontsize)
+                            from pptx.dml.color import RGBColor
+                            p.font.color.rgb = RGBColor(*font_color)
+                            p.alignment = PP_ALIGN.CENTER
+                            
+                    except Exception as e:
+                        self._vprint(f'   ⚠️  Could not process: {img_path} - {e}', level='full')
+        
+        prs.save(pptx_path)
+        return pptx_path
+
     def _to_rgba(self, color, alpha=None):
         # Convert color to uint8 RGBA for trimesh.
         import matplotlib.colors as mcolors
@@ -4432,7 +4710,8 @@ class VisualizeSkeleton:
 
     def export_video(self, fps=30, degree_per_frame=1.0, rotate='horizontal', rotate_plane=None, 
                     view_direction=None, view_distance=None, synapse_size=1, 
-                    html_file=None, output_dir=None, use_existing_images=True, **kwargs):
+                    html_file=None, output_dir=None, use_existing_images=True, 
+                    export_gif=True, gif_scale=0.2, gif_optimize=True, **kwargs):
         '''
         Export a rotating 3D visualization to MP4 video.
         
@@ -4477,6 +4756,13 @@ class VisualizeSkeleton:
         use_existing_images : bool, default True
             If True, skip rendering and reuse cached images from previous export.
             Useful for regenerating video with different fps without re-rendering.
+        export_gif : bool, default True
+            If True, automatically convert videos to GIF format after export.
+        gif_scale : float, default 0.2
+            Scale factor for GIF resolution (0.1-1.0). Lower values = smaller file size.
+            Example: 0.2 = 20% of original video resolution.
+        gif_optimize : bool, default True
+            Enable GIF compression optimization for smaller file sizes.
         **kwargs : dict
             Additional arguments for plotly write_image():
             - scale : int, default 2 - Resolution multiplier
@@ -4493,6 +4779,8 @@ class VisualizeSkeleton:
         - {output_dir}/pics_{fps}fps_{rotate_plane}/ : Cached frame images
         - {output_dir}/{name}_video_forward.mp4 : Forward rotation video
         - {output_dir}/{name}_video_backward.mp4 : Reverse rotation video
+        - {output_dir}/{name}_video_forward.gif : Forward rotation GIF (if export_gif=True)
+        - {output_dir}/{name}_video_backward.gif : Reverse rotation GIF (if export_gif=True)
         
         Examples
         --------
@@ -4735,11 +5023,46 @@ class VisualizeSkeleton:
         print(f'\n✅ Video export complete!')
         self._vprint(f'   Image cache: {pic_folder}')
         self._vprint(f'   Tip: Use use_existing_images=True to skip re-rendering next time')
+        
+        # Convert to GIF if requested
+        if export_gif:
+            self._vprint(f'\n🎞️  Converting videos to GIF format...')
+            self._vprint(f'   Scale: {gif_scale} | Optimize: {gif_optimize}')
+            
+            # Convert forward video to GIF
+            gif_path_forward = video_path_forward.replace('.mp4', '.gif')
+            try:
+                video2gif(
+                    video_path_forward,
+                    gif_path_forward,
+                    fps=fps,
+                    scale=gif_scale,
+                    optimize=gif_optimize
+                )
+                self._vprint(f'   ✓ Forward GIF: {gif_path_forward}')
+            except Exception as e:
+                self._vprint(f'   ⚠️  Forward GIF conversion failed: {e}')
+            
+            # Convert backward video to GIF
+            gif_path_backward = video_path_backward.replace('.mp4', '.gif')
+            try:
+                video2gif(
+                    video_path_backward,
+                    gif_path_backward,
+                    fps=fps,
+                    scale=gif_scale,
+                    optimize=gif_optimize
+                )
+                self._vprint(f'   ✓ Backward GIF: {gif_path_backward}')
+            except Exception as e:
+                self._vprint(f'   ⚠️  Backward GIF conversion failed: {e}')
+        
         return 0
 
 
 def export_video_from_html(html_file, fps=30, degree_per_frame=1.0, rotate='horizontal',
-                           output_dir=None, use_existing_images=True, **kwargs):
+                           output_dir=None, use_existing_images=True, 
+                           export_gif=True, gif_scale=0.2, gif_optimize=True, **kwargs):
     '''
     Standalone function to export a rotating video from an existing Plotly HTML file.
     
@@ -4762,6 +5085,12 @@ def export_video_from_html(html_file, fps=30, degree_per_frame=1.0, rotate='hori
         Directory to save video output. If None, uses the directory containing html_file.
     use_existing_images : bool, default True
         If True, reuse cached images from previous export if available.
+    export_gif : bool, default True
+        If True, automatically convert videos to GIF format after export.
+    gif_scale : float, default 0.2
+        Scale factor for GIF resolution (0.1-1.0). Lower values = smaller file size.
+    gif_optimize : bool, default True
+        Enable GIF compression optimization for smaller file sizes.
     **kwargs : dict
         Additional arguments for plotly write_image():
         - scale : int, default 2
@@ -4949,4 +5278,697 @@ def export_video_from_html(html_file, fps=30, degree_per_frame=1.0, rotate='hori
     print(f'✓ Backward video: {video_path_backward}')
     
     print(f'\n✅ Video export complete!')
+    
+    # Convert to GIF if requested
+    if export_gif:
+        print(f'\n🎞️  Converting videos to GIF format...')
+        print(f'   Scale: {gif_scale} | Optimize: {gif_optimize}')
+        
+        # Convert forward video to GIF
+        gif_path_forward = video_path_forward.replace('.mp4', '.gif')
+        try:
+            video2gif(
+                video_path_forward,
+                gif_path_forward,
+                fps=fps,
+                scale=gif_scale,
+                optimize=gif_optimize
+            )
+            print(f'   ✓ Forward GIF: {gif_path_forward}')
+        except Exception as e:
+            print(f'   ⚠️  Forward GIF conversion failed: {e}')
+        
+        # Convert backward video to GIF
+        gif_path_backward = video_path_backward.replace('.mp4', '.gif')
+        try:
+            video2gif(
+                video_path_backward,
+                gif_path_backward,
+                fps=fps,
+                scale=gif_scale,
+                optimize=gif_optimize
+            )
+            print(f'   ✓ Backward GIF: {gif_path_backward}')
+        except Exception as e:
+            print(f'   ⚠️  Backward GIF conversion failed: {e}')
+    
     return 0
+
+
+def video2gif(
+    input_video: str,
+    output_gif: str = None,
+    fps: int = None,
+    scale: float = 1.0,
+    optimize: bool = True,
+    loop: int = 0,
+) -> str:
+    """
+    Convert a video file (MP4) to an animated GIF with adjustable compression and fps.
+    
+    This is a static helper function that can be called independently.
+    
+    Parameters
+    ----------
+    input_video : str
+        Path to the input video file (MP4 or other formats supported by cv2).
+    output_gif : str, optional
+        Path for the output GIF file. If None, uses the same path as input with .gif extension.
+    fps : int, optional
+        Target frames per second for the GIF. If None, uses the original video fps.
+        Lower fps = smaller file size, choppier animation.
+    scale : float, default 1.0
+        Scale factor for the output dimensions (0.0-1.0 for compression).
+        - 1.0: Original resolution
+        - 0.5: Half resolution (75% file size reduction)
+        - 0.25: Quarter resolution
+    optimize : bool, default True
+        Whether to optimize the GIF palette for smaller file size.
+        Uses PIL's optimize and disposal settings for better compression.
+    loop : int, default 0
+        Number of times the GIF should loop.
+        - 0: Loop forever
+        - 1: Play once
+        - n: Loop n times
+    
+    Returns
+    -------
+    str
+        Path to the created GIF file.
+    
+    Examples
+    --------
+    # Basic conversion
+    from visualize_skeleton import video2gif
+    video2gif('/path/to/video.mp4')
+    
+    # With compression (half size, 15 fps)
+    video2gif('/path/to/video.mp4', fps=15, scale=0.5)
+    
+    # Custom output path
+    video2gif('/path/to/video.mp4', output_gif='/path/to/output.gif', scale=0.75)
+    """
+    from PIL import Image
+    
+    if not os.path.exists(input_video):
+        raise FileNotFoundError(f"Input video not found: {input_video}")
+    
+    # Set output path
+    if output_gif is None:
+        output_gif = os.path.splitext(input_video)[0] + '.gif'
+    
+    # Open video with cv2
+    cap = cv2.VideoCapture(input_video)
+    if not cap.isOpened():
+        raise ValueError(f"Could not open video file: {input_video}")
+    
+    # Get video properties
+    original_fps = cap.get(cv2.CAP_PROP_FPS)
+    frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    
+    # Use original fps if not specified
+    target_fps = fps if fps is not None else int(original_fps)
+    
+    # Calculate frame skip for target fps
+    if target_fps >= original_fps:
+        frame_skip = 1
+    else:
+        frame_skip = int(original_fps / target_fps)
+    
+    # Calculate new dimensions
+    new_width = int(width * scale)
+    new_height = int(height * scale)
+    
+    print(f'🎬 Converting video to GIF...')
+    print(f'   Input: {input_video}')
+    print(f'   Original: {width}x{height} @ {original_fps:.1f} fps, {frame_count} frames')
+    print(f'   Output: {new_width}x{new_height} @ {target_fps} fps')
+    
+    # Read frames
+    frames = []
+    frame_idx = 0
+    
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            break
+        
+        if frame_idx % frame_skip == 0:
+            # Convert BGR to RGB
+            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            
+            # Resize if needed
+            if scale != 1.0:
+                frame_rgb = cv2.resize(frame_rgb, (new_width, new_height), 
+                                       interpolation=cv2.INTER_AREA)
+            
+            # Convert to PIL Image
+            pil_frame = Image.fromarray(frame_rgb)
+            frames.append(pil_frame)
+        
+        frame_idx += 1
+    
+    cap.release()
+    
+    if not frames:
+        raise ValueError("No frames extracted from video")
+    
+    print(f'   Extracted {len(frames)} frames')
+    
+    # Calculate frame duration in milliseconds
+    duration = int(1000 / target_fps)
+    
+    # Save as GIF with progress bar
+    # PIL's save doesn't have a progress callback, so we save frame by frame
+    print(f'   Saving GIF ({len(frames)} frames)...')
+    
+    import io
+    
+    # For large GIFs, save incrementally to show progress
+    total_frames = len(frames)
+    
+    # Use a temporary buffer approach with progress reporting
+    print(f'   [', end='', flush=True)
+    bar_width = 40
+    
+    # We'll save all at once but show a simple progress indicator during optimization
+    # Since PIL doesn't support progress callbacks, we simulate with frame processing info
+    for i, frame in enumerate(frames):
+        # Show progress bar
+        progress = (i + 1) / total_frames
+        filled = int(bar_width * progress)
+        print(f'\r   [{"="*filled}{">" if filled < bar_width else ""}{" "*(bar_width-filled-1 if filled < bar_width else 0)}] {i+1}/{total_frames}', end='', flush=True)
+    
+    print(f'\r   [{"="*bar_width}] Optimizing...', end='', flush=True)
+    
+    frames[0].save(
+        output_gif,
+        save_all=True,
+        append_images=frames[1:],
+        duration=duration,
+        loop=loop,
+        optimize=optimize,
+        disposal=2,  # Clear frame before drawing next (better for animations)
+    )
+    print(f'\r   [{"="*bar_width}] Done!          ')
+    
+    # Report file sizes
+    input_size = os.path.getsize(input_video) / (1024 * 1024)
+    output_size = os.path.getsize(output_gif) / (1024 * 1024)
+    
+    print(f'✅ GIF created: {output_gif}')
+    print(f'   Input size: {input_size:.2f} MB')
+    print(f'   Output size: {output_size:.2f} MB')
+    print(f'   Compression ratio: {output_size/input_size:.2%}')
+    
+    return output_gif
+
+
+def img2pptx(
+    input_path: str | list,
+    output_pptx: str = None,
+    images_per_slide: tuple = (4, 3),
+    slide_title: str = None,
+    slide_size: str = 'widescreen',
+    margin: float = 0.3,
+    title_height: float = 0.5,
+    label_fontsize: int = 20,
+    title_fontsize: int = 24,
+    label_position: str = 'below',
+    label_overlay_alpha: float = 0.7,
+    cell_padding: float = 0.05,
+    include_subfolders: bool = False,
+    group_by_subfolder: bool = True,
+    font_color: tuple = (0, 0, 0),
+) -> str:
+    """
+    Aggregate images to PowerPoint (PPTX) with proper layout, or convert PDF pages to PPTX.
+    
+    This is a static helper function that can be called independently.
+    Supports:
+    - List of image files → PPTX with grid layout
+    - Single PDF file → PPTX with one slide per page
+    - Directory of images → PPTX with grid layout
+    - Directory with subfolders → PPTX with images from all subfolders
+    
+    Parameters
+    ----------
+    input_path : str or list
+        Path(s) to input files. Can be:
+        - A single PDF file path (converts pages to slides)
+        - A single directory path (aggregates all images in the folder)
+        - A list of image file paths (aggregates into PPTX)
+    output_pptx : str, optional
+        Path for the output PPTX file. If None, auto-generated based on input.
+    images_per_slide : tuple, default (4, 3)
+        (columns, rows) - number of images per slide when aggregating images.
+        Not used for PDF conversion.
+    slide_title : str, optional
+        Title to add to each slide. For image aggregation, can use {page} placeholder
+        for page number, {subfolder} for subfolder name. For PDF, defaults to showing page numbers.
+    slide_size : str, default 'widescreen'
+        Slide dimensions:
+        - 'widescreen': 13.333" x 7.5" (16:9)
+        - 'standard': 10" x 7.5" (4:3)
+        - 'a4': 11.69" x 8.27" (A4 landscape)
+    margin : float, default 0.3
+        Margin in inches from slide edges.
+    title_height : float, default 0.5
+        Height reserved for title in inches.
+    label_fontsize : int, default 20
+        Font size in points for image labels.
+    title_fontsize : int, default 24
+        Font size in points for slide titles.
+    label_position : str, default 'below'
+        Position of image labels:
+        - 'below': Label below the image (default)
+        - 'above': Label above the image  
+        - 'overlay': Label overlaid on bottom of image without background
+        - 'none': No labels
+    label_overlay_alpha : float, default 0.7
+        Alpha (opacity) for overlay label background (0.0-1.0). Only used when label_position='overlay'.
+        Note: Background shape is no longer added, this parameter is preserved for compatibility.
+    cell_padding : float, default 0
+        Padding within each cell in inches.
+    include_subfolders : bool, default False
+        If True and input_path is a directory, recursively include images from all subfolders.
+    group_by_subfolder : bool, default True
+        If True and include_subfolders=True, create separate slides for each subfolder.
+        The subfolder name will be used as slide title (or appended to slide_title).
+        If False, all images are mixed together regardless of subfolder.
+    font_color : tuple, default (0, 0, 0)
+        RGB color tuple for label text (r, g, b), each value 0-255. Default is black.
+    
+    Returns
+    -------
+    str
+        Path to the created PPTX file.
+    
+    Examples
+    --------
+    # Convert PDF to PPTX
+    from visualize_skeleton import img2pptx
+    img2pptx('/path/to/document.pdf')
+    
+    # Aggregate images from a folder
+    img2pptx('/path/to/image_folder/', images_per_slide=(3, 2))
+    
+    # Aggregate images from folder and all subfolders
+    img2pptx('/path/to/image_folder/', include_subfolders=True, group_by_subfolder=True)
+    
+    # Aggregate specific images with overlay labels
+    img2pptx(['/path/to/img1.png', '/path/to/img2.png'], 
+             output_pptx='/path/to/output.pptx',
+             label_position='overlay',
+             label_fontsize=16)
+    
+    # Custom layout with title template
+    img2pptx('/path/to/images/', 
+             include_subfolders=True,
+             images_per_slide=(2, 2),
+             slide_title='{subfolder} - Page {page}')
+    """
+    try:
+        from pptx import Presentation
+        from pptx.util import Inches, Pt
+        from pptx.enum.text import PP_ALIGN
+    except ImportError:
+        raise ImportError(
+            "python-pptx is required for PPTX generation.\n"
+            "Install with: pip install python-pptx"
+        )
+    
+    from PIL import Image
+    import io
+    
+    # Natural sort function for proper ordering
+    def natural_sort_key(s):
+        import re
+        return [int(c) if c.isdigit() else c.lower() for c in re.split(r'(\d+)', str(s))]
+    
+    # Slide size presets (width, height in inches)
+    size_presets = {
+        'widescreen': (13.333, 7.5),
+        'standard': (10, 7.5),
+        'a4': (11.69, 8.27),
+    }
+    
+    if slide_size in size_presets:
+        slide_width, slide_height = size_presets[slide_size]
+    else:
+        slide_width, slide_height = size_presets['widescreen']
+    
+    # Calculate label height based on fontsize
+    label_height_inches = (label_fontsize / 72) * 1.5  # 1.5x line height
+    
+    # Determine input type and gather files
+    is_pdf = False
+    image_files = []  # List of (path, subfolder_name) tuples
+    pdf_path = None
+    valid_extensions = {'.png', '.jpg', '.jpeg', '.gif', '.bmp', '.tiff', '.tif'}
+    
+    def collect_images_from_dir(dir_path, subfolder_name=''):
+        """Collect images from a directory, optionally recursively."""
+        collected = []
+        for f in sorted(os.listdir(dir_path), key=natural_sort_key):
+            full_path = os.path.join(dir_path, f)
+            if os.path.isfile(full_path) and os.path.splitext(f)[1].lower() in valid_extensions:
+                collected.append((full_path, subfolder_name))
+            elif os.path.isdir(full_path) and include_subfolders:
+                # Recursively collect from subfolder
+                sub_name = f if group_by_subfolder else subfolder_name
+                collected.extend(collect_images_from_dir(full_path, sub_name))
+        return collected
+    
+    if isinstance(input_path, str):
+        if input_path.lower().endswith('.pdf'):
+            is_pdf = True
+            pdf_path = input_path
+            if not os.path.exists(pdf_path):
+                raise FileNotFoundError(f"PDF file not found: {pdf_path}")
+        elif os.path.isdir(input_path):
+            # Directory of images
+            image_files = collect_images_from_dir(input_path, '')
+            if not image_files:
+                raise ValueError(f"No image files found in directory: {input_path}")
+        else:
+            # Single image file
+            if os.path.exists(input_path):
+                image_files = [(input_path, '')]
+            else:
+                raise FileNotFoundError(f"File not found: {input_path}")
+    elif isinstance(input_path, list):
+        # List of image paths
+        for p in input_path:
+            if os.path.exists(p):
+                image_files.append((p, ''))
+            else:
+                print(f"⚠️  Skipping missing file: {p}")
+        if not image_files:
+            raise ValueError("No valid image files provided")
+        image_files = sorted(image_files, key=lambda x: natural_sort_key(x[0]))
+    
+    # Set output path
+    if output_pptx is None:
+        if is_pdf:
+            output_pptx = os.path.splitext(pdf_path)[0] + '.pptx'
+        elif isinstance(input_path, str) and os.path.isdir(input_path):
+            output_pptx = os.path.join(input_path, 'aggregated_images.pptx')
+        else:
+            base_dir = os.path.dirname(image_files[0][0]) if image_files else '.'
+            output_pptx = os.path.join(base_dir, 'aggregated_images.pptx')
+    
+    # Create presentation
+    prs = Presentation()
+    prs.slide_width = Inches(slide_width)
+    prs.slide_height = Inches(slide_height)
+    
+    # Get blank layout
+    blank_layout = prs.slide_layouts[6]  # Blank slide
+    
+    if is_pdf:
+        # Convert PDF pages to PPTX slides
+        print(f'📄 Converting PDF to PPTX...')
+        print(f'   Input: {pdf_path}')
+        
+        try:
+            import fitz  # PyMuPDF
+        except ImportError:
+            raise ImportError(
+                "PyMuPDF is required for PDF conversion.\n"
+                "Install with: pip install pymupdf"
+            )
+        
+        pdf_doc = fitz.open(pdf_path)
+        num_pages = len(pdf_doc)
+        print(f'   Pages: {num_pages}')
+        
+        for page_num in range(num_pages):
+            page = pdf_doc[page_num]
+            
+            # Render page to image with good quality
+            zoom = 2.0  # 2x zoom for better quality
+            mat = fitz.Matrix(zoom, zoom)
+            pix = page.get_pixmap(matrix=mat, alpha=False)
+            
+            # Convert to PIL Image
+            img_data = pix.tobytes("png")
+            img = Image.open(io.BytesIO(img_data))
+            
+            # Create slide
+            slide = prs.slides.add_slide(blank_layout)
+            
+            # Add title if specified
+            content_top = margin
+            if slide_title:
+                title_text = slide_title.format(page=page_num + 1, subfolder='')
+                txBox = slide.shapes.add_textbox(
+                    Inches(margin), 
+                    Inches(margin / 2),
+                    Inches(slide_width - 2 * margin),
+                    Inches(title_height)
+                )
+                tf = txBox.text_frame
+                p = tf.paragraphs[0]
+                p.text = title_text
+                p.font.size = Pt(title_fontsize)
+                p.font.bold = True
+                p.alignment = PP_ALIGN.CENTER
+                content_top = margin + title_height
+            
+            # Calculate image placement (fit to slide)
+            usable_width = slide_width - 2 * margin
+            usable_height = slide_height - content_top - margin
+            
+            img_width, img_height = img.size
+            scale_w = usable_width / (img_width / 72)  # Convert pixels to inches
+            scale_h = usable_height / (img_height / 72)
+            scale_factor = min(scale_w, scale_h, 1.0)
+            
+            final_width = (img_width / 72) * scale_factor
+            final_height = (img_height / 72) * scale_factor
+            
+            # Center on slide
+            left = (slide_width - final_width) / 2
+            top = content_top + (usable_height - final_height) / 2
+            
+            # Save image temporarily and add to slide
+            with io.BytesIO() as img_buffer:
+                img.save(img_buffer, format='PNG')
+                img_buffer.seek(0)
+                slide.shapes.add_picture(
+                    img_buffer,
+                    Inches(left),
+                    Inches(top),
+                    Inches(final_width),
+                    Inches(final_height)
+                )
+            
+            print(f'\r   Processing page {page_num + 1}/{num_pages}...', end='', flush=True)
+        
+        pdf_doc.close()
+        print(f'\n✅ PPTX created: {output_pptx}')
+        print(f'   Slides: {num_pages}')
+    
+    else:
+        # Aggregate images to PPTX with grid layout
+        print(f'📊 Aggregating images to PPTX...')
+        print(f'   Images: {len(image_files)}')
+        print(f'   Layout: {images_per_slide[0]} columns × {images_per_slide[1]} rows')
+        if include_subfolders:
+            subfolders = set(sf for _, sf in image_files if sf)
+            if subfolders:
+                print(f'   Subfolders: {len(subfolders)}')
+        
+        cols, rows = images_per_slide
+        images_per_page = cols * rows
+        
+        # Group images by subfolder if needed
+        if group_by_subfolder and include_subfolders:
+            # Group by subfolder
+            from collections import OrderedDict
+            grouped_images = OrderedDict()
+            for img_path, subfolder in image_files:
+                key = subfolder if subfolder else '_root_'
+                if key not in grouped_images:
+                    grouped_images[key] = []
+                grouped_images[key].append(img_path)
+        else:
+            # All images in one group
+            grouped_images = {'': [img_path for img_path, _ in image_files]}
+        
+        # Calculate cell dimensions (account for label position)
+        has_title = slide_title is not None
+        content_top = margin if not has_title else margin + title_height
+        usable_width = slide_width - 2 * margin
+        usable_height = slide_height - content_top - margin
+        cell_width = usable_width / cols
+        cell_height = usable_height / rows
+        
+        total_slides = 0
+        total_images_added = 0
+        
+        for group_name, group_images in grouped_images.items():
+            num_slides_for_group = (len(group_images) + images_per_page - 1) // images_per_page
+            
+            for slide_idx in range(num_slides_for_group):
+                slide = prs.slides.add_slide(blank_layout)
+                
+                # Build title text
+                if slide_title:
+                    subfolder_display = group_name if group_name != '_root_' else ''
+                    title_text = slide_title.format(page=slide_idx + 1, subfolder=subfolder_display)
+                elif group_name and group_name != '_root_':
+                    title_text = group_name
+                    if num_slides_for_group > 1:
+                        title_text += f" ({slide_idx + 1}/{num_slides_for_group})"
+                else:
+                    title_text = None
+                
+                # Add title
+                if title_text:
+                    txBox = slide.shapes.add_textbox(
+                        Inches(margin),
+                        Inches(margin / 2),
+                        Inches(slide_width - 2 * margin),
+                        Inches(title_height)
+                    )
+                    tf = txBox.text_frame
+                    p = tf.paragraphs[0]
+                    p.text = title_text
+                    p.font.size = Pt(title_fontsize)
+                    p.font.bold = True
+                    p.alignment = PP_ALIGN.CENTER
+                
+                # Get images for this slide
+                start_idx = slide_idx * images_per_page
+                end_idx = min(start_idx + images_per_page, len(group_images))
+                slide_images = group_images[start_idx:end_idx]
+                
+                for i, img_path in enumerate(slide_images):
+                    row = i // cols
+                    col = i % cols
+                    
+                    # Calculate cell position
+                    cell_left = margin + col * cell_width
+                    cell_top = content_top + row * cell_height
+                    
+                    try:
+                        with Image.open(img_path) as img:
+                            img_width, img_height = img.size
+                            
+                            # Calculate space for label based on position
+                            if label_position == 'none' or label_position == 'overlay':
+                                label_space = 0
+                            else:
+                                label_space = label_height_inches
+                            
+                            # Calculate scaling to fit in cell with padding
+                            max_width = cell_width - 2 * cell_padding
+                            max_height = cell_height - 2 * cell_padding - label_space
+                            
+                            scale_w = max_width / (img_width / 96)  # Assume 96 DPI
+                            scale_h = max_height / (img_height / 96)
+                            scale_factor = min(scale_w, scale_h)
+                            
+                            final_width = (img_width / 96) * scale_factor
+                            final_height = (img_height / 96) * scale_factor
+                            
+                            # Calculate image position based on label position
+                            if label_position == 'above':
+                                img_top = cell_top + label_space + (cell_height - label_space - final_height) / 2
+                            else:  # below, overlay, none
+                                img_top = cell_top + (cell_height - label_space - final_height) / 2
+                            
+                            img_left = cell_left + (cell_width - final_width) / 2
+                            
+                            # Add image
+                            slide.shapes.add_picture(
+                                img_path,
+                                Inches(img_left),
+                                Inches(img_top),
+                                Inches(final_width),
+                                Inches(final_height)
+                            )
+                            
+                            # Add label if not 'none'
+                            if label_position != 'none':
+                                # Import RGBColor for font color
+                                from pptx.dml.color import RGBColor
+                                
+                                # Get label text (filename without extension)
+                                label = os.path.splitext(os.path.basename(img_path))[0]
+                                max_label_chars = int(cell_width * 10)  # Approximate chars that fit
+                                if len(label) > max_label_chars:
+                                    label = label[:max_label_chars-3] + '...'
+                                
+                                if label_position == 'overlay':
+                                    # Overlay on bottom of image without background
+                                    label_top = img_top + final_height - label_height_inches
+                                    label_left = img_left
+                                    label_width = final_width
+                                    
+                                    # Add textbox without background shape
+                                    txBox = slide.shapes.add_textbox(
+                                        Inches(label_left),
+                                        Inches(label_top),
+                                        Inches(label_width),
+                                        Inches(label_height_inches)
+                                    )
+                                    tf = txBox.text_frame
+                                    p = tf.paragraphs[0]
+                                    p.text = label
+                                    p.font.size = Pt(label_fontsize)
+                                    p.font.color.rgb = RGBColor(*font_color)
+                                    p.alignment = PP_ALIGN.CENTER
+                                    
+                                elif label_position == 'above':
+                                    txBox = slide.shapes.add_textbox(
+                                        Inches(cell_left),
+                                        Inches(cell_top + cell_padding),
+                                        Inches(cell_width),
+                                        Inches(label_height_inches)
+                                    )
+                                    tf = txBox.text_frame
+                                    p = tf.paragraphs[0]
+                                    p.text = label
+                                    p.font.size = Pt(label_fontsize)
+                                    p.font.color.rgb = RGBColor(*font_color)
+                                    p.alignment = PP_ALIGN.CENTER
+                                    
+                                else:  # below
+                                    txBox = slide.shapes.add_textbox(
+                                        Inches(cell_left),
+                                        Inches(cell_top + cell_height - label_height_inches - cell_padding),
+                                        Inches(cell_width),
+                                        Inches(label_height_inches)
+                                    )
+                                    tf = txBox.text_frame
+                                    p = tf.paragraphs[0]
+                                    p.text = label
+                                    p.font.size = Pt(label_fontsize)
+                                    p.font.color.rgb = RGBColor(*font_color)
+                                    p.alignment = PP_ALIGN.CENTER
+                            
+                            total_images_added += 1
+                            
+                    except Exception as e:
+                        print(f'⚠️  Could not process {img_path}: {e}')
+                
+                total_slides += 1
+                print(f'\r   Creating slide {total_slides}...', end='', flush=True)
+        
+        print(f'\n✅ PPTX created: {output_pptx}')
+        print(f'   Slides: {total_slides}')
+        print(f'   Images: {total_images_added}')
+    
+    # Save presentation
+    prs.save(output_pptx)
+    
+    # Report file size
+    output_size = os.path.getsize(output_pptx) / (1024 * 1024)
+    print(f'   File size: {output_size:.2f} MB')
+    
+    return output_pptx

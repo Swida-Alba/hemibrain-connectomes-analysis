@@ -14,6 +14,7 @@ The FlyLight Downloader module provides programmatic access to FlyLight imagery 
 - [File Types and Formats](#file-types-and-formats)
 - [Simple Mode](#simple-mode)
 - [VT Lines (HTTP CDN)](#vt-lines-http-cdn)
+- [R-Lines (GMR Collection)](#r-lines-gmr-collection)
 - [Examples](#examples)
 - [Convenience Functions](#convenience-functions)
 - [Troubleshooting](#troubleshooting)
@@ -27,14 +28,23 @@ FlyLight is a large-scale effort to characterize Drosophila neural anatomy using
 ### Data Sources
 
 1. **S3 Bucket** (`janelia-flylight-imagery/`)
-   - Gen1 GAL4/LexA lines (R-lines)
+   - Gen1 GAL4/LexA lines (R-lines) - CDM images
    - Gen1 MCFO stochastic labeling
    - Split-GAL4 lines (SS-lines)
    - Paper-specific collections (Lateral Horn, Descending Neurons, etc.)
 
 2. **HTTP CDN** (`flimg.janelia.org`)
-   - VT GAL4 lines
-   - Projections, translations, and LSM stacks
+   - VT GAL4 lines - Expression patterns and projections
+   - R-lines (GMR Gen1) - Full expression pattern images from FlyLight web
+   - Projections, translations, and substacks
+
+### Supported Line Types
+
+| Line Type    | Pattern    | Examples               | Data Sources                     |
+| ------------ | ---------- | ---------------------- | -------------------------------- |
+| **R-lines**  | `R##X##`   | R78H08, R14A01, R50E06 | HTTP (projections) + S3 (CDM)    |
+| **VT lines** | `VT######` | VT037867, VT000770     | HTTP (projections, translations) |
+| **SS-lines** | `SS#####`  | SS01015, SS00731       | S3 (MIP, multichannel, CDM)      |
 
 ### Key Features
 
@@ -42,6 +52,7 @@ FlyLight is a large-scale effort to characterize Drosophila neural anatomy using
 - **Collection filtering**: Search specific collections (GAL4, Split-GAL4, MCFO)
 - **Format filtering**: Download specific file types (PNG, H5J, LSM, MP4)
 - **Image type filtering**: Select MIP, CDM, aligned stacks, metadata, etc.
+- **Region filtering**: Filter by Brain or VNC
 - **Simple mode**: Reduce download volume with intelligent filename filtering
 - **Parallel downloads**: Multi-threaded downloading for efficiency
 - **Caching**: File list caching to speed up repeated queries
@@ -131,20 +142,42 @@ class FlyLightDownloader:
     use_boto3: bool = True
     include_vt_lines: bool = True
     simple_mode: bool = False
+    region: str = 'All'
 ```
 
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `output_dir` | `str` | `'./flylight_downloads'` | Default directory to save downloaded files. |
-| `collections` | `list` or `None` | `None` | Explicit list of collection folder names to search. Overrides `collection_category` if both specified. |
-| `collection_category` | `str`, `list`, or `None` | `None` | Collection category: `'GAL4/LEXA'`, `'SplitGAL4'`, `'MCFO'`, `'RawImages'`, `'All'`. Can be a list. |
-| `formats` | `str` or `list` | `'png'` | File formats to include: `'png'`, `'jpg'`, `'h5j'`, `'lsm'`, `'mp4'`, `'json'`, `'all'`. |
-| `image_types` | `str` or `list` | `'all'` | Image types to filter: `'mip'`, `'cdm'`, `'aligned'`, `'metadata'`, etc. |
-| `max_workers` | `int` | `4` | Number of parallel download threads. |
-| `verbose` | `bool` | `True` | Print progress messages. |
-| `use_boto3` | `bool` | `True` | Use boto3 for S3 access if available (faster). |
-| `include_vt_lines` | `bool` | `True` | Also search VT lines via HTTP CDN. |
-| `simple_mode` | `bool` | `False` | Apply filename filtering to reduce download volume. |
+| Parameter             | Type                     | Default                  | Description                                                                                            |
+| --------------------- | ------------------------ | ------------------------ | ------------------------------------------------------------------------------------------------------ |
+| `output_dir`          | `str`                    | `'./flylight_downloads'` | Default directory to save downloaded files.                                                            |
+| `collections`         | `list` or `None`         | `None`                   | Explicit list of collection folder names to search. Overrides `collection_category` if both specified. |
+| `collection_category` | `str`, `list`, or `None` | `None`                   | Collection category: `'GAL4/LEXA'`, `'SplitGAL4'`, `'MCFO'`, `'RawImages'`, `'All'`. Can be a list.    |
+| `formats`             | `str` or `list`          | `'png'`                  | File formats to include: `'png'`, `'jpg'`, `'h5j'`, `'lsm'`, `'mp4'`, `'json'`, `'all'`.               |
+| `image_types`         | `str` or `list`          | `'all'`                  | Image types to filter: `'mip'`, `'cdm'`, `'aligned'`, `'metadata'`, etc.                               |
+| `region`              | `str`                    | `'All'`                  | Anatomical region filter: `'Brain'`, `'VNC'`, or `'All'`.                                              |
+| `max_workers`         | `int`                    | `4`                      | Number of parallel download threads.                                                                   |
+| `verbose`             | `bool`                   | `True`                   | Print progress messages.                                                                               |
+| `use_boto3`           | `bool`                   | `True`                   | Use boto3 for S3 access if available (faster).                                                         |
+| `include_vt_lines`    | `bool`                   | `True`                   | Also search VT lines via HTTP CDN.                                                                     |
+| `simple_mode`         | `bool`                   | `False`                  | Apply filename filtering to reduce download volume.                                                    |
+
+---
+
+### Region Filtering
+
+Filter images by anatomical region:
+
+| Region    | Description                                                |
+| --------- | ---------------------------------------------------------- |
+| `'Brain'` | Only brain imagery (excludes VNC files)                    |
+| `'VNC'`   | Only ventral nerve cord imagery                            |
+| `'All'`   | All regions (default) - includes both Brain and VNC images |
+
+**Example:**
+```python
+downloader = FlyLightDownloader(
+    region='Brain',  # Only download brain images
+    collection_category='SplitGAL4'
+)
+```
 
 ---
 
@@ -152,13 +185,13 @@ class FlyLightDownloader:
 
 Collection categories provide an easy way to filter by data type:
 
-| Category | Collections | Description |
-|----------|-------------|-------------|
-| `'GAL4/LEXA'` | Gen1 | Gen1 GAL4/LexA R-lines (CDM images) |
-| `'SplitGAL4'` | Split-GAL4 Omnibus Broad, Split-GAL4 Omnibus Rescreen, Lateral Horn 2019, Descending Neurons 2018/2025, SEZ 2021, MB Paper 2014 | SS-lines from various collections |
-| `'MCFO'` | Annotator Gen1 MCFO, Gen1 MCFO | MCFO stochastic labeling |
-| `'RawImages'` | Collections with LSM files | Raw confocal data |
-| `'All'` | All collections | Search everything |
+| Category      | Collections                                                                                                                     | Description                         |
+| ------------- | ------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------- |
+| `'GAL4/LEXA'` | Gen1                                                                                                                            | Gen1 GAL4/LexA R-lines (CDM images) |
+| `'SplitGAL4'` | Split-GAL4 Omnibus Broad, Split-GAL4 Omnibus Rescreen, Lateral Horn 2019, Descending Neurons 2018/2025, SEZ 2021, MB Paper 2014 | SS-lines from various collections   |
+| `'MCFO'`      | Annotator Gen1 MCFO, Gen1 MCFO                                                                                                  | MCFO stochastic labeling            |
+| `'RawImages'` | Collections with LSM files                                                                                                      | Raw confocal data                   |
+| `'All'`       | All collections                                                                                                                 | Search everything                   |
 
 **Using multiple categories:**
 ```python
@@ -181,10 +214,10 @@ for f in files:
     print(f"{f.collection}/{f.filename} - {f.size_mb:.1f} MB")
 ```
 
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `line_name` | `str` | Required | Driver line name (e.g., 'R10A06', 'SS01015', 'VT037867'). |
-| `use_cache` | `bool` | `True` | Use cached file list if available. |
+| Parameter   | Type   | Default  | Description                                               |
+| ----------- | ------ | -------- | --------------------------------------------------------- |
+| `line_name` | `str`  | Required | Driver line name (e.g., 'R10A06', 'SS01015', 'VT037867'). |
+| `use_cache` | `bool` | `True`   | Use cached file list if available.                        |
 
 **Returns**: `List[FlyLightFile]` objects with attributes:
 - `key`: S3 key or file path
@@ -203,49 +236,66 @@ for f in files:
 Get files matching format, image type, and simple mode filters.
 
 ```python
-# Get filtered files
+# Single line
 files = downloader.get_filtered_files('SS01015')
+
+# Multiple lines (comma-separated)
+files = downloader.get_filtered_files('SS01015,VT037867')
+
+# Multiple lines (list)
+files = downloader.get_filtered_files(['SS01015', 'VT037867'])
 
 # Override simple_mode setting
 files = downloader.get_filtered_files('SS01015', apply_simple_mode=True)
 ```
 
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `line_name` | `str` | Required | Driver line name. |
-| `apply_simple_mode` | `bool` or `None` | `None` | Override class `simple_mode` setting. |
+| Parameter           | Type             | Default  | Description                                                                 |
+| ------------------- | ---------------- | -------- | --------------------------------------------------------------------------- |
+| `line_name`         | `str` or `list`  | Required | Driver line name(s). Can be single string, comma-separated string, or list. |
+| `apply_simple_mode` | `bool` or `None` | `None`   | Override class `simple_mode` setting.                                       |
 
 ---
 
-#### `download(line_name, output_dir=None, max_files=None, dry_run=False, flat_structure=False, files=None)`
+#### `download(line_name, output_dir=None, max_files=None, dry_run=False, flat_structure=False, files=None, generate_summary=None, summary_images_per_page=(3,2), add_timestamp=True)`
 
-Download files for a driver line.
+Download files for driver line(s).
 
 ```python
-# Basic download
+# Basic download (single line)
 paths = downloader.download('SS01015')
+
+# Multiple lines (comma-separated)
+paths = downloader.download('SS01015,VT037867')
+
+# Multiple lines (list)
+paths = downloader.download(['SS01015', 'VT037867'])
 
 # With options
 paths = downloader.download(
     line_name='SS01015',
     output_dir='./my_downloads',
     max_files=10,
-    flat_structure=True
+    flat_structure=True,
+    generate_summary=['pdf', 'pptx'],
+    add_timestamp=True
 )
 
 # Dry run (list files without downloading)
 downloader.download('SS01015', dry_run=True)
 ```
 
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `line_name` | `str` | Required | Driver line name. |
-| `output_dir` | `str` or `None` | `None` | Override output directory. |
-| `max_files` | `int` or `None` | `None` | Maximum files to download. |
-| `dry_run` | `bool` | `False` | List files without downloading. |
-| `on_file_downloaded` | `callable` or `None` | `None` | Callback after each file: `callback(path, line_name)`. |
-| `flat_structure` | `bool` | `False` | Save as `{line_name}/{filename}` instead of preserving S3 structure. |
-| `files` | `list` or `None` | `None` | Pre-filtered file list (skips `get_filtered_files()`). |
+| Parameter                 | Type                     | Default  | Description                                                                                                                                                                                                                                                                           |
+| ------------------------- | ------------------------ | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `line_name`               | `str` or `list`          | Required | Driver line name(s). Can be single string, comma-separated string ('SS01015,VT037867'), or list (['SS01015', 'VT037867']). Output folder naming: 1 line → `{line}_timestamp`, 2-3 lines → `{line1}_{line2}_{line3}_timestamp`, 4+ lines → `{line1}_{line2}_{line3}_etc{N}_timestamp`. |
+| `output_dir`              | `str` or `None`          | `None`   | Override output directory.                                                                                                                                                                                                                                                            |
+| `max_files`               | `int` or `None`          | `None`   | Maximum files to download **per line**. When downloading multiple lines, this limit applies to each line separately.                                                                                                                                                                  |
+| `dry_run`                 | `bool`                   | `False`  | List files without downloading.                                                                                                                                                                                                                                                       |
+| `on_file_downloaded`      | `callable` or `None`     | `None`   | Callback after each file: `callback(path, line_name)`.                                                                                                                                                                                                                                |
+| `flat_structure`          | `bool`                   | `False`  | Save as `{line_name}/{filename}` instead of preserving S3 structure.                                                                                                                                                                                                                  |
+| `files`                   | `list` or `None`         | `None`   | Pre-filtered file list (skips `get_filtered_files()`).                                                                                                                                                                                                                                |
+| `generate_summary`        | `str`, `list`, or `None` | `None`   | Generate image summary: 'pdf', 'pptx', ['pdf', 'pptx'], or None to disable.                                                                                                                                                                                                           |
+| `summary_images_per_page` | `tuple`                  | `(3, 2)` | (columns, rows) for summary layout.                                                                                                                                                                                                                                                   |
+| `add_timestamp`           | `bool`                   | `True`   | Add timestamp to output folder name.                                                                                                                                                                                                                                                  |
 
 **Returns**: `List[Path]` of downloaded file paths.
 
@@ -302,31 +352,31 @@ print(f"Found {len(lines)} matching lines")
 
 ### File Formats
 
-| Format | Extensions | Description |
-|--------|------------|-------------|
-| `'png'` | `.png` | PNG images (MIPs, CDMs) |
-| `'jpg'` | `.jpg`, `.jpeg` | JPEG images (VT projections) |
-| `'h5j'` | `.h5j` | H5J 3D stacks (aligned/unaligned) |
-| `'lsm'` | `.lsm`, `.lsm.bz2` | Raw confocal data |
-| `'mp4'` | `.mp4` | Translation videos |
-| `'json'` | `.json` | Metadata files |
-| `'all'` | All above | All formats |
+| Format   | Extensions         | Description                       |
+| -------- | ------------------ | --------------------------------- |
+| `'png'`  | `.png`             | PNG images (MIPs, CDMs)           |
+| `'jpg'`  | `.jpg`, `.jpeg`    | JPEG images (VT projections)      |
+| `'h5j'`  | `.h5j`             | H5J 3D stacks (aligned/unaligned) |
+| `'lsm'`  | `.lsm`, `.lsm.bz2` | Raw confocal data                 |
+| `'mp4'`  | `.mp4`             | Translation videos                |
+| `'json'` | `.json`            | Metadata files                    |
+| `'all'`  | All above          | All formats                       |
 
 ### Image Types
 
-| Type | Pattern | Description |
-|------|---------|-------------|
-| `'mip'` | `*_mip.png`, `*_signals_mip.png`, `*_multichannel_mip.png` | Maximum Intensity Projections |
-| `'cdm'` | `*-CDM_*.png` | Color Depth Mask images |
-| `'aligned'` | `*-aligned_stack.h5j` | Aligned 3D stacks |
-| `'unaligned'` | `*-unaligned_stack.h5j` | Unaligned 3D stacks |
-| `'translation'` | `*_translation.mp4`, `*.t.mp4` | Translation videos |
-| `'signals'` | `*_signals*` | Signal channel images |
-| `'multichannel'` | `*_multichannel*` | Multichannel images |
-| `'metadata'` | `*-metadata.json` | Specimen metadata |
-| `'raw'` | `*.lsm`, `*.lsm.bz2` | Raw confocal data |
-| `'projection'` | `*_total.jpg` | VT line projections |
-| `'all'` | `.*` | All types |
+| Type             | Pattern                                                    | Description                   |
+| ---------------- | ---------------------------------------------------------- | ----------------------------- |
+| `'mip'`          | `*_mip.png`, `*_signals_mip.png`, `*_multichannel_mip.png` | Maximum Intensity Projections |
+| `'cdm'`          | `*-CDM_*.png`                                              | Color Depth Mask images       |
+| `'aligned'`      | `*-aligned_stack.h5j`                                      | Aligned 3D stacks             |
+| `'unaligned'`    | `*-unaligned_stack.h5j`                                    | Unaligned 3D stacks           |
+| `'translation'`  | `*_translation.mp4`, `*.t.mp4`                             | Translation videos            |
+| `'signals'`      | `*_signals*`                                               | Signal channel images         |
+| `'multichannel'` | `*_multichannel*`                                          | Multichannel images           |
+| `'metadata'`     | `*-metadata.json`                                          | Specimen metadata             |
+| `'raw'`          | `*.lsm`, `*.lsm.bz2`                                       | Raw confocal data             |
+| `'projection'`   | `*_total.jpg`                                              | VT line projections           |
+| `'all'`          | `.*`                                                       | All types                     |
 
 ---
 
@@ -336,12 +386,12 @@ Simple mode (`simple_mode=True`) intelligently filters files based on collection
 
 ### Filtering Rules
 
-| Collection Type | Filter Applied | Typical Reduction |
-|-----------------|----------------|-------------------|
-| **Split-GAL4** | Only `20x` AND `multichannel` files, excluding `image1`/`image2` duplicates | 241 → 13 files (~95%) |
-| **VT GAL4** | Only files with `total` in filename | 44 → 4 files (~90%) |
-| **Gen1 R-lines** | Keep CDM and MIP files | Keeps all (already minimal) |
-| **MCFO** | Keep all files | No reduction (need full stochastic data) |
+| Collection Type  | Filter Applied                                                              | Typical Reduction                        |
+| ---------------- | --------------------------------------------------------------------------- | ---------------------------------------- |
+| **Split-GAL4**   | Only `20x` AND `multichannel` files, excluding `image1`/`image2` duplicates | 241 → 13 files (~95%)                    |
+| **VT GAL4**      | Only files with `total` in filename                                         | 44 → 4 files (~90%)                      |
+| **Gen1 R-lines** | Keep CDM and MIP files                                                      | Keeps all (already minimal)              |
+| **MCFO**         | Keep all files                                                              | No reduction (need full stochastic data) |
 
 ### Example
 
@@ -378,12 +428,12 @@ files = downloader.list_files('VT037867')
 
 ### VT File Types
 
-| Type | Filename Pattern | Description |
-|------|------------------|-------------|
-| Total Projection | `*_total.jpg` | Main projection image |
-| Pattern Channel | `*_ch2_total.jpg` | Pattern channel projection |
-| Substacks | `*_01.jpg` to `*_10.jpg` | Substack projections |
-| Translation | `*.t.mp4` | Fly-through video |
+| Type             | Filename Pattern         | Description                |
+| ---------------- | ------------------------ | -------------------------- |
+| Total Projection | `*_total.jpg`            | Main projection image      |
+| Pattern Channel  | `*_ch2_total.jpg`        | Pattern channel projection |
+| Substacks        | `*_01.jpg` to `*_10.jpg` | Substack projections       |
+| Translation      | `*.t.mp4`                | Fly-through video          |
 
 ### Verifying VT Files
 
@@ -395,6 +445,72 @@ files = downloader.list_vt_files('VT037867', verify=False)
 
 # List only verified files (slower but accurate)
 files = downloader.list_vt_files('VT037867', verify=True)
+```
+
+---
+
+## R-Lines (GMR Collection)
+
+R-lines (e.g., 'R78H08', 'R14A01') are from the original Gen1 GAL4/LexA collection. The module now supports downloading full expression pattern images from the FlyLight web interface in addition to CDM images from S3.
+
+### R-Line Naming Pattern
+
+R-lines follow the pattern `R##X##` where:
+- `R` = prefix
+- `##` = two digits
+- `X` = single letter (A-Z)
+- `##` = two digits
+
+Examples: `R78H08`, `R14A01`, `R50E06`
+
+### Automatic Detection
+
+The module automatically detects R-lines and fetches images from both HTTP and S3:
+
+```python
+downloader = FlyLightDownloader(
+    collection_category='GAL4/LexA',
+    region='Brain'  # Filter by region
+)
+
+# This automatically:
+# 1. Fetches expression pattern images from flweb.janelia.org
+# 2. Fetches CDM images from S3 bucket
+files = downloader.list_files('R78H08')
+```
+
+### R-Line File Types
+
+| Type             | Source | Filename Pattern         | Description                       |
+| ---------------- | ------ | ------------------------ | --------------------------------- |
+| Total Projection | HTTP   | `*_total.jpg`            | Maximum intensity projection      |
+| Pattern Channel  | HTTP   | `*_ch2_total.jpg`        | Pattern projection (no reference) |
+| Substacks        | HTTP   | `*_01.jpg` to `*_11.jpg` | ~10µm substack projections        |
+| CDM              | S3     | `*-brain-*-CDM.png`      | Color Depth MIP for NeuronBridge  |
+
+### GAL4 vs LexA
+
+R-lines typically have both GAL4 and LexA driver constructs. The module identifies them by filename patterns:
+- **GAL4**: Files with `_AE_` in the path (Gen1 GAL4)
+- **LexA**: Files with `_LJ_` or `_L_` in the path (Gen1 LexA)
+
+### Example: Download R-Line Brain Images
+
+```python
+from src.flylight_downloader import FlyLightDownloader
+
+downloader = FlyLightDownloader(
+    output_dir='./r_line_images',
+    collection_category='GAL4/LexA',
+    formats=['jpg', 'png'],
+    simple_mode=True,  # Only download 'total' projections + CDM
+    region='Brain',
+    verbose=True
+)
+
+# Download brain images only
+paths = downloader.download('R78H08', flat_structure=True)
+print(f"Downloaded {len(paths)} brain images")
 ```
 
 ---
@@ -415,13 +531,51 @@ downloader = FlyLightDownloader(
     verbose=True
 )
 
-# Download for multiple lines
-for line in ['SS01015', 'SS01540', 'SS02017']:
-    paths = downloader.download(line, flat_structure=True)
-    print(f"{line}: {len(paths)} files downloaded")
+# Download for a single line
+paths = downloader.download('SS01015', flat_structure=True)
+print(f"SS01015: {len(paths)} files downloaded")
 ```
 
-### Example 2: Get Metadata Without Downloading Images
+### Example 2: Download Multiple Lines at Once
+
+```python
+from src.flylight_downloader import FlyLightDownloader
+
+downloader = FlyLightDownloader(
+    output_dir='./multiple_lines',
+    formats=['jpg', 'png'],
+    simple_mode=True,
+    verbose=True
+)
+
+# Download from multiple lines using comma-separated string
+paths = downloader.download(
+    line_name='SS01015,VT037867',
+    max_files=30,
+    flat_structure=True,
+    generate_summary=['pdf', 'pptx'],  # Generate summary documents
+    add_timestamp=True
+)
+# Output folder: SS01015_VT037867_20240103_121530/
+
+# Or using a list
+paths = downloader.download(
+    line_name=['SS01015', 'VT037867', 'R10A06'],
+    max_files=20
+)
+# Output folder: SS01015_VT037867_R10A06_20240103_121530/
+
+# For more than 3 lines, uses _etc{N} format to keep names short
+paths = downloader.download(
+    line_name=['SS01015', 'VT037867', 'R10A06', 'SS01540', 'SS02017'],
+    max_files=50
+)
+# Output folder: SS01015_VT037867_R10A06_etc5_20240103_121530/
+
+print(f"Downloaded {len(paths)} files from multiple lines")
+```
+
+### Example 3: Get Metadata Without Downloading Images
 
 ```python
 downloader = FlyLightDownloader(verbose=False)
@@ -434,7 +588,7 @@ for m in metadata:
     print("---")
 ```
 
-### Example 3: Search for Lines by Pattern
+### Example 4: Search for Lines by Pattern
 
 ```python
 downloader = FlyLightDownloader(
@@ -552,12 +706,12 @@ class FlyLightFile:
 
 ### Properties
 
-| Property | Type | Description |
-|----------|------|-------------|
-| `filename` | `str` | Base filename from key |
-| `extension` | `str` | File extension (e.g., '.png') |
-| `size_mb` | `float` | Size in megabytes |
-| `url` | `str` | Direct download URL |
+| Property    | Type    | Description                   |
+| ----------- | ------- | ----------------------------- |
+| `filename`  | `str`   | Base filename from key        |
+| `extension` | `str`   | File extension (e.g., '.png') |
+| `size_mb`   | `float` | Size in megabytes             |
+| `url`       | `str`   | Direct download URL           |
 
 ---
 

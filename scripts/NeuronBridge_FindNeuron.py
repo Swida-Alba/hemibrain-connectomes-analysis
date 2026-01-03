@@ -103,13 +103,18 @@ if __name__ == "__main__":
     visualize_per_dataset = True
     
     # Generate individual profile PNGs for each neuron type/bodyId
-    # Creates a subfolder 'individual_profiles' with one PNG per type + PDF summary
-    # PDF uses natural sorting: r1, r2, ..., r9, r10 (not r1, r10, r11...)
+    # Creates a subfolder 'individual_profiles' with one PNG per type + summary files
+    # Options:
+    #   - 'pdf' or ['pdf']: Generate PDF only
+    #   - 'pptx' or ['pptx']: Generate PPTX only
+    #   - ['pdf', 'pptx']: Generate both formats
+    #   - False or None: Disable generation
+    # Uses natural sorting: r1, r2, ..., r9, r10 (not r1, r10, r11...)
     # Only uses front view
-    generate_individual_profiles = True
+    generate_individual_profiles = ['pdf', 'pptx']
     
-    # PDF layout for individual profiles (columns, rows)
-    # Default: (3, 2) = 3 columns x 2 rows = 6 images per page
+    # Layout for individual profiles (columns, rows)
+    # Default: (3, 2) = 3 columns x 2 rows = 6 images per page/slide
     pdf_images_per_page = (3, 2)
     
     

@@ -5213,7 +5213,7 @@ class NeuronBridgeFinder:
         per_dataset: bool = True,
         source_line: str = '',
         visualize_by: str = 'type',
-        generate_individual_profiles: bool = False,
+        generate_individual_profiles: Union[bool, List[str]] = None,
         pdf_images_per_page: Tuple[int, int] = (4, 3),
         labeling_info: Optional[pd.DataFrame] = None,
     ) -> None:
@@ -5234,8 +5234,9 @@ class NeuronBridgeFinder:
             Source line name for folder naming
         visualize_by : str
             How to organize: 'type' (merge) or 'bodyId' (individual)
-        generate_individual_profiles : bool
-            If True, generate individual PNG profiles with PDF summary
+        generate_individual_profiles : list of str, bool, or None
+            Formats to generate: ['pdf'], ['pptx'], or ['pdf', 'pptx']
+            Set to False or None to disable generation
         pdf_images_per_page : tuple
             (columns, rows) for PDF layout
         labeling_info : pd.DataFrame, optional
@@ -5473,7 +5474,8 @@ class NeuronBridgeFinder:
                         views='front',
                         scale=3,
                         pdf_images_per_page=pdf_images_per_page,
-                        pdf_title=f"{source_line} - {dataset}"
+                        pdf_title=f"{source_line} - {dataset}",
+                        summary_format=generate_individual_profiles
                     )
                 
                 self._vprint(f"   ✅ Visualization saved to: {vs.save_folder}")
@@ -5493,7 +5495,7 @@ class NeuronBridgeFinder:
         visualize_top_n: int = 0,
         visualize_by: str = 'type',
         visualize_per_dataset: bool = True,
-        generate_individual_profiles: bool = False,
+        generate_individual_profiles: Union[bool, List[str]] = None,
         pdf_images_per_page: Tuple[int, int] = (4, 3),
     ) -> pd.DataFrame:
         """
@@ -5524,9 +5526,9 @@ class NeuronBridgeFinder:
         visualize_per_dataset : bool
             If True (default), create separate visualizations per dataset.
             If False, combine all datasets in one visualization.
-        generate_individual_profiles : bool
-            If True, generate individual PNG profiles for each neuron type
-            with a PDF summary. Default: False.
+        generate_individual_profiles : list of str, bool, or None
+            Formats to generate: ['pdf'], ['pptx'], or ['pdf', 'pptx']
+            Set to False or None to disable generation. Default: None.
         pdf_images_per_page : tuple
             (columns, rows) for PDF layout. Default: (4, 3).
             
@@ -5808,7 +5810,7 @@ class NeuronBridgeFinder:
         generate_report: bool = True,
         visualize: bool = True,
         visualize_top_n: int = 0,
-        generate_individual_profiles: bool = False,
+        generate_individual_profiles: Union[bool, List[str]] = None,
         pdf_images_per_page: Tuple[int, int] = (3, 2),
         min_score: float = 20000.0,
         min_type_avg_score: float = 10000.0
@@ -5845,8 +5847,9 @@ class NeuronBridgeFinder:
             Generate heatmap visualizations. Default: True
         visualize_top_n : int
             Visualize top N types per dataset using 3D skeleton. Default: 0 (disabled)
-        generate_individual_profiles : bool
-            Generate individual PNG profiles with PDF summary. Default: False
+        generate_individual_profiles : list of str, bool, or None
+            Formats to generate: ['pdf'], ['pptx'], or ['pdf', 'pptx']
+            Set to False or None to disable generation. Default: None
         pdf_images_per_page : tuple
             (columns, rows) for PDF layout. Default: (3, 2)
         min_score : float
@@ -6515,12 +6518,13 @@ class NeuronBridgeFinder:
         download_img_for_top_n_lines: Optional[int] = 10,
         image_formats: Union[str, List[str]] = ['png','jpg'],
         image_types: Union[str, List[str]] = 'all',
-        max_download_images_per_line: Optional[int] = 20,
+        max_download_images_per_line: Optional[int] = 12,
         flylight_category: Optional[Union[str, List[str]]] = ['GAL4/LEXA', 'SplitGAL4'],
         organize_by_region: bool = False,
         simple_mode: bool = False,
         pdf_images_per_page: Tuple[int, int] = (3, 2),
-        pdf_landscape: bool = True
+        pdf_landscape: bool = True,
+        summary_format: Union[str, List[str]] = 'pdf',
     ) -> pd.DataFrame:
         """
         Find driver lines for multiple EM neurons with automatic saving.
@@ -6586,10 +6590,14 @@ class NeuronBridgeFinder:
             - GAL4/LexA collections: only files with 'total' in filename
             Default: False
         pdf_images_per_page : tuple of (int, int)
-            (columns, rows) - number of images per page in the PDF summary.
-            Default: (5, 3) = 15 images per page
+            (columns, rows) - number of images per page/slide in the summary.
+            Default: (3, 2) = 6 images per page/slide
         pdf_landscape : bool
             Use landscape orientation for PDF. Default: True (horizontal A4)
+        summary_format : str or list of str
+            Format(s) for summary file generation.
+            Options: 'pdf', 'pptx', or list like ['pdf', 'pptx']
+            Default: 'pdf'
         
         Notes
         -----
@@ -7354,20 +7362,37 @@ class NeuronBridgeFinder:
                                 self._vprint(f"   {', '.join(lines_without_flylight)}")
                                 self._vprint("   (tried all categories including MCFO fallback)")
                             
-                            # Generate PDF summary if images were downloaded
+                            # Generate PDF/PPTX summary if images were downloaded
                             images_dir = os.path.join(output_path, 'images')
                             if os.path.exists(images_dir):
-                                self._vprint(f"\n📄 Generating PDF summary...")
-                                pdf_path = create_image_pdf(
-                                    images_dir=images_dir,
-                                    output_pdf=os.path.join(output_path, 'images_summary.pdf'),
-                                    images_per_page=pdf_images_per_page,
-                                    landscape=pdf_landscape,
-                                    line_order=download_lines,  # Preserve ranking order
-                                    verbose=self.verbose
-                                )
-                                if pdf_path:
-                                    self._vprint(f"   ✅ PDF saved: {pdf_path}")
+                                # Normalize summary_format
+                                formats = summary_format if isinstance(summary_format, list) else [summary_format]
+                                formats = [f.lower() for f in formats]
+                                
+                                if 'pdf' in formats:
+                                    self._vprint(f"\n📄 Generating PDF summary...")
+                                    pdf_path = create_image_pdf(
+                                        images_dir=images_dir,
+                                        output_pdf=os.path.join(output_path, 'images_summary.pdf'),
+                                        images_per_page=pdf_images_per_page,
+                                        landscape=pdf_landscape,
+                                        line_order=download_lines,  # Preserve ranking order
+                                        verbose=self.verbose
+                                    )
+                                    if pdf_path:
+                                        self._vprint(f"   ✅ PDF saved: {pdf_path}")
+                                
+                                if 'pptx' in formats:
+                                    self._vprint(f"\n📊 Generating PPTX summary...")
+                                    pptx_path = create_image_pptx(
+                                        images_dir=images_dir,
+                                        output_pptx=os.path.join(output_path, 'images_summary.pptx'),
+                                        images_per_slide=pdf_images_per_page,
+                                        line_order=download_lines,  # Preserve ranking order
+                                        verbose=self.verbose
+                                    )
+                                    if pptx_path:
+                                        self._vprint(f"   ✅ PPTX saved: {pptx_path}")
             
             return combined_df
         
@@ -8561,6 +8586,261 @@ def create_image_pdf(
         print(f"   {total_pages} pages, {total_images} images from {len(line_images)} lines")
     
     return str(output_pdf)
+
+
+def create_image_pptx(
+    images_dir: str,
+    output_pptx: Optional[str] = None,
+    images_per_slide: Tuple[int, int] = (5, 3),
+    slide_size: str = 'widescreen',
+    title_font_size: int = 24,
+    label_font_size: int = 20,
+    margin: float = 0.3,
+    line_order: Optional[List[str]] = None,
+    font_color: Tuple[int, int, int] = (0, 0, 0),
+    verbose: bool = True
+) -> Optional[str]:
+    """
+    Create a PPTX file from downloaded images, organized by line name.
+    
+    Each slide shows images for one driver line with the line name as title.
+    Images are arranged in a grid (default 5 columns x 3 rows = 15 images per slide).
+    If a line has more images than fit on one slide, additional slides are created.
+    
+    Parameters
+    ----------
+    images_dir : str
+        Directory containing images, organized by line name subdirectories.
+        Expected structure: images_dir/LineName/*.png (or .jpg)
+    output_pptx : str, optional
+        Path for output PPTX file. If None, saves to images_dir/images_summary.pptx
+    images_per_slide : tuple of (int, int)
+        (columns, rows) - number of images per slide. Default: (5, 3) = 15 images
+    slide_size : str
+        Slide dimensions: 'widescreen' (16:9), 'standard' (4:3), 'a4'. Default: 'widescreen'
+    title_font_size : int
+        Font size for line name title. Default: 24
+    label_font_size : int
+        Font size for image labels. Default: 20
+    margin : float
+        Slide margin in inches. Default: 0.3
+    line_order : list of str, optional
+        Ordered list of line names for slide ordering. Lines are sorted in this order,
+        preserving the ranking used to select top-N lines (e.g., by weighted_score).
+        Lines not in this list are appended at the end alphabetically.
+        If None, lines are sorted alphabetically.
+    font_color : tuple of (int, int, int), default (0, 0, 0)
+        RGB color tuple for label text (r, g, b), each value 0-255. Default is black.
+    verbose : bool
+        Print progress messages. Default: True
+        
+    Returns
+    -------
+    str or None
+        Path to the created PPTX file, or None if creation failed.
+    """
+    try:
+        from pptx import Presentation
+        from pptx.util import Inches, Pt
+        from pptx.enum.text import PP_ALIGN
+        HAS_PPTX = True
+    except ImportError:
+        HAS_PPTX = False
+    
+    if not HAS_PPTX:
+        if verbose:
+            print("⚠️  PPTX generation requires python-pptx.")
+            print("   Install with: pip install python-pptx")
+        return None
+    
+    from pathlib import Path
+    from PIL import Image
+    
+    images_path = Path(images_dir)
+    if not images_path.exists():
+        if verbose:
+            print(f"⚠️  Images directory not found: {images_dir}")
+        return None
+    
+    # Find all line directories with images
+    line_images = {}
+    image_extensions = {'.png', '.jpg', '.jpeg'}
+    
+    for item in sorted(images_path.iterdir()):
+        if item.is_dir():
+            line_name = item.name
+            images = sorted([
+                f for f in item.iterdir()
+                if f.suffix.lower() in image_extensions
+            ])
+            if images:
+                line_images[line_name] = images
+        elif item.suffix.lower() in image_extensions:
+            line_name = item.stem.split('-')[0] if '-' in item.stem else 'Unknown'
+            if line_name not in line_images:
+                line_images[line_name] = []
+            line_images[line_name].append(item)
+    
+    if not line_images:
+        if verbose:
+            print(f"⚠️  No images found in: {images_dir}")
+        return None
+    
+    # Sort images within each line
+    for line_name in line_images:
+        line_images[line_name] = sorted(line_images[line_name])
+    
+    # Determine line ordering
+    if line_order:
+        ordered_lines = []
+        remaining_lines = set(line_images.keys())
+        for line in line_order:
+            if line in remaining_lines:
+                ordered_lines.append(line)
+                remaining_lines.remove(line)
+        ordered_lines.extend(sorted(remaining_lines))
+    else:
+        ordered_lines = sorted(line_images.keys())
+    
+    # Set output path
+    if output_pptx is None:
+        output_pptx = images_path / 'images_summary.pptx'
+    output_pptx = Path(output_pptx)
+    
+    # Slide setup
+    size_presets = {
+        'widescreen': (13.333, 7.5),
+        'standard': (10, 7.5),
+        'a4': (11.69, 8.27),
+    }
+    slide_width, slide_height = size_presets.get(slide_size, size_presets['widescreen'])
+    
+    cols, rows = images_per_slide
+    title_height = 0.5
+    label_height = (label_font_size / 72) * 1.5
+    
+    # Calculate cell dimensions
+    usable_width = slide_width - 2 * margin
+    usable_height = slide_height - margin - title_height - margin
+    cell_width = usable_width / cols
+    cell_height = usable_height / rows
+    
+    # Create presentation
+    prs = Presentation()
+    prs.slide_width = Inches(slide_width)
+    prs.slide_height = Inches(slide_height)
+    blank_layout = prs.slide_layouts[6]
+    
+    total_slides = 0
+    total_images = 0
+    
+    if verbose:
+        if line_order:
+            print(f"📊 Creating PPTX from {len(line_images)} lines (ordered by ranking)...")
+        else:
+            print(f"📊 Creating PPTX from {len(line_images)} lines (alphabetical order)...")
+    
+    for line_name in ordered_lines:
+        images = line_images[line_name]
+        images_per_full_slide = cols * rows
+        num_slides = (len(images) + images_per_full_slide - 1) // images_per_full_slide
+        
+        for slide_idx in range(num_slides):
+            slide = prs.slides.add_slide(blank_layout)
+            
+            # Build title
+            slide_title = line_name
+            if num_slides > 1:
+                slide_title += f" ({slide_idx + 1}/{num_slides})"
+            
+            # Add title
+            txBox = slide.shapes.add_textbox(
+                Inches(margin),
+                Inches(margin / 2),
+                Inches(slide_width - 2 * margin),
+                Inches(title_height)
+            )
+            tf = txBox.text_frame
+            p = tf.paragraphs[0]
+            p.text = slide_title
+            p.font.size = Pt(title_font_size)
+            p.font.bold = True
+            p.alignment = PP_ALIGN.CENTER
+            
+            # Get images for this slide
+            start_idx = slide_idx * images_per_full_slide
+            end_idx = min(start_idx + images_per_full_slide, len(images))
+            slide_images = images[start_idx:end_idx]
+            
+            content_top = margin + title_height
+            
+            for i, img_path in enumerate(slide_images):
+                row = i // cols
+                col = i % cols
+                
+                cell_left = margin + col * cell_width
+                cell_top = content_top + row * cell_height
+                
+                try:
+                    with Image.open(img_path) as img:
+                        img_width, img_height = img.size
+                        
+                        max_width = cell_width - 0.1
+                        max_height = cell_height - label_height - 0.1
+                        
+                        scale_w = max_width / (img_width / 96)
+                        scale_h = max_height / (img_height / 96)
+                        scale_factor = min(scale_w, scale_h)
+                        
+                        final_width = (img_width / 96) * scale_factor
+                        final_height = (img_height / 96) * scale_factor
+                        
+                        img_left = cell_left + (cell_width - final_width) / 2
+                        img_top = cell_top + (cell_height - label_height - final_height) / 2
+                        
+                        slide.shapes.add_picture(
+                            str(img_path),
+                            Inches(img_left),
+                            Inches(img_top),
+                            Inches(final_width),
+                            Inches(final_height)
+                        )
+                        
+                        # Add label
+                        label = img_path.stem
+                        max_chars = int(cell_width * 8)
+                        if len(label) > max_chars:
+                            label = label[:max_chars-3] + '...'
+                        
+                        label_box = slide.shapes.add_textbox(
+                            Inches(cell_left),
+                            Inches(cell_top + cell_height - label_height),
+                            Inches(cell_width),
+                            Inches(label_height)
+                        )
+                        tf = label_box.text_frame
+                        p = tf.paragraphs[0]
+                        p.text = label
+                        p.font.size = Pt(label_font_size)
+                        from pptx.dml.color import RGBColor
+                        p.font.color.rgb = RGBColor(*font_color)
+                        p.alignment = PP_ALIGN.CENTER
+                        
+                        total_images += 1
+                        
+                except Exception as e:
+                    if verbose:
+                        print(f"   ⚠️  Could not process: {img_path.name} - {e}")
+            
+            total_slides += 1
+    
+    prs.save(str(output_pptx))
+    
+    if verbose:
+        print(f"✅ Created PPTX: {output_pptx}")
+        print(f"   {total_slides} slides, {total_images} images from {len(line_images)} lines")
+    
+    return str(output_pptx)
 
 
 # Convenience function for quick usage
