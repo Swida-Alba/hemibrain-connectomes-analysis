@@ -5489,11 +5489,11 @@ def video2gif(
 def img2pptx(
     input_path: str | list,
     output_pptx: str = None,
-    images_per_slide: tuple = (4, 3),
+    images_per_slide: tuple = (4, 2),
     slide_title: str = None,
     slide_size: str = 'widescreen',
     margin: float = 0.3,
-    title_height: float = 0.5,
+    title_height: int = 60,
     label_fontsize: int = 20,
     title_fontsize: int = 24,
     label_position: str = 'below',
@@ -5536,8 +5536,9 @@ def img2pptx(
         - 'a4': 11.69" x 8.27" (A4 landscape)
     margin : float, default 0.3
         Margin in inches from slide edges.
-    title_height : float, default 0.5
-        Height reserved for title in inches.
+    title_height : int, default 0
+        Height reserved for title in points (pt). Set to 0 to disable title space.
+        Recommended: 20-30 for visible titles.
     label_fontsize : int, default 20
         Font size in points for image labels.
     title_fontsize : int, default 24
@@ -5625,6 +5626,9 @@ def img2pptx(
     
     # Calculate label height based on fontsize
     label_height_inches = (label_fontsize / 72) * 1.5  # 1.5x line height
+    
+    # Convert title_height from points to inches
+    title_height_inches = title_height / 72 if title_height > 0 else 0
     
     # Handle font color (convert 0-1 float to 0-255 int if needed)
     r, g, b = font_color
@@ -5742,7 +5746,7 @@ def img2pptx(
                     Inches(margin), 
                     Inches(margin / 2),
                     Inches(slide_width - 2 * margin),
-                    Inches(title_height)
+                    Inches(title_height_inches)
                 )
                 tf = txBox.text_frame
                 p = tf.paragraphs[0]
@@ -5750,7 +5754,7 @@ def img2pptx(
                 p.font.size = Pt(title_fontsize)
                 p.font.bold = True
                 p.alignment = PP_ALIGN.CENTER
-                content_top = margin + title_height
+                content_top = margin + title_height_inches
             
             # Calculate image placement (fit to slide)
             usable_width = slide_width - 2 * margin
@@ -5814,8 +5818,9 @@ def img2pptx(
             grouped_images = {'': [img_path for img_path, _ in image_files]}
         
         # Calculate cell dimensions (account for label position)
-        has_title = slide_title is not None or (group_by_subfolder and include_subfolders and len(grouped_images) > 0)
-        content_top = margin if not has_title else margin + title_height
+        # Reserve space for title if title_height is set (> 0)
+        has_title_space = title_height > 0
+        content_top = margin if not has_title_space else margin + title_height_inches
         usable_width = slide_width - 2 * margin
         usable_height = slide_height - content_top - margin
         cell_width = usable_width / cols
@@ -5847,7 +5852,7 @@ def img2pptx(
                         Inches(margin),
                         Inches(margin / 2),
                         Inches(slide_width - 2 * margin),
-                        Inches(title_height)
+                        Inches(title_height_inches)
                     )
                     tf = txBox.text_frame
                     p = tf.paragraphs[0]
