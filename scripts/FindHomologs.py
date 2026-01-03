@@ -45,7 +45,7 @@ if __name__ == "__main__":
     finder = HomologFinder(
         token='',
 
-        source='VP2_adPN', # MTe07/MeVPLo2
+        source='VP2_adPN', # type or bodyId
         source_dataset='male-cns:v0.9',
         target_dataset='male-cns:v0.9',
         
