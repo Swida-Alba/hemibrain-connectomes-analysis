@@ -1,4 +1,4 @@
-# Drosophila Connectome Analysis v4.3.3
+# Drosophila Connectome Analysis Toolkit (DROCAT) v4.3.3
 
 A comprehensive Python toolkit for analyzing and visualizing connectome data from **all NeuPrint databases and FlyWire datasets**. Features type-based pathfinding algorithms, interactive network visualizations, 3D neuron morphology rendering, and EM↔LM driver line mapping.
 
@@ -11,7 +11,7 @@ A comprehensive Python toolkit for analyzing and visualizing connectome data fro
 
 | Category | Features |
 |----------|----------|
-| **🗄️ Dataset Support** | Universal NeuPrint datasets (hemibrain, male-cns, optic-lobe, MANC) + FlyWire FAFB/BANC |
+| **🗄️ Dataset Support** | Inter-dataset analysis and comprehensive dataset support |
 | **🔬 EM↔LM Mapping** | NeuronBridge integration for GAL4/Split-GAL4 driver line discovery |
 | **🎨 Visualization** | 3D skeletons, interactive networks, Sankey diagrams, heatmaps |
 | **📊 Analysis** | Multi-hop pathfinding, cross-dataset comparison, homolog finding |
@@ -126,8 +126,8 @@ fc.FindAllPath()
 
 ```bash
 # Create environment
-conda create -n droca python=3.11 -y
-conda activate droca
+conda create -n drocat python=3.11 -y
+conda activate drocat
 
 # Install dependencies
 pip install -r requirements.txt  # Linux/macOS

@@ -1,7 +1,7 @@
 # =============================================================================
 # Hemibrain Connectomes Analysis - Windows Requirements
 # Project Structure: Reorganized with src/ layout (v4.1)
-# Versions pinned to tested working versions from conda env 'droca'
+# Versions pinned to tested working versions from conda env 'drocat'
 # =============================================================================
 # This is a Windows-specific version that handles neuronbridge-python dependencies
 # without the Linux/macOS-only memray package.

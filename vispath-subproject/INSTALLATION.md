@@ -140,8 +140,8 @@ python -c "from vispath_pkg.vispath import VisualizePath; print('✓ vispath-sub
 cd ..
 
 # Use existing conda environment or create new one
-conda create -n droca python=3.11 -y
-conda activate droca
+conda create -n drocat python=3.11 -y
+conda activate drocat
 
 # Install in development mode
 pip install -e .

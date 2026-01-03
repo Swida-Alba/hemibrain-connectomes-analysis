@@ -27,7 +27,7 @@ classifiers = [
     "Programming Language :: Python :: 3.12",
 ]
 
-# Dependencies pinned to tested working versions from conda env 'droca'
+# Dependencies pinned to tested working versions from conda env 'drocat'
 dependencies = [
     "numpy==1.26.4",
     "pandas==1.5.3",
