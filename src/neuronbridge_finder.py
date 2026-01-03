@@ -7080,9 +7080,9 @@ class NeuronBridgeFinder:
                                 ascending=[False, True]
                             )
                         else:  # sort_by == 'max'
-                            # Sort by agg_max_score (higher is better), then by combined_rank (lower is better)
+                            # Sort by agg_mean_score (higher is better), then by combined_rank (lower is better)
                             line_stats = line_stats.sort_values(
-                                ['agg_max_score', 'agg_combined_rank'], 
+                                ['agg_mean_score', 'agg_combined_rank'], 
                                 ascending=[False, True]
                             )
                     else:
@@ -7200,9 +7200,9 @@ class NeuronBridgeFinder:
                             line_stats = line_stats.sort_values('weighted_score', ascending=False)
                             self._vprint(f"   📊 Sorting by weighted_score (agg_mean_score × coverage_ratio)")
                         else:  # sort_by == 'max'
-                            # Sort by agg_max_score (prioritizes lines with highest individual scores)
-                            line_stats = line_stats.sort_values('agg_max_score', ascending=False)
-                            self._vprint(f"   📊 Sorting by agg_max_score (highest individual match scores)")
+                            # Sort by agg_mean_score (prioritizes lines with highest average scores)
+                            line_stats = line_stats.sort_values('agg_mean_score', ascending=False)
+                            self._vprint(f"   📊 Sorting by agg_mean_score (average match scores)")
                         self._vprint(f"      Total query neurons: {total_query_neurons}")
                     elif is_multi_dataset:
                         # Fallback to min_score_per_dataset for multi-dataset
@@ -7212,7 +7212,7 @@ class NeuronBridgeFinder:
                         if sort_by == 'completeness':
                             line_stats = line_stats.sort_values('agg_mean_score', ascending=False)
                         else:  # sort_by == 'max'
-                            line_stats = line_stats.sort_values('agg_max_score', ascending=False)
+                            line_stats = line_stats.sort_values('agg_mean_score', ascending=False)
                 
                 # Add aggregated stats back to combined_df
                 merge_cols = ['line', 'matched_bodyIds']
@@ -8224,6 +8224,7 @@ class NeuronBridgeFinder:
                         max_files=max_files,
                         on_file_downloaded=on_file_downloaded,
                         flat_structure=True,
+                        add_timestamp=False,  # Don't add timestamp - organize by line name only for summary generation
                         files=line_files_map[line_name]  # Use pre-filtered files
                     )
                     downloaded.extend([str(f) for f in dl_files])

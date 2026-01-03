@@ -9,13 +9,13 @@ A comprehensive Python toolkit for analyzing and visualizing connectome data fro
 
 ## ✨ Key Features
 
-| Category | Features |
-|----------|----------|
-| **🗄️ Dataset Support** | Inter-dataset analysis and comprehensive dataset support |
-| **🔬 EM↔LM Mapping** | NeuronBridge integration for GAL4/Split-GAL4 driver line discovery |
-| **🎨 Visualization** | 3D skeletons, interactive networks, Sankey diagrams, heatmaps |
-| **📊 Analysis** | Multi-hop pathfinding, cross-dataset comparison, homolog finding |
-| **⚡ Performance** | 10-100x speedup with local caching, Polars acceleration |
+| Category              | Features                                                           |
+| --------------------- | ------------------------------------------------------------------ |
+| **🗄️ Dataset Support** | Inter-dataset analysis and comprehensive dataset support           |
+| **🔬 EM↔LM Mapping**   | NeuronBridge integration for GAL4/Split-GAL4 driver line discovery |
+| **🎨 Visualization**   | 3D skeletons, interactive networks, Sankey diagrams, heatmaps      |
+| **📊 Analysis**        | Multi-hop pathfinding, cross-dataset comparison, homolog finding   |
+| **⚡ Performance**     | 10-100x speedup with local caching, Polars acceleration            |
 
 ---
 
@@ -23,22 +23,24 @@ A comprehensive Python toolkit for analyzing and visualizing connectome data fro
 
 ### 🚀 Getting Started
 
-| Guide | Description |
-|-------|-------------|
-| **[Quick Start](QUICK_START.md)** | First-time setup and basic examples |
-| **[Installation](docs/INSTALLATION.md)** | Detailed installation instructions |
-| **[Basic Usage](#basic-usage)** | Core script tutorials |
+| Guide                                    | Description                         |
+| ---------------------------------------- | ----------------------------------- |
+| **[Quick Start](QUICK_START.md)**        | First-time setup and basic examples |
+| **[Installation](docs/INSTALLATION.md)** | Detailed installation instructions  |
+| **[Basic Usage](#basic-usage)**          | Core script tutorials               |
 
 ### 📖 Feature Documentation
 
-| Feature | Guide | Script |
-|---------|-------|--------|
-| **EM↔LM Mapping** | [NeuronBridge Guide](docs/core-features/NeuronBridge_Guide.md) | `NeuronBridge_FindLines.py` |
-| **Line Analysis** | [Workflow Guide](docs/core-features/NeuronBridge_Workflow.md) | `NeuronBridge_Colabel.py` |
-| **FlyLight Images** | [FlyLight Guide](docs/core-features/FlyLight_Guide.md) | `FlyLight_fetcher.py` |
-| **Cross-Dataset** | [Comparison Guide](docs/core-features/CrossDatasetComparison_Guide.md) | `InterDatasetComparator.py` |
-| **Homolog Finding** | [Homolog Guide](docs/core-features/HomologFinding_Guide.md) | `FindHomologs.py` |
-| **3D Visualization** | [3D Skeleton Guide](docs/visualizations/3D_Skeleton_Guide.md) | `plot3dSkeleton.py` |
+| Feature                | Guide                                                                   | Script                         |
+| ---------------------- | ----------------------------------------------------------------------- | ------------------------------ |
+| **Basic Usage**        | [Basic Usage Guide](docs/core-features/BasicUsage_Guide.md)             | `FindDirect.py`, `FindPath.py` |
+| **Score Calculations** | [Score Calculation Guide](docs/core-features/ScoreCalculation_Guide.md) | All pathfinding scripts        |
+| **EM↔LM Mapping**      | [NeuronBridge Guide](docs/core-features/NeuronBridge_Guide.md)          | `NeuronBridge_FindLines.py`    |
+| **Line Analysis**      | [Workflow Guide](docs/core-features/NeuronBridge_Workflow.md)           | `NeuronBridge_Colabel.py`      |
+| **FlyLight Images**    | [FlyLight Guide](docs/core-features/FlyLight_Guide.md)                  | `FlyLight_fetcher.py`          |
+| **Cross-Dataset**      | [Comparison Guide](docs/core-features/CrossDatasetComparison_Guide.md)  | `InterDatasetComparator.py`    |
+| **Homolog Finding**    | [Homolog Guide](docs/core-features/HomologFinding_Guide.md)             | `FindHomologs.py`              |
+| **3D Visualization**   | [3D Skeleton Guide](docs/visualizations/3D_Skeleton_Guide.md)           | `plot3dSkeleton.py`            |
 
 ### 📂 Full Documentation Index
 
@@ -83,13 +85,12 @@ results = finder.find_lines_batch(
 
 ## Basic Usage
 
-### FindDirect.py - Direct Connections
+### Quick Example
 
 ```python
 from coana import FindNeuronConnection
 
 fc = FindNeuronConnection(
-    token='your_neuprint_token',
     dataset='hemibrain:v1.2.1',
     sourceNeurons=['KC.*'],
     targetNeurons=['MBON03'],
@@ -97,26 +98,24 @@ fc = FindNeuronConnection(
 )
 
 fc.InitializeNeuronInfo()
-fc.FindDirectConnection()
+fc.FindDirectConnection()  # Direct connections
+# or
+fc.FindAllPath()           # Multi-hop pathways
 ```
 
-### FindPath.py - Multi-Hop Pathways
+### Available Methods
 
-```python
-fc = FindNeuronConnection(
-    token='your_neuprint_token',
-    dataset='hemibrain:v1.2.1',
-    sourceNeurons=['.*PN.*'],
-    targetNeurons=['MBON.*'],
-    max_interlayer=2,  # Up to 2 intermediate layers
-    keyword_in_path_to_remove=['None', 'APL'],
-)
+| Method                   | Description                 | Use Case         |
+| ------------------------ | --------------------------- | ---------------- |
+| `FindDirectConnection()` | Direct synaptic connections | One-hop analysis |
+| `FindAllPath()`          | Multi-hop pathways          | Circuit tracing  |
+| `FetchNeuronsOnly()`     | Get neuron metadata only    | Data exploration |
 
-fc.InitializeNeuronInfo()
-fc.FindAllPath()
-```
+📖 **[Full Basic Usage Guide](docs/core-features/BasicUsage_Guide.md)** - Detailed examples and parameters
 
-📖 **[Detailed Usage Guide](docs/core-features/PathFinding_Methods.md)**
+📖 **[Score Calculation Guide](docs/core-features/ScoreCalculation_Guide.md)** - Understanding `connection_ratio`, `traversal_probability`, and path metrics
+
+📖 **[Pathfinding Methods](docs/core-features/PathFinding_Methods.md)** - Algorithm selection for `FindAllPath`
 
 ---
 
@@ -146,14 +145,14 @@ pip install -r requirements-windows.txt  # Windows
 
 ## Supported Datasets
 
-| Dataset | Type | Description |
-|---------|------|-------------|
-| `hemibrain:v1.2.1` | NeuPrint | Adult fly brain (central) |
-| `male-cns:v0.9` | NeuPrint | Full male CNS |
-| `optic-lobe:v1.1` | NeuPrint | Optic lobe detailed |
-| `manc:v1.2.3` | NeuPrint | Male VNC |
-| `flywire_FAFB_v783` | Local | FlyWire female brain |
-| `flywire_BANC_v626` | Local | FlyWire male VNC |
+| Dataset             | Type     | Description               |
+| ------------------- | -------- | ------------------------- |
+| `hemibrain:v1.2.1`  | NeuPrint | Adult fly brain (central) |
+| `male-cns:v0.9`     | NeuPrint | Full male CNS             |
+| `optic-lobe:v1.1`   | NeuPrint | Optic lobe detailed       |
+| `manc:v1.2.3`       | NeuPrint | Male VNC                  |
+| `flywire_FAFB_v783` | Local    | FlyWire female brain      |
+| `flywire_BANC_v626` | Local    | FlyWire male VNC          |
 
 📖 **[FlyWire Setup Guide](docs/FLYWIRE_USAGE.md)**
 
@@ -188,11 +187,11 @@ connection_data/
 
 ## Performance Features
 
-| Feature | Speedup | Description |
-|---------|---------|-------------|
+| Feature         | Speedup | Description                      |
+| --------------- | ------- | -------------------------------- |
 | **Local Cache** | 10-100x | Automatic caching of API results |
-| **Polars** | 5-50x | Fast CSV/matrix operations |
-| **Batch Mode** | 2-10x | Optimized batch processing |
+| **Polars**      | 5-50x   | Fast CSV/matrix operations       |
+| **Batch Mode**  | 2-10x   | Optimized batch processing       |
 
 ```python
 # Enable caching
@@ -230,11 +229,11 @@ fc = FindNeuronConnection(
 
 See the `examples/` folder for complete working examples:
 
-| Example | Description |
-|---------|-------------|
-| `basic/` | Basic pathfinding and visualization |
-| `comparison/` | Cross-dataset comparison |
-| `visualization/` | Advanced visualization options |
+| Example          | Description                         |
+| ---------------- | ----------------------------------- |
+| `basic/`         | Basic pathfinding and visualization |
+| `comparison/`    | Cross-dataset comparison            |
+| `visualization/` | Advanced visualization options      |
 
 ---
 
