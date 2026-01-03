@@ -186,6 +186,9 @@ if __name__ == "__main__":
     # Set to None to download for all lines
     download_img_for_top_n_lines = 10
     
+    # Sort by 'max' score or 'completeness' 
+    sort_by = 'max'
+    
     # File formats to download
     # For neuronbridge: 'png', 'jpg'
     # For flylight: 'png', 'jpg', 'h5j', 'mp4', 'all'
@@ -245,7 +248,7 @@ if __name__ == "__main__":
     results = finder.find_lines_batch(
         queries=query,
         dataset=dataset,
-        # match_type=match_type,  # Can override here if needed
+        sort_by=sort_by,
         output_dir=output_dir,
         download_img_for_top_n_lines=download_img_for_top_n_lines,
         image_formats=image_formats,

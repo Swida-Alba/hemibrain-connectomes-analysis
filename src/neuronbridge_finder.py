@@ -6509,7 +6509,7 @@ class NeuronBridgeFinder:
         queries: Union[str, int, List[Union[str, int]], Any],  # str, int, List, or LabelMapper
         dataset: Optional[Union[str, List[str]]] = None,
         match_type: Optional[str] = None,
-        sort_by: str = 'completeness',
+        sort_by: str = 'max',
         output_dir: Optional[str] = None,
         download_images: Optional[str] = 'flylight',
         download_img_for_top_n_lines: Optional[int] = 10,
@@ -6551,7 +6551,7 @@ class NeuronBridgeFinder:
             Sorting method for line summary results (case-insensitive):
             - 'completeness': Sort by weighted_score (prioritizes lines labeling ALL queried neurons)
             - 'max': Sort by agg_max_score (prioritizes lines with highest individual match scores)
-            Default: 'completeness'
+            Default: 'max'
         output_dir : str, optional
             Directory to save results. If provided, saves individual and combined CSVs.
         download_images : str, optional
