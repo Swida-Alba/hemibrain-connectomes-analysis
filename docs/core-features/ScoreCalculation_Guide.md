@@ -52,7 +52,7 @@ These metrics are calculated for each individual synaptic connection (edge) in t
 
 **Formula**:
 
-$$\text{connection_ratio}_{ij} = \frac{w_{ij}}{W_j}$$
+$$\text{connection\_ratio}_{ij} = \frac{w_{ij}}{W_j}$$
 
 Where:
 - $w_{ij}$ = Number of synapses from neuron $i$ to neuron $j$ (weight)
@@ -85,7 +85,7 @@ connection_ratio = 50 / 200 = 0.25 (25%)
 
 **Formula**:
 
-$$p_{ij} = \min\left(1.0, \frac{w_{ij}}{W_j \times 0.3}\right) = \min\left(1.0, \frac{\text{connection_ratio}_{ij}}{0.3}\right)$$
+$$p_{ij} = \min\left(1.0, \frac{w_{ij}}{W_j \times 0.3}\right) = \min\left(1.0, \frac{\text{connection\_ratio}_{ij}}{0.3}\right)$$
 
 **The 0.3 Biological Threshold**:
 
@@ -116,7 +116,7 @@ The 0.3 scaling factor represents a **30% input threshold**—connections provid
 
 **Formula**:
 
-$$\text{block_probability}_{ij} = 1 - \text{traversal_probability}_{ij}$$
+$$\text{block\_probability}_{ij} = 1 - \text{traversal\_probability}_{ij}$$
 
 **Used in**:
 - [`src/statvis.py`](../../src/statvis.py#L4607-L4609) - Path probability calculations
@@ -134,7 +134,7 @@ When analyzing connections between neuron **types** (populations), individual co
 
 **Formula**:
 
-$$\text{connection_ratio}_{AB} = \frac{\sum_{i \in A, j \in B} w_{ij}}{\sum_{j \in B} W_j}$$
+$$\text{connection\_ratio}_{AB} = \frac{\sum_{i \in A, j \in B} w_{ij}}{\sum_{j \in B} W_j}$$
 
 Where:
 - $A$ = Set of neurons of type A (presynaptic population)
@@ -300,7 +300,7 @@ These scores are used for EM↔LM mapping via NeuronBridge.
 
 **Formula**:
 
-$$\text{coverage_ratio} = \frac{\text{match_count}}{\text{total_query_neurons}}$$
+$$\text{coverage\_ratio} = \frac{\text{match\_count}}{\text{total\_query\_neurons}}$$
 
 Where:
 - `match_count` = Number of unique queried neurons this line matches
@@ -328,11 +328,11 @@ line_stats['coverage_ratio'] = line_stats['match_count'] / total_query_neurons
 
 **Formula**:
 
-$$\text{weighted_score} = \text{agg_mean_score} \times \text{coverage_ratio}$$
+$$\text{weighted\_score} = \text{agg\_mean\_score} \times \text{coverage\_ratio}$$
 
 Or equivalently:
 
-$$\text{weighted_score} = \text{agg_mean_score} \times \frac{\text{match_count}}{\text{total_query_neurons}}$$
+$$\text{weighted\_score} = \text{agg\_mean\_score} \times \frac{\text{match\_count}}{\text{total\_query\_neurons}}$$
 
 **Sorting Modes** (controlled by `sort_by` parameter):
 
@@ -387,10 +387,10 @@ else:  # sort_by == 'max'
 **Formulas**:
 
 1. **Min Score per Dataset**: Worst-case performance across datasets
-   $$\text{min_score_per_dataset} = \min_{d \in \text{datasets}} \max_{n \in d} \text{score}_{n}$$
+   $$\text{min\_score\_per\_dataset} = \min_{d \in \text{datasets}} \max_{n \in d} \text{score}_{n}$$
 
 2. **Cross-Dataset Score**: Average of max scores across datasets
-   $$\text{cross_dataset_score} = \frac{1}{|D|} \sum_{d \in D} \max_{n \in d} \text{score}_{n}$$
+   $$\text{cross\_dataset\_score} = \frac{1}{|D|} \sum_{d \in D} \max_{n \in d} \text{score}_{n}$$
 
 **Used for**: Finding lines that reliably label homologous neurons in multiple connectome datasets.
 

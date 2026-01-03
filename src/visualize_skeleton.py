@@ -5502,6 +5502,7 @@ def img2pptx(
     include_subfolders: bool = False,
     group_by_subfolder: bool = True,
     font_color: tuple = (0, 0, 0),
+    font: str = 'Arial',
 ) -> str:
     """
     Aggregate images to PowerPoint (PPTX) with proper layout, or convert PDF pages to PPTX.
@@ -5560,6 +5561,8 @@ def img2pptx(
         If False, all images are mixed together regardless of subfolder.
     font_color : tuple, default (0, 0, 0)
         RGB color tuple for label text (r, g, b), each value 0-255. Default is black.
+    font : str, default 'Arial'
+        Font name for titles and labels.
     
     Returns
     -------
@@ -5622,6 +5625,17 @@ def img2pptx(
     
     # Calculate label height based on fontsize
     label_height_inches = (label_fontsize / 72) * 1.5  # 1.5x line height
+    
+    # Handle font color (convert 0-1 float to 0-255 int if needed)
+    r, g, b = font_color
+    if all(isinstance(c, (int, float)) and c <= 1.0 for c in font_color) and not all(c == 0 for c in font_color):
+        # Heuristic: if all values are <= 1.0 (and not all 0), assume float 0-1 and convert to 0-255
+        print(f"ℹ️  Converting font_color {font_color} from 0-1 range to 0-255 range.")
+        r, g, b = [int(c * 255) for c in font_color]
+    else:
+        r, g, b = [int(c) for c in font_color]
+    
+    font_color_rgb = (r, g, b)
     
     # Determine input type and gather files
     is_pdf = False
@@ -5800,7 +5814,7 @@ def img2pptx(
             grouped_images = {'': [img_path for img_path, _ in image_files]}
         
         # Calculate cell dimensions (account for label position)
-        has_title = slide_title is not None
+        has_title = slide_title is not None or (group_by_subfolder and include_subfolders and len(grouped_images) > 0)
         content_top = margin if not has_title else margin + title_height
         usable_width = slide_width - 2 * margin
         usable_height = slide_height - content_top - margin
@@ -5838,6 +5852,7 @@ def img2pptx(
                     tf = txBox.text_frame
                     p = tf.paragraphs[0]
                     p.text = title_text
+                    p.font.name = font
                     p.font.size = Pt(title_fontsize)
                     p.font.bold = True
                     p.alignment = PP_ALIGN.CENTER
@@ -5920,8 +5935,9 @@ def img2pptx(
                                     tf = txBox.text_frame
                                     p = tf.paragraphs[0]
                                     p.text = label
+                                    p.font.name = font
                                     p.font.size = Pt(label_fontsize)
-                                    p.font.color.rgb = RGBColor(*font_color)
+                                    p.font.color.rgb = RGBColor(*font_color_rgb)
                                     p.alignment = PP_ALIGN.CENTER
                                     
                                 elif label_position == 'above':
@@ -5934,8 +5950,9 @@ def img2pptx(
                                     tf = txBox.text_frame
                                     p = tf.paragraphs[0]
                                     p.text = label
+                                    p.font.name = font
                                     p.font.size = Pt(label_fontsize)
-                                    p.font.color.rgb = RGBColor(*font_color)
+                                    p.font.color.rgb = RGBColor(*font_color_rgb)
                                     p.alignment = PP_ALIGN.CENTER
                                     
                                 else:  # below
@@ -5948,8 +5965,9 @@ def img2pptx(
                                     tf = txBox.text_frame
                                     p = tf.paragraphs[0]
                                     p.text = label
+                                    p.font.name = font
                                     p.font.size = Pt(label_fontsize)
-                                    p.font.color.rgb = RGBColor(*font_color)
+                                    p.font.color.rgb = RGBColor(*font_color_rgb)
                                     p.alignment = PP_ALIGN.CENTER
                             
                             total_images_added += 1
