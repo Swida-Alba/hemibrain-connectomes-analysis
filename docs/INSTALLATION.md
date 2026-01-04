@@ -114,18 +114,18 @@ To access NeuPrint and FlyWire datasets, you need to configure your authenticati
 
 The following packages are **required**:
 
-| Package | Purpose | Version |
-|---------|---------|---------|
-| numpy | Numerical computing | >=1.20.0, <2.0.0 |
-| pandas | Data manipulation | >=1.3.0, <2.0.0 |
-| polars | Memory-efficient large data | >=1.0.0 |
-| scipy | Scientific computing | >=1.7.0 |
-| plotly | Interactive visualizations | >=5.0.0 |
-| matplotlib | Static plots | >=3.4.0 |
-| networkx | Network analysis | >=2.6.0 |
-| openpyxl | Excel file support | >=3.0.0 |
-| **PyQt5** | **Fast GUI dialogs** | **>=5.15.0** |
-| neuprint-python | NeUPRINT database | >=0.4.0 |
+| Package         | Purpose                     | Version          |
+| --------------- | --------------------------- | ---------------- |
+| numpy           | Numerical computing         | >=1.20.0, <2.0.0 |
+| pandas          | Data manipulation           | >=1.3.0, <2.0.0  |
+| polars          | Memory-efficient large data | >=1.0.0          |
+| scipy           | Scientific computing        | >=1.7.0          |
+| plotly          | Interactive visualizations  | >=5.0.0          |
+| matplotlib      | Static plots                | >=3.4.0          |
+| networkx        | Network analysis            | >=2.6.0          |
+| openpyxl        | Excel file support          | >=3.0.0          |
+| **PyQt5**       | **Fast GUI dialogs**        | **>=5.15.0**     |
+| neuprint-python | NeUPRINT database           | >=0.4.0          |
 
 **Important:** numpy is constrained to <2.0.0 for binary compatibility with pandas 1.x.
 
@@ -336,12 +336,12 @@ Type `y` to proceed with the download. Transforms are shared across all NeuPrint
 
 ### Dataset-Specific Requirements
 
-| Dataset | Template Mesh | Whole Brain/VNC | Transform Required |
-|---------|--------------|-----------------|-------------------|
-| **hemibrain:v1.2.1** | JRCFIB2018F (EM) | JRC2018F (confocal) | ✅ Yes (~10GB download) |
-| **optic-lobe:v1.1** | JRCFIB2018F (EM) | JRC2018F (confocal) | ✅ Yes (~10GB download) |
-| **manc:v1.2.3** | MANC (native VNC) | — | ❌ No (native) |
-| **male-cns:v0.9** | JRCFIB2022M (native) | — | ❌ No (native) |
+| Dataset              | Template Mesh        | Whole Brain/VNC     | Transform Required     |
+| -------------------- | -------------------- | ------------------- | ---------------------- |
+| **hemibrain:v1.2.1** | JRCFIB2018F (EM)     | JRC2018F (confocal) | ✅ Yes (~10GB download) |
+| **optic-lobe:v1.1**  | JRCFIB2018F (EM)     | JRC2018F (confocal) | ✅ Yes (~10GB download) |
+| **manc:v1.2.3**      | MANC (native VNC)    | —                   | ❌ No (native)          |
+| **male-cns:v0.9**    | JRCFIB2022M (native) | —                   | ❌ No (native)          |
 
 ### Manual Transform Verification
 

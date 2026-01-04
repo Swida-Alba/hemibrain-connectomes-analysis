@@ -23,12 +23,12 @@ A comprehensive Python toolkit for analyzing and visualizing connectome data fro
 
 ### 🚀 Getting Started
 
-| Guide                                    | Description                         |
-| ---------------------------------------- | ----------------------------------- |
-| **[Quick Start](QUICK_START.md)**        | First-time setup and basic examples |
-| **[Installation](docs/INSTALLATION.md)** | Detailed installation instructions  |
-| **[Authentication](docs/INSTALLATION.md#authentication-setup)** | **Set up your API tokens** |
-| **[Basic Usage](#basic-usage)**          | Core script tutorials               |
+| Guide                                                           | Description                         |
+| --------------------------------------------------------------- | ----------------------------------- |
+| **[Quick Start](QUICK_START.md)**                               | First-time setup and basic examples |
+| **[Installation](docs/INSTALLATION.md)**                        | Detailed installation instructions  |
+| **[Authentication](docs/INSTALLATION.md#authentication-setup)** | **Set up your API tokens**          |
+| **[Basic Usage](#basic-usage)**                                 | Core script tutorials               |
 
 ### 📖 Feature Documentation
 
