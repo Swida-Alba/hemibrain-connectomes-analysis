@@ -18,7 +18,7 @@ matplotlib==3.10.0         # Static plots
 seaborn==0.13.2            # Statistical visualizations
 opencv-python==4.10.0.84   # Computer vision (video generation, image processing)
 bokeh==3.6.0               # Additional visualization (palettes)
-kaleido==0.2.1             # Plotly static image export
+kaleido>=1.0.0             # Plotly static image export (1.0.0+ required after Sep 2025)
 
 # Network Analysis
 # -----------------------------------------------------------------------------

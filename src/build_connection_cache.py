@@ -84,6 +84,13 @@ def build_cache(
         print("Neuron types: ALL")
     print()
     
+    # Use TokenManager to get token
+    try:
+        from utils.token_manager import token_manager
+        token = token_manager.get_token('NEUPRINT_TOKEN', token)
+    except ImportError:
+        pass
+
     # Initialize FNC with cache enabled
     fnc = FindNeuronConnection(
         dataset=dataset,

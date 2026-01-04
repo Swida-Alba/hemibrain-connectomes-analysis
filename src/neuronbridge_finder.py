@@ -3241,10 +3241,19 @@ class NeuronBridgeFinder:
                     existing = None
                 
                 if existing is None:
-                    # Get token: 1) instance attribute, 2) env vars
+                    # Get token using TokenManager
                     token = self.neuprint_token
-                    if not token:
-                        token = os.environ.get('NEUPRINT_TOKEN', os.environ.get('NEUPRINT_APPLICATION_CREDENTIALS', ''))
+                    try:
+                        from .utils.token_manager import token_manager
+                        token = token_manager.get_token('NEUPRINT_TOKEN', token)
+                    except ImportError:
+                        try:
+                            from src.utils.token_manager import token_manager
+                            token = token_manager.get_token('NEUPRINT_TOKEN', token)
+                        except ImportError:
+                            # Fallback to env vars if TokenManager missing
+                            if not token:
+                                token = os.environ.get('NEUPRINT_TOKEN', os.environ.get('NEUPRINT_APPLICATION_CREDENTIALS', ''))
                     
                     if not token:
                         self._vprint(f"")

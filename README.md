@@ -27,6 +27,7 @@ A comprehensive Python toolkit for analyzing and visualizing connectome data fro
 | ---------------------------------------- | ----------------------------------- |
 | **[Quick Start](QUICK_START.md)**        | First-time setup and basic examples |
 | **[Installation](docs/INSTALLATION.md)** | Detailed installation instructions  |
+| **[Authentication](docs/INSTALLATION.md#authentication-setup)** | **Set up your API tokens** |
 | **[Basic Usage](#basic-usage)**          | Core script tutorials               |
 
 ### 📖 Feature Documentation
@@ -48,6 +49,7 @@ A comprehensive Python toolkit for analyzing and visualizing connectome data fro
 - **[Core Features](docs/core-features/README.md)** - All feature guides
 - **[Visualizations](docs/visualizations/README.md)** - Visualization options
 - **[Output Files](docs/OUTPUT_FILES.md)** - File format reference
+- **[Available ROI Meshes](docs/AVAILABLE_ROIS.md)** - ROI mesh reference for 3D visualizations
 
 ---
 

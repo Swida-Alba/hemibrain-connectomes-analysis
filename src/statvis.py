@@ -393,6 +393,17 @@ def LogInHemibrain(token,dataset='hemibrain:v1.2.1'): # log in to hemibrain data
     Log in to hemibrain dataset;
     Please provide your own token, which can be obtained from https://neuprint.janelia.org/account
     '''
+    # Use TokenManager
+    try:
+        from .utils.token_manager import token_manager
+        token = token_manager.get_token('NEUPRINT_TOKEN', token)
+    except ImportError:
+        try:
+            from src.utils.token_manager import token_manager
+            token = token_manager.get_token('NEUPRINT_TOKEN', token)
+        except ImportError:
+            pass
+
     client = Client(
         'neuprint.janelia.org',
         dataset = dataset,

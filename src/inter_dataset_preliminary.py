@@ -72,6 +72,18 @@ class DatasetConfig:
     def __post_init__(self):
         if not self.name:
             self.name = self.dataset
+            
+        # Use TokenManager
+        try:
+            from utils.token_manager import token_manager
+            self.token = token_manager.get_token('NEUPRINT_TOKEN', self.token)
+        except ImportError:
+            # Fallback
+            try:
+                from src.utils.token_manager import token_manager
+                self.token = token_manager.get_token('NEUPRINT_TOKEN', self.token)
+            except ImportError:
+                pass
 
     
 class InterDatasetComparator:

@@ -88,7 +88,28 @@ If you only need the visualization path component:
 cd vispath-subproject
 pip install -e .
 ```
+## Authentication Setup
 
+To access NeuPrint and FlyWire datasets, you need to configure your authentication tokens.
+
+1.  **Get your tokens:**
+    *   **NeuPrint Token:** Log in to [neuprint.janelia.org](https://neuprint.janelia.org/account) and copy your token.
+    *   **CAVE Token (FlyWire/FAFB):** Log in to [cave-client](https://cave-client.readthedocs.io/en/latest/guide/authentication.html) or your respective CAVE provider.
+
+2.  **Configure local tokens:**
+    The project uses a local file `token_info_local.txt` to store your secrets. This file is gitignored to prevent accidental commits.
+
+    *   Copy the template file:
+        ```bash
+        cp token_info.txt token_info_local.txt
+        ```
+    *   Edit `token_info_local.txt` and paste your tokens:
+        ```text
+        NEUPRINT_TOKEN='your_actual_token_here'
+        CAVE_TOKEN='your_actual_token_here'
+        ```
+
+    Alternatively, you can set environment variables `NEUPRINT_TOKEN` and `CAVE_TOKEN`.
 ## Core Dependencies
 
 The following packages are **required**:

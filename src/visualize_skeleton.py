@@ -8,6 +8,7 @@ from typing import List
 import logging
 import warnings
 from contextlib import contextmanager
+from tqdm import tqdm
 
 # Suppress FutureWarning from neuprint about Series.__getitem__
 warnings.filterwarnings("ignore", category=FutureWarning, module="neuprint")
@@ -169,9 +170,9 @@ class VisualizeSkeleton:
     synapse_size: int | str = 1
     '''
     size of synapse\n
-    when synapse_mode='scatter', 1 to 10 is recommended\n
-    when synapse_mode='sphere', 100 is recommended\n
-    can be 'real' to use the real distance between pre- and post-synaptic sites (only for sphere/cone/tetrahedron)\n
+    when synapse_mode='scatter': size in pixels (1-10 recommended)\n
+    when synapse_mode='sphere'/'cone'/'tetrahedron': multiplier of the real distance between pre- and post-synaptic sites.\n
+    e.g., 1 or 'real' = exact distance size. 2 = 2x distance size.\n
     '''
 
     synapse_criteria: SynapseCriteria = None
@@ -237,23 +238,42 @@ class VisualizeSkeleton:
     False: Only show the original data (default).
     '''
 
-    skeleton_mesh_simplification: float = 0.9
+    skeleton_mesh_simplification: float = None
     '''
     Mesh simplification factor for neuron skeletons (0.0 to 1.0).
     Only applies when skeleton_mode='tube'.
     0.0: No simplification (keep all faces).
     0.8: Remove 80% of faces (keep 20%).
     Higher values reduce file size but may lose detail.
-    Recommended: 0.5 - 0.9 for large populations.
+    
+    Default:
+    - FAFB/FlyWire: 0.95 (remove 95% of faces - high detail meshes)
+    - NeuPrint datasets: 0.9 (remove 90% of faces)
+    
+    Recommended: 0.5 - 0.95 for large populations.
     '''
 
-    roi_mesh_simplification: float = 0.95
+    roi_mesh_simplification: float = 0.9
     '''
     Mesh simplification factor for ROI meshes (0.0 to 1.0).
     0.0: No simplification (keep all faces).
     0.9: Remove 90% of faces (keep 10%).
     Higher values reduce file size but may lose detail.
     Recommended: 0.9 - 0.99 for large ROI meshes.
+    '''
+
+    FAFB_template_correction: bool = True
+    '''
+    Whether to apply tilt correction for FAFB/FlyWire datasets when using 'template' brain mesh.
+    
+    The FAFB/FlyWire template mesh has a slight tilt relative to the standard view axes.
+    When True (default), a rotation correction is applied to align the brain:
+    - Z-axis rotation: -4 degrees (corrects left-right tilt in front view)
+    - Y-axis rotation: -3 degrees (corrects tilt in top view)
+    - Rotation is applied around the brain center to preserve position.
+    
+    Set to False to use original coordinates (no rotation), which may be preferred if
+    aligning with other raw FAFB data or if the rotation causes issues.
     '''
 
     show_soma: bool = True
@@ -316,15 +336,21 @@ class VisualizeSkeleton:
     Brain/VNC mesh visualization options (dataset-specific):\n
     - 'none': Only plot meshes specified in mesh_roi parameter\n
     - 'template': Plot the dataset's native template mesh (EM resolution)\n
-      • hemibrain → JRCFIB2018F (hemibrain only)\n
-      • optic-lobe → JRCFIB2022M (part of Male CNS volume)\n
-      • manc → MANC (male adult nerve cord VNC)\n
-      • male-cns → JRCFIB2022M (full male CNS: brain + VNC)\n
+      • hemibrain → JRCFIB2018F (affine transform only, fast)\n
+      • optic-lobe → JRCFIB2022M (affine transform only, fast)\n
+      • manc → MANC (male adult nerve cord VNC, affine transform only, fast)\n
+      • male-cns → JRCFIB2022M (full male CNS: brain + VNC, affine transform only, fast)\n
+      • flywire/FAFB → FLYWIRE (native FAFB coordinates, NO transform needed)\n
     - 'whole': Plot standard whole-brain/VNC envelope mesh\n
-      • hemibrain/optic-lobe → JRC2018F (requires transforms)\n
-      • manc → MANC VNC envelope (no transform needed)\n
-      • male-cns → JRCFIB2022M CNS envelope (no transform needed)\n
-    Note: Some transforms require download (~500MB, one-time)\n
+      • hemibrain → JRC2018F (REQUIRES H5 transforms ~13GB download)\n
+      • optic-lobe → JRCFIB2022M (affine transform only, fast)\n
+      • manc → MANC VNC envelope (affine transform only, fast)\n
+      • male-cns → JRCFIB2022M CNS envelope (affine transform only, fast)\n
+      • flywire/FAFB → JRC2018F (REQUIRES H5 transforms, standard female brain)\n
+    \n
+    ⚡ Performance Tip: Use 'template' for fast visualization with native coordinates.\n
+    Only hemibrain and FAFB with brain_mesh='whole' require H5 transform downloads.\n
+    \n
     See https://github.com/navis-org/navis-flybrains
     '''
     
@@ -620,10 +646,21 @@ class VisualizeSkeleton:
         if self.client_type == 'flywire' or 'flywire' in self.dataset.lower() or 'fafb' in self.dataset.lower():
             # Raw skeleton pkl caching is disabled (files too large and need transformation anyway)
             if self.cache_neurons:
-                self._vprint("  ℹ️  FlyWire/FAFB: Using mesh cache (transformed+meshed) instead of raw skeletons", level='full')
+                self._vprint("  ℹ️  FlyWire/FAFB: Using mesh cache (simplified) instead of raw skeletons", level='full')
             if self.cache_synapses:
                 self._vprint("  ℹ️  Disabling synapse caching for FlyWire/FAFB (files too large)", level='full')
                 self.cache_synapses = False
+        
+        # Set default skeleton_mesh_simplification based on dataset if not specified
+        if self.skeleton_mesh_simplification is None:
+            if 'flywire' in self.dataset.lower() or 'fafb' in self.dataset.lower():
+                # FAFB meshes are very high detail, use 0.95 (keep 5% of faces)
+                self.skeleton_mesh_simplification = 0.95
+                self._vprint(f"  ℹ️  Using default skeleton_mesh_simplification=0.95 for FAFB (high-detail meshes)", level='full')
+            else:
+                # NeuPrint datasets (hemibrain, male-cns, manc, optic-lobe) use 0.9
+                self.skeleton_mesh_simplification = 0.9
+                self._vprint(f"  ℹ️  Using default skeleton_mesh_simplification=0.9 for {self.dataset}", level='full')
 
         # Auto-detect version from dataset if not provided
         if self.client_type == 'flywire' and self.version is None:
@@ -651,6 +688,13 @@ class VisualizeSkeleton:
                     pass
 
                 if not client_exists:
+                    # Use TokenManager to get token
+                    try:
+                        from .utils.token_manager import token_manager
+                        self.token = token_manager.get_token('NEUPRINT_TOKEN', self.token)
+                    except ImportError:
+                        pass
+
                     if self.token:
                         self.client = Client(self.server, dataset=self.dataset, token=self.token)
                         self.client.fetch_version()
@@ -718,13 +762,8 @@ class VisualizeSkeleton:
         if self.backend not in ['plotly', 'k3d']:
             raise ValueError('backend must be "plotly" or "k3d"')
         
-        # Check brain transforms early if brain_mesh='whole' is requested
-        # Only some datasets require transforms
-        if self.brain_mesh == 'whole':
-            needs_transform = self._dataset_needs_transform()
-            if needs_transform and not self._check_and_download_transforms():
-                self.brain_mesh = 'none'
-                self._vprint('⚠️  brain_mesh reset to "none" due to missing transforms', level='full')
+        # Early transform check - advise user on transformation-free options
+        self._check_transform_requirements_early()
         
         # Parse layer_map_csv if provided (overrides neuron_layers and custom_layer_names)
         if self.layer_map_csv is not None:
@@ -739,11 +778,12 @@ class VisualizeSkeleton:
         
         if self.synapse_mode == 'scatter' and self.synapse_size == 0:
             self.synapse_size = 2
-        elif self.synapse_mode in ['sphere', 'cone', 'tetrahedron']:
-            # Only check size limit if synapse_size is a number (not 'real')
-            if isinstance(self.synapse_size, (int, float)) and self.synapse_size < 20 and self.brain_mesh != 'whole':
-                self.synapse_size = 20
-                self._vprint('\033[33mSynapse size is too small (< 20) for sphere, cone, or tetrahedron mode, automatically reset to 20\033[0m', level='full')
+        # elif self.synapse_mode in ['sphere', 'cone', 'tetrahedron']:
+        #     # Only check size limit if synapse_size is a number (not 'real')
+        #     # For these modes, synapse_size is a multiplier, so small values (e.g. 1.0) are valid
+        #     if isinstance(self.synapse_size, (int, float)) and self.synapse_size < 20 and self.brain_mesh != 'whole':
+        #         self.synapse_size = 20
+        #         self._vprint('\033[33mSynapse size is too small (< 20) for sphere, cone, or tetrahedron mode, automatically reset to 20\033[0m', level='full')
             
         if self.mesh_roi == None:
             self.mesh_roi = []
@@ -1215,29 +1255,31 @@ class VisualizeSkeleton:
         if saved_count > 0:
             self._vprint(f'  💾 Saved {saved_count} new neurons to cache', level='full')
     
-    # Cache stores meshes simplified at this fixed level
-    FAFB_MESH_CACHE_SIMPLIFICATION = 0.9
+    # Cache stores meshes simplified at this fixed level (95% reduction = keep 5% of faces)
+    # FAFB meshes are high-detail, so 0.95 simplification is appropriate
+    FAFB_MESH_CACHE_SIMPLIFICATION = 0.95
     
     def _get_fafb_mesh_cache_key(self):
-        """Generate a cache key based on transform settings.
+        """Generate a cache key based on coordinate space.
         
-        Returns a subfolder name like 'JRC2018F_simp90' for caching purposes.
-        Cache always stores meshes at 0.9 simplification level.
+        Returns a subfolder name like 'FLYWIRE_simp95' for caching purposes.
+        Cache always stores meshes at 0.95 simplification level.
+        Note: FAFB cache stores UN-TRANSFORMED, UN-ROTATED meshes (native FLYWIRE).
         """
-        # Get target template
-        template_info = self._get_template_info() if self.brain_mesh in ['whole', 'template'] else None
-        target = template_info['target'] if template_info else 'raw'
+        # Always use 'FLYWIRE' as base since we cache raw simplified meshes
+        target = 'FLYWIRE'
         
         # Include fixed simplification level in cache key
         simp_percent = int(self.FAFB_MESH_CACHE_SIMPLIFICATION * 100)
         return f"{target}_simp{simp_percent}"
     
     def _load_cached_fafb_meshes(self, body_ids):
-        """Load transformed and meshed FAFB neurons from cache.
+        """Load simplified and meshed FAFB neurons from cache.
         
-        Cache contains meshes at 0.9 simplification. Only used when
-        skeleton_mesh_simplification >= 0.9. If simplification > 0.9,
-        additional simplification is applied after loading.
+        Cache contains meshes at 0.95 simplification (keep 5% of faces).
+        No coordinate transformation is needed since FAFB uses native FLYWIRE coordinates.
+        Only used when skeleton_mesh_simplification >= 0.95.
+        If simplification > 0.95, additional simplification is applied after loading.
         
         Parameters
         ----------
@@ -1251,7 +1293,7 @@ class VisualizeSkeleton:
         if not self.cache_neurons:
             return {}, body_ids
         
-        # Only use cache when simplification >= 0.9
+        # Only use cache when simplification >= cache level (0.95)
         if self.skeleton_mesh_simplification < self.FAFB_MESH_CACHE_SIMPLIFICATION:
             return {}, body_ids
         
@@ -1388,9 +1430,10 @@ class VisualizeSkeleton:
             layer_pbar.set_postfix_str(f"{layer_name} ({n_in_layer} neurons)")
             
             # Determine if we need transformation
-            needs_transform = self.brain_mesh in ['whole', 'template']
+            # Use _needs_skeleton_transform() which checks for skip_transform flag (FAFB uses native coords)
+            needs_transform = self._needs_skeleton_transform()
             template_info = None
-            if needs_transform:
+            if self.brain_mesh in ['whole', 'template']:
                 template_info = self._get_template_info()
             
             neuron_vols = None
@@ -1528,48 +1571,8 @@ class VisualizeSkeleton:
             if self.soma_radius_cap is not None and self.skeleton_mode == 'tube':
                 self._apply_soma_radius_cap(neuron_vols)
 
-            # Transform if needed (skip for cached mesh neurons)
-            needs_actual_transform = needs_transform and (not is_fafb or mesh_missing_ids)
-            if needs_actual_transform and neuron_vols is not None:
-                layer_pbar.set_postfix_str(f"{layer_name} (transforming {len(neuron_vols)}...)")
-                try:
-                    # Ensure float64 coordinates to avoid dtype warnings in navis
-                    if isinstance(neuron_vols, (list, navis.NeuronList)):
-                        for n in neuron_vols:
-                            if hasattr(n, 'nodes') and isinstance(n.nodes, pd.DataFrame):
-                                for col in ['x', 'y', 'z']:
-                                    if col in n.nodes.columns:
-                                        n.nodes[col] = n.nodes[col].astype('float64')
-                    elif hasattr(neuron_vols, 'nodes') and isinstance(neuron_vols.nodes, pd.DataFrame):
-                         for col in ['x', 'y', 'z']:
-                            if col in neuron_vols.nodes.columns:
-                                neuron_vols.nodes[col] = neuron_vols.nodes[col].astype('float64')
+            # Transformation logic moved to after caching to ensure cache stores raw FlyWire coordinates
 
-                    with self._suppress_output():
-                        neuron_vols = navis.xform_brain(neuron_vols, source=template_info['source'], target=template_info['target'])
-                    
-                    # Ensure iterable after transform
-                    if neuron_vols is not None and not isinstance(neuron_vols, (list, navis.NeuronList)):
-                        neuron_vols = navis.NeuronList([neuron_vols])
-                    
-                except Exception as e:
-                    tqdm.write(f'  ⚠️  Layer {i} transform failed: {e}')
-                    if self._dataset_needs_transform() and not self._check_and_download_transforms():
-                        self.brain_mesh = 'none'
-                    else:
-                        # Retry transformation after download
-                        try:
-                            with self._suppress_output():
-                                neuron_vols = navis.xform_brain(neuron_vols, source=template_info['source'], target=template_info['target'])
-                            if neuron_vols is not None and not isinstance(neuron_vols, (list, navis.NeuronList)):
-                                neuron_vols = navis.NeuronList([neuron_vols])
-                        except Exception as retry_e:
-                            tqdm.write(f'  ⚠️  Transformation still failed, setting brain_mesh to "none"')
-                            self.brain_mesh = 'none'
-            
-            # Ensure iterable after potential transforms (navis may return TreeNeuron)
-            if neuron_vols is not None and not isinstance(neuron_vols, (list, navis.NeuronList)):
-                neuron_vols = navis.NeuronList([neuron_vols])
             
             # For FAFB: convert to mesh, apply 0.9 simplification, and cache (only when cache is used)
             # Cache stores meshes at fixed 0.9 simplification for reuse
@@ -1580,7 +1583,12 @@ class VisualizeSkeleton:
                     mesh_neurons_list = []
                     cache_simp = self.FAFB_MESH_CACHE_SIMPLIFICATION
                     
-                    for n in neuron_vols:
+                    # Setup progress bar if verbose
+                    iterator = neuron_vols
+                    if self.verbose == 'full' or self.verbose is True:
+                        iterator = tqdm(neuron_vols, desc="Simplifying meshes", leave=False)
+
+                    for n in iterator:
                         if hasattr(n, 'id') and n.id in mesh_missing_ids:
                             # Convert TreeNeuron to MeshNeuron if needed
                             if isinstance(n, navis.TreeNeuron):
@@ -1615,7 +1623,7 @@ class VisualizeSkeleton:
                                         mesh_n.id = n.id  # Preserve original ID
                                         if hasattr(n, 'name'):
                                             mesh_n.name = n.name
-                                        self._vprint(f'      Simplified {n.id}: {n_faces} -> {len(simplified_trimesh.faces)} faces', level='full', use_tqdm=True)
+                                        # self._vprint(f'      Simplified {n.id}: {n_faces} -> {len(simplified_trimesh.faces)} faces', level='full', use_tqdm=True)
                                     except Exception as e:
                                         self._vprint(f'      ⚠️ Simplification failed for {n.id}: {e}', level='full', use_tqdm=True)
                             
@@ -1627,7 +1635,7 @@ class VisualizeSkeleton:
                     # Save 0.9-simplified meshes to cache
                     if meshes_to_cache:
                         self._save_cached_fafb_meshes(meshes_to_cache)
-                        self._vprint(f'    ✓ Cached {len(meshes_to_cache)} transformed meshes (simp={cache_simp})', level='full', use_tqdm=True)
+                        self._vprint(f'    ✓ Cached {len(meshes_to_cache)} meshes (simp={cache_simp})', level='full', use_tqdm=True)
                     
                     # Apply additional simplification to newly cached neurons if target > 0.9
                     target_simp = self.skeleton_mesh_simplification
@@ -1780,6 +1788,57 @@ class VisualizeSkeleton:
                 
                 # Mark FAFB as already simplified to skip generic simplification below
                 fafb_already_simplified = True
+
+            # Transform if needed (Now applies to ALL neurons: cached + new)
+            needs_actual_transform = needs_transform
+            if needs_actual_transform and neuron_vols is not None:
+                layer_pbar.set_postfix_str(f"{layer_name} (transforming {len(neuron_vols)}...)")
+                try:
+                    # Ensure float64 coordinates to avoid dtype warnings in navis
+                    if isinstance(neuron_vols, (list, navis.NeuronList)):
+                        for n in neuron_vols:
+                            if hasattr(n, 'nodes') and isinstance(n.nodes, pd.DataFrame):
+                                for col in ['x', 'y', 'z']:
+                                    if col in n.nodes.columns:
+                                        n.nodes[col] = n.nodes[col].astype('float64')
+                            # Also handle MeshNeuron vertices
+                            if hasattr(n, 'vertices') and n.vertices is not None:
+                                n.vertices = n.vertices.astype('float64')
+                    elif hasattr(neuron_vols, 'nodes') and isinstance(neuron_vols.nodes, pd.DataFrame):
+                         for col in ['x', 'y', 'z']:
+                            if col in neuron_vols.nodes.columns:
+                                neuron_vols.nodes[col] = neuron_vols.nodes[col].astype('float64')
+
+                    with self._suppress_output():
+                        neuron_vols = navis.xform_brain(neuron_vols, source=template_info['source'], target=template_info['target'])
+                    
+                    # Ensure iterable after transform
+                    if neuron_vols is not None and not isinstance(neuron_vols, (list, navis.NeuronList)):
+                        neuron_vols = navis.NeuronList([neuron_vols])
+                    
+                except Exception as e:
+                    tqdm.write(f'  ⚠️  Layer {i} transform failed: {e}')
+                    if self._dataset_needs_transform() and not self._check_and_download_transforms():
+                        self.brain_mesh = 'none'
+                    else:
+                        # Retry transformation after download
+                        try:
+                            with self._suppress_output():
+                                neuron_vols = navis.xform_brain(neuron_vols, source=template_info['source'], target=template_info['target'])
+                            if neuron_vols is not None and not isinstance(neuron_vols, (list, navis.NeuronList)):
+                                neuron_vols = navis.NeuronList([neuron_vols])
+                        except Exception as retry_e:
+                            tqdm.write(f'  ⚠️  Transformation still failed, setting brain_mesh to "none"')
+                            self.brain_mesh = 'none'
+            
+            # Apply FAFB tilt correction if using template mode
+            # This corrects the left-right tilt in the FLYWIRE template mesh
+            if is_fafb and self.brain_mesh == 'template' and neuron_vols is not None:
+                neuron_vols = self._apply_fafb_tilt_correction(neuron_vols)
+            
+            # Ensure iterable after potential transforms (navis may return TreeNeuron)
+            if neuron_vols is not None and not isinstance(neuron_vols, (list, navis.NeuronList)):
+                neuron_vols = navis.NeuronList([neuron_vols])
 
             # Mirror neurons if requested
             if self.mirror_on_contralateral:
@@ -2428,11 +2487,18 @@ class VisualizeSkeleton:
                          xyz_df['__color'] = c_val
                          is_color_array = True
                 
-                if self.brain_mesh in ['whole', 'template']:
+                # Transform synapses only if needed (skip for FAFB native coords)
+                if self._needs_skeleton_transform():
                     template_info = self._get_template_info()
                     self._vprint(f'Transforming synapses of layer {i} -> {i+1}...', end='', level='full')
                     with self._suppress_output():
                         xyz_df = navis.xform_brain(xyz_df, source=template_info['source'], target=template_info['target'])
+                
+                # Apply FAFB tilt correction if using template mode
+                # This corrects the left-right tilt in the FLYWIRE template mesh
+                is_fafb = 'flywire' in self.dataset.lower() or 'fafb' in self.dataset.lower()
+                if is_fafb and self.brain_mesh == 'template':
+                    xyz_df = self._apply_fafb_tilt_correction(xyz_df)
                 
                 # Retrieve colors
                 if is_color_array and '__color' in xyz_df.columns:
@@ -2554,19 +2620,42 @@ class VisualizeSkeleton:
                 pre_coords = conn_df[['x_pre', 'y_pre', 'z_pre']].rename(columns={'x_pre':'x', 'y_pre':'y', 'z_pre':'z'})
                 post_coords = conn_df[['x_post', 'y_post', 'z_post']].rename(columns={'x_post':'x', 'y_post':'y', 'z_post':'z'})
                 
-                if self.brain_mesh in ['whole', 'template']:
+                # Transform synapses only if needed (skip for FAFB native coords)
+                if self._needs_skeleton_transform():
                     template_info = self._get_template_info()
                     self._vprint(f'Transforming synapses of layer {i} -> {i+1}...', end='', level='full')
                     pre_coords = navis.xform_brain(pre_coords, source=template_info['source'], target=template_info['target'])
                     post_coords = navis.xform_brain(post_coords, source=template_info['source'], target=template_info['target'])
                 
-                # Calculate sizes if 'real'
-                current_size = self.synapse_size
+                # Apply FAFB tilt correction if using template mode
+                # This corrects the left-right tilt in the FLYWIRE template mesh
+                is_fafb = 'flywire' in self.dataset.lower() or 'fafb' in self.dataset.lower()
+                if is_fafb and self.brain_mesh == 'template':
+                    pre_coords = self._apply_fafb_tilt_correction(pre_coords)
+                    post_coords = self._apply_fafb_tilt_correction(post_coords)
+                
+                # Calculate sizes
+                # Calculate Euclidean distance
+                diff = pre_coords[['x', 'y', 'z']].values - post_coords[['x', 'y', 'z']].values
+                dists = np.linalg.norm(diff, axis=1)
+                
                 if self.synapse_size == 'real':
-                     # Calculate Euclidean distance
-                     diff = pre_coords[['x', 'y', 'z']].values - post_coords[['x', 'y', 'z']].values
-                     dists = np.linalg.norm(diff, axis=1)
-                     current_size = dists
+                    multiplier = 1.0
+                else:
+                    try:
+                        multiplier = float(self.synapse_size)
+                    except ValueError:
+                        multiplier = 1.0 # Default fallback
+                
+                # Adjust for template geometry in statvis.py to ensure size=1.0 matches real distance
+                # Cone: template height 2 (-1 to 1) -> divide by 2
+                # Sphere: template diameter 2 (radius 1) -> divide by 2
+                # Tetrahedron: template height 3 (-1.5 to 1.5) -> divide by 3
+                if self.synapse_mode == 'tetrahedron':
+                    current_size = (dists * multiplier) / 3.0
+                else:
+                    # Cone and Sphere (diameter)
+                    current_size = (dists * multiplier) / 2.0
                 
                 mesh = sv.build_synapse_mesh(
                     pre_coords, 
@@ -2648,7 +2737,20 @@ class VisualizeSkeleton:
             
         # Get available ROIs if not provided
         if available_rois is None:
-            available_rois = self._get_available_rois(use_cache=True, fetch_online=False)
+            # For FAFB/FlyWire, use male-cns ROI list for expansion since ROIs are fetched from there
+            is_fafb = 'flywire' in self.dataset.lower() or 'fafb' in self.dataset.lower()
+            if is_fafb:
+                # Load male-cns ROI list for proper expansion
+                malecns_cache = os.path.join(self.script_path, 'cache', 'male-cns_v0_9', 'available_rois.json')
+                if os.path.exists(malecns_cache):
+                    import json
+                    with open(malecns_cache, 'r') as f:
+                        available_rois = json.load(f)
+                    self._vprint(f'   Using male-cns ROI list for expansion ({len(available_rois)} ROIs)', level='full')
+                else:
+                    available_rois = self._get_available_rois(use_cache=True, fetch_online=False)
+            else:
+                available_rois = self._get_available_rois(use_cache=True, fetch_online=False)
         
         # Create a set for faster lookup
         available_set = set(available_rois) if available_rois else set()
@@ -2871,27 +2973,353 @@ class VisualizeSkeleton:
             self._vprint(f'⚠️ No ROI data available (online fetch failed and no local cache)', level='full')
             return []
     
+    def _check_transform_requirements_early(self):
+        """Check transform requirements at startup and advise user on options.
+        
+        This method checks if the current dataset and brain_mesh settings require
+        coordinate transforms, and if so, verifies transform availability and
+        advises the user on transformation-free alternatives.
+        
+        For hemibrain or FAFB with brain_mesh='whole', H5 transforms are required. 
+        The user will be prompted to either:
+        1. Download transforms (~13GB, enables JRC2018F whole brain view)
+        2. Use brain_mesh='template' for transformation-free native view
+        3. Use brain_mesh='none' for no brain mesh
+        
+        For all other datasets, native templates are used without transforms.
+        """
+        dataset_lower = self.dataset.lower()
+        
+        # Check if transforms are needed
+        needs_transform = self._dataset_needs_transform()
+        
+        if not needs_transform:
+            # Dataset uses native template - no transforms needed
+            if self.brain_mesh in ['template', 'whole']:
+                template_info = self._get_template_info()
+                if template_info.get('skip_transform', False):
+                    self._vprint(f'✓ Using native {template_info["mesh_name"]} - no coordinate transforms needed', level='full')
+            return
+        
+        # Only hemibrain and FAFB with brain_mesh='whole' require H5 transforms
+        is_hemibrain = 'hemibrain' in dataset_lower
+        is_fafb = 'flywire' in dataset_lower or 'fafb' in dataset_lower
+        
+        if not (is_hemibrain or is_fafb):
+            return
+            
+        # brain_mesh='whole' needs transform check
+        if self.brain_mesh == 'none':
+            return
+            
+        # Check if transforms are available
+        import flybrains
+        import navis
+        
+        template_info = self._get_template_info()
+        source = template_info['source']
+        target = template_info['target']
+        
+        # Try to find the transform path
+        transforms_available = False
+        try:
+            path = navis.transforms.registry.find_bridging_path(source, target)
+            transforms_available = True
+        except (ValueError, KeyError):
+            pass
+        
+        if transforms_available:
+            if self.brain_mesh == 'whole':
+                self._vprint(f'✓ Transforms available for {source} → {target}', level='full')
+            return
+            
+        # Transforms not available - prompt user
+        YELLOW = '\\033[93m'
+        CYAN = '\\033[96m'
+        GREEN = '\\033[92m'
+        RED = '\\033[91m'
+        RESET = '\\033[0m'
+        
+        dataset_name = 'FlyWire/FAFB' if is_fafb else 'Hemibrain'
+        native_template = 'FLYWIRE' if is_fafb else 'JRCFIB2018F'
+        
+        print(f'\\n{YELLOW}{"="*70}')
+        print(f'⚠️  Coordinate Transform Required for {dataset_name}')
+        print(f'{"="*70}{RESET}')
+        print()
+        print(f'Your settings: dataset={self.dataset}, brain_mesh={self.brain_mesh}')
+        print()
+        print(f'The {dataset_name} dataset requires coordinate transforms for brain_mesh="whole":')
+        print(f'  • Transform path: {source} → {target}')
+        print(f'  • Requires downloading ~{CYAN}13 GB{RESET} of transform files')
+        print(f'  • Transformation adds processing time to visualization')
+        print()
+        print(f'{GREEN}💡 Transformation-Free Alternatives:{RESET}')
+        print()
+        print(f'  Option 1: Use brain_mesh="template" (recommended)')
+        print(f'            → Uses native {native_template} template mesh')
+        print(f'            → No transforms needed, fast visualization')
+        print()
+        print(f'  Option 2: Use brain_mesh="none"')
+        print(f'            → No brain mesh, only neurons and synapses')
+        print()
+        print(f'  Option 3: Use a different dataset')
+        if is_fafb:
+            print(f'            → male-cns: Native JRCFIB2022M template (male CNS)')
+            print(f'            → hemibrain: Native JRCFIB2018F template')
+        else:
+            print(f'            → FlyWire/FAFB: Native FLYWIRE template (female brain)')
+            print(f'            → male-cns: Native JRCFIB2022M template (male CNS)')
+        print(f'            → These datasets have no transform requirements with brain_mesh="template"')
+        print()
+        print(f'{"="*70}')
+        
+        # Prompt user for choice
+        print(f'\\nHow would you like to proceed?')
+        print(f'  [1] Download transforms (~13GB) and continue with brain_mesh="whole"')
+        print(f'  [2] Use brain_mesh="template" instead (no download, fast)')
+        print(f'  [3] Use brain_mesh="none" (no brain mesh)')
+        print(f'  [q] Quit')
+        print()
+        
+        try:
+            choice = input('Enter choice [1/2/3/q] (default: 2): ').strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            choice = '2'
+        
+        if choice == '' or choice == '2':
+            print(f'\\n{GREEN}✓ Using brain_mesh="template" (transformation-free){RESET}')
+            self.brain_mesh = 'template'
+        elif choice == '3':
+            print(f'\\n{GREEN}✓ Using brain_mesh="none"{RESET}')
+            self.brain_mesh = 'none'
+        elif choice == '1':
+            # Try to download transforms
+            if self._check_and_download_transforms():
+                print(f'\\n{GREEN}✓ Transforms downloaded successfully{RESET}')
+            else:
+                print(f'\\n{YELLOW}⚠️ Transform download failed or cancelled, using brain_mesh="template"{RESET}')
+                self.brain_mesh = 'template'
+        elif choice == 'q':
+            print(f'\\n{RED}Exiting...{RESET}')
+            sys.exit(0)
+        else:
+            print(f'\\n{YELLOW}⚠️ Invalid choice, using brain_mesh="template"{RESET}')
+            self.brain_mesh = 'template'
+    
     def _dataset_needs_transform(self):
-        """Check if current dataset needs transforms for 'whole' brain mesh.
+        """Check if current dataset needs H5 transforms that require file downloads.
         
         Returns
         -------
         bool
-            True if transforms are required, False if native template is sufficient
+            True if H5 transforms requiring file downloads are needed,
+            False if only built-in affine transforms are needed
+            
+        Notes
+        -----
+        H5 transforms required (need ~13GB download):
+        - hemibrain with brain_mesh='whole': JRCFIB2018Fraw → JRC2018F path includes H5transform
+        - FlyWire/FAFB with brain_mesh='whole': FAFB → JRC2018F path includes H5transform
+        
+        Only affine transforms (built-in, no download):
+        - hemibrain with brain_mesh='template': JRCFIB2018Fraw → JRCFIB2018F
+        - male-cns: JRCFIB2022Mraw → JRCFIB2022M
+        - manc: MANCraw → MANC
+        - optic-lobe: JRCFIB2022Mraw → JRCFIB2022M
+        
+        No transforms at all:
+        - FlyWire/FAFB with brain_mesh='template': Native FLYWIRE template (identity transform)
         """
         dataset_lower = self.dataset.lower()
-        # Hemibrain needs transform to JRC2018F
-        # Optic-lobe and Male CNS need transform to JRCFIB2022M
-        # MANC needs transform to MANC
-        if 'hemibrain' in dataset_lower:
+        
+        # Hemibrain with brain_mesh='whole' requires H5 transforms
+        # because it needs to go from JRCFIB2018Fraw to JRC2018F (involves H5transform)
+        if 'hemibrain' in dataset_lower and self.brain_mesh == 'whole':
             return True
-        if 'optic' in dataset_lower or 'male-cns' in dataset_lower or 'malecns' in dataset_lower:
+        
+        # FlyWire/FAFB with brain_mesh='whole' requires H5 transforms
+        # because it needs to go from FAFB to JRC2018F (involves H5transform)
+        if ('flywire' in dataset_lower or 'fafb' in dataset_lower) and self.brain_mesh == 'whole':
             return True
-        if 'manc' in dataset_lower:
-            return True
-        if 'flywire' in dataset_lower or 'fafb' in dataset_lower:
-            return True
+        
+        # All other cases use only affine transforms or no transforms:
+        # - hemibrain with template: Affine only
+        # - FlyWire/FAFB with template: No transform (native FLYWIRE)
+        # - male-cns, manc, optic-lobe: Affine only
         return False
+    
+    def _check_elastix_available(self):
+        """Check if elastix binaries are available in PATH.
+        
+        Elastix is required for non-affine transforms between certain template spaces,
+        such as JRCFIB2022Mraw -> JRC2018F.
+        
+        Returns
+        -------
+        bool
+            True if elastix is available, False otherwise
+            
+        Notes
+        -----
+        Installation instructions:
+        - macOS (Homebrew): brew install elastix
+        - macOS (conda): conda install -c conda-forge elastix
+        - Linux: sudo apt-get install elastix (Ubuntu/Debian) or download from https://github.com/SuperElastix/elastix/releases
+        - Windows: Download from https://github.com/SuperElastix/elastix/releases and add to PATH
+        - Python package: pip install itk-elastix (alternative, may work in some cases)
+        
+        After installation, ensure the elastix binary is in your PATH.
+        """
+        import shutil
+        return shutil.which('elastix') is not None
+    
+    def _get_fafb_tilt_correction_matrix(self):
+        """Get the affine transformation matrix to correct FAFB/FLYWIRE left-right tilt.
+        
+        The FLYWIRE template mesh has an intrinsic left-right tilt (~8-10 degrees rotation 
+        around the Z-axis when viewed from the front). This method returns a rotation matrix
+        that corrects this tilt.
+        
+        Returns
+        -------
+        numpy.ndarray
+            4x4 affine transformation matrix for tilt correction.
+            Returns identity matrix if not FAFB dataset or not using template mode.
+        
+        Notes
+        -----
+        The rotation is applied around the center of the FLYWIRE brain mesh to avoid
+        shifting objects. The rotation combines:
+        - Z-axis rotation (-4 degrees) to correct left-right tilt in front view
+        - Y-axis rotation (-3 degrees) to correct tilt in top view
+        """
+        import numpy as np
+        
+        # Check if correction is needed
+        is_fafb = 'flywire' in self.dataset.lower() or 'fafb' in self.dataset.lower()
+        if not is_fafb or self.brain_mesh != 'template':
+            return np.eye(4)  # Return identity - no correction needed
+        
+        import math
+        
+        # Rotation angles
+        angle_z = math.radians(-3)  # Front view tilt correction (Z-axis)
+        angle_y = math.radians(-3)  # Top view tilt correction (Y-axis)
+        
+        # FLYWIRE brain mesh approximate center (computed from flybrains.FLYWIRE.mesh)
+        # This ensures rotation happens around the brain center, not the origin
+        center_x = 527652.0
+        center_y = 240039.0
+        center_z = 148110.0
+        
+        # Build transformation: translate to origin -> rotate -> translate back
+        # T_back @ R @ T_to_origin
+        
+        # Translation to origin
+        T_to_origin = np.array([
+            [1, 0, 0, -center_x],
+            [0, 1, 0, -center_y],
+            [0, 0, 1, -center_z],
+            [0, 0, 0, 1]
+        ])
+        
+        # Translation back
+        T_back = np.array([
+            [1, 0, 0, center_x],
+            [0, 1, 0, center_y],
+            [0, 0, 1, center_z],
+            [0, 0, 0, 1]
+        ])
+        
+        # Rotation matrix around Z-axis (front view correction)
+        cos_z = math.cos(angle_z)
+        sin_z = math.sin(angle_z)
+        Rz = np.array([
+            [cos_z, -sin_z, 0, 0],
+            [sin_z,  cos_z, 0, 0],
+            [0,      0,     1, 0],
+            [0,      0,     0, 1]
+        ])
+        
+        # Rotation matrix around Y-axis (top view correction)
+        cos_y = math.cos(angle_y)
+        sin_y = math.sin(angle_y)
+        Ry = np.array([
+            [cos_y,  0, sin_y, 0],
+            [0,      1, 0,     0],
+            [-sin_y, 0, cos_y, 0],
+            [0,      0, 0,     1]
+        ])
+        
+        # Combined rotation: first Z, then Y
+        R = Ry @ Rz
+        
+        # Full transformation: translate to origin, rotate, translate back
+        rotation_matrix = T_back @ R @ T_to_origin
+        
+        return rotation_matrix
+    
+    def _apply_fafb_tilt_correction(self, obj):
+        """Apply FAFB tilt correction to navis objects or DataFrames with xyz coordinates.
+        
+        Parameters
+        ----------
+        obj : TreeNeuron, MeshNeuron, Volume, NeuronList, or pd.DataFrame
+            Object to transform. DataFrames must have 'x', 'y', 'z' columns.
+            
+        Returns
+        -------
+        same type as input
+            Transformed object (in-place for most objects)
+        """
+        import numpy as np
+        
+        # Check if correction is needed
+        is_fafb = 'flywire' in self.dataset.lower() or 'fafb' in self.dataset.lower()
+        if not is_fafb or self.brain_mesh != 'template' or not self.FAFB_template_correction:
+            return obj  # No correction needed
+        
+        rotation_matrix = self._get_fafb_tilt_correction_matrix()
+        
+        # Check if it's identity (no transform needed)
+        if np.allclose(rotation_matrix, np.eye(4)):
+            return obj
+        
+        # Handle DataFrame separately (for synapse coordinates)
+        if isinstance(obj, pd.DataFrame):
+            try:
+                # Apply full 4x4 affine transform to x, y, z columns
+                if 'x' in obj.columns and 'y' in obj.columns and 'z' in obj.columns:
+                    # Convert to homogeneous coordinates and apply full transform
+                    coords = obj[['x', 'y', 'z']].values
+                    n_points = coords.shape[0]
+                    
+                    # Add homogeneous coordinate (1s column)
+                    homogeneous = np.hstack([coords, np.ones((n_points, 1))])
+                    
+                    # Apply transform: result = coords @ transform.T
+                    transformed = homogeneous @ rotation_matrix.T
+                    
+                    obj = obj.copy()
+                    obj['x'] = transformed[:, 0]
+                    obj['y'] = transformed[:, 1]
+                    obj['z'] = transformed[:, 2]
+                return obj
+            except Exception as e:
+                self._vprint(f'⚠️  Failed to apply FAFB tilt correction to DataFrame: {e}', level='full')
+                return obj
+        
+        # Apply transform using navis.xform for neurons/volumes
+        try:
+            # navis.xform requires an AffineTransform object, not a raw numpy array
+            from navis.transforms import AffineTransform
+            affine_transform = AffineTransform(rotation_matrix)
+            transformed = navis.xform(obj, affine_transform)
+            return transformed
+        except Exception as e:
+            self._vprint(f'⚠️  Failed to apply FAFB tilt correction: {e}', level='full')
+            return obj
     
     def _get_template_info(self):
         """Get template brain/VNC information for current dataset.
@@ -2962,14 +3390,33 @@ class VisualizeSkeleton:
             }
         
         # FlyWire / FAFB datasets
+        # For 'template': No transform needed - use native FLYWIRE coordinates
+        # For 'whole': Transform to JRC2018F (standard female brain template)
         elif 'flywire' in dataset_lower or 'fafb' in dataset_lower:
-            # FlyWire is in FAFB14 space (approx)
-            return {
-                'source': 'FAFB',
-                'target': 'JRC2018F',
-                'template_obj': flybrains.JRC2018F,
-                'mesh_name': 'JRC2018F (whole brain)'
-            }
+            if self.brain_mesh == 'whole':
+                # Transform to JRC2018F standard whole-brain template
+                # This requires H5 transforms (~580MB download)
+                return {
+                    'source': 'FAFB',  # FAFB native coordinates
+                    'target': 'JRC2018F',  # Standard female brain template
+                    'template_obj': flybrains.JRC2018F,
+                    'mesh_name': 'JRC2018F (standard whole brain)',
+                    'skip_transform': False  # Need to transform skeletons/synapses
+                }
+            else:
+                # 'template' mode: Use native FLYWIRE coordinates (no transform)
+                # FLYWIRE and FAFB14 share the same bounding box and are effectively the same space
+                # for visualization purposes. Using native coordinates avoids:
+                # 1. Downloading ~580MB transform file (JRC2018F_FAFB.h5)
+                # 2. Slow transformation of all skeleton vertices and synapse coordinates
+                # 3. Potential coordinate precision loss from warping
+                return {
+                    'source': 'FLYWIRE',  # Native space - no transform
+                    'target': 'FLYWIRE',  # Same as source - identity transform
+                    'template_obj': flybrains.FLYWIRE,
+                    'mesh_name': 'FLYWIRE (native FAFB coordinates)',
+                    'skip_transform': True  # Flag to skip skeleton/synapse transforms
+                }
         
         # Fallback to hemibrain for unknown datasets
         else:
@@ -3017,6 +3464,45 @@ class VisualizeSkeleton:
         
         # VNC mesh not available for other datasets
         return None
+    
+    def _needs_skeleton_transform(self):
+        """Check if skeleton/synapse coordinate transforms are needed.
+        
+        This method determines whether coordinate transforms should be applied
+        to skeleton and synapse data during visualization.
+        
+        Returns
+        -------
+        bool
+            True if transforms should be applied, False if data is already in target space
+            
+        Notes
+        -----
+        Returns False (skip transform) for:
+        - FlyWire/FAFB: Data and template mesh are both in FLYWIRE space (identity transform)
+        - brain_mesh='none': No template mesh, no transform needed
+        
+        Returns True (apply transform) for:
+        - hemibrain, male-cns, manc, optic-lobe: Data needs affine transform to template space
+          (These are fast, built-in affine transforms, no file download needed)
+        
+        Note: This is different from _dataset_needs_transform() which checks if heavy
+        H5 transforms requiring file downloads are needed.
+        """
+        if self.brain_mesh == 'none':
+            return False
+            
+        template_info = self._get_template_info()
+        
+        # Check for skip_transform flag (set for FAFB/FlyWire - identity transform)
+        if template_info.get('skip_transform', False):
+            return False
+        
+        # No transform needed if source == target (identity transform)
+        if template_info['source'] == template_info['target']:
+            return False
+            
+        return True
     
     def _check_and_download_transforms(self):
         """Check if flybrains transforms exist locally, prompt user before downloading.
@@ -3218,6 +3704,22 @@ class VisualizeSkeleton:
         if not has_roi_meshes and not has_brain_mesh and not has_vnc_mesh:
             return
         
+        # For FAFB with brain_mesh='whole' and mesh_roi specified
+        # ROI transforms from male-cns (JRCFIB2022Mraw) to JRC2018F require elastix which is problematic
+        is_flywire = 'flywire' in self.dataset.lower() or 'fafb' in self.dataset.lower()
+        if is_flywire and self.brain_mesh == 'whole' and has_roi_meshes:
+            # Always skip ROI meshes in whole mode for FAFB/FlyWire to avoid elastix dependency
+            self._vprint('')
+            self._vprint('⚠️  WARNING: ROI mesh transformation is not supported in "whole" mode for FAFB.', level='simple')
+            self._vprint('   ROI meshes (mesh_roi) will be skipped.', level='simple')
+            self._vprint('', level='simple')
+            self._vprint('   📌 Recommendation:', level='simple')
+            self._vprint('   Use brain_mesh="template" instead. This mode supports ROI meshes natively.', level='simple')
+            self._vprint('')
+            # Clear mesh_roi to skip ROI plotting but continue with brain mesh
+            self.mesh_roi = []
+            has_roi_meshes = False
+        
         # Ensure available_rois.json exists (generate if missing)
         # This checks cache first, and if missing, fetches from API or scans local meshes
         self._get_available_rois(use_cache=True, fetch_online=True)
@@ -3249,6 +3751,7 @@ class VisualizeSkeleton:
             color = final_mesh_colors[i]
             source_info = "Dataset Cache"
             roi_source_space = None # Track the coordinate space of the ROI
+            roi_needs_transform = False  # Track if ROI needs transform after loading
             
             # Determine if this is FlyWire/FAFB
             is_flywire = 'flywire' in self.dataset.lower() or 'fafb' in self.dataset.lower()
@@ -3256,9 +3759,25 @@ class VisualizeSkeleton:
             # Try dataset-specific directory first
             mesh_file = os.path.join(mesh_dir, roi + '.json')
             
-            # Special handling for FlyWire/FAFB
+            # For FAFB: Check for pre-transformed ROI mesh cache first
+            # Transformed meshes are stored in cache/{dataset}/meshes_transformed/{TARGET}/
+            # where TARGET is FLYWIRE (for template mode) or JRC2018F (for whole mode)
+            transformed_mesh_file = None
             if is_flywire:
-                if not os.path.exists(mesh_file):
+                # Determine target space based on brain_mesh mode
+                target_space = 'JRC2018F' if self.brain_mesh == 'whole' else 'FLYWIRE'
+                transformed_cache_dir = os.path.join(self._get_cache_path('meshes_transformed'), target_space)
+                transformed_mesh_file = os.path.join(transformed_cache_dir, roi + '.json')
+                
+                if os.path.exists(transformed_mesh_file):
+                    # Load pre-transformed mesh - no further transform needed
+                    mesh_file = transformed_mesh_file
+                    source_info = f"FAFB Transformed Cache ({target_space})"
+                    roi_needs_transform = False
+                    self._vprint(f'  ✓ Loading "{roi}" from transformed cache ({target_space})', level='full')
+            
+            # Special handling for FlyWire/FAFB - fetch from male-cns if not found
+            if is_flywire and not os.path.exists(mesh_file):
                     self._vprint(f'📥 ROI mesh "{roi}" not found locally, attempting to download...', level='full')
                     mesh_found = False
                     
@@ -3365,30 +3884,59 @@ class VisualizeSkeleton:
                     mesh = navis.Volume.from_json(mesh_file)
                     self._vprint(f'✓ Loaded "{roi}" from {source_info}', level='full')
                     
-                    # Transform if needed
-                    if self.brain_mesh in ['whole', 'template']:
+                    # Transform if needed (skip if loaded from transformed cache)
+                    if self.brain_mesh in ['whole', 'template'] and "Transformed Cache" not in source_info:
                         template_info = self._get_template_info()
                         target = template_info['target']
                         
-                        # Determine source for transform
+                        # For FAFB with ROIs from male-cns:
+                        # - 'template' mode: transform to FLYWIRE (native FAFB space)
+                        # - 'whole' mode: transform to JRC2018F (standard whole brain template)
                         if is_flywire:
-                            # For FlyWire, use the source space of the ROI, not the dataset source (FAFB14)
+                            # ROIs from male-cns need to be transformed
                             if roi_source_space:
                                 source = roi_source_space
                             else:
-                                # If loading from cache (roi_source_space is None), assume it's from male-cns (JRCFIB2022Mraw)
-                                # This fixes the issue where cached meshes were wrongly assumed to be in JRCFIB2018F
+                                # If loading from raw cache (roi_source_space is None), assume it's from male-cns
                                 source = 'JRCFIB2022Mraw'
+                            
+                            # Target depends on brain_mesh mode
+                            if self.brain_mesh == 'whole':
+                                target = 'JRC2018F'  # Match skeleton/template space
+                            else:
+                                target = 'FLYWIRE'  # Native FAFB space for template mode
+                            
+                            self._vprint(f'Transforming ROI {roi} ({source} -> {target})...', end='', level='full')
+                            try:
+                                with self._suppress_output():
+                                    mesh = navis.xform_brain(mesh, source=source, target=target)
+                                self._vprint(' Done', level='full')
+                                
+                                # Cache the transformed mesh for future use
+                                # Use target space name for cache directory (FLYWIRE or JRC2018F)
+                                transformed_cache_dir = os.path.join(self._get_cache_path('meshes_transformed'), target)
+                                os.makedirs(transformed_cache_dir, exist_ok=True)
+                                transformed_mesh_file = os.path.join(transformed_cache_dir, roi + '.json')
+                                try:
+                                    mesh.to_json(transformed_mesh_file)
+                                    self._vprint(f'  💾 Cached transformed ROI to {transformed_mesh_file}', level='full')
+                                except Exception as cache_e:
+                                    self._vprint(f'  ⚠️ Failed to cache transformed ROI: {cache_e}', level='full')
+                            except Exception as e:
+                                self._vprint(f' Failed: {e}', level='full')
                         else:
+                            # Non-FAFB datasets: use standard transform
                             source = template_info['source']
                             
-                        self._vprint(f'Transforming brain region {roi} ({source} -> {target})...', end='', level='full')
-                        try:
-                            with self._suppress_output():
-                                mesh = navis.xform_brain(mesh, source=source, target=target)
-                            self._vprint(' Done', level='full')
-                        except Exception as e:
-                            self._vprint(f' Failed: {e}', level='full')
+                            # Skip transform if source == target (identity)
+                            if source != target:
+                                self._vprint(f'Transforming brain region {roi} ({source} -> {target})...', end='', level='full')
+                                try:
+                                    with self._suppress_output():
+                                        mesh = navis.xform_brain(mesh, source=source, target=target)
+                                    self._vprint(' Done', level='full')
+                                except Exception as e:
+                                    self._vprint(f' Failed: {e}', level='full')
                     
                     # Simplify mesh if requested
                     if self.roi_mesh_simplification > 0:
@@ -3451,6 +3999,11 @@ class VisualizeSkeleton:
                             pass
                     except Exception as e:
                         self._vprint(f' (export collection failed: {e})', end='', level='full')
+
+                    # Apply FAFB tilt correction if using template mode
+                    # This corrects the left-right tilt in the FLYWIRE template mesh
+                    if is_flywire and self.brain_mesh == 'template':
+                        mesh = self._apply_fafb_tilt_correction(mesh)
 
                     roiunits.append(mesh)
                     roi_names.append(roi)
@@ -3553,6 +4106,12 @@ class VisualizeSkeleton:
                 else:
                     brain_mesh = template_info['template_obj'].mesh if hasattr(template_info['template_obj'], 'mesh') else template_info['template_obj']
                 
+                # Apply FAFB tilt correction if using template mode
+                # This corrects the left-right tilt in the FLYWIRE template mesh
+                is_fafb = 'flywire' in self.dataset.lower() or 'fafb' in self.dataset.lower()
+                if is_fafb and self.brain_mesh == 'template':
+                    brain_mesh = self._apply_fafb_tilt_correction(brain_mesh)
+                
                 if self.backend == 'plotly':
                     with self._suppress_output():
                         fig_brain = navis.plot3d(brain_mesh, backend='plotly')
@@ -3651,11 +4210,21 @@ class VisualizeSkeleton:
             # This ensures consistent viewing angle for all visualizations
             # Standard fly brain orientation: X: Left-Right, Y: Dorsal-Ventral, Z: Anterior-Posterior
             # Frontal view: Look from Anterior (negative Z direction)
+            
             scene_camera_parameters = dict(
                 up=dict(x=0, y=-1, z=0),  # Y is up (inverted in some templates)
                 eye=dict(x=0, y=0, z=-2.0),  # Look from front
                 # center=dict(x=0, y=0, z=0), # Let Plotly auto-center
             )
+            
+            # Fix for hemibrain template mode (JRCFIB2018F)
+            # JRCFIB2018F has Z as Dorsal-Ventral axis, so default camera (looking from Z) shows Top view.
+            # To show Frontal view, we need to look from Anterior (Y axis).
+            if 'hemibrain' in self.dataset.lower() and self.brain_mesh == 'template':
+                 scene_camera_parameters = dict(
+                    up=dict(x=0, y=0, z=-1),  # Z is up (Dorsal)
+                    eye=dict(x=0, y=-2.0, z=0),  # Look from Front (Anterior is -Y)
+                )
             
             self.fig_3d.update_layout(
                 colorway = self.synapse_colors,
@@ -3720,6 +4289,17 @@ class VisualizeSkeleton:
                     'left': dict(eye=dict(x=-2.5, y=0, z=0), center=dict(x=0, y=0, z=0), up=dict(x=0, y=-1, z=0)),
                     'right': dict(eye=dict(x=2.5, y=0, z=0), center=dict(x=0, y=0, z=0), up=dict(x=0, y=-1, z=0)),
                 }
+
+                # Adjust for hemibrain template (JRCFIB2018F)
+                if 'hemibrain' in self.dataset.lower() and self.brain_mesh == 'template':
+                     view_cameras = {
+                        'front': dict(eye=dict(x=0, y=-2.5, z=0), center=dict(x=0, y=0, z=0), up=dict(x=0, y=0, z=-1)),
+                        'back': dict(eye=dict(x=0, y=2.5, z=0), center=dict(x=0, y=0, z=0), up=dict(x=0, y=0, z=-1)),
+                        'top': dict(eye=dict(x=0, y=0, z=-2.5), center=dict(x=0, y=0, z=0), up=dict(x=0, y=-1, z=0)),
+                        'bottom': dict(eye=dict(x=0, y=0, z=2.5), center=dict(x=0, y=0, z=0), up=dict(x=0, y=-1, z=0)),
+                        'left': dict(eye=dict(x=-2.5, y=0, z=0), center=dict(x=0, y=0, z=0), up=dict(x=0, y=0, z=-1)),
+                        'right': dict(eye=dict(x=2.5, y=0, z=0), center=dict(x=0, y=0, z=0), up=dict(x=0, y=0, z=-1)),
+                    }
                 
                 # Update layout for static export to remove UI elements
                 self.fig_3d.update_layout(
@@ -4895,6 +5475,12 @@ class VisualizeSkeleton:
             up=dict(x=0, y=-1, z=0),
             eye=dict(x=0, y=0, z=-view_distance),
         )
+        
+        if 'hemibrain' in self.dataset.lower() and self.brain_mesh == 'template':
+             scene_camera_parameters = dict(
+                up=dict(x=0, y=0, z=-1),
+                eye=dict(x=0, y=-view_distance, z=0),
+            )
         
         fig_new.update_layout(
             sliders=[],  # Remove sliders for cleaner video

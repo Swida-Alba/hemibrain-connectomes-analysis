@@ -1,0 +1,9 @@
+# Token Information Template
+# Copy this file to 'token_info_local.txt' and fill in your tokens.
+# 'token_info_local.txt' is gitignored and will take precedence over this file.
+
+# NeuPrint Token (https://neuprint.janelia.org/account)
+NEUPRINT_TOKEN='YOUR_NEUPRINT_TOKEN_HERE'
+
+# CAVE Token (for FlyWire/FAFB)
+CAVE_TOKEN='YOUR_CAVE_TOKEN_HERE'

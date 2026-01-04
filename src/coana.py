@@ -782,6 +782,19 @@ class FindNeuronConnection:
             
             if need_new_client:
                 self._vprint(f"Initializing NeuPrint client for dataset: {self.dataset}", level='full')
+                
+                # Use TokenManager
+                try:
+                    from .utils.token_manager import token_manager
+                    self.token = token_manager.get_token('NEUPRINT_TOKEN', self.token)
+                except ImportError:
+                    # Fallback if import fails (e.g. running script directly)
+                    try:
+                        from src.utils.token_manager import token_manager
+                        self.token = token_manager.get_token('NEUPRINT_TOKEN', self.token)
+                    except ImportError:
+                        pass
+
                 self.client_hemibrain = Client(self.server, self.dataset, self.token)
                 set_default_client(self.client_hemibrain)
 

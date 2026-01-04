@@ -107,11 +107,19 @@ from coana import VisualizeSkeleton
 vs = VisualizeSkeleton(
     dataset='flywire_FAFB_v783',
     neuron_layers=['720575940621039145'],
-    brain_mesh='template'  # Uses FAFB template
+    brain_mesh='template',  # Uses FAFB template
+    FAFB_template_correction=True # Default: True. Corrects the slight tilt of the FAFB template.
 )
 
 vs.plot_neurons()
 ```
+
+### FAFB Tilt Correction
+The FAFB/FlyWire template mesh has a slight tilt relative to the standard view axes. By default (`FAFB_template_correction=True`), `VisualizeSkeleton` applies a rotation correction to align the brain:
+- **Z-axis rotation**: -4 degrees (corrects left-right tilt in front view)
+- **Y-axis rotation**: -3 degrees (corrects tilt in top view)
+
+This ensures that the brain appears straight in standard views (Front, Top, etc.). If you need the original raw coordinates (e.g., for alignment with other raw FAFB data), you can set `FAFB_template_correction=False`.
 
 **Note:** FlyWire-based BANC dataset does not currently support skeleton visualization.
 
