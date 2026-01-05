@@ -1,4 +1,4 @@
-# Drosophila Connectome Analysis Toolkit (DROCAT) v4.3.3
+# *Drosophila* Connectome Analysis Toolkit (DROCAT) v4.3.3
 
 A comprehensive Python toolkit for analyzing and visualizing connectome data from **all NeuPrint databases and FlyWire datasets**. Features type-based pathfinding algorithms, interactive network visualizations, 3D neuron morphology rendering, and EM↔LM driver line mapping.
 
