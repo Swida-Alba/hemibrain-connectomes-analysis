@@ -29,12 +29,10 @@ vs = VisualizeSkeleton(
     skeleton_mode = 'tube',
     synapse_mode = 'cone',
     merge_neurons=True,
-    skeleton_mesh_simplification=0.9,
-    roi_mesh_simplification=0.95,
     
     show_fig=True,
     
-    mesh_roi = ['EB', 'LH'],
+    mesh_roi = ['EB', 'LH', 'AL'],
     # mesh_color=(1,1,1,0),
     brain_mesh='template',
     vnc_mesh=False, #
