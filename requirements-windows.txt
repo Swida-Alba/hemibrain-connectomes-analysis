@@ -50,8 +50,8 @@ flybrains>=0.6.3           # Drosophila brain templates and meshes (0.6.3+ adds 
 # -----------------------------------------------------------------------------
 caveclient>=8.0.0          # CAVE materialization API for FlyWire FAFB
 cloud-volume>=12.0.0       # CloudVolume for mesh fetching via graphene protocol
-fast-simplification>=0.1.0 # Fast mesh simplification for skeleton generation
-trimesh>=4.0.0             # Mesh processing for skeletonization
+fast-simplification>=0.1.0 # Mesh simplification (used by trimesh 4.x, but limited to ~60% on tube meshes)
+trimesh>=4.0.0             # Mesh processing for skeletonization (simplification uses open3d instead)
 
 # NeuronBridge & FlyLight Integration (v4.3.0)
 # -----------------------------------------------------------------------------
@@ -66,7 +66,9 @@ img2pdf==0.5.1             # Convert images to PDF
 # -----------------------------------------------------------------------------
 k3d==2.17.0                # High-performance 3D visualization (WebGL)
 ipywidgets==8.1.5          # Required for k3d HTML export
-open3d==0.19.0             # 3D mesh processing and simplification
+open3d==0.19.0             # 3D mesh processing - REQUIRED for accurate mesh simplification
+                           # Note: trimesh 4.x uses fast-simplification which only achieves ~60%
+                           # reduction on neuron tube meshes. open3d achieves exact target (90%+).
 
 # NeuronBridge API (EM↔LM Integration) - Windows-compatible installation
 # -----------------------------------------------------------------------------

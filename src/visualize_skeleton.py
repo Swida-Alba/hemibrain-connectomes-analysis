@@ -2,6 +2,7 @@ import os
 import sys
 import shutil
 import time
+import signal
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import List
@@ -21,6 +22,15 @@ import navis.interfaces.neuprint as neu
 from neuprint import Client, fetch_synapse_connections, SynapseCriteria, fetch_meta
 import plotly.graph_objects as go
 import bokeh.palettes
+
+# Timeout exception for PNG export
+class PNGExportTimeout(Exception):
+    """Raised when PNG export times out."""
+    pass
+
+def _timeout_handler(signum, frame):
+    """Signal handler for PNG export timeout."""
+    raise PNGExportTimeout("PNG export timed out")
 
 # Local imports
 try:
@@ -148,6 +158,33 @@ class VisualizeSkeleton:
 
     saveas: str = None
     '''filename to save the plot, if an absolute path is given, ignore data_folder'''
+
+    export_views: bool | list = True
+    '''
+    Which views to export as PNG.
+    True: Export all 6 views (front, back, top, bottom, left, right)
+    False: Do not export PNGs
+    List[str]: List of views to export, e.g. ['front', 'top']
+    Default: True (all 6 views)
+    '''
+
+    export_scale: int = 3
+    '''
+    Scale factor for PNG export resolution (1-4 recommended).
+    Higher values produce larger, higher-quality images but take longer to export.
+    - scale=1: 1200x900 pixels (fast, ~135KB)
+    - scale=2: 2400x1800 pixels (~400KB)
+    - scale=3: 3600x2700 pixels (default, ~1MB+)
+    - scale=4: 4800x3600 pixels (high quality, ~2MB+)
+    
+    Note: PNG export uses a 60-second timeout per image. If export times out:
+    1. Automatic retry with scale=1
+    2. If still fails, remaining exports are skipped
+    3. Recommendation: increase skeleton_mesh_simplification (e.g., 0.95)
+    
+    For large figures (>50MB HTML), consider using scale=2 to avoid timeouts.
+    For export_video, scale is capped at 3 by default. Use scale=4 explicitly to override.
+    '''
 
     include_timestamp: bool = True
     '''Whether to include timestamp in the output folder name. Default True for unique folders.'''
@@ -469,6 +506,168 @@ class VisualizeSkeleton:
                 tqdm.write(msg, **kwargs)
         else:
             print(msg, **kwargs)
+
+    def _simplify_mesh_open3d(self, trimesh_obj, target_faces):
+        """
+        Simplify a trimesh mesh using open3d's quadric decimation.
+        
+        This uses open3d directly instead of trimesh's wrapper because:
+        - trimesh 4.x uses fast_simplification which achieves ~60% max reduction on tube meshes
+        - open3d achieves exact target face count (true 90%+ reduction)
+        
+        Parameters
+        ----------
+        trimesh_obj : trimesh.Trimesh
+            The mesh to simplify.
+        target_faces : int
+            Target number of faces after simplification.
+            
+        Returns
+        -------
+        trimesh.Trimesh
+            Simplified mesh, or original if simplification fails.
+        """
+        try:
+            import open3d as o3d
+            import trimesh
+            import numpy as np
+            
+            # Convert trimesh to open3d
+            o3d_mesh = o3d.geometry.TriangleMesh()
+            o3d_mesh.vertices = o3d.utility.Vector3dVector(trimesh_obj.vertices)
+            o3d_mesh.triangles = o3d.utility.Vector3iVector(trimesh_obj.faces)
+            
+            # Simplify with open3d (achieves exact target)
+            simplified = o3d_mesh.simplify_quadric_decimation(int(target_faces))
+            
+            # Convert back to trimesh
+            return trimesh.Trimesh(
+                vertices=np.asarray(simplified.vertices),
+                faces=np.asarray(simplified.triangles)
+            )
+        except ImportError:
+            # Fallback to trimesh if open3d not available
+            try:
+                return trimesh_obj.simplify_quadric_decimation(face_count=target_faces)
+            except Exception:
+                return trimesh_obj
+        except Exception:
+            # Return original on any error
+            return trimesh_obj
+
+    def _export_png_with_timeout(self, fig, output_path, width=1200, height=900, scale=3, timeout=60):
+        """
+        Export PNG with timeout control and automatic retry with lower scale.
+        
+        Parameters
+        ----------
+        fig : plotly.graph_objects.Figure
+            The figure to export.
+        output_path : str
+            Path to save the PNG file.
+        width : int
+            Image width in pixels.
+        height : int
+            Image height in pixels.
+        scale : int
+            Scale factor for resolution.
+        timeout : int
+            Timeout in seconds (default 60).
+            
+        Returns
+        -------
+        tuple
+            (success: bool, message: str, final_scale: int)
+            If success, message contains file size info.
+            If failed, message contains error/recommendation.
+        """
+        # Set up timeout handler (Unix only)
+        old_handler = None
+        has_alarm_support = False
+        try:
+            old_handler = signal.signal(signal.SIGALRM, _timeout_handler)
+            has_alarm_support = True
+        except (AttributeError, ValueError):
+            # Windows doesn't support SIGALRM, skip timeout
+            has_alarm_support = False
+        
+        current_scale = scale
+        result = None
+        
+        try:
+            while current_scale >= 1:
+                try:
+                    # Set timeout alarm
+                    if has_alarm_support:
+                        signal.alarm(timeout)
+                    
+                    # Attempt export
+                    fig.write_image(output_path, width=width, height=height, scale=current_scale)
+                    
+                    # Cancel timeout
+                    if has_alarm_support:
+                        signal.alarm(0)
+                    
+                    # Check if file was created successfully
+                    if os.path.exists(output_path):
+                        size_kb = os.path.getsize(output_path) / 1024
+                        if size_kb < 10:
+                            # File too small, likely blank
+                            result = (False, f"Export produced blank image ({size_kb:.1f}KB)", current_scale)
+                            break
+                        
+                        if current_scale < scale:
+                            result = (True, f"{size_kb:.1f}KB (reduced to scale={current_scale})", current_scale)
+                        else:
+                            result = (True, f"{size_kb:.1f}KB", current_scale)
+                        break
+                    else:
+                        result = (False, "Export failed - no file created", current_scale)
+                        break
+                        
+                except PNGExportTimeout:
+                    if has_alarm_support:
+                        signal.alarm(0)  # Cancel alarm
+                    
+                    if current_scale > 1:
+                        self._vprint(f'      ⚠️  Export timed out at scale={current_scale}, retrying with scale=1...')
+                        current_scale = 1
+                        continue
+                    else:
+                        # Already at scale=1, give up
+                        result = (False, 
+                                f"Export timed out even at scale=1. Figure is too complex.\n"
+                                f"         💡 Try increasing skeleton_mesh_simplification (e.g., 0.95 or 0.98)",
+                                current_scale)
+                        break
+                                
+                except Exception as e:
+                    if has_alarm_support:
+                        signal.alarm(0)  # Cancel alarm
+                    
+                    if current_scale > 1:
+                        self._vprint(f'      ⚠️  Export failed at scale={current_scale}: {e}')
+                        self._vprint(f'      Retrying with scale=1...')
+                        current_scale = 1
+                        continue
+                    else:
+                        result = (False, f"Export failed: {e}", current_scale)
+                        break
+            
+            if result is None:
+                result = (False, "Export failed after all retries", 1)
+                
+        finally:
+            # Always cancel any pending alarm and restore original handler
+            if has_alarm_support:
+                try:
+                    signal.alarm(0)  # Cancel any pending alarm
+                    if old_handler is not None:
+                        signal.signal(signal.SIGALRM, old_handler)
+                except:
+                    pass
+        
+        return result
 
     def _parse_layer_map_csv(self):
         """
@@ -1687,8 +1886,11 @@ class VisualizeSkeleton:
                         fafb_skeleton_cache.update(zip_skeletons)
                 
                 # Auto-fallback to API for any still missing (graceful degradation)
+                # Skip IDs that are already in mesh cache (they don't need skeleton processing)
                 still_missing = [bid for bid in all_fafb_body_ids 
-                                if bid not in fafb_skeleton_cache and str(bid) not in fafb_skeleton_cache]
+                                if bid not in fafb_skeleton_cache 
+                                and str(bid) not in fafb_skeleton_cache
+                                and bid not in fafb_mesh_cache]  # Don't fetch if mesh cache has them
                 if still_missing:
                     self._vprint(f'  ⚠️  {len(still_missing)} neurons not in local cache/ZIP, auto-fetching via CAVE API...')
                     api_fetched = self._fetch_fafb_skeletons_via_api(still_missing)
@@ -1889,10 +2091,10 @@ class VisualizeSkeleton:
                             # Apply fixed 0.9 simplification for caching
                             if mesh_n and hasattr(mesh_n, 'trimesh'):
                                 n_faces = len(mesh_n.trimesh.faces)
-                                target_faces = int(n_faces * (1 - cache_simp))
-                                if target_faces < n_faces and target_faces > 0:
+                                target_faces = max(100, int(n_faces * (1 - cache_simp)))  # Keep at least 100 faces
+                                if target_faces < n_faces:
                                     try:
-                                        simplified_trimesh = mesh_n.trimesh.simplify_quadric_decimation(face_count=target_faces)
+                                        simplified_trimesh = self._simplify_mesh_open3d(mesh_n.trimesh, target_faces)
                                         # Create new MeshNeuron with simplified mesh to ensure proper storage
                                         mesh_n = navis.MeshNeuron(simplified_trimesh)
                                         mesh_n.id = n.id  # Preserve original ID
@@ -1924,10 +2126,10 @@ class VisualizeSkeleton:
                         for mesh_n in mesh_neurons_list:
                             if hasattr(mesh_n, 'trimesh'):
                                 n_faces = len(mesh_n.trimesh.faces)
-                                target_faces = int(n_faces * additional_keep_factor)
-                                if target_faces < n_faces and target_faces > 0:
+                                target_faces = max(100, int(n_faces * additional_keep_factor))  # Keep at least 100 faces
+                                if target_faces < n_faces:
                                     try:
-                                        simplified_trimesh = mesh_n.trimesh.simplify_quadric_decimation(face_count=target_faces)
+                                        simplified_trimesh = self._simplify_mesh_open3d(mesh_n.trimesh, target_faces)
                                         new_mesh = navis.MeshNeuron(simplified_trimesh)
                                         new_mesh.id = mesh_n.id if hasattr(mesh_n, 'id') else None
                                         if hasattr(mesh_n, 'name'):
@@ -1974,10 +2176,10 @@ class VisualizeSkeleton:
                         for mesh_n in cached_mesh_neurons:
                             if hasattr(mesh_n, 'trimesh'):
                                 n_faces = len(mesh_n.trimesh.faces)
-                                target_faces = int(n_faces * additional_keep_factor)
-                                if target_faces < n_faces and target_faces > 0:
+                                target_faces = max(100, int(n_faces * additional_keep_factor))  # Keep at least 100 faces
+                                if target_faces < n_faces:
                                     try:
-                                        simplified_trimesh = mesh_n.trimesh.simplify_quadric_decimation(face_count=target_faces)
+                                        simplified_trimesh = self._simplify_mesh_open3d(mesh_n.trimesh, target_faces)
                                         new_mesh = navis.MeshNeuron(simplified_trimesh)
                                         new_mesh.id = mesh_n.id if hasattr(mesh_n, 'id') else None
                                         if hasattr(mesh_n, 'name'):
@@ -2026,10 +2228,10 @@ class VisualizeSkeleton:
                             # Apply simplification
                             if target_simp > 0 and mesh_n and hasattr(mesh_n, 'trimesh'):
                                 n_faces = len(mesh_n.trimesh.faces)
-                                target_faces = int(n_faces * (1 - target_simp))
-                                if target_faces < n_faces and target_faces > 0:
+                                target_faces = max(100, int(n_faces * (1 - target_simp)))  # Keep at least 100 faces
+                                if target_faces < n_faces:
                                     try:
-                                        simplified_trimesh = mesh_n.trimesh.simplify_quadric_decimation(face_count=target_faces)
+                                        simplified_trimesh = self._simplify_mesh_open3d(mesh_n.trimesh, target_faces)
                                         mesh_n = navis.MeshNeuron(simplified_trimesh)
                                         mesh_n.id = n.id if hasattr(n, 'id') else None
                                         if hasattr(n, 'name'):
@@ -2138,9 +2340,9 @@ class VisualizeSkeleton:
                     tqdm.write(f'  ⚠️ Mirror failed for layer {i}: {e}')
 
             # Simplify individual neurons if requested (and not merging)
-            # If merging is enabled, simplification is handled during the merge process
+            # Simplify individual neurons if requested
             # Skip for FAFB - already handled in the FAFB-specific block above
-            if self.skeleton_mesh_simplification > 0 and self.skeleton_mode == 'tube' and not self.merge_neurons and not fafb_already_simplified:
+            if self.skeleton_mesh_simplification > 0 and self.skeleton_mode == 'tube' and not fafb_already_simplified:
                 try:
                     import trimesh
                     simplified_neurons = []
@@ -2169,15 +2371,22 @@ class VisualizeSkeleton:
                                 mesh_n = n
                                 
                             # Simplify if we have a mesh neuron
+                            # MeshNeuron.trimesh is read-only, so we must create a new MeshNeuron
                             if mesh_n and hasattr(mesh_n, 'trimesh'):
                                 n_faces = len(mesh_n.trimesh.faces)
                                 total_original_faces += n_faces
                                 target_faces = max(100, int(n_faces * (1 - self.skeleton_mesh_simplification)))  # Keep at least 100 faces
                                 if target_faces < n_faces:
-                                    # simplify_quadric_decimation returns a new trimesh object
+                                    # Use open3d for accurate simplification (trimesh 4.x fast_simplification only achieves ~60%)
                                     # Create NEW MeshNeuron from simplified trimesh (can't just assign to .trimesh)
-                                    simplified_tm = mesh_n.trimesh.simplify_quadric_decimation(face_count=target_faces)
+                                    try:
+                                        simplified_tm = self._simplify_mesh_open3d(mesh_n.trimesh, target_faces)
+                                    except Exception as simp_err:
+                                        # Fallback to original if simplification fails
+                                        simplified_tm = mesh_n.trimesh
+                                    
                                     new_mesh_n = navis.MeshNeuron(simplified_tm)
+                                    # Copy over attributes
                                     new_mesh_n.id = mesh_n.id if hasattr(mesh_n, 'id') else n.id
                                     if hasattr(mesh_n, 'name'):
                                         new_mesh_n.name = mesh_n.name
@@ -2190,8 +2399,8 @@ class VisualizeSkeleton:
                                 # Keep original if conversion failed or not applicable
                                 simplified_neurons.append(n)
                         except Exception as e:
-                            # print(f'Warning: Failed to simplify neuron {n.id}: {e}')
-                            simplified_neurons.append(n) # Keep original if failed
+                            # Keep original if failed
+                            simplified_neurons.append(n if mesh_n is None else mesh_n)
                     
                     neuron_vols = navis.NeuronList(simplified_neurons)
                     
@@ -2204,9 +2413,13 @@ class VisualizeSkeleton:
                     pass  # Keep original neurons if simplification fails
 
             # Merge neurons if requested (optimization)
+            # Also handle single neuron case when merge_neurons=True to ensure simplification is applied
             num_neurons = len(neuron_vols) if isinstance(neuron_vols, (list, navis.NeuronList)) else 1
-            if self.merge_neurons and num_neurons > 1:
-                layer_pbar.set_postfix_str(f"{layer_name} (meshing {num_neurons}...)")
+            
+            if self.merge_neurons and num_neurons > 0:
+                if num_neurons > 1:
+                    layer_pbar.set_postfix_str(f"{layer_name} (meshing {num_neurons}...)")
+                
                 try:
                     if self.skeleton_mode == 'tube':
                         import trimesh
@@ -2235,6 +2448,8 @@ class VisualizeSkeleton:
                                 # Let's try navis.conversion.tree2meshneuron first as it's explicit
                                 if hasattr(navis, 'conversion') and hasattr(navis.conversion, 'tree2meshneuron'):
                                     mesh_neuron = navis.conversion.tree2meshneuron(n)
+                                elif isinstance(n, navis.MeshNeuron):
+                                    mesh_neuron = n
                                 else:
                                     # Fallback: try to create MeshNeuron directly or use other method
                                     # navis.MeshNeuron(n) might not work directly for TreeNeuron
@@ -2266,16 +2481,38 @@ class VisualizeSkeleton:
                             merged_mesh = trimesh.util.concatenate(meshes)
                             
                             # Simplify if requested
+                            # Only simplify merged mesh if individual simplification was NOT performed
+                            # Or if we want to apply additional simplification (but usually not)
+                            # If we already simplified individuals, we skip merged simplification to avoid double simplification
+                            # unless fafb_already_simplified is True (which means we skipped individual simplification)
+                            
+                            should_simplify_merged = False
                             if self.skeleton_mesh_simplification > 0:
+                                if fafb_already_simplified:
+                                    should_simplify_merged = True
+                                elif not (self.skeleton_mesh_simplification > 0 and self.skeleton_mode == 'tube' and not fafb_already_simplified):
+                                    # This condition mirrors the individual simplification block
+                                    # If individual simplification block was skipped, we might want to simplify here
+                                    should_simplify_merged = True
+                                else:
+                                    # Individual simplification was performed.
+                                    # Do we want to simplify again? Probably not.
+                                    should_simplify_merged = False
+                            
+                            if should_simplify_merged:
                                 n_faces = len(merged_mesh.faces)
-                                target_faces = int(n_faces * (1 - self.skeleton_mesh_simplification))
+                                target_faces = max(100, int(n_faces * (1 - self.skeleton_mesh_simplification)))  # Keep at least 100 faces
                                 if target_faces < n_faces:
                                     try:
-                                        # Try open3d simplification first (better quality)
-                                        # If open3d not installed, trimesh might fail or use other method
-                                        # trimesh.simplify_quadric_decimation uses open3d or fast-simplification
-                                        merged_mesh = merged_mesh.simplify_quadric_decimation(face_count=target_faces)
-                                    except Exception:
+                                        # Use open3d for accurate simplification (trimesh 4.x fast_simplification only achieves ~60%)
+                                        merged_mesh = self._simplify_mesh_open3d(merged_mesh, target_faces)
+                                        
+                                        # Log simplification result
+                                        new_faces = len(merged_mesh.faces)
+                                        reduction = (1 - new_faces / n_faces) * 100
+                                        self._vprint(f'    ✓ Simplified merged mesh: {n_faces:,} → {new_faces:,} faces ({reduction:.1f}% reduction)', level='full')
+                                    except Exception as e:
+                                        self._vprint(f'    ⚠️ Merged mesh simplification failed: {e}', level='full')
                                         pass  # Skip simplification if it fails
                             
                             # Convert back to navis object
@@ -4232,8 +4469,8 @@ class VisualizeSkeleton:
                                 n_faces = len(tm.faces)
                                 target_faces = int(n_faces * (1 - self.roi_mesh_simplification))
                                 if target_faces < n_faces:
-                                    # simplify_quadric_decimation returns a new trimesh object
-                                    new_tm = tm.simplify_quadric_decimation(face_count=target_faces)
+                                    # Use open3d for accurate simplification (trimesh 4.x fast_simplification only achieves ~60%)
+                                    new_tm = self._simplify_mesh_open3d(tm, target_faces)
                                     
                                     # Re-instantiate Volume to ensure it's clean and updated
                                     # Preserving attributes
@@ -4546,78 +4783,125 @@ class VisualizeSkeleton:
             self._vprint('Done (HTML saved)')
             
             # Export multiple view angles as PNG
-            try:
-                self._vprint('   Exporting static PNGs (multiple views)...')
-                
-                # Create exported_views subfolder
-                views_folder = os.path.join(self.save_folder, 'exported_views')
-                os.makedirs(views_folder, exist_ok=True)
-                
-                # Define camera angles for different views
-                # Based on the default front view: eye=(0, 0, -2), up=(0, -1, 0)
-                # X: Left-Right, Y: Dorsal-Ventral (up), Z: Anterior-Posterior (front-back)
-                view_cameras = {
-                    'front': dict(eye=dict(x=0, y=0, z=-2.5), center=dict(x=0, y=0, z=0), up=dict(x=0, y=-1, z=0)),
-                    'back': dict(eye=dict(x=0, y=0, z=2.5), center=dict(x=0, y=0, z=0), up=dict(x=0, y=-1, z=0)),
-                    'top': dict(eye=dict(x=0, y=-2.5, z=0), center=dict(x=0, y=0, z=0), up=dict(x=0, y=0, z=1)),
-                    'bottom': dict(eye=dict(x=0, y=2.5, z=0), center=dict(x=0, y=0, z=0), up=dict(x=0, y=0, z=-1)),
-                    'left': dict(eye=dict(x=-2.5, y=0, z=0), center=dict(x=0, y=0, z=0), up=dict(x=0, y=-1, z=0)),
-                    'right': dict(eye=dict(x=2.5, y=0, z=0), center=dict(x=0, y=0, z=0), up=dict(x=0, y=-1, z=0)),
-                }
-
-                # Adjust for hemibrain template (JRCFIB2018F)
-                # JRCFIB2018F coordinate system:
-                #   X-axis: Left-Right (as normal fly brain)
-                #   Y-axis: Posterior→Anterior (front is +Y direction)
-                #   Z-axis: Ventral→Dorsal (up is +Z direction, but we use -Z as "up" for standard brain viewing)
-                #
-                # For front view: eye at +Y, looking at origin, with -Z as up (dorsal up)
-                # Key insight: When looking from +Y, the up vector should be -Z to match standard viewing
-                if 'hemibrain' in self.dataset.lower() and self.brain_mesh == 'template':
-                     view_cameras = {
-                        'front': dict(eye=dict(x=0, y=2.5, z=0), center=dict(x=0, y=0, z=0), up=dict(x=0, y=0, z=-1)),
-                        'back': dict(eye=dict(x=0, y=-2.5, z=0), center=dict(x=0, y=0, z=0), up=dict(x=0, y=0, z=-1)),
-                        'top': dict(eye=dict(x=0, y=0, z=-2.5), center=dict(x=0, y=0, z=0), up=dict(x=0, y=1, z=0)),
-                        'bottom': dict(eye=dict(x=0, y=0, z=2.5), center=dict(x=0, y=0, z=0), up=dict(x=0, y=1, z=0)),
-                        'left': dict(eye=dict(x=-2.5, y=0, z=0), center=dict(x=0, y=0, z=0), up=dict(x=0, y=0, z=-1)),
-                        'right': dict(eye=dict(x=2.5, y=0, z=0), center=dict(x=0, y=0, z=0), up=dict(x=0, y=0, z=-1)),
-                    }
-                
-                # Update layout for static export to remove UI elements
-                self.fig_3d.update_layout(
-                    margin=dict(l=0, r=0, b=0, t=0),
-                    sliders=[],      # Remove sliders
-                    updatemenus=[],  # Remove any buttons
-                )
-                
-                import shutil
-                front_view_path = None
-                
-                for view_name, camera in view_cameras.items():
-                    view_path = os.path.join(views_folder, f"{self.saveas}_{view_name}.png")
-                    self.fig_3d.update_layout(scene_camera=camera)
-                    self.fig_3d.write_image(view_path, width=1200, height=900, scale=3)
+            # Skip if export_views is False
+            if self.export_views is not False:
+                try:
+                    self._vprint('   Exporting static PNGs (multiple views)...')
                     
-                    if os.path.exists(view_path):
-                        size = os.path.getsize(view_path)
-                        self._vprint(f'      {view_name}: {size/1024:.1f} KB', level='full')
-                        if size < 15 * 1024:
-                            self._vprint(f'      ⚠️  {view_name} view seems blank/empty', level='full')
+                    # Create exported_views subfolder
+                    views_folder = os.path.join(self.save_folder, 'exported_views')
+                    os.makedirs(views_folder, exist_ok=True)
+                    
+                    # Define camera angles for different views
+                    # Based on the default front view: eye=(0, 0, -2), up=(0, -1, 0)
+                    # X: Left-Right, Y: Dorsal-Ventral (up), Z: Anterior-Posterior (front-back)
+                    view_cameras = {
+                        'front': dict(eye=dict(x=0, y=0, z=-2.5), center=dict(x=0, y=0, z=0), up=dict(x=0, y=-1, z=0)),
+                        'back': dict(eye=dict(x=0, y=0, z=2.5), center=dict(x=0, y=0, z=0), up=dict(x=0, y=-1, z=0)),
+                        'top': dict(eye=dict(x=0, y=-2.5, z=0), center=dict(x=0, y=0, z=0), up=dict(x=0, y=0, z=1)),
+                        'bottom': dict(eye=dict(x=0, y=2.5, z=0), center=dict(x=0, y=0, z=0), up=dict(x=0, y=0, z=-1)),
+                        'left': dict(eye=dict(x=-2.5, y=0, z=0), center=dict(x=0, y=0, z=0), up=dict(x=0, y=-1, z=0)),
+                        'right': dict(eye=dict(x=2.5, y=0, z=0), center=dict(x=0, y=0, z=0), up=dict(x=0, y=-1, z=0)),
+                    }
+
+                    # Adjust for hemibrain template (JRCFIB2018F)
+                    # JRCFIB2018F coordinate system:
+                    #   X-axis: Left-Right (as normal fly brain)
+                    #   Y-axis: Posterior→Anterior (front is +Y direction)
+                    #   Z-axis: Ventral→Dorsal (up is +Z direction, but we use -Z as "up" for standard brain viewing)
+                    #
+                    # For front view: eye at +Y, looking at origin, with -Z as up (dorsal up)
+                    # Key insight: When looking from +Y, the up vector should be -Z to match standard viewing
+                    if 'hemibrain' in self.dataset.lower() and self.brain_mesh == 'template':
+                         view_cameras = {
+                            'front': dict(eye=dict(x=0, y=2.5, z=0), center=dict(x=0, y=0, z=0), up=dict(x=0, y=0, z=-1)),
+                            'back': dict(eye=dict(x=0, y=-2.5, z=0), center=dict(x=0, y=0, z=0), up=dict(x=0, y=0, z=-1)),
+                            'top': dict(eye=dict(x=0, y=0, z=-2.5), center=dict(x=0, y=0, z=0), up=dict(x=0, y=1, z=0)),
+                            'bottom': dict(eye=dict(x=0, y=0, z=2.5), center=dict(x=0, y=0, z=0), up=dict(x=0, y=1, z=0)),
+                            'left': dict(eye=dict(x=-2.5, y=0, z=0), center=dict(x=0, y=0, z=0), up=dict(x=0, y=0, z=-1)),
+                            'right': dict(eye=dict(x=2.5, y=0, z=0), center=dict(x=0, y=0, z=0), up=dict(x=0, y=0, z=-1)),
+                        }
+                    
+                    # Update layout for static export to remove UI elements
+                    self.fig_3d.update_layout(
+                        margin=dict(l=0, r=0, b=0, t=0),
+                        sliders=[],      # Remove sliders
+                        updatemenus=[],  # Remove any buttons
+                    )
+                    
+                    import shutil
+                    front_view_path = None
+                    
+                    # Determine which views to export
+                    views_to_export = []
+                    if self.export_views is True:
+                        views_to_export = list(view_cameras.keys())
+                    elif isinstance(self.export_views, list):
+                        views_to_export = self.export_views
+                    elif isinstance(self.export_views, str):
+                        views_to_export = [self.export_views]
+                    
+                    if not views_to_export:
+                        self._vprint('   Skipping PNG export (export_views=False)')
+                    else:
+                        # Check HTML size and warn if export may be slow/hang
+                        html_path = self.fig_path + '.html'
+                        if os.path.exists(html_path):
+                            html_size_mb = os.path.getsize(html_path) / 1024 / 1024
+                            if html_size_mb > 100:
+                                self._vprint(f'      ⚠️  Large HTML ({html_size_mb:.1f}MB) - PNG export may be slow.')
+                                self._vprint(f'      💡 Consider using skeleton_mesh_simplification=0.95 or export_scale=2')
+                            elif html_size_mb > 50:
+                                self._vprint(f'      ⚠️  HTML size: {html_size_mb:.1f}MB - export may take 1-2 minutes')
                         
-                        # Save front view path for copying to root
-                        if view_name == 'front':
-                            front_view_path = view_path
+                        # Track if any export fails to skip remaining views
+                        export_failed = False
+                        exported_views = []
+                        
+                        for view_name in views_to_export:
+                            if export_failed:
+                                self._vprint(f'      ⚠️  Skipping {view_name} (previous export failed)')
+                                continue
+                                
+                            if view_name not in view_cameras:
+                                self._vprint(f'      ⚠️  Skipping invalid view: {view_name}')
+                                continue
+                                
+                            camera = view_cameras[view_name]
+                            view_path = os.path.join(views_folder, f"{self.saveas}_{view_name}.png")
+                            self.fig_3d.update_layout(scene_camera=camera)
+                            
+                            # Use timeout-controlled export with retry
+                            success, msg, final_scale = self._export_png_with_timeout(
+                                self.fig_3d, view_path, 
+                                width=1200, height=900, 
+                                scale=self.export_scale, 
+                                timeout=60
+                            )
+                            
+                            if success:
+                                self._vprint(f'      {view_name}: {msg}', level='full')
+                                exported_views.append(view_name)
+                                
+                                # Save front view path for copying to root
+                                if view_name == 'front':
+                                    front_view_path = view_path
+                            else:
+                                self._vprint(f'      ⚠️  {view_name} export failed: {msg}')
+                                export_failed = True
+                                self._vprint(f'      💡 Skipping remaining views. Try reducing export_scale or increasing skeleton_mesh_simplification.')
+                        
+                        # Copy front view to root folder without '_front' suffix
+                        if front_view_path and os.path.exists(front_view_path):
+                            root_png_path = os.path.join(self.save_folder, f"{self.saveas}.png")
+                            shutil.copy2(front_view_path, root_png_path)
+                            self._vprint(f'   ✓ Copied front view to root: {self.saveas}.png')
+                        
+                        if exported_views:
+                            self._vprint(f'   ✓ Exported {len(exported_views)} view PNGs to exported_views/ ({", ".join(exported_views)})')
                 
-                # Copy front view to root folder without '_front' suffix
-                if front_view_path and os.path.exists(front_view_path):
-                    root_png_path = os.path.join(self.save_folder, f"{self.saveas}.png")
-                    shutil.copy2(front_view_path, root_png_path)
-                    self._vprint(f'   ✓ Copied front view to root: {self.saveas}.png')
-                
-                self._vprint('   ✓ Exported 6 view PNGs to exported_views/ (front, back, top, bottom, left, right)')
-                
-            except Exception as e:
-                self._vprint(f'\\n   ⚠️  PNG export failed: {e}. Continuing without PNG...')
+                except Exception as e:
+                    self._vprint(f'\\n   ⚠️  PNG export failed: {e}. Continuing without PNG...')
             
         elif self.backend == 'k3d':
             self.fig_path = os.path.join(self.save_folder,self.saveas)
@@ -4663,7 +4947,7 @@ class VisualizeSkeleton:
         self,
         output_format: str | list = 'png',
         views: str | list = 'front',
-        scale: int = 3,
+        scale: int = None,
         pdf_images_per_page: tuple = (3, 2),
         pdf_title: str = None,
         neuron_alpha: float = None,
@@ -4688,8 +4972,8 @@ class VisualizeSkeleton:
             View angle(s) for PNG exports.
             Options: 'front', 'back', 'top', 'bottom', 'left', 'right'
             Can be a single string or list like ['front', 'top']
-        scale : int, default 3
-            Scale factor for PNG export resolution.
+        scale : int, default None (uses self.export_scale)
+            Scale factor for PNG export resolution. Overrides self.export_scale if provided.
             Higher values produce larger, higher-quality images.
         pdf_images_per_page : tuple, default (3, 2)
             (columns, rows) - number of images per page when generating PDF/PPTX.
@@ -4724,6 +5008,10 @@ class VisualizeSkeleton:
         if self.backend != 'plotly':
             self._vprint('⚠️  plot_individuals() only supports plotly backend.')
             return None
+        
+        # Use self.export_scale if scale not specified
+        if scale is None:
+            scale = self.export_scale
         
         # Normalize inputs
         if isinstance(output_format, str):
@@ -4879,12 +5167,19 @@ class VisualizeSkeleton:
         # Generate individual plots by hiding/showing traces
         generated_files = {'png': {}, 'html': []}
         
+        # Track if PNG export fails to skip remaining individuals
+        png_export_failed = False
+        
         # No subfolders needed - use flat structure with naming convention
         
         from tqdm import tqdm
         legend_names = list(legend_entries.keys())
         
         for legend_name in tqdm(legend_names, desc='Plotting individuals'):
+            # Skip if PNG export already failed
+            if png_export_failed and 'png' in output_format and 'html' not in output_format:
+                continue  # Skip if only PNG requested and it failed
+            
             trace_indices = legend_entries[legend_name]
             
             # Sanitize filename - keep + signs
@@ -4940,11 +5235,14 @@ class VisualizeSkeleton:
                 generated_files['html'].append(html_path)
             
             # Export PNG(s) if requested
-            if 'png' in output_format:
+            if 'png' in output_format and not png_export_failed:
                 if safe_name not in generated_files['png']:
                     generated_files['png'][safe_name] = []
                 
                 for view_name in views:
+                    if png_export_failed:
+                        break  # Skip remaining views if export failed
+                        
                     camera = view_cameras[view_name]
                     self.fig_3d.update_layout(scene_camera=camera)
                     
@@ -4953,13 +5251,21 @@ class VisualizeSkeleton:
                     png_filename = f'{view_name}_{safe_name}.png'
                     png_path = os.path.join(output_dir, png_filename)
                     
-                    try:
-                        # Use square dimensions to minimize horizontal margins
-                        # (3D scene maintains aspect ratio, square fills frame better)
-                        self.fig_3d.write_image(png_path, width=900, height=900, scale=scale)
+                    # Use timeout-controlled export with retry
+                    success, msg, final_scale = self._export_png_with_timeout(
+                        self.fig_3d, png_path, 
+                        width=900, height=900, 
+                        scale=scale, 
+                        timeout=60
+                    )
+                    
+                    if success:
                         generated_files['png'][safe_name].append((png_path, view_name))
-                    except Exception as e:
-                        self._vprint(f'   ⚠️  PNG export failed for {legend_name} ({view_name}): {e}', level='full')
+                    else:
+                        self._vprint(f'   ⚠️  PNG export failed for {legend_name} ({view_name}): {msg}')
+                        png_export_failed = True
+                        self._vprint(f'   💡 Skipping remaining individual exports. Try reducing scale or increasing skeleton_mesh_simplification.')
+                        break
         
         # Restore original figure state (visibility, opacity, and colors)
         for idx in range(n_traces):
@@ -5642,7 +5948,9 @@ class VisualizeSkeleton:
             Enable GIF compression optimization for smaller file sizes.
         **kwargs : dict
             Additional arguments for plotly write_image():
-            - scale : int, default 2 - Resolution multiplier
+            - scale : int - Resolution multiplier. Defaults to min(self.export_scale, 3).
+              For video, scale is capped at 3 for reasonable performance.
+              To use scale=4 (very slow), pass it explicitly: scale=4
             - width : int - Video width in pixels (default 1200)
             - height : int - Video height in pixels (default 900)
         
@@ -5700,9 +6008,21 @@ class VisualizeSkeleton:
         if view_distance is None:
             view_distance = 2.2
         
-        # Set default scale if not specified
+        # Set default scale from self.export_scale if not specified in kwargs
+        # For video, cap at scale=3 for reasonable performance (scale=4 is very slow)
+        # Users can explicitly set scale=4 to override the cap
         if kwargs.get('scale') is None and kwargs.get('width') is None and kwargs.get('height') is None:
-            kwargs['scale'] = 2
+            # Use min(self.export_scale, 3) - cap at 3 for video
+            default_scale = min(getattr(self, 'export_scale', 3), 3)
+            kwargs['scale'] = default_scale
+        elif kwargs.get('scale') is not None:
+            # User explicitly provided scale - check if > 3 and warn
+            user_scale = kwargs['scale']
+            if user_scale > 3:
+                self._vprint(f'⚠️  Using scale={user_scale} for video export (uncapped). This may be slow.')
+            elif user_scale > getattr(self, 'export_scale', 3):
+                # User requested higher than default, allow it
+                pass
         
         # Use explicit degree_per_frame instead of calculating from fps
         step = degree_per_frame
@@ -5830,39 +6150,123 @@ class VisualizeSkeleton:
             if 'height' not in kwargs: kwargs['height'] = 900
             
             t0 = time.time()
+            current_scale = kwargs.get('scale', 2)
+            frame_export_failed = False
             
-            # Sequential rendering
+            # Set up timeout handler (Unix only)
+            old_handler = None
+            has_alarm_support = False
+            try:
+                old_handler = signal.signal(signal.SIGALRM, _timeout_handler)
+                has_alarm_support = True
+            except (AttributeError, ValueError):
+                has_alarm_support = False
+            
+            # Sequential rendering with timeout control
             self._vprint(f'   Rendering frames... (First frame may take longer to initialize Kaleido)')
             
-            for i, deg in enumerate(steps_to_write):
-                rad_i = np.deg2rad(deg)
-                x = view_distance * np.sin(rad_i) * view_direction[0]
-                y = view_distance * np.cos(rad_i) * view_direction[1]
-                
-                if rotate_plane == 'xy':
-                    fig_new.update_layout(scene_camera=dict(eye=dict(x=x, y=y, z=0)))
-                elif rotate_plane == 'yz':
-                    fig_new.update_layout(scene_camera=dict(eye=dict(x=0, y=x, z=y)))
-                elif rotate_plane == 'xz':
-                    fig_new.update_layout(scene_camera=dict(eye=dict(x=x, y=0, z=y)))
-                
-                fig_path = os.path.join(pic_folder, f'deg_{deg:.1f}.jpeg')
-                
-                try:
-                    fig_new.write_image(fig_path, **kwargs)
-                except Exception as e:
-                    self._vprint(f'\n⚠️  Frame {i+1} failed: {e}')
-                    if i == 0:
-                        self._vprint('   Try reducing "scale" (e.g. scale=1) or using "width"/"height" parameters.')
-                        return 1
-                
-                elapsed = time.time() - t0
-                avg_time = elapsed / (i + 1)
-                remaining = avg_time * (len(steps_to_write) - i - 1)
-                print(f'\r  Frame {i+1}/{len(steps_to_write)} | '
-                      f'Elapsed: {elapsed:.1f}s | '
-                      f'ETA: {remaining:.1f}s | '
-                      f'{avg_time:.2f}s/frame', end='    ', flush=True)
+            try:
+                for i, deg in enumerate(steps_to_write):
+                    if frame_export_failed:
+                        break
+                        
+                    rad_i = np.deg2rad(deg)
+                    x = view_distance * np.sin(rad_i) * view_direction[0]
+                    y = view_distance * np.cos(rad_i) * view_direction[1]
+                    
+                    if rotate_plane == 'xy':
+                        fig_new.update_layout(scene_camera=dict(eye=dict(x=x, y=y, z=0)))
+                    elif rotate_plane == 'yz':
+                        fig_new.update_layout(scene_camera=dict(eye=dict(x=0, y=x, z=y)))
+                    elif rotate_plane == 'xz':
+                        fig_new.update_layout(scene_camera=dict(eye=dict(x=x, y=0, z=y)))
+                    
+                    fig_path = os.path.join(pic_folder, f'deg_{deg:.1f}.jpeg')
+                    
+                    try:
+                        # Set timeout alarm (60s for first frame, 30s for subsequent)
+                        timeout_sec = 60 if i == 0 else 30
+                        if has_alarm_support:
+                            signal.alarm(timeout_sec)
+                        
+                        kwargs_copy = kwargs.copy()
+                        kwargs_copy['scale'] = current_scale
+                        fig_new.write_image(fig_path, **kwargs_copy)
+                        
+                        if has_alarm_support:
+                            signal.alarm(0)  # Cancel timeout
+                            
+                    except PNGExportTimeout:
+                        if has_alarm_support:
+                            signal.alarm(0)
+                        
+                        if current_scale > 1:
+                            self._vprint(f'\n⚠️  Frame {i+1} timed out at scale={current_scale}, retrying with scale=1...')
+                            current_scale = 1
+                            try:
+                                if has_alarm_support:
+                                    signal.alarm(60)
+                                kwargs_copy = kwargs.copy()
+                                kwargs_copy['scale'] = 1
+                                fig_new.write_image(fig_path, **kwargs_copy)
+                                if has_alarm_support:
+                                    signal.alarm(0)
+                                self._vprint(f'   ✓ Frame {i+1} exported with scale=1')
+                            except (PNGExportTimeout, Exception) as retry_e:
+                                if has_alarm_support:
+                                    signal.alarm(0)
+                                self._vprint(f'\n⚠️  Frame {i+1} failed even at scale=1: {retry_e}')
+                                self._vprint('   💡 Figure is too complex. Try increasing skeleton_mesh_simplification (e.g., 0.95).')
+                                frame_export_failed = True
+                                break
+                        else:
+                            self._vprint(f'\n⚠️  Frame {i+1} timed out at scale=1. Figure is too complex.')
+                            self._vprint('   💡 Try increasing skeleton_mesh_simplification (e.g., 0.95 or 0.98).')
+                            frame_export_failed = True
+                            break
+                            
+                    except Exception as e:
+                        if has_alarm_support:
+                            signal.alarm(0)
+                        self._vprint(f'\n⚠️  Frame {i+1} failed: {e}')
+                        if i == 0 and current_scale > 1:
+                            self._vprint(f'   Retrying with scale=1...')
+                            current_scale = 1
+                            try:
+                                kwargs_copy = kwargs.copy()
+                                kwargs_copy['scale'] = 1
+                                fig_new.write_image(fig_path, **kwargs_copy)
+                                self._vprint(f'   ✓ Frame {i+1} exported with scale=1')
+                            except Exception as retry_e:
+                                self._vprint(f'   ⚠️  Retry failed: {retry_e}')
+                                self._vprint('   💡 Try increasing skeleton_mesh_simplification.')
+                                frame_export_failed = True
+                                break
+                        else:
+                            frame_export_failed = True
+                            break
+                    
+                    elapsed = time.time() - t0
+                    avg_time = elapsed / (i + 1)
+                    remaining = avg_time * (len(steps_to_write) - i - 1)
+                    print(f'\r  Frame {i+1}/{len(steps_to_write)} | '
+                          f'Elapsed: {elapsed:.1f}s | '
+                          f'ETA: {remaining:.1f}s | '
+                          f'{avg_time:.2f}s/frame', end='    ', flush=True)
+                          
+            finally:
+                # Always cancel any pending alarm and restore original handler
+                if has_alarm_support:
+                    try:
+                        signal.alarm(0)  # Cancel any pending alarm
+                        if old_handler is not None:
+                            signal.signal(signal.SIGALRM, old_handler)
+                    except:
+                        pass
+            
+            if frame_export_failed:
+                self._vprint(f'\n⚠️  Frame rendering aborted. Skipping video generation.')
+                return 1
             
             print('\n✓ Image rendering complete')
         # Generate videos from images
