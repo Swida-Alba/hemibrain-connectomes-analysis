@@ -41,10 +41,8 @@ import pandas as pd
 from comparison.profile_comparator import HomologFinder
 
 if __name__ == "__main__":
-    # dataset = 'male-cns:v0.9'
+    # Token automatically loaded from token_info.txt (recommended) or set token='' here
     finder = HomologFinder(
-        token='',
-
         source='VP2_adPN', # type or bodyId
         source_dataset='male-cns:v0.9',
         target_dataset='male-cns:v0.9',

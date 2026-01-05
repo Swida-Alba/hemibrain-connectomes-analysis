@@ -84,6 +84,97 @@ def parse_color_to_hex_opacity(color_str):
     return (color_str, 1.0)
 
 
+# Neurotransmitter color palette
+# Colors chosen for visual distinction and biological relevance
+# Grouped by excitatory/inhibitory/modulatory for interactive color adjustment
+NT_COLORS = {
+    # Excitatory neurotransmitters - warm colors (orange/yellow tones)
+    'acetylcholine': '#F39C12',  # Orange - major excitatory NT in insects
+    'ACH': '#F39C12',
+    'ach': '#F39C12',
+    'glutamate': '#E67E22',      # Darker orange - excitatory
+    'GLUT': '#E67E22',
+    'glut': '#E67E22',
+    
+    # Inhibitory neurotransmitters - green-based colors
+    'gaba': '#27AE60',           # Green - major inhibitory NT
+    'GABA': '#27AE60',
+    
+    # Modulatory neurotransmitters - varied colors
+    'dopamine': '#9B59B6',       # Purple - neuromodulator
+    'DA': '#9B59B6',
+    'da': '#9B59B6',
+    'serotonin': '#3498DB',      # Blue - neuromodulator
+    'SER': '#3498DB',
+    'ser': '#3498DB',
+    '5-HT': '#3498DB',
+    '5-ht': '#3498DB',
+    'octopamine': '#1ABC9C',     # Teal - insect-specific neuromodulator
+    'OCT': '#1ABC9C',
+    'oct': '#1ABC9C',
+    
+    # Unknown/other
+    'unknown': '#95A5A6',        # Gray
+    'none': '#95A5A6',
+    '': '#95A5A6',
+}
+
+# NT type groupings for interactive color adjustment
+NT_GROUPS = {
+    'excitatory': ['acetylcholine', 'ACH', 'ach', 'glutamate', 'GLUT', 'glut'],
+    'inhibitory': ['gaba', 'GABA'],
+    'modulatory': ['dopamine', 'DA', 'da', 'serotonin', 'SER', 'ser', '5-HT', '5-ht', 'octopamine', 'OCT', 'oct'],
+    'unknown': ['unknown', 'none', ''],
+}
+
+# Default colors for NT groups (for interactive color pickers)
+NT_GROUP_COLORS = {
+    'excitatory': '#F39C12',  # Orange
+    'inhibitory': '#27AE60',  # Green
+    'modulatory': '#9B59B6',  # Purple
+    'unknown': '#95A5A6',     # Gray
+}
+
+def get_nt_group(nt_type):
+    """Get the group name for a neurotransmitter type."""
+    if nt_type is None or pd.isna(nt_type):
+        return 'unknown'
+    nt_str = str(nt_type).strip()
+    for group, members in NT_GROUPS.items():
+        if nt_str in members or nt_str.lower() in [m.lower() for m in members]:
+            return group
+    return 'unknown'
+
+def get_nt_color(nt_type, opacity=0.6):
+    """
+    Get the color for a neurotransmitter type.
+    
+    Parameters
+    ----------
+    nt_type : str or None
+        Neurotransmitter type (e.g., 'acetylcholine', 'gaba', 'dopamine')
+    opacity : float
+        Opacity for the color (0.0 to 1.0)
+        
+    Returns
+    -------
+    str
+        RGBA color string
+    """
+    if nt_type is None or pd.isna(nt_type):
+        hex_color = NT_COLORS.get('unknown', '#95A5A6')
+    else:
+        # Try exact match first, then lowercase
+        nt_str = str(nt_type).strip()
+        hex_color = NT_COLORS.get(nt_str) or NT_COLORS.get(nt_str.lower()) or NT_COLORS.get('unknown', '#95A5A6')
+    
+    # Convert hex to rgba
+    r = int(hex_color[1:3], 16)
+    g = int(hex_color[3:5], 16)
+    b = int(hex_color[5:7], 16)
+    return f'rgba({r}, {g}, {b}, {opacity})'
+
+
 class VisualizePath:
     """
     A class for visualizing neural pathways from CSV/Excel files.
@@ -151,6 +242,7 @@ class VisualizePath:
         output_format='xlsx',   # NEW: Output format for data files ('xlsx' or 'csv')
         verbose=True,           # NEW: Control print output (True=show prints, False=silent)
         edge_labels=None,       # NEW: Custom edge labels dict {(source, target): {'label_name': value, ...}}
+        color_edges_by_nt=False, # NEW: Color edges by neurotransmitter type
     ):
         """
         Initialize VisualizePath with pathway data and visualization settings.
@@ -334,6 +426,9 @@ class VisualizePath:
         # Custom edge labels for multi-dataset synapse info
         self.edge_labels = edge_labels  # Dict: {(source, target): {label_name: value, ...}}
         
+        # Neurotransmitter-based edge coloring
+        self.color_edges_by_nt = color_edges_by_nt  # If True, color edges by NT type
+        
         # Edge width scaling parameters
         self.edge_width_scale = edge_width_scale
         self.edge_width_factor = edge_width_factor
@@ -392,8 +487,8 @@ class VisualizePath:
         self.target_opacity = target_opacity
         
         # Parse link/edge color - extract hex and opacity for network edges
-        link_hex, link_opacity = parse_color_to_hex_opacity(link_color or 'rgba(100,100,100,0.3)')
-        self.link_color = link_color or 'rgba(100,100,100,0.3)'  # Keep original for Sankey
+        link_hex, link_opacity = parse_color_to_hex_opacity(link_color or 'rgba(100,100,100,0.5)')
+        self.link_color = link_color or 'rgba(100,100,100,0.5)'  # Keep original for Sankey
         self.edge_color = link_hex  # Hex color for network edges
         self.edge_opacity = link_opacity  # Opacity for network edges
         
@@ -2081,12 +2176,14 @@ class VisualizePath:
         # Check which optional columns are available
         has_ratios = 'connection_ratios' in self.path_df.columns
         has_probs = 'traversal_probabilities' in self.path_df.columns
+        has_nt = 'nt_types' in self.path_df.columns
         
         for idx, row in self.path_df.iterrows():
             path_block = row['path_block']
             weights = self._safe_eval_list(row['weights'])
             ratios = self._safe_eval_list(row.get('connection_ratios', [])) if has_ratios else []
             probs = self._safe_eval_list(row.get('traversal_probabilities', [])) if has_probs else []
+            nt_types = self._safe_eval_list(row.get('nt_types', [])) if has_nt else []
             
             nodes = self._parse_path_block(path_block)
             
@@ -2104,15 +2201,19 @@ class VisualizePath:
                 weight = weights[i] if i < len(weights) else 0
                 ratio = ratios[i] if i < len(ratios) else 0
                 prob = probs[i] if i < len(probs) else 0
+                nt = nt_types[i] if i < len(nt_types) else None
                 
                 if edge_key not in edge_data:
-                    edge_data[edge_key] = {'weight': weight, 'ratio': ratio, 'prob': prob}
+                    edge_data[edge_key] = {'weight': weight, 'ratio': ratio, 'prob': prob, 'nt': nt}
                 else:
                     # Same edge in different paths: use max since it's the same biological connection
                     # (weight should be identical, but use max to be safe)
                     edge_data[edge_key]['weight'] = max(edge_data[edge_key]['weight'], weight)
                     edge_data[edge_key]['ratio'] = max(edge_data[edge_key]['ratio'], ratio)
                     edge_data[edge_key]['prob'] = max(edge_data[edge_key]['prob'], prob)
+                    # Keep first NT type found (they should be the same for same edge)
+                    if edge_data[edge_key]['nt'] is None:
+                        edge_data[edge_key]['nt'] = nt
         
         # Remove zero-weight layer edges (user preference: drop zero-weight edges)
         edge_data = {k: v for k, v in edge_data.items() if v.get('weight', 0) != 0}
@@ -2208,8 +2309,10 @@ class VisualizePath:
         original_weights = []  # Store original weights (including negatives) for hover
         ratios = []
         probs = []
+        nt_types_list = []  # Store NT types for edges
         edge_colors = []  # Custom edge colors
         has_negative = False  # Track if any negative weights exist
+        has_nt_coloring = False  # Track if NT-based coloring is applied
         
         for (layer_idx, source, target), data in edge_data.items():
             source_indices.append(node_to_idx[source])
@@ -2227,10 +2330,18 @@ class VisualizePath:
             ratios.append(data['ratio'])
             probs.append(data['prob'])
             
+            # Get NT type
+            nt = data.get('nt', None)
+            nt_types_list.append(nt)
+            
             # Determine edge color
             if is_negative:
-                # Red color for negative edges
+                # Red color for negative edges (overrides NT coloring)
                 edge_colors.append('rgba(231, 76, 60, 0.4)')
+            elif self.color_edges_by_nt and nt is not None:
+                # Use NT-based color
+                edge_colors.append(get_nt_color(nt, opacity=0.6))
+                has_nt_coloring = True
             elif self.custom_edge_colors and (source, target) in self.custom_edge_colors:
                 edge_colors.append(self.custom_edge_colors[(source, target)])
             else:
@@ -2238,6 +2349,8 @@ class VisualizePath:
         
         if has_negative:
             self._vprint(f"  ℹ️  Found negative edge weights - using absolute values for link width, light blue for negative edges")
+        if has_nt_coloring:
+            self._vprint(f"  🧬 Applied neurotransmitter-based edge coloring")
         
         # Create custom hover labels that show source, target, and original weights
         hover_labels = []
@@ -2250,16 +2363,24 @@ class VisualizePath:
                 hover_text += f"<br>Ratio: {ratios[i]:.3f}"
             if probs[i] != 0:
                 hover_text += f"<br>Probability: {probs[i]:.3f}"
+            # Add NT type to hover if available
+            if nt_types_list[i] is not None:
+                hover_text += f"<br>NT: {nt_types_list[i]}"
             hover_labels.append(hover_text)
         
         # Create Sankey figure using Plotly directly (like coana)
         import plotly.graph_objects as go
         
-        # Update edge colors: gray for positive, light blue for negative
+        # Update edge colors: use previously computed edge_colors (which already handles
+        # negative weights, NT coloring, and custom colors)
+        # Only override if we need to apply the final styling
         edge_colors_updated = []
         for i, orig_weight in enumerate(original_weights):
             if orig_weight < 0:
                 edge_colors_updated.append('rgba(74, 144, 226, 0.4)')  # Light blue for negative
+            elif self.color_edges_by_nt and nt_types_list[i] is not None:
+                # Use NT-based color (already computed in edge_colors)
+                edge_colors_updated.append(edge_colors[i])
             elif self.custom_edge_colors:
                 # Check if custom color exists for this edge
                 src_node = node_list[source_indices[i]]
@@ -2326,6 +2447,58 @@ class VisualizePath:
                 )
             ]
         
+        # Add NT legend if NT coloring is applied
+        if has_nt_coloring:
+            # Collect unique NT types present in the data
+            unique_nts = set(nt for nt in nt_types_list if nt is not None)
+            y_offset = 0.86 if has_negative else 0.98  # Start below negative legend or at top
+            
+            if not annotations:
+                annotations = [
+                    dict(
+                        x=0.02, y=y_offset,
+                        xref='paper', yref='paper',
+                        text='<b>Neurotransmitters:</b>',
+                        showarrow=False,
+                        font=dict(size=12, color='black'),
+                        align='left',
+                        xanchor='left',
+                        yanchor='top'
+                    )
+                ]
+                y_offset -= 0.04
+            else:
+                annotations.append(
+                    dict(
+                        x=0.02, y=y_offset,
+                        xref='paper', yref='paper',
+                        text='<b>Neurotransmitters:</b>',
+                        showarrow=False,
+                        font=dict(size=12, color='black'),
+                        align='left',
+                        xanchor='left',
+                        yanchor='top'
+                    )
+                )
+                y_offset -= 0.04
+            
+            # Add each NT type to legend
+            for nt in sorted(unique_nts):
+                nt_color = get_nt_color(nt, opacity=0.8)
+                annotations.append(
+                    dict(
+                        x=0.02, y=y_offset,
+                        xref='paper', yref='paper',
+                        text=f'<span style="color: {nt_color};">■</span> {nt}',
+                        showarrow=False,
+                        font=dict(size=11, color='black'),
+                        align='left',
+                        xanchor='left',
+                        yanchor='top'
+                    )
+                )
+                y_offset -= 0.04
+        
         fig.update_layout(
             title_text='Sankey diagram of pathway connections',
             font_size=12,
@@ -2354,7 +2527,8 @@ class VisualizePath:
             probs,
             original_weights,
             simplification_applied,
-            original_edge_count
+            original_edge_count,
+            nt_types_list=nt_types_list
         )
         
         with open(output_path, 'w', encoding='utf-8') as f:
@@ -2371,7 +2545,7 @@ class VisualizePath:
     
     def _create_sankey_html_with_controls(self, plotly_div, node_list, node_labels, node_colors_list, 
                                           source_indices, target_indices, weights, ratios=None, probs=None, original_weights=None,
-                                          simplification_applied=False, original_edge_count=0):
+                                          simplification_applied=False, original_edge_count=0, nt_types_list=None):
         """
         Create HTML with interactive controls for Sankey diagram.
         
@@ -2379,6 +2553,7 @@ class VisualizePath:
         - Node color pickers for each node type
         - Edge color and opacity sliders
         - Metric toggle (weight/ratio/prob)
+        - NT group color pickers (excitatory, inhibitory, modulatory, unknown)
         - Hide/show nodes and edges by clicking
         - Reset button
         
@@ -2418,9 +2593,25 @@ class VisualizePath:
         if probs is None:
             probs = [0] * len(weights)
         
+        # Process NT types list for edge coloring by NT group
+        # Check if we have actual NT data (not all None/empty)
+        if nt_types_list is None:
+            nt_types_list = ['unknown'] * len(weights)
+            has_nt_types = False
+        else:
+            # Replace None values with 'unknown' for JavaScript compatibility
+            nt_types_list = [nt if nt is not None else 'unknown' for nt in nt_types_list]
+            # Check if we have any actual NT data (not all unknown)
+            has_nt_types = any(nt != 'unknown' for nt in nt_types_list)
+        
+        # Map NT types to groups for each edge
+        nt_groups_for_edges = []
+        for nt in nt_types_list:
+            nt_groups_for_edges.append(get_nt_group(nt))
+        
         # Parse edge color and opacity
         # For Sankey, always use gray for positive edges (negative edges are light blue)
-        edge_hex, edge_opacity = parse_color_to_hex_opacity('rgba(100, 100, 100, 0.4)')
+        edge_hex, edge_opacity = parse_color_to_hex_opacity('rgba(100, 100, 100, 0.5)')
         
         html = f"""<!DOCTYPE html>
 <html>
@@ -2721,7 +2912,48 @@ class VisualizePath:
                 </div>
             </div>
             
-            <!-- Row 3: Action Buttons -->
+            <!-- Row 3: NT Group Colors (only shown if NT data available) -->
+            <div class="control-row" id="ntControlRow" style="display: {'flex' if has_nt_types else 'none'};">
+                <div class="control-group">
+                    <label class="control-label">
+                        <input type="checkbox" id="colorByNt" onchange="toggleNtColoring()"> Color by NT
+                    </label>
+                </div>
+                
+                <div class="control-group">
+                    <label class="control-label">Excitatory (ACh, Glut)</label>
+                    <div class="color-input-group">
+                        <input type="color" id="excitatoryColor" value="{NT_GROUP_COLORS['excitatory']}" onchange="updateNtGroupColorText('excitatory')">
+                        <input type="text" id="excitatoryColorText" value="{NT_GROUP_COLORS['excitatory']}" readonly>
+                    </div>
+                </div>
+                
+                <div class="control-group">
+                    <label class="control-label">Inhibitory (GABA)</label>
+                    <div class="color-input-group">
+                        <input type="color" id="inhibitoryColor" value="{NT_GROUP_COLORS['inhibitory']}" onchange="updateNtGroupColorText('inhibitory')">
+                        <input type="text" id="inhibitoryColorText" value="{NT_GROUP_COLORS['inhibitory']}" readonly>
+                    </div>
+                </div>
+                
+                <div class="control-group">
+                    <label class="control-label">Modulatory (DA, 5-HT, OA)</label>
+                    <div class="color-input-group">
+                        <input type="color" id="modulatoryColor" value="{NT_GROUP_COLORS['modulatory']}" onchange="updateNtGroupColorText('modulatory')">
+                        <input type="text" id="modulatoryColorText" value="{NT_GROUP_COLORS['modulatory']}" readonly>
+                    </div>
+                </div>
+                
+                <div class="control-group">
+                    <label class="control-label">Unknown NT</label>
+                    <div class="color-input-group">
+                        <input type="color" id="unknownColor" value="{NT_GROUP_COLORS['unknown']}" onchange="updateNtGroupColorText('unknown')">
+                        <input type="text" id="unknownColorText" value="{NT_GROUP_COLORS['unknown']}" readonly>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Row 4: Action Buttons -->
             <div class="control-row">
                 <div class="btn-group">
                     <button class="btn-primary" onclick="applyColors()">Apply</button>
@@ -2765,8 +2997,6 @@ class VisualizePath:
             </div>
         </div>
     </div>
-                <div class="slider-value" id="edgeOpacityValue">{int(edge_opacity * 100)}%</div>
-            </div>
     
     <script>
         // Store original data
@@ -2782,6 +3012,22 @@ class VisualizePath:
         const hasRatios = {str(has_ratios).lower()};
         const hasProbs = {str(has_probs).lower()};
         
+        // NT type data for edge coloring
+        const ntTypes = {nt_types_list};  // NT type for each edge
+        const ntGroups = {nt_groups_for_edges};  // NT group for each edge (excitatory, inhibitory, modulatory, unknown)
+        const hasNtTypes = {str(has_nt_types).lower()};
+        
+        // NT group colors (can be modified via controls)
+        const ntGroupColors = {{
+            'excitatory': '{NT_GROUP_COLORS["excitatory"]}',
+            'inhibitory': '{NT_GROUP_COLORS["inhibitory"]}',
+            'modulatory': '{NT_GROUP_COLORS["modulatory"]}',
+            'unknown': '{NT_GROUP_COLORS["unknown"]}'
+        }};
+        
+        // Whether to color edges by NT group
+        let colorEdgesByNt = false;
+        
         // Current metric being displayed
         let currentMetric = 'weight';
         
@@ -2796,6 +3042,29 @@ class VisualizePath:
         // Track visibility
         let hiddenNodes = new Set();
         let hiddenEdges = new Set();
+        
+        // Toggle NT-based edge coloring
+        function toggleNtColoring() {{
+            colorEdgesByNt = document.getElementById('colorByNt').checked;
+            updateDiagram();
+        }}
+        
+        // Update NT group color text display
+        function updateNtGroupColorText(group) {{
+            const colorInput = document.getElementById(group + 'Color');
+            const textInput = document.getElementById(group + 'ColorText');
+            textInput.value = colorInput.value;
+            ntGroupColors[group] = colorInput.value;
+            if (colorEdgesByNt) {{
+                updateDiagram();
+            }}
+        }}
+        
+        // Get color for an edge based on its NT group
+        function getEdgeColorByNtGroup(edgeIdx) {{
+            const group = ntGroups[edgeIdx];
+            return ntGroupColors[group] || ntGroupColors['unknown'];
+        }}
         
         // Toggle visibility panel
         function toggleVisibilityPanel() {{
@@ -2958,6 +3227,24 @@ class VisualizePath:
             document.getElementById('fontSize').value = 12;
             document.getElementById('fontSizeValue').textContent = '12px';
             
+            // Reset NT group colors if available
+            if (hasNtTypes) {{
+                document.getElementById('colorByNt').checked = false;
+                colorEdgesByNt = false;
+                document.getElementById('excitatoryColor').value = '{NT_GROUP_COLORS["excitatory"]}';
+                document.getElementById('excitatoryColorText').value = '{NT_GROUP_COLORS["excitatory"]}';
+                document.getElementById('inhibitoryColor').value = '{NT_GROUP_COLORS["inhibitory"]}';
+                document.getElementById('inhibitoryColorText').value = '{NT_GROUP_COLORS["inhibitory"]}';
+                document.getElementById('modulatoryColor').value = '{NT_GROUP_COLORS["modulatory"]}';
+                document.getElementById('modulatoryColorText').value = '{NT_GROUP_COLORS["modulatory"]}';
+                document.getElementById('unknownColor').value = '{NT_GROUP_COLORS["unknown"]}';
+                document.getElementById('unknownColorText').value = '{NT_GROUP_COLORS["unknown"]}';
+                ntGroupColors['excitatory'] = '{NT_GROUP_COLORS["excitatory"]}';
+                ntGroupColors['inhibitory'] = '{NT_GROUP_COLORS["inhibitory"]}';
+                ntGroupColors['modulatory'] = '{NT_GROUP_COLORS["modulatory"]}';
+                ntGroupColors['unknown'] = '{NT_GROUP_COLORS["unknown"]}';
+            }}
+            
             // Reset node colors
             nodeLabels.forEach((label, idx) => {{
                 if (nodeTypes[idx] === 'source') nodeColors[idx] = '{self.source_color}';
@@ -3029,14 +3316,26 @@ class VisualizePath:
                     const valueStr = (currentMetric === 'ratio' || currentMetric === 'prob') 
                         ? metricValue.toFixed(4)
                         : Math.round(metricValue).toLocaleString();
-                    const hoverStr = '<b>Source:</b> ' + nodeLabels[src] + '<br><b>Target:</b> ' + nodeLabels[tgt] + '<br><b>' + metricDisplayName + ':</b> ' + valueStr;
+                    
+                    // Add NT info to hover text if available
+                    let ntInfo = '';
+                    if (hasNtTypes && ntTypes[idx] && ntTypes[idx] !== 'unknown') {{
+                        ntInfo = '<br><b>NT Type:</b> ' + ntTypes[idx].toUpperCase();
+                    }}
+                    const hoverStr = '<b>Source:</b> ' + nodeLabels[src] + '<br><b>Target:</b> ' + nodeLabels[tgt] + '<br><b>' + metricDisplayName + ':</b> ' + valueStr + ntInfo;
                     visibleHoverText.push(hoverStr);
                     
-                    // Determine edge color based on whether it's negative
+                    // Determine edge color based on NT group (if enabled) or default coloring
                     const isNegative = originalWeights[idx] < 0;
                     let r, g, b;
                     
-                    if (isNegative) {{
+                    if (colorEdgesByNt && hasNtTypes) {{
+                        // Color by NT group
+                        const ntColor = getEdgeColorByNtGroup(idx);
+                        r = parseInt(ntColor.substr(1,2), 16);
+                        g = parseInt(ntColor.substr(3,2), 16);
+                        b = parseInt(ntColor.substr(5,2), 16);
+                    }} else if (isNegative) {{
                         // Light blue for negative edges: #4A90E2 = rgb(74, 144, 226)
                         r = 74;
                         g = 144;
@@ -3403,10 +3702,18 @@ class VisualizePath:
                 'classes': ''  # For CSS classes
             })
         
+        # Build NT type lookup from conn_df if available
+        nt_lookup = {}
+        if self.conn_df is not None and 'nt_type' in self.conn_df.columns:
+            for _, row in self.conn_df.iterrows():
+                nt_lookup[(row['source'], row['target'])] = row.get('nt_type', None)
+        
         # Prepare edge data
         edges_data = []
         edge_weights = []  # Collect weights for scaling
         has_negative = False  # Track if any negative weights exist
+        has_nt_coloring_network = False  # Track if NT coloring applies
+        unique_nts_network = set()  # Collect unique NT types for CSS
         
         for source, target, data in G.edges(data=True):
             weight = data.get('weight', 0)
@@ -3420,12 +3727,20 @@ class VisualizePath:
             ratio = data.get('ratio', np.nan)
             prob = data.get('probability', np.nan)
             
+            # Get NT type from lookup
+            nt_type = nt_lookup.get((source, target), None)
+            if self.color_edges_by_nt and nt_type is not None:
+                has_nt_coloring_network = True
+                unique_nts_network.add(nt_type)
+            
             # Format tooltip - use actual newline character, not escaped
             tooltip_parts = [f"Weight: {weight:,}"]
             if not np.isnan(ratio):
                 tooltip_parts.append(f"Ratio: {ratio:.3f}")
             if not np.isnan(prob):
                 tooltip_parts.append(f"Probability: {prob:.3f}")
+            if nt_type:
+                tooltip_parts.append(f"NT: {nt_type}")
             
             # Add custom edge labels (e.g., multi-dataset synapse strengths)
             if self.edge_labels and (source, target) in self.edge_labels:
@@ -3451,6 +3766,7 @@ class VisualizePath:
                     'weight': abs_weight,  # Store positive for Cytoscape
                     'original_weight': weight,  # Store original for hover modification
                     'is_negative': 1 if is_negative else 0,  # Use 1/0 instead of True/False for JavaScript
+                    'nt_type': nt_type if nt_type else '',  # Store NT type for CSS styling
                     'ratio': ratio if not np.isnan(ratio) else 0,
                     'probability': prob if not np.isnan(prob) else 0,
                     'tooltip': tooltip,
@@ -3460,6 +3776,8 @@ class VisualizePath:
         
         if has_negative:
             self._vprint(f"  ℹ️  Found negative edge weights - using absolute values for width, light blue color for negative edges")
+        if has_nt_coloring_network:
+            self._vprint(f"  🧬 Applied neurotransmitter-based edge coloring in network")
         
         # Calculate scaled edge widths
         scaled_widths = self._calculate_edge_widths(edge_weights)
@@ -3492,6 +3810,40 @@ class VisualizePath:
             'elk': 'elk'                    # ELK - Eclipse Layout Kernel
         }
         cytoscape_layout = layout_map.get(layout, 'dagre')
+        
+        # Generate NT-based edge styles if enabled
+        nt_edge_styles = ""
+        nt_edge_group_options = ""  # For dropdown selector
+        if has_nt_coloring_network and unique_nts_network:
+            nt_style_parts = []
+            nt_option_parts = []
+            for nt in sorted(unique_nts_network):
+                # Get color without opacity for Cytoscape
+                nt_color_rgba = get_nt_color(nt, opacity=1.0)
+                # Extract hex color from rgba
+                if nt_color_rgba.startswith('rgba'):
+                    # Convert rgba to hex for Cytoscape
+                    import re
+                    match = re.match(r'rgba\((\d+),\s*(\d+),\s*(\d+)', nt_color_rgba)
+                    if match:
+                        r, g, b = int(match.group(1)), int(match.group(2)), int(match.group(3))
+                        nt_hex = f'#{r:02x}{g:02x}{b:02x}'
+                    else:
+                        nt_hex = '#888888'
+                else:
+                    nt_hex = nt_color_rgba
+                
+                nt_style_parts.append(f"""{{
+                    selector: 'edge[nt_type = "{nt}"]',
+                    style: {{
+                        'line-color': '{nt_hex}',
+                        'target-arrow-color': '{nt_hex}'
+                    }}
+                }},""")
+                # Add option for dropdown
+                nt_option_parts.append(f'<option value="nt_{nt}">{nt} Edges</option>')
+            nt_edge_styles = "\n                ".join(nt_style_parts)
+            nt_edge_group_options = "\n                                    ".join(nt_option_parts)
         
         # Create HTML content
         html_content = f"""<!DOCTYPE html>
@@ -4015,80 +4367,82 @@ class VisualizePath:
                     </div>
                 </div>
                 
-                <!-- Node Type Colors Section -->
+                <!-- Group Selection Section (replaces fixed Node Type Colors) -->
                 <div class="palette-section">
-                    <h4>Node Colors by Type</h4>
+                    <h4>🎯 Edit by Group</h4>
                     <div class="color-group">
-                        <label>Source Nodes:</label>
+                        <label>Select Group:</label>
                         <div class="color-input-group">
-                            <input type="color" id="sourceColor" value="{self.node_color[0]}">
-                            <input type="text" id="sourceColorText" value="{self.node_color[0]}" readonly>
+                            <select id="groupSelector" onchange="updateGroupControls()" style="width: 100%;">
+                                <optgroup label="Nodes">
+                                    <option value="source">Source Nodes</option>
+                                    <option value="intermediate">Intermediate Nodes</option>
+                                    <option value="target">Target Nodes</option>
+                                    <option value="all_nodes">All Nodes</option>
+                                </optgroup>
+                                <optgroup label="Edges">
+                                    <option value="positive_edges">Positive Edges</option>
+                                    <option value="negative_edges">Negative Edges</option>
+                                    <option value="all_edges">All Edges</option>
+                                </optgroup>
+                                <optgroup label="NT Edges" id="ntEdgeGroup">
+                                    {nt_edge_group_options}
+                                </optgroup>
+                            </select>
                         </div>
                     </div>
                     <div class="color-group">
-                        <label>Source Opacity:</label>
+                        <label id="groupColorLabel">Color:</label>
                         <div class="color-input-group">
-                            <input type="range" id="sourceOpacity" min="0" max="100" value="{int(self.source_opacity * 100)}" oninput="updateOpacityDisplay('source', this.value)">
-                            <span class="alpha-value" id="sourceOpacityValue">{int(self.source_opacity * 100)}%</span>
+                            <input type="color" id="groupColor" value="{self.node_color[0]}">
+                            <input type="text" id="groupColorText" value="{self.node_color[0]}" readonly>
                         </div>
                     </div>
                     <div class="color-group">
-                        <label>Intermediate Nodes:</label>
+                        <label>Opacity:</label>
                         <div class="color-input-group">
-                            <input type="color" id="intermediateColor" value="{self.node_color[1]}">
-                            <input type="text" id="intermediateColorText" value="{self.node_color[1]}" readonly>
+                            <input type="range" id="groupOpacity" min="0" max="100" value="100" oninput="updateOpacityDisplay('group', this.value)">
+                            <span class="alpha-value" id="groupOpacityValue">100%</span>
                         </div>
+                    </div>
+                    <button class="apply-btn" onclick="applyGroupColor()">Apply to Group</button>
+                    <div style="font-size: 10px; color: #666; margin-top: 8px; line-height: 1.3;">
+                        💡 Use dropdown to select which group to edit.<br>
+                        Changes apply to all elements in the group.
+                    </div>
+                </div>
+                
+                <!-- Custom Groups Section -->
+                <div class="palette-section">
+                    <h4>📁 Custom Groups</h4>
+                    <div style="font-size: 11px; color: #666; margin-bottom: 8px;">
+                        Create groups from selected elements
                     </div>
                     <div class="color-group">
-                        <label>Intermediate Opacity:</label>
-                        <div class="color-input-group">
-                            <input type="range" id="intermediateOpacity" min="0" max="100" value="{int(self.intermediate_opacity * 100)}" oninput="updateOpacityDisplay('intermediate', this.value)">
-                            <span class="alpha-value" id="intermediateOpacityValue">{int(self.intermediate_opacity * 100)}%</span>
-                        </div>
+                        <label>Group Name:</label>
+                        <input type="text" id="customGroupName" placeholder="My Group" style="width: 100%; padding: 4px; border: 1px solid #ddd; border-radius: 3px;">
                     </div>
-                    <div class="color-group">
-                        <label>Target Nodes:</label>
-                        <div class="color-input-group">
-                            <input type="color" id="targetColor" value="{self.target_color}">
-                            <input type="text" id="targetColorText" value="{self.target_color}" readonly>
-                        </div>
+                    <div style="display: flex; gap: 6px; margin-top: 8px;">
+                        <button class="apply-btn" onclick="createCustomGroup()" style="flex: 1; background: #2196F3;">➕ Create</button>
+                        <button class="apply-btn" onclick="deleteCustomGroup()" style="flex: 1; background: #f44336;">🗑️ Delete</button>
                     </div>
-                    <div class="color-group">
-                        <label>Target Opacity:</label>
-                        <div class="color-input-group">
-                            <input type="range" id="targetOpacity" min="0" max="100" value="{int(self.target_opacity * 100)}" oninput="updateOpacityDisplay('target', this.value)">
-                            <span class="alpha-value" id="targetOpacityValue">{int(self.target_opacity * 100)}%</span>
-                        </div>
+                    <select id="customGroupList" style="width: 100%; margin-top: 8px; padding: 4px; display: none;">
+                        <option value="">-- Custom Groups --</option>
+                    </select>
+                </div>
+                
+                <!-- Quick Actions Section -->
+                <div class="palette-section">
+                    <h4>⚡ Quick Actions</h4>
+                    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-bottom: 8px;">
+                        <button class="btn" onclick="selectGroup('source')" style="font-size: 10px; padding: 5px; background: {self.node_color[0]};">Select Source</button>
+                        <button class="btn" onclick="selectGroup('intermediate')" style="font-size: 10px; padding: 5px; background: {self.node_color[1]};">Select Intermed.</button>
                     </div>
-                    <div class="color-group">
-                        <label>Positive Edge Color:</label>
-                        <div class="color-input-group">
-                            <input type="color" id="edgeColor" value="{self.edge_color}">
-                            <input type="text" id="edgeColorText" value="{self.edge_color}" readonly>
-                        </div>
+                    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-bottom: 8px;">
+                        <button class="btn" onclick="selectGroup('target')" style="font-size: 10px; padding: 5px; background: {self.target_color};">Select Target</button>
+                        <button class="btn" onclick="selectGroup('all_edges')" style="font-size: 10px; padding: 5px; background: {self.edge_color};">Select All Edges</button>
                     </div>
-                    <div class="color-group">
-                        <label>Positive Edge Opacity:</label>
-                        <div class="color-input-group">
-                            <input type="range" id="edgeOpacity" min="0" max="100" value="{int(self.edge_opacity * 100)}" oninput="updateOpacityDisplay('edge', this.value)">
-                            <span class="alpha-value" id="edgeOpacityValue">{int(self.edge_opacity * 100)}%</span>
-                        </div>
-                    </div>
-                    <div class="color-group">
-                        <label>Negative Edge Color:</label>
-                        <div class="color-input-group">
-                            <input type="color" id="negativeEdgeColor" value="#4A90E2">
-                            <input type="text" id="negativeEdgeColorText" value="#4A90E2" readonly>
-                        </div>
-                    </div>
-                    <div class="color-group">
-                        <label>Negative Edge Opacity:</label>
-                        <div class="color-input-group">
-                            <input type="range" id="negativeEdgeOpacity" min="0" max="100" value="100" oninput="updateOpacityDisplay('negativeEdge', this.value)">
-                            <span class="alpha-value" id="negativeEdgeOpacityValue">100%</span>
-                        </div>
-                    </div>
-                    <button class="apply-btn" onclick="applyGlobalColors()">Apply to All</button>
+                    <button class="apply-btn" onclick="applyGlobalColors()" style="background: #9c27b0;">🔄 Reset All Colors</button>
                 </div>
             </div>
         </div>
@@ -4214,6 +4568,7 @@ class VisualizePath:
                         'target-arrow-color': '#4A90E2'
                     }}
                 }},
+                {nt_edge_styles}
                 {{
                     selector: 'edge.hidden',
                     style: {{
@@ -4439,6 +4794,12 @@ class VisualizePath:
                 }} else {{
                     html += `<br><b>Probability:</b> ${{data.probability.toFixed(4)}}`;
                 }}
+            }}
+            
+            // Display NT type if available
+            if (data.nt_type && data.nt_type !== '') {{
+                const ntColor = getNTColor(data.nt_type);
+                html += `<br><b>NT:</b> <span style="color: ${{ntColor}}; font-weight: bold;">${{data.nt_type}}</span>`;
             }}
             
             // Display custom edge labels (e.g., multi-dataset synapse strengths)
@@ -5266,20 +5627,8 @@ class VisualizePath:
         }}
 
         // Update color text fields when color picker changes
-        document.getElementById('sourceColor').addEventListener('input', function(e) {{
-            document.getElementById('sourceColorText').value = e.target.value;
-        }});
-        document.getElementById('intermediateColor').addEventListener('input', function(e) {{
-            document.getElementById('intermediateColorText').value = e.target.value;
-        }});
-        document.getElementById('targetColor').addEventListener('input', function(e) {{
-            document.getElementById('targetColorText').value = e.target.value;
-        }});
-        document.getElementById('edgeColor').addEventListener('input', function(e) {{
-            document.getElementById('edgeColorText').value = e.target.value;
-        }});
-        document.getElementById('negativeEdgeColor').addEventListener('input', function(e) {{
-            document.getElementById('negativeEdgeColorText').value = e.target.value;
+        document.getElementById('groupColor').addEventListener('input', function(e) {{
+            document.getElementById('groupColorText').value = e.target.value;
         }});
         document.getElementById('individualColor').addEventListener('input', function(e) {{
             document.getElementById('individualColorText').value = e.target.value;
@@ -5361,81 +5710,410 @@ class VisualizePath:
             }});
         }}
 
-        // Apply global colors to all nodes by type using CSS-based opacity (coana approach)
-        function applyGlobalColors() {{
-            const sourceColor = document.getElementById('sourceColor').value;
-            const intermediateColor = document.getElementById('intermediateColor').value;
-            const targetColor = document.getElementById('targetColor').value;
-            const edgeColor = document.getElementById('edgeColor').value;
-            const negativeEdgeColor = document.getElementById('negativeEdgeColor').value;
+        // Store default colors for groups (includes original defaults for reset)
+        const originalGroupDefaults = {{
+            source: {{ color: '{self.node_color[0]}', opacity: {int(self.source_opacity * 100)} }},
+            intermediate: {{ color: '{self.node_color[1]}', opacity: {int(self.intermediate_opacity * 100)} }},
+            target: {{ color: '{self.target_color}', opacity: {int(self.target_opacity * 100)} }},
+            positive_edges: {{ color: '{self.edge_color}', opacity: {int(self.edge_opacity * 100)} }},
+            negative_edges: {{ color: '#4A90E2', opacity: 100 }}
+        }};
+        const groupDefaults = JSON.parse(JSON.stringify(originalGroupDefaults));
+        
+        // Custom groups storage
+        const customGroups = {{}};
+        
+        // NT color mapping for JavaScript
+        const ntColors = {{
+            'acetylcholine': '#F39C12',
+            'ach': '#F39C12',
+            'gaba': '#27AE60', 
+            'glutamate': '#E74C3C',
+            'glut': '#E74C3C',
+            'dopamine': '#9B59B6',
+            'da': '#9B59B6',
+            'serotonin': '#3498DB',
+            'ser': '#3498DB',
+            'octopamine': '#1ABC9C',
+            'oct': '#1ABC9C',
+            'histamine': '#E67E22',
+            'glycine': '#16A085',
+            'unknown': '#95A5A6'
+        }};
+        
+        function getNTColor(nt) {{
+            if (!nt) return '#95A5A6';
+            const ntLower = nt.toLowerCase();
+            return ntColors[ntLower] || ntColors['unknown'];
+        }}
+
+        // Update group controls when dropdown changes
+        function updateGroupControls() {{
+            const group = document.getElementById('groupSelector').value;
+            let defaults = groupDefaults[group] || groupDefaults[group.replace('all_', '')] || {{ color: '#888888', opacity: 100 }};
             
-            const sourceOpacity = document.getElementById('sourceOpacity').value / 100;
-            const intermediateOpacity = document.getElementById('intermediateOpacity').value / 100;
-            const targetOpacity = document.getElementById('targetOpacity').value / 100;
-            const edgeOpacity = document.getElementById('edgeOpacity').value / 100;
-            const negativeEdgeOpacity = document.getElementById('negativeEdgeOpacity').value / 100;
+            // Handle NT edge groups (prefixed with 'nt_')
+            if (group.startsWith('nt_')) {{
+                const ntType = group.replace('nt_', '');
+                const ntColor = getNTColor(ntType);
+                // Use saved color if exists, otherwise default NT color
+                defaults = groupDefaults[group] || {{ color: ntColor, opacity: 100 }};
+            }}
             
-            console.log('Applying global colors with CSS-based opacity...');
+            // Handle custom groups (prefixed with 'custom_')
+            if (group.startsWith('custom_')) {{
+                const groupName = group.replace('custom_', '');
+                if (customGroups[groupName]) {{
+                    defaults = {{ color: customGroups[groupName].color, opacity: customGroups[groupName].opacity }};
+                }}
+            }}
             
-            // Update nodes by type with color AND opacity (only if they haven't been individually customized)
-            // Using CSS style update (coana's approach) instead of data modification
-            // Exclude selected nodes to keep highlight color static
-            cy.nodes().forEach(function(node) {{
-                if (!node.data('customColor') && !node.selected()) {{  // Skip selected nodes
-                    const nodeType = node.data('node_type');
-                    if (nodeType === 'source') {{
-                        node.style({{
-                            'background-color': sourceColor,
-                            'opacity': sourceOpacity  // CSS opacity property (coana's approach)
-                        }});
-                    }} else if (nodeType === 'intermediate') {{
-                        node.style({{
-                            'background-color': intermediateColor,
-                            'opacity': intermediateOpacity
-                        }});
-                    }} else if (nodeType === 'target') {{
-                        node.style({{
-                            'background-color': targetColor,
-                            'opacity': targetOpacity
-                        }});
+            // Update color picker with current group's default/saved color
+            document.getElementById('groupColor').value = defaults.color;
+            document.getElementById('groupColorText').value = defaults.color;
+            document.getElementById('groupOpacity').value = defaults.opacity;
+            document.getElementById('groupOpacityValue').textContent = defaults.opacity + '%';
+            
+            // Update label based on group type
+            const label = document.getElementById('groupColorLabel');
+            if (group.includes('edge') || group.startsWith('nt_')) {{
+                label.textContent = 'Edge Color:';
+            }} else if (group.startsWith('custom_')) {{
+                label.textContent = 'Element Color:';
+            }} else {{
+                label.textContent = 'Node Color:';
+            }}
+        }}
+
+        // Apply color to selected group
+        function applyGroupColor() {{
+            const group = document.getElementById('groupSelector').value;
+            const color = document.getElementById('groupColor').value;
+            const opacity = document.getElementById('groupOpacity').value / 100;
+            
+            console.log('Applying color to group:', group, color, opacity);
+            
+            if (group === 'source' || group === 'all_nodes') {{
+                cy.nodes().filter('[node_type = "source"]').forEach(node => {{
+                    if (!node.selected()) {{
+                        node.style({{ 'background-color': color, 'opacity': opacity }});
                     }}
-                }}
-            }});
+                }});
+                groupDefaults.source = {{ color: color, opacity: opacity * 100 }};
+            }}
+            if (group === 'intermediate' || group === 'all_nodes') {{
+                cy.nodes().filter('[node_type = "intermediate"]').forEach(node => {{
+                    if (!node.selected()) {{
+                        node.style({{ 'background-color': color, 'opacity': opacity }});
+                    }}
+                }});
+                groupDefaults.intermediate = {{ color: color, opacity: opacity * 100 }};
+            }}
+            if (group === 'target' || group === 'all_nodes') {{
+                cy.nodes().filter('[node_type = "target"]').forEach(node => {{
+                    if (!node.selected()) {{
+                        node.style({{ 'background-color': color, 'opacity': opacity }});
+                    }}
+                }});
+                groupDefaults.target = {{ color: color, opacity: opacity * 100 }};
+            }}
+            if (group === 'positive_edges' || group === 'all_edges') {{
+                cy.edges().filter('[is_negative = 0]').forEach(edge => {{
+                    if (!edge.selected() && !edge.hasClass('highlighted')) {{
+                        setEdgeBaseAppearance(edge, color, opacity, true);
+                    }}
+                }});
+                groupDefaults.positive_edges = {{ color: color, opacity: opacity * 100 }};
+            }}
+            if (group === 'negative_edges' || group === 'all_edges') {{
+                cy.edges().filter('[is_negative = 1]').forEach(edge => {{
+                    if (!edge.selected() && !edge.hasClass('highlighted')) {{
+                        setEdgeBaseAppearance(edge, color, opacity, true);
+                    }}
+                }});
+                groupDefaults.negative_edges = {{ color: color, opacity: opacity * 100 }};
+            }}
             
-            // Update edges with separate colors for positive and negative edges
-            cy.edges().forEach(function(edge) {{
-                if (edge.data('customColor')) {{
-                    return;  // Respect individually customized edges
-                }}
-
-                const isNegative = edge.data('is_negative') === 1;
-                const color = isNegative ? negativeEdgeColor : edgeColor;
-                const opacity = isNegative ? negativeEdgeOpacity : edgeOpacity;
-                const canApplyImmediately = !edge.selected() && !edge.hasClass('highlighted');
-
-                setEdgeBaseAppearance(edge, color, opacity, canApplyImmediately);
-
-                if (!canApplyImmediately) {{
-                    applyEdgeHighlightOverride(edge);
-                }}
-            }});
+            // Handle NT edge groups (prefixed with 'nt_')
+            if (group.startsWith('nt_')) {{
+                const ntType = group.replace('nt_', '');
+                cy.edges().filter(`[nt_type = "${{ntType}}"]`).forEach(edge => {{
+                    if (!edge.selected() && !edge.hasClass('highlighted')) {{
+                        setEdgeBaseAppearance(edge, color, opacity, true);
+                    }}
+                }});
+                // Store the custom color for this NT type
+                groupDefaults[group] = {{ color: color, opacity: opacity * 100 }};
+            }}
             
-            // Update legend colors (with opacity for visual consistency)
+            // Handle custom groups (prefixed with 'custom_')
+            if (group.startsWith('custom_')) {{
+                const groupName = group.replace('custom_', '');
+                if (customGroups[groupName]) {{
+                    const ids = customGroups[groupName].ids;
+                    ids.forEach(id => {{
+                        const el = cy.getElementById(id);
+                        if (el.length > 0) {{
+                            if (el.isNode()) {{
+                                el.style({{ 'background-color': color, 'opacity': opacity }});
+                            }} else {{
+                                setEdgeBaseAppearance(el, color, opacity, true);
+                            }}
+                        }}
+                    }});
+                    customGroups[groupName].color = color;
+                    customGroups[groupName].opacity = opacity * 100;
+                }}
+            }}
+            
+            // Update legend for nodes
             const legendColors = document.querySelectorAll('.legend-color');
-            if (legendColors[0]) {{
-                legendColors[0].style.background = sourceColor;
-                legendColors[0].style.opacity = sourceOpacity;
+            if (group === 'source' || group === 'all_nodes') {{
+                if (legendColors[0]) {{
+                    legendColors[0].style.background = color;
+                    legendColors[0].style.opacity = opacity;
+                }}
             }}
-            if (legendColors[1]) {{
-                legendColors[1].style.background = intermediateColor;
-                legendColors[1].style.opacity = intermediateOpacity;
+            if (group === 'intermediate' || group === 'all_nodes') {{
+                if (legendColors[1]) {{
+                    legendColors[1].style.background = color;
+                    legendColors[1].style.opacity = opacity;
+                }}
             }}
-            if (legendColors[2]) {{
-                legendColors[2].style.background = targetColor;
-                legendColors[2].style.opacity = targetOpacity;
+            if (group === 'target' || group === 'all_nodes') {{
+                if (legendColors[2]) {{
+                    legendColors[2].style.background = color;
+                    legendColors[2].style.opacity = opacity;
+                }}
             }}
             
-            console.log('✓ Global colors applied (CSS opacity method for nodes and edges)');
+            console.log('✓ Color applied to group:', group);
+        }}
+
+        // Select all elements in a group
+        function selectGroup(group) {{
+            // Unselect all first
+            cy.elements().unselect();
+            
+            if (group === 'source') {{
+                cy.nodes().filter('[node_type = "source"]').select();
+            }} else if (group === 'intermediate') {{
+                cy.nodes().filter('[node_type = "intermediate"]').select();
+            }} else if (group === 'target') {{
+                cy.nodes().filter('[node_type = "target"]').select();
+            }} else if (group === 'positive_edges') {{
+                cy.edges().filter('[is_negative = 0]').select();
+            }} else if (group === 'negative_edges') {{
+                cy.edges().filter('[is_negative = 1]').select();
+            }} else if (group === 'all_edges') {{
+                cy.edges().select();
+            }} else if (group === 'all_nodes') {{
+                cy.nodes().select();
+            }} else if (group.startsWith('nt_')) {{
+                // Handle NT edge groups
+                const ntType = group.replace('nt_', '');
+                cy.edges().filter(`[nt_type = "${{ntType}}"]`).select();
+            }} else if (group.startsWith('custom_')) {{
+                // Handle custom groups
+                const groupName = group.replace('custom_', '');
+                if (customGroups[groupName]) {{
+                    const ids = customGroups[groupName].ids;
+                    ids.forEach(id => {{
+                        const el = cy.getElementById(id);
+                        if (el.length > 0) el.select();
+                    }});
+                }}
+            }}
+            
+            // Update dropdown to match
+            document.getElementById('groupSelector').value = group;
+            updateGroupControls();
+            
+            // Update selection info
+            const selectionCount = getSelectionCount();
+            document.getElementById('selectedInfo').innerHTML = 
+                `<strong>Group Selected:</strong><br>` +
+                `${{selectionCount.nodes}} node(s), ${{selectionCount.edges}} edge(s)`;
+            document.getElementById('individualControls').style.display = 'block';
+        }}
+
+        // Create custom group from current selection
+        function createCustomGroup() {{
+            const nameInput = document.getElementById('customGroupName');
+            let groupName = nameInput.value.trim();
+            
+            if (!groupName) {{
+                groupName = 'Group_' + (Object.keys(customGroups).length + 1);
+            }}
+            
+            // Sanitize name (remove special characters)
+            groupName = groupName.replace(/[^a-zA-Z0-9_-]/g, '_');
+            
+            const selected = cy.$(':selected');
+            if (selected.length === 0) {{
+                alert('Please select some nodes or edges first');
+                return;
+            }}
+            
+            // Store selected element IDs
+            const ids = [];
+            selected.forEach(el => ids.push(el.id()));
+            
+            // Get current color from first selected element
+            const firstEl = selected[0];
+            let color = '#888888';
+            if (firstEl.isNode()) {{
+                color = firstEl.style('background-color');
+            }} else {{
+                color = firstEl.style('line-color');
+            }}
+            
+            // Store custom group
+            customGroups[groupName] = {{
+                ids: ids,
+                color: color,
+                opacity: 100,
+                type: selected.nodes().length > 0 ? 'mixed' : 'edges'
+            }};
+            
+            // Add to dropdown
+            const selector = document.getElementById('groupSelector');
+            let customOptgroup = document.getElementById('customGroupOptgroup');
+            if (!customOptgroup) {{
+                customOptgroup = document.createElement('optgroup');
+                customOptgroup.id = 'customGroupOptgroup';
+                customOptgroup.label = 'Custom Groups';
+                selector.appendChild(customOptgroup);
+            }}
+            
+            const option = document.createElement('option');
+            option.value = 'custom_' + groupName;
+            option.textContent = groupName + ' (' + ids.length + ')';
+            customOptgroup.appendChild(option);
+            
+            // Update custom group list
+            updateCustomGroupList();
+            
+            // Select the new group in dropdown
+            selector.value = 'custom_' + groupName;
+            updateGroupControls();
+            
+            nameInput.value = '';
+            console.log('✓ Created custom group: ' + groupName + ' with ' + ids.length + ' elements');
+        }}
+        
+        // Delete selected custom group
+        function deleteCustomGroup() {{
+            const selector = document.getElementById('groupSelector');
+            const currentValue = selector.value;
+            
+            if (!currentValue.startsWith('custom_')) {{
+                alert('Please select a custom group to delete');
+                return;
+            }}
+            
+            const groupName = currentValue.replace('custom_', '');
+            
+            if (!confirm('Delete custom group "' + groupName + '"?')) {{
+                return;
+            }}
+            
+            // Remove from storage
+            delete customGroups[groupName];
+            
+            // Remove from dropdown
+            const optgroup = document.getElementById('customGroupOptgroup');
+            if (optgroup) {{
+                const option = optgroup.querySelector(`option[value="${{currentValue}}"]`);
+                if (option) option.remove();
+                
+                // Remove optgroup if empty
+                if (optgroup.children.length === 0) {{
+                    optgroup.remove();
+                }}
+            }}
+            
+            // Update custom group list
+            updateCustomGroupList();
+            
+            // Reset selection
+            selector.value = 'source';
+            updateGroupControls();
+            
+            console.log('✓ Deleted custom group: ' + groupName);
+        }}
+        
+        // Update custom group list display
+        function updateCustomGroupList() {{
+            const list = document.getElementById('customGroupList');
+            list.innerHTML = '<option value="">-- Custom Groups --</option>';
+            
+            const groupNames = Object.keys(customGroups);
+            if (groupNames.length > 0) {{
+                list.style.display = 'block';
+                groupNames.forEach(name => {{
+                    const opt = document.createElement('option');
+                    opt.value = 'custom_' + name;
+                    opt.textContent = name + ' (' + customGroups[name].ids.length + ')';
+                    list.appendChild(opt);
+                }});
+            }} else {{
+                list.style.display = 'none';
+            }}
+        }}
+
+        // Reset all colors to defaults
+        function applyGlobalColors() {{
+            // Reset all node colors to original defaults
+            cy.nodes().filter('[node_type = "source"]').forEach(node => {{
+                node.style({{ 'background-color': originalGroupDefaults.source.color, 'opacity': originalGroupDefaults.source.opacity / 100 }});
+                node.data('customColor', false);
+            }});
+            cy.nodes().filter('[node_type = "intermediate"]').forEach(node => {{
+                node.style({{ 'background-color': originalGroupDefaults.intermediate.color, 'opacity': originalGroupDefaults.intermediate.opacity / 100 }});
+                node.data('customColor', false);
+            }});
+            cy.nodes().filter('[node_type = "target"]').forEach(node => {{
+                node.style({{ 'background-color': originalGroupDefaults.target.color, 'opacity': originalGroupDefaults.target.opacity / 100 }});
+                node.data('customColor', false);
+            }});
+            
+            // Reset positive edges to original default
+            cy.edges().filter('[is_negative = 0]').forEach(edge => {{
+                setEdgeBaseAppearance(edge, originalGroupDefaults.positive_edges.color, originalGroupDefaults.positive_edges.opacity / 100, true);
+                edge.data('customColor', false);
+            }});
+            // Reset negative edges to original default
+            cy.edges().filter('[is_negative = 1]').forEach(edge => {{
+                setEdgeBaseAppearance(edge, originalGroupDefaults.negative_edges.color, originalGroupDefaults.negative_edges.opacity / 100, true);
+                edge.data('customColor', false);
+            }});
+            
+            // Reset group defaults to original values
+            Object.keys(originalGroupDefaults).forEach(key => {{
+                groupDefaults[key] = JSON.parse(JSON.stringify(originalGroupDefaults[key]));
+            }});
+            
+            // Clear any NT group custom colors (reset to NT defaults)
+            Object.keys(groupDefaults).forEach(key => {{
+                if (key.startsWith('nt_')) {{
+                    delete groupDefaults[key];
+                }}
+            }});
+            
+            // Clear custom groups
+            Object.keys(customGroups).forEach(key => delete customGroups[key]);
+            
+            // Update legend
+            const legendColors = document.querySelectorAll('.legend-color');
+            if (legendColors[0]) {{ legendColors[0].style.background = originalGroupDefaults.source.color; legendColors[0].style.opacity = originalGroupDefaults.source.opacity / 100; }}
+            if (legendColors[1]) {{ legendColors[1].style.background = originalGroupDefaults.intermediate.color; legendColors[1].style.opacity = originalGroupDefaults.intermediate.opacity / 100; }}
+            if (legendColors[2]) {{ legendColors[2].style.background = originalGroupDefaults.target.color; legendColors[2].style.opacity = originalGroupDefaults.target.opacity / 100; }}
+            
+            // Update group controls to current selection
+            updateGroupControls();
+            
+            console.log('✓ All colors reset to defaults');
         }}
 
         // Handle element selection for individual coloring
@@ -5641,21 +6319,21 @@ class VisualizePath:
                 // Enable node dragging in edit mode
                 cy.autoungrabify(false);
                 
-                // Add click handlers for edge drawing
-                cy.on('tap', 'node', function(evt) {{
+                // Add click handlers for edge drawing (use namespace to avoid conflicts)
+                cy.on('tap.editmode', 'node', function(evt) {{
                     if (editMode) {{
                         handleNodeClickForEdge(evt.target);
                     }}
                 }});
                 
-                // Add double-click to edit properties
-                cy.on('dbltap', 'node', function(evt) {{
+                // Add double-click to edit properties (use namespace)
+                cy.on('dbltap.editmode', 'node', function(evt) {{
                     if (editMode) {{
                         editNodeProperties(evt.target);
                     }}
                 }});
                 
-                cy.on('dbltap', 'edge', function(evt) {{
+                cy.on('dbltap.editmode', 'edge', function(evt) {{
                     if (editMode) {{
                         editEdgeProperties(evt.target);
                     }}
@@ -5669,10 +6347,9 @@ class VisualizePath:
                 btn.style.background = '#ff9800';
                 controls.style.display = 'none';
                 
-                // Disable special edit handlers (but keep cxttap for hide functionality)
-                cy.off('tap', 'node');
-                cy.off('dbltap', 'node');
-                cy.off('dbltap', 'edge');
+                // Disable special edit handlers only (use namespace to preserve main handlers)
+                cy.off('tap.editmode');
+                cy.off('dbltap.editmode');
                 edgeDrawMode = false;
                 sourceNodeForEdge = null;
                 
@@ -6186,19 +6863,22 @@ class VisualizePath:
                 }},
                 arrowSize: parseFloat(document.getElementById('arrowSizeSlider')?.value || 9),
                 fontSize: parseFloat(document.getElementById('fontSizeSlider')?.value || 12),
-                nodeSize: parseFloat(document.getElementById('nodeSizeSlider')?.value || 40)
+                nodeSize: parseFloat(document.getElementById('nodeSizeSlider')?.value || 40),
+                groupDefaults: JSON.parse(JSON.stringify(groupDefaults)),
+                customGroups: JSON.parse(JSON.stringify(customGroups))
             }};
             
             // Create export object
             const exportData = {{
-                version: '2.0',
+                version: '2.1',
                 timestamp: new Date().toISOString(),
                 nodes: nodesData,
                 edges: edgesData,
                 settings: settings,
                 metadata: {{
                     nodeCount: nodesData.length,
-                    edgeCount: edgesData.length
+                    edgeCount: edgesData.length,
+                    customGroupCount: Object.keys(customGroups).length
                 }}
             }};
             
@@ -6214,7 +6894,7 @@ class VisualizePath:
             document.body.removeChild(link);
             URL.revokeObjectURL(url);
             
-            updateHoverInfo('✓ Exported graph with settings: ' + nodesData.length + ' nodes, ' + edgesData.length + ' edges');
+            updateHoverInfo('✓ Exported graph with settings: ' + nodesData.length + ' nodes, ' + edgesData.length + ' edges' + (Object.keys(customGroups).length > 0 ? ', ' + Object.keys(customGroups).length + ' custom groups' : ''));
         }}
         
         // Import graph (trigger file input)
@@ -6390,9 +7070,45 @@ class VisualizePath:
                             }}
                         }}
                         
+                        // Restore group defaults (NT groups, etc.)
+                        if (settings.groupDefaults) {{
+                            Object.keys(settings.groupDefaults).forEach(key => {{
+                                groupDefaults[key] = settings.groupDefaults[key];
+                            }});
+                        }}
+                        
+                        // Restore custom groups
+                        if (settings.customGroups) {{
+                            Object.keys(settings.customGroups).forEach(groupName => {{
+                                customGroups[groupName] = settings.customGroups[groupName];
+                            }});
+                            
+                            // Rebuild custom groups in dropdown
+                            if (Object.keys(settings.customGroups).length > 0) {{
+                                const selector = document.getElementById('groupSelector');
+                                let customOptgroup = document.getElementById('customGroupOptgroup');
+                                if (!customOptgroup) {{
+                                    customOptgroup = document.createElement('optgroup');
+                                    customOptgroup.id = 'customGroupOptgroup';
+                                    customOptgroup.label = 'Custom Groups';
+                                    selector.appendChild(customOptgroup);
+                                }}
+                                
+                                Object.keys(settings.customGroups).forEach(groupName => {{
+                                    const option = document.createElement('option');
+                                    option.value = 'custom_' + groupName;
+                                    option.textContent = groupName + ' (' + settings.customGroups[groupName].ids.length + ')';
+                                    customOptgroup.appendChild(option);
+                                }});
+                                
+                                updateCustomGroupList();
+                            }}
+                        }}
+                        
+                        const customGroupCount = settings.customGroups ? Object.keys(settings.customGroups).length : 0;
                         updateHoverInfo(
                             '✓ Imported with settings: ' + importData.nodes.length + ' nodes, ' + 
-                            addedEdges + ' edges'
+                            addedEdges + ' edges' + (customGroupCount > 0 ? ', ' + customGroupCount + ' custom groups' : '')
                         );
                     }} else {{
                         updateHoverInfo(

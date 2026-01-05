@@ -5,5 +5,6 @@
 # NeuPrint Token (https://neuprint.janelia.org/account)
 NEUPRINT_TOKEN='YOUR_NEUPRINT_TOKEN_HERE'
 
-# CAVE Token (for FlyWire/FAFB)
+# CAVE Token (for FlyWire FAFB)
+# Get your token at: https://codex.flywire.ai/auth_token
 CAVE_TOKEN='YOUR_CAVE_TOKEN_HERE'

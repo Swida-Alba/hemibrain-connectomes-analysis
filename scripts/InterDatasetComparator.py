@@ -108,8 +108,7 @@ def run_comprehensive_comparison():
     # )
     
     params = ComparisonParameters(
-        # Token - empty means load from NEUPRINT_APPLICATION_TOKEN env var
-        token='',
+        # Token automatically loaded from token_info.txt (recommended) or set token='' here
         # Output settings
         output_folder='../local_data/dataset_comparison',
         saveas=None,  # Auto-generate timestamp folder

@@ -445,6 +445,27 @@ sourceNeurons = ['aMe.*']          # All aMe neurons
 sourceNeurons = ['MBON01', 'MBON03', 'KC.*']
 ```
 
+#### Search Priority
+
+The system searches for neurons using the following priority order:
+
+| Priority | Column        | Match Type                  | Example                          |
+| -------- | ------------- | --------------------------- | -------------------------------- |
+| 1        | **bodyId**    | Exact (numeric, int or str) | `[123456789]` or `['123456789']` |
+| 2        | **type**      | Exact                       | `['MBON01']`                     |
+| 3        | **type**      | Regex                       | `['KC.*']`                       |
+| 4        | **instance**  | Exact                       | `['MBON01(R)']`                  |
+| 5        | **instance**  | Regex                       | `['.*_R']`                       |
+| 6        | **bodyId**    | Regex                       | `['720575.*']`                   |
+| 7        | Other columns | Exact/Regex                 | fallback                         |
+
+**Notes:**
+- Numeric inputs (int or numeric strings like `'123456789'`) are matched against `bodyId` first
+- Both `[123456789]` (int) and `['123456789']` (string) are supported for bodyId lookup
+- Regex patterns (containing `*`, `.`, `^`, `$`, `[`) are matched via pattern
+- The search returns all neurons matching the **first column that produces results**
+- All comparisons are string-based internally for consistency
+
 ### Connection Filters
 
 | Parameter                   | Description                            | Default    | Typical Values |
@@ -669,6 +690,8 @@ sourceNeurons=['L[1-5]']         # L1 through L5
 # Multiple patterns
 sourceNeurons=['MBON01', 'MBON03', 'KC.*']
 ```
+
+> 📖 **Search Priority**: The system searches columns in order: `bodyId` (exact) → `type` (exact/regex) → `instance` (exact/regex) → other columns. See [Search Priority](#search-priority) section above for details.
 
 ### Connection Filters
 

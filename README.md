@@ -1,6 +1,8 @@
-# Drosophila Connectome Analysis Toolkit (DROCAT) v4.3.3
+# Drosophila Connectome Analysis Toolkit (DROCAT) v4.4.0
 
-A comprehensive Python toolkit for analyzing and visualizing connectome data from **all NeuPrint databases and FlyWire datasets**. Features type-based pathfinding algorithms, interactive network visualizations, 3D neuron morphology rendering, and EM↔LM driver line mapping.
+A comprehensive Python toolkit for analyzing and visualizing connectome data from **all NeuPrint databases and FlyWire datasets**. Features type-based pathfinding algorithms, interactive network visualizations with NT grouping, 3D neuron morphology rendering, and EM↔LM driver line mapping.
+
+**NEW in v4.4.0**: Local FAFB/BANC dataset support (10-100x faster!), priority-based neuron search, NT visualization & grouping, and token_info.txt authentication.
 
 [![Python Version](https://img.shields.io/badge/python-3.8%2B-blue)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
@@ -94,8 +96,8 @@ from coana import FindNeuronConnection
 
 fc = FindNeuronConnection(
     dataset='hemibrain:v1.2.1',
-    sourceNeurons=['KC.*'],
-    targetNeurons=['MBON03'],
+    sourceNeurons=['KC.*'],       # Regex patterns supported
+    targetNeurons=['MBON03'],     # Searches: bodyId → type → instance
     min_synapse_num=10,
 )
 
@@ -207,21 +209,42 @@ fc = FindNeuronConnection(
 
 ---
 
-## What's New in v4.3
+## What's New in v4.4.0
 
-### NeuronBridge Enhancements
-- **Weighted Score Ranking**: `weighted_score = avg_score × coverage_ratio`
-- **Coverage Ratio**: Fraction of queried neurons labeled by each line
-- **Multi-Type Query**: Find lines labeling ALL queried neuron types
+### 🚀 Local FAFB/BANC Dataset Support (RECOMMENDED)
+- **Local-first architecture**: Store FlyWire datasets locally for 10-100x faster access
+- **Mixed mode**: Seamlessly combines local cache + API fallback
+- **Zero API latency**: Instant queries for cached neurons
+- **Automatic caching**: Build your cache once, reuse forever
 
-### HomologFinder Improvements
-- Hierarchical ConnectivityStatus (5 levels)
-- Dict-based similarity_metric for weighted combinations
-- Vector prefiltering for faster candidate selection
+📖 **[FAFB Integration Guide](docs/FAFB_INTEGRATION.md)** | **[Cache System](docs/core-features/CacheSystem_Guide.md)**
 
-### Performance
+### 🔍 Priority-Based Neuron Search
+- **Smart search order**: bodyId → type → instance with automatic fallback
+- **Flexible input**: Accept both int and string bodyIds: `[123456789]` or `['123456789']`
+- **Regex support**: Use patterns like `['KC.*']`, `['.*PN.*']` across all columns
+- **Consistent matching**: String-based comparison internally for reliability
+
+### 🎨 NT Visualization & Grouping
+- **NT edge groups**: ACH, GABA, GLUT, DA, SER, OCT - select and style by neurotransmitter
+- **Custom groups**: Create and save custom element groups for batch editing
+- **Hover labels**: NT type displayed in edge tooltips with color coding
+- **Export/Import**: Save complete graph states including custom groups and NT settings
+- **Default opacity**: 50% for edges (vs 20%), 100% for nodes (vs 50%) - better visibility
+
+📖 **[Network Features Guide](docs/visualizations/VisualizePath_Network_Features.md)**
+
+### 🔐 Authentication Improvements
+- **token_info.txt recommended**: Store all API tokens in one file (NeuPrint, CAVE, NeuronBridge)
+- **Automatic loading**: No need to pass tokens manually in scripts
+- **Secure storage**: Keep credentials out of version control
+
+📖 **[Authentication Setup](docs/INSTALLATION.md#authentication-setup)**
+
+### Previous Updates (v4.3)
+- Weighted Score Ranking for NeuronBridge
+- HomologFinder with hierarchical ConnectivityStatus
 - Polars integration for 10-100x faster operations
-- Skip BodyId processing option for large-scale analyses
 
 📖 **[Full Changelog](docs/README.md#recent-updates-december-2025---v43)**
 

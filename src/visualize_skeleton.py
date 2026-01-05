@@ -331,6 +331,19 @@ class VisualizeSkeleton:
     For FlyWire/FAFB: Always uses datasets/{dataset}/flywire_FAFB_v783_synapse_table.parquet\n
     '''
     
+    force_API_fetching: bool = False
+    '''
+    Force fetching skeletons from CAVE API instead of downloaded ZIP files (FAFB only).\n
+    \n
+    True: Fetch meshes from CloudVolume API and skeletonize using navis.\n
+          Avoids extrusion artifacts from pre-generated ZIP skeletons.\n
+          Results are cached in cache/{dataset}/API_cache/skeletons/\n
+    False: Use downloaded ZIP skeletons if available (default).\n
+    \n
+    Note: API fetching is slower (~5-10s per neuron) but produces cleaner skeletons.\n
+    Only applies to FlyWire/FAFB datasets. Has no effect on NeuPrint datasets.\n
+    '''
+    
     brain_mesh: str = 'none'
     ''' 
     Brain/VNC mesh visualization options (dataset-specific):\n
@@ -899,9 +912,12 @@ class VisualizeSkeleton:
             hash_suffix = hashlib.md5('_'.join(self.layer_names).encode()).hexdigest()[:6]
             self.saveas = self.saveas[:70] + f"_{hash_suffix}"
         
+        # Get dataset abbreviation for folder naming
+        dataset_abbrev = self._get_dataset_abbreviation()
+        
         # Create output subfolder (with or without timestamp based on include_timestamp)
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        base_folder_name = 'plot3d_' + self.saveas.split('.')[0]
+        base_folder_name = f'plot3d_{dataset_abbrev}_' + self.saveas.split('.')[0]
         if self.include_timestamp:
             self.save_folder = os.path.join(self.output_dir, base_folder_name + '_' + timestamp)
         else:
@@ -997,6 +1013,48 @@ class VisualizeSkeleton:
         cache_dir = os.path.join(self.script_path, 'cache', dataset_normalized, cache_type)
         os.makedirs(cache_dir, exist_ok=True)
         return cache_dir
+    
+    def _get_dataset_abbreviation(self) -> str:
+        """Get a short abbreviation for the dataset name for use in folder naming.
+        
+        Maps common dataset names to short abbreviations:
+        - hemibrain -> HEMI
+        - male-cns -> MCNS
+        - flywire_FAFB -> FAFB
+        - flywire_BANC -> BANC
+        - optic-lobe -> OL
+        - manc -> MANC
+        
+        Returns
+        -------
+        str
+            Short abbreviation for the dataset, or first 4 chars if not recognized
+        """
+        # Dataset abbreviation mapping
+        abbrev_map = {
+            'hemibrain': 'HEMI',
+            'male-cns': 'MCNS',
+            'male_cns': 'MCNS',
+            'flywire_fafb': 'FAFB',
+            'fafb': 'FAFB',
+            'flywire_banc': 'BANC',
+            'banc': 'BANC',
+            'optic-lobe': 'OL',
+            'optic_lobe': 'OL',
+            'manc': 'MANC',
+        }
+        
+        if self.dataset is None:
+            return 'UNKN'
+        
+        # Try exact match first (lowercase)
+        dataset_lower = self.dataset.lower()
+        for key, abbrev in abbrev_map.items():
+            if key in dataset_lower:
+                return abbrev
+        
+        # If no match, use first 4 chars uppercase
+        return self.dataset[:4].upper().replace('-', '').replace('_', '')
     
     def _generate_smart_layer_names(self) -> List[str]:
         """Generate smart layer names based on neuron types.
@@ -1367,6 +1425,176 @@ class VisualizeSkeleton:
         if saved_count > 0:
             self._vprint(f'  💾 Saved {saved_count} new meshes to cache', level='full')
 
+    def _load_api_cached_skeletons(self, body_ids: list) -> tuple:
+        """Load skeletons from API cache (cache/{dataset}/API_cache/skeletons/).
+        
+        These are skeletons previously fetched via CAVE API and cached locally.
+        API cache takes priority over ZIP files as it contains more up-to-date data.
+        
+        Parameters
+        ----------
+        body_ids : list
+            List of body IDs to look for in cache
+            
+        Returns
+        -------
+        tuple
+            (dict of loaded skeletons {bodyId: TreeNeuron}, list of missing bodyIds)
+        """
+        import pickle
+        
+        project_root = os.path.dirname(os.path.dirname(__file__))
+        dataset_safe = self.dataset.replace(':', '_').replace('.', '_')
+        cache_dir = os.path.join(project_root, 'cache', dataset_safe, 'API_cache', 'skeletons')
+        
+        if not os.path.exists(cache_dir):
+            return {}, list(body_ids)
+        
+        cached = {}
+        missing = []
+        
+        for bid in body_ids:
+            # Check for both int and str versions of bodyId
+            cache_file = os.path.join(cache_dir, f'{bid}.pkl')
+            if os.path.exists(cache_file):
+                try:
+                    with open(cache_file, 'rb') as f:
+                        neuron = pickle.load(f)
+                        cached[bid] = neuron
+                        cached[str(bid)] = neuron  # Also store with str key for compatibility
+                except Exception:
+                    missing.append(bid)
+            else:
+                missing.append(bid)
+        
+        return cached, missing
+
+    def _fetch_fafb_skeletons_via_api(self, body_ids: list) -> dict:
+        """Fetch FAFB skeletons via CAVE API (CloudVolume mesh + navis skeletonization).
+        
+        Uses CAVEDataFetcher to fetch meshes and generate skeletons.
+        Results are cached in cache/{dataset}/API_cache/skeletons/.
+        
+        Parameters
+        ----------
+        body_ids : list
+            List of body IDs to fetch (can be strings or ints)
+            
+        Returns
+        -------
+        dict
+            Dictionary of bodyId -> TreeNeuron (keys are both int and str for compatibility)
+        """
+        try:
+            from cave_data_fetcher import CAVEDataFetcher
+        except ImportError:
+            try:
+                from .cave_data_fetcher import CAVEDataFetcher
+            except ImportError:
+                self._vprint("  ⚠️  cave_data_fetcher module not found, falling back to ZIP", use_tqdm=True)
+                return {}
+        
+        self._vprint(f'  🌐 Fetching {len(body_ids)} skeletons via CAVE API...', use_tqdm=True)
+        
+        # Convert body_ids to integers for API call
+        int_body_ids = [int(bid) for bid in body_ids]
+        
+        fetcher = CAVEDataFetcher(
+            dataset=self.dataset,
+            verbose=self.verbose == 'full'
+        )
+        
+        skeleton_cache = {}
+        neurons = fetcher.fetch_skeletons(int_body_ids, use_cache=True, simplify_mesh=0.95)
+        
+        for n in neurons:
+            if hasattr(n, 'id'):
+                # Store with both int and str keys for compatibility
+                skeleton_cache[n.id] = n
+                skeleton_cache[str(n.id)] = n
+        
+        self._vprint(f'  ✓ Fetched {len(neurons)}/{len(body_ids)} skeletons via API', use_tqdm=True)
+        return skeleton_cache
+
+    @staticmethod
+    def fix_fafb_extrusions(body_ids: list, dataset: str = 'flywire_FAFB_v783', 
+                            verbose: bool = True) -> dict:
+        """Fix FAFB skeleton extrusion issues by fetching fresh data from CAVE API.
+        
+        The downloaded FAFB skeleton ZIP (sk_lod1_783_healed.zip) may contain neurons
+        with extrusion artifacts (mesh errors appearing as spikes/protrusions). This
+        method fetches fresh skeletons from CAVE API and caches them locally.
+        
+        Once cached, VisualizeSkeleton will automatically use the API-cached versions
+        instead of the problematic ZIP versions.
+        
+        Parameters
+        ----------
+        body_ids : list
+            List of body IDs (as integers or strings) with extrusion issues
+        dataset : str
+            Dataset name, default 'flywire_FAFB_v783'
+        verbose : bool
+            Whether to print progress messages
+            
+        Returns
+        -------
+        dict
+            Dictionary of fixed skeletons {bodyId: TreeNeuron}
+            
+        Example
+        -------
+        >>> # Fix specific neurons with extrusion issues
+        >>> from coana import VisualizeSkeleton
+        >>> fixed = VisualizeSkeleton.fix_fafb_extrusions([720575940596125868, 720575940597856265])
+        >>> print(f"Fixed {len(fixed)} neurons")
+        
+        >>> # Now use them in visualization (automatically uses fixed versions)
+        >>> vs = VisualizeSkeleton(
+        ...     dataset='flywire_FAFB_v783',
+        ...     neuron_layers=['l-LNv'],
+        ...     force_API_fetching=False,  # API cache still takes priority
+        ... )
+        >>> vs.plot_neurons()
+        """
+        try:
+            from cave_data_fetcher import CAVEDataFetcher
+        except ImportError:
+            try:
+                from .cave_data_fetcher import CAVEDataFetcher
+            except ImportError:
+                raise ImportError(
+                    "CAVE data fetcher not available. Install with: "
+                    "pip install caveclient cloud-volume"
+                )
+        
+        if verbose:
+            print(f"🔧 Fixing FAFB skeleton extrusions for {len(body_ids)} neurons...")
+        
+        # Convert to integers
+        int_body_ids = [int(bid) for bid in body_ids]
+        
+        fetcher = CAVEDataFetcher(
+            dataset=dataset,
+            verbose=verbose
+        )
+        
+        # Fetch and cache fresh skeletons (0.95 simplification)
+        neurons = fetcher.fetch_skeletons(int_body_ids, use_cache=False, simplify_mesh=0.95)
+        
+        result = {}
+        for n in neurons:
+            if hasattr(n, 'id'):
+                result[n.id] = n
+                result[str(n.id)] = n
+        
+        if verbose:
+            print(f"✓ Fixed and cached {len(neurons)}/{len(body_ids)} skeletons")
+            print(f"  Cache location: cache/{dataset.replace(':', '_').replace('.', '_')}/API_cache/skeletons/")
+            print(f"  These will automatically be used instead of ZIP versions")
+        
+        return result
+
     def plot_skeleton(self):
         from tqdm import tqdm
         import sys
@@ -1391,12 +1619,19 @@ class VisualizeSkeleton:
         fafb_mesh_missing = []  # bodyIds that need processing
         use_fafb_cache = is_fafb and self.cache_neurons and self.skeleton_mesh_simplification >= self.FAFB_MESH_CACHE_SIMPLIFICATION
         
+        # Check for force_API_fetching - bypasses ZIP loading for FAFB
+        use_api_fetching = is_fafb and self.force_API_fetching
+        
         if is_fafb:
-            if use_fafb_cache:
+            if use_api_fetching:
+                self._vprint(f'  ℹ️  force_API_fetching=True: Using CAVE API instead of ZIP', level='simple')
+            elif use_fafb_cache:
                 self._vprint(f'  ℹ️  FAFB mesh cache enabled (simplification={self.skeleton_mesh_simplification} >= cache level {self.FAFB_MESH_CACHE_SIMPLIFICATION})', level='full')
             else:
                 self._vprint(f'  ℹ️  FAFB mesh cache bypassed (simplification={self.skeleton_mesh_simplification} < cache level {self.FAFB_MESH_CACHE_SIMPLIFICATION})', level='full')
         
+        # Load from mesh cache when simplification >= cache level
+        # This applies regardless of force_API_fetching, since mesh cache stores processed meshes
         if use_fafb_cache:
             # Collect all body IDs across layers
             all_fafb_body_ids = []
@@ -1408,17 +1643,57 @@ class VisualizeSkeleton:
             # Load from mesh cache
             fafb_mesh_cache, fafb_mesh_missing = self._load_cached_fafb_meshes(all_fafb_body_ids)
         
-        # Pre-load all FAFB skeletons from ZIP
+        # Pre-load all FAFB skeletons
         fafb_skeleton_cache = {}  # bodyId -> TreeNeuron
         if is_fafb:
-            if use_fafb_cache and fafb_mesh_missing:
-                # Cache is used but some neurons are missing - load only those from ZIP
-                self._vprint(f'  ℹ️  {len(fafb_mesh_missing)} neurons need processing from ZIP')
-                fafb_skeleton_cache = self._preload_fafb_skeletons(body_ids_filter=set(fafb_mesh_missing))
-            elif not use_fafb_cache:
-                # Cache not used (simplification < 0.9 or caching disabled) - load all from ZIP
-                self._vprint(f'  ℹ️  Loading all neurons from ZIP (simplification={self.skeleton_mesh_simplification})')
-                fafb_skeleton_cache = self._preload_fafb_skeletons()
+            # Collect all body IDs first
+            all_fafb_body_ids = []
+            for df in self.neuron_dfs:
+                if df is not None and 'bodyId' in df.columns:
+                    all_fafb_body_ids.extend(df['bodyId'].tolist())
+            all_fafb_body_ids = list(set(all_fafb_body_ids))
+            
+            # ALWAYS check API cache first for VisualizeSkeleton
+            # This allows fixing individual neurons with extrusion issues by fetching via API
+            # API-cached skeletons take priority over ZIP data for better morphology
+            api_cached_skeletons, api_cache_missing = self._load_api_cached_skeletons(all_fafb_body_ids)
+            
+            if api_cached_skeletons:
+                fafb_skeleton_cache.update(api_cached_skeletons)
+                self._vprint(f'  ✓ Loaded {len(api_cached_skeletons)} skeletons from API cache (extrusion-fixed)', level='simple')
+            
+            if use_api_fetching:
+                # force_API_fetching=True: Fetch remaining via CAVE API
+                if api_cache_missing:
+                    self._vprint(f'  🌐 Fetching {len(api_cache_missing)} skeletons via CAVE API...')
+                    api_fetched = self._fetch_fafb_skeletons_via_api(api_cache_missing)
+                    fafb_skeleton_cache.update(api_fetched)
+            else:
+                # force_API_fetching=False: Load remaining from local ZIP
+                remaining_ids = set(api_cache_missing)
+                
+                if remaining_ids:
+                    if use_fafb_cache and fafb_mesh_missing:
+                        # Load only those that are missing from both API cache and mesh cache
+                        zip_needed = remaining_ids & set(fafb_mesh_missing)
+                        if zip_needed:
+                            self._vprint(f'  ℹ️  {len(zip_needed)} neurons loading from ZIP')
+                            zip_skeletons = self._preload_fafb_skeletons(body_ids_filter=zip_needed)
+                            fafb_skeleton_cache.update(zip_skeletons)
+                    elif not use_fafb_cache:
+                        # Cache not used - load remaining from ZIP
+                        self._vprint(f'  ℹ️  Loading {len(remaining_ids)} neurons from ZIP')
+                        zip_skeletons = self._preload_fafb_skeletons(body_ids_filter=remaining_ids)
+                        fafb_skeleton_cache.update(zip_skeletons)
+                
+                # Auto-fallback to API for any still missing (graceful degradation)
+                still_missing = [bid for bid in all_fafb_body_ids 
+                                if bid not in fafb_skeleton_cache and str(bid) not in fafb_skeleton_cache]
+                if still_missing:
+                    self._vprint(f'  ⚠️  {len(still_missing)} neurons not in local cache/ZIP, auto-fetching via CAVE API...')
+                    api_fetched = self._fetch_fafb_skeletons_via_api(still_missing)
+                    fafb_skeleton_cache.update(api_fetched)
+        
         
         # Main progress bar for layers - always show when verbose is enabled
         layer_pbar = tqdm(range(n_layers), desc="Processing layers", 
@@ -1617,7 +1892,7 @@ class VisualizeSkeleton:
                                 target_faces = int(n_faces * (1 - cache_simp))
                                 if target_faces < n_faces and target_faces > 0:
                                     try:
-                                        simplified_trimesh = mesh_n.trimesh.simplify_quadric_decimation(target_faces)
+                                        simplified_trimesh = mesh_n.trimesh.simplify_quadric_decimation(face_count=target_faces)
                                         # Create new MeshNeuron with simplified mesh to ensure proper storage
                                         mesh_n = navis.MeshNeuron(simplified_trimesh)
                                         mesh_n.id = n.id  # Preserve original ID
@@ -1652,7 +1927,7 @@ class VisualizeSkeleton:
                                 target_faces = int(n_faces * additional_keep_factor)
                                 if target_faces < n_faces and target_faces > 0:
                                     try:
-                                        simplified_trimesh = mesh_n.trimesh.simplify_quadric_decimation(target_faces)
+                                        simplified_trimesh = mesh_n.trimesh.simplify_quadric_decimation(face_count=target_faces)
                                         new_mesh = navis.MeshNeuron(simplified_trimesh)
                                         new_mesh.id = mesh_n.id if hasattr(mesh_n, 'id') else None
                                         if hasattr(mesh_n, 'name'):
@@ -1702,7 +1977,7 @@ class VisualizeSkeleton:
                                 target_faces = int(n_faces * additional_keep_factor)
                                 if target_faces < n_faces and target_faces > 0:
                                     try:
-                                        simplified_trimesh = mesh_n.trimesh.simplify_quadric_decimation(target_faces)
+                                        simplified_trimesh = mesh_n.trimesh.simplify_quadric_decimation(face_count=target_faces)
                                         new_mesh = navis.MeshNeuron(simplified_trimesh)
                                         new_mesh.id = mesh_n.id if hasattr(mesh_n, 'id') else None
                                         if hasattr(mesh_n, 'name'):
@@ -1754,7 +2029,7 @@ class VisualizeSkeleton:
                                 target_faces = int(n_faces * (1 - target_simp))
                                 if target_faces < n_faces and target_faces > 0:
                                     try:
-                                        simplified_trimesh = mesh_n.trimesh.simplify_quadric_decimation(target_faces)
+                                        simplified_trimesh = mesh_n.trimesh.simplify_quadric_decimation(face_count=target_faces)
                                         mesh_n = navis.MeshNeuron(simplified_trimesh)
                                         mesh_n.id = n.id if hasattr(n, 'id') else None
                                         if hasattr(n, 'name'):
@@ -1901,7 +2176,7 @@ class VisualizeSkeleton:
                                 if target_faces < n_faces:
                                     # simplify_quadric_decimation returns a new trimesh object
                                     # Create NEW MeshNeuron from simplified trimesh (can't just assign to .trimesh)
-                                    simplified_tm = mesh_n.trimesh.simplify_quadric_decimation(target_faces)
+                                    simplified_tm = mesh_n.trimesh.simplify_quadric_decimation(face_count=target_faces)
                                     new_mesh_n = navis.MeshNeuron(simplified_tm)
                                     new_mesh_n.id = mesh_n.id if hasattr(mesh_n, 'id') else n.id
                                     if hasattr(mesh_n, 'name'):
@@ -1999,7 +2274,7 @@ class VisualizeSkeleton:
                                         # Try open3d simplification first (better quality)
                                         # If open3d not installed, trimesh might fail or use other method
                                         # trimesh.simplify_quadric_decimation uses open3d or fast-simplification
-                                        merged_mesh = merged_mesh.simplify_quadric_decimation(target_faces)
+                                        merged_mesh = merged_mesh.simplify_quadric_decimation(face_count=target_faces)
                                     except Exception:
                                         pass  # Skip simplification if it fails
                             
@@ -3958,7 +4233,7 @@ class VisualizeSkeleton:
                                 target_faces = int(n_faces * (1 - self.roi_mesh_simplification))
                                 if target_faces < n_faces:
                                     # simplify_quadric_decimation returns a new trimesh object
-                                    new_tm = tm.simplify_quadric_decimation(target_faces)
+                                    new_tm = tm.simplify_quadric_decimation(face_count=target_faces)
                                     
                                     # Re-instantiate Volume to ensure it's clean and updated
                                     # Preserving attributes
@@ -4218,12 +4493,12 @@ class VisualizeSkeleton:
             )
             
             # Fix for hemibrain template mode (JRCFIB2018F)
-            # JRCFIB2018F has Z as Dorsal-Ventral axis, so default camera (looking from Z) shows Top view.
-            # To show Frontal view, we need to look from Anterior (Y axis).
+            # JRCFIB2018F has Y-axis pointing posterior→anterior, Z is Dorsal-Ventral.
+            # To show Frontal view, we need to look from Anterior (positive Y axis).
             if 'hemibrain' in self.dataset.lower() and self.brain_mesh == 'template':
                  scene_camera_parameters = dict(
                     up=dict(x=0, y=0, z=-1),  # Z is up (Dorsal)
-                    eye=dict(x=0, y=-2.0, z=0),  # Look from Front (Anterior is -Y)
+                    eye=dict(x=0, y=2.0, z=0),  # Look from Front (Anterior is +Y)
                 )
             
             self.fig_3d.update_layout(
@@ -4291,12 +4566,19 @@ class VisualizeSkeleton:
                 }
 
                 # Adjust for hemibrain template (JRCFIB2018F)
+                # JRCFIB2018F coordinate system:
+                #   X-axis: Left-Right (as normal fly brain)
+                #   Y-axis: Posterior→Anterior (front is +Y direction)
+                #   Z-axis: Ventral→Dorsal (up is +Z direction, but we use -Z as "up" for standard brain viewing)
+                #
+                # For front view: eye at +Y, looking at origin, with -Z as up (dorsal up)
+                # Key insight: When looking from +Y, the up vector should be -Z to match standard viewing
                 if 'hemibrain' in self.dataset.lower() and self.brain_mesh == 'template':
                      view_cameras = {
-                        'front': dict(eye=dict(x=0, y=-2.5, z=0), center=dict(x=0, y=0, z=0), up=dict(x=0, y=0, z=-1)),
-                        'back': dict(eye=dict(x=0, y=2.5, z=0), center=dict(x=0, y=0, z=0), up=dict(x=0, y=0, z=-1)),
-                        'top': dict(eye=dict(x=0, y=0, z=-2.5), center=dict(x=0, y=0, z=0), up=dict(x=0, y=-1, z=0)),
-                        'bottom': dict(eye=dict(x=0, y=0, z=2.5), center=dict(x=0, y=0, z=0), up=dict(x=0, y=-1, z=0)),
+                        'front': dict(eye=dict(x=0, y=2.5, z=0), center=dict(x=0, y=0, z=0), up=dict(x=0, y=0, z=-1)),
+                        'back': dict(eye=dict(x=0, y=-2.5, z=0), center=dict(x=0, y=0, z=0), up=dict(x=0, y=0, z=-1)),
+                        'top': dict(eye=dict(x=0, y=0, z=-2.5), center=dict(x=0, y=0, z=0), up=dict(x=0, y=1, z=0)),
+                        'bottom': dict(eye=dict(x=0, y=0, z=2.5), center=dict(x=0, y=0, z=0), up=dict(x=0, y=1, z=0)),
                         'left': dict(eye=dict(x=-2.5, y=0, z=0), center=dict(x=0, y=0, z=0), up=dict(x=0, y=0, z=-1)),
                         'right': dict(eye=dict(x=2.5, y=0, z=0), center=dict(x=0, y=0, z=0), up=dict(x=0, y=0, z=-1)),
                     }
@@ -4480,6 +4762,21 @@ class VisualizeSkeleton:
             'left': dict(eye=dict(x=-2.5, y=0, z=0), center=dict(x=0, y=0, z=0), up=dict(x=0, y=-1, z=0)),
             'right': dict(eye=dict(x=2.5, y=0, z=0), center=dict(x=0, y=0, z=0), up=dict(x=0, y=-1, z=0)),
         }
+        
+        # Adjust for hemibrain template (JRCFIB2018F) - front/back swapped due to Y-axis orientation
+        # JRCFIB2018F coordinate system:
+        #   X-axis: Left-Right (as normal fly brain)
+        #   Y-axis: Posterior→Anterior (front is +Y direction)
+        #   Z-axis: Ventral→Dorsal (up is +Z direction, but we use -Z as "up" for standard brain viewing)
+        if 'hemibrain' in self.dataset.lower() and self.brain_mesh == 'template':
+            view_cameras = {
+                'front': dict(eye=dict(x=0, y=2.5, z=0), center=dict(x=0, y=0, z=0), up=dict(x=0, y=0, z=-1)),
+                'back': dict(eye=dict(x=0, y=-2.5, z=0), center=dict(x=0, y=0, z=0), up=dict(x=0, y=0, z=-1)),
+                'top': dict(eye=dict(x=0, y=0, z=-2.5), center=dict(x=0, y=0, z=0), up=dict(x=0, y=1, z=0)),
+                'bottom': dict(eye=dict(x=0, y=0, z=2.5), center=dict(x=0, y=0, z=0), up=dict(x=0, y=1, z=0)),
+                'left': dict(eye=dict(x=-2.5, y=0, z=0), center=dict(x=0, y=0, z=0), up=dict(x=0, y=0, z=-1)),
+                'right': dict(eye=dict(x=2.5, y=0, z=0), center=dict(x=0, y=0, z=0), up=dict(x=0, y=0, z=-1)),
+            }
         
         # Get all traces from the main figure
         all_traces = list(self.fig_3d.data)
@@ -5479,7 +5776,7 @@ class VisualizeSkeleton:
         if 'hemibrain' in self.dataset.lower() and self.brain_mesh == 'template':
              scene_camera_parameters = dict(
                 up=dict(x=0, y=0, z=-1),
-                eye=dict(x=0, y=-view_distance, z=0),
+                eye=dict(x=0, y=view_distance, z=0),  # +Y is front (anterior)
             )
         
         fig_new.update_layout(

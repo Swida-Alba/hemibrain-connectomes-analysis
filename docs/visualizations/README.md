@@ -2,10 +2,50 @@
 
 Comprehensive guides for all visualization types in the Hemibrain Connectomes Analysis toolkit.
 
-## Recent Updates
+## Quick Reference
 
-- **[VisualizeSkeleton Multi-Dataset Support (Nov 2024)](./VisualizeSkeleton_Updates_Nov2024.md)** - New dataset-specific ROI mesh caching, automatic ROI discovery, and brain transformation confirmation
-- **[VisualizePath Connection Matrix Support (Nov 2024)](./VisualizePath_Updates_Nov2025.md)** - Connection matrix input, individual visualization control, and enhanced format detection
+| Guide                                                         | Description                                              |
+| ------------------------------------------------------------- | -------------------------------------------------------- |
+| [VisualizePath Quick Reference](./VisualizePath_QuickRef.md)  | Quick start guide for VisualizePath                      |
+| [Network Features Guide](./VisualizePath_Network_Features.md) | **Complete guide to network features, groups, NT edges** |
+| [Heatmap Guide](./Heatmap_Guide.md)                           | Interactive connection matrix visualization              |
+| [Network Guide](./Network_Guide.md)                           | Basic network visualization                              |
+| [Sankey Guide](./Sankey_Guide.md)                             | Flow-based diagram guide                                 |
+| [3D Skeleton Guide](./3D_Skeleton_Guide.md)                   | 3D anatomical visualization                              |
+
+## Recent Updates (2026)
+
+- **[Network Features Guide](./VisualizePath_Network_Features.md)** - Complete network documentation including:
+  - NT (Neurotransmitter) edge groups with color coding
+  - Custom group creation and management
+  - Export/import with group preservation
+  - Enhanced group selection controls
+  - Fixed reset colors functionality
+
+## Feature Reference
+
+### Network Features
+| Feature           | Documentation                                                                                 |
+| ----------------- | --------------------------------------------------------------------------------------------- |
+| NT Edge Groups    | [Network Features Guide](./VisualizePath_Network_Features.md#nt-neurotransmitter-edge-groups) |
+| Custom Groups     | [Network Features Guide](./VisualizePath_Network_Features.md#custom-groups)                   |
+| Export/Import     | [Network Features Guide](./VisualizePath_Network_Features.md#exportimport)                    |
+| Edit Mode         | [Network Features Guide](./VisualizePath_Network_Features.md#edit-mode)                       |
+| Layout Algorithms | [Layout Algorithms Quick Ref](./LayoutAlgorithms_QuickRef.md)                                 |
+| Edge Filtering    | [Network Edge Filter](./NETWORK_EDGE_FILTER.md)                                               |
+
+### Heatmap Features
+| Feature         | Documentation                                            |
+| --------------- | -------------------------------------------------------- |
+| Clustering      | [Heatmap Clustering](./HEATMAP_CLUSTERING_QUICKREF.md)   |
+| Custom Ordering | [Custom Ordering](./CUSTOM_HEATMAP_ORDERING_QuickRef.md) |
+| UI Improvements | [Heatmap UI](./HEATMAP_UI_IMPROVEMENT.md)                |
+
+### Sankey Features
+| Feature              | Documentation                                         |
+| -------------------- | ----------------------------------------------------- |
+| Interactive Controls | [Sankey Controls](./SANKEY_CONTROLS_QUICKREF.md)      |
+| Multi-Selection      | [Sankey Multi-Selection](./SANKEY_MULTI_SELECTION.md) |
 
 ## Available Visualizations
 
@@ -34,17 +74,20 @@ Comprehensive guides for all visualization types in the Hemibrain Connectomes An
 **Best for**: Exploring topology, pathways, and network structure  
 **Output**: Interactive HTML with draggable nodes and edges  
 **Key features**:
-- 4 layout algorithms (hierarchical, force-directed, circular, distributed)
+- 4+ layout algorithms (hierarchical, force-directed, circular, distributed)
 - Real-time node and edge customization
+- **NT (Neurotransmitter) edge groups** - Color-code by ACH, GABA, GLUT, etc.
+- **Custom groups** - Create groups from selected elements
 - Edit mode for manual graph construction
 - Multiple connection metrics (weight, ratio, probability)
 - Edge width scaling and filtering
-- Export/import graph state and layouts
+- Export/import graph state including custom groups
 
 **When to use**:
 - Visualizing neural pathways and circuits
 - Exploring network topology
 - Identifying hubs and bottlenecks
+- Analyzing neurotransmitter distribution
 - Interactive presentations and demonstrations
 
 ---
@@ -93,37 +136,37 @@ Comprehensive guides for all visualization types in the Hemibrain Connectomes An
 
 ### By Analysis Goal
 
-| Goal | Primary Visualization | Secondary |
-|------|----------------------|-----------|
-| **Compare connection strengths** | Heatmap | - |
-| **Find connection patterns** | Heatmap (with clustering) | Network |
-| **Explore pathway structure** | Network | Sankey |
-| **Show information flow** | Sankey | Network |
-| **Understand anatomy** | 3D Skeleton | - |
-| **Present to non-experts** | Sankey or Network | 3D Skeleton |
-| **Statistical analysis** | Heatmap | - |
-| **Interactive exploration** | Network | Heatmap |
-| **Publication figure** | Any (depends on message) | - |
+| Goal                             | Primary Visualization     | Secondary   |
+| -------------------------------- | ------------------------- | ----------- |
+| **Compare connection strengths** | Heatmap                   | -           |
+| **Find connection patterns**     | Heatmap (with clustering) | Network     |
+| **Explore pathway structure**    | Network                   | Sankey      |
+| **Show information flow**        | Sankey                    | Network     |
+| **Understand anatomy**           | 3D Skeleton               | -           |
+| **Present to non-experts**       | Sankey or Network         | 3D Skeleton |
+| **Statistical analysis**         | Heatmap                   | -           |
+| **Interactive exploration**      | Network                   | Heatmap     |
+| **Publication figure**           | Any (depends on message)  | -           |
 
 ### By Data Type
 
-| Data Type | Recommended Visualization | Input Format |
-|-----------|--------------------------|-------------|
-| **Dense connectivity matrix** | Heatmap | Connection matrix or edge-list |
-| **Sparse pathways** | Network or Sankey | Edge-list or path-based |
-| **Multi-hop paths** | Sankey (flow) or Network (topology) | Path-based |
-| **Single neuron morphology** | 3D Skeleton | N/A |
-| **Population-level connectivity** | Heatmap or Sankey | Connection matrix |
-| **Circuit motifs** | Network | Edge-list |
-| **Layered feedforward** | Sankey | Path-based |### By Audience
+| Data Type                         | Recommended Visualization           | Input Format                   |
+| --------------------------------- | ----------------------------------- | ------------------------------ |
+| **Dense connectivity matrix**     | Heatmap                             | Connection matrix or edge-list |
+| **Sparse pathways**               | Network or Sankey                   | Edge-list or path-based        |
+| **Multi-hop paths**               | Sankey (flow) or Network (topology) | Path-based                     |
+| **Single neuron morphology**      | 3D Skeleton                         | N/A                            |
+| **Population-level connectivity** | Heatmap or Sankey                   | Connection matrix              |
+| **Circuit motifs**                | Network                             | Edge-list                      |
+| **Layered feedforward**           | Sankey                              | Path-based                     | ### By Audience |
 
-| Audience | Best Choice | Reason |
-|----------|------------|--------|
-| **Researchers** | Network or Heatmap | Detailed, interactive exploration |
-| **General audience** | Sankey or 3D Skeleton | Intuitive flow/spatial representation |
-| **Statistical analysis** | Heatmap | Quantitative, matrix-based |
-| **Presentations** | Network or Sankey | Interactive, visually engaging |
-| **Publications** | Any | All support high-quality export |
+| Audience                 | Best Choice           | Reason                                |
+| ------------------------ | --------------------- | ------------------------------------- |
+| **Researchers**          | Network or Heatmap    | Detailed, interactive exploration     |
+| **General audience**     | Sankey or 3D Skeleton | Intuitive flow/spatial representation |
+| **Statistical analysis** | Heatmap               | Quantitative, matrix-based            |
+| **Presentations**        | Network or Sankey     | Interactive, visually engaging        |
+| **Publications**         | Any                   | All support high-quality export       |
 
 ---
 
@@ -284,14 +327,14 @@ plot_navis_3d(bodyIds=[...], show_rois=True)
 
 ### Common Issues
 
-| Issue | Visualization | Solution |
-|-------|---------------|----------|
-| Slow performance | All | Reduce data size, filter weak connections |
-| Overlapping labels | Network, Sankey | Increase plot size, adjust font size |
-| Colors not visible | Heatmap | Adjust colorscale, check data range |
-| Export fails | All | Check browser permissions, try different format |
-| Clustering unavailable | Heatmap | Matrix too small or contains NaN |
-| Nodes overlap | Network | Try different layout algorithm |
+| Issue                  | Visualization   | Solution                                        |
+| ---------------------- | --------------- | ----------------------------------------------- |
+| Slow performance       | All             | Reduce data size, filter weak connections       |
+| Overlapping labels     | Network, Sankey | Increase plot size, adjust font size            |
+| Colors not visible     | Heatmap         | Adjust colorscale, check data range             |
+| Export fails           | All             | Check browser permissions, try different format |
+| Clustering unavailable | Heatmap         | Matrix too small or contains NaN                |
+| Nodes overlap          | Network         | Try different layout algorithm                  |
 
 ### Getting Help
 

@@ -356,6 +356,10 @@ class ComparisonAnalyzer:
         # It will auto-detect client_type from dataset name and create/reuse clients as needed
         # - If dataset contains 'flywire' or 'fafb' -> uses local data
         # - Otherwise -> uses NeuPrint (creates client using dataset name and token from env var)
+        # Determine if force_API_fetching should be applied (only for FAFB/FlyWire datasets)
+        is_fafb = 'flywire' in dataset_name.lower() or 'fafb' in dataset_name.lower()
+        use_force_api = self.parameters.force_API_fetching if is_fafb else False
+        
         fnc = FindNeuronConnection(
             sourceNeurons=source_neurons,
             targetNeurons=target_neurons,
@@ -372,6 +376,7 @@ class ComparisonAnalyzer:
             skip_bodyId=self.parameters.skip_bodyId,  # Skip bodyId-level processing if requested
             label_mapper=self.label_mapper,  # Pass label mapper for standardization
             pathfinding=self.parameters.pathfinding,  # Pass pathfinding algorithm
+            force_API_fetching=use_force_api,  # Use CAVE API for FAFB if enabled
         )
         
         # Initialize and run analysis

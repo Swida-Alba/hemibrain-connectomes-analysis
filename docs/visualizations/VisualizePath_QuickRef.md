@@ -90,25 +90,25 @@ vp2.visualize()
 
 ## Parameters
 
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `path_file` | str or DataFrame | **Required** | CSV/Excel file or DataFrame |
-| `sheet_name` | str | `None` | Excel sheet ('path_type', 'path_bodyId') |
-| `output_folder` | str | `'./selected_paths'` | Output directory |
-| `node_color` | list | `['#1f77b4', '#2ca02c']` | [source, intermediate] |
-| `target_color` | str | `'#d62728'` | Target node color |
-| `link_color` | str | `'rgba(100,100,100,0.3)'` | Connection color |
-| `network_layout` | str | `'hierarchical'` | Layout algorithm |
-| `showfig` | bool | `False` | Auto-open in browser |
+| Parameter        | Type             | Default                   | Description                              |
+| ---------------- | ---------------- | ------------------------- | ---------------------------------------- |
+| `path_file`      | str or DataFrame | **Required**              | CSV/Excel file or DataFrame              |
+| `sheet_name`     | str              | `None`                    | Excel sheet ('path_type', 'path_bodyId') |
+| `output_folder`  | str              | `'./selected_paths'`      | Output directory                         |
+| `node_color`     | list             | `['#1f77b4', '#2ca02c']`  | [source, intermediate]                   |
+| `target_color`   | str              | `'#d62728'`               | Target node color                        |
+| `link_color`     | str              | `'rgba(100,100,100,0.3)'` | Connection color                         |
+| `network_layout` | str              | `'hierarchical'`          | Layout algorithm                         |
+| `showfig`        | bool             | `False`                   | Auto-open in browser                     |
 
 ## Layout Options
 
-| Layout | Best For | Description |
-|--------|----------|-------------|
-| `'hierarchical'` | Sequential pathways | Layer-by-layer arrangement |
-| `'spring'` | Complex networks | Force-directed (organic) |
-| `'circular'` | Connectivity comparison | Circular arrangement |
-| `'distributed'` | Balanced view | Kamada-Kawai (aesthetic) |
+| Layout           | Best For                | Description                |
+| ---------------- | ----------------------- | -------------------------- |
+| `'hierarchical'` | Sequential pathways     | Layer-by-layer arrangement |
+| `'spring'`       | Complex networks        | Force-directed (organic)   |
+| `'circular'`     | Connectivity comparison | Circular arrangement       |
+| `'distributed'`  | Balanced view           | Kamada-Kawai (aesthetic)   |
 
 ## Color Schemes
 
@@ -140,11 +140,11 @@ target_color='#000000'              # Black
 
 Each run creates 3 files in `output_folder`:
 
-| File | Type | Features |
-|------|------|----------|
-| `sankey_selected_paths.html` | Sankey | Flow diagram, hover details |
-| `network_selected_paths.html` | Cytoscape | Drag nodes, hide, hover, export PNG |
-| `selected_paths_connections.xlsx` | Excel | 2 sheets: connections + original paths |
+| File                              | Type      | Features                               |
+| --------------------------------- | --------- | -------------------------------------- |
+| `sankey_selected_paths.html`      | Sankey    | Flow diagram, hover details            |
+| `network_selected_paths.html`     | Cytoscape | Drag nodes, hide, hover, export PNG    |
+| `selected_paths_connections.xlsx` | Excel     | 2 sheets: connections + original paths |
 
 ## Required Data Format
 
@@ -157,6 +157,7 @@ Each run creates 3 files in `output_folder`:
 **Optional:**
 - `connection_ratios` (list): `[0.25, 0.18, 0.12]`
 - `traversal_probabilities` (list): `[0.85, 0.75, 0.65]`
+- `nt_types` (list): `['ACH', 'GABA', 'GLUT']` (NT for each connection)
 
 ### Example DataFrame
 ```python
@@ -164,8 +165,35 @@ df = pd.DataFrame({
     'path_block': ['L3_R -> Mi1_R -> Tm3_R -> T4a_R'],
     'weights': [[150, 80, 45]],
     'connection_ratios': [[0.25, 0.18, 0.12]],
-    'traversal_probabilities': [[0.85, 0.75, 0.65]]
+    'traversal_probabilities': [[0.85, 0.75, 0.65]],
+    'nt_types': [['ACH', 'GABA', 'GLUT']]  # NEW: NT types
 })
+```
+
+## Neurotransmitter (NT) Groups
+
+### NT Edge Groups in Network
+The network visualization automatically creates groups for each neurotransmitter type:
+- **ACH Edges** - Acetylcholine (orange)
+- **GABA Edges** - GABAergic (green)
+- **GLUT Edges** - Glutamate (red)
+- **DA Edges** - Dopamine (purple)
+- **SER Edges** - Serotonin (blue)
+- **OCT Edges** - Octopamine (teal)
+
+### Using NT Groups
+1. Open the network HTML in a browser
+2. Expand "Group Selection" panel
+3. Select an NT group (e.g., "ACH Edges")
+4. Adjust color/opacity
+5. Click "Apply to Group"
+
+### NT Hover Display
+Hovering over edges shows NT type with color coding:
+```
+Connection: A → B
+Weight: 150 synapses
+NT: ACH (displayed in orange)
 ```
 
 ## Methods
@@ -267,13 +295,13 @@ Full examples: `Example_VisualizeSelectedPaths_Standalone.py`
 
 ## vs FindNeuronConnection
 
-| Feature | VisualizePath (Standalone) | fc.VisualizeSelectedPaths() |
-|---------|---------------------------|----------------------------|
-| Import | `from vispath import VisualizePath` | `from coana import FindNeuronConnection` |
-| Initialization | Light (no token/dataset) | Heavy (requires FC init) |
-| Use Case | Post-analysis visualization | During analysis workflow |
-| Performance | Fast | Slightly slower |
-| Recommendation | ✅ Use this | Only if FC already initialized |
+| Feature        | VisualizePath (Standalone)          | fc.VisualizeSelectedPaths()              |
+| -------------- | ----------------------------------- | ---------------------------------------- |
+| Import         | `from vispath import VisualizePath` | `from coana import FindNeuronConnection` |
+| Initialization | Light (no token/dataset)            | Heavy (requires FC init)                 |
+| Use Case       | Post-analysis visualization         | During analysis workflow                 |
+| Performance    | Fast                                | Slightly slower                          |
+| Recommendation | ✅ Use this                          | Only if FC already initialized           |
 
 ## Quick Comparison
 

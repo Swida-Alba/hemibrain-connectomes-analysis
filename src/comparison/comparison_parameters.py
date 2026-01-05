@@ -242,6 +242,11 @@ class ComparisonParameters:
     """If True, skip bodyId-level data saving, visualization, and calculations.
     Useful for large-scale analyses where only type-level data is needed."""
 
+    force_API_fetching: bool = False
+    """If True, use CAVE API to fetch FlyWire (FAFB) data instead of local files.
+    This fetches connection data directly from the CAVE API for more up-to-date data.
+    Note: Only applies to FAFB datasets. BANC does not support API fetching."""
+
     def __post_init__(self):
         """Validate and process parameters after initialization."""
         from .label_mapper import LabelMapper

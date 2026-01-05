@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hemibrain-connectomes-analysis"
-version = "4.3.3"
+version = "4.4.0"
 description = "Hemibrain connectome analysis and visualization toolkit with reorganized modular structure"
 readme = {file = "README.md", content-type = "text/markdown"}
 requires-python = ">=3.8"
@@ -60,6 +60,11 @@ dependencies = [
     # NOTE: neuronbridge-python may fail on Windows due to memray dependency.
     # See docs/INSTALLATION.md for Windows troubleshooting.
     "neuronbridge-python>=3.3.0",
+    # CAVE API dependencies for FlyWire (FAFB) online data fetching
+    "caveclient>=8.0.0",
+    "cloud-volume>=12.0.0",
+    "fast-simplification>=0.1.0",
+    "trimesh>=4.0.0",
 ]
 
 [project.optional-dependencies]

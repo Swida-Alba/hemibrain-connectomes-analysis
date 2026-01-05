@@ -29,6 +29,16 @@ Lists of complete paths found from source to target.
 *   **`path_data_bodyId.csv`**: All valid paths at the bodyId level. Each row is a path: `source -> node1 -> node2 -> target`.
 *   **`path_data_type.csv`**: All valid paths at the type level.
 
+#### Data Details Subfolder
+Detailed neuron and parameter data saved in the `data_details/` subfolder:
+*   **`neurons_included.csv`**: Combined list of all neurons in the found paths with metadata.
+    *   Columns: `group`, `bodyId`, `type`, `instance`, `nt_type` (if available)
+    *   The `group` column indicates: `source`, `intermediate`, or `target`
+    *   The `nt_type` column contains neurotransmitter type (ACH, GABA, GLUT, etc.) extracted from connection data
+*   **`parameters.csv`**: Parameters used for the pathfinding run.
+*   **`source_neurons.csv`**: Source neurons with full metadata.
+*   **`target_neurons.csv`**: Target neurons with full metadata.
+
 #### Metadata & Structure
 *   **`neuron_layers.json`**: A JSON file describing the layer-by-layer structure of the network (which neurons belong to Layer 0, Layer 1, etc.).
 *   **`real_layer_map_bodyId.json`**: Mapping of each bodyId to its "real" layer (earliest appearance in paths).
@@ -135,9 +145,9 @@ Outputs are saved in a timestamped folder: `colabel_{lines}_{timestamp}`.
 - Values: Maximum NeuronBridge match score (0-50000)
 
 ### Merged vs Original Expression Matrix
-| Aspect | Original | Merged |
-|--------|----------|--------|
-| Row index | `MCNS_aMe12`, `FAFB_aMe12` | `aMe12` |
-| Purpose | Distinguish dataset source | Type identity only |
-| Aggregation | None | Max score across datasets |
-| Use case | Dataset-specific analysis | Cross-dataset type comparison |
+| Aspect      | Original                   | Merged                        |
+| ----------- | -------------------------- | ----------------------------- |
+| Row index   | `MCNS_aMe12`, `FAFB_aMe12` | `aMe12`                       |
+| Purpose     | Distinguish dataset source | Type identity only            |
+| Aggregation | None                       | Max score across datasets     |
+| Use case    | Dataset-specific analysis  | Cross-dataset type comparison |

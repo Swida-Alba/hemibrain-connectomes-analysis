@@ -94,7 +94,7 @@ To access NeuPrint and FlyWire datasets, you need to configure your authenticati
 
 1.  **Get your tokens:**
     *   **NeuPrint Token:** Log in to [neuprint.janelia.org](https://neuprint.janelia.org/account) and copy your token.
-    *   **CAVE Token (FlyWire/FAFB):** Log in to [cave-client](https://cave-client.readthedocs.io/en/latest/guide/authentication.html) or your respective CAVE provider.
+    *   **CAVE Token (FlyWire/FAFB):** Log in to [codex.flywire.ai](https://codex.flywire.ai/auth_token) and copy your token.
 
 2.  **Configure local tokens:**
     The project uses a local file `token_info_local.txt` to store your secrets. This file is gitignored to prevent accidental commits.

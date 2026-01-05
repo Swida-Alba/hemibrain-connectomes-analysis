@@ -16,9 +16,11 @@ VisualizePath provides interactive visualization capabilities for neural pathway
 ✅ **Interactive Sankey Diagrams** - Flow-based pathway visualization with edge filtering  
 ✅ **Network Graphs** - Multiple layout algorithms (hierarchical, spring, circular)  
 ✅ **Connection Heatmaps** - With hierarchical clustering and metric toggle  
-✅ **Flexible Input** - CSV/Excel edge-lists or path-based formats  
+✅ **Flexible Input** - CSV/Excel edge-lists, path-based formats, or connection matrices  
 ✅ **Custom Styling** - Node colors, edge colors, fonts, sizes  
-✅ **Export Support** - Save visualizations as SVG/PNG
+✅ **NT (Neurotransmitter) Support** - Color-coded edges by NT type with group selection  
+✅ **Custom Groups** - Create custom groups from selected elements  
+✅ **Export/Import** - Save and restore complete graph states including custom groups  
 
 ## Installation
 
@@ -122,11 +124,11 @@ VisualizePath supports three input formats:
 
 **Example:**
 
-|        | Neuron_1 | Neuron_2 | Neuron_3 |
-|--------|----------|----------|----------|
-| Neuron_A | 10     | 0        | 5        |
-| Neuron_B | 15     | 8        | 0        |
-| Neuron_C | 0      | 12       | 3        |
+|          | Neuron_1 | Neuron_2 | Neuron_3 |
+| -------- | -------- | -------- | -------- |
+| Neuron_A | 10       | 0        | 5        |
+| Neuron_B | 15       | 8        | 0        |
+| Neuron_C | 0        | 12       | 3        |
 
 **Auto-generation:** If index/columns are numeric, node names are auto-generated as `N0`, `N1`, etc.
 
@@ -145,10 +147,10 @@ VisualizePath supports three input formats:
 
 **Example:**
 
-| path_block     | weights      | connection_ratios | traversal_probabilities |
-|----------------|--------------|-------------------|-------------------------|
-| A -> B -> C    | [10, 5]      | [0.5, 0.3]        | [0.8, 0.6]              |
-| A -> D -> C    | [15, 8]      | [0.6, 0.4]        | [0.9, 0.7]              |
+| path_block  | weights | connection_ratios | traversal_probabilities |
+| ----------- | ------- | ----------------- | ----------------------- |
+| A -> B -> C | [10, 5] | [0.5, 0.3]        | [0.8, 0.6]              |
+| A -> D -> C | [15, 8] | [0.6, 0.4]        | [0.9, 0.7]              |
 
 ### 3. Edge-list format (Direct connections):
 
@@ -164,7 +166,7 @@ VisualizePath supports three input formats:
 **Example:**
 
 | source | target | weight | ratio | probability |
-|--------|--------|--------|-------|-------------|
+| ------ | ------ | ------ | ----- | ----------- |
 | A      | B      | 10     | 0.5   | 0.8         |
 | B      | C      | 5      | 0.3   | 0.6         |
 | D      | C      | 8      | 0.4   | 0.7         |
@@ -178,16 +180,49 @@ VisualizePath supports three input formats:
 - `{basename}_network.html` - Interactive network graph
 - `{basename}_data.xlsx` - Processed data
 
+## Network Features
+
+### NT (Neurotransmitter) Edge Groups
+- Edges are automatically grouped by neurotransmitter type (ACH, GABA, GLUT, DA, SER, OCT)
+- Select NT groups from the dropdown to color/style all edges of that type
+- NT type is shown in hover tooltip with color coding
+
+### Custom Groups
+- Select nodes/edges and create custom groups for batch editing
+- Groups persist across export/import cycles
+- Access via "Custom Groups" section in the left panel
+
+### Group Selection
+| Group Type         | Elements                            | Default Opacity |
+| ------------------ | ----------------------------------- | --------------- |
+| Source Nodes       | All source (input) neurons          | 100%            |
+| Intermediate Nodes | All intermediate neurons            | 100%            |
+| Target Nodes       | All target neurons                  | 70%             |
+| Positive Edges     | All positive weight edges           | 50%             |
+| Negative Edges     | All negative weight edges           | 100%            |
+| NT Groups          | ACH, GABA, GLUT, DA, SER, OCT edges | Inherited       |
+| Custom Groups      | User-defined selections             | Custom          |
+
+### Keyboard Shortcuts
+| Key          | Action                                  |
+| ------------ | --------------------------------------- |
+| H            | Hide selected nodes                     |
+| E            | Hide selected edges                     |
+| L            | Toggle label position                   |
+| Right-click  | Hide node/edge (or delete in edit mode) |
+| Double-click | Highlight connected edges               |
+
+### Export/Import
+- **Export Graph**: Saves nodes, edges, positions, styles, group settings, and custom groups
+- **Import Graph**: Restores complete graph state including custom groups
+- **Export Layout**: Saves only node positions for applying to other networks
+
 ## Documentation
 
-For full documentation, see the [main project README](https://github.com/Swida-Alba/hemibrain-connectomes-analysis).
-
-## License
-
-MIT License
-
-## Author
-
+For full documentation, see:
+- [VisualizePath Quick Reference](../docs/visualizations/VisualizePath_QuickRef.md)
+- [Network Features Guide](../docs/visualizations/VisualizePath_Network_Features.md)
+- [Main Project README](https://github.com/Swida-Alba/hemibrain-connectomes-analysis)
 Swida Alba & Copilot
 
 ## Part of

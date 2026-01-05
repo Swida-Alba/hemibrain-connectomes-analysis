@@ -556,29 +556,16 @@ def getNeurons(requiredNeurons, dataset='hemibrain:v1.2.1', custom_group_names=N
                     else:
                         flat_list.append(item)
                 
-                # Filter logic
-                # Check if items are bodyIds (digits) or types (strings)
-                bodyIds = [str(x) for x in flat_list if str(x).isdigit()]
-                types = [str(x) for x in flat_list if not str(x).isdigit()]
+                # Use comprehensive search for each item
+                # This searches: bodyId -> type -> instance -> other columns with proper priority
+                bodyId_alltypes = full_neuron_df['bodyId'].astype(str).tolist()
                 
-                filtered_df = pd.DataFrame()
-                
-                if bodyIds:
-                    df_by_id = full_neuron_df[full_neuron_df['bodyId'].isin(bodyIds)].copy()
-                    selected_dfs.append(df_by_id)
-                    
-                if types:
-                    # Matching for types
-                    for t in types:
-                        # Only use regex when * is present (e.g., "MBON.*", "DN1*")
-                        # All other characters (+, -, etc.) are treated as literals
-                        if '*' in t:
-                            # User wants regex matching
-                            df_by_type = full_neuron_df[full_neuron_df['type'].str.match(t, na=False)].copy()
-                        else:
-                            # Exact match - treat +, -, etc. as literal characters
-                            df_by_type = full_neuron_df[full_neuron_df['type'] == t].copy()
-                        selected_dfs.append(df_by_type)
+                for item in flat_list:
+                    item_bodyIds, search_info = _process_single_neuron(item, full_neuron_df, bodyId_alltypes, verbose=verbose)
+                    if item_bodyIds:
+                        # Get matching rows
+                        item_df = full_neuron_df[full_neuron_df['bodyId'].astype(str).isin([str(b) for b in item_bodyIds])].copy()
+                        selected_dfs.append(item_df)
                 
                 if selected_dfs:
                     filtered_df = pd.concat(selected_dfs).drop_duplicates(subset=['bodyId'])
@@ -682,7 +669,7 @@ def getNeurons(requiredNeurons, dataset='hemibrain:v1.2.1', custom_group_names=N
                     
                     for item in requiredNeuron:
                         group_items.append(str(item).replace('.*', ''))
-                        item_bodyIds = _process_single_neuron(item, ndf_alltypes, bodyId_alltypes, verbose=verbose)
+                        item_bodyIds, _ = _process_single_neuron(item, ndf_alltypes, bodyId_alltypes, verbose=verbose)
                         group_bodyIds.extend(item_bodyIds)
                     
                     # Generate group name
@@ -702,7 +689,7 @@ def getNeurons(requiredNeurons, dataset='hemibrain:v1.2.1', custom_group_names=N
                     print(f'Custom group "{group_name}": {len(group_bodyIds)} neurons from {len(requiredNeuron)} items')
                 else:
                     # Regular item
-                    item_bodyIds = _process_single_neuron(requiredNeuron, ndf_alltypes, bodyId_alltypes, verbose=verbose)
+                    item_bodyIds, _ = _process_single_neuron(requiredNeuron, ndf_alltypes, bodyId_alltypes, verbose=verbose)
                     bodyId_list.extend(item_bodyIds)
                     group_names.append(str(requiredNeuron).replace('.*', ''))
             
@@ -736,7 +723,7 @@ def getNeurons(requiredNeurons, dataset='hemibrain:v1.2.1', custom_group_names=N
                     # Get bodyIds for this custom group
                     group_bodyIds = []
                     for item in requiredNeuron:
-                        item_bodyIds = _process_single_neuron(item, ndf_alltypes, bodyId_alltypes, verbose=verbose)
+                        item_bodyIds, _ = _process_single_neuron(item, ndf_alltypes, bodyId_alltypes, verbose=verbose)
                         group_bodyIds.extend(item_bodyIds)
                     
                     # Ensure type consistency for .isin() matching
@@ -766,7 +753,7 @@ def getNeurons(requiredNeurons, dataset='hemibrain:v1.2.1', custom_group_names=N
                 elif i == 1:
                     auto_name += '_etc'
                 
-                item_bodyIds = _process_single_neuron(requiredNeuron, ndf_alltypes, bodyId_alltypes, verbose=verbose)
+                item_bodyIds, _ = _process_single_neuron(requiredNeuron, ndf_alltypes, bodyId_alltypes, verbose=verbose)
                 bodyId_list.extend(item_bodyIds)
             
             # Ensure bodyId_list type matches DataFrame's bodyId column type for .isin() to work
@@ -784,76 +771,170 @@ def getNeurons(requiredNeurons, dataset='hemibrain:v1.2.1', custom_group_names=N
     return neuron_df, roi_count_df, auto_name, criteria
 
 def _process_single_neuron(requiredNeuron, ndf_alltypes, bodyId_alltypes, verbose=True):
-    '''Helper function to process a single neuron identifier and return bodyIds
+    '''Helper function to process a single neuron identifier and return bodyIds.
+    
+    Search priority:
+    1. bodyId (numeric) - exact match first, then regex if contains .*
+    2. type - exact match first, then regex if contains .*
+    3. instance - exact match first, then regex if contains .*
+    4. Other columns - regex search as fallback
     
     Parameters
     ----------
+    requiredNeuron : str, int, or np.integer
+        The neuron identifier to search for (bodyId, type, instance, or regex pattern)
+    ndf_alltypes : pd.DataFrame
+        DataFrame containing all neurons with columns like bodyId, type, instance, etc.
+    bodyId_alltypes : list
+        List of all bodyIds for quick lookup
     verbose : bool
         Whether to print progress messages
+        
+    Returns
+    -------
+    tuple : (list of bodyIds, dict with search info)
+        Search info contains: {'search_term': str, 'matched_column': str, 'match_count': int}
     '''
+    import re
+    
     bodyId_list = []
+    search_info = {
+        'search_term': str(requiredNeuron),
+        'matched_column': None,
+        'match_count': 0
+    }
     
     # Check if it's a numeric bodyId (int, np.int64, or numeric string)
-    is_bodyid = False
-    bodyid_value = None
-    
+    is_numeric = False
     if isinstance(requiredNeuron, (int, np.integer)):
-        # Native int or numpy integer types (np.int64, etc.)
-        is_bodyid = True
-        bodyid_value = requiredNeuron
-    elif isinstance(requiredNeuron, str) and requiredNeuron.isdigit():
-        # String that looks like a number (e.g., "535898")
-        is_bodyid = True
-        bodyid_value = requiredNeuron  # Keep as string for matching
+        is_numeric = True
+    elif isinstance(requiredNeuron, str) and requiredNeuron.replace('.', '').isdigit():
+        # String that looks like a number (e.g., "535898" or "720575940634984800")
+        is_numeric = True
     
-    if is_bodyid:
-        # bodyId lookup - handle both int and string types in bodyId_alltypes
-        # Convert to both types for comparison since CSV loading may produce either
-        bodyid_int = int(bodyid_value) if isinstance(bodyid_value, str) else bodyid_value
-        bodyid_str = str(bodyid_value)
+    # Check if pattern contains regex wildcard
+    has_regex = isinstance(requiredNeuron, str) and ('.*' in requiredNeuron or '*' in requiredNeuron)
+    
+    # Convert input to string for consistent handling
+    search_str = str(requiredNeuron)
+    
+    # Helper function for regex matching
+    def try_regex_match(df, column, pattern):
+        """Try regex match on a column, return matching rows."""
+        try:
+            # Convert pattern with * to proper regex (e.g., "aMe*" -> "aMe.*")
+            regex_pattern = pattern.replace('*', '.*') if '*' in pattern and '.*' not in pattern else pattern
+            # Ensure pattern matches from start if not starting with .* 
+            if not regex_pattern.startswith('.*') and not regex_pattern.startswith('^'):
+                regex_pattern = '^' + regex_pattern
+            # Match against column, handling both string and numeric columns
+            col_str = df[column].astype(str)
+            matches = col_str.str.match(regex_pattern, na=False)
+            return df[matches]
+        except Exception:
+            return pd.DataFrame()
+    
+    # Helper function for exact match
+    def try_exact_match(df, column, value):
+        """Try exact match on a column, return matching rows."""
+        try:
+            # Always convert both sides to string for consistent comparison
+            col_str = df[column].astype(str)
+            value_str = str(value)
+            # For numeric values, also normalize (remove .0 suffix)
+            if is_numeric:
+                value_str = str(int(float(value_str)))
+            result = df[col_str == value_str]
+            return result
+        except Exception:
+            return pd.DataFrame()
+    
+    # Priority 1: bodyId (for numeric inputs or explicit bodyId patterns)
+    if is_numeric or (has_regex and search_str.replace('.*', '').replace('*', '').replace('^', '').replace('$', '').isdigit()):
+        if is_numeric and not has_regex:
+            # Exact bodyId lookup - always use string comparison for consistency
+            bodyid_str = str(int(float(search_str)))
+            
+            # Convert bodyId_alltypes to strings for comparison, but return original format
+            if bodyId_alltypes:
+                bodyId_alltypes_str = [str(x) for x in bodyId_alltypes]
+                if bodyid_str in bodyId_alltypes_str:
+                    # Return the original format from the list
+                    idx = bodyId_alltypes_str.index(bodyid_str)
+                    bodyId_list.append(bodyId_alltypes[idx])
+                    search_info['matched_column'] = 'bodyId'
+                    search_info['match_count'] = 1
+            
+            if bodyId_list:
+                if verbose:
+                    print(f'Found 1 neuron with bodyId "{search_str}"')
+                return bodyId_list, search_info
+            # If not found as bodyId, fall through to try other columns
+    
+    # Priority 2: type column
+    if 'type' in ndf_alltypes.columns:
+        if has_regex:
+            find_df = try_regex_match(ndf_alltypes, 'type', search_str)
+        else:
+            find_df = try_exact_match(ndf_alltypes, 'type', search_str)
         
-        # Check if bodyId_alltypes contains ints or strings
-        if bodyId_alltypes:
-            sample = bodyId_alltypes[0]
-            if isinstance(sample, (int, np.integer)):
-                # List contains ints, use int comparison
-                if bodyid_int in bodyId_alltypes:
-                    bodyId_list.append(bodyid_int)
-                else:
-                    if verbose:
-                        print(f'\033[33mbodyId {bodyid_int} not found, please check your input (skipped)\033[0m')
-            else:
-                # List contains strings, use string comparison
-                if bodyid_str in bodyId_alltypes:
-                    bodyId_list.append(bodyid_str)
-                else:
-                    if verbose:
-                        print(f'\033[33mbodyId {bodyid_str} not found, please check your input (skipped)\033[0m')
-        else:
-            if verbose:
-                print(f'\033[33mEmpty neuron list, cannot find bodyId {bodyid_value}\033[0m')
-    elif isinstance(requiredNeuron, str) and requiredNeuron.find('.*') != -1:
-        # regex of instance
-        find_df = ndf_alltypes[ndf_alltypes['instance'].str.match(requiredNeuron, na=False)]
         if len(find_df) > 0:
             bodyId_list = find_df['bodyId'].tolist()
+            search_info['matched_column'] = 'type'
+            search_info['match_count'] = len(bodyId_list)
             if verbose:
-                print(f'Found {len(find_df)} neurons of instance "{requiredNeuron}"')
-        else:
-            if verbose:
-                print(f'\033[33minstance "{requiredNeuron}" not found, please check your input (skipped)\033[0m')
-    else:
-        # type
-        find_df = ndf_alltypes[ndf_alltypes['type']==requiredNeuron]
-        if len(find_df) > 0:
-            bodyId_list = find_df['bodyId'].tolist()
-            if verbose:
-                print(f'Found {len(find_df)} neurons of type "{requiredNeuron}"')
-        else:
-            if verbose:
-                print(f'\033[33mtype "{requiredNeuron}" not found, please check your input (skipped)\033[0m')
+                match_type = 'regex' if has_regex else 'exact'
+                print(f'Found {len(find_df)} neurons of type "{search_str}" ({match_type} match)')
+            return bodyId_list, search_info
     
-    return bodyId_list
+    # Priority 3: instance column
+    if 'instance' in ndf_alltypes.columns:
+        if has_regex:
+            find_df = try_regex_match(ndf_alltypes, 'instance', search_str)
+        else:
+            find_df = try_exact_match(ndf_alltypes, 'instance', search_str)
+        
+        if len(find_df) > 0:
+            bodyId_list = find_df['bodyId'].tolist()
+            search_info['matched_column'] = 'instance'
+            search_info['match_count'] = len(bodyId_list)
+            if verbose:
+                match_type = 'regex' if has_regex else 'exact'
+                print(f'Found {len(find_df)} neurons of instance "{search_str}" ({match_type} match)')
+            return bodyId_list, search_info
+    
+    # Priority 4: bodyId column with regex (for patterns like "7205759406.*")
+    if has_regex and 'bodyId' in ndf_alltypes.columns:
+        find_df = try_regex_match(ndf_alltypes, 'bodyId', search_str)
+        if len(find_df) > 0:
+            bodyId_list = find_df['bodyId'].tolist()
+            search_info['matched_column'] = 'bodyId'
+            search_info['match_count'] = len(bodyId_list)
+            if verbose:
+                print(f'Found {len(find_df)} neurons with bodyId matching "{search_str}" (regex match)')
+            return bodyId_list, search_info
+    
+    # Priority 5: Search other string columns as fallback (only for regex patterns)
+    if has_regex:
+        string_columns = [col for col in ndf_alltypes.columns 
+                        if col not in ['bodyId', 'type', 'instance'] 
+                        and ndf_alltypes[col].dtype == 'object']
+        
+        for col in string_columns:
+            find_df = try_regex_match(ndf_alltypes, col, search_str)
+            if len(find_df) > 0:
+                bodyId_list = find_df['bodyId'].tolist()
+                search_info['matched_column'] = col
+                search_info['match_count'] = len(bodyId_list)
+                if verbose:
+                    print(f'Found {len(find_df)} neurons matching "{search_str}" in column "{col}" (regex match)')
+                return bodyId_list, search_info
+    
+    # Not found in any column
+    if verbose:
+        print(f'\033[33m"{search_str}" not found in any column, please check your input (skipped)\033[0m')
+    
+    return bodyId_list, search_info
 
 def removeSearchedNeurons(conn_df,searchedNeurons,exempt_neurons=None):
     '''remove neurons on searched layers, except those in exempt_neurons'''
@@ -4626,9 +4707,17 @@ def EnrichConnectionTable(conn_table, traversal_probability_threshold=0, dataset
     # Calculate from bodyId level to ensure accuracy (neurons in connections, not types in connections)
     # First deduplicate by bodyId pairs to avoid counting same connection multiple times
     cols_to_keep = ['bodyId_pre', 'bodyId_post', group_pre, group_post, 'weight']
-    has_nt = 'nt_type' in conn_df.columns
+    
+    # Check for NT type column - prefer nt_type_pre (presynaptic NT), fallback to nt_type
+    nt_col = None
+    if 'nt_type_pre' in conn_df.columns:
+        nt_col = 'nt_type_pre'
+    elif 'nt_type' in conn_df.columns:
+        nt_col = 'nt_type'
+    
+    has_nt = nt_col is not None
     if has_nt:
-        cols_to_keep.append('nt_type')
+        cols_to_keep.append(nt_col)
         
     bodyid_pairs = conn_df[cols_to_keep].drop_duplicates(subset=['bodyId_pre', 'bodyId_post'])
     
@@ -4641,8 +4730,11 @@ def EnrichConnectionTable(conn_table, traversal_probability_threshold=0, dataset
         # For nt_type, take the most frequent one (mode)
         weight_sum = bodyid_pairs.groupby([group_pre, group_post]).agg({
             'weight': 'sum',
-            'nt_type': lambda x: x.mode().iloc[0] if not x.mode().empty else None
+            nt_col: lambda x: x.mode().iloc[0] if not x.mode().empty else None
         }).reset_index()
+        # Rename to standard nt_type column
+        if nt_col != 'nt_type':
+            weight_sum = weight_sum.rename(columns={nt_col: 'nt_type'})
     else:
         weight_sum = bodyid_pairs.groupby([group_pre, group_post])['weight'].sum().reset_index(name='weight')
     

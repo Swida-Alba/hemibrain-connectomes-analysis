@@ -315,6 +315,189 @@ class FindNeuronConnection:
                 except Exception as e2:
                     print(f"  Error saving CSV (Polars: {e}, Pandas: {e2})", flush=True)
 
+    def _create_combined_neurons_csv(self, source_df, target_df, conn_inpath, csv_folder):
+        """
+        Combine source, target, and intermediate neurons into a single CSV file.
+        Includes NT (neurotransmitter) info if available in connection data.
+        
+        Parameters:
+        -----------
+        source_df : pd.DataFrame or pl.DataFrame
+            Source neurons DataFrame
+        target_df : pd.DataFrame or pl.DataFrame
+            Target neurons DataFrame
+        conn_inpath : pd.DataFrame or pl.DataFrame
+            Connection data with path information (has bodyId_pre, bodyId_post, conn_layer columns)
+        csv_folder : str
+            Folder to save the combined CSV
+        
+        Returns:
+        --------
+        None - saves neurons_included.csv to csv_folder
+        """
+        import polars as pl
+        import pandas as pd
+        
+        # Convert to Polars if needed for consistent handling
+        def to_polars(df):
+            if df is None:
+                return pl.DataFrame()
+            if isinstance(df, pl.DataFrame):
+                return df
+            return pl.from_pandas(df)
+        
+        source_pl = to_polars(source_df)
+        target_pl = to_polars(target_df)
+        
+        # Get source and target bodyIds
+        source_ids = set()
+        target_ids = set()
+        
+        if not source_pl.is_empty() and 'bodyId' in source_pl.columns:
+            source_ids = set(source_pl['bodyId'].cast(pl.Utf8).to_list())
+        
+        if not target_pl.is_empty() and 'bodyId' in target_pl.columns:
+            target_ids = set(target_pl['bodyId'].cast(pl.Utf8).to_list())
+        
+        # Get all bodyIds from conn_inpath (these are neurons actually in paths)
+        conn_pl = to_polars(conn_inpath)
+        all_bodyIds_in_paths = set()
+        
+        if not conn_pl.is_empty():
+            if 'bodyId_pre' in conn_pl.columns:
+                all_bodyIds_in_paths.update(conn_pl['bodyId_pre'].cast(pl.Utf8).unique().to_list())
+            if 'bodyId_post' in conn_pl.columns:
+                all_bodyIds_in_paths.update(conn_pl['bodyId_post'].cast(pl.Utf8).unique().to_list())
+        
+        # Extract NT info from connection data if available
+        # NT type is typically on the pre-synaptic side (nt_type_pre)
+        nt_lookup = {}
+        if not conn_pl.is_empty():
+            # Try to get NT info from nt_type_pre column
+            if 'nt_type_pre' in conn_pl.columns:
+                nt_data = conn_pl.select([
+                    pl.col('bodyId_pre').cast(pl.Utf8).alias('bodyId'),
+                    pl.col('nt_type_pre').alias('nt_type')
+                ]).unique(subset=['bodyId']).drop_nulls(subset=['nt_type'])
+                for row in nt_data.iter_rows(named=True):
+                    if row['bodyId'] and row['nt_type']:
+                        nt_lookup[row['bodyId']] = row['nt_type']
+            # Also check nt_type column directly (some datasets use this)
+            elif 'nt_type' in conn_pl.columns and 'bodyId_pre' in conn_pl.columns:
+                nt_data = conn_pl.select([
+                    pl.col('bodyId_pre').cast(pl.Utf8).alias('bodyId'),
+                    pl.col('nt_type')
+                ]).unique(subset=['bodyId']).drop_nulls(subset=['nt_type'])
+                for row in nt_data.iter_rows(named=True):
+                    if row['bodyId'] and row['nt_type']:
+                        nt_lookup[row['bodyId']] = row['nt_type']
+        
+        # Intermediate neurons are those in paths but not source or target
+        intermediate_ids = all_bodyIds_in_paths - source_ids - target_ids
+        
+        # Filter source/target to only those actually in paths
+        source_ids_in_paths = source_ids & all_bodyIds_in_paths
+        target_ids_in_paths = target_ids & all_bodyIds_in_paths
+        
+        # Create combined DataFrame
+        result_dfs = []
+        
+        # Add source neurons (only those in paths)
+        if source_ids_in_paths and not source_pl.is_empty():
+            source_subset = source_pl.filter(pl.col('bodyId').cast(pl.Utf8).is_in(list(source_ids_in_paths)))
+            if not source_subset.is_empty():
+                # Add group column at position 0
+                source_subset = source_subset.with_columns(pl.lit('source').alias('group'))
+                # Reorder to put group first
+                cols = ['group'] + [c for c in source_subset.columns if c != 'group']
+                source_subset = source_subset.select(cols)
+                result_dfs.append(source_subset)
+        
+        # Add target neurons (only those in paths, excluding those also in source)
+        target_only_ids = target_ids_in_paths - source_ids_in_paths
+        if target_only_ids and not target_pl.is_empty():
+            target_subset = target_pl.filter(pl.col('bodyId').cast(pl.Utf8).is_in(list(target_only_ids)))
+            if not target_subset.is_empty():
+                target_subset = target_subset.with_columns(pl.lit('target').alias('group'))
+                cols = ['group'] + [c for c in target_subset.columns if c != 'group']
+                target_subset = target_subset.select(cols)
+                result_dfs.append(target_subset)
+        
+        # Add intermediate neurons
+        if intermediate_ids:
+            # Fetch neuron info for intermediate neurons
+            intermediate_df = self._fetch_neurons_local_or_api(list(intermediate_ids), columns=['bodyId', 'type', 'instance'])
+            if intermediate_df is not None and not intermediate_df.empty:
+                intermediate_pl = pl.from_pandas(intermediate_df)
+                intermediate_pl = intermediate_pl.with_columns(pl.lit('intermediate').alias('group'))
+                cols = ['group'] + [c for c in intermediate_pl.columns if c != 'group']
+                intermediate_pl = intermediate_pl.select(cols)
+                result_dfs.append(intermediate_pl)
+        
+        # Combine all DataFrames
+        if result_dfs:
+            # Get common columns (group + shared columns across all dfs)
+            common_cols = set(result_dfs[0].columns)
+            for df in result_dfs[1:]:
+                common_cols = common_cols & set(df.columns)
+            
+            # Ensure we have at least group and bodyId
+            required_cols = ['group', 'bodyId']
+            common_cols = common_cols | set(required_cols)
+            
+            # Select common columns from each df and concatenate
+            normalized_dfs = []
+            for df in result_dfs:
+                # Get columns that exist in this df
+                existing_cols = [c for c in common_cols if c in df.columns]
+                # Reorder with group first
+                ordered_cols = ['group'] + [c for c in existing_cols if c != 'group']
+                normalized_dfs.append(df.select([c for c in ordered_cols if c in df.columns]))
+            
+            combined_df = pl.concat(normalized_dfs, how='diagonal')
+            
+            # Add NT info column if we have NT data
+            if nt_lookup:
+                # Create nt_type column by looking up each bodyId
+                combined_df = combined_df.with_columns(
+                    pl.col('bodyId').cast(pl.Utf8).replace(nt_lookup).alias('nt_type')
+                )
+                # Clear values where no match was found (replace returns original if not found)
+                combined_df = combined_df.with_columns(
+                    pl.when(pl.col('nt_type') == pl.col('bodyId').cast(pl.Utf8))
+                    .then(pl.lit(None))
+                    .otherwise(pl.col('nt_type'))
+                    .alias('nt_type')
+                )
+            
+            # Sort by group order (source, intermediate, target) then by bodyId
+            group_order = {'source': 0, 'intermediate': 1, 'target': 2}
+            combined_df = combined_df.with_columns(
+                pl.col('group').replace(group_order).alias('_group_order')
+            ).sort(['_group_order', 'bodyId']).drop('_group_order')
+            
+            # Reorder columns to put nt_type after type if it exists
+            if 'nt_type' in combined_df.columns:
+                cols = combined_df.columns
+                # Desired order: group, bodyId, type, instance, nt_type, ...rest
+                ordered_cols = []
+                for col in ['group', 'bodyId', 'type', 'instance', 'nt_type']:
+                    if col in cols:
+                        ordered_cols.append(col)
+                # Add remaining columns
+                for col in cols:
+                    if col not in ordered_cols:
+                        ordered_cols.append(col)
+                combined_df = combined_df.select(ordered_cols)
+            
+            # Save to CSV
+            output_path = os.path.join(csv_folder, 'neurons_included.csv')
+            combined_df.write_csv(output_path)
+            nt_info = f" (with NT info: {len(nt_lookup)} neurons)" if nt_lookup else ""
+            self._vprint(f'  ✓ Saved {len(combined_df)} neurons to neurons_included.csv{nt_info}', level='full')
+        else:
+            self._vprint('  ⚠️  No neurons to save to neurons_included.csv', level='full')
+
     def _read_csv(self, filepath: str, **kwargs) -> 'pd.DataFrame':
         """Read CSV with polars (faster) and convert to pandas.
         
@@ -412,6 +595,7 @@ class FindNeuronConnection:
         Check and prepare FlyWire data from downloaded archives.
         Uses FAFB_file_converter or BANC_file_converter to ensure data validity and conversion.
         
+        If force_API_fetching is True for FAFB, skip local file preparation and use CAVE API later.
         If cache already exists with complete data, source files are not required.
         '''
         if self.client_type != 'flywire':
@@ -420,6 +604,27 @@ class FindNeuronConnection:
         dataset_safe = self.dataset.replace(':', '_').replace('.', '_')
         dataset_dir = os.path.join(self.script_path, 'datasets', dataset_safe)
         cache_dir = os.path.join(self.script_path, 'cache', dataset_safe)
+        
+        # If force_API_fetching is True for FAFB, we'll use CAVE API instead of local files
+        # Note: BANC does not support force_API_fetching due to API access restrictions
+        if self.force_API_fetching:
+            if 'BANC' in self.dataset:
+                self._vprint("⚠️  force_API_fetching=True is not supported for BANC (API access restricted).", level='simple')
+                self._vprint("   Falling back to local data mode.", level='simple')
+                self.force_API_fetching = False
+            else:
+                # Check for API cache first
+                api_cache_dir = os.path.join(cache_dir, 'API_cache')
+                api_conn_cache = os.path.join(api_cache_dir, 'connections.parquet')
+                api_index_cache = os.path.join(api_cache_dir, 'neuron_index.parquet')
+                
+                if os.path.exists(api_conn_cache) and os.path.exists(api_index_cache):
+                    self._vprint(f"Using API cache for {self.dataset}", level='simple')
+                    return
+                
+                self._vprint(f"force_API_fetching=True: Will fetch data via CAVE API for {self.dataset}", level='simple')
+                # Don't require local files - we'll fetch via API
+                return
         
         # Check if cache already exists and is complete
         # If so, we don't need the source files
@@ -444,8 +649,23 @@ class FindNeuronConnection:
             success = FAFB_file_converter.ensure_flywire_data(self.dataset, dataset_dir)
             
         if not success:
-            print("\n\033[31mCRITICAL ERROR: FlyWire/BANC data preparation failed.\033[0m")
-            print("Please follow the instructions above to download the required files.")
+            # For FAFB, provide option to use CAVE API
+            if 'BANC' not in self.dataset:
+                print("\n\033[33m" + "="*70 + "\033[0m")
+                print("\033[33mFAFB LOCAL DATA NOT FOUND\033[0m")
+                print("\033[33m" + "="*70 + "\033[0m")
+                print("\nYou have two options:")
+                print("\n\033[32m1. Download local data (RECOMMENDED for performance):\033[0m")
+                print("   Follow the instructions above to download the synapse table.")
+                print(f"   Save to: datasets/{dataset_safe}/")
+                print("\n\033[36m2. Use CAVE API (slow, for testing/small queries):\033[0m")
+                print("   Set force_API_fetching=True in your script:")
+                print("   fnc = FindNeuronConnection(..., force_API_fetching=True)")
+                print("\n   ⚠️  WARNING: CAVE API is slow for large queries.")
+                print("   Downloading local data is strongly recommended.\n")
+            else:
+                print("\n\033[31mCRITICAL ERROR: BANC data preparation failed.\033[0m")
+                print("Please follow the instructions above to download the required files.")
             sys.exit(1)
 
     source_path: str = os.path.dirname(os.path.abspath(__file__))
@@ -495,6 +715,14 @@ class FindNeuronConnection:
 
     version: int | None = None
     '''Materialization version for FlyWire (e.g. 783). If None, uses default/latest.'''
+    
+    force_API_fetching: bool = False
+    '''
+    When True, use CAVE API to fetch FlyWire data (FAFB only, requires CAVE token).
+    This fetches connection data directly from the CAVE API instead of local files.
+    When False (default), use local data from datasets/ folder via file converter.
+    Note: BANC currently does not support force_API_fetching due to API access restrictions.
+    '''
     
     sourceNeurons: list = field(default_factory=list)
     '''
@@ -632,11 +860,11 @@ class FindNeuronConnection:
     showfig: bool = False
     '''whether to show the figures'''
     
-    link_color: str = 'rgba(100,150,240,0.2)'
-    '''link color for Sankey diagram'''
+    link_color: str = 'rgba(100,150,240,0.5)'
+    '''link color for Sankey diagram (default 50% opacity)'''
     
-    node_color: str = 'rgba(60,100,200,0.5)'
-    '''node color for Sankey diagram'''
+    node_color: str = 'rgba(60,100,200,1.0)'
+    '''node color for Sankey diagram (default 100% opacity)'''
     
     target_color: str = 'rgba(120,40,70,0.7)'
     '''target node color for Sankey diagram, only works when interlayers exist'''
@@ -732,6 +960,9 @@ class FindNeuronConnection:
     def __post_init__(self):
         # Flag to use tqdm.write instead of print when inside progress bar
         self._in_progress_bar = False
+        
+        # Lazy-initialized CAVE fetcher (reused across calls)
+        self._cave_fetcher = None
         
         self._vprint('Initializing...', level='full')
         
@@ -884,7 +1115,7 @@ class FindNeuronConnection:
         neurons without types.
         '''
         if self.client_type == 'flywire':
-            self._vprint("   Skipping complete dataset download for FlyWire (too large). Cache enrichment will rely on on-demand fetching.", level='full')
+            # No need to print anything - FlyWire uses local files or CAVE API, not downloaded dataset
             return
 
         # Create datasets folder if it doesn't exist
@@ -2088,9 +2319,35 @@ class FindNeuronConnection:
                 if not missing_neuron_df.empty:
                     neuron_df = pd.concat([neuron_df, missing_neuron_df], ignore_index=True)
         
-        neuron_info = neuron_df[['bodyId', 'type', 'instance']].copy()
+        # Extract base columns: bodyId, type, instance
+        base_cols = ['bodyId', 'type', 'instance']
+        
+        # Check for neurotransmitter columns and include them
+        # FAFB uses: nt_type
+        # male-cns uses: predictedNt, consensusNt, celltypePredictedNt
+        nt_columns = []
+        for nt_col in ['nt_type', 'predictedNt', 'consensusNt', 'celltypePredictedNt']:
+            if nt_col in neuron_df.columns:
+                nt_columns.append(nt_col)
+        
+        # Build neuron_info with available columns
+        available_cols = [c for c in base_cols + nt_columns if c in neuron_df.columns]
+        neuron_info = neuron_df[available_cols].copy()
+        
         # Ensure bodyId is string for merging
         neuron_info['bodyId'] = neuron_info['bodyId'].astype(str)
+        
+        # Determine which NT column to use as primary (prefer nt_type, then consensusNt, then predictedNt)
+        nt_col_to_use = None
+        if 'nt_type' in nt_columns:
+            nt_col_to_use = 'nt_type'
+        elif 'consensusNt' in nt_columns:
+            nt_col_to_use = 'consensusNt'
+        elif 'predictedNt' in nt_columns:
+            nt_col_to_use = 'predictedNt'
+        
+        if nt_col_to_use:
+            self._vprint(f'  ℹ️  Including neurotransmitter info from column: {nt_col_to_use}', level='full')
         
         # Add custom_group from source_df and target_df if available
         if hasattr(self, 'source_df') and 'custom_group' in self.source_df.columns:
@@ -2107,28 +2364,34 @@ class FindNeuronConnection:
             target_custom['bodyId'] = target_custom['bodyId'].astype(str)
             neuron_info = neuron_info.merge(target_custom, on='bodyId', how='left')
         
-        # Drop existing type/instance/custom_group columns if they exist (to avoid _x, _y suffixes after merge)
+        # Drop existing type/instance/custom_group/nt columns if they exist (to avoid _x, _y suffixes after merge)
         columns_to_drop = []
         for col in ['type_pre', 'instance_pre', 'type_post', 'instance_post', 
-                    'custom_group_pre', 'custom_group_post']:
+                    'custom_group_pre', 'custom_group_post', 'nt_type_pre', 'nt_type_post']:
             if col in conn_df.columns:
                 columns_to_drop.append(col)
         if columns_to_drop:
             conn_df = conn_df.drop(columns=columns_to_drop)
         
-        # Prepare columns to merge
-        merge_cols = {'type': 'type_pre', 'instance': 'instance_pre'}
-        if 'custom_group_pre' in neuron_info.columns:
-            merge_cols['custom_group_pre'] = 'custom_group_pre'
-        if 'custom_group_post' in neuron_info.columns:
-            merge_cols['custom_group_post'] = 'custom_group_post'
+        # Prepare columns to merge - add NT column if available
+        rename_dict_pre = {'type': 'type_pre', 'instance': 'instance_pre'}
+        rename_dict_post = {'type': 'type_post', 'instance': 'instance_post'}
         
-        # Join type and instance for pre-synaptic neurons
-        merge_info_pre = neuron_info.rename(columns={'type': 'type_pre', 'instance': 'instance_pre'})
+        # Add NT column renaming if available
+        if nt_col_to_use and nt_col_to_use in neuron_info.columns:
+            rename_dict_pre[nt_col_to_use] = 'nt_type_pre'
+            rename_dict_post[nt_col_to_use] = 'nt_type_post'
+        
+        # Join type, instance, and NT for pre-synaptic neurons
+        merge_info_pre = neuron_info.rename(columns=rename_dict_pre)
+        
+        # Build list of columns to keep for pre
+        pre_cols = ['bodyId', 'type_pre', 'instance_pre']
+        if 'nt_type_pre' in merge_info_pre.columns:
+            pre_cols.append('nt_type_pre')
         if 'custom_group_pre' in merge_info_pre.columns:
-            merge_info_pre = merge_info_pre[['bodyId', 'type_pre', 'instance_pre', 'custom_group_pre']]
-        else:
-            merge_info_pre = merge_info_pre[['bodyId', 'type_pre', 'instance_pre']]
+            pre_cols.append('custom_group_pre')
+        merge_info_pre = merge_info_pre[[c for c in pre_cols if c in merge_info_pre.columns]]
         
         # Ensure bodyId columns are strings for merging to avoid warnings
         conn_df['bodyId_pre'] = conn_df['bodyId_pre'].astype(str)
@@ -2141,12 +2404,16 @@ class FindNeuronConnection:
             how='left'
         ).drop(columns=['bodyId'])
         
-        # Join type and instance for post-synaptic neurons  
-        merge_info_post = neuron_info.rename(columns={'type': 'type_post', 'instance': 'instance_post'})
+        # Join type, instance, and NT for post-synaptic neurons  
+        merge_info_post = neuron_info.rename(columns=rename_dict_post)
+        
+        # Build list of columns to keep for post
+        post_cols = ['bodyId', 'type_post', 'instance_post']
+        if 'nt_type_post' in merge_info_post.columns:
+            post_cols.append('nt_type_post')
         if 'custom_group_post' in merge_info_post.columns:
-            merge_info_post = merge_info_post[['bodyId', 'type_post', 'instance_post', 'custom_group_post']]
-        else:
-            merge_info_post = merge_info_post[['bodyId', 'type_post', 'instance_post']]
+            post_cols.append('custom_group_post')
+        merge_info_post = merge_info_post[[c for c in post_cols if c in merge_info_post.columns]]
         
         # Ensure bodyId columns are strings for merging to avoid warnings
         conn_df['bodyId_post'] = conn_df['bodyId_post'].astype(str)
@@ -2413,6 +2680,217 @@ class FindNeuronConnection:
                 return pd.DataFrame(columns=columns if columns else [])
     
     # ============================================================================
+    # CAVE API Fetching (for force_API_fetching=True)
+    # ============================================================================
+    
+    def _get_cave_fetcher(self):
+        '''
+        Get or create a persistent CAVEDataFetcher instance.
+        Reuses existing fetcher to avoid reconnecting to CAVE server repeatedly.
+        '''
+        if self._cave_fetcher is None:
+            from cave_data_fetcher import CAVEDataFetcher
+            
+            self._cave_fetcher = CAVEDataFetcher(
+                dataset=self.dataset,
+                cache_enabled=False,  # We handle caching ourselves
+                verbose=self.verbose_mode == 'full'
+            )
+        return self._cave_fetcher
+    
+    def _fetch_connections_with_cave_api(self, upstream_bodyIds, downstream_bodyIds=None,
+                                         min_weight=None, min_traversal_prob=None, min_conn_ratio=None):
+        '''
+        Fetch connections using CAVE API for FAFB/FlyWire datasets.
+        Results are cached in API_cache/ folder, separate from downloaded data cache.
+        
+        Parameters:
+        -----------
+        upstream_bodyIds : list
+            List of upstream neuron bodyIds
+        downstream_bodyIds : list or None
+            List of downstream neuron bodyIds (None = all downstream)
+        min_weight : int or None
+            Minimum synapse count for filtering
+        min_traversal_prob : float or None
+            Minimum traversal probability for edge filtering
+        min_conn_ratio : float or None
+            Minimum connection ratio (weight/post) for edge filtering
+        
+        Returns:
+        --------
+        pd.DataFrame : Connection table filtered by specified criteria
+        '''
+        if min_weight is None:
+            min_weight = self.min_synapse_num
+        if min_traversal_prob is None:
+            min_traversal_prob = self.min_traversal_probability  
+        if min_conn_ratio is None:
+            min_conn_ratio = self.min_ratio
+            
+        # Setup API cache paths
+        dataset_safe = self.dataset.replace(':', '_').replace('.', '_')
+        api_cache_dir = os.path.join(self.script_path, 'cache', dataset_safe, 'API_cache')
+        os.makedirs(api_cache_dir, exist_ok=True)
+        
+        api_conn_cache = os.path.join(api_cache_dir, 'connections.parquet')
+        api_neuron_cache = os.path.join(api_cache_dir, 'neuron_index.parquet')
+        
+        # Convert to strings
+        upstream_strs = [str(x) for x in upstream_bodyIds]
+        
+        # Check API cache for already fetched neurons
+        cached_upstream = set()
+        cached_conn = pd.DataFrame()
+        
+        if os.path.exists(api_neuron_cache):
+            try:
+                import polars as pl
+                neuron_index = pl.read_parquet(api_neuron_cache)
+                cached_upstream = set(neuron_index['bodyId'].unique().to_list())
+                self._vprint(f'  📂 API cache contains {len(cached_upstream)} neurons', level='full')
+            except Exception as e:
+                self._vprint(f'  ⚠️ Error loading API neuron cache: {e}', level='full')
+        
+        if os.path.exists(api_conn_cache) and cached_upstream:
+            try:
+                import polars as pl
+                all_cached = pl.read_parquet(api_conn_cache)
+                # Filter to upstream neurons
+                cached_conn = all_cached.filter(pl.col('bodyId_pre').is_in(upstream_strs))
+                if not cached_conn.is_empty():
+                    cached_conn = cached_conn.to_pandas()
+                    self._vprint(f'  📂 Retrieved {len(cached_conn):,} connections from API cache', level='full')
+                else:
+                    cached_conn = pd.DataFrame()
+            except Exception as e:
+                self._vprint(f'  ⚠️ Error loading API connection cache: {e}', level='full')
+        
+        # Identify neurons that need API fetching
+        uncached_upstream = [x for x in upstream_strs if x not in cached_upstream]
+        
+        # Fetch uncached neurons from CAVE API
+        api_conn = pd.DataFrame()
+        if len(uncached_upstream) > 0:
+            self._vprint(f'  🌐 Fetching {len(uncached_upstream)} neurons via CAVE API...', level='full')
+            
+            try:
+                # Reuse existing CAVE fetcher to avoid reconnecting
+                fetcher = self._get_cave_fetcher()
+                
+                # Convert to int for CAVE API
+                uncached_ints = [int(x) for x in uncached_upstream]
+                
+                # Fetch connections (direction='pre' gets outgoing connections)
+                conn_df = fetcher.fetch_connections(uncached_ints, direction='pre')
+                
+                if conn_df is not None and not conn_df.empty:
+                    # Rename columns to match expected format
+                    api_conn = conn_df.rename(columns={
+                        'pre_pt_root_id': 'bodyId_pre',
+                        'post_pt_root_id': 'bodyId_post'
+                    })
+                    
+                    # Ensure string types
+                    api_conn['bodyId_pre'] = api_conn['bodyId_pre'].astype(str)
+                    api_conn['bodyId_post'] = api_conn['bodyId_post'].astype(str)
+                    
+                    # Add roi column
+                    if 'roi' not in api_conn.columns:
+                        api_conn['roi'] = 'WholeBrain'
+                    
+                    self._vprint(f'  ✓ Fetched {len(api_conn)} connections via CAVE API', level='full')
+                    
+                    # Save to API cache
+                    self._save_to_api_cache(api_conn, uncached_upstream, api_cache_dir)
+                else:
+                    self._vprint(f'  ℹ️ No connections found via CAVE API', level='full')
+                    
+            except ImportError:
+                self._vprint(f'  ⚠️ CAVE data fetcher not available. Install caveclient package.', level='full')
+                return pd.DataFrame(columns=['bodyId_pre', 'bodyId_post', 'weight', 'roi'])
+            except Exception as e:
+                self._vprint(f'  ⚠️ Error fetching from CAVE API: {e}', level='full')
+                import traceback
+                self._vprint(f'     {traceback.format_exc()}', level='full')
+        
+        # Combine cached and API results
+        if cached_conn.empty if isinstance(cached_conn, pd.DataFrame) else True:
+            combined = api_conn if not api_conn.empty else pd.DataFrame(columns=['bodyId_pre', 'bodyId_post', 'weight', 'roi'])
+        elif api_conn.empty:
+            combined = cached_conn
+        else:
+            combined = pd.concat([cached_conn, api_conn], ignore_index=True)
+        
+        if combined.empty:
+            return pd.DataFrame(columns=['bodyId_pre', 'bodyId_post', 'weight', 'roi', 'type_pre', 'type_post', 'instance_pre', 'instance_post'])
+        
+        # Enrich with neuron info
+        combined = self._enrich_connections_with_neuron_info(combined)
+        
+        # Apply filters
+        if self.label_mapper and not combined.empty:
+            self._vprint(f'  🏷️  Applying label mapping to {len(combined):,} connections...', level='full')
+            combined = self.label_mapper.apply_to_dataframe(combined, self.dataset)
+            
+            if 'std_label_pre' in combined.columns:
+                mask = combined['std_label_pre'] != ''
+                combined.loc[mask, 'type_pre'] = combined.loc[mask, 'std_label_pre']
+                combined = combined.drop(columns=['std_label_pre'])
+                
+            if 'std_label_post' in combined.columns:
+                mask = combined['std_label_post'] != ''
+                combined.loc[mask, 'type_post'] = combined.loc[mask, 'std_label_post']
+                combined = combined.drop(columns=['std_label_post'])
+        
+        # Exclude intra-type connections if requested
+        if self.exclude_intra_type_connections and len(combined) > 0:
+            combined = combined[combined['type_pre'] != combined['type_post']].copy()
+        
+        # Apply threshold filters
+        total_before_filter = len(combined)
+        if min_weight > 1 and 'weight' in combined.columns:
+            combined = combined[combined['weight'] >= min_weight]
+        
+        self._vprint(f'  ⏳ Applying filters to {total_before_filter} connections...', level='full')
+        self._vprint(f'     Filtered: {total_before_filter} → {len(combined)} connections (weight ≥ {min_weight})', level='full')
+        
+        return combined
+    
+    def _save_to_api_cache(self, conn_df, bodyIds, api_cache_dir):
+        '''Save connection data to API cache.'''
+        try:
+            import polars as pl
+            
+            api_conn_cache = os.path.join(api_cache_dir, 'connections.parquet')
+            api_neuron_cache = os.path.join(api_cache_dir, 'neuron_index.parquet')
+            
+            # Load existing cache or create new
+            if os.path.exists(api_conn_cache):
+                existing_conn = pl.read_parquet(api_conn_cache)
+                new_conn = pl.from_pandas(conn_df)
+                combined = pl.concat([existing_conn, new_conn], how='diagonal_relaxed').unique()
+            else:
+                combined = pl.from_pandas(conn_df)
+            
+            # Save connections
+            combined.write_parquet(api_conn_cache)
+            
+            # Update neuron index
+            if os.path.exists(api_neuron_cache):
+                existing_index = pl.read_parquet(api_neuron_cache)
+                new_index = pl.DataFrame({'bodyId': bodyIds, 'cached_date': [datetime.now().strftime('%Y-%m-%d %H:%M:%S')] * len(bodyIds)})
+                combined_index = pl.concat([existing_index, new_index], how='diagonal_relaxed').unique(subset=['bodyId'])
+            else:
+                combined_index = pl.DataFrame({'bodyId': bodyIds, 'cached_date': [datetime.now().strftime('%Y-%m-%d %H:%M:%S')] * len(bodyIds)})
+            
+            combined_index.write_parquet(api_neuron_cache)
+            
+            self._vprint(f'  💾 Saved {len(bodyIds)} neurons to API cache', level='full')
+        except Exception as e:
+            self._vprint(f'  ⚠️ Error saving to API cache: {e}', level='full')
+    
+    # ============================================================================
     # Main Fetch Method (replaces old _fetch_connections_with_cache)
     # ============================================================================
     
@@ -2421,6 +2899,10 @@ class FindNeuronConnection:
         '''
         Fetch connections with v4.0 pair-level caching.
         Queries unified database first, only fetches missing neurons from API.
+        
+        When force_API_fetching=True for FAFB/FlyWire:
+        - Uses CAVE API instead of local files
+        - Caches API results in API_cache/ folder separately from downloaded data cache
         
         Parameters:
         -----------
@@ -2445,6 +2927,15 @@ class FindNeuronConnection:
             min_traversal_prob = self.min_traversal_probability
         if min_conn_ratio is None:
             min_conn_ratio = self.min_ratio
+        
+        # Check if we should use CAVE API (force_API_fetching for FAFB/FlyWire)
+        use_cave_api = (self.force_API_fetching and 
+                       ('fafb' in self.dataset.lower() or 'flywire' in self.dataset.lower()) and
+                       'BANC' not in self.dataset.upper())
+        
+        if use_cave_api:
+            return self._fetch_connections_with_cave_api(upstream_bodyIds, downstream_bodyIds,
+                                                        min_weight, min_traversal_prob, min_conn_ratio)
         
         # Step 1: Query database for cached connections
         cached_conn, uncached_upstream, partially_cached = self._query_connection_db(upstream_bodyIds, downstream_bodyIds)
@@ -4834,6 +5325,8 @@ class FindNeuronConnection:
             self._save_df_to_csv_polars(self.parameter_df, os.path.join(csv_folder, 'parameters.csv'))
             self._save_df_to_csv_polars(self.source_df, os.path.join(csv_folder, 'source_neurons.csv'))
             self._save_df_to_csv_polars(self.target_df, os.path.join(csv_folder, 'target_neurons.csv'))
+            # Save combined neurons CSV with group column
+            self._create_combined_neurons_csv(self.source_df, self.target_df, conn_inpath, csv_folder)
             self._save_df_to_csv_polars(totalweight_df, os.path.join(csv_folder, 'total_weight_layer.csv'))
             self._save_df_to_csv_polars(conn_types, os.path.join(csv_folder, 'connection_type.csv'))
             self._save_matrices_to_csv(conn_types, csv_folder, level='type')
@@ -5264,7 +5757,8 @@ class FindNeuronConnection:
                     showfig=self.showfig,
                     edgeN_limit=self.edgeN_limit,
                     output_format=self.output_format,
-                    verbose=(self.verbose_mode == 'full')
+                    verbose=(self.verbose_mode == 'full'),
+                    color_edges_by_nt=True  # Enable NT-based edge coloring
                 )
                 vp.visualize()
                 self._vprint('  Created network_selected_paths.html and sankey_selected_paths.html')
@@ -6180,6 +6674,9 @@ class FindNeuronConnection:
             self._save_df_to_csv_polars(self.source_df, os.path.join(csv_folder, 'source_neurons.csv'))
             self._save_df_to_csv_polars(self.target_df, os.path.join(csv_folder, 'target_neurons.csv'))
             
+            # Save combined neurons CSV (will be empty for intermediate since no paths)
+            self._create_combined_neurons_csv(self.source_df, self.target_df, conn_inpath, csv_folder)
+            
             # Save discovered type-level edges even without valid paths
             # conn_types contains type-level aggregated edges (correctly aggregated at this threshold)
             if not conn_types.is_empty():
@@ -6336,6 +6833,9 @@ class FindNeuronConnection:
             
             # print("    - target_neurons.csv", flush=True)
             self._save_df_to_csv_polars(self.target_df, os.path.join(csv_folder, 'target_neurons.csv'), index=True)
+            
+            # Save combined neurons CSV with group column
+            self._create_combined_neurons_csv(self.source_df, self.target_df, conn_inpath, csv_folder)
             
             # print("    - total_weight_layer.csv", flush=True)
             self._save_df_to_csv_polars(totalweight_df, os.path.join(csv_folder, 'total_weight_layer.csv'), index=True)
@@ -7086,7 +7586,8 @@ class FindNeuronConnection:
                     showfig=self.showfig,
                     edgeN_limit=self.edgeN_limit,
                     output_format=self.output_format,
-                    verbose=(self.verbose_mode == 'full')
+                    verbose=(self.verbose_mode == 'full'),
+                    color_edges_by_nt=True  # Enable NT-based edge coloring
                 )
                 vp.visualize()
                 if self.verbose_mode == 'simple':

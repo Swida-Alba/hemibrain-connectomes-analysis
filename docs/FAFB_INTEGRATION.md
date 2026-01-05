@@ -73,14 +73,20 @@ After the script successfully completes (look for "✓ Conversion complete" mess
 Use `FindNeuronConnection` with the FAFB dataset name.
 
 ```python
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).parent.parent / 'src'))
+
 from coana import FindNeuronConnection
 
-fnc = FindNeuronConnection()
-fnc.dataset = 'flywire_FAFB_v783'
-
-# Use FAFB Root IDs (as integers or strings)
-fnc.sourceNeurons = [720575940596125868] 
-fnc.targetNeurons = [720575940597856265]
+fnc = FindNeuronConnection(
+    dataset='flywire_FAFB_v783',
+    sourceNeurons=['l-LNv.*'],  # Regex patterns supported
+    targetNeurons=['s-LNv.*'],
+    max_interlayer=2,
+    min_synapse_num=5,
+    verbose_mode='simple',
+)
 
 fnc.InitializeNeuronInfo()
 fnc.FindAllPath()
@@ -88,28 +94,112 @@ fnc.FindAllPath()
 
 ### Visualization
 
-You can visualize skeletons using `Vis3S` (or `VisualizeSkeleton`).
+Visualize skeletons using `VisualizeSkeleton` (or the shorthand `Vis3S`).
 
 ```python
-import statvis as sv
-import pandas as pd
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).parent.parent / 'src'))
 
-# Create a DataFrame with neurons to visualize
-df = pd.DataFrame({
-    'bodyId': ['720575940596125868'],
-    'type': ['T5c']
-})
+from coana import VisualizeSkeleton
 
-sv.Vis3S(
-    df,
-    toPlot='skeleton',
+vs = VisualizeSkeleton(
     dataset='flywire_FAFB_v783',
-    showfig=True
+    token='',  # Not needed for FAFB local data
+    output_dir='/path/to/output',
+    neuron_layers=['l-LNv'],  # Neuron types or bodyIds
+    skip_synapse=True,
+    neuron_alpha=0.2,
+    min_synapse_num=3,
+    skeleton_mode='tube',
+    merge_neurons=True,
+    show_fig=True,
+    brain_mesh='template',  # Use native FAFB coordinates
+    cache_neurons=True,
 )
+
+vs.plot_neurons()
 ```
+
+### CAVE API Fetching (force_API_fetching)
+
+For more up-to-date skeleton data, you can fetch skeletons directly from the CAVE API instead of using the local ZIP file:
+
+```python
+from coana import VisualizeSkeleton
+
+vs = VisualizeSkeleton(
+    dataset='flywire_FAFB_v783',
+    output_dir='/path/to/output',
+    neuron_layers=['l-LNv'],
+    skip_synapse=True,
+    neuron_alpha=0.2,
+    skeleton_mode='tube',
+    merge_neurons=True,
+    show_fig=True,
+    brain_mesh='template',
+    cache_neurons=True,
+    force_API_fetching=True,  # Fetch from CAVE API instead of local ZIP
+)
+
+vs.plot_neurons()
+```
+
+**Key Features:**
+- **API Cache**: When `force_API_fetching=True`, skeletons fetched via API are cached locally in `cache/{dataset}/API_cache/skeletons/`. On subsequent runs, cached skeletons are loaded first before fetching new ones.
+- **Local ZIP Mode**: When `force_API_fetching=False` (default), only local ZIP data is used. The system will NOT check API cache - this ensures consistency with the downloaded dataset.
+- **Automatic Fallback**: If `force_API_fetching=False` and the local ZIP is missing or empty, the system will automatically fall back to API fetching as a last resort.
+- **Updated Data**: Use `force_API_fetching=True` to ensure you're using the most up-to-date neuron morphologies from the CAVE API.
+
+### Fixing Skeleton Extrusion Issues
+
+The downloaded FAFB skeleton ZIP (`sk_lod1_783_healed.zip`) may contain neurons with extrusion artifacts (mesh errors that appear as spikes or protrusions). You can fix specific neurons by fetching fresh skeletons via CAVE API:
+
+```python
+from coana import VisualizeSkeleton
+
+# Method 1: Fix specific neurons by fetching them via API
+# Run with force_API_fetching=True for the problematic neurons only
+vs = VisualizeSkeleton(
+    dataset='flywire_FAFB_v783',
+    neuron_layers=[720575940596125868, 720575940597856265],  # Problematic bodyIds
+    force_API_fetching=True,  # Fetch fresh data from CAVE API
+    show_fig=False,  # Just cache the fixed skeletons
+    cache_neurons=True,
+)
+vs.plot_neurons()  # This caches the API-fetched skeletons
+
+# Method 2: Once fixed, run your full visualization
+# API-cached skeletons are automatically prioritized over ZIP data
+vs2 = VisualizeSkeleton(
+    dataset='flywire_FAFB_v783',
+    neuron_layers=['l-LNv', 's-LNv'],  # Mix of neurons
+    force_API_fetching=False,  # Use local data, but API cache takes priority
+    show_fig=True,
+    brain_mesh='template',
+)
+vs2.plot_neurons()
+```
+
+**How Extrusion Fixes Work:**
+1. Neurons fetched via API are cached in `cache/{dataset}/API_cache/skeletons/`
+2. **VisualizeSkeleton** ALWAYS checks API cache first, even when `force_API_fetching=False`
+3. This allows you to selectively fix problematic neurons without re-downloading the entire 13GB ZIP
+4. Fixed neurons persist across sessions via the cache
+
+**Note on force_API_fetching Behavior:**
+- **VisualizeSkeleton**: Prioritizes API cache even when `force_API_fetching=False` (for extrusion fixes)
+- **FindNeuronConnection**: Uses API only when `force_API_fetching=True` (for consistency with local data)
+
+**Requirements:**
+- CAVE token (obtain from https://global.daf-apis.com/auth/api/v1/create_token)
+- Set token in `token_info_local.txt` or as environment variable `CAVE_TOKEN`
+
+**Note:** BANC dataset does not support `force_API_fetching` due to API access restrictions (requires community membership at brain-and-nerve-cord.org).
 
 ## Notes
 
 *   **Root IDs**: FAFB root IDs are very large integers. The system handles them as strings internally to avoid precision loss, but you can pass them as integers in your scripts.
 *   **Caching**: The caching system currently produces warnings for FAFB IDs due to their size, but this does not affect the analysis results.
-*   **Skeletons**: Skeleton visualization requires the `sk_lod1_783_healed.zip` file. Only neurons present in this zip file can be visualized as skeletons.
+*   **Skeletons**: Skeleton visualization requires either the `sk_lod1_783_healed.zip` file or CAVE API access (via `force_API_fetching=True`). VisualizeSkeleton always prioritizes API-cached skeletons over ZIP data.
+*   **Extrusion Issues**: The downloaded `sk_lod1_783_healed.zip` may contain neurons with extrusion artifacts (mesh errors appearing as spikes). Use `VisualizeSkeleton.fix_fafb_extrusions([bodyId1, bodyId2, ...])` to fetch fresh skeletons for problematic neurons. Once cached, they will be automatically used instead of ZIP versions.

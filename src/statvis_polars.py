@@ -183,11 +183,8 @@ def prepare_connection_data(conn_data, level='type'):
         aggs.append(pl.col('connection_ratio').mean().alias('connection_ratio'))
         
     if 'nt_type' in df.columns:
-        # Custom aggregation for nt_type: unique values joined by |
-        # Polars doesn't have a direct 'unique_join' agg, so we might need a custom expression or list
-        # For speed, let's just take the first one or list
-        # aggs.append(pl.col('nt_type').unique().alias('nt_type_list'))
-        pass 
+        # For nt_type, take the first value (most edges between same nodes have same NT)
+        aggs.append(pl.col('nt_type').first().alias('nt_type'))
 
     # Group and aggregate
     df_agg = df.group_by(['src', 'tgt']).agg(aggs)
@@ -240,6 +237,9 @@ def process_batch_polars(paths_batch, df_conn, level='type', keyword_in_path_to_
     df_joined = df_edges.join(df_conn, on=['src', 'tgt'], how='left')
     
     # Fill missing values (if any edge not found)
+    # Check if nt_type exists
+    has_nt = 'nt_type' in df_joined.columns
+    
     df_joined = df_joined.with_columns([
         pl.col('weight').fill_null(0),
         pl.col('traversal_probability').fill_null(0),
@@ -260,6 +260,10 @@ def process_batch_polars(paths_batch, df_conn, level='type', keyword_in_path_to_
         pl.col('connection_ratio').min().alias('min_ratio'),
         pl.count('src').alias('length')
     ]
+    
+    # Add nt_type aggregation if available
+    if has_nt:
+        aggs.append(pl.col('nt_type').alias('nt_types'))
     
     df_results = df_joined.group_by('path_id', maintain_order=True).agg(aggs)
     
@@ -300,11 +304,20 @@ def process_batch_polars(paths_batch, df_conn, level='type', keyword_in_path_to_
     
     # Convert list columns to string for CSV compatibility
     # Format as "[w1, w2, w3]" to match original statvis output
-    df_final = df_final.with_columns([
+    list_format_cols = [
         (pl.lit("[") + pl.col('weights').list.eval(pl.element().cast(pl.Utf8)).list.join(', ') + pl.lit("]")).alias('weights'),
         (pl.lit("[") + pl.col('probabilities').list.eval(pl.element().cast(pl.Utf8)).list.join(', ') + pl.lit("]")).alias('probabilities'),
         (pl.lit("[") + pl.col('ratios').list.eval(pl.element().cast(pl.Utf8)).list.join(', ') + pl.lit("]")).alias('ratios')
-    ])
+    ]
+    
+    # Add nt_types formatting if available - use quoted strings for proper parsing
+    if 'nt_types' in df_final.columns:
+        # Format as ["ACH", "GABA"] so ast.literal_eval can parse it
+        list_format_cols.append(
+            (pl.lit('["') + pl.col('nt_types').list.eval(pl.element().cast(pl.Utf8)).list.join('", "') + pl.lit('"]')).alias('nt_types')
+        )
+    
+    df_final = df_final.with_columns(list_format_cols)
     
     # Rename path_nodes to path_str (to match statvis output convention)
     # But statvis uses 'path_str' for the list object in pandas.
@@ -333,6 +346,10 @@ def process_batch_polars(paths_batch, df_conn, level='type', keyword_in_path_to_
         'path', 'weights', 'probabilities', 'ratios', 
         'min_weight', 'path_prob', 'min_ratio', 'length'
     ]
+    
+    # Add nt_types if available
+    if 'nt_types' in df_final.columns:
+        cols_to_keep.append('nt_types')
     
     # Note: 'path_nodes' is the list. We can keep it if needed, but CSV writing might stringify it.
     # statvis writes 'path' as string "A->B->C".
@@ -692,12 +709,23 @@ def EnrichConnectionTablePolars(conn_table, traversal_probability_threshold=0, d
                     'std_label_pre', 'std_label_post', 'weight', 'block_probability', 'traversal_probability']
     if 'custom_group_pre' in conn_df.columns:
         cols_to_keep.extend(['custom_group_pre', 'custom_group_post'])
-    if 'nt_type' in conn_df.columns:
+    
+    # Check for NT type column - prefer nt_type_pre (presynaptic NT), fallback to nt_type
+    nt_col = None
+    if 'nt_type_pre' in conn_df.columns:
+        nt_col = 'nt_type_pre'
+        cols_to_keep.append('nt_type_pre')
+    elif 'nt_type' in conn_df.columns:
+        nt_col = 'nt_type'
         cols_to_keep.append('nt_type')
     
     # Keep only existing columns
     cols_to_keep = [c for c in cols_to_keep if c in conn_df.columns]
     bodyid_pairs = conn_df.select(cols_to_keep).unique(subset=['bodyId_pre', 'bodyId_post'])
+    
+    # Rename nt_type_pre to nt_type for consistency in downstream processing
+    if nt_col == 'nt_type_pre' and 'nt_type_pre' in bodyid_pairs.columns:
+        bodyid_pairs = bodyid_pairs.rename({'nt_type_pre': 'nt_type'})
     
     # Also add std_label to ref_df for total_post calculation
     ref_df_with_labels = None
@@ -714,12 +742,19 @@ def EnrichConnectionTablePolars(conn_table, traversal_probability_threshold=0, d
     elif ref_df is not None:
         ref_df_with_labels = ref_df.with_columns(pl.col('type').alias('std_label'))
     
+    # Check if nt_type exists
+    has_nt_type = 'nt_type' in bodyid_pairs.columns
+    
     # Function to aggregate
     def aggregate_connections(group_pre_col, group_post_col, ref_group_col=None):
         # Sum weights from deduplicated bodyId pairs
-        agg_df = bodyid_pairs.group_by([group_pre_col, group_post_col]).agg([
-            pl.col('weight').sum()
-        ])
+        agg_list = [pl.col('weight').sum()]
+        
+        # Add nt_type aggregation if available (take first/mode)
+        if has_nt_type:
+            agg_list.append(pl.col('nt_type').first().alias('nt_type'))
+        
+        agg_df = bodyid_pairs.group_by([group_pre_col, group_post_col]).agg(agg_list)
         
         # Calculate Traversal Probability
         if aggregate_method == 'product':

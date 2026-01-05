@@ -14,8 +14,7 @@ if __name__ == '__main__':
     neurons_network = ['aMe.*']
     
     fc = FindNeuronConnection(
-        # please provide your own neuprint token, which can be found at https://neuprint.janelia.org/account
-        token='',
+        # Token automatically loaded from token_info.txt (recommended) or set token='' here
         output_dir='../local_data/connection_data',
         # dataset='flywire_FAFB_v783',  # Combined dataset and version in one parameter
         dataset = 'male-cns:v0.9',

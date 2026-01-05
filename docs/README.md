@@ -1,6 +1,36 @@
 # Documentation Index
 
-Welcome to the Hemibrain Connectomes Analysis documentation!
+Welcome to the Drosophila Connectome Analysis Toolkit (DROCAT) documentation!
+
+## 🆕 Recent Updates (January 2026) - V4.4.0
+
+### 🚀 Local FAFB/BANC Dataset Support (RECOMMENDED)
+- **Local-first architecture**: Store FlyWire datasets locally for 10-100x faster access
+- **Mixed mode**: Seamlessly combines local cache + API fallback  
+- **Zero API latency**: Instant queries for cached neurons
+- **Automatic caching**: Build your cache once, reuse forever
+- **📖 [FAFB Integration Guide](./FAFB_INTEGRATION.md)** | **[Cache System](./core-features/CacheSystem_Guide.md)**
+
+### 🔍 Priority-Based Neuron Search
+- **Smart search order**: bodyId → type → instance with automatic fallback
+- **Flexible input**: Accept both int and string bodyIds: `[123456789]` or `['123456789']`
+- **Regex support**: Use patterns like `['KC.*']`, `['.*PN.*']` across all columns
+- **Consistent matching**: String-based comparison internally for reliability
+- **📖 [Basic Usage Guide](./core-features/BasicUsage_Guide.md#search-priority)**
+
+### 🎨 NT Visualization & Grouping
+- **NT edge groups**: ACH, GABA, GLUT, DA, SER, OCT - select and style by neurotransmitter
+- **Custom groups**: Create and save custom element groups for batch editing
+- **Hover labels**: NT type displayed in edge tooltips with color coding
+- **Export/Import**: Save complete graph states including custom groups and NT settings
+- **Default opacity**: 50% for edges (vs 20%), 100% for nodes (vs 50%) - better visibility
+- **📖 [Network Features Guide](./visualizations/VisualizePath_Network_Features.md)**
+
+### 🔐 Authentication Improvements
+- **token_info.txt recommended**: Store all API tokens in one file (NeuPrint, CAVE, NeuronBridge)
+- **Automatic loading**: No need to pass tokens manually in scripts
+- **Secure storage**: Keep credentials out of version control
+- **📖 [Authentication Setup](./INSTALLATION.md#authentication-setup)**
 
 ## 🆕 Recent Updates (December 2025) - V4.3
 
@@ -148,38 +178,38 @@ Advanced technical documentation:
 ## Documentation by Task
 
 ### Finding Connections
-| Task | Documentation |
-|------|--------------|
-| Direct connections | [Main README](../README.md#finddirectpy) |
-| Multi-hop paths | [FindAllPath](./core-features/FindAllPath_Documentation.md) |
-| **Compare across datasets** | **[Cross-Dataset Comparison](./core-features/CrossDatasetComparison_Guide.md)** |
-| **Verify neuron types** | **[Profile Verification](./core-features/ConnectivityProfileVerification_Guide.md)** |
-| **Find homologs** | **[Homolog Finding](./core-features/HomologFinding_Guide.md)** |
-| Custom neuron groups | [Custom Groups](./core-features/CustomGroups_Feature.md) |
-| Forward-only paths | [Forward-Only Guide](./core-features/ForwardOnly_Guide.md) |
-| Filter connections | [Connection Filters](./core-features/README.md#filtering) |
+| Task                        | Documentation                                                                        |
+| --------------------------- | ------------------------------------------------------------------------------------ |
+| Direct connections          | [Main README](../README.md#finddirectpy)                                             |
+| Multi-hop paths             | [FindAllPath](./core-features/FindAllPath_Documentation.md)                          |
+| **Compare across datasets** | **[Cross-Dataset Comparison](./core-features/CrossDatasetComparison_Guide.md)**      |
+| **Verify neuron types**     | **[Profile Verification](./core-features/ConnectivityProfileVerification_Guide.md)** |
+| **Find homologs**           | **[Homolog Finding](./core-features/HomologFinding_Guide.md)**                       |
+| Custom neuron groups        | [Custom Groups](./core-features/CustomGroups_Feature.md)                             |
+| Forward-only paths          | [Forward-Only Guide](./core-features/ForwardOnly_Guide.md)                           |
+| Filter connections          | [Connection Filters](./core-features/README.md#filtering)                            |
 
 ### Visualizing Data
-| Task | Documentation |
-|------|--------------|
-| Connection matrix | [Heatmap Guide](./visualizations/Heatmap_Guide.md) |
-| Network graph | [Network Guide](./visualizations/Network_Guide.md) |
-| Flow diagram | [Sankey Guide](./visualizations/Sankey_Guide.md) |
-| 3D anatomy | [3D Skeleton Guide](./visualizations/3D_Skeleton_Guide.md) |
+| Task              | Documentation                                              |
+| ----------------- | ---------------------------------------------------------- |
+| Connection matrix | [Heatmap Guide](./visualizations/Heatmap_Guide.md)         |
+| Network graph     | [Network Guide](./visualizations/Network_Guide.md)         |
+| Flow diagram      | [Sankey Guide](./visualizations/Sankey_Guide.md)           |
+| 3D anatomy        | [3D Skeleton Guide](./visualizations/3D_Skeleton_Guide.md) |
 
 ### Optimizing Performance
-| Task | Documentation |
-|------|--------------|
-| Enable caching | [Cache Quick Start](./core-features/CacheSystem_QuickStart.md) |
+| Task             | Documentation                                                         |
+| ---------------- | --------------------------------------------------------------------- |
+| Enable caching   | [Cache Quick Start](./core-features/CacheSystem_QuickStart.md)        |
 | Optimize queries | [Deep Backend Optimizations](./technical/DeepBackendOptimizations.md) |
 
 ### Customizing Output
-| Task | Documentation |
-|------|--------------|
-| Custom colors | [Custom Colors Guide](./visualizations/CUSTOM_COLORS_GUIDE.md) |
-| Layout algorithms | [Advanced Layout Algorithms](./visualizations/AdvancedLayoutAlgorithms.md) |
-| Heatmap clustering | [Heatmap Clustering](./visualizations/HEATMAP_CLUSTERING_FEATURE.md) |
-| Edge width control | [Edge Width Scaling](./visualizations/EDGE_WIDTH_SCALING.md) |
+| Task               | Documentation                                                              |
+| ------------------ | -------------------------------------------------------------------------- |
+| Custom colors      | [Custom Colors Guide](./visualizations/CUSTOM_COLORS_GUIDE.md)             |
+| Layout algorithms  | [Advanced Layout Algorithms](./visualizations/AdvancedLayoutAlgorithms.md) |
+| Heatmap clustering | [Heatmap Clustering](./visualizations/HEATMAP_CLUSTERING_FEATURE.md)       |
+| Edge width control | [Edge Width Scaling](./visualizations/EDGE_WIDTH_SCALING.md)               |
 
 ---
 
