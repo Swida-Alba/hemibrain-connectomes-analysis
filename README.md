@@ -155,7 +155,7 @@ pip install -r requirements-windows.txt  # Windows
 | `male-cns:v0.9`     | NeuPrint | Full male CNS             |
 | `optic-lobe:v1.1`   | NeuPrint | Optic lobe detailed       |
 | `manc:v1.2.3`       | NeuPrint | Male VNC                  |
-| `flywire_FAFB_v783` | Local    | FlyWire female brain      |
+| `flywire_FAFB_v783` | Local&API| FlyWire female brain      |
 | `flywire_BANC_v626` | Local    | FlyWire male VNC          |
 
 📖 **[FlyWire Setup Guide](docs/FLYWIRE_USAGE.md)**
