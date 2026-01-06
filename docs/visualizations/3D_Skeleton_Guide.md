@@ -16,11 +16,11 @@ The 3D skeleton visualization displays:
 
 3D skeleton visualization requires **neuron bodyIds** from NeuPrint:
 
-| Input Type | Description | Example | Source |
-|------------|-------------|---------|--------|
-| **bodyId** | Unique neuron identifier | 123456789, 987654321 | NeuPrint database |
-| **Neuron types** | Type name (converted to bodyIds) | 'KC_alpha', 'MBON03' | Fetched via NeuPrint API |
-| **Layer specification** | Multi-layer pathway | ['KC.*', 'MBON.*', 'DAN.*'] | From path analysis |
+| Input Type              | Description                      | Example                     | Source                   |
+| ----------------------- | -------------------------------- | --------------------------- | ------------------------ |
+| **bodyId**              | Unique neuron identifier         | 123456789, 987654321        | NeuPrint database        |
+| **Neuron types**        | Type name (converted to bodyIds) | 'KC_alpha', 'MBON03'        | Fetched via NeuPrint API |
+| **Layer specification** | Multi-layer pathway              | ['KC.*', 'MBON.*', 'DAN.*'] | From path analysis       |
 
 ### Example Input Files
 
@@ -146,18 +146,220 @@ export_video_from_html(
 
 **Video Export Parameters:**
 
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `fps` | 30 | Frames per second |
-| `degree_per_frame` | 1.0 | Rotation angle per frame (1.0 → 360 frames) |
-| `rotate` | 'horizontal' | Rotation direction: 'horizontal' or 'vertical' |
-| `scale` | 2 | Resolution multiplier |
-| `use_existing_images` | True | Reuse cached frame images if available |
+| Parameter             | Default      | Description                                    |
+| --------------------- | ------------ | ---------------------------------------------- |
+| `fps`                 | 30           | Frames per second                              |
+| `degree_per_frame`    | 1.0          | Rotation angle per frame (1.0 → 360 frames)    |
+| `rotate`              | 'horizontal' | Rotation direction: 'horizontal' or 'vertical' |
+| `scale`               | 2            | Resolution multiplier                          |
+| `use_existing_images` | True         | Reuse cached frame images if available         |
 
 **Output Files:**
 - `{folder}/pics_{fps}fps_{plane}/` - Cached frame images
 - `{folder}/{name}_video_forward.mp4` - Forward rotation
 - `{folder}/{name}_video_backward.mp4` - Reverse rotation
+
+---
+
+## Export Methods: WebDriver vs Kaleido
+
+VisualizeSkeleton supports two export engines for PNG/video generation, each with different trade-offs:
+
+### Method Comparison
+
+| Feature           | **Kaleido** (default)           | **WebDriver**                      |
+| ----------------- | ------------------------------- | ---------------------------------- |
+| **Speed**         | 🐢 Slower (one-by-one rendering) | ⚡ Fast (browser-based screenshot ) |
+| **Quality**       | ✅ Excellent                     | ✅ Excellent                        |
+| **Max HTML Size** | ~100 MB                         | ~200 MB+                           |
+| **WebGL Support** | ❌ Limited (rasterization)       | ✅ Full (native WebGL)              |
+| **Dependencies**  | `kaleido` only                  | `selenium` + Chrome                |
+| **Reliability**   | ✅ Very stable                   | ⚠️ Requires Chrome version match    |
+| **Large Figures** | ❌ May timeout                   | ✅ Better handling                  |
+
+### When to Use Each Method
+
+**Use `export_method='kaleido'` (default) when:**
+- HTML file size < 100 MB
+- You want minimal dependencies
+- Fast export is priority
+- Simple 3D scenes without complex WebGL
+
+**Use `export_method='webdriver'` when:**
+- HTML file size > 100 MB
+- Kaleido times out on complex figures
+- You need native WebGL rendering quality
+- Exporting rotating videos (efficient frame generation)
+
+### Configuration Example
+
+```python
+vs = VisualizeSkeleton(
+    dataset='hemibrain:v1.2.1',
+    neuron_layers=['MBON.*'],
+    
+    # Export method selection
+    export_method='webdriver',      # 'kaleido' or 'webdriver'
+    
+    # WebDriver-specific settings
+    webdriver_render_wait=0.3,      # Seconds between frames (None = auto-calibrate)
+    
+    # Shared export settings
+    export_scale=3,                 # Resolution multiplier (1-5)
+    export_timeout=60,              # Timeout per frame (kaleido only)
+    
+    # Auto-simplification threshold
+    html_size_cap=150,              # MB threshold for auto-simplification
+                                    # None = auto (100MB kaleido, 200MB webdriver)
+)
+```
+
+### Auto-Simplification
+
+For large figures, VisualizeSkeleton automatically simplifies meshes before export:
+
+| Export Method | Default Threshold | Behavior                                       |
+| ------------- | ----------------- | ---------------------------------------------- |
+| Kaleido       | 100 MB            | Simplify if HTML > threshold, retry on timeout |
+| WebDriver     | 200 MB            | Simplify if HTML > threshold                   |
+
+**Manual override:**
+```python
+# Disable auto-simplification (may cause timeouts)
+vs = VisualizeSkeleton(..., html_size_cap=9999)
+
+# Force aggressive simplification
+vs = VisualizeSkeleton(..., html_size_cap=50)
+```
+
+When simplification occurs, a `{name}_simplified.html` file is saved for reference.
+
+---
+
+## WebDriver Setup & Requirements
+
+### Dependencies
+
+WebDriver export requires:
+
+1. **Python packages:**
+   ```bash
+   pip install selenium webdriver-manager
+   ```
+
+2. **Google Chrome browser** (version 109 or later)
+   - The `--headless=new` mode requires Chrome 109+
+   - Download: https://www.google.com/chrome/
+
+### Platform-Specific Setup
+
+#### macOS
+
+```bash
+# Install via Homebrew (recommended)
+brew install --cask google-chrome
+
+# Or download directly from google.com/chrome
+
+# Verify Chrome version (must be 109+)
+/Applications/Google\ Chrome.app/Contents/MacOS/Google\ Chrome --version
+```
+
+**ChromeDriver is managed automatically** by `webdriver-manager`. It:
+- Detects your Chrome version
+- Downloads matching ChromeDriver
+- Caches it at `~/.wdm/drivers/chromedriver/`
+
+#### Linux
+
+```bash
+# Ubuntu/Debian
+sudo apt update
+sudo apt install google-chrome-stable
+
+# Or download .deb from google.com/chrome
+wget https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
+sudo dpkg -i google-chrome-stable_current_amd64.deb
+
+# Verify version
+google-chrome --version
+```
+
+#### Windows
+
+1. Download Chrome from https://www.google.com/chrome/
+2. Install normally
+3. ChromeDriver is auto-managed by `webdriver-manager`
+
+**Note:** On Windows, Chrome is typically found at:
+- `C:\Program Files\Google\Chrome\Application\chrome.exe`
+- `C:\Program Files (x86)\Google\Chrome\Application\chrome.exe`
+
+### Troubleshooting WebDriver
+
+#### Error: "Could not initialize Chrome WebDriver"
+
+**Causes and solutions:**
+
+1. **Chrome not installed:**
+   ```
+   Install Google Chrome from google.com/chrome
+   ```
+
+2. **Chrome version too old:**
+   ```
+   Update Chrome to version 109 or later
+   Current minimum: Chrome 109 (for --headless=new WebGL support)
+   ```
+
+3. **ChromeDriver version mismatch:**
+   ```bash
+   # Clear cached ChromeDriver
+   rm -rf ~/.wdm/drivers/chromedriver/
+   
+   # Re-run export (will download fresh ChromeDriver)
+   ```
+
+4. **webdriver-manager not installed:**
+   ```bash
+   pip install webdriver-manager
+   ```
+
+5. **Network error downloading ChromeDriver:**
+   ```
+   Check internet connection
+   Retry the export
+   ```
+
+#### Error: "WebGL not supported"
+
+This typically means Chrome is running in legacy headless mode. The code now uses `--headless=new` which supports WebGL on all platforms.
+
+#### Fallback to Kaleido
+
+If WebDriver fails, you can always fall back:
+```python
+vs = VisualizeSkeleton(..., export_method='kaleido')
+```
+
+### Chrome Version Check
+
+To verify your Chrome version meets requirements:
+
+```bash
+# macOS
+/Applications/Google\ Chrome.app/Contents/MacOS/Google\ Chrome --version
+
+# Linux
+google-chrome --version
+
+# Windows (PowerShell)
+(Get-Item "C:\Program Files\Google\Chrome\Application\chrome.exe").VersionInfo.FileVersion
+```
+
+**Minimum required: Chrome 109** (released January 2023)
+
+---
 
 ### Prerequisites
 
@@ -167,6 +369,12 @@ pip install navis
 pip install flybrains  # For brain templates and transforms
 pip install plotly
 pip install neuprint-python
+```
+
+**For WebDriver export:**
+```bash
+pip install selenium webdriver-manager
+# + Google Chrome browser (version 109+)
 ```
 
 **Data requirements**:
@@ -209,12 +417,12 @@ vs = VisualizeSkeleton(
 
 **Dataset-Specific Templates:**
 
-| Dataset | `brain_mesh='template'` | `brain_mesh='whole'` | Transform Required |
-|---------|------------------------|---------------------|-------------------|
-| **hemibrain:v1.2.1** | JRCFIB2018F (EM) | JRC2018F (confocal) | ✅ Yes (~10GB) |
-| **optic-lobe:v1.1** | JRCFIB2018F (EM) | JRC2018F (confocal) | ✅ Yes (~10GB) |
-| **manc:v1.2.3** | MANC (native VNC) | — | ❌ No |
-| **male-cns:v0.9** | JRCFIB2022M (native) | — | ❌ No |
+| Dataset              | `brain_mesh='template'` | `brain_mesh='whole'` | Transform Required |
+| -------------------- | ----------------------- | -------------------- | ------------------ |
+| **hemibrain:v1.2.1** | JRCFIB2018F (EM)        | JRC2018F (confocal)  | ✅ Yes (~10GB)      |
+| **optic-lobe:v1.1**  | JRCFIB2018F (EM)        | JRC2018F (confocal)  | ✅ Yes (~10GB)      |
+| **manc:v1.2.3**      | MANC (native VNC)       | —                    | ❌ No               |
+| **male-cns:v0.9**    | JRCFIB2022M (native)    | —                    | ❌ No               |
 
 **Transform Storage:**
 

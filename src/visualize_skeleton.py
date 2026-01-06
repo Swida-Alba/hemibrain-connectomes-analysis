@@ -98,10 +98,18 @@ from tqdm import tqdm
 # Suppress FutureWarning from neuprint about Series.__getitem__
 warnings.filterwarnings("ignore", category=FutureWarning, module="neuprint")
 
+# Suppress navis warnings about missing/invalid radii
+# These are expected when skeletons have no radius info and are handled automatically
+warnings.filterwarnings("ignore", message=".*radii are missing or <= 0.*")
+warnings.filterwarnings("ignore", message=".*Mesh will look funny.*")
+
 import numpy as np
 import pandas as pd
 import cv2
 import navis
+# Configure navis logger to suppress warnings about missing radii
+logging.getLogger("navis").setLevel(logging.ERROR)
+
 import navis.interfaces.neuprint as neu
 from neuprint import Client, fetch_synapse_connections, SynapseCriteria, fetch_meta
 import plotly.graph_objects as go
@@ -115,6 +123,941 @@ class PNGExportTimeout(Exception):
 def _timeout_handler(signum, frame):
     """Signal handler for PNG export timeout."""
     raise PNGExportTimeout("PNG export timed out")
+
+
+class WebDriverExportSession:
+    """
+    Context manager for WebDriver-based exports that keeps the browser open
+    for efficient multi-view or video frame exports.
+    
+    Opens the browser once and allows:
+    - Loading HTML once and exporting multiple views by rotating camera
+    - Exporting video frames without reopening browser
+    
+    Usage:
+    ------
+    ```python
+    with WebDriverExportSession(width=1200, height=900, scale=2) as session:
+        session.load_html('/path/to/figure.html')
+        for view_name, camera in cameras.items():
+            session.set_camera(camera['eye'], camera['up'], camera.get('center'))
+            session.screenshot(f'output_{view_name}.png')
+    ```
+    """
+    
+    def __init__(self, width=1200, height=900, scale=2, timeout=300, render_wait=None):
+        """
+        Initialize WebDriver session parameters.
+        
+        Parameters
+        ----------
+        width : int
+            Browser viewport width
+        height : int
+            Browser viewport height  
+        scale : int
+            Scale factor for high DPI rendering (2 = 144 DPI, 3 = 216 DPI)
+        timeout : int
+            Timeout in seconds for page load (default 300s for large HTML files)
+        render_wait : float, optional
+            Fixed render wait time in seconds. If None, auto-calibrated.
+        """
+        self.width = width
+        self.height = height
+        self.scale = scale
+        self.timeout = timeout
+        self.driver = None
+        self._loaded_url = None
+        self._render_wait = render_wait if render_wait is not None else 0.3
+        self._render_wait_fixed = render_wait is not None  # Skip calibration if fixed
+        self._initial_camera = None  # Store initial camera from HTML
+        
+    def __enter__(self):
+        """Initialize the WebDriver and return self."""
+        try:
+            from selenium import webdriver
+            from selenium.webdriver.chrome.service import Service as ChromeService
+            from selenium.webdriver.chrome.options import Options as ChromeOptions
+        except ImportError:
+            raise ImportError("selenium is required. Install with: pip install selenium webdriver-manager")
+        
+        # Use base dimensions for window - scale via deviceScaleFactor to avoid flashing
+        # This prevents window resize flashing while still getting high-resolution output
+        base_width = self.width
+        base_height = self.height
+        
+        chrome_options = ChromeOptions()
+        chrome_options.add_argument('--no-sandbox')
+        chrome_options.add_argument('--disable-dev-shm-usage')
+        chrome_options.add_argument(f'--window-size={base_width},{base_height}')
+        
+        # Use new headless mode (Chrome 109+) which supports WebGL better than old headless
+        # This replaces the offscreen/position hack which can be flaky on macOS
+        chrome_options.add_argument('--headless=new')
+        
+        # Disable animations and GPU compositing to reduce flashing
+        chrome_options.add_argument('--disable-gpu-compositing')
+        chrome_options.add_argument('--disable-smooth-scrolling')
+        # Memory and stability settings for large HTML files (>100MB)
+        chrome_options.add_argument('--js-flags=--max-old-space-size=8192')  # 8GB JS heap
+        chrome_options.add_argument('--disable-features=RendererCodeIntegrity')
+        chrome_options.add_argument('--disable-backgrounding-occluded-windows')
+        chrome_options.add_argument('--disable-renderer-backgrounding')
+        chrome_options.add_argument('--memory-pressure-off')
+        # GPU memory for large WebGL scenes
+        chrome_options.add_argument('--enable-gpu-rasterization')
+        chrome_options.add_argument('--ignore-gpu-blocklist')
+        
+        # Initialize ChromeDriver using webdriver-manager (cross-platform) or system Chrome
+        # webdriver-manager automatically downloads and caches the correct ChromeDriver version
+        # Cache location: ~/.wdm/drivers/chromedriver/ (managed automatically)
+        try:
+            from webdriver_manager.chrome import ChromeDriverManager
+            service = ChromeService(ChromeDriverManager().install())
+            self.driver = webdriver.Chrome(service=service, options=chrome_options)
+        except ImportError:
+            # webdriver-manager not installed, try system Chrome directly
+            try:
+                self.driver = webdriver.Chrome(options=chrome_options)
+            except Exception as e:
+                raise RuntimeError(
+                    f"Could not initialize Chrome WebDriver: {e}\n\n"
+                    f"WebDriver export requires:\n"
+                    f"  1. Google Chrome browser (version 109+)\n"
+                    f"  2. selenium package: pip install selenium\n"
+                    f"  3. webdriver-manager package: pip install webdriver-manager\n\n"
+                    f"Install with: pip install selenium webdriver-manager\n"
+                    f"Or use export_method='kaleido' as fallback."
+                )
+        except Exception as e:
+            # webdriver-manager failed (version mismatch, network error, etc.)
+            # Try system Chrome directly
+            try:
+                self.driver = webdriver.Chrome(options=chrome_options)
+            except Exception as e2:
+                raise RuntimeError(
+                    f"Could not initialize Chrome WebDriver: {e2}\n\n"
+                    f"Common causes:\n"
+                    f"  - Chrome not installed or not found in PATH\n"
+                    f"  - Chrome version mismatch with ChromeDriver\n"
+                    f"  - Network error downloading ChromeDriver\n\n"
+                    f"Solutions:\n"
+                    f"  1. Install/update Google Chrome (version 109+ required for --headless=new)\n"
+                    f"  2. Ensure webdriver-manager is installed: pip install webdriver-manager\n"
+                    f"  3. Check internet connection for ChromeDriver download\n"
+                    f"  4. Use export_method='kaleido' as fallback\n\n"
+                    f"Original error: {e}"
+                )
+        
+        # Set up viewport size once at initialization using CDP
+        # Use deviceScaleFactor for high-resolution output instead of scaling window size
+        # This prevents flashing by keeping window at fixed size
+        try:
+            self.driver.execute_cdp_cmd('Emulation.setDeviceMetricsOverride', {
+                'width': self.width,
+                'height': self.height,
+                'deviceScaleFactor': self.scale,  # Use scale factor for resolution
+                'mobile': False
+            })
+            self._viewport_configured = True
+        except Exception:
+            self._viewport_configured = False
+        
+        return self
+    
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """Clean up WebDriver."""
+        if self.driver:
+            try:
+                self.driver.quit()
+            except:
+                pass
+        return False
+    
+    def load_html(self, html_path, wait_for_render=True, render_wait=3):
+        """
+        Load an HTML file into the browser.
+        
+        Parameters
+        ----------
+        html_path : str
+            Path to the HTML file
+        wait_for_render : bool
+            If True, wait for Plotly to render
+        render_wait : float
+            Additional seconds to wait after Plotly detected
+        """
+        from selenium.webdriver.support.ui import WebDriverWait
+        from selenium.webdriver.support import expected_conditions as EC
+        from selenium.webdriver.common.by import By
+        import time
+        
+        # Set page load timeout for large HTML files
+        self.driver.set_page_load_timeout(self.timeout)
+        self.driver.set_script_timeout(self.timeout)
+        
+        file_url = f'file://{os.path.abspath(html_path)}'
+        self.driver.get(file_url)
+        self._loaded_url = file_url
+        
+        if wait_for_render:
+            wait = WebDriverWait(self.driver, self.timeout)
+            wait.until(EC.presence_of_element_located((By.CLASS_NAME, "plotly")))
+            time.sleep(render_wait)
+            
+            # Set up the viewport and figure size ONCE to avoid flashing on every screenshot
+            # This must be done after Plotly is loaded
+            self._setup_viewport_size()
+            
+            # Force an initial draw to ensure WebGL canvas has content
+            # This prevents blank images on first screenshot
+            self._force_initial_draw()
+            
+            # Read initial camera from HTML - this is the "front view" reference
+            self._initial_camera = self.get_current_camera()
+            
+            # Calibrate render wait time based on machine performance (unless fixed)
+            if not self._render_wait_fixed:
+                self._calibrate_render_wait()
+    
+    def _setup_viewport_size(self):
+        """
+        Initialize viewport settings without resizing the Plotly figure.
+        Resizing causes canvas flashing - instead we export at the canvas's natural size
+        and rely on deviceScaleFactor for resolution.
+        """
+        # Don't resize Plotly figure - this causes canvas flashing
+        # The deviceScaleFactor set in __enter__() handles resolution scaling
+        # The screenshot will capture whatever size the figure renders at
+        pass
+    
+    def _force_initial_draw(self):
+        """
+        Force an initial WebGL draw to ensure canvas has content.
+        This prevents blank images on first screenshot due to WebGL buffer clearing.
+        """
+        try:
+            self.driver.execute_script("""
+                var gd = document.querySelector('.js-plotly-plot');
+                if (gd && gd._fullLayout && gd._fullLayout.scene) {
+                    var scene = gd._fullLayout.scene._scene;
+                    if (scene && scene.glplot) {
+                        // Force WebGL to draw and keep the buffer
+                        scene.glplot.draw();
+                    }
+                }
+            """)
+        except Exception:
+            pass  # Not critical - screenshot will fall back to CDP
+    
+    def _calibrate_render_wait(self):
+        """Calibrate render wait time based on machine performance."""
+        import time
+        
+        if self._initial_camera is None:
+            self._render_wait = 0.4
+            return
+        
+        # Measure time for a small camera change
+        eye = self._initial_camera.get('eye', {'x': 0, 'y': 0, 'z': -2.5})
+        
+        t0 = time.time()
+        # Make a tiny camera adjustment
+        self.driver.execute_script("""
+            var gd = document.querySelector('.js-plotly-plot');
+            if (gd && Plotly) {
+                Plotly.relayout(gd, {'scene.camera.eye.x': arguments[0]});
+            }
+        """, eye.get('x', 0) + 0.001)
+        
+        # Wait for render to stabilize
+        time.sleep(0.1)
+        
+        # Restore original
+        self.driver.execute_script("""
+            var gd = document.querySelector('.js-plotly-plot');
+            if (gd && Plotly) {
+                Plotly.relayout(gd, {'scene.camera.eye.x': arguments[0]});
+            }
+        """, eye.get('x', 0))
+        
+        elapsed = time.time() - t0
+        
+        # Set render wait based on observed performance
+        # Minimum 0.2s, scale up for slower machines
+        self._render_wait = max(0.2, min(0.6, elapsed * 1.5))
+    
+    def get_current_camera(self):
+        """
+        Get the current camera settings from the Plotly figure.
+        
+        Returns
+        -------
+        dict
+            Camera settings with 'eye', 'up', 'center' keys
+        """
+        try:
+            camera = self.driver.execute_script("""
+                var gd = document.querySelector('.js-plotly-plot');
+                if (gd && gd.layout && gd.layout.scene && gd.layout.scene.camera) {
+                    return gd.layout.scene.camera;
+                }
+                return null;
+            """)
+            return camera if camera else {}
+        except Exception:
+            return {}
+    
+    def set_camera(self, eye, up=None, center=None):
+        """
+        Set the camera position using JavaScript.
+        
+        Parameters
+        ----------
+        eye : dict
+            Camera eye position, e.g., {'x': 0, 'y': 2.5, 'z': 0}
+        up : dict, optional
+            Camera up vector, e.g., {'x': 0, 'y': 0, 'z': -1}
+        center : dict, optional
+            Camera center point
+        """
+        import time
+        import json
+        
+        # Build camera object
+        camera_obj = {}
+        if eye:
+            camera_obj['eye'] = eye
+        if up:
+            camera_obj['up'] = up
+        if center:
+            camera_obj['center'] = center
+        
+        camera_json = json.dumps(camera_obj)
+        
+        # Use Plotly.relayout which is the official API for camera updates
+        # The key insight: flashing comes from deviceScaleFactor being applied
+        # during relayout. We use relayout but ensure it's instant with no animation.
+        js_code = f"""
+        (function() {{
+            var gd = document.querySelector('.js-plotly-plot');
+            if (!gd || !Plotly) return;
+            
+            var camera = {camera_json};
+            
+            // Use relayout - the official Plotly API for updating camera
+            // This is synchronous and doesn't cause resize if we only update camera
+            Plotly.relayout(gd, {{'scene.camera': camera}});
+        }})();
+        """
+        self.driver.execute_script(js_code)
+        
+        # Wait for rendering using calibrated time
+        time.sleep(self._render_wait)
+    
+    def set_camera_for_rotation(self, eye_x, eye_y, eye_z, up_x=0, up_y=-1, up_z=0):
+        """
+        Set camera for rotation animation (convenience method).
+        
+        Parameters
+        ----------
+        eye_x, eye_y, eye_z : float
+            Camera eye position
+        up_x, up_y, up_z : float
+            Camera up vector
+        """
+        self.set_camera(
+            eye={'x': eye_x, 'y': eye_y, 'z': eye_z},
+            up={'x': up_x, 'y': up_y, 'z': up_z}
+        )
+    
+    def screenshot(self, output_path, convert_to_jpeg=False, jpeg_quality=100,
+                   auto_crop=False, margin=20, background_color=(255, 255, 255),
+                   use_webgl_export=True):
+        """
+        Take a screenshot and save to file.
+        
+        Parameters
+        ----------
+        output_path : str
+            Output file path
+        convert_to_jpeg : bool
+            If True, convert PNG to JPEG (smaller files)
+        jpeg_quality : int
+            JPEG quality (1-100)
+        auto_crop : bool
+            If True, automatically crop whitespace/background and add margin
+        margin : int
+            Margin (in pixels) to preserve around content when auto_crop=True
+        background_color : tuple
+            RGB tuple for background color detection (default white)
+        use_webgl_export : bool, default True
+            If True, use WebGL canvas.toDataURL() for higher quality export.
+            Falls back to CDP screenshot if WebGL export fails.
+        """
+        from PIL import Image
+        import base64
+        
+        img = None
+        temp_png = output_path.rsplit('.', 1)[0] + '_temp.png'
+        
+        # Method 1: Try WebGL canvas export
+        # We need to force a render right before capture because WebGL clears buffer after each frame
+        if use_webgl_export:
+            try:
+                # Force render and immediately capture the WebGL canvas
+                canvas_data = self.driver.execute_script("""
+                    var gd = document.querySelector('.js-plotly-plot');
+                    if (!gd) return null;
+                    
+                    // Try to get the scene and force a render
+                    if (gd._fullLayout && gd._fullLayout.scene && gd._fullLayout.scene._scene) {
+                        var scene = gd._fullLayout.scene._scene;
+                        
+                        // Force the scene to render
+                        if (scene.render) {
+                            scene.render();
+                        }
+                        
+                        // Get the canvas
+                        if (scene.glplot && scene.glplot.canvas) {
+                            return scene.glplot.canvas.toDataURL('image/png');
+                        }
+                    }
+                    
+                    // Fallback: try direct canvas access from gl-container
+                    var glCanvas = gd.querySelector('.gl-container canvas');
+                    if (glCanvas) {
+                        return glCanvas.toDataURL('image/png');
+                    }
+                    
+                    return null;
+                """)
+                
+                if canvas_data and canvas_data.startswith('data:image/png;base64,'):
+                    # Decode base64 canvas data
+                    base64_data = canvas_data.split(',')[1]
+                    img_data = base64.b64decode(base64_data)
+                    
+                    # Verify it's not blank (all zeros = black image)
+                    if len(set(img_data[:1000])) > 1:  # Quick check first 1000 bytes
+                        with open(temp_png, 'wb') as f:
+                            f.write(img_data)
+                        img = Image.open(temp_png)
+                        # Additional verification: check if image has content
+                        import numpy as np
+                        arr = np.array(img)
+                        if arr.max() > 0:  # Has non-black pixels
+                            pass  # img is valid, use it
+                        else:
+                            img = None  # Blank image, fall back to CDP
+                    else:
+                        img = None  # Blank data, fall back to CDP
+            except Exception as e:
+                # WebGL export failed, will fall back to CDP screenshot
+                pass
+        
+        # Method 2: Fall back to CDP screenshot (captures entire page)
+        if img is None:
+            try:
+                result = self.driver.execute_cdp_cmd('Page.captureScreenshot', {
+                    'format': 'png',
+                    'captureBeyondViewport': False
+                })
+                screenshot_data = base64.b64decode(result['data'])
+                with open(temp_png, 'wb') as f:
+                    f.write(screenshot_data)
+                img = Image.open(temp_png)
+            except Exception as e:
+                # Fallback to regular screenshot
+                self.driver.save_screenshot(temp_png)
+                img = Image.open(temp_png)
+        
+        if auto_crop:
+            img = self._auto_crop_image(img, margin, background_color)
+        
+        if convert_to_jpeg:
+            img = img.convert('RGB')
+            img.save(output_path, 'JPEG', quality=jpeg_quality)
+        else:
+            # For PNG output with auto_crop, save directly
+            if auto_crop:
+                img.save(output_path, 'PNG')
+            else:
+                # No processing needed, just rename
+                os.rename(temp_png, output_path)
+                return
+        
+        # Clean up temp file if it still exists
+        if os.path.exists(temp_png):
+            os.remove(temp_png)
+    
+    def _auto_crop_image(self, img, margin=20, background_color=(255, 255, 255)):
+        """
+        Auto-crop image by detecting content boundaries against background.
+        
+        Parameters
+        ----------
+        img : PIL.Image
+            Input image
+        margin : int
+            Margin to preserve around content
+        background_color : tuple
+            RGB tuple for background color
+            
+        Returns
+        -------
+        PIL.Image
+            Cropped image with margin
+        """
+        bounds = self._detect_content_bounds(img, background_color)
+        if bounds is None:
+            return img
+        
+        row_min, row_max, col_min, col_max = bounds
+        
+        # Add margin
+        row_min = max(0, row_min - margin)
+        row_max = min(img.height - 1, row_max + margin)
+        col_min = max(0, col_min - margin)
+        col_max = min(img.width - 1, col_max + margin)
+        
+        # Crop the original image (preserve RGBA if present)
+        cropped = img.crop((col_min, row_min, col_max + 1, row_max + 1))
+        
+        return cropped
+    
+    def _detect_content_bounds(self, img, background_color=(255, 255, 255)):
+        """
+        Detect the bounding box of content in an image.
+        
+        Parameters
+        ----------
+        img : PIL.Image
+            Input image
+        background_color : tuple
+            RGB tuple for background color
+            
+        Returns
+        -------
+        tuple or None
+            (row_min, row_max, col_min, col_max) or None if no content found
+        """
+        from PIL import Image
+        import numpy as np
+        
+        # Convert to RGB if needed
+        if img.mode == 'RGBA':
+            bg = Image.new('RGB', img.size, background_color)
+            bg.paste(img, mask=img.split()[3])
+            img_rgb = bg
+        else:
+            img_rgb = img.convert('RGB')
+        
+        arr = np.array(img_rgb)
+        
+        tolerance = 10
+        bg_r, bg_g, bg_b = background_color
+        
+        non_bg_mask = (
+            (np.abs(arr[:, :, 0].astype(int) - bg_r) > tolerance) |
+            (np.abs(arr[:, :, 1].astype(int) - bg_g) > tolerance) |
+            (np.abs(arr[:, :, 2].astype(int) - bg_b) > tolerance)
+        )
+        
+        rows = np.any(non_bg_mask, axis=1)
+        cols = np.any(non_bg_mask, axis=0)
+        
+        if not rows.any() or not cols.any():
+            return None
+        
+        row_min, row_max = np.where(rows)[0][[0, -1]]
+        col_min, col_max = np.where(cols)[0][[0, -1]]
+        
+        return (row_min, row_max, col_min, col_max)
+    
+    def _crop_to_bounds(self, img, bounds, margin=20):
+        """
+        Crop image to specific bounds with margin.
+        
+        Parameters
+        ----------
+        img : PIL.Image
+            Input image
+        bounds : tuple
+            (row_min, row_max, col_min, col_max) - the unified bounds
+        margin : int
+            Margin to preserve around content
+            
+        Returns
+        -------
+        PIL.Image
+            Cropped image
+        """
+        row_min, row_max, col_min, col_max = bounds
+        
+        # Add margin
+        row_min = max(0, row_min - margin)
+        row_max = min(img.height - 1, row_max + margin)
+        col_min = max(0, col_min - margin)
+        col_max = min(img.width - 1, col_max + margin)
+        
+        return img.crop((col_min, row_min, col_max + 1, row_max + 1))
+    
+    def _compute_unified_crop_bounds(self, image_paths, background_color=(255, 255, 255), 
+                                      sample_count=None):
+        """
+        Compute unified crop bounds across multiple images.
+        
+        This method finds the maximum extent (union) of content across all images
+        to ensure consistent cropping during video rotation.
+        
+        Parameters
+        ----------
+        image_paths : list
+            List of image file paths to analyze
+        background_color : tuple
+            RGB tuple for background color
+        sample_count : int, optional
+            Number of evenly-spaced frames to sample (None = all frames)
+            
+        Returns
+        -------
+        tuple or None
+            (row_min, row_max, col_min, col_max) unified bounds or None if no content
+        """
+        from PIL import Image
+        
+        if not image_paths:
+            return None
+        
+        # Determine which frames to sample
+        if sample_count is not None and sample_count < len(image_paths):
+            # Sample evenly across all frames
+            indices = [int(i * len(image_paths) / sample_count) for i in range(sample_count)]
+            sampled_paths = [image_paths[i] for i in indices]
+        else:
+            sampled_paths = image_paths
+        
+        # Initialize with None (will expand with each frame)
+        unified_row_min = None
+        unified_row_max = None
+        unified_col_min = None
+        unified_col_max = None
+        
+        for path in sampled_paths:
+            try:
+                img = Image.open(path)
+                bounds = self._detect_content_bounds(img, background_color)
+                img.close()
+                
+                if bounds is None:
+                    continue
+                    
+                row_min, row_max, col_min, col_max = bounds
+                
+                # Expand unified bounds
+                if unified_row_min is None:
+                    unified_row_min = row_min
+                    unified_row_max = row_max
+                    unified_col_min = col_min
+                    unified_col_max = col_max
+                else:
+                    unified_row_min = min(unified_row_min, row_min)
+                    unified_row_max = max(unified_row_max, row_max)
+                    unified_col_min = min(unified_col_min, col_min)
+                    unified_col_max = max(unified_col_max, col_max)
+            except Exception as e:
+                # Skip frames that can't be read
+                continue
+        
+        if unified_row_min is None:
+            return None
+            
+        return (unified_row_min, unified_row_max, unified_col_min, unified_col_max)
+    
+    def _apply_consistent_crop(self, pic_folder, margin=20, background_color=(255, 255, 255)):
+        """
+        Apply consistent cropping to all images in a folder based on unified bounds.
+        
+        This method:
+        1. Detects content bounds across all frames
+        2. Computes the union (maximum extent) of all bounds
+        3. Crops all frames to the same unified bounds + margin
+        
+        Parameters
+        ----------
+        pic_folder : str
+            Folder containing the frame images
+        margin : int
+            Margin to preserve around content
+        background_color : tuple
+            RGB tuple for background color
+            
+        Returns
+        -------
+        tuple
+            (width, height) of the cropped images, or None if failed
+        """
+        from PIL import Image
+        import glob
+        
+        # Find all JPEG images in folder
+        image_paths = sorted(glob.glob(os.path.join(pic_folder, 'deg_*.jpeg')))
+        
+        if not image_paths:
+            return None
+        
+        # Compute unified bounds across all frames
+        # Sample 36 frames (every 10 degrees) for efficiency on long videos
+        unified_bounds = self._compute_unified_crop_bounds(
+            image_paths, background_color, sample_count=min(36, len(image_paths))
+        )
+        
+        if unified_bounds is None:
+            return None
+        
+        row_min, row_max, col_min, col_max = unified_bounds
+        
+        # Get image dimensions from first image
+        with Image.open(image_paths[0]) as img:
+            img_height = img.height
+            img_width = img.width
+        
+        # Add margin to unified bounds
+        row_min = max(0, row_min - margin)
+        row_max = min(img_height - 1, row_max + margin)
+        col_min = max(0, col_min - margin)
+        col_max = min(img_width - 1, col_max + margin)
+        
+        final_bounds = (row_min, row_max, col_min, col_max)
+        final_width = col_max - col_min + 1
+        final_height = row_max - row_min + 1
+        
+        # Apply consistent crop to all images
+        for path in image_paths:
+            try:
+                with Image.open(path) as img:
+                    # Crop to unified bounds (no additional margin - already added)
+                    cropped = img.crop((col_min, row_min, col_max + 1, row_max + 1))
+                    # Convert to RGB for JPEG
+                    if cropped.mode == 'RGBA':
+                        rgb_img = Image.new('RGB', cropped.size, background_color)
+                        rgb_img.paste(cropped, mask=cropped.split()[3])
+                        cropped = rgb_img
+                    elif cropped.mode != 'RGB':
+                        cropped = cropped.convert('RGB')
+                    cropped.save(path, 'JPEG', quality=95)
+            except Exception as e:
+                # Log but continue
+                pass
+        
+        return (final_width, final_height)
+
+    def set_trace_visibility(self, visible_indices: list, total_traces: int):
+        """
+        Set visibility of traces by index using JavaScript.
+        
+        Parameters
+        ----------
+        visible_indices : list
+            List of trace indices to make visible (0-indexed)
+        total_traces : int
+            Total number of traces in the figure
+        """
+        import json
+        import time
+        
+        # Build visibility array
+        visibility = [False] * total_traces
+        for idx in visible_indices:
+            if 0 <= idx < total_traces:
+                visibility[idx] = True
+        
+        visibility_json = json.dumps(visibility)
+        
+        js_code = f"""
+        var gd = document.querySelector('.js-plotly-plot');
+        if (gd && Plotly) {{
+            Plotly.restyle(gd, {{'visible': {visibility_json}}});
+        }}
+        """
+        self.driver.execute_script(js_code)
+        time.sleep(0.15)  # Brief wait for restyle
+    
+    def update_layout(self, layout_update: dict):
+        """
+        Update layout properties using JavaScript.
+        
+        Parameters
+        ----------
+        layout_update : dict
+            Dictionary of layout properties to update
+        """
+        import json
+        import time
+        
+        layout_json = json.dumps(layout_update)
+        
+        js_code = f"""
+        var gd = document.querySelector('.js-plotly-plot');
+        if (gd && Plotly) {{
+            Plotly.relayout(gd, {layout_json});
+        }}
+        """
+        self.driver.execute_script(js_code)
+        time.sleep(0.1)
+
+
+def export_individuals_webdriver(
+    html_path: str,
+    output_dir: str,
+    legend_entries: dict,
+    background_indices: list,
+    total_traces: int,
+    views: list,
+    view_cameras: dict,
+    scale: int = 2,
+    width: int = 900,
+    height: int = 900,
+    timeout: int = 60,
+    verbose: bool = True,
+    auto_crop: bool = True,
+    crop_margin: int = 30
+) -> dict:
+    """
+    Export individual neuron plots efficiently using WebDriver.
+    
+    Opens the HTML once and toggles trace visibility via JavaScript
+    to export each individual neuron/type with all requested views.
+    This avoids reopening the browser for each export, significantly
+    improving performance for large numbers of individuals.
+    
+    Parameters
+    ----------
+    html_path : str
+        Path to the main HTML figure file
+    output_dir : str
+        Directory to save exported PNG files
+    legend_entries : dict
+        Dictionary mapping legend names to lists of trace indices
+        e.g., {'MTe04': [0, 1, 2], 'MTe50': [3, 4, 5]}
+    background_indices : list
+        List of trace indices to always keep visible (meshes, ROIs)
+    total_traces : int
+        Total number of traces in the figure
+    views : list
+        List of view names to export, e.g., ['front', 'top']
+    view_cameras : dict
+        Dictionary mapping view names to camera settings
+        e.g., {'front': {'eye': {...}, 'up': {...}}}
+    scale : int, default 2
+        Scale factor for export resolution
+    width : int, default 900
+        Base viewport width
+    height : int, default 900
+        Base viewport height
+    timeout : int, default 60
+        Timeout for page load
+    verbose : bool, default True
+        Whether to print progress messages
+    auto_crop : bool, default True
+        If True, automatically crop whitespace and preserve margin
+    crop_margin : int, default 30
+        Margin (in pixels) to preserve around content when auto_crop=True
+    
+    Returns
+    -------
+    dict
+        Dictionary with results:
+        {
+            'success': bool,
+            'files': {safe_name: [(png_path, view_name), ...]},
+            'failed': [legend_name, ...],
+            'error': str or None
+        }
+    """
+    from tqdm import tqdm
+    
+    result = {
+        'success': True,
+        'files': {},
+        'failed': [],
+        'error': None
+    }
+    
+    def _sanitize_filename(name):
+        """Sanitize legend name for use as filename."""
+        safe_name = "".join(c if c.isalnum() or c in '.+_- ' else '_' for c in str(name))
+        safe_name = safe_name.strip().replace(' ', '_')
+        while '__' in safe_name:
+            safe_name = safe_name.replace('__', '_')
+        return safe_name.rstrip('_')
+    
+    try:
+        with WebDriverExportSession(
+            width=width, 
+            height=height, 
+            scale=scale, 
+            timeout=timeout
+        ) as session:
+            # Load HTML once
+            session.load_html(html_path, wait_for_render=True, render_wait=2)
+            
+            # Hide legend and clean up layout for export
+            session.update_layout({
+                'showlegend': False,
+                'title.text': '',
+                'margin': {'l': 0, 'r': 0, 'b': 0, 't': 0},
+                'scene.domain': {'x': [0.01, 0.99], 'y': [0.01, 0.99]}
+            })
+            
+            legend_names = list(legend_entries.keys())
+            progress_iter = tqdm(legend_names, desc='Exporting individuals') if verbose else legend_names
+            
+            for legend_name in progress_iter:
+                trace_indices = legend_entries[legend_name]
+                safe_name = _sanitize_filename(legend_name)
+                
+                # Set visibility: show this legend's traces + background
+                visible_indices = list(trace_indices) + list(background_indices)
+                session.set_trace_visibility(visible_indices, total_traces)
+                
+                result['files'][safe_name] = []
+                
+                # Export each view
+                for view_name in views:
+                    camera = view_cameras.get(view_name, {})
+                    
+                    # Set camera position
+                    session.set_camera(
+                        eye=camera.get('eye'),
+                        up=camera.get('up'),
+                        center=camera.get('center')
+                    )
+                    
+                    # Export PNG with auto-crop
+                    png_filename = f'{view_name}_{safe_name}.png'
+                    png_path = os.path.join(output_dir, png_filename)
+                    session.screenshot(png_path, auto_crop=auto_crop, margin=crop_margin)
+                    
+                    # Verify export
+                    if os.path.exists(png_path) and os.path.getsize(png_path) > 1024:
+                        result['files'][safe_name].append((png_path, view_name))
+                    else:
+                        result['failed'].append(legend_name)
+                        if verbose:
+                            print(f'   ⚠️  PNG export failed for {legend_name} ({view_name})')
+                        break
+            
+    except Exception as e:
+        result['success'] = False
+        result['error'] = str(e)
+        if verbose:
+            print(f'   ⚠️  WebDriver export failed: {e}')
+    
+    return result
+
 
 # Local imports
 try:
@@ -439,6 +1382,68 @@ class VisualizeSkeleton:
     For export_video, scale is capped at 3 by default. Use scale=4 explicitly to override.
     '''
 
+    export_method: str = 'webdriver'
+    '''
+    PNG export method. Options:
+    - 'webdriver': Use Selenium WebDriver with Chrome (default, best quality with WebGL, requires Chrome version 109+)
+    - 'kaleido': Use kaleido engine (slower but reliable fallback if WebDriver fails)
+    
+    Note: 'webdriver' requires selenium and webdriver-manager packages.
+    If WebDriver fails, the export automatically falls back to kaleido.
+    '''
+
+    webdriver_render_wait: float = None
+    '''
+    Render wait time (seconds) between camera updates in WebDriver export.
+    If None (default), automatically calibrated based on machine performance.
+    Set to a specific value (e.g., 0.3, 0.5) to override auto-calibration.
+    Higher values = more stable but slower export.
+    '''
+
+    export_timeout: int = 60
+    '''
+    Timeout in seconds for kaleido-based PNG/video export per frame.
+    Default: 60 seconds for first frame, subsequent frames use 2x this value
+    if frame 1 exports successfully (verified working).
+    
+    For large/complex figures, increase this value or use export_method='webdriver'.
+    '''
+
+    html_size_cap: int = None
+    '''
+    HTML file size threshold (in MB) for automatic figure simplification before export.
+    When HTML file size exceeds this threshold, the figure is simplified before PNG/video export.
+    
+    Options:
+    - None (default): Auto-determine based on export_method:
+        • kaleido: 100 MB (kaleido struggles with large figures)
+        • webdriver: 200 MB (Chrome can handle larger files but may still crash)
+    - int: Explicit threshold in MB (e.g., 50, 100, 200)
+    
+    When threshold is exceeded:
+    1. First export attempt uses original figure
+    2. If export fails (timeout/crash), automatically simplifies and retries
+    3. Simplified HTML is saved as {name}_simplified.html for reference
+    
+    To disable automatic simplification, set a very high value (e.g., 9999).
+    '''
+
+    export_simplified_png: bool | int = False
+    '''
+    Whether to create a simplified figure for PNG export (reduces mesh complexity).
+    
+    Options:
+    - False: Never simplify. Export the full figure directly (default).
+            If export times out, will retry with simplified figure.
+    - True: Always simplify figures > 50MB HTML before export.
+    - int (e.g., 50): Target size threshold in MB. Simplify figures larger than this.
+    
+    Simplification reduces mesh vertex/face count by ~90% for faster export.
+    The original HTML is always preserved at full quality.
+    
+    Note: Simplification only affects PNG export, not the interactive HTML.
+    '''
+
     include_timestamp: bool = True
     '''Whether to include timestamp in the output folder name. Default True for unique folders.'''
 
@@ -737,8 +1742,6 @@ class VisualizeSkeleton:
         """List all available ROIs for the current dataset.
         
         Parameters
-        
-        Parameters
         ----------
         refresh : bool
             If True, force refresh from NeuPrint API. If False, use cached data if available.
@@ -806,6 +1809,28 @@ class VisualizeSkeleton:
                 tqdm.write(msg, **kwargs)
         else:
             print(msg, **kwargs)
+
+    def _get_html_size_cap(self):
+        """
+        Get the effective HTML size cap in MB for figure simplification.
+        
+        Returns the configured html_size_cap, or auto-determines based on export_method:
+        - kaleido: 100 MB (kaleido struggles with large figures)
+        - webdriver: 200 MB (Chrome can handle larger files)
+        
+        Returns
+        -------
+        int
+            HTML size threshold in MB
+        """
+        if self.html_size_cap is not None:
+            return self.html_size_cap
+        
+        # Auto-determine based on export method
+        if self.export_method == 'webdriver':
+            return 200
+        else:  # kaleido
+            return 100
 
     def _simplify_mesh_open3d(self, trimesh_obj, target_faces):
         """
@@ -950,9 +1975,10 @@ class VisualizeSkeleton:
             target_faces = max(100, int(n_faces * (1 - skeleton_simp)))
             return self._simplify_mesh_open3d(trimesh_obj, target_faces)
 
-    def _export_png_with_timeout(self, fig, output_path, width=1200, height=900, scale=3, timeout=60):
+    def _export_png_with_timeout(self, fig, output_path, width=1200, height=900, scale=3, timeout=120,
+                                   auto_crop=False, crop_margin=30):
         """
-        Export PNG with timeout control and automatic retry with lower scale.
+        Export PNG using kaleido with timeout protection and optional auto-crop.
         
         Parameters
         ----------
@@ -967,7 +1993,11 @@ class VisualizeSkeleton:
         scale : int
             Scale factor for resolution.
         timeout : int
-            Timeout in seconds (default 60).
+            Timeout in seconds (default 120).
+        auto_crop : bool, default False
+            If True, automatically crop whitespace/background from the exported image.
+        crop_margin : int, default 30
+            Margin (in pixels) to preserve around content when auto_crop=True.
             
         Returns
         -------
@@ -976,6 +2006,11 @@ class VisualizeSkeleton:
             If success, message contains file size info.
             If failed, message contains error/recommendation.
         """
+        import signal
+        
+        # Get export_timeout from attribute if set, otherwise use parameter
+        actual_timeout = getattr(self, 'export_timeout', timeout)
+        
         # Set up timeout handler (Unix only)
         old_handler = None
         has_alarm_support = False
@@ -983,86 +2018,752 @@ class VisualizeSkeleton:
             old_handler = signal.signal(signal.SIGALRM, _timeout_handler)
             has_alarm_support = True
         except (AttributeError, ValueError):
-            # Windows doesn't support SIGALRM, skip timeout
             has_alarm_support = False
         
-        current_scale = scale
-        result = None
+        try:
+            if has_alarm_support:
+                signal.alarm(actual_timeout)
+            
+            # Direct kaleido export
+            fig.write_image(output_path, width=width, height=height, scale=scale, validate=False)
+            
+            if has_alarm_support:
+                signal.alarm(0)  # Cancel timeout
+
+            # Verify file existence and size
+            if os.path.exists(output_path):
+                size_kb = os.path.getsize(output_path) / 1024
+                if size_kb < 10:
+                    return (False, f"Export produced blank image ({size_kb:.1f}KB)", scale)
+                
+                # Apply auto-crop if requested
+                if auto_crop:
+                    try:
+                        from PIL import Image
+                        img = Image.open(output_path)
+                        bounds = self._detect_content_bounds(img, (255, 255, 255))
+                        if bounds:
+                            row_min, row_max, col_min, col_max = bounds
+                            # Add margin
+                            row_min = max(0, row_min - crop_margin)
+                            row_max = min(img.height - 1, row_max + crop_margin)
+                            col_min = max(0, col_min - crop_margin)
+                            col_max = min(img.width - 1, col_max + crop_margin)
+                            # Crop and save
+                            cropped = img.crop((col_min, row_min, col_max + 1, row_max + 1))
+                            cropped.save(output_path, 'PNG')
+                            size_kb = os.path.getsize(output_path) / 1024
+                    except Exception as crop_e:
+                        # If cropping fails, keep the original
+                        pass
+                
+                return (True, f"{size_kb:.1f}KB", scale)
+            else:
+                return (False, "Export failed - no file created", scale)
+        
+        except PNGExportTimeout:
+            if has_alarm_support:
+                signal.alarm(0)
+            return (False, f"Kaleido export timed out after {actual_timeout}s - figure too complex", scale)
+                
+        except Exception as e:
+            if has_alarm_support:
+                signal.alarm(0)
+            self._vprint(f'      ⚠️  Error in kaleido export: {e}')
+            return (False, f"Kaleido export error: {e}", scale)
+        
+        finally:
+            # Restore original handler
+            if has_alarm_support and old_handler is not None:
+                try:
+                    signal.alarm(0)
+                    signal.signal(signal.SIGALRM, old_handler)
+                except:
+                    pass
+
+    def _export_png_with_webdriver(self, html_path, output_path, width=1200, height=900, scale=3, timeout=120):
+        """
+        Export PNG using Selenium WebDriver (Chrome headless) - direct call.
+        
+        This is an alternative to kaleido that works by:
+        1. Loading the saved HTML file in a headless browser
+        2. Waiting for Plotly to render the 3D scene
+        3. Taking a screenshot
+        
+        Parameters
+        ----------
+        html_path : str
+            Path to the HTML file to render.
+        output_path : str
+            Path to save the PNG file.
+        width : int
+            Image width in pixels.
+        height : int
+            Image height in pixels.
+        scale : int
+            Scale factor for resolution.
+        timeout : int
+            Timeout in seconds (default 120).
+            
+        Returns
+        -------
+        tuple
+            (success: bool, message: str, final_scale: int)
+        """
+        try:
+            # Direct WebDriver call using the session class (no multiprocessing)
+            with WebDriverExportSession(width=width, height=height, scale=scale, timeout=timeout) as session:
+                session.load_html(html_path, wait_for_render=True, render_wait=3)
+                session.screenshot(output_path)
+            
+            # Verify file
+            if os.path.exists(output_path):
+                size_kb = os.path.getsize(output_path) / 1024
+                if size_kb < 10:
+                    return (False, f"WebDriver produced blank image ({size_kb:.1f}KB)", scale)
+                return (True, f"{size_kb:.1f}KB (WebDriver)", scale)
+            else:
+                return (False, "WebDriver export failed - no file created", scale)
+                
+        except Exception as e:
+            return (False, f"WebDriver error: {e}", scale)
+
+    def _export_views_with_webdriver_session(self, export_fig, views_to_export, view_cameras, output_folder):
+        """
+        Export multiple views efficiently using a single WebDriver session.
+        
+        Opens the browser once, loads the HTML, then rotates camera via JavaScript
+        to export all views without reopening the browser.
+        
+        Parameters
+        ----------
+        export_fig : plotly.graph_objects.Figure
+            The figure to export
+        views_to_export : list
+            List of view names to export (e.g., ['front', 'back', 'top'])
+        view_cameras : dict
+            Dict mapping view names to camera dicts with 'eye', 'up', 'center' keys
+        output_folder : str
+            Folder to save the PNG files
+            
+        Returns
+        -------
+        list
+            List of successfully exported view names
+        """
+        exported_views = []
+        
+        # Save figure to temporary HTML
+        temp_html = os.path.join(output_folder, "_temp_export.html")
+        export_fig.write_html(
+            temp_html, 
+            auto_open=False, 
+            include_plotlyjs='cdn',
+            config={'displayModeBar': False}
+        )
         
         try:
-            while current_scale >= 1:
-                try:
-                    # Set timeout alarm
-                    if has_alarm_support:
-                        signal.alarm(timeout)
+            self._vprint(f'      🌐 Using WebDriver session for {len(views_to_export)} views...')
+            
+            # Get render_wait from attribute (None = auto-calibrate)
+            render_wait = getattr(self, 'webdriver_render_wait', None)
+            
+            with WebDriverExportSession(
+                width=1200, height=900, 
+                scale=self.export_scale, 
+                timeout=300,
+                render_wait=render_wait
+            ) as session:
+                # Load HTML once
+                session.load_html(temp_html, wait_for_render=True, render_wait=3)
+                self._vprint(f'      ✓ HTML loaded in browser (render_wait={session._render_wait:.2f}s)')
+                
+                for view_name in views_to_export:
+                    if view_name not in view_cameras:
+                        self._vprint(f'      ⚠️  Skipping invalid view: {view_name}')
+                        continue
                     
-                    # Attempt export
-                    fig.write_image(output_path, width=width, height=height, scale=current_scale)
+                    camera = view_cameras[view_name]
+                    view_path = os.path.join(output_folder, f"{self.saveas}_{view_name}.png")
                     
-                    # Cancel timeout
-                    if has_alarm_support:
-                        signal.alarm(0)
-                    
-                    # Check if file was created successfully
-                    if os.path.exists(output_path):
-                        size_kb = os.path.getsize(output_path) / 1024
-                        if size_kb < 10:
-                            # File too small, likely blank
-                            result = (False, f"Export produced blank image ({size_kb:.1f}KB)", current_scale)
+                    try:
+                        # Rotate camera via JavaScript
+                        session.set_camera(
+                            eye=camera.get('eye'),
+                            up=camera.get('up'),
+                            center=camera.get('center')
+                        )
+                        
+                        # Take screenshot
+                        session.screenshot(view_path)
+                        
+                        # Verify file
+                        if os.path.exists(view_path):
+                            size_kb = os.path.getsize(view_path) / 1024
+                            if size_kb > 10:
+                                exported_views.append(view_name)
+                                self._vprint(f'      {view_name}: {size_kb:.1f}KB', level='full')
+                            else:
+                                self._vprint(f'      ⚠️  {view_name}: blank image ({size_kb:.1f}KB)')
+                        else:
+                            self._vprint(f'      ⚠️  {view_name}: no file created')
+                            
+                    except Exception as e:
+                        self._vprint(f'      ⚠️  {view_name} export failed: {e}')
+                
+        except Exception as e:
+            self._vprint(f'      ⚠️  WebDriver session failed: {e}')
+            
+            # Check HTML size and try with simplified figure
+            html_size_mb = os.path.getsize(temp_html) / 1024 / 1024 if os.path.exists(temp_html) else 0
+            html_size_cap = self._get_html_size_cap()
+            
+            if html_size_mb > html_size_cap:
+                # First check if we already have a simplified figure
+                existing_simplified = getattr(self, '_simplified_export_fig', None)
+                existing_html = getattr(self, '_simplified_html_path', None)
+                
+                if existing_simplified is not None and existing_html and os.path.exists(existing_html):
+                    self._vprint(f'      💡 Trying with existing simplified figure...')
+                    try:
+                        with WebDriverExportSession(
+                            width=1200, height=900, 
+                            scale=self.export_scale, 
+                            timeout=300,
+                            render_wait=render_wait
+                        ) as session:
+                            session.load_html(existing_html, wait_for_render=True, render_wait=3)
+                            self._vprint(f'      ✓ Existing simplified HTML loaded in browser')
+                            
+                            for view_name in views_to_export:
+                                if view_name not in view_cameras:
+                                    continue
+                                
+                                camera = view_cameras[view_name]
+                                view_path = os.path.join(output_folder, f"{self.saveas}_{view_name}.png")
+                                
+                                try:
+                                    session.set_camera(
+                                        eye=camera.get('eye'),
+                                        up=camera.get('up'),
+                                        center=camera.get('center')
+                                    )
+                                    session.screenshot(view_path)
+                                    
+                                    if os.path.exists(view_path):
+                                        size_kb = os.path.getsize(view_path) / 1024
+                                        if size_kb > 10:
+                                            exported_views.append(view_name)
+                                            self._vprint(f'      {view_name}: {size_kb:.1f}KB', level='full')
+                                except Exception as inner_e:
+                                    self._vprint(f'      ⚠️  {view_name} failed: {inner_e}')
+                    except Exception as retry_e:
+                        self._vprint(f'      ⚠️  Existing simplified failed: {retry_e}')
+                
+                # If still no success, try creating new simplified figure with 50% target, then 25%
+                if not exported_views:
+                    html_overhead_mb = 25  # Estimated fixed overhead
+                    for reduction_target in [0.5, 0.25]:  # 50% then 25% of original
+                        if exported_views:
                             break
                         
-                        if current_scale < scale:
-                            result = (True, f"{size_kb:.1f}KB (reduced to scale={current_scale})", current_scale)
-                        else:
-                            result = (True, f"{size_kb:.1f}KB", current_scale)
-                        break
-                    else:
-                        result = (False, "Export failed - no file created", current_scale)
-                        break
+                        target_size_mb = html_size_mb * reduction_target
+                        data_size = html_size_mb - html_overhead_mb
+                        target_data_size = target_size_mb - html_overhead_mb
+                        simplification_factor = max(0.1, target_data_size / data_size) if data_size > 0 else reduction_target
                         
-                except PNGExportTimeout:
-                    if has_alarm_support:
-                        signal.alarm(0)  # Cancel alarm
-                    
-                    if current_scale > 1:
-                        self._vprint(f'      ⚠️  Export timed out at scale={current_scale}, retrying with scale=1...')
-                        current_scale = 1
-                        continue
-                    else:
-                        # Already at scale=1, give up
-                        result = (False, 
-                                f"Export timed out even at scale=1. Figure is too complex.\n"
-                                f"         💡 Try increasing skeleton_mesh_simplification (e.g., 0.95 or 0.98)",
-                                current_scale)
-                        break
+                        self._vprint(f'      💡 Retrying with simplified figure (target ~{target_size_mb:.0f}MB, factor={simplification_factor:.2f})...')
+                        
+                        try:
+                            simplified_fig = self._simplify_figure_for_kaleido(export_fig, simplification_factor)
+                            
+                            # Save simplified HTML to permanent file for reuse
+                            simplified_html_path = os.path.join(output_folder, f"{self.saveas}_simplified.html")
+                            simplified_fig.write_html(simplified_html_path, auto_open=False, 
+                                                     include_plotlyjs='cdn',
+                                                     config={'displayModeBar': False})
+                            
+                            new_size_mb = os.path.getsize(simplified_html_path) / 1024 / 1024
+                            self._vprint(f'      ✓ Simplified HTML saved: {os.path.basename(simplified_html_path)} ({new_size_mb:.0f}MB)')
+                            
+                            # Store simplified figure and path for reuse in subsequent exports
+                            self._simplified_export_fig = simplified_fig
+                            self._simplified_html_path = simplified_html_path
+                            
+                            with WebDriverExportSession(
+                                width=1200, height=900, 
+                                scale=self.export_scale, 
+                                timeout=300,
+                                render_wait=render_wait
+                            ) as session:
+                                session.load_html(simplified_html_path, wait_for_render=True, render_wait=3)
+                                self._vprint(f'      ✓ Simplified HTML loaded in browser')
                                 
-                except Exception as e:
-                    if has_alarm_support:
-                        signal.alarm(0)  # Cancel alarm
-                    
-                    if current_scale > 1:
-                        self._vprint(f'      ⚠️  Export failed at scale={current_scale}: {e}')
-                        self._vprint(f'      Retrying with scale=1...')
-                        current_scale = 1
-                        continue
-                    else:
-                        result = (False, f"Export failed: {e}", current_scale)
-                        break
+                                for view_name in views_to_export:
+                                    if view_name not in view_cameras:
+                                        continue
+                                    
+                                    camera = view_cameras[view_name]
+                                    view_path = os.path.join(output_folder, f"{self.saveas}_{view_name}.png")
+                                    
+                                    try:
+                                        session.set_camera(
+                                            eye=camera.get('eye'),
+                                            up=camera.get('up'),
+                                            center=camera.get('center')
+                                        )
+                                        session.screenshot(view_path)
+                                        
+                                        if os.path.exists(view_path):
+                                            size_kb = os.path.getsize(view_path) / 1024
+                                            if size_kb > 10:
+                                                exported_views.append(view_name)
+                                                self._vprint(f'      {view_name}: {size_kb:.1f}KB', level='full')
+                                    except Exception as inner_e:
+                                        self._vprint(f'      ⚠️  {view_name} failed: {inner_e}')
+                            
+                            if exported_views:
+                                break  # Success with this simplification level
+                                
+                        except Exception as retry_e:
+                            self._vprint(f'      ⚠️  Retry failed: {retry_e}')
+                            continue
             
-            if result is None:
-                result = (False, "Export failed after all retries", 1)
-                
+            if not exported_views:
+                self._vprint(f'      ⚠️  All WebDriver export attempts failed')
+                self._vprint(f'      💡 Try: export_method="kaleido" or increase skeleton_mesh_simplification')
+        
         finally:
-            # Always cancel any pending alarm and restore original handler
-            if has_alarm_support:
+            # Clean up temp HTML (but not the permanent simplified HTML)
+            if temp_html and not temp_html.endswith('_simplified.html'):
                 try:
-                    signal.alarm(0)  # Cancel any pending alarm
-                    if old_handler is not None:
-                        signal.signal(signal.SIGALRM, old_handler)
+                    os.remove(temp_html)
                 except:
                     pass
         
-        return result
+        return exported_views
+
+    def _create_simplified_export_figure(self):
+        """
+        Create a simplified copy of the figure for PNG export.
+        
+        For large/complex figures, this dramatically reduces export time by:
+        1. Reducing mesh complexity (decimating vertices/faces)
+        2. Simplifying line traces (reducing point count)
+        3. Keeping visual appearance similar but with less data
+        
+        Returns
+        -------
+        plotly.graph_objects.Figure
+            Simplified figure optimized for static image export.
+        """
+        import trimesh
+        
+        self._vprint('      Creating simplified figure for PNG export...')
+        
+        # Create a new figure with same layout
+        simplified_fig = go.Figure()
+        simplified_fig.update_layout(self.fig_3d.layout)
+        
+        # Statistics
+        total_original_vertices = 0
+        total_simplified_vertices = 0
+        mesh_count = 0
+        
+        for trace in self.fig_3d.data:
+            trace_dict = trace.to_plotly_json()
+            trace_type = trace_dict.get('type', '')
+            
+            if trace_type == 'mesh3d':
+                # Simplify mesh traces - this is the main bottleneck
+                x = trace_dict.get('x', [])
+                y = trace_dict.get('y', [])
+                z = trace_dict.get('z', [])
+                i = trace_dict.get('i', [])
+                j = trace_dict.get('j', [])
+                k = trace_dict.get('k', [])
+                
+                if x is not None and len(x) > 0 and i is not None and len(i) > 0:
+                    original_verts = len(x)
+                    original_faces = len(i)
+                    total_original_vertices += original_verts
+                    mesh_count += 1
+                    
+                    # Only simplify large meshes
+                    if original_faces > 5000:
+                        try:
+                            import numpy as np
+                            vertices = np.array([x, y, z]).T
+                            faces = np.array([i, j, k]).T
+                            
+                            mesh = trimesh.Trimesh(vertices=vertices, faces=faces, process=False)
+                            
+                            # Target: reduce to ~10% of faces (aggressive for export)
+                            target_faces = max(500, int(original_faces * 0.1))
+                            simplified_mesh = self._simplify_mesh_open3d(mesh, target_faces)
+                            
+                            # Create new trace with simplified data
+                            new_trace_dict = {k: v for k, v in trace_dict.items() 
+                                             if k not in ['x', 'y', 'z', 'i', 'j', 'k', 'type'] and v is not None}
+                            new_trace_dict['x'] = simplified_mesh.vertices[:, 0].tolist()
+                            new_trace_dict['y'] = simplified_mesh.vertices[:, 1].tolist()
+                            new_trace_dict['z'] = simplified_mesh.vertices[:, 2].tolist()
+                            new_trace_dict['i'] = simplified_mesh.faces[:, 0].tolist()
+                            new_trace_dict['j'] = simplified_mesh.faces[:, 1].tolist()
+                            new_trace_dict['k'] = simplified_mesh.faces[:, 2].tolist()
+                            
+                            simplified_fig.add_trace(go.Mesh3d(**new_trace_dict))
+                            total_simplified_vertices += len(simplified_mesh.vertices)
+                            continue
+                            
+                        except Exception as e:
+                            # Fall back to original if simplification fails
+                            self._vprint(f'        ⚠️ Mesh simplification failed: {e}', level='full')
+                    
+                    total_simplified_vertices += original_verts
+                
+                # Keep original if not simplified
+                simplified_fig.add_trace(trace)
+                
+            elif trace_type == 'scatter3d':
+                # For scatter/line traces, reduce point count
+                x = trace_dict.get('x', [])
+                y = trace_dict.get('y', [])
+                z = trace_dict.get('z', [])
+                
+                if x is not None and len(x) > 1000:
+                    # Subsample large traces
+                    step = max(1, len(x) // 500)
+                    trace_dict['x'] = list(x[::step])
+                    trace_dict['y'] = list(y[::step])
+                    trace_dict['z'] = list(z[::step])
+                    
+                    new_trace = go.Scatter3d(**{k: v for k, v in trace_dict.items() 
+                                               if k != 'type' and v is not None})
+                    simplified_fig.add_trace(new_trace)
+                else:
+                    simplified_fig.add_trace(trace)
+                
+            else:
+                # Keep other trace types as-is
+                simplified_fig.add_trace(trace)
+        
+        if total_original_vertices > 0:
+            reduction = (1 - total_simplified_vertices / total_original_vertices) * 100
+            self._vprint(f'      Simplified {mesh_count} meshes: {total_original_vertices:,} → {total_simplified_vertices:,} vertices ({reduction:.0f}% reduction)')
+        
+        return simplified_fig
+
+    def _simplify_figure_for_kaleido(self, fig, simplification_factor):
+        """
+        Simplify a figure for kaleido export based on HTML size ratio.
+        
+        For figures where HTML size > 100MB, this applies proportional simplification
+        to reduce memory/time requirements for kaleido rendering.
+        
+        Parameters
+        ----------
+        fig : plotly.graph_objects.Figure
+            The figure to simplify
+        simplification_factor : float
+            Target ratio for data reduction (e.g., 0.25 = reduce to 25% of original)
+            
+        Returns
+        -------
+        plotly.graph_objects.Figure
+            Simplified figure
+        """
+        import trimesh
+        import numpy as np
+        
+        # Create new figure with same layout
+        simplified_fig = go.Figure()
+        simplified_fig.update_layout(fig.layout)
+        
+        mesh_count = 0
+        total_original_faces = 0
+        total_simplified_faces = 0
+        
+        for trace in fig.data:
+            trace_dict = trace.to_plotly_json()
+            trace_type = trace_dict.get('type', '')
+            
+            if trace_type == 'mesh3d':
+                x = trace_dict.get('x', [])
+                y = trace_dict.get('y', [])
+                z = trace_dict.get('z', [])
+                i = trace_dict.get('i', [])
+                j = trace_dict.get('j', [])
+                k = trace_dict.get('k', [])
+                
+                if x is not None and len(x) > 0 and i is not None and len(i) > 0:
+                    original_faces = len(i)
+                    total_original_faces += original_faces
+                    mesh_count += 1
+                    
+                    # Target faces based on simplification factor
+                    target_faces = max(100, int(original_faces * simplification_factor))
+                    
+                    # Only simplify if it's worth it
+                    if target_faces < original_faces * 0.8:
+                        try:
+                            vertices = np.array([x, y, z]).T
+                            faces = np.array([i, j, k]).T
+                            
+                            mesh = trimesh.Trimesh(vertices=vertices, faces=faces, process=False)
+                            simplified_mesh = self._simplify_mesh_open3d(mesh, target_faces)
+                            
+                            # Create new trace with simplified data
+                            new_trace_dict = {k: v for k, v in trace_dict.items() 
+                                             if k not in ['x', 'y', 'z', 'i', 'j', 'k', 'type'] and v is not None}
+                            new_trace_dict['x'] = simplified_mesh.vertices[:, 0].tolist()
+                            new_trace_dict['y'] = simplified_mesh.vertices[:, 1].tolist()
+                            new_trace_dict['z'] = simplified_mesh.vertices[:, 2].tolist()
+                            new_trace_dict['i'] = simplified_mesh.faces[:, 0].tolist()
+                            new_trace_dict['j'] = simplified_mesh.faces[:, 1].tolist()
+                            new_trace_dict['k'] = simplified_mesh.faces[:, 2].tolist()
+                            
+                            simplified_fig.add_trace(go.Mesh3d(**new_trace_dict))
+                            total_simplified_faces += len(simplified_mesh.faces)
+                            continue
+                            
+                        except Exception as e:
+                            # Fall back to original if simplification fails
+                            pass
+                    
+                    total_simplified_faces += original_faces
+                
+                simplified_fig.add_trace(trace)
+                
+            elif trace_type == 'scatter3d':
+                # Reduce point count for line traces
+                x = trace_dict.get('x', [])
+                
+                if x is not None and len(x) > 500:
+                    # Subsample based on factor
+                    target_points = max(100, int(len(x) * simplification_factor))
+                    step = max(1, len(x) // target_points)
+                    
+                    for key in ['x', 'y', 'z']:
+                        if key in trace_dict and trace_dict[key] is not None:
+                            trace_dict[key] = list(trace_dict[key][::step])
+                    
+                    # Also handle marker colors if present
+                    if 'marker' in trace_dict and isinstance(trace_dict['marker'], dict):
+                        if 'color' in trace_dict['marker'] and isinstance(trace_dict['marker']['color'], (list, tuple)):
+                            trace_dict['marker']['color'] = list(trace_dict['marker']['color'][::step])
+                    
+                    new_trace = go.Scatter3d(**{k: v for k, v in trace_dict.items() 
+                                               if k != 'type' and v is not None})
+                    simplified_fig.add_trace(new_trace)
+                else:
+                    simplified_fig.add_trace(trace)
+            else:
+                simplified_fig.add_trace(trace)
+        
+        if total_original_faces > 0:
+            reduction = (1 - total_simplified_faces / total_original_faces) * 100
+            self._vprint(f'   Simplified {mesh_count} meshes: {total_original_faces:,} → {total_simplified_faces:,} faces ({reduction:.0f}% reduction)')
+        
+        return simplified_fig
+
+    def _detect_content_bounds(self, img, background_color=(255, 255, 255)):
+        """
+        Detect the bounding box of content in an image.
+        
+        Parameters
+        ----------
+        img : PIL.Image
+            Input image
+        background_color : tuple
+            RGB tuple for background color
+            
+        Returns
+        -------
+        tuple or None
+            (row_min, row_max, col_min, col_max) or None if no content found
+        """
+        from PIL import Image
+        import numpy as np
+        
+        # Convert to RGB if needed
+        if img.mode == 'RGBA':
+            bg = Image.new('RGB', img.size, background_color)
+            bg.paste(img, mask=img.split()[3])
+            img_rgb = bg
+        else:
+            img_rgb = img.convert('RGB')
+        
+        arr = np.array(img_rgb)
+        
+        tolerance = 10
+        bg_r, bg_g, bg_b = background_color
+        
+        non_bg_mask = (
+            (np.abs(arr[:, :, 0].astype(int) - bg_r) > tolerance) |
+            (np.abs(arr[:, :, 1].astype(int) - bg_g) > tolerance) |
+            (np.abs(arr[:, :, 2].astype(int) - bg_b) > tolerance)
+        )
+        
+        rows = np.any(non_bg_mask, axis=1)
+        cols = np.any(non_bg_mask, axis=0)
+        
+        if not rows.any() or not cols.any():
+            return None
+        
+        row_min, row_max = np.where(rows)[0][[0, -1]]
+        col_min, col_max = np.where(cols)[0][[0, -1]]
+        
+        return (row_min, row_max, col_min, col_max)
+
+    def _compute_unified_crop_bounds(self, image_paths, background_color=(255, 255, 255), 
+                                      sample_count=None):
+        """
+        Compute unified crop bounds across multiple images.
+        
+        This method finds the maximum extent (union) of content across all images
+        to ensure consistent cropping during video rotation.
+        
+        Parameters
+        ----------
+        image_paths : list
+            List of image file paths to analyze
+        background_color : tuple
+            RGB tuple for background color
+        sample_count : int, optional
+            Number of evenly-spaced frames to sample (None = all frames)
+            
+        Returns
+        -------
+        tuple or None
+            (row_min, row_max, col_min, col_max) unified bounds or None if no content
+        """
+        from PIL import Image
+        
+        if not image_paths:
+            return None
+        
+        # Determine which frames to sample
+        if sample_count is not None and sample_count < len(image_paths):
+            # Sample evenly across all frames
+            indices = [int(i * len(image_paths) / sample_count) for i in range(sample_count)]
+            sampled_paths = [image_paths[i] for i in indices]
+        else:
+            sampled_paths = image_paths
+        
+        # Initialize with None (will expand with each frame)
+        unified_row_min = None
+        unified_row_max = None
+        unified_col_min = None
+        unified_col_max = None
+        
+        for path in sampled_paths:
+            try:
+                img = Image.open(path)
+                bounds = self._detect_content_bounds(img, background_color)
+                img.close()
+                
+                if bounds is None:
+                    continue
+                    
+                row_min, row_max, col_min, col_max = bounds
+                
+                # Expand unified bounds
+                if unified_row_min is None:
+                    unified_row_min = row_min
+                    unified_row_max = row_max
+                    unified_col_min = col_min
+                    unified_col_max = col_max
+                else:
+                    unified_row_min = min(unified_row_min, row_min)
+                    unified_row_max = max(unified_row_max, row_max)
+                    unified_col_min = min(unified_col_min, col_min)
+                    unified_col_max = max(unified_col_max, col_max)
+            except Exception:
+                # Skip frames that can't be read
+                continue
+        
+        if unified_row_min is None:
+            return None
+            
+        return (unified_row_min, unified_row_max, unified_col_min, unified_col_max)
+
+    def _apply_consistent_crop(self, pic_folder, margin=20, background_color=(255, 255, 255)):
+        """
+        Apply consistent cropping to all images in a folder based on unified bounds.
+        
+        This method:
+        1. Detects content bounds across all frames
+        2. Computes the union (maximum extent) of all bounds
+        3. Crops all frames to the same unified bounds + margin
+        
+        Parameters
+        ----------
+        pic_folder : str
+            Folder containing the frame images
+        margin : int
+            Margin to preserve around content
+        background_color : tuple
+            RGB tuple for background color
+            
+        Returns
+        -------
+        tuple
+            (width, height) of the cropped images, or None if failed
+        """
+        from PIL import Image
+        import glob
+        
+        # Find all JPEG images in folder
+        image_paths = sorted(glob.glob(os.path.join(pic_folder, 'deg_*.jpeg')))
+        
+        if not image_paths:
+            return None
+        
+        # Compute unified bounds across all frames
+        # Sample 36 frames (every 10 degrees) for efficiency on long videos
+        unified_bounds = self._compute_unified_crop_bounds(
+            image_paths, background_color, sample_count=min(36, len(image_paths))
+        )
+        
+        if unified_bounds is None:
+            return None
+        
+        row_min, row_max, col_min, col_max = unified_bounds
+        
+        # Get image dimensions from first image
+        with Image.open(image_paths[0]) as img:
+            img_height = img.height
+            img_width = img.width
+        
+        # Add margin to unified bounds
+        row_min = max(0, row_min - margin)
+        row_max = min(img_height - 1, row_max + margin)
+        col_min = max(0, col_min - margin)
+        col_max = min(img_width - 1, col_max + margin)
+        
+        final_width = col_max - col_min + 1
+        final_height = row_max - row_min + 1
+        
+        # Apply consistent crop to all images
+        for path in image_paths:
+            try:
+                with Image.open(path) as img:
+                    # Crop to unified bounds (no additional margin - already added)
+                    cropped = img.crop((col_min, row_min, col_max + 1, row_max + 1))
+                    # Convert to RGB for JPEG
+                    if cropped.mode == 'RGBA':
+                        rgb_img = Image.new('RGB', cropped.size, background_color)
+                        rgb_img.paste(cropped, mask=cropped.split()[3])
+                        cropped = rgb_img
+                    elif cropped.mode != 'RGB':
+                        cropped = cropped.convert('RGB')
+                    cropped.save(path, 'JPEG', quality=95)
+            except Exception:
+                # Log but continue
+                pass
+        
+        return (final_width, final_height)
 
     def _parse_layer_map_csv(self):
         """
@@ -1228,10 +2929,15 @@ class VisualizeSkeleton:
         # Silence navis INFO messages (like "Use the `.show()` method to plot the figure.")
         # These are not useful for automated visualization and clutter output
         try:
-            navis.set_loggers('WARNING')  # Still show warnings but not INFO
+            # Set to ERROR to suppress "radii are missing" warnings which are common/harmless
+            # when generating meshes from skeletons without radius info
+            navis.set_loggers('ERROR') 
         except Exception:
             pass  # Ignore if function not available in older versions
             
+        # Ensure cleanup of logging handlers if needed
+        logging.getLogger('navis').setLevel(logging.ERROR)
+
         # Silence navis and other libraries' debug output if verbose is not full
         if self.verbose != 'full':
             logging.getLogger('navis').setLevel(logging.ERROR)
@@ -1518,20 +3224,25 @@ class VisualizeSkeleton:
             self.save_folder = os.path.join(self.output_dir, base_folder_name)
         if not os.path.exists(self.save_folder): os.makedirs(self.save_folder)
         
-        # Save parameters to text file with improved formatting
+        # Save parameters to text file with comprehensive formatting
         param_file = os.path.join(self.save_folder, 'parameters.txt')
         with open(param_file, 'w') as f:
-            f.write("=" * 60 + "\n")
-            f.write("VisualizeSkeleton Parameters\n")
-            f.write("=" * 60 + "\n\n")
+            f.write("=" * 70 + "\n")
+            f.write("VisualizeSkeleton Parameters - Complete Configuration\n")
+            f.write("=" * 70 + "\n\n")
             
             # Basic Info
             f.write("[Basic Info]\n")
-            f.write(f"  Dataset:     {self.dataset}\n")
-            f.write(f"  Timestamp:   {timestamp}\n")
+            f.write(f"  Dataset:          {self.dataset}\n")
+            f.write(f"  Timestamp:        {timestamp}\n")
             if self.version:
-                f.write(f"  Version:     {self.version}\n")
-            f.write(f"  Client Type: {self.client_type}\n")
+                f.write(f"  Version:          {self.version}\n")
+            f.write(f"  Client Type:      {self.client_type}\n")
+            f.write(f"  Server:           {self.server}\n")
+            f.write(f"  Output Directory: {self.output_dir}\n")
+            f.write(f"  Save Filename:    {self.saveas}\n")
+            f.write(f"  Include Timestamp:{self.include_timestamp}\n")
+            f.write(f"  Verbose:          {self.verbose}\n")
             f.write("\n")
             
             # Layer Info
@@ -1546,25 +3257,90 @@ class VisualizeSkeleton:
                     if n_neurons > 5:
                         ids_str += f", ... (+{n_neurons - 5} more)"
                     f.write(f"           IDs: {ids_str}\n")
+            f.write(f"  Total Layers:     {len(self.neuron_layers)}\n")
+            f.write("\n")
+            
+            # Color Settings
+            f.write("[Color Settings]\n")
+            if self.neuron_colors:
+                if isinstance(self.neuron_colors, list):
+                    colors_preview = self.neuron_colors[:5]
+                    f.write(f"  Neuron Colors:    {colors_preview}")
+                    if len(self.neuron_colors) > 5:
+                        f.write(f" ... (+{len(self.neuron_colors) - 5} more)")
+                    f.write("\n")
+                else:
+                    f.write(f"  Neuron Colors:    {self.neuron_colors}\n")
+            else:
+                f.write(f"  Neuron Colors:    (auto-assigned)\n")
+            f.write(f"  Neuron Alpha:     {self.neuron_alpha}\n")
+            f.write(f"  Synapse Alpha:    {self.synapse_alpha}\n")
+            f.write(f"  Brain Mesh Color: {self.brain_mesh_color}\n")
+            f.write(f"  VNC Mesh Color:   {self.vnc_mesh_color}\n")
+            if self.mesh_color:
+                f.write(f"  Mesh ROI Color:   {self.mesh_color}\n")
             f.write("\n")
             
             # Visualization Settings
             f.write("[Visualization]\n")
-            f.write(f"  Skeleton Mode:   {self.skeleton_mode}\n")
-            f.write(f"  Backend:         {self.backend}\n")
-            f.write(f"  Brain Mesh:      {self.brain_mesh}\n")
+            f.write(f"  Skeleton Mode:    {self.skeleton_mode}\n")
+            f.write(f"  Backend:          {self.backend}\n")
+            f.write(f"  Brain Mesh:       {self.brain_mesh}\n")
+            f.write(f"  VNC Mesh:         {self.vnc_mesh}\n")
             if self.mesh_roi:
-                f.write(f"  Mesh ROI:        {self.mesh_roi}\n")
+                f.write(f"  Mesh ROI:         {self.mesh_roi}\n")
+            f.write(f"  Merge Neurons:    {self.merge_neurons}\n")
+            f.write(f"  Show Soma:        {self.show_soma}\n")
             f.write("\n")
             
             # Synapse Settings
             f.write("[Synapse Settings]\n")
-            f.write(f"  Synapse Mode:    {self.synapse_mode}\n")
-            f.write(f"  Synapse Size:    {self.synapse_size}\n")
-            f.write(f"  Min Synapse Num: {self.min_synapse_num}\n")
+            f.write(f"  Synapse Mode:     {self.synapse_mode}\n")
+            f.write(f"  Synapse Size:     {self.synapse_size}\n")
+            f.write(f"  Min Synapse Num:  {self.min_synapse_num}\n")
+            f.write(f"  Synapse Alpha:    {self.synapse_alpha}\n")
             f.write("\n")
             
-            f.write("=" * 60 + "\n")
+            # Export Settings
+            f.write("[Export Settings]\n")
+            f.write(f"  Export Method:    {self.export_method}\n")
+            f.write(f"  Export Scale:     {self.export_scale}\n")
+            if isinstance(self.export_views, list):
+                export_views_str = ', '.join(self.export_views)
+            elif self.export_views is True:
+                export_views_str = 'all (front, back, top, bottom, left, right)'
+            else:
+                export_views_str = 'disabled'
+            f.write(f"  Export Views:     {export_views_str}\n")
+            f.write(f"  Simplified PNG:   {self.export_simplified_png}\n")
+            f.write("\n")
+            
+            # Mesh Simplification Settings
+            f.write("[Mesh Simplification]\n")
+            f.write(f"  Skeleton Mesh:    {self.skeleton_mesh_simplification}\n")
+            f.write(f"  Soma Mesh:        {self.soma_mesh_simplification}\n")
+            f.write(f"  ROI Mesh:         {self.roi_mesh_simplification}\n")
+            f.write("\n")
+            
+            # Cache Settings
+            f.write("[Cache Settings]\n")
+            f.write(f"  Cache Neurons:    {self.cache_neurons}\n")
+            f.write(f"  Cache Synapses:   {self.cache_synapses}\n")
+            f.write(f"  Force API Fetch:  {self.force_API_fetching}\n")
+            f.write("\n")
+            
+            # FAFB/FlyWire Specific Settings (only show if relevant)
+            if 'FAFB' in self.dataset.upper() or 'flywire' in self.dataset.lower():
+                f.write("[FAFB/FlyWire Settings]\n")
+                f.write(f"  Auto Fix Extrusions:     {self.auto_fix_extrusions}\n")
+                f.write(f"  Template Correction:     {self.FAFB_template_correction}\n")
+                f.write(f"  Soma Region Radius:      {self.soma_region_radius}\n")
+                f.write(f"  Force API Fetching:      {self.force_API_fetching}\n")
+                f.write("\n")
+            
+            f.write("=" * 70 + "\n")
+            f.write(f"Generated by VisualizeSkeleton\n")
+            f.write("=" * 70 + "\n")
         
         if self.backend == 'plotly':
             self.fig_3d = go.Figure()
@@ -5936,52 +7712,119 @@ class VisualizeSkeleton:
                     if not views_to_export:
                         self._vprint('   Skipping PNG export (export_views=False)')
                     else:
-                        # Check HTML size and warn if export may be slow/hang
+                        # Check HTML size
                         html_path = self.fig_path + '.html'
+                        html_size_mb = 0
                         if os.path.exists(html_path):
                             html_size_mb = os.path.getsize(html_path) / 1024 / 1024
-                            if html_size_mb > 100:
-                                self._vprint(f'      ⚠️  Large HTML ({html_size_mb:.1f}MB) - PNG export may be slow.')
-                                self._vprint(f'      💡 Consider using skeleton_mesh_simplification=0.95 or export_scale=2')
-                            elif html_size_mb > 50:
-                                self._vprint(f'      ⚠️  HTML size: {html_size_mb:.1f}MB - export may take 1-2 minutes')
+                        
+                        # Determine if we should pre-simplify based on export_simplified_png setting
+                        # Default (False): Only simplify on timeout
+                        # True: Simplify if > 50MB
+                        # int: Simplify if > that many MB
+                        simplify_threshold_mb = None
+                        if self.export_simplified_png is True:
+                            simplify_threshold_mb = 50
+                        elif isinstance(self.export_simplified_png, (int, float)) and self.export_simplified_png > 0:
+                            simplify_threshold_mb = self.export_simplified_png
+                        
+                        # Create export figure (may be simplified)
+                        export_fig = self.fig_3d
+                        using_simplified = False
+                        html_size_cap = self._get_html_size_cap()
+                        
+                        # Auto-simplify for kaleido if HTML > size cap (prevents timeout)
+                        if self.export_method != 'webdriver' and html_size_mb > html_size_cap:
+                            # Target 50% file size reduction
+                            # HTML overhead (Plotly.js, layout, etc.) is ~20-30MB
+                            # To get 50% total reduction, we need more aggressive mesh simplification
+                            # Factor = (target_size - overhead) / (original_size - overhead)
+                            html_overhead_mb = 25  # Estimated fixed overhead
+                            target_size_mb = html_size_mb * 0.5  # 50% target
+                            data_size = html_size_mb - html_overhead_mb
+                            target_data_size = target_size_mb - html_overhead_mb
+                            simplification_factor = max(0.1, target_data_size / data_size) if data_size > 0 else 0.5
+                            
+                            self._vprint(f'      ⚠️  HTML size ({html_size_mb:.0f}MB) exceeds {html_size_cap}MB - auto-simplifying for kaleido')
+                            self._vprint(f'         Target: {target_size_mb:.0f}MB (50% reduction), simplification factor: {simplification_factor:.2f}')
+                            export_fig = self._simplify_figure_for_kaleido(self.fig_3d, simplification_factor)
+                            using_simplified = True
+                            
+                            # Save simplified HTML for reuse by export_video, plot_individuals, etc.
+                            simplified_html_path = os.path.join(self.save_folder, f"{self.saveas}_simplified.html")
+                            export_fig.write_html(simplified_html_path, auto_open=False,
+                                                 include_plotlyjs='cdn',
+                                                 config={'displayModeBar': False})
+                            simplified_size_mb = os.path.getsize(simplified_html_path) / 1024 / 1024
+                            self._vprint(f'      ✓ Saved simplified HTML: {os.path.basename(simplified_html_path)} ({simplified_size_mb:.0f}MB)')
+                            
+                            # Store for reuse
+                            self._simplified_export_fig = export_fig
+                            self._simplified_html_path = simplified_html_path
+                            
+                            self._vprint(f'      💡 For better quality, use export_method="webdriver"')
+                        elif simplify_threshold_mb and html_size_mb > simplify_threshold_mb:
+                            self._vprint(f'      ⚠️  HTML size: {html_size_mb:.1f}MB > {simplify_threshold_mb}MB - creating simplified copy for export')
+                            export_fig = self._create_simplified_export_figure()
+                            using_simplified = True
+                        elif html_size_mb > 50:
+                            self._vprint(f'      ℹ️  HTML size: {html_size_mb:.1f}MB - export may take 1-2 minutes')
                         
                         # Track if any export fails to skip remaining views
                         export_failed = False
                         exported_views = []
+                        use_kaleido_fallback = False
                         
-                        for view_name in views_to_export:
-                            if export_failed:
-                                self._vprint(f'      ⚠️  Skipping {view_name} (previous export failed)')
-                                continue
-                                
-                            if view_name not in view_cameras:
-                                self._vprint(f'      ⚠️  Skipping invalid view: {view_name}')
-                                continue
-                                
-                            camera = view_cameras[view_name]
-                            view_path = os.path.join(views_folder, f"{self.saveas}_{view_name}.png")
-                            self.fig_3d.update_layout(scene_camera=camera)
-                            
-                            # Use timeout-controlled export with retry
-                            success, msg, final_scale = self._export_png_with_timeout(
-                                self.fig_3d, view_path, 
-                                width=1200, height=900, 
-                                scale=self.export_scale, 
-                                timeout=60
+                        # Choose export method
+                        if self.export_method == 'webdriver':
+                            # WebDriver method - OPTIMIZED: open browser once for all views
+                            exported_views = self._export_views_with_webdriver_session(
+                                export_fig, views_to_export, view_cameras, views_folder
                             )
+                            export_failed = len(exported_views) == 0
+                            if exported_views and 'front' in exported_views:
+                                front_view_path = os.path.join(views_folder, f"{self.saveas}_front.png")
                             
-                            if success:
-                                self._vprint(f'      {view_name}: {msg}', level='full')
-                                exported_views.append(view_name)
+                            # Fallback to kaleido if webdriver failed
+                            if export_failed:
+                                self._vprint(f'      ⚠️  WebDriver export failed. Falling back to kaleido...')
+                                self._vprint(f'      💡 Tip: Set export_method="kaleido" for future use if WebDriver continues to fail.')
+                                use_kaleido_fallback = True
+                                export_failed = False  # Reset to try kaleido
+                        
+                        if self.export_method == 'kaleido' or use_kaleido_fallback:
+                            # Default: kaleido export with timeout (per-view)
+                            for view_name in views_to_export:
+                                if export_failed:
+                                    self._vprint(f'      ⚠️  Skipping {view_name} (previous export failed)')
+                                    continue
+                                    
+                                if view_name not in view_cameras:
+                                    self._vprint(f'      ⚠️  Skipping invalid view: {view_name}')
+                                    continue
+                                    
+                                camera = view_cameras[view_name]
+                                view_path = os.path.join(views_folder, f"{self.saveas}_{view_name}.png")
+                                export_fig.update_layout(scene_camera=camera)
                                 
-                                # Save front view path for copying to root
-                                if view_name == 'front':
-                                    front_view_path = view_path
-                            else:
-                                self._vprint(f'      ⚠️  {view_name} export failed: {msg}')
-                                export_failed = True
-                                self._vprint(f'      💡 Skipping remaining views. Try reducing export_scale or increasing skeleton_mesh_simplification.')
+                                success, msg, final_scale = self._export_png_with_timeout(
+                                    export_fig, view_path, 
+                                    width=1200, height=900, 
+                                    scale=self.export_scale, 
+                                    timeout=300
+                                )
+                                
+                                if success:
+                                    self._vprint(f'      {view_name}: {msg}', level='full')
+                                    exported_views.append(view_name)
+                                    
+                                    # Save front view path for copying to root
+                                    if view_name == 'front':
+                                        front_view_path = view_path
+                                else:
+                                    self._vprint(f'      ⚠️  {view_name} export failed: {msg}')
+                                    export_failed = True
+                                    self._vprint(f'      💡 Skipping remaining views. Try reducing export_scale or increasing skeleton_mesh_simplification.')
                         
                         # Copy front view to root folder without '_front' suffix
                         if front_view_path and os.path.exists(front_view_path):
@@ -6021,6 +7864,10 @@ class VisualizeSkeleton:
         import time
         start_time = time.time()
         
+        # Reset simplified figure and HTML path from previous export
+        self._simplified_export_fig = None
+        self._simplified_html_path = None
+        
         self._vprint('\n' + '='*60)
         self._vprint(f'🧠 VisualizeSkeleton: Plotting {self.dataset}')
         self._vprint('='*60)
@@ -6044,6 +7891,9 @@ class VisualizeSkeleton:
         pdf_title: str = None,
         neuron_alpha: float = None,
         summary_format: str | list = 'pdf',
+        auto_crop: bool = True,
+        crop_margin: int = 30,
+        export_method: str = None,
     ):
         """
         Plot individual neurons/types independently based on the main figure's legend entries.
@@ -6077,6 +7927,16 @@ class VisualizeSkeleton:
         summary_format : str or list, default 'pdf'
             Format(s) for summary file generation.
             Options: 'pdf', 'pptx', or list like ['pdf', 'pptx']
+        auto_crop : bool, default True
+            If True, automatically crop whitespace/background from PNG exports
+            to minimize empty margins around content.
+        crop_margin : int, default 30
+            Margin (in pixels) to preserve around content when auto_crop=True.
+        export_method : str, optional
+            Export method for PNG generation. Options: 'webdriver', 'kaleido'.
+            If None, uses self.export_method (default from class initialization).
+            - 'webdriver': Uses Selenium Chrome for rendering (better for large figures)
+            - 'kaleido': Uses kaleido for rendering (faster for small figures)
             
         Returns
         -------
@@ -6090,6 +7950,7 @@ class VisualizeSkeleton:
         >>> vs.plot_neurons()
         >>> vs.plot_individuals(output_format=['png', 'html'], views=['front', 'top'])
         >>> vs.plot_individuals(summary_format=['pdf', 'pptx'])  # Generate both PDF and PPTX
+        >>> vs.plot_individuals(export_method='webdriver')  # Force webdriver for large figures
         """
         import copy
         
@@ -6100,6 +7961,9 @@ class VisualizeSkeleton:
         if self.backend != 'plotly':
             self._vprint('⚠️  plot_individuals() only supports plotly backend.')
             return None
+        
+        # Use specified export_method or fall back to self.export_method
+        actual_export_method = export_method if export_method is not None else self.export_method
         
         # Use self.export_scale if scale not specified
         if scale is None:
@@ -6218,6 +8082,10 @@ class VisualizeSkeleton:
         # Get mesh_roi names for matching
         mesh_roi_names = [r.lower() for r in self.mesh_roi] if self.mesh_roi else []
         
+        # Template/mesh names to always include as background
+        mesh_keywords = ['mesh', 'brain regions', 'template', 'vnc']
+        template_names = ['JRCFIB', 'MANC', 'JRC2018', 'FLYWIRE', 'FAFB', 'jrcfib', 'flywire', 'fafb']
+        
         for idx, trace in enumerate(all_traces):
             trace_name = getattr(trace, 'name', '')
             show_legend = getattr(trace, 'showlegend', True)
@@ -6226,10 +8094,20 @@ class VisualizeSkeleton:
             
             # Identify mesh/roi traces (keep visible as background)
             # Include brain regions, standard templates, and user-specified mesh_roi
-            if trace_name and ('brain regions' in trace_name_lower or 
-                              'mesh' in trace_name_lower or
-                              any(template in trace_name for template in ['JRCFIB', 'MANC', 'JRC2018']) or
-                              any(roi_name in trace_name_lower for roi_name in mesh_roi_names)):
+            is_background = False
+            
+            if trace_name:
+                # Check for mesh-related keywords
+                if any(kw in trace_name_lower for kw in mesh_keywords):
+                    is_background = True
+                # Check for template names (case-insensitive for most, case-sensitive for acronyms)
+                elif any(tn in trace_name for tn in template_names):
+                    is_background = True
+                # Check for user-specified ROI meshes
+                elif any(roi_name in trace_name_lower for roi_name in mesh_roi_names):
+                    is_background = True
+            
+            if is_background:
                 background_indices.append(idx)
                 continue
                 
@@ -6262,102 +8140,175 @@ class VisualizeSkeleton:
         # Track if PNG export fails to skip remaining individuals
         png_export_failed = False
         
-        # No subfolders needed - use flat structure with naming convention
+        # Helper to sanitize filenames
+        def _sanitize_filename(name):
+            safe_name = "".join(c if c.isalnum() or c in '.+_- ' else '_' for c in str(name))
+            safe_name = safe_name.strip().replace(' ', '_')
+            while '__' in safe_name:
+                safe_name = safe_name.replace('__', '_')
+            return safe_name.rstrip('_')
         
         from tqdm import tqdm
         legend_names = list(legend_entries.keys())
         
-        for legend_name in tqdm(legend_names, desc='Plotting individuals'):
-            # Skip if PNG export already failed
-            if png_export_failed and 'png' in output_format and 'html' not in output_format:
-                continue  # Skip if only PNG requested and it failed
+        # ==============================================================================
+        # OPTIMIZED WEBDRIVER EXPORT: Open browser once, toggle visibility via JavaScript
+        # ==============================================================================
+        if actual_export_method == 'webdriver' and 'png' in output_format:
+            self._vprint(f'   Using optimized WebDriver export (single browser session)')
             
-            trace_indices = legend_entries[legend_name]
+            # Use simplified HTML if available from previous export (e.g., export_views)
+            simplified_html = getattr(self, '_simplified_html_path', None)
+            if simplified_html and os.path.exists(simplified_html):
+                self._vprint(f'   ✓ Reusing simplified HTML from previous export')
+                temp_html = simplified_html
+            else:
+                # Use simplified figure if available, otherwise use original
+                export_fig = getattr(self, '_simplified_export_fig', None) or self.fig_3d
+                if export_fig is not self.fig_3d:
+                    self._vprint(f'   ✓ Reusing simplified figure from previous export')
+                
+                # Save main HTML with all traces visible for WebDriver
+                temp_html = os.path.join(output_dir, '_temp_main_figure.html')
+                export_fig.write_html(temp_html, auto_open=False, 
+                                       include_plotlyjs='cdn',
+                                       config={'displayModeBar': False})
             
-            # Sanitize filename - keep + signs
-            safe_name = "".join(c if c.isalnum() or c in '.+_- ' else '_' for c in str(legend_name))
-            safe_name = safe_name.strip().replace(' ', '_')
-            # Clean up multiple consecutive underscores
-            while '__' in safe_name:
-                safe_name = safe_name.replace('__', '_')
-            # Remove trailing underscores
-            safe_name = safe_name.rstrip('_')
-            
-            # Hide all neuron traces, show only this legend's traces + background
-            # Also apply custom alpha for better individual visibility
-            for idx in range(n_traces):
-                if idx in trace_indices or idx in background_indices:
-                    self.fig_3d.data[idx].visible = True
-                    # Apply custom alpha to neuron traces (not background)
-                    # navis encodes alpha in the color as RGBA, so we must modify the color
-                    if idx in trace_indices:
-                        trace = self.fig_3d.data[idx]
-                        # Modify the color's alpha component (navis stores alpha in RGBA color)
-                        if hasattr(trace, 'color') and trace.color is not None:
-                            trace.color = _modify_color_alpha(trace.color, individual_alpha)
-                        # Also set opacity attribute for non-Mesh3d traces (Scatter3d, etc.)
-                        if hasattr(trace, 'opacity'):
-                            trace.opacity = individual_alpha
-                else:
-                    self.fig_3d.data[idx].visible = False
-            
-            # Update layout for export (no title/legend for cleaner PNG)
-            # Use square output dimensions with scene domain for 10% margins
-            self.fig_3d.update_layout(
-                title=dict(text='', x=0.5),
-                margin=dict(l=0, r=0, b=0, t=0),
-                sliders=[],
-                updatemenus=[],
-                showlegend=False,
-                scene=dict(
-                    domain=dict(x=[0.01, 0.99], y=[0.01, 0.99])  # 1% margin on all sides
-                ),
+            # Use the optimized helper function
+            result = export_individuals_webdriver(
+                html_path=temp_html,
+                output_dir=output_dir,
+                legend_entries=legend_entries,
+                background_indices=background_indices,
+                total_traces=n_traces,
+                views=views,
+                view_cameras=view_cameras,
+                scale=scale,
+                width=900,
+                height=900,
+                timeout=300,
+                verbose=True,
+                auto_crop=auto_crop,
+                crop_margin=crop_margin
             )
             
-            # Export HTML if requested
-            if 'html' in output_format:
-                # Include view info in filename if multiple views
-                html_filename = f'{safe_name}.html'
-                html_path = os.path.join(output_dir, html_filename)
-                self.fig_3d.write_html(
-                    html_path,
-                    include_plotlyjs='cdn',
-                    full_html=True
-                )
-                generated_files['html'].append(html_path)
+            # Clean up temp HTML (but not the permanent simplified HTML)
+            if temp_html and not temp_html.endswith('_simplified.html'):
+                try:
+                    os.remove(temp_html)
+                except:
+                    pass
             
-            # Export PNG(s) if requested
-            if 'png' in output_format and not png_export_failed:
-                if safe_name not in generated_files['png']:
-                    generated_files['png'][safe_name] = []
-                
-                for view_name in views:
-                    if png_export_failed:
-                        break  # Skip remaining views if export failed
-                        
-                    camera = view_cameras[view_name]
-                    self.fig_3d.update_layout(scene_camera=camera)
+            if result['success']:
+                generated_files['png'] = result['files']
+            else:
+                png_export_failed = True
+                self._vprint(f'   ⚠️  WebDriver export failed: {result["error"]}')
+            
+            # Export HTML files separately if requested (in traditional loop)
+            if 'html' in output_format:
+                for legend_name in tqdm(legend_names, desc='Exporting HTML files'):
+                    trace_indices = legend_entries[legend_name]
+                    safe_name = _sanitize_filename(legend_name)
                     
-                    # Use consistent naming: {view}_{safe_name}.png
-                    # PDFs will organize the same images differently
-                    png_filename = f'{view_name}_{safe_name}.png'
-                    png_path = os.path.join(output_dir, png_filename)
+                    # Set visibility for this individual
+                    for idx in range(n_traces):
+                        if idx in trace_indices or idx in background_indices:
+                            self.fig_3d.data[idx].visible = True
+                            if idx in trace_indices:
+                                trace = self.fig_3d.data[idx]
+                                if hasattr(trace, 'color') and trace.color is not None:
+                                    trace.color = _modify_color_alpha(trace.color, individual_alpha)
+                                if hasattr(trace, 'opacity'):
+                                    trace.opacity = individual_alpha
+                        else:
+                            self.fig_3d.data[idx].visible = False
                     
-                    # Use timeout-controlled export with retry
-                    success, msg, final_scale = self._export_png_with_timeout(
-                        self.fig_3d, png_path, 
-                        width=900, height=900, 
-                        scale=scale, 
-                        timeout=60
+                    self.fig_3d.update_layout(
+                        title=dict(text='', x=0.5),
+                        margin=dict(l=0, r=0, b=0, t=0),
+                        showlegend=False,
                     )
                     
-                    if success:
-                        generated_files['png'][safe_name].append((png_path, view_name))
+                    html_filename = f'{safe_name}.html'
+                    html_path = os.path.join(output_dir, html_filename)
+                    self.fig_3d.write_html(html_path, include_plotlyjs='cdn', full_html=True)
+                    generated_files['html'].append(html_path)
+        
+        # ==============================================================================
+        # FALLBACK: Traditional loop for kaleido or HTML-only export
+        # ==============================================================================
+        else:
+            for legend_name in tqdm(legend_names, desc='Plotting individuals'):
+                # Skip if PNG export already failed
+                if png_export_failed and 'png' in output_format and 'html' not in output_format:
+                    continue
+                
+                trace_indices = legend_entries[legend_name]
+                safe_name = _sanitize_filename(legend_name)
+                
+                # Hide all neuron traces, show only this legend's traces + background
+                for idx in range(n_traces):
+                    if idx in trace_indices or idx in background_indices:
+                        self.fig_3d.data[idx].visible = True
+                        if idx in trace_indices:
+                            trace = self.fig_3d.data[idx]
+                            if hasattr(trace, 'color') and trace.color is not None:
+                                trace.color = _modify_color_alpha(trace.color, individual_alpha)
+                            if hasattr(trace, 'opacity'):
+                                trace.opacity = individual_alpha
                     else:
-                        self._vprint(f'   ⚠️  PNG export failed for {legend_name} ({view_name}): {msg}')
-                        png_export_failed = True
-                        self._vprint(f'   💡 Skipping remaining individual exports. Try reducing scale or increasing skeleton_mesh_simplification.')
-                        break
+                        self.fig_3d.data[idx].visible = False
+                
+                self.fig_3d.update_layout(
+                    title=dict(text='', x=0.5),
+                    margin=dict(l=0, r=0, b=0, t=0),
+                    sliders=[],
+                    updatemenus=[],
+                    showlegend=False,
+                    scene=dict(
+                        domain=dict(x=[0.01, 0.99], y=[0.01, 0.99])
+                    ),
+                )
+                
+                # Export HTML if requested
+                if 'html' in output_format:
+                    html_filename = f'{safe_name}.html'
+                    html_path = os.path.join(output_dir, html_filename)
+                    self.fig_3d.write_html(html_path, include_plotlyjs='cdn', full_html=True)
+                    generated_files['html'].append(html_path)
+                
+                # Export PNG(s) if requested (kaleido path)
+                if 'png' in output_format and not png_export_failed:
+                    if safe_name not in generated_files['png']:
+                        generated_files['png'][safe_name] = []
+                    
+                    for view_name in views:
+                        if png_export_failed:
+                            break
+                            
+                        camera = view_cameras[view_name]
+                        self.fig_3d.update_layout(scene_camera=camera)
+                        
+                        png_filename = f'{view_name}_{safe_name}.png'
+                        png_path = os.path.join(output_dir, png_filename)
+                        
+                        success, msg, final_scale = self._export_png_with_timeout(
+                            self.fig_3d, png_path, 
+                            width=900, height=900, 
+                            scale=scale, 
+                            timeout=300,
+                            auto_crop=auto_crop,
+                            crop_margin=crop_margin
+                        )
+                        
+                        if success:
+                            generated_files['png'][safe_name].append((png_path, view_name))
+                        else:
+                            self._vprint(f'   ⚠️  PNG export failed for {legend_name} ({view_name}): {msg}')
+                            png_export_failed = True
+                            self._vprint(f'   💡 Skipping remaining exports. Try reducing scale or skeleton_mesh_simplification.')
+                            break
         
         # Restore original figure state (visibility, opacity, and colors)
         for idx in range(n_traces):
@@ -6986,7 +8937,8 @@ class VisualizeSkeleton:
     def export_video(self, fps=30, degree_per_frame=1.0, rotate='horizontal', rotate_plane=None, 
                     view_direction=None, view_distance=None, synapse_size=1, 
                     html_file=None, output_dir=None, use_existing_images=True, 
-                    export_gif=True, gif_scale=0.2, gif_optimize=True, **kwargs):
+                    export_gif=True, gif_scale=0.2, gif_optimize=True,
+                    auto_crop=True, crop_margin=30, export_method: str = None, **kwargs):
         '''
         Export a rotating 3D visualization to MP4 video.
         
@@ -7038,6 +8990,18 @@ class VisualizeSkeleton:
             Example: 0.2 = 20% of original video resolution.
         gif_optimize : bool, default True
             Enable GIF compression optimization for smaller file sizes.
+        auto_crop : bool, default True
+            If True, automatically crop whitespace/background from each frame
+            with consistent sizing across all frames (computes max projection bounds).
+            This ensures uniform frame dimensions for smooth video playback.
+        crop_margin : int, default 30
+            Margin (in pixels) to preserve around content when auto_crop=True.
+            Has no effect unless auto_crop=True.
+        export_method : str, optional
+            Export method to use for frame rendering: 'webdriver' or 'kaleido'.
+            If None, uses the class-level export_method attribute.
+            - 'webdriver': Uses Chrome WebDriver (recommended for large figures)
+            - 'kaleido': Uses Kaleido static image export (default)
         **kwargs : dict
             Additional arguments for plotly write_image():
             - scale : int - Resolution multiplier. Defaults to min(self.export_scale, 3).
@@ -7095,10 +9059,23 @@ class VisualizeSkeleton:
             rotate_plane = 'xz'
         # else: use the explicitly provided rotate_plane
         
+        # Determine which export method to use
+        actual_export_method = export_method if export_method else self.export_method
+        
         if view_direction is None:
             view_direction = (1, -1)
         if view_distance is None:
             view_distance = 2.2
+        
+        # Warn if crop_margin is set but auto_crop is disabled
+        if crop_margin != 30 and not auto_crop:
+            self._vprint(f'⚠️  crop_margin={crop_margin} has no effect without auto_crop=True')
+            self._vprint(f'   Add auto_crop=True to enable automatic frame cropping')
+        
+        # Warn about kaleido limitations for video export
+        if actual_export_method == 'kaleido':
+            self._vprint('💡 Tip: For video export, consider using export_method="webdriver" for better stability.')
+            self._vprint('   Kaleido can timeout on complex figures. WebDriver is more reliable for animations.')
         
         # Set default scale from self.export_scale if not specified in kwargs
         # For video, cap at scale=3 for reasonable performance (scale=4 is very slow)
@@ -7164,10 +9141,24 @@ class VisualizeSkeleton:
                     'No figure found. Either run plot_neurons() first or provide html_file parameter.'
                 )
             html_size = os.path.getsize(self.fig_path+'.html') / 1024 / 1024 # in MB
-            if html_size > 100:
+            html_size_cap = self._get_html_size_cap()
+            if html_size > html_size_cap:
                 self._vprint(f'⚠️  Figure is large ({html_size:.1f} MB). Rendering may be slow.')
-                self._vprint(f'   Consider using lower scale or smaller dimensions in kwargs.')
-            fig_traces = self.fig_3d.data
+                if actual_export_method == 'kaleido':
+                    self._vprint(f'   ⚠️  Kaleido may timeout on figures > {html_size_cap}MB.')
+                    self._vprint(f'   💡 Recommended: Use export_method="webdriver" for large figures.')
+                    self._vprint(f'   💡 Or increase skeleton_mesh_simplification (e.g., 0.97-0.99).')
+                else:
+                    self._vprint(f'   Consider using higher skeleton_mesh_simplification if export is slow.')
+            
+            # Use simplified HTML file if available from previous export (e.g., export_views)
+            simplified_fig = getattr(self, '_simplified_export_fig', None)
+            if simplified_fig is not None:
+                self._vprint(f'   ✓ Using simplified figure from previous export')
+                fig_traces = simplified_fig.data
+            else:
+                # Use original figure
+                fig_traces = self.fig_3d.data
         # Configure figure for video export
         for trace in fig_traces:
             trace.showlegend = False
@@ -7245,122 +9236,355 @@ class VisualizeSkeleton:
             current_scale = kwargs.get('scale', 2)
             frame_export_failed = False
             
-            # Set up timeout handler (Unix only)
-            old_handler = None
-            has_alarm_support = False
-            try:
-                old_handler = signal.signal(signal.SIGALRM, _timeout_handler)
-                has_alarm_support = True
-            except (AttributeError, ValueError):
-                has_alarm_support = False
-            
-            # Sequential rendering with timeout control
-            self._vprint(f'   Rendering frames... (First frame may take longer to initialize Kaleido)')
-            
-            try:
-                for i, deg in enumerate(steps_to_write):
-                    if frame_export_failed:
-                        break
+            # Choose export method
+            if actual_export_method == 'webdriver':
+                # WebDriver method - efficient: open browser once for all frames
+                # Uses HTML's initial camera as "front view" reference
+                self._vprint(f'   Using WebDriver for frame export (opens browser once)...')
+                
+                # Get render_wait from attribute (None = auto-calibrate)
+                render_wait = getattr(self, 'webdriver_render_wait', None)
+                if render_wait is not None:
+                    self._vprint(f'   Render wait: {render_wait}s (fixed)')
+                
+                # Save figure to temp HTML
+                temp_html = os.path.join(pic_folder, '_temp_video.html')
+                fig_new.write_html(temp_html, auto_open=False, 
+                                   include_plotlyjs='cdn',
+                                   config={'displayModeBar': False})
+                
+                # Only save simplified HTML copy if we actually used a simplified figure
+                # Check if _simplified_export_fig exists AND was used for this export
+                simplified_fig = getattr(self, '_simplified_export_fig', None)
+                if simplified_fig is not None:
+                    html_size_mb = os.path.getsize(temp_html) / 1024 / 1024
+                    simplified_html_path = os.path.join(save_folder, f"{saveas}_simplified.html")
+                    if not os.path.exists(simplified_html_path):
+                        import shutil
+                        shutil.copy(temp_html, simplified_html_path)
+                        self._vprint(f'   ✓ Saved simplified HTML: {os.path.basename(simplified_html_path)} ({html_size_mb:.1f}MB)')
+                
+                try:
+                    with WebDriverExportSession(
+                        width=kwargs['width'], height=kwargs['height'],
+                        scale=current_scale,
+                        timeout=300,
+                        render_wait=render_wait
+                    ) as session:
+                        session.load_html(temp_html, wait_for_render=True, render_wait=3)
+                        self._vprint(f'   ✓ HTML loaded in browser (render_wait={session._render_wait:.2f}s)')
                         
-                    rad_i = np.deg2rad(deg)
-                    x = view_distance * np.sin(rad_i) * view_direction[0]
-                    y = view_distance * np.cos(rad_i) * view_direction[1]
-                    
-                    if rotate_plane == 'xy':
-                        fig_new.update_layout(scene_camera=dict(eye=dict(x=x, y=y, z=0)))
-                    elif rotate_plane == 'yz':
-                        fig_new.update_layout(scene_camera=dict(eye=dict(x=0, y=x, z=y)))
-                    elif rotate_plane == 'xz':
-                        fig_new.update_layout(scene_camera=dict(eye=dict(x=x, y=0, z=y)))
-                    
-                    fig_path = os.path.join(pic_folder, f'deg_{deg:.1f}.jpeg')
-                    
-                    try:
-                        # Set timeout alarm (60s for first frame, 30s for subsequent)
-                        timeout_sec = 60 if i == 0 else 30
-                        if has_alarm_support:
-                            signal.alarm(timeout_sec)
+                        # Get initial camera from HTML - this defines "front view"
+                        initial_camera = session.get_current_camera()
+                        if initial_camera:
+                            initial_eye = initial_camera.get('eye', {'x': 0, 'y': 0, 'z': -view_distance})
+                            initial_up = initial_camera.get('up', {'x': 0, 'y': -1, 'z': 0})
+                            self._vprint(f'   Initial camera: eye=({initial_eye.get("x", 0):.2f}, {initial_eye.get("y", 0):.2f}, {initial_eye.get("z", 0):.2f})')
+                        else:
+                            initial_eye = {'x': 0, 'y': 0, 'z': -view_distance}
+                            initial_up = {'x': 0, 'y': -1, 'z': 0}
                         
-                        kwargs_copy = kwargs.copy()
-                        kwargs_copy['scale'] = current_scale
-                        fig_new.write_image(fig_path, **kwargs_copy)
+                        # Compute view distance from initial camera
+                        cam_distance = np.sqrt(
+                            initial_eye.get('x', 0)**2 + 
+                            initial_eye.get('y', 0)**2 + 
+                            initial_eye.get('z', 0)**2
+                        )
+                        if cam_distance < 0.1:
+                            cam_distance = view_distance
                         
-                        if has_alarm_support:
-                            signal.alarm(0)  # Cancel timeout
+                        for i, deg in enumerate(steps_to_write):
+                            if frame_export_failed:
+                                break
                             
-                    except PNGExportTimeout:
-                        if has_alarm_support:
-                            signal.alarm(0)
-                        
-                        if current_scale > 1:
-                            self._vprint(f'\n⚠️  Frame {i+1} timed out at scale={current_scale}, retrying with scale=1...')
-                            current_scale = 1
-                            try:
-                                if has_alarm_support:
-                                    signal.alarm(60)
-                                kwargs_copy = kwargs.copy()
-                                kwargs_copy['scale'] = 1
-                                fig_new.write_image(fig_path, **kwargs_copy)
-                                if has_alarm_support:
-                                    signal.alarm(0)
-                                self._vprint(f'   ✓ Frame {i+1} exported with scale=1')
-                            except (PNGExportTimeout, Exception) as retry_e:
-                                if has_alarm_support:
-                                    signal.alarm(0)
-                                self._vprint(f'\n⚠️  Frame {i+1} failed even at scale=1: {retry_e}')
-                                self._vprint('   💡 Figure is too complex. Try increasing skeleton_mesh_simplification (e.g., 0.95).')
+                            rad_i = np.deg2rad(deg)
+                            sin_val = np.sin(rad_i)
+                            cos_val = np.cos(rad_i)
+                            
+                            # Small offset to avoid gimbal lock
+                            offset = cam_distance * 0.01
+                            
+                            # Rotation logic - independent from kaleido
+                            # Rotate camera around the object based on rotation plane
+                            # Note: Initial camera is eye={0,0,-z}, up={0,-1,0}
+                            if rotate_plane == 'xy':
+                                # Horizontal rotation around Z axis
+                                eye = {
+                                    'x': cam_distance * sin_val,
+                                    'y': cam_distance * cos_val,
+                                    'z': offset
+                                }
+                                up = {'x': 0, 'y': 0, 'z': 1}
+                                
+                            elif rotate_plane == 'yz':
+                                # Vertical rotation around X axis (front→bottom→back→top)
+                                # At deg=0: eye={0, 0, -cam_distance}, up={0, -1, 0} (front)
+                                # At deg=90: eye={0, cam_distance, 0}, up={0, 0, -1} (bottom)
+                                # At deg=180: eye={0, 0, cam_distance}, up={0, 1, 0} (back)
+                                # At deg=270: eye={0, -cam_distance, 0}, up={0, 0, 1} (top)
+                                eye = {
+                                    'x': offset,
+                                    'y': cam_distance * sin_val,
+                                    'z': -cam_distance * cos_val
+                                }
+                                # Up vector rotates with camera (perpendicular to eye)
+                                up = {
+                                    'x': 0,
+                                    'y': -cos_val,
+                                    'z': -sin_val
+                                }
+                                
+                            elif rotate_plane == 'xz':
+                                # Horizontal rotation around Y axis
+                                eye = {
+                                    'x': cam_distance * sin_val,
+                                    'y': offset,
+                                    'z': -cam_distance * cos_val  # Negative to start from front
+                                }
+                                up = {'x': 0, 'y': -1, 'z': 0}
+                            
+                            # Rotate camera via JavaScript
+                            session.set_camera(eye=eye, up=up)
+                            
+                            # Take screenshot - NO auto_crop here; we'll do consistent cropping after all frames
+                            fig_path = os.path.join(pic_folder, f'deg_{deg:.1f}.jpeg')
+                            session.screenshot(fig_path, convert_to_jpeg=True, jpeg_quality=95,
+                                             auto_crop=False)  # Disable per-frame crop
+                            
+                            # Verify
+                            if not os.path.exists(fig_path) or os.path.getsize(fig_path) < 1024:
+                                self._vprint(f'\n⚠️  Frame {i+1} export failed')
                                 frame_export_failed = True
                                 break
-                        else:
-                            self._vprint(f'\n⚠️  Frame {i+1} timed out at scale=1. Figure is too complex.')
-                            self._vprint('   💡 Try increasing skeleton_mesh_simplification (e.g., 0.95 or 0.98).')
-                            frame_export_failed = True
-                            break
                             
-                    except Exception as e:
-                        if has_alarm_support:
-                            signal.alarm(0)
-                        self._vprint(f'\n⚠️  Frame {i+1} failed: {e}')
-                        if i == 0 and current_scale > 1:
-                            self._vprint(f'   Retrying with scale=1...')
-                            current_scale = 1
-                            try:
-                                kwargs_copy = kwargs.copy()
-                                kwargs_copy['scale'] = 1
-                                fig_new.write_image(fig_path, **kwargs_copy)
-                                self._vprint(f'   ✓ Frame {i+1} exported with scale=1')
-                            except Exception as retry_e:
-                                self._vprint(f'   ⚠️  Retry failed: {retry_e}')
-                                self._vprint('   💡 Try increasing skeleton_mesh_simplification.')
-                                frame_export_failed = True
-                                break
-                        else:
-                            frame_export_failed = True
-                            break
-                    
-                    elapsed = time.time() - t0
-                    avg_time = elapsed / (i + 1)
-                    remaining = avg_time * (len(steps_to_write) - i - 1)
-                    print(f'\r  Frame {i+1}/{len(steps_to_write)} | '
-                          f'Elapsed: {elapsed:.1f}s | '
-                          f'ETA: {remaining:.1f}s | '
-                          f'{avg_time:.2f}s/frame', end='    ', flush=True)
-                          
-            finally:
-                # Always cancel any pending alarm and restore original handler
-                if has_alarm_support:
+                            elapsed = time.time() - t0
+                            avg_time = elapsed / (i + 1)
+                            remaining = avg_time * (len(steps_to_write) - i - 1)
+                            print(f'\r  Frame {i+1}/{len(steps_to_write)} | '
+                                  f'Elapsed: {elapsed:.1f}s | '
+                                  f'ETA: {remaining:.1f}s | '
+                                  f'{avg_time:.2f}s/frame', end='    ', flush=True)
+                            
+                except Exception as e:
+                    self._vprint(f'\n⚠️  WebDriver export failed: {e}')
+                    frame_export_failed = True
+                finally:
                     try:
-                        signal.alarm(0)  # Cancel any pending alarm
-                        if old_handler is not None:
-                            signal.signal(signal.SIGALRM, old_handler)
+                        os.remove(temp_html)
                     except:
                         pass
+                
+            else:
+                # Default: kaleido export with timeout
+                # Check HTML size and auto-simplify if > size cap
+                html_size_mb = 0
+                if hasattr(self, 'fig_path') and os.path.exists(self.fig_path + '.html'):
+                    html_size_mb = os.path.getsize(self.fig_path + '.html') / 1024 / 1024
+                
+                html_size_cap = self._get_html_size_cap()
+                
+                # Auto-simplify for kaleido if HTML > size cap
+                # But first check if we already have a simplified figure from previous export
+                if html_size_mb > html_size_cap:
+                    simplified_fig = getattr(self, '_simplified_export_fig', None)
+                    simplified_html = getattr(self, '_simplified_html_path', None)
+                    
+                    if simplified_fig is not None:
+                        self._vprint(f'⚠️  HTML size ({html_size_mb:.0f}MB) exceeds {html_size_cap}MB - using previously simplified figure')
+                        # Rebuild fig_new from simplified figure traces
+                        fig_new = go.Figure(data=simplified_fig.data, layout=fig_layout)
+                        fig_new.update_layout(
+                            sliders=[],
+                            scene=dict(
+                                dragmode='orbit',
+                                xaxis={'visible':False}, 
+                                yaxis={'visible':False},
+                                zaxis={'visible':False},
+                            ),
+                            scene_camera=scene_camera_parameters,
+                        )
+                    else:
+                        # Target 50% file size reduction with overhead estimation
+                        html_overhead_mb = 25  # Estimated fixed overhead
+                        target_size_mb = html_size_mb * 0.5  # 50% target
+                        data_size = html_size_mb - html_overhead_mb
+                        target_data_size = target_size_mb - html_overhead_mb
+                        simplification_factor = max(0.1, target_data_size / data_size) if data_size > 0 else 0.5
+                        
+                        self._vprint(f'⚠️  HTML size ({html_size_mb:.0f}MB) exceeds {html_size_cap}MB - kaleido may timeout')
+                        self._vprint(f'   Target: {target_size_mb:.0f}MB (50% reduction), simplification factor: {simplification_factor:.2f}...')
+                        
+                        # Create simplified copy with dynamic reduction
+                        fig_new = self._simplify_figure_for_kaleido(fig_new, simplification_factor)
+                        
+                        # Save simplified HTML for future reuse
+                        simplified_html_path = os.path.join(save_folder, f"{saveas}_simplified.html")
+                        fig_new.write_html(simplified_html_path, auto_open=False,
+                                          include_plotlyjs='cdn',
+                                          config={'displayModeBar': False})
+                        simplified_size_mb = os.path.getsize(simplified_html_path) / 1024 / 1024
+                        self._vprint(f'   ✓ Saved simplified HTML: {os.path.basename(simplified_html_path)} ({simplified_size_mb:.0f}MB)')
+                        
+                        # Store for reuse
+                        self._simplified_export_fig = fig_new
+                        self._simplified_html_path = simplified_html_path
+                        
+                        self._vprint(f'   💡 For better quality, consider using export_method="webdriver"')
+                
+                # Set up timeout handler (Unix only)
+                old_handler = None
+                has_alarm_support = False
+                try:
+                    old_handler = signal.signal(signal.SIGALRM, _timeout_handler)
+                    has_alarm_support = True
+                except (AttributeError, ValueError):
+                    has_alarm_support = False
+                
+                # Get base timeout from attribute
+                base_timeout = getattr(self, 'export_timeout', 60)
+                frame1_success = False  # Track if frame 1 exported successfully
+                
+                # Sequential rendering with timeout control
+                self._vprint(f'   Rendering frames... (First frame may take longer to initialize Kaleido)')
+                
+                try:
+                    for i, deg in enumerate(steps_to_write):
+                        if frame_export_failed:
+                            break
+                            
+                        rad_i = np.deg2rad(deg)
+                        x = view_distance * np.sin(rad_i) * view_direction[0]
+                        z = view_distance * np.cos(rad_i) * view_direction[1]
+                        
+                        # Add small offset to avoid gimbal lock at axis-aligned positions
+                        # This prevents camera flipping at 90, 180, 270 degrees
+                        y_offset = view_distance * 0.01  # 1% offset
+                        
+                        if rotate_plane == 'xy':
+                            fig_new.update_layout(scene_camera=dict(eye=dict(x=x, y=z, z=y_offset)))
+                        elif rotate_plane == 'yz':
+                            fig_new.update_layout(scene_camera=dict(eye=dict(x=y_offset, y=x, z=z)))
+                        elif rotate_plane == 'xz':
+                            fig_new.update_layout(scene_camera=dict(eye=dict(x=x, y=y_offset, z=z)))
+                        
+                        fig_path = os.path.join(pic_folder, f'deg_{deg:.1f}.jpeg')
+                        
+                        try:
+                            # Timeout: first frame gets base_timeout, subsequent frames get 2x if frame1 succeeded
+                            # This is because frame 1 success verifies export is working (just slower)
+                            if i == 0:
+                                timeout_sec = base_timeout
+                            else:
+                                timeout_sec = base_timeout * 2 if frame1_success else base_timeout
+                            
+                            if has_alarm_support:
+                                signal.alarm(timeout_sec)
+                            
+                            kwargs_copy = kwargs.copy()
+                            kwargs_copy['scale'] = current_scale
+                            fig_new.write_image(fig_path, **kwargs_copy)
+                            
+                            if has_alarm_support:
+                                signal.alarm(0)  # Cancel timeout
+                            
+                            # Mark frame 1 as successful - allows 2x timeout tolerance for subsequent frames
+                            if i == 0:
+                                frame1_success = True
+                                
+                        except PNGExportTimeout:
+                            if has_alarm_support:
+                                signal.alarm(0)
+                            
+                            if current_scale > 1:
+                                self._vprint(f'\n⚠️  Frame {i+1} timed out at scale={current_scale}, retrying with scale=1...')
+                                current_scale = 1
+                                try:
+                                    if has_alarm_support:
+                                        signal.alarm(base_timeout * 2)
+                                    kwargs_copy = kwargs.copy()
+                                    kwargs_copy['scale'] = 1
+                                    fig_new.write_image(fig_path, **kwargs_copy)
+                                    if has_alarm_support:
+                                        signal.alarm(0)
+                                    self._vprint(f'   ✓ Frame {i+1} exported with scale=1')
+                                    if i == 0:
+                                        frame1_success = True
+                                except (PNGExportTimeout, Exception) as retry_e:
+                                    if has_alarm_support:
+                                        signal.alarm(0)
+                                    self._vprint(f'\n⚠️  Frame {i+1} failed even at scale=1: {retry_e}')
+                                    self._vprint('   💡 Figure is too complex. Recommendations:')
+                                    self._vprint('      1. Use export_method=\"webdriver\" (more reliable for complex figures)')
+                                    self._vprint('      2. Increase skeleton_mesh_simplification (e.g., 0.97-0.99)')
+                                    self._vprint('      3. Increase export_timeout (current: {base_timeout}s)')
+                                    frame_export_failed = True
+                                    break
+                            else:
+                                self._vprint(f'\n⚠️  Frame {i+1} timed out at scale=1. Figure is too complex.')
+                                self._vprint('   💡 Recommendations:')
+                                self._vprint('      1. Use export_method=\"webdriver\" (more reliable for complex figures)')
+                                self._vprint('      2. Increase skeleton_mesh_simplification (e.g., 0.97-0.99)')
+                                self._vprint(f'      3. Increase export_timeout (current: {base_timeout}s)')
+                                frame_export_failed = True
+                                break
+                                
+                        except Exception as e:
+                            if has_alarm_support:
+                                signal.alarm(0)
+                            self._vprint(f'\n⚠️  Frame {i+1} failed: {e}')
+                            if i == 0 and current_scale > 1:
+                                self._vprint(f'   Retrying with scale=1...')
+                                current_scale = 1
+                                try:
+                                    kwargs_copy = kwargs.copy()
+                                    kwargs_copy['scale'] = 1
+                                    fig_new.write_image(fig_path, **kwargs_copy)
+                                    self._vprint(f'   ✓ Frame {i+1} exported with scale=1')
+                                    frame1_success = True
+                                except Exception as retry_e:
+                                    self._vprint(f'   ⚠️  Retry failed: {retry_e}')
+                                    self._vprint('   💡 Use export_method=\"webdriver\" or increase skeleton_mesh_simplification.')
+                                    frame_export_failed = True
+                                    break
+                            else:
+                                frame_export_failed = True
+                                break
+                        
+                        elapsed = time.time() - t0
+                        avg_time = elapsed / (i + 1)
+                        remaining = avg_time * (len(steps_to_write) - i - 1)
+                        print(f'\r  Frame {i+1}/{len(steps_to_write)} | '
+                              f'Elapsed: {elapsed:.1f}s | '
+                              f'ETA: {remaining:.1f}s | '
+                              f'{avg_time:.2f}s/frame', end='    ', flush=True)
+                              
+                finally:
+                    # Always cancel any pending alarm and restore original handler
+                    if has_alarm_support:
+                        try:
+                            signal.alarm(0)  # Cancel any pending alarm
+                            if old_handler is not None:
+                                signal.signal(signal.SIGALRM, old_handler)
+                        except:
+                            pass
             
             if frame_export_failed:
                 self._vprint(f'\n⚠️  Frame rendering aborted. Skipping video generation.')
                 return 1
             
             print('\n✓ Image rendering complete')
+            
+            # Apply consistent cropping if auto_crop is enabled
+            # This ensures all frames have the same dimensions during rotation
+            if auto_crop:
+                self._vprint(f'   Applying consistent auto-crop across all frames...')
+                crop_result = self._apply_consistent_crop(pic_folder, margin=crop_margin)
+                if crop_result:
+                    crop_w, crop_h = crop_result
+                    self._vprint(f'   ✓ All frames cropped consistently to {crop_w}x{crop_h}')
+                else:
+                    self._vprint(f'   ⚠️  Auto-crop failed, using original frame sizes')
+        
         # Generate videos from images
         self._vprint(f'\nGenerating videos...')
         imglist = os.listdir(pic_folder)
@@ -7439,9 +9663,146 @@ class VisualizeSkeleton:
         return 0
 
 
+def _detect_content_bounds_standalone(img, background_color=(255, 255, 255)):
+    """Detect the bounding box of content in an image (standalone version)."""
+    from PIL import Image
+    import numpy as np
+    
+    if img.mode == 'RGBA':
+        bg = Image.new('RGB', img.size, background_color)
+        bg.paste(img, mask=img.split()[3])
+        img_rgb = bg
+    else:
+        img_rgb = img.convert('RGB')
+    
+    arr = np.array(img_rgb)
+    tolerance = 10
+    bg_r, bg_g, bg_b = background_color
+    
+    non_bg_mask = (
+        (np.abs(arr[:, :, 0].astype(int) - bg_r) > tolerance) |
+        (np.abs(arr[:, :, 1].astype(int) - bg_g) > tolerance) |
+        (np.abs(arr[:, :, 2].astype(int) - bg_b) > tolerance)
+    )
+    
+    rows = np.any(non_bg_mask, axis=1)
+    cols = np.any(non_bg_mask, axis=0)
+    
+    if not rows.any() or not cols.any():
+        return None
+    
+    row_min, row_max = np.where(rows)[0][[0, -1]]
+    col_min, col_max = np.where(cols)[0][[0, -1]]
+    
+    return (row_min, row_max, col_min, col_max)
+
+
+def _apply_consistent_crop_standalone(pic_folder, margin=20, background_color=(255, 255, 255)):
+    """
+    Apply consistent cropping to all images in a folder (standalone version).
+    
+    This finds the maximum extent of content across all frames and crops
+    all frames to the same unified bounds + margin.
+    
+    Parameters
+    ----------
+    pic_folder : str
+        Folder containing the frame images (deg_*.jpeg)
+    margin : int
+        Margin to preserve around content
+    background_color : tuple
+        RGB tuple for background color
+        
+    Returns
+    -------
+    tuple or None
+        (width, height) of the cropped images, or None if failed
+    """
+    from PIL import Image
+    import glob
+    
+    # Find all JPEG images in folder
+    image_paths = sorted(glob.glob(os.path.join(pic_folder, 'deg_*.jpeg')))
+    
+    if not image_paths:
+        return None
+    
+    # Sample frames for efficiency (every 10 degrees for 360 rotation)
+    sample_count = min(36, len(image_paths))
+    if sample_count < len(image_paths):
+        indices = [int(i * len(image_paths) / sample_count) for i in range(sample_count)]
+        sampled_paths = [image_paths[i] for i in indices]
+    else:
+        sampled_paths = image_paths
+    
+    # Compute unified bounds across sampled frames
+    unified_row_min = None
+    unified_row_max = None
+    unified_col_min = None
+    unified_col_max = None
+    
+    for path in sampled_paths:
+        try:
+            with Image.open(path) as img:
+                bounds = _detect_content_bounds_standalone(img, background_color)
+            
+            if bounds is None:
+                continue
+                
+            row_min, row_max, col_min, col_max = bounds
+            
+            if unified_row_min is None:
+                unified_row_min = row_min
+                unified_row_max = row_max
+                unified_col_min = col_min
+                unified_col_max = col_max
+            else:
+                unified_row_min = min(unified_row_min, row_min)
+                unified_row_max = max(unified_row_max, row_max)
+                unified_col_min = min(unified_col_min, col_min)
+                unified_col_max = max(unified_col_max, col_max)
+        except Exception:
+            continue
+    
+    if unified_row_min is None:
+        return None
+    
+    # Get image dimensions from first image
+    with Image.open(image_paths[0]) as img:
+        img_height = img.height
+        img_width = img.width
+    
+    # Add margin to unified bounds
+    row_min = max(0, unified_row_min - margin)
+    row_max = min(img_height - 1, unified_row_max + margin)
+    col_min = max(0, unified_col_min - margin)
+    col_max = min(img_width - 1, unified_col_max + margin)
+    
+    final_width = col_max - col_min + 1
+    final_height = row_max - row_min + 1
+    
+    # Apply consistent crop to all images
+    for path in image_paths:
+        try:
+            with Image.open(path) as img:
+                cropped = img.crop((col_min, row_min, col_max + 1, row_max + 1))
+                if cropped.mode == 'RGBA':
+                    rgb_img = Image.new('RGB', cropped.size, background_color)
+                    rgb_img.paste(cropped, mask=cropped.split()[3])
+                    cropped = rgb_img
+                elif cropped.mode != 'RGB':
+                    cropped = cropped.convert('RGB')
+                cropped.save(path, 'JPEG', quality=95)
+        except Exception:
+            pass
+    
+    return (final_width, final_height)
+
+
 def export_video_from_html(html_file, fps=30, degree_per_frame=1.0, rotate='horizontal',
                            output_dir=None, use_existing_images=True, 
-                           export_gif=True, gif_scale=0.2, gif_optimize=True, **kwargs):
+                           export_gif=True, gif_scale=0.2, gif_optimize=True,
+                           auto_crop=False, crop_margin=30, **kwargs):
     '''
     Standalone function to export a rotating video from an existing Plotly HTML file.
     
@@ -7470,6 +9831,11 @@ def export_video_from_html(html_file, fps=30, degree_per_frame=1.0, rotate='hori
         Scale factor for GIF resolution (0.1-1.0). Lower values = smaller file size.
     gif_optimize : bool, default True
         Enable GIF compression optimization for smaller file sizes.
+    auto_crop : bool, default False
+        If True, auto-crop frames to content bounds with consistent sizing across all frames.
+        This ensures uniform frame dimensions during rotation for smooth video playback.
+    crop_margin : int, default 30
+        Margin in pixels around content when auto_crop is enabled.
     **kwargs : dict
         Additional arguments for plotly write_image():
         - scale : int, default 2
@@ -7629,6 +9995,16 @@ def export_video_from_html(html_file, fps=30, degree_per_frame=1.0, rotate='hori
             print(f'\r  Frame {i+1}/{len(steps_to_write)} | Elapsed: {elapsed:.1f}s | ETA: {remaining:.1f}s', end='  ', flush=True)
         
         print('\n✓ Image rendering complete')
+        
+        # Apply consistent cropping if auto_crop is enabled
+        if auto_crop:
+            print(f'   Applying consistent auto-crop across all frames...')
+            crop_result = _apply_consistent_crop_standalone(pic_folder, margin=crop_margin)
+            if crop_result:
+                crop_w, crop_h = crop_result
+                print(f'   ✓ All frames cropped consistently to {crop_w}x{crop_h}')
+            else:
+                print(f'   ⚠️  Auto-crop failed, using original frame sizes')
     
     # Generate videos
     print(f'\nGenerating videos...')
@@ -7692,6 +10068,488 @@ def export_video_from_html(html_file, fps=30, degree_per_frame=1.0, rotate='hori
             print(f'   ⚠️  Backward GIF conversion failed: {e}')
     
     return 0
+
+
+def export_video_webdriver(
+    html_file: str,
+    fps: int = 30,
+    degree_per_frame: float = 1.0,
+    rotate: str = 'horizontal',
+    output_dir: str = None,
+    width: int = 1200,
+    height: int = 900,
+    scale: int = 2,
+    view_distance: float = 2.2,
+    export_gif: bool = True,
+    gif_scale: float = 0.2,
+    gif_optimize: bool = True,
+    timeout: int = 120,
+    auto_crop: bool = False,
+    crop_margin: int = 30,
+) -> int:
+    """
+    Export a rotating video from an existing Plotly HTML file using WebDriver.
+    
+    This is an EFFICIENT alternative to export_video_from_html() that:
+    - Opens the browser ONCE and keeps it open
+    - Rotates the camera using JavaScript (no figure regeneration)
+    - Takes screenshots in series without reopening the browser
+    
+    This method is significantly faster for large/complex 3D figures because:
+    1. The HTML only needs to load once (not per-frame)
+    2. Camera rotation uses JavaScript instead of Python figure update + kaleido export
+    3. Works with WebGL for smooth rendering
+    
+    Parameters
+    ----------
+    html_file : str
+        Path to existing Plotly HTML file to load.
+    fps : int, default 30
+        Frames per second for the output video.
+    degree_per_frame : float, default 1.0
+        Rotation angle in degrees per frame.
+        - 1.0 → 360 frames for full rotation (12 sec video at 30 fps)
+        - 2.0 → 180 frames for full rotation (6 sec video at 30 fps)
+    rotate : str, default 'horizontal'
+        Rotation direction: 'horizontal' or 'vertical'.
+    output_dir : str, optional
+        Directory to save video output. If None, uses the directory containing html_file.
+    width : int, default 1200
+        Browser viewport width.
+    height : int, default 900
+        Browser viewport height.
+    scale : int, default 2
+        Scale factor for screenshot resolution (actual size = width*scale x height*scale).
+    view_distance : float, default 2.2
+        Camera distance from the center (affects zoom level).
+    export_gif : bool, default True
+        If True, automatically convert videos to GIF format after export.
+    gif_scale : float, default 0.2
+        Scale factor for GIF resolution (0.1-1.0).
+    gif_optimize : bool, default True
+        Enable GIF compression optimization.
+    timeout : int, default 120
+        Maximum time in seconds to wait for page load.
+    auto_crop : bool, default False
+        If True, auto-crop frames to content bounds with consistent sizing across all frames.
+        This ensures uniform frame dimensions during rotation for smooth video playback.
+    crop_margin : int, default 30
+        Margin in pixels around content when auto_crop is enabled.
+    
+    Returns
+    -------
+    int
+        0 on success, 1 on failure
+    
+    Notes
+    -----
+    Requires: selenium, webdriver-manager
+    
+    On macOS, headless Chrome doesn't support WebGL, so we use an offscreen
+    window (positioned at -10000,-10000) instead of true headless mode.
+    
+    Examples
+    --------
+    # Basic usage
+    from visualize_skeleton import export_video_webdriver
+    export_video_webdriver('/path/to/my_neurons.html')
+    
+    # Faster rotation, higher quality
+    export_video_webdriver(
+        '/path/to/my_neurons.html',
+        fps=60,
+        degree_per_frame=2.0,  # Faster rotation
+        scale=3  # Higher quality
+    )
+    
+    # Vertical rotation
+    export_video_webdriver(
+        '/path/to/my_neurons.html',
+        rotate='vertical',
+        view_distance=2.5
+    )
+    """
+    try:
+        from selenium import webdriver
+        from selenium.webdriver.chrome.service import Service as ChromeService
+        from selenium.webdriver.chrome.options import Options as ChromeOptions
+        from selenium.webdriver.support.ui import WebDriverWait
+        from selenium.webdriver.support import expected_conditions as EC
+        from selenium.webdriver.common.by import By
+    except ImportError:
+        print("❌ Error: selenium is required for export_video_webdriver()")
+        print("   Install with: pip install selenium webdriver-manager")
+        return 1
+    
+    import shutil
+    import time
+    
+    # Validate input
+    if not os.path.exists(html_file):
+        raise FileNotFoundError(f'HTML file not found: {html_file}')
+    
+    # Determine output directory
+    if output_dir is None:
+        save_folder = os.path.dirname(os.path.abspath(html_file))
+    else:
+        save_folder = output_dir
+        os.makedirs(save_folder, exist_ok=True)
+    
+    saveas = os.path.splitext(os.path.basename(html_file))[0]
+    
+    # Handle rotate parameter
+    if rotate == 'horizontal':
+        rotate_plane = 'xz'
+    elif rotate == 'vertical':
+        rotate_plane = 'yz'
+    else:
+        rotate_plane = 'xz'
+    
+    # Calculate rotation steps
+    step = degree_per_frame
+    steps_to_write = np.linspace(0, 360, int(360/step), endpoint=False)
+    
+    # Set up image folder
+    pic_folder = os.path.join(save_folder, f'pics_{fps}fps_{rotate_plane}_webdriver')
+    if os.path.exists(pic_folder):
+        shutil.rmtree(pic_folder)
+    os.makedirs(pic_folder)
+    
+    # Calculate actual browser dimensions
+    actual_width = width * scale
+    actual_height = height * scale
+    
+    # Set up Chrome options
+    # Use --headless=new (Chrome 109+) for WebGL support in headless mode
+    chrome_options = ChromeOptions()
+    chrome_options.add_argument('--no-sandbox')
+    chrome_options.add_argument('--disable-dev-shm-usage')
+    chrome_options.add_argument(f'--window-size={actual_width},{actual_height}')
+    chrome_options.add_argument('--headless=new')  # Modern headless with WebGL support
+    
+    # Initialize ChromeDriver using webdriver-manager (cross-platform)
+    driver = None
+    try:
+        from webdriver_manager.chrome import ChromeDriverManager
+        service = ChromeService(ChromeDriverManager().install())
+        driver = webdriver.Chrome(service=service, options=chrome_options)
+    except ImportError:
+        try:
+            driver = webdriver.Chrome(options=chrome_options)
+        except Exception as e:
+            print(f"❌ Error: Could not initialize Chrome WebDriver: {e}")
+            print(f"   Install dependencies: pip install selenium webdriver-manager")
+            return 1
+    except Exception as e:
+        try:
+            driver = webdriver.Chrome(options=chrome_options)
+        except Exception as e2:
+            print(f"❌ Error: Could not initialize Chrome WebDriver: {e2}")
+            print(f"   Ensure Chrome 109+ is installed and webdriver-manager is up to date")
+            return 1
+    
+    try:
+        print(f'📂 Loading HTML file: {html_file}')
+        file_url = f'file://{os.path.abspath(html_file)}'
+        driver.get(file_url)
+        
+        # Wait for Plotly to render
+        print(f'   Waiting for Plotly to render...')
+        wait = WebDriverWait(driver, timeout)
+        wait.until(EC.presence_of_element_located((By.CLASS_NAME, "plotly")))
+        
+        # Additional wait for WebGL rendering
+        time.sleep(3)
+        print(f'✓ Page loaded and rendered')
+        
+        # JavaScript to update camera position
+        # Plotly stores camera in layout.scene.camera.eye
+        js_set_camera = """
+        var gd = document.querySelector('.js-plotly-plot');
+        if (gd && gd.layout && gd.layout.scene) {
+            Plotly.relayout(gd, {
+                'scene.camera.eye': {x: %f, y: %f, z: %f},
+                'scene.camera.up': {x: 0, y: -1, z: 0}
+            });
+        }
+        """
+        
+        print(f'🎬 Rendering {len(steps_to_write)} frames at {fps} fps...')
+        t0 = time.time()
+        
+        for i, deg in enumerate(steps_to_write):
+            rad_i = np.deg2rad(deg)
+            
+            # Add small offset to avoid gimbal lock at axis-aligned positions
+            # This prevents camera flipping at 90, 180, 270 degrees
+            offset = view_distance * 0.01  # 1% offset
+            
+            # Use view_direction (1, -1) to match original export_video_from_html behavior
+            # The -1 for cos component ensures consistent rotation direction
+            sin_component = view_distance * np.sin(rad_i)  # * 1
+            cos_component = view_distance * np.cos(rad_i) * (-1)  # * -1
+            
+            if rotate_plane == 'xz':  # Horizontal rotation
+                eye_x = sin_component
+                eye_y = offset  # Small offset instead of 0
+                eye_z = cos_component
+            elif rotate_plane == 'yz':  # Vertical rotation
+                eye_x = offset  # Small offset instead of 0
+                eye_y = sin_component
+                eye_z = cos_component
+            else:  # xy plane
+                eye_x = sin_component
+                eye_y = cos_component
+                eye_z = offset  # Small offset instead of 0
+            
+            # Update camera via JavaScript
+            driver.execute_script(js_set_camera % (eye_x, eye_y, eye_z))
+            
+            # Brief wait for rendering
+            time.sleep(0.1)
+            
+            # Take screenshot
+            frame_path = os.path.join(pic_folder, f'deg_{deg:.1f}.jpeg')
+            
+            # Get screenshot as PNG, then convert to JPEG
+            screenshot_png = os.path.join(pic_folder, f'temp_{deg:.1f}.png')
+            driver.save_screenshot(screenshot_png)
+            
+            # Convert PNG to JPEG for consistency with existing code
+            from PIL import Image
+            img = Image.open(screenshot_png)
+            img = img.convert('RGB')
+            img.save(frame_path, 'JPEG', quality=95)
+            os.remove(screenshot_png)
+            
+            # Progress update
+            elapsed = time.time() - t0
+            avg_time = elapsed / (i + 1)
+            remaining = avg_time * (len(steps_to_write) - i - 1)
+            print(f'\r   Frame {i+1}/{len(steps_to_write)} | Elapsed: {elapsed:.1f}s | ETA: {remaining:.1f}s', end='  ', flush=True)
+        
+        print('\n✓ Image rendering complete')
+        
+        # Apply consistent cropping if auto_crop is enabled
+        if auto_crop:
+            print(f'   Applying consistent auto-crop across all frames...')
+            crop_result = _apply_consistent_crop_standalone(pic_folder, margin=crop_margin)
+            if crop_result:
+                crop_w, crop_h = crop_result
+                print(f'   ✓ All frames cropped consistently to {crop_w}x{crop_h}')
+            else:
+                print(f'   ⚠️  Auto-crop failed, using original frame sizes')
+        
+    finally:
+        driver.quit()
+    
+    # Generate videos
+    print(f'\nGenerating videos...')
+    imglist = os.listdir(pic_folder)
+    imglist = [f for f in imglist if f.endswith('.jpeg')]
+    
+    img_eg = cv2.imread(os.path.join(pic_folder, imglist[0]))
+    frame_height, frame_width, layers = img_eg.shape
+    
+    fourcc = cv2.VideoWriter_fourcc(*'avc1')
+    
+    # Forward video
+    video_path_forward = os.path.join(save_folder, f'{saveas}_video_forward_webdriver.mp4')
+    out = cv2.VideoWriter(video_path_forward, fourcc, fps, frameSize=(frame_width, frame_height))
+    for deg in steps_to_write:
+        img = cv2.imread(os.path.join(pic_folder, f'deg_{deg:.1f}.jpeg'))
+        out.write(img)
+    out.release()
+    print(f'✓ Forward video: {video_path_forward}')
+    
+    # Backward video
+    video_path_backward = os.path.join(save_folder, f'{saveas}_video_backward_webdriver.mp4')
+    out = cv2.VideoWriter(video_path_backward, fourcc, fps, frameSize=(frame_width, frame_height))
+    for deg in steps_to_write[::-1]:
+        img = cv2.imread(os.path.join(pic_folder, f'deg_{deg:.1f}.jpeg'))
+        out.write(img)
+    out.release()
+    print(f'✓ Backward video: {video_path_backward}')
+    
+    print(f'\n✅ Video export complete!')
+    
+    # Convert to GIF if requested
+    if export_gif:
+        print(f'\n🎞️  Converting videos to GIF format...')
+        print(f'   Scale: {gif_scale} | Optimize: {gif_optimize}')
+        
+        # Convert forward video to GIF
+        gif_path_forward = video_path_forward.replace('.mp4', '.gif')
+        try:
+            video2gif(
+                video_path_forward,
+                gif_path_forward,
+                fps=fps,
+                scale=gif_scale,
+                optimize=gif_optimize
+            )
+            print(f'   ✓ Forward GIF: {gif_path_forward}')
+        except Exception as e:
+            print(f'   ⚠️  Forward GIF conversion failed: {e}')
+        
+        # Convert backward video to GIF
+        gif_path_backward = video_path_backward.replace('.mp4', '.gif')
+        try:
+            video2gif(
+                video_path_backward,
+                gif_path_backward,
+                fps=fps,
+                scale=gif_scale,
+                optimize=gif_optimize
+            )
+            print(f'   ✓ Backward GIF: {gif_path_backward}')
+        except Exception as e:
+            print(f'   ⚠️  Backward GIF conversion failed: {e}')
+    
+    return 0
+
+
+def export_png_webdriver(
+    html_file: str,
+    output_path: str = None,
+    width: int = 1200,
+    height: int = 900,
+    scale: int = 3,
+    timeout: int = 60,
+) -> str:
+    """
+    Export a single PNG from an existing Plotly HTML file using WebDriver.
+    
+    This is an alternative to kaleido-based PNG export that works reliably
+    with WebGL for complex 3D scenes.
+    
+    Parameters
+    ----------
+    html_file : str
+        Path to existing Plotly HTML file to load.
+    output_path : str, optional
+        Path for the output PNG file. If None, uses the same path as html_file
+        with .png extension.
+    width : int, default 1200
+        Browser viewport width.
+    height : int, default 900
+        Browser viewport height.
+    scale : int, default 3
+        Scale factor for screenshot resolution (actual size = width*scale x height*scale).
+    timeout : int, default 60
+        Maximum time in seconds to wait for page load.
+    
+    Returns
+    -------
+    str
+        Path to the created PNG file on success, None on failure.
+    
+    Notes
+    -----
+    Requires: selenium, webdriver-manager
+    
+    On macOS, headless Chrome doesn't support WebGL, so we use an offscreen
+    window (positioned at -10000,-10000) instead of true headless mode.
+    
+    Examples
+    --------
+    # Basic usage
+    from visualize_skeleton import export_png_webdriver
+    export_png_webdriver('/path/to/my_neurons.html')
+    
+    # Higher resolution
+    export_png_webdriver('/path/to/my_neurons.html', scale=4)
+    
+    # Custom output path
+    export_png_webdriver('/path/to/my_neurons.html', output_path='/path/to/output.png')
+    """
+    try:
+        from selenium import webdriver
+        from selenium.webdriver.chrome.service import Service as ChromeService
+        from selenium.webdriver.chrome.options import Options as ChromeOptions
+        from selenium.webdriver.support.ui import WebDriverWait
+        from selenium.webdriver.support import expected_conditions as EC
+        from selenium.webdriver.common.by import By
+    except ImportError:
+        print("❌ Error: selenium is required for export_png_webdriver()")
+        print("   Install with: pip install selenium webdriver-manager")
+        return None
+    
+    import time
+    
+    # Validate input
+    if not os.path.exists(html_file):
+        raise FileNotFoundError(f'HTML file not found: {html_file}')
+    
+    # Determine output path
+    if output_path is None:
+        output_path = os.path.splitext(html_file)[0] + '_webdriver.png'
+    
+    # Calculate actual browser dimensions
+    actual_width = width * scale
+    actual_height = height * scale
+    
+    # Set up Chrome options
+    # Use --headless=new (Chrome 109+) for WebGL support in headless mode
+    chrome_options = ChromeOptions()
+    chrome_options.add_argument('--no-sandbox')
+    chrome_options.add_argument('--disable-dev-shm-usage')
+    chrome_options.add_argument(f'--window-size={actual_width},{actual_height}')
+    chrome_options.add_argument('--headless=new')  # Modern headless with WebGL support
+    
+    # Initialize ChromeDriver using webdriver-manager (cross-platform)
+    driver = None
+    try:
+        from webdriver_manager.chrome import ChromeDriverManager
+        service = ChromeService(ChromeDriverManager().install())
+        driver = webdriver.Chrome(service=service, options=chrome_options)
+    except ImportError:
+        try:
+            driver = webdriver.Chrome(options=chrome_options)
+        except Exception as e:
+            print(f"❌ Error: Could not initialize Chrome WebDriver: {e}")
+            print(f"   Install dependencies: pip install selenium webdriver-manager")
+            return None
+    except Exception as e:
+        try:
+            driver = webdriver.Chrome(options=chrome_options)
+        except Exception as e2:
+            print(f"❌ Error: Could not initialize Chrome WebDriver: {e2}")
+            print(f"   Ensure Chrome 109+ is installed and webdriver-manager is up to date")
+            return None
+    
+    try:
+        print(f'📂 Loading HTML file: {html_file}')
+        file_url = f'file://{os.path.abspath(html_file)}'
+        driver.get(file_url)
+        
+        # Wait for Plotly to render
+        print(f'   Waiting for Plotly to render...')
+        wait = WebDriverWait(driver, timeout)
+        wait.until(EC.presence_of_element_located((By.CLASS_NAME, "plotly")))
+        
+        # Additional wait for WebGL rendering
+        time.sleep(3)
+        print(f'✓ Page loaded and rendered')
+        
+        # Take screenshot
+        driver.save_screenshot(output_path)
+        
+        print(f'✅ PNG exported: {output_path}')
+        
+        # Report file size
+        output_size = os.path.getsize(output_path) / (1024 * 1024)
+        print(f'   Resolution: {actual_width}x{actual_height}')
+        print(f'   File size: {output_size:.2f} MB')
+        
+        return output_path
+        
+    except Exception as e:
+        print(f'❌ Error during export: {e}')
+        return None
+        
+    finally:
+        driver.quit()
 
 
 def video2gif(

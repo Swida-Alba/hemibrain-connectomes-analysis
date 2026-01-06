@@ -129,6 +129,7 @@ Advanced technical documentation:
 1. Start with [Installation Guide](./INSTALLATION.md)
 2. Read [Quick Start Guide](../QUICK_START.md)
 3. Explore [Visualization Overview](./visualizations/README.md)
+4. Check [Troubleshooting Guide](./TROUBLESHOOTING.md) if you encounter issues
 
 ### For Researchers
 - **[NeuronBridge Integration](./core-features/NeuronBridge_Guide.md)** - Find driver lines for EM neurons (NEW)
@@ -153,6 +154,7 @@ Advanced technical documentation:
 ### Getting Started
 - **[Installation](./INSTALLATION.md)**: Setup instructions and requirements
 - **[Quick Start](../QUICK_START.md)**: Get running in 5 minutes
+- **[Troubleshooting](./TROUBLESHOOTING.md)**: Common issues and solutions
 - **[Output Files Reference](./OUTPUT_FILES.md)**: Detailed explanation of all generated files
 - **[FlyWire-FAFB Integration](./FAFB_INTEGRATION.md)**: Setup guide for FAFB dataset
 - **[FlyWire-BANC Integration](./BANC_INTEGRATION.md)**: Setup guide for BANC dataset

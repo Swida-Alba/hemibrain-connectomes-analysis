@@ -30,6 +30,7 @@ A comprehensive Python toolkit for analyzing and visualizing connectome data fro
 | **[Quick Start](QUICK_START.md)**                               | First-time setup and basic examples |
 | **[Installation](docs/INSTALLATION.md)**                        | Detailed installation instructions  |
 | **[Authentication](docs/INSTALLATION.md#authentication-setup)** | **Set up your API tokens**          |
+| **[Troubleshooting](docs/TROUBLESHOOTING.md)**                  | Common issues and solutions         |
 | **[Basic Usage](#basic-usage)**                                 | Core script tutorials               |
 
 ### 📖 Feature Documentation
@@ -149,14 +150,14 @@ pip install -r requirements-windows.txt  # Windows
 
 ## Supported Datasets
 
-| Dataset             | Type     | Description               |
-| ------------------- | -------- | ------------------------- |
-| `hemibrain:v1.2.1`  | NeuPrint | Adult fly brain (central) |
-| `male-cns:v0.9`     | NeuPrint | Full male CNS             |
-| `optic-lobe:v1.1`   | NeuPrint | Optic lobe detailed       |
-| `manc:v1.2.3`       | NeuPrint | Male VNC                  |
-| `flywire_FAFB_v783` | Local&API| FlyWire female brain      |
-| `flywire_BANC_v626` | Local    | FlyWire male VNC          |
+| Dataset             | Type      | Description               |
+| ------------------- | --------- | ------------------------- |
+| `hemibrain:v1.2.1`  | NeuPrint  | Adult fly brain (central) |
+| `male-cns:v0.9`     | NeuPrint  | Full male CNS             |
+| `optic-lobe:v1.1`   | NeuPrint  | Optic lobe detailed       |
+| `manc:v1.2.3`       | NeuPrint  | Male VNC                  |
+| `flywire_FAFB_v783` | Local&API | FlyWire female brain      |
+| `flywire_BANC_v626` | Local     | FlyWire male VNC          |
 
 📖 **[FlyWire Setup Guide](docs/FLYWIRE_USAGE.md)**
 
@@ -280,4 +281,18 @@ If you use this toolkit in your research, please cite the relevant connectome da
 
 - **[Documentation](docs/README.md)** - Full documentation
 - **[Examples](examples/)** - Working code examples
+- **[Troubleshooting](docs/TROUBLESHOOTING.md)** - Common issues and solutions
 - **[Issues](https://github.com/Swida-Alba/Drosophila-cross-dataset-connectome-analysis/issues)** - Bug reports and feature requests
+
+## Report an Issue
+
+If you encounter bugs or have feature requests:
+
+1. **Check [Troubleshooting Guide](docs/TROUBLESHOOTING.md)** for common solutions
+2. **Search [existing issues](https://github.com/Swida-Alba/Drosophila-cross-dataset-connectome-analysis/issues)**
+3. **Email the author:** krleng(a*t)pku.edu.cn (replace `(a*t)` with `@`)
+
+When reporting, please include:
+- Python version and OS
+- Full error traceback
+- Minimal code to reproduce the issue
