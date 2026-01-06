@@ -153,7 +153,107 @@ vs.plot_neurons()
 
 ### Fixing Skeleton Extrusion Issues
 
-The downloaded FAFB skeleton ZIP (`sk_lod1_783_healed.zip`) may contain neurons with extrusion artifacts (mesh errors that appear as spikes or protrusions). You can fix specific neurons by fetching fresh skeletons via CAVE API:
+The downloaded FAFB skeleton ZIP (`sk_lod1_783_healed.zip`) may contain neurons with extrusion artifacts (mesh errors that appear as spikes or protrusions). These typically occur around the soma (cell body) region when aggressive mesh simplification is applied.
+
+#### Understanding Extrusions
+
+Extrusion artifacts happen because:
+1. The soma region has high vertex density in the original mesh
+2. When simplification is applied uniformly (e.g., 0.95 = remove 95% of faces), the soma's fine structure collapses
+3. This creates "spiky" protrusions extending from the cell body
+
+#### Solution 1: Automatic Extrusion Detection and Fix
+
+Enable `auto_fix_extrusions=True` to automatically detect and replace problematic skeletons:
+
+```python
+from coana import VisualizeSkeleton
+
+vs = VisualizeSkeleton(
+    dataset='flywire_FAFB_v783',
+    neuron_layers=['MTe50', 'MTe51', 'MTe54'],
+    skeleton_mesh_simplification=0.95,
+    auto_fix_extrusions=True,  # Automatically detect and fix extrusions
+    cache_neurons=True,
+    show_fig=True,
+)
+vs.plot_neurons()
+```
+
+**How auto_fix_extrusions works:**
+1. When loading skeletons from ZIP, each is converted to a simplified mesh
+2. Edge length analysis detects abnormal "spiky" geometry (edge ratio > 10x median)
+3. Problematic neurons are automatically fetched fresh from CAVE API
+4. **Extrusion check results are cached** in `cache/{dataset}/extrusion_check_results.parquet`
+5. On subsequent runs, only new neurons are checked (previously checked neurons use cached results)
+6. Fixed neurons are cached in `cache/{dataset}/API_cache/skeletons/` for future use
+
+**Performance notes:**
+- First run may take longer due to mesh analysis for extrusion detection
+- Subsequent runs are fast because check results are cached in parquet format
+- Set `auto_fix_extrusions=False` if you need faster loading and can tolerate artifacts
+
+#### Solution 2: Soma-Aware Simplification (Built-in)
+
+The visualization system includes **soma-aware simplification** that applies gentler simplification to the soma region:
+
+```python
+from coana import VisualizeSkeleton
+
+vs = VisualizeSkeleton(
+    dataset='flywire_FAFB_v783',
+    neuron_layers=[720575940624086675],
+    skeleton_mesh_simplification=0.95,     # Aggressive on skeleton branches
+    soma_mesh_simplification=0.8,          # Gentler on cell body (default)
+    soma_region_radius=20000,              # 20µm radius around soma (default)
+    cache_neurons=True,
+    show_fig=True,
+)
+vs.plot_neurons()
+```
+
+**Default cache settings:**
+- Skeleton simplification: 0.95 (keep 5% of faces)
+- Soma simplification: 0.8 (keep 20% of faces) 
+- Soma region radius: 20,000nm (20µm)
+
+#### Solution 3: Detect and Fix Extrusions Manually
+
+Use the built-in detection tools to identify problematic neurons:
+
+```python
+from coana import VisualizeSkeleton
+
+# Check a specific neuron for extrusions
+result = VisualizeSkeleton.check_fafb_skeleton_for_extrusions(
+    720575940624086675,
+    simplification=0.95,
+    verbose=True
+)
+
+if result['has_extrusions']:
+    print(f"Extrusions detected! Severity: {result['severity']}")
+    print(f"Recommendation: {result['recommendation']}")
+    
+    # Fix it by fetching from CAVE API
+    VisualizeSkeleton.fix_fafb_extrusions([720575940624086675])
+```
+
+Or use **auto-fix** mode:
+
+```python
+# Check AND automatically fix if extrusions found
+result = VisualizeSkeleton.check_fafb_skeleton_for_extrusions(
+    720575940624086675,
+    auto_fix=True,  # Automatically fetch from API if needed
+    verbose=True
+)
+print(f"Auto-fixed: {result['auto_fixed']}")
+```
+
+#### Solution 4: Manual API Fetching
+
+For more control, you can manually fetch fresh skeletons via CAVE API:
 
 ```python
 from coana import VisualizeSkeleton
@@ -181,11 +281,36 @@ vs2 = VisualizeSkeleton(
 vs2.plot_neurons()
 ```
 
+#### Extrusion Detection API
+
+The `detect_mesh_extrusions()` method provides detailed analysis:
+
+```python
+from coana import VisualizeSkeleton
+
+# If you have a mesh object already
+result = VisualizeSkeleton.detect_mesh_extrusions(
+    mesh,
+    soma_pos=[100, 200, 300],  # Soma position (optional)
+    soma_radius=20000,         # 20µm radius
+    verbose=True
+)
+
+# Result dictionary contains:
+# - 'has_extrusions': bool
+# - 'severity': 'none', 'mild', 'moderate', or 'severe'
+# - 'extrusion_count': number of problematic vertices
+# - 'edge_length_ratio': max/median edge ratio (>3 indicates issues)
+# - 'soma_region_issues': bool (extrusions near cell body)
+# - 'recommendation': suggested action string
+```
+
 **How Extrusion Fixes Work:**
 1. Neurons fetched via API are cached in `cache/{dataset}/API_cache/skeletons/`
-2. **VisualizeSkeleton** ALWAYS checks API cache first, even when `force_API_fetching=False`
-3. This allows you to selectively fix problematic neurons without re-downloading the entire 13GB ZIP
-4. Fixed neurons persist across sessions via the cache
+2. Extrusion check results are cached in `cache/{dataset}/extrusion_check_results.pkl`
+3. **VisualizeSkeleton** ALWAYS checks API cache first, even when `force_API_fetching=False`
+4. This allows you to selectively fix problematic neurons without re-downloading the entire 13GB ZIP
+5. Fixed neurons persist across sessions via the cache
 
 **Note on force_API_fetching Behavior:**
 - **VisualizeSkeleton**: Prioritizes API cache even when `force_API_fetching=False` (for extrusion fixes)

@@ -841,9 +841,15 @@ def _process_single_neuron(requiredNeuron, ndf_alltypes, bodyId_alltypes, verbos
             # Always convert both sides to string for consistent comparison
             col_str = df[column].astype(str)
             value_str = str(value)
-            # For numeric values, also normalize (remove .0 suffix)
+            # For numeric values, normalize (remove .0 suffix) but avoid float conversion
+            # for large integers (FlyWire IDs exceed float precision ~2^53)
             if is_numeric:
-                value_str = str(int(float(value_str)))
+                if '.' in value_str:
+                    # Only use int(float()) for actual floats with decimals
+                    value_str = str(int(float(value_str)))
+                else:
+                    # For integer strings, just strip any whitespace
+                    value_str = value_str.strip()
             result = df[col_str == value_str]
             return result
         except Exception:
@@ -853,7 +859,8 @@ def _process_single_neuron(requiredNeuron, ndf_alltypes, bodyId_alltypes, verbos
     if is_numeric or (has_regex and search_str.replace('.*', '').replace('*', '').replace('^', '').replace('$', '').isdigit()):
         if is_numeric and not has_regex:
             # Exact bodyId lookup - always use string comparison for consistency
-            bodyid_str = str(int(float(search_str)))
+            # Avoid float conversion for large integers (FlyWire IDs exceed float precision)
+            bodyid_str = search_str.strip() if '.' not in search_str else str(int(float(search_str)))
             
             # Convert bodyId_alltypes to strings for comparison, but return original format
             if bodyId_alltypes:

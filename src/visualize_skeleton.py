@@ -1,3 +1,87 @@
+"""
+3D Neuron Skeleton Visualization Module
+========================================
+
+This module provides the `VisualizeSkeleton` class for interactive 3D visualization
+of neuron skeletons, synapses, and brain region meshes across multiple connectome datasets.
+
+Supported Datasets
+------------------
+- **NeuPrint datasets**: hemibrain:v1.2.1, optic-lobe:v1.1, manc:v1.0, male-cns:v0.9
+- **FlyWire/FAFB datasets**: flywire_FAFB_v783, flywire_BANC_v626
+
+Key Features
+------------
+- **Multi-dataset support**: Seamlessly work with NeuPrint and FlyWire datasets
+- **Skeleton visualization**: Render neurons as meshes or lines with automatic simplification
+- **Synapse plotting**: Visualize synapses as scatter points, spheres, cones, or tetrahedrons
+- **ROI meshes**: Display brain region meshes with automatic bilateral expansion
+- **Soma-aware simplification**: Preserve cell body detail while simplifying branches (FAFB)
+- **Extrusion auto-fix**: Detect and replace distorted skeletons automatically (FAFB)
+- **Caching system**: Efficient caching for skeletons, meshes, and analysis results
+- **Export options**: Save as HTML, PNG images, or video animations
+
+Quick Start
+-----------
+```python
+from coana import VisualizeSkeleton
+
+# Basic neuron visualization
+vs = VisualizeSkeleton(
+    dataset='hemibrain:v1.2.1',
+    neuron_layers=['DA1_lPN'],
+)
+vs.plot_skeleton()
+
+# FlyWire with automatic extrusion fixes
+vs = VisualizeSkeleton(
+    dataset='flywire_FAFB_v783',
+    neuron_layers=['MTe50'],
+    auto_fix_extrusions=True,  # Auto-detect and fix distorted skeletons
+)
+vs.plot_skeleton()
+```
+
+Main Class
+----------
+VisualizeSkeleton : dataclass
+    3D visualization of neuron skeletons with synapses and brain ROI meshes.
+    
+    Key attributes:
+    - dataset: Dataset identifier (e.g., 'hemibrain:v1.2.1', 'flywire_FAFB_v783')
+    - neuron_layers: List of neuron types or body IDs to visualize
+    - skeleton_mode: 'tube' (mesh) or 'line' rendering
+    - auto_fix_extrusions: Automatically detect and replace distorted skeletons (FAFB)
+    - cache_neurons: Enable persistent caching for faster subsequent loads
+    
+    Key methods:
+    - plot_skeleton(): Generate 3D visualization
+    - list_available_rois(): Show available brain regions for current dataset
+
+FAFB-Specific Features
+----------------------
+For FlyWire/FAFB datasets, the system includes:
+- **Soma-aware mesh simplification**: Preserves cell body detail
+  (skeleton_mesh_simplification=0.95, soma_mesh_simplification=0.8)
+- **Automatic extrusion detection**: Identifies and replaces distorted skeletons
+  (auto_fix_extrusions=True by default)
+- **Parquet-based caching**: Efficient storage of extrusion check results
+- **API fallback**: Fetches fresh skeletons from CAVE API when needed
+
+Performance Notes
+-----------------
+- First run downloads and caches data (may take several minutes)
+- Subsequent runs use cached data (typically <10 seconds)
+- For FAFB: Auto-extrusion detection adds ~30-60s on first run, cached thereafter
+- Use skeleton_mesh_simplification=0.95-0.99 for faster rendering of large scenes
+
+See Also
+--------
+- FAFB_INTEGRATION.md: Detailed guide for FlyWire/FAFB usage
+- INSTALLATION.md: Setup and configuration instructions
+- OUTPUT_FILES.md: Documentation of output formats and file structure
+"""
+
 import os
 import sys
 import shutil
@@ -45,7 +129,176 @@ except ImportError:
 
 @dataclass
 class VisualizeSkeleton:
-    '''3-D visualize skeleton with synapses and brain roi meshes'''
+    """
+    Interactive 3D visualization of neuron skeletons, synapses, and brain regions.
+    
+    This class provides comprehensive tools for visualizing connectome data from multiple
+    datasets including NeuPrint (hemibrain, male-cns, manc, optic-lobe) and FlyWire/FAFB.
+    It handles data fetching, coordinate transformations, mesh simplification, caching,
+    and export to various formats.
+    
+    Key Capabilities
+    ----------------
+    - **Multi-dataset support**: Seamlessly visualize neurons from different connectome datasets
+    - **Flexible neuron selection**: Query by type, instance name, bodyId, or custom layers
+    - **Mesh rendering**: High-quality tube meshes with automatic simplification
+    - **Synapse visualization**: Multiple modes (scatter, sphere, cone, tetrahedron)
+    - **ROI meshes**: Display brain region boundaries with bilateral auto-expansion
+    - **Smart caching**: Efficient storage of skeletons, meshes, and analysis results
+    - **Export options**: HTML (interactive), PNG (multiple views), video animations
+    
+    FAFB/FlyWire Features
+    ---------------------
+    For FlyWire datasets, specialized features handle high-resolution mesh data:
+    
+    - **Soma-aware simplification**: Preserves cell body detail while simplifying branches
+    - **Automatic extrusion detection**: Identifies and replaces distorted skeletons
+    - **Parquet caching**: Efficient storage of large-scale analysis results
+    - **API fallback**: Fetches fresh meshes from CAVE when ZIP data has artifacts
+    
+    Attributes
+    ----------
+    dataset : str, default='hemibrain:v1.2.1'
+        Dataset identifier. Supported values:
+        - NeuPrint: 'hemibrain:v1.2.1', 'optic-lobe:v1.1', 'manc:v1.0', 'male-cns:v0.9'
+        - FlyWire: 'flywire_FAFB_v783', 'flywire_BANC_v626'
+    
+    neuron_layers : str | list
+        Neuron layers to visualize. Can be:
+        - List of layers: ['L1', 'L2', 'L3']
+        - String with '->' separator: 'L1->L2->L3'
+        - Each layer can contain types, instances (regex), bodyIds, or lists thereof
+    
+    backend : str, default='plotly'
+        Visualization backend. Options: 'plotly' (interactive HTML), 'k3d' (WebGL)
+    
+    skeleton_mode : str, default='tube'
+        Rendering mode: 'tube' (mesh with radius), 'line' (simple lines)
+    
+    auto_fix_extrusions : bool, default=True
+        (FAFB only) Automatically detect and replace distorted skeletons.
+        Uses edge length analysis to identify extrusion artifacts from aggressive
+        simplification. Results cached in parquet format for fast subsequent runs.
+    
+    skeleton_mesh_simplification : float, optional
+        Mesh simplification factor (0.0-1.0). Higher = more simplification.
+        Default: 0.95 for FAFB (high-detail), 0.9 for NeuPrint datasets.
+        Example: 0.95 removes 95% of faces, keeping 5%.
+    
+    soma_mesh_simplification : float, default=0.9
+        (FAFB only) Gentler simplification for soma region to prevent artifacts.
+        Applied within soma_region_radius (default 15µm) of detected soma position.
+    
+    cache_neurons : bool, default=False
+        Enable persistent caching of fetched skeletons to disk.
+        Cache location: cache/{dataset}/skeletons/{bodyId}.pkl
+    
+    mesh_roi : list, default=[]
+        List of brain region names to display. ROI names without (L)/(R) suffix
+        are auto-expanded to bilateral variants. Use list_available_rois() to see options.
+    
+    brain_mesh : str, default='none'
+        Brain/VNC envelope mesh. Options:
+        - 'none': No envelope (only ROIs in mesh_roi)
+        - 'template': Dataset's native template (fast, no H5 transforms needed)
+        - 'whole': Standard brain mesh (may require H5 transform download)
+    
+    merge_neurons : bool, default=True
+        Merge neurons of same layer into single mesh. Significantly reduces file size
+        and rendering time for large populations.
+    
+    min_synapse_num : int, default=10
+        Minimum synapse count threshold for fetching/plotting connections.
+    
+    synapse_mode : str, default='scatter'
+        Synapse rendering mode: 'scatter', 'sphere', 'cone', 'tetrahedron'
+    
+    skip_synapse : bool, default=False
+        Skip all synapse operations for faster initialization and smaller files.
+    
+    export_views : bool | list, default=True
+        PNG export configuration:
+        - True: Export all 6 views (front, back, top, bottom, left, right)
+        - False: No PNG export
+        - List[str]: Specific views to export, e.g., ['front', 'top']
+    
+    export_scale : int, default=3
+        PNG resolution scale factor (1-4). Higher = larger/better quality but slower.
+        scale=3 produces ~3600x2700 pixel images.
+    
+    verbose : bool | str, default='full'
+        Verbosity level: 'full' (all messages), 'simple' (essential only), False (silent)
+    
+    output_dir : str, optional
+        Directory for output files. If None, uses data_folder.
+    
+    include_timestamp : bool, default=True
+        Include timestamp in output folder names for unique versioning.
+    
+    Methods
+    -------
+    plot_skeleton()
+        Generate and display/save the 3D visualization.
+    
+    list_available_rois(refresh=False, fetch_online=True)
+        List all brain regions available for the current dataset.
+    
+    Examples
+    --------
+    Basic visualization with hemibrain data:
+    
+    >>> vs = VisualizeSkeleton(
+    ...     dataset='hemibrain:v1.2.1',
+    ...     neuron_layers=['DA1_lPN', 'DA1_adPN'],
+    ...     mesh_roi=['AL', 'LH', 'MB'],
+    ... )
+    >>> vs.plot_skeleton()
+    
+    FlyWire with automatic artifact correction:
+    
+    >>> vs = VisualizeSkeleton(
+    ...     dataset='flywire_FAFB_v783',
+    ...     neuron_layers=['MTe50', 'MTe51'],
+    ...     auto_fix_extrusions=True,  # Auto-detect distorted neurons
+    ...     skeleton_mesh_simplification=0.95,
+    ...     soma_mesh_simplification=0.8,  # Gentler on cell bodies
+    ... )
+    >>> vs.plot_skeleton()
+    
+    Custom layer mapping from CSV:
+    
+    >>> vs = VisualizeSkeleton(
+    ...     dataset='male-cns:v0.9',
+    ...     layer_map_csv='my_layers.csv',  # CSV with 'layer' and 'id_type_instance' columns
+    ...     cache_neurons=True,
+    ... )
+    >>> vs.plot_skeleton()
+    
+    Video export with multiple views:
+    
+    >>> vs = VisualizeSkeleton(
+    ...     dataset='hemibrain:v1.2.1',
+    ...     neuron_layers=['MBON14'],
+    ...     export_views=['front', 'top', 'lateral'],
+    ...     export_scale=2,
+    ... )
+    >>> vs.plot_skeleton()
+    
+    Notes
+    -----
+    - First run downloads and caches data (may take several minutes)
+    - Subsequent runs use cached data (typically <10 seconds)
+    - For FAFB: First run with auto_fix_extrusions takes ~30-60s for analysis,
+      then results are cached in parquet format
+    - Use higher simplification (0.95-0.99) for scenes with many neurons
+    - Set merge_neurons=False to see individual neurons in legend
+    
+    See Also
+    --------
+    FAFB_INTEGRATION.md : Detailed guide for FlyWire/FAFB usage
+    INSTALLATION.md : Setup and configuration instructions
+    OUTPUT_FILES.md : Documentation of output formats
+    """
     
     backend: str = 'plotly'
     '''
@@ -289,6 +542,35 @@ class VisualizeSkeleton:
     
     Recommended: 0.5 - 0.95 for large populations.
     '''
+    
+    soma_mesh_simplification: float = 0.9
+    '''
+    Mesh simplification factor specifically for the soma (cell body) region (0.0 to 1.0).
+    Only applies when skeleton_mode='tube' and for FAFB/FlyWire datasets.
+    
+    The soma region often has high vertex density that can cause extrusion artifacts
+    when using high simplification levels. This parameter allows applying gentler 
+    simplification to the soma while keeping higher simplification for the skeleton.
+    
+    None (default): Use skeleton_mesh_simplification for the entire neuron.
+    0.8: Recommended for FAFB - reduces soma artifacts while preserving shape.
+    
+    Example usage:
+        skeleton_mesh_simplification=0.95,  # Aggressive on skeleton branches
+        soma_mesh_simplification=0.8,       # Gentler on cell body
+    
+    Note: The soma region is defined as vertices within soma_region_radius (default 15µm)
+    of the detected soma position.
+    '''
+    
+    soma_region_radius: float = 15000
+    '''
+    Radius (in nm) around the soma position to define the soma region for 
+    differential simplification. Default is 15000nm (15 microns).
+    
+    Vertices within this distance from the soma center will use soma_mesh_simplification.
+    Vertices outside will use skeleton_mesh_simplification.
+    '''
 
     roi_mesh_simplification: float = 0.9
     '''
@@ -378,6 +660,24 @@ class VisualizeSkeleton:
     False: Use downloaded ZIP skeletons if available (default).\n
     \n
     Note: API fetching is slower (~5-10s per neuron) but produces cleaner skeletons.\n
+    Only applies to FlyWire/FAFB datasets. Has no effect on NeuPrint datasets.\n
+    '''
+    
+    auto_fix_extrusions: bool = True
+    '''
+    Automatically detect and replace skeletons with extrusion artifacts (FAFB only).\n
+    \n
+    True: When loading skeletons from ZIP, automatically check for extrusion artifacts\n
+          (spiky protrusions from aggressive mesh simplification). If detected, fetch\n
+          fresh skeletons from CAVE API to replace them. Results are cached for future use.\n
+          This is the default to ensure visual quality.\n
+    False: Skip extrusion detection. Faster but may show distorted neurons.\n
+    \n
+    Extrusion check results are cached in cache/{dataset}/extrusion_check_results.parquet\n
+    to avoid repeated analysis. Previously checked neurons are skipped.\n
+    \n
+    Note: First run with this enabled may take longer due to mesh analysis.\n
+    Subsequent runs use cached results and only check new neurons.\n
     Only applies to FlyWire/FAFB datasets. Has no effect on NeuPrint datasets.\n
     '''
     
@@ -554,6 +854,101 @@ class VisualizeSkeleton:
         except Exception:
             # Return original on any error
             return trimesh_obj
+
+    def _simplify_mesh_with_soma_awareness(self, trimesh_obj, skeleton_simp, soma_simp, soma_pos, soma_radius=15000):
+        """
+        Simplify a mesh with different simplification levels for soma vs skeleton regions.
+        
+        This method splits the mesh into soma region and skeleton region, applies different
+        simplification levels to each, then recombines them. This helps prevent extrusion
+        artifacts around the cell body that can occur with aggressive simplification.
+        
+        Parameters
+        ----------
+        trimesh_obj : trimesh.Trimesh
+            The mesh to simplify.
+        skeleton_simp : float
+            Simplification factor for skeleton region (0.0-1.0, e.g., 0.95 = remove 95% faces).
+        soma_simp : float
+            Simplification factor for soma region (0.0-1.0, e.g., 0.8 = remove 80% faces).
+        soma_pos : array-like
+            [x, y, z] position of the soma center in the same units as the mesh.
+        soma_radius : float
+            Radius around soma_pos defining the soma region (default 15000nm = 15µm).
+            
+        Returns
+        -------
+        trimesh.Trimesh
+            Combined simplified mesh with region-specific simplification.
+        """
+        import trimesh
+        import numpy as np
+        
+        if soma_pos is None or len(soma_pos) == 0:
+            # No soma info, fall back to uniform simplification
+            n_faces = len(trimesh_obj.faces)
+            target_faces = max(100, int(n_faces * (1 - skeleton_simp)))
+            return self._simplify_mesh_open3d(trimesh_obj, target_faces)
+        
+        # Ensure soma_pos is a 1D array
+        soma_pos = np.array(soma_pos).flatten()[:3]
+        
+        # Calculate face centroids
+        vertices = trimesh_obj.vertices
+        faces = trimesh_obj.faces
+        face_centroids = vertices[faces].mean(axis=1)
+        
+        # Calculate distance from each face centroid to soma
+        distances = np.linalg.norm(face_centroids - soma_pos, axis=1)
+        
+        # Split faces into soma region and skeleton region
+        soma_mask = distances <= soma_radius
+        skeleton_mask = ~soma_mask
+        
+        soma_faces = faces[soma_mask]
+        skeleton_faces = faces[skeleton_mask]
+        
+        # If one region is empty, simplify the whole mesh with appropriate level
+        if len(soma_faces) == 0:
+            n_faces = len(faces)
+            target_faces = max(100, int(n_faces * (1 - skeleton_simp)))
+            return self._simplify_mesh_open3d(trimesh_obj, target_faces)
+        
+        if len(skeleton_faces) == 0:
+            n_faces = len(faces)
+            target_faces = max(100, int(n_faces * (1 - soma_simp)))
+            return self._simplify_mesh_open3d(trimesh_obj, target_faces)
+        
+        # Create sub-meshes for each region
+        # We need to keep all vertices and just select faces
+        try:
+            # Create soma sub-mesh
+            soma_mesh = trimesh.Trimesh(vertices=vertices, faces=soma_faces, process=False)
+            # Remove unreferenced vertices to clean up
+            soma_mesh.remove_unreferenced_vertices()
+            
+            # Create skeleton sub-mesh  
+            skeleton_mesh = trimesh.Trimesh(vertices=vertices, faces=skeleton_faces, process=False)
+            skeleton_mesh.remove_unreferenced_vertices()
+            
+            # Simplify each region with its target level
+            soma_target = max(50, int(len(soma_mesh.faces) * (1 - soma_simp)))
+            skeleton_target = max(50, int(len(skeleton_mesh.faces) * (1 - skeleton_simp)))
+            
+            simplified_soma = self._simplify_mesh_open3d(soma_mesh, soma_target)
+            simplified_skeleton = self._simplify_mesh_open3d(skeleton_mesh, skeleton_target)
+            
+            # Combine the simplified meshes
+            combined = trimesh.util.concatenate([simplified_soma, simplified_skeleton])
+            
+            return combined
+            
+        except Exception as e:
+            # Fall back to uniform simplification on any error
+            self._vprint(f'      ⚠️ Soma-aware simplification failed ({e}), using uniform', level='full')
+            n_faces = len(faces)
+            target_faces = max(100, int(n_faces * (1 - skeleton_simp)))
+            return self._simplify_mesh_open3d(trimesh_obj, target_faces)
 
     def _export_png_with_timeout(self, fig, output_path, width=1200, height=900, scale=3, timeout=60):
         """
@@ -1432,6 +1827,200 @@ class VisualizeSkeleton:
             self._vprint(f'  ⚠️  Error pre-loading FAFB skeletons: {e}')
         
         return skeleton_cache
+
+    def _load_extrusion_check_cache(self):
+        """Load cached extrusion check results from parquet.
+        
+        Returns
+        -------
+        dict
+            Dictionary of bodyId -> bool (True if has extrusion)
+        """
+        import pandas as pd
+        
+        project_root = os.path.dirname(os.path.dirname(__file__))
+        dataset_safe = self.dataset.replace(':', '_').replace('.', '_')
+        cache_file = os.path.join(project_root, 'cache', dataset_safe, 'extrusion_check_results.parquet')
+        
+        if os.path.exists(cache_file):
+            try:
+                df = pd.read_parquet(cache_file)
+                # Convert DataFrame to dict with bodyId as key
+                return dict(zip(df['bodyId'].astype(str), df['has_extrusion']))
+            except Exception:
+                return {}
+        return {}
+    
+    def _save_extrusion_check_cache(self, results_dict):
+        """Save extrusion check results to parquet cache.
+        
+        Parameters
+        ----------
+        results_dict : dict
+            Dictionary of bodyId -> bool (True if has extrusion)
+        """
+        import pandas as pd
+        
+        project_root = os.path.dirname(os.path.dirname(__file__))
+        dataset_safe = self.dataset.replace(':', '_').replace('.', '_')
+        cache_dir = os.path.join(project_root, 'cache', dataset_safe)
+        os.makedirs(cache_dir, exist_ok=True)
+        cache_file = os.path.join(cache_dir, 'extrusion_check_results.parquet')
+        
+        # Load existing cache and merge
+        existing = self._load_extrusion_check_cache()
+        existing.update({str(k): v for k, v in results_dict.items()})
+        
+        try:
+            # Convert to DataFrame with bodyId index for efficient lookup
+            df = pd.DataFrame([
+                {'bodyId': str(k), 'has_extrusion': v}
+                for k, v in existing.items()
+            ])
+            df.to_parquet(cache_file, index=False)
+        except Exception as e:
+            self._vprint(f'  ⚠️ Failed to save extrusion cache: {e}', level='full')
+
+    def _detect_extrusions_in_skeletons(self, skeletons_dict, simplification=0.95):
+        """Detect extrusion artifacts in a batch of skeletons.
+        
+        Converts each skeleton to a simplified mesh and checks for extrusion
+        artifacts using edge length analysis. Returns list of body IDs that
+        have moderate or severe extrusions and should be replaced via API.
+        
+        Results are cached in cache/{dataset}/extrusion_check_results.parquet to
+        avoid repeated analysis. Previously checked neurons are skipped.
+        
+        Parameters
+        ----------
+        skeletons_dict : dict
+            Dictionary of bodyId -> TreeNeuron
+        simplification : float
+            Simplification level to apply for testing (default 0.95)
+            
+        Returns
+        -------
+        list
+            List of body IDs with extrusion issues that need API replacement
+        """
+        from tqdm import tqdm
+        import sys
+        import numpy as np
+        
+        # Load cached results to skip already-checked neurons
+        cached_results = self._load_extrusion_check_cache()
+        
+        # Filter to only check neurons not in cache
+        to_check = {bid: skel for bid, skel in skeletons_dict.items() 
+                    if bid not in cached_results and str(bid) not in cached_results}
+        
+        # Return cached extrusion IDs for neurons we already know about
+        extrusion_ids = [bid for bid in skeletons_dict.keys() 
+                        if cached_results.get(bid, False) or cached_results.get(str(bid), False)]
+        
+        if not to_check:
+            if extrusion_ids:
+                self._vprint(f'  ℹ️  Using cached extrusion results: {len(extrusion_ids)} known issues', level='simple')
+            return extrusion_ids
+        
+        self._vprint(f'  🔍 Checking {len(to_check)} skeletons for extrusions (skipping {len(skeletons_dict) - len(to_check)} cached)...', level='simple')
+        
+        new_results = {}  # bodyId -> bool (True if has extrusion)
+        
+        # Progress bar for extrusion checking
+        pbar = tqdm(to_check.items(), desc="  Checking extrusions", 
+                   disable=not self.verbose, leave=False, file=sys.stdout)
+        
+        for body_id, skeleton in pbar:
+            has_extrusion = False
+            try:
+                # Get soma position if available
+                soma_pos = None
+                if hasattr(skeleton, 'soma') and skeleton.soma is not None:
+                    soma_idx = skeleton.soma
+                    if isinstance(soma_idx, (list, np.ndarray)) and len(soma_idx) > 0:
+                        soma_idx = soma_idx[0]
+                    if soma_idx is not None and hasattr(skeleton, 'nodes'):
+                        soma_node = skeleton.nodes[skeleton.nodes['node_id'] == soma_idx]
+                        if len(soma_node) > 0:
+                            soma_pos = soma_node[['x', 'y', 'z']].values[0]
+                
+                # Convert to mesh with simplification
+                if hasattr(skeleton, 'nodes') and 'radius' in skeleton.nodes.columns:
+                    invalid_mask = (skeleton.nodes['radius'] <= 0) | (skeleton.nodes['radius'].isna())
+                    if invalid_mask.any():
+                        skeleton.nodes.loc[invalid_mask, 'radius'] = 1
+                elif hasattr(skeleton, 'nodes'):
+                    skeleton.nodes['radius'] = 1
+                
+                mesh_neuron = navis.conversion.tree2meshneuron(
+                    skeleton,
+                    tube_points=8,
+                    use_normals=True
+                )
+                
+                if not hasattr(mesh_neuron, 'trimesh'):
+                    new_results[body_id] = False
+                    continue
+                    
+                # Apply simplification
+                original_faces = len(mesh_neuron.trimesh.faces)
+                target_faces = max(100, int(original_faces * (1 - simplification)))
+                
+                try:
+                    import open3d as o3d
+                    o3d_mesh = o3d.geometry.TriangleMesh()
+                    o3d_mesh.vertices = o3d.utility.Vector3dVector(mesh_neuron.trimesh.vertices)
+                    o3d_mesh.triangles = o3d.utility.Vector3iVector(mesh_neuron.trimesh.faces)
+                    simplified = o3d_mesh.simplify_quadric_decimation(target_number_of_triangles=target_faces)
+                    
+                    import trimesh
+                    simplified_trimesh = trimesh.Trimesh(
+                        vertices=np.asarray(simplified.vertices),
+                        faces=np.asarray(simplified.triangles)
+                    )
+                except ImportError:
+                    simplified_trimesh = mesh_neuron.trimesh.simplify_quadric_decimation(target_faces)
+                
+                # Analyze for extrusions using edge length analysis
+                vertices = simplified_trimesh.vertices
+                faces = simplified_trimesh.faces
+                
+                edges = set()
+                for face in faces:
+                    for j in range(3):
+                        v1, v2 = face[j], face[(j + 1) % 3]
+                        edges.add((min(v1, v2), max(v1, v2)))
+                
+                edge_lengths = [np.linalg.norm(vertices[e[0]] - vertices[e[1]]) for e in edges]
+                edge_lengths = np.array(edge_lengths)
+                
+                if len(edge_lengths) == 0:
+                    new_results[body_id] = False
+                    continue
+                
+                median_edge = np.median(edge_lengths)
+                max_edge = np.max(edge_lengths)
+                edge_ratio = max_edge / median_edge if median_edge > 0 else 0
+                
+                # Check if edge ratio indicates extrusions (threshold=10)
+                # Also check if max edge is unreasonably long (>50000nm indicates extrusion spike)
+                if edge_ratio > 10 or max_edge > 50000:
+                    has_extrusion = True
+                    extrusion_ids.append(body_id)
+                    
+            except Exception:
+                pass  # Skip errors silently
+            
+            new_results[body_id] = has_extrusion
+        
+        # Save new results to cache
+        if new_results:
+            self._save_extrusion_check_cache(new_results)
+            n_new_extrusions = sum(1 for v in new_results.values() if v)
+            self._vprint(f'  💾 Cached extrusion results for {len(new_results)} neurons ({n_new_extrusions} with issues)', level='full')
+        
+        return extrusion_ids
     
     def _load_cached_neurons(self, neuron_df, transformed_target=None):
         """Load cached neuron skeletons if available.
@@ -1512,28 +2101,36 @@ class VisualizeSkeleton:
         if saved_count > 0:
             self._vprint(f'  💾 Saved {saved_count} new neurons to cache', level='full')
     
-    # Cache stores meshes simplified at this fixed level (95% reduction = keep 5% of faces)
-    # FAFB meshes are high-detail, so 0.95 simplification is appropriate
-    FAFB_MESH_CACHE_SIMPLIFICATION = 0.95
+    # Cache stores meshes simplified with soma-aware parameters
+    # Skeleton: 0.95 simplification (keep 5% of faces) 
+    # Soma: 0.8 simplification (keep 20% of faces) to prevent extrusion artifacts
+    FAFB_MESH_CACHE_SIMPLIFICATION = 0.95  # Skeleton simplification level
+    FAFB_MESH_CACHE_SOMA_SIMPLIFICATION = 0.8  # Gentler simplification for soma region
+    FAFB_MESH_CACHE_SOMA_RADIUS = 20000  # 20µm radius around soma for gentler simplification
     
     def _get_fafb_mesh_cache_key(self):
-        """Generate a cache key based on coordinate space.
+        """Generate a cache key based on coordinate space and simplification settings.
         
-        Returns a subfolder name like 'FLYWIRE_simp95' for caching purposes.
-        Cache always stores meshes at 0.95 simplification level.
+        Returns a subfolder name like 'FLYWIRE_simp95_soma80_r20' for caching purposes.
+        Cache stores meshes with soma-aware simplification (gentler on cell body).
         Note: FAFB cache stores UN-TRANSFORMED, UN-ROTATED meshes (native FLYWIRE).
         """
         # Always use 'FLYWIRE' as base since we cache raw simplified meshes
         target = 'FLYWIRE'
         
-        # Include fixed simplification level in cache key
-        simp_percent = int(self.FAFB_MESH_CACHE_SIMPLIFICATION * 100)
-        return f"{target}_simp{simp_percent}"
+        # Include simplification levels and soma radius in cache key
+        skel_simp = int(self.FAFB_MESH_CACHE_SIMPLIFICATION * 100)
+        soma_simp = int(self.FAFB_MESH_CACHE_SOMA_SIMPLIFICATION * 100)
+        soma_r = int(self.FAFB_MESH_CACHE_SOMA_RADIUS / 1000)  # In µm for readability
+        return f"{target}_simp{skel_simp}_soma{soma_simp}_r{soma_r}"
     
     def _load_cached_fafb_meshes(self, body_ids):
         """Load simplified and meshed FAFB neurons from cache.
         
-        Cache contains meshes at 0.95 simplification (keep 5% of faces).
+        Cache contains meshes with soma-aware simplification:
+        - Skeleton: 0.95 simplification (keep 5% of faces)
+        - Soma region (within 20µm): 0.8 simplification (keep 20% of faces)
+        
         No coordinate transformation is needed since FAFB uses native FLYWIRE coordinates.
         Only used when skeleton_mesh_simplification >= 0.95.
         If simplification > 0.95, additional simplification is applied after loading.
@@ -1582,7 +2179,7 @@ class VisualizeSkeleton:
                 missing.append(bid)
         
         if loaded:
-            self._vprint(f'  ✓ Loaded {len(loaded)} neurons from mesh cache (simp={self.FAFB_MESH_CACHE_SIMPLIFICATION})', level='full')
+            self._vprint(f'  ✓ Loaded {len(loaded)} neurons from mesh cache (skel={self.FAFB_MESH_CACHE_SIMPLIFICATION}, soma={self.FAFB_MESH_CACHE_SOMA_SIMPLIFICATION})', level='full')
         
         return loaded, missing
     
@@ -1703,17 +2300,221 @@ class VisualizeSkeleton:
             verbose=self.verbose == 'full'
         )
         
+        # Fetch skeletons with soma-aware simplification
+        # Use the class cache parameters for consistency
+        skeleton_simp = self.FAFB_MESH_CACHE_SIMPLIFICATION
+        soma_simp = self.FAFB_MESH_CACHE_SOMA_SIMPLIFICATION
+        soma_radius = self.FAFB_MESH_CACHE_SOMA_RADIUS
+        
         skeleton_cache = {}
-        neurons = fetcher.fetch_skeletons(int_body_ids, use_cache=True, simplify_mesh=0.95)
+        # Fetch with skeleton simplification level (soma-aware applied after)
+        neurons = fetcher.fetch_skeletons(int_body_ids, use_cache=True, simplify_mesh=skeleton_simp)
         
         for n in neurons:
             if hasattr(n, 'id'):
+                # Apply soma-aware simplification if soma position is available
+                if hasattr(n, 'trimesh') and hasattr(n, 'soma_pos') and n.soma_pos is not None:
+                    try:
+                        simplified_trimesh = self._simplify_mesh_with_soma_awareness(
+                            n.trimesh,
+                            skeleton_simp=skeleton_simp,
+                            soma_simp=soma_simp,
+                            soma_pos=n.soma_pos,
+                            soma_radius=soma_radius
+                        )
+                        n._trimesh = simplified_trimesh
+                    except Exception:
+                        pass  # Keep original if soma-aware simplification fails
+                
                 # Store with both int and str keys for compatibility
                 skeleton_cache[n.id] = n
                 skeleton_cache[str(n.id)] = n
         
-        self._vprint(f'  ✓ Fetched {len(neurons)}/{len(body_ids)} skeletons via API', use_tqdm=True)
+        self._vprint(f'  ✓ Fetched {len(neurons)}/{len(body_ids)} skeletons via API (soma-aware simplification)', use_tqdm=True)
         return skeleton_cache
+
+    @staticmethod
+    def detect_mesh_extrusions(mesh, soma_pos=None, soma_radius=20000, 
+                               distance_threshold_factor=3.0, verbose=False) -> dict:
+        """Detect extrusion artifacts in a mesh (spikes/protrusions from simplification).
+        
+        Extrusions typically manifest as:
+        1. Vertices with very long edge connections (spiky protrusions)
+        2. Isolated vertex clusters far from the main mesh body
+        3. Non-manifold geometry issues
+        
+        Parameters
+        ----------
+        mesh : trimesh.Trimesh or navis.MeshNeuron
+            The mesh to analyze for extrusions.
+        soma_pos : array-like, optional
+            [x, y, z] position of the soma center. If provided, analysis focuses
+            on the soma region where extrusions are most common.
+        soma_radius : float
+            Radius (in nm) around soma_pos to focus analysis (default 20000nm = 20µm).
+        distance_threshold_factor : float
+            Vertices with average edge length > (median_edge_length * this_factor) 
+            are flagged as potential extrusions (default 3.0).
+        verbose : bool
+            Whether to print detailed analysis info.
+            
+        Returns
+        -------
+        dict
+            Analysis results with keys:
+            - 'has_extrusions': bool - Whether extrusions were detected
+            - 'severity': str - 'none', 'mild', 'moderate', 'severe'
+            - 'extrusion_count': int - Number of extrusion vertices detected
+            - 'extrusion_vertices': array - Indices of extrusion vertices
+            - 'max_edge_length': float - Maximum edge length in mesh
+            - 'median_edge_length': float - Median edge length
+            - 'edge_length_ratio': float - Ratio of max to median edge length
+            - 'soma_region_issues': bool - Whether issues are near soma
+            - 'recommendation': str - Suggested action
+            
+        Example
+        -------
+        >>> from coana import VisualizeSkeleton
+        >>> import trimesh
+        >>> # Analyze a mesh
+        >>> result = VisualizeSkeleton.detect_mesh_extrusions(mesh, soma_pos=[100, 200, 300])
+        >>> if result['has_extrusions']:
+        ...     print(f"Extrusions detected! Severity: {result['severity']}")
+        ...     print(result['recommendation'])
+        """
+        import numpy as np
+        
+        # Extract trimesh object if MeshNeuron
+        if hasattr(mesh, 'trimesh'):
+            trimesh_obj = mesh.trimesh
+        elif hasattr(mesh, 'vertices') and hasattr(mesh, 'faces'):
+            trimesh_obj = mesh
+        else:
+            return {
+                'has_extrusions': False,
+                'severity': 'unknown',
+                'extrusion_count': 0,
+                'extrusion_vertices': np.array([]),
+                'max_edge_length': 0,
+                'median_edge_length': 0,
+                'edge_length_ratio': 0,
+                'soma_region_issues': False,
+                'recommendation': 'Unable to analyze - invalid mesh format'
+            }
+        
+        vertices = trimesh_obj.vertices
+        faces = trimesh_obj.faces
+        
+        # Calculate edge lengths
+        edges = []
+        for face in faces:
+            for i in range(3):
+                v1, v2 = face[i], face[(i + 1) % 3]
+                edges.append((min(v1, v2), max(v1, v2)))
+        
+        edges = list(set(edges))  # Unique edges
+        edge_lengths = []
+        edge_to_length = {}
+        for e in edges:
+            length = np.linalg.norm(vertices[e[0]] - vertices[e[1]])
+            edge_lengths.append(length)
+            edge_to_length[e] = length
+        
+        edge_lengths = np.array(edge_lengths)
+        median_edge = np.median(edge_lengths)
+        max_edge = np.max(edge_lengths)
+        edge_ratio = max_edge / median_edge if median_edge > 0 else 0
+        
+        # Calculate per-vertex average edge length
+        vertex_edge_lengths = {i: [] for i in range(len(vertices))}
+        for e, length in edge_to_length.items():
+            vertex_edge_lengths[e[0]].append(length)
+            vertex_edge_lengths[e[1]].append(length)
+        
+        vertex_avg_edge = np.array([
+            np.mean(vertex_edge_lengths[i]) if vertex_edge_lengths[i] else 0 
+            for i in range(len(vertices))
+        ])
+        
+        # Detect extrusion vertices (abnormally long edges)
+        threshold = median_edge * distance_threshold_factor
+        extrusion_mask = vertex_avg_edge > threshold
+        extrusion_vertices = np.where(extrusion_mask)[0]
+        
+        # Check if extrusions are near soma region
+        soma_region_issues = False
+        if soma_pos is not None and len(extrusion_vertices) > 0:
+            soma_pos = np.array(soma_pos).flatten()[:3]
+            extrusion_positions = vertices[extrusion_vertices]
+            distances_to_soma = np.linalg.norm(extrusion_positions - soma_pos, axis=1)
+            soma_region_issues = np.any(distances_to_soma <= soma_radius)
+        
+        # Determine severity
+        n_extrusions = len(extrusion_vertices)
+        total_vertices = len(vertices)
+        extrusion_ratio = n_extrusions / total_vertices if total_vertices > 0 else 0
+        
+        if n_extrusions == 0:
+            severity = 'none'
+        elif extrusion_ratio < 0.001 or n_extrusions < 5:
+            severity = 'mild'
+        elif extrusion_ratio < 0.01 or n_extrusions < 50:
+            severity = 'moderate'
+        else:
+            severity = 'severe'
+        
+        has_extrusions = n_extrusions > 0 and (edge_ratio > distance_threshold_factor)
+        
+        # Generate recommendation
+        if not has_extrusions:
+            recommendation = 'No extrusions detected. Mesh appears clean.'
+        elif severity == 'mild':
+            recommendation = (
+                'Mild extrusions detected. Consider using soma-aware simplification '
+                '(soma_mesh_simplification=0.8) or fetch fresh skeleton via CAVE API.'
+            )
+        elif severity == 'moderate':
+            if soma_region_issues:
+                recommendation = (
+                    'Moderate extrusions near soma region. Strongly recommend using '
+                    'VisualizeSkeleton.fix_fafb_extrusions([bodyId]) to fetch fresh '
+                    'skeleton from CAVE API.'
+                )
+            else:
+                recommendation = (
+                    'Moderate extrusions detected. Use soma-aware simplification or '
+                    'VisualizeSkeleton.fix_fafb_extrusions([bodyId]) to fix.'
+                )
+        else:  # severe
+            recommendation = (
+                'Severe extrusions detected! This skeleton should be replaced. Use '
+                'VisualizeSkeleton.fix_fafb_extrusions([bodyId]) to fetch fresh '
+                'skeleton from CAVE API.'
+            )
+        
+        if verbose:
+            print(f"Mesh Analysis Results:")
+            print(f"  Total vertices: {total_vertices:,}")
+            print(f"  Total faces: {len(faces):,}")
+            print(f"  Median edge length: {median_edge:.1f}nm")
+            print(f"  Max edge length: {max_edge:.1f}nm")
+            print(f"  Edge ratio (max/median): {edge_ratio:.1f}x")
+            print(f"  Extrusion vertices: {n_extrusions} ({extrusion_ratio*100:.2f}%)")
+            print(f"  Severity: {severity}")
+            print(f"  Near soma: {soma_region_issues}")
+            print(f"  Recommendation: {recommendation}")
+        
+        return {
+            'has_extrusions': has_extrusions,
+            'severity': severity,
+            'extrusion_count': n_extrusions,
+            'extrusion_vertices': extrusion_vertices,
+            'max_edge_length': max_edge,
+            'median_edge_length': median_edge,
+            'edge_length_ratio': edge_ratio,
+            'soma_region_issues': soma_region_issues,
+            'recommendation': recommendation
+        }
 
     @staticmethod
     def fix_fafb_extrusions(body_ids: list, dataset: str = 'flywire_FAFB_v783', 
@@ -1791,6 +2592,246 @@ class VisualizeSkeleton:
             print(f"✓ Fixed and cached {len(neurons)}/{len(body_ids)} skeletons")
             print(f"  Cache location: cache/{dataset.replace(':', '_').replace('.', '_')}/API_cache/skeletons/")
             print(f"  These will automatically be used instead of ZIP versions")
+        
+        return result
+
+    @staticmethod
+    def check_fafb_skeleton_for_extrusions(body_id, dataset: str = 'flywire_FAFB_v783',
+                                           simplification: float = 0.95,
+                                           verbose: bool = True,
+                                           auto_fix: bool = False) -> dict:
+        """Load a FAFB skeleton from ZIP and check for extrusion artifacts.
+        
+        This is a convenience method that combines loading a skeleton from the local
+        ZIP file, applying simplification, and running extrusion detection.
+        
+        Parameters
+        ----------
+        body_id : int or str
+            The body ID to check.
+        dataset : str
+            Dataset name, default 'flywire_FAFB_v783'.
+        simplification : float
+            Simplification level to apply before checking (default 0.95).
+        verbose : bool
+            Whether to print detailed analysis results.
+        auto_fix : bool
+            If True and extrusions are detected, automatically fetch fresh
+            skeleton from CAVE API (default False).
+            
+        Returns
+        -------
+        dict
+            Analysis results with additional keys:
+            - All keys from detect_mesh_extrusions()
+            - 'body_id': The body ID that was checked
+            - 'auto_fixed': bool - Whether auto-fix was applied
+            - 'skeleton': The loaded skeleton (TreeNeuron or MeshNeuron)
+            
+        Example
+        -------
+        >>> from coana import VisualizeSkeleton
+        >>> # Check a specific neuron
+        >>> result = VisualizeSkeleton.check_fafb_skeleton_for_extrusions(
+        ...     720575940624086675, 
+        ...     simplification=0.95,
+        ...     verbose=True
+        ... )
+        >>> if result['has_extrusions']:
+        ...     # Auto-fix it
+        ...     VisualizeSkeleton.fix_fafb_extrusions([720575940624086675])
+        
+        >>> # Or use auto_fix=True
+        >>> result = VisualizeSkeleton.check_fafb_skeleton_for_extrusions(
+        ...     720575940624086675,
+        ...     auto_fix=True  # Automatically fetch from API if extrusions found
+        ... )
+        """
+        import navis
+        from pathlib import Path
+        import zipfile
+        import re
+        import numpy as np
+        
+        body_id_str = str(body_id)
+        body_id_int = int(body_id)
+        
+        if verbose:
+            print(f"🔍 Checking FAFB skeleton {body_id} for extrusions...")
+        
+        # Find the skeleton ZIP file
+        dataset_clean = dataset.replace(':', '_').replace('.', '_')
+        zip_path = Path('datasets') / dataset_clean / 'sk_lod1_783_healed.zip'
+        
+        if not zip_path.exists():
+            return {
+                'has_extrusions': False,
+                'severity': 'unknown',
+                'extrusion_count': 0,
+                'extrusion_vertices': np.array([]),
+                'max_edge_length': 0,
+                'median_edge_length': 0,
+                'edge_length_ratio': 0,
+                'soma_region_issues': False,
+                'recommendation': f'ZIP file not found: {zip_path}',
+                'body_id': body_id_int,
+                'auto_fixed': False,
+                'skeleton': None
+            }
+        
+        # Find matching file in ZIP
+        skeleton = None
+        soma_pos = None
+        
+        try:
+            with zipfile.ZipFile(zip_path, 'r') as zf:
+                # Find file matching this body ID
+                pattern = re.compile(rf'^{body_id_str}\..*\.swc$', re.IGNORECASE)
+                matching_files = [f for f in zf.namelist() if pattern.match(f)]
+                
+                if not matching_files:
+                    # Try without extension pattern
+                    matching_files = [f for f in zf.namelist() if f.startswith(f'{body_id_str}.')]
+                
+                if not matching_files:
+                    return {
+                        'has_extrusions': False,
+                        'severity': 'unknown',
+                        'extrusion_count': 0,
+                        'extrusion_vertices': np.array([]),
+                        'max_edge_length': 0,
+                        'median_edge_length': 0,
+                        'edge_length_ratio': 0,
+                        'soma_region_issues': False,
+                        'recommendation': f'Body ID {body_id} not found in ZIP',
+                        'body_id': body_id_int,
+                        'auto_fixed': False,
+                        'skeleton': None
+                    }
+                
+                swc_filename = matching_files[0]
+                
+                # Read SWC content
+                with zf.open(swc_filename) as swc_file:
+                    swc_content = swc_file.read().decode('utf-8')
+                
+                # Parse with navis
+                from io import StringIO
+                skeleton = navis.read_swc(StringIO(swc_content))
+                
+                if isinstance(skeleton, navis.NeuronList):
+                    skeleton = skeleton[0]
+                
+                skeleton.id = body_id_int
+                
+                # Get soma position if available
+                if hasattr(skeleton, 'soma') and skeleton.soma is not None:
+                    soma_idx = skeleton.soma
+                    if isinstance(soma_idx, (list, np.ndarray)) and len(soma_idx) > 0:
+                        soma_idx = soma_idx[0]
+                    if soma_idx is not None:
+                        soma_node = skeleton.nodes[skeleton.nodes['node_id'] == soma_idx]
+                        if len(soma_node) > 0:
+                            soma_pos = soma_node[['x', 'y', 'z']].values[0]
+                
+                if verbose:
+                    print(f"  ✓ Loaded skeleton with {len(skeleton.nodes):,} nodes")
+                    if soma_pos is not None:
+                        print(f"  ✓ Soma position: [{soma_pos[0]:.0f}, {soma_pos[1]:.0f}, {soma_pos[2]:.0f}]")
+        
+        except Exception as e:
+            return {
+                'has_extrusions': False,
+                'severity': 'unknown',
+                'extrusion_count': 0,
+                'extrusion_vertices': np.array([]),
+                'max_edge_length': 0,
+                'median_edge_length': 0,
+                'edge_length_ratio': 0,
+                'soma_region_issues': False,
+                'recommendation': f'Error loading skeleton: {e}',
+                'body_id': body_id_int,
+                'auto_fixed': False,
+                'skeleton': None
+            }
+        
+        # Convert to mesh with simplification
+        if verbose:
+            print(f"  ⚙️  Converting to mesh (simplification={simplification})...")
+        
+        try:
+            mesh_neuron = navis.conversion.tree2meshneuron(
+                skeleton,
+                tube_points=8,
+                use_normals=True
+            )
+            
+            if hasattr(mesh_neuron, 'trimesh') and simplification > 0:
+                import trimesh
+                original_faces = len(mesh_neuron.trimesh.faces)
+                target_faces = max(100, int(original_faces * (1 - simplification)))
+                
+                # Simplify using quadric decimation
+                try:
+                    import open3d as o3d
+                    o3d_mesh = o3d.geometry.TriangleMesh()
+                    o3d_mesh.vertices = o3d.utility.Vector3dVector(mesh_neuron.trimesh.vertices)
+                    o3d_mesh.triangles = o3d.utility.Vector3iVector(mesh_neuron.trimesh.faces)
+                    simplified = o3d_mesh.simplify_quadric_decimation(target_number_of_triangles=target_faces)
+                    simplified_trimesh = trimesh.Trimesh(
+                        vertices=np.asarray(simplified.vertices),
+                        faces=np.asarray(simplified.triangles)
+                    )
+                    mesh_neuron._trimesh = simplified_trimesh
+                except ImportError:
+                    # Fallback to trimesh simplification
+                    mesh_neuron._trimesh = mesh_neuron.trimesh.simplify_quadric_decimation(target_faces)
+                
+                if verbose:
+                    print(f"  ✓ Simplified: {original_faces:,} → {len(mesh_neuron.trimesh.faces):,} faces")
+        
+        except Exception as e:
+            return {
+                'has_extrusions': False,
+                'severity': 'unknown',
+                'extrusion_count': 0,
+                'extrusion_vertices': np.array([]),
+                'max_edge_length': 0,
+                'median_edge_length': 0,
+                'edge_length_ratio': 0,
+                'soma_region_issues': False,
+                'recommendation': f'Error converting to mesh: {e}',
+                'body_id': body_id_int,
+                'auto_fixed': False,
+                'skeleton': skeleton
+            }
+        
+        # Run extrusion detection
+        result = VisualizeSkeleton.detect_mesh_extrusions(
+            mesh_neuron,
+            soma_pos=soma_pos,
+            soma_radius=20000,
+            verbose=verbose
+        )
+        
+        result['body_id'] = body_id_int
+        result['auto_fixed'] = False
+        result['skeleton'] = mesh_neuron
+        
+        # Auto-fix if requested
+        if auto_fix and result['has_extrusions']:
+            if verbose:
+                print(f"\n  🔧 Auto-fixing: Fetching fresh skeleton from CAVE API...")
+            try:
+                fixed = VisualizeSkeleton.fix_fafb_extrusions([body_id_int], dataset=dataset, verbose=verbose)
+                if body_id_int in fixed or body_id_str in fixed:
+                    result['auto_fixed'] = True
+                    result['skeleton'] = fixed.get(body_id_int) or fixed.get(body_id_str)
+                    result['recommendation'] = 'Extrusions fixed! Fresh skeleton fetched and cached from CAVE API.'
+            except Exception as e:
+                if verbose:
+                    print(f"  ⚠️  Auto-fix failed: {e}")
+                result['recommendation'] += f' Auto-fix failed: {e}'
         
         return result
 
@@ -1879,11 +2920,31 @@ class VisualizeSkeleton:
                             self._vprint(f'  ℹ️  {len(zip_needed)} neurons loading from ZIP')
                             zip_skeletons = self._preload_fafb_skeletons(body_ids_filter=zip_needed)
                             fafb_skeleton_cache.update(zip_skeletons)
+                            
+                            # Auto-detect extrusions and fetch via API if enabled
+                            if self.auto_fix_extrusions:
+                                extrusion_ids = self._detect_extrusions_in_skeletons(zip_skeletons)
+                                if extrusion_ids:
+                                    self._vprint(f'  🔍 Detected {len(extrusion_ids)} skeletons with extrusion artifacts, fetching fresh from API...', level='simple')
+                                    api_fixed = self._fetch_fafb_skeletons_via_api(extrusion_ids)
+                                    if api_fixed:
+                                        fafb_skeleton_cache.update(api_fixed)
+                                        self._vprint(f'  ✓ Replaced {len(api_fixed)} extrusion-affected skeletons', level='simple')
                     elif not use_fafb_cache:
                         # Cache not used - load remaining from ZIP
                         self._vprint(f'  ℹ️  Loading {len(remaining_ids)} neurons from ZIP')
                         zip_skeletons = self._preload_fafb_skeletons(body_ids_filter=remaining_ids)
                         fafb_skeleton_cache.update(zip_skeletons)
+                        
+                        # Auto-detect extrusions and fetch via API if enabled
+                        if self.auto_fix_extrusions:
+                            extrusion_ids = self._detect_extrusions_in_skeletons(zip_skeletons)
+                            if extrusion_ids:
+                                self._vprint(f'  🔍 Detected {len(extrusion_ids)} skeletons with extrusion artifacts, fetching fresh from API...', level='simple')
+                                api_fixed = self._fetch_fafb_skeletons_via_api(extrusion_ids)
+                                if api_fixed:
+                                    fafb_skeleton_cache.update(api_fixed)
+                                    self._vprint(f'  ✓ Replaced {len(api_fixed)} extrusion-affected skeletons', level='simple')
                 
                 # Auto-fallback to API for any still missing (graceful degradation)
                 # Skip IDs that are already in mesh cache (they don't need skeleton processing)
@@ -2051,22 +3112,29 @@ class VisualizeSkeleton:
             # Transformation logic moved to after caching to ensure cache stores raw FlyWire coordinates
 
             
-            # For FAFB: convert to mesh, apply 0.9 simplification, and cache (only when cache is used)
-            # Cache stores meshes at fixed 0.9 simplification for reuse
+            # For FAFB: convert to mesh, apply soma-aware simplification, and cache (only when cache is used)
+            # Cache stores meshes with soma-aware simplification for reuse
             if use_fafb_cache and mesh_missing_ids and neuron_vols is not None and self.skeleton_mode == 'tube':
                 try:
                     import trimesh
                     meshes_to_cache = {}
                     mesh_neurons_list = []
-                    cache_simp = self.FAFB_MESH_CACHE_SIMPLIFICATION
+                    cache_skel_simp = self.FAFB_MESH_CACHE_SIMPLIFICATION
+                    cache_soma_simp = self.FAFB_MESH_CACHE_SOMA_SIMPLIFICATION
+                    cache_soma_radius = self.FAFB_MESH_CACHE_SOMA_RADIUS
                     
                     # Setup progress bar if verbose
                     iterator = neuron_vols
                     if self.verbose == 'full' or self.verbose is True:
-                        iterator = tqdm(neuron_vols, desc="Simplifying meshes", leave=False)
+                        iterator = tqdm(neuron_vols, desc="Simplifying meshes (soma-aware)", leave=False)
 
                     for n in iterator:
                         if hasattr(n, 'id') and n.id in mesh_missing_ids:
+                            # Get soma position before conversion (TreeNeuron has this info)
+                            soma_pos = None
+                            if hasattr(n, 'soma_pos') and n.soma_pos is not None:
+                                soma_pos = n.soma_pos
+                            
                             # Convert TreeNeuron to MeshNeuron if needed
                             if isinstance(n, navis.TreeNeuron):
                                 # Fix radii if needed
@@ -2088,36 +3156,39 @@ class VisualizeSkeleton:
                                 mesh_neurons_list.append(n)
                                 continue
                             
-                            # Apply fixed 0.9 simplification for caching
+                            # Apply soma-aware simplification for caching
                             if mesh_n and hasattr(mesh_n, 'trimesh'):
-                                n_faces = len(mesh_n.trimesh.faces)
-                                target_faces = max(100, int(n_faces * (1 - cache_simp)))  # Keep at least 100 faces
-                                if target_faces < n_faces:
-                                    try:
-                                        simplified_trimesh = self._simplify_mesh_open3d(mesh_n.trimesh, target_faces)
-                                        # Create new MeshNeuron with simplified mesh to ensure proper storage
-                                        mesh_n = navis.MeshNeuron(simplified_trimesh)
-                                        mesh_n.id = n.id  # Preserve original ID
-                                        if hasattr(n, 'name'):
-                                            mesh_n.name = n.name
-                                        # self._vprint(f'      Simplified {n.id}: {n_faces} -> {len(simplified_trimesh.faces)} faces', level='full', use_tqdm=True)
-                                    except Exception as e:
-                                        self._vprint(f'      ⚠️ Simplification failed for {n.id}: {e}', level='full', use_tqdm=True)
+                                try:
+                                    # Use soma-aware simplification with cache parameters
+                                    simplified_trimesh = self._simplify_mesh_with_soma_awareness(
+                                        mesh_n.trimesh,
+                                        skeleton_simp=cache_skel_simp,
+                                        soma_simp=cache_soma_simp,
+                                        soma_pos=soma_pos,
+                                        soma_radius=cache_soma_radius
+                                    )
+                                    # Create new MeshNeuron with simplified mesh to ensure proper storage
+                                    mesh_n = navis.MeshNeuron(simplified_trimesh)
+                                    mesh_n.id = n.id  # Preserve original ID
+                                    if hasattr(n, 'name'):
+                                        mesh_n.name = n.name
+                                except Exception as e:
+                                    self._vprint(f'      ⚠️ Simplification failed for {n.id}: {e}', level='full', use_tqdm=True)
                             
                             meshes_to_cache[n.id] = mesh_n
                             mesh_neurons_list.append(mesh_n)
                         else:
                             mesh_neurons_list.append(n)
                     
-                    # Save 0.9-simplified meshes to cache
+                    # Save soma-aware simplified meshes to cache
                     if meshes_to_cache:
                         self._save_cached_fafb_meshes(meshes_to_cache)
-                        self._vprint(f'    ✓ Cached {len(meshes_to_cache)} meshes (simp={cache_simp})', level='full', use_tqdm=True)
+                        self._vprint(f'    ✓ Cached {len(meshes_to_cache)} meshes (skel={cache_skel_simp}, soma={cache_soma_simp})', level='full', use_tqdm=True)
                     
-                    # Apply additional simplification to newly cached neurons if target > 0.9
+                    # Apply additional simplification to newly cached neurons if target > cache level
                     target_simp = self.skeleton_mesh_simplification
-                    if target_simp > cache_simp and mesh_neurons_list:
-                        remaining_after_cache = 1 - cache_simp
+                    if target_simp > cache_skel_simp and mesh_neurons_list:
+                        remaining_after_cache = 1 - cache_skel_simp
                         remaining_target = 1 - target_simp
                         additional_keep_factor = remaining_target / remaining_after_cache
                         self._vprint(f'    ⚡ Applying additional simplification to new meshes: {target_simp} (keep {additional_keep_factor:.1%})', level='full', use_tqdm=True)
@@ -2202,10 +3273,20 @@ class VisualizeSkeleton:
                     if not use_fafb_cache:
                         processed_neurons = []
                         target_simp = self.skeleton_mesh_simplification
+                        soma_simp = self.soma_mesh_simplification
+                        use_soma_aware = soma_simp is not None and soma_simp != target_simp
                         
-                        self._vprint(f'    ⚡ Processing {len(neurons_list)} neurons from ZIP (target simplification={target_simp})', level='full', use_tqdm=True)
+                        if use_soma_aware:
+                            self._vprint(f'    ⚡ Processing {len(neurons_list)} neurons from ZIP (skeleton simp={target_simp}, soma simp={soma_simp})', level='full', use_tqdm=True)
+                        else:
+                            self._vprint(f'    ⚡ Processing {len(neurons_list)} neurons from ZIP (target simplification={target_simp})', level='full', use_tqdm=True)
                         
                         for n in neurons_list:
+                            # Get soma position before conversion (TreeNeuron has this info)
+                            soma_pos = None
+                            if use_soma_aware and hasattr(n, 'soma_pos') and n.soma_pos is not None:
+                                soma_pos = n.soma_pos
+                            
                             # Convert TreeNeuron to MeshNeuron if needed
                             if isinstance(n, navis.TreeNeuron):
                                 if hasattr(n, 'nodes') and 'radius' in n.nodes.columns:
@@ -2225,19 +3306,30 @@ class VisualizeSkeleton:
                                 processed_neurons.append(n)
                                 continue
                             
-                            # Apply simplification
+                            # Apply simplification (soma-aware if configured)
                             if target_simp > 0 and mesh_n and hasattr(mesh_n, 'trimesh'):
                                 n_faces = len(mesh_n.trimesh.faces)
-                                target_faces = max(100, int(n_faces * (1 - target_simp)))  # Keep at least 100 faces
-                                if target_faces < n_faces:
-                                    try:
+                                try:
+                                    if use_soma_aware and soma_pos is not None:
+                                        # Use soma-aware simplification with different levels
+                                        simplified_trimesh = self._simplify_mesh_with_soma_awareness(
+                                            mesh_n.trimesh, 
+                                            skeleton_simp=target_simp,
+                                            soma_simp=soma_simp,
+                                            soma_pos=soma_pos,
+                                            soma_radius=self.soma_region_radius
+                                        )
+                                    else:
+                                        # Standard uniform simplification
+                                        target_faces = max(100, int(n_faces * (1 - target_simp)))
                                         simplified_trimesh = self._simplify_mesh_open3d(mesh_n.trimesh, target_faces)
-                                        mesh_n = navis.MeshNeuron(simplified_trimesh)
-                                        mesh_n.id = n.id if hasattr(n, 'id') else None
-                                        if hasattr(n, 'name'):
-                                            mesh_n.name = n.name
-                                    except Exception:
-                                        pass
+                                    
+                                    mesh_n = navis.MeshNeuron(simplified_trimesh)
+                                    mesh_n.id = n.id if hasattr(n, 'id') else None
+                                    if hasattr(n, 'name'):
+                                        mesh_n.name = n.name
+                                except Exception:
+                                    pass
                             
                             processed_neurons.append(mesh_n)
                         
