@@ -2089,8 +2089,8 @@ class VisualizeSkeleton:
     - manc → MANC template (native VNC mesh)\n
     For other datasets (hemibrain, optic-lobe, flywire), this option is ignored.\n
     Note: For MANC with brain_mesh='template', the VNC is already shown\n
-    (MANC template IS the VNC). Use vnc_mesh=True with brain_mesh='none'\n
-    to show VNC mesh without the template envelope.\n
+    (MANC template IS the VNC, so it ignores vnc_mesh value). 
+    Use brain_mesh='none' to hide brain and VNC mesh.\n
     Default: False\n
     '''
     
