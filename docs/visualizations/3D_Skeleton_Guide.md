@@ -93,9 +93,11 @@ vs = VisualizeSkeleton(
     neuron_layers=['KC.*', 'MBON03'],  # Neuron types to visualize
     brain_mesh='template',              # 'none', 'template', or 'whole'
     mesh_roi=['MB(R)', 'CA(R)'],       # ROI meshes to display
-    neuron_alpha=0.2,                   # Neuron transparency
+    neuron_alpha=0.2,                   # Neuron transparency (legend shows full opacity)
     synapse_size=3,                     # Synapse marker size
     skeleton_mode='tube',               # 'tube' or 'line'
+    legend_mode='layer',                # 'layer', 'type', or 'single'
+    expand_colors='interpolation',      # Color expansion: 'interpolation' or 'darken'
     show_fig=True
 )
 
@@ -233,6 +235,108 @@ vs = VisualizeSkeleton(..., html_size_cap=50)
 ```
 
 When simplification occurs, a `{name}_simplified.html` file is saved for reference.
+
+---
+
+## Legend and Color Configuration
+
+### Legend Display Modes
+
+Control how neurons appear in the legend using `legend_mode`:
+
+```python
+vs = VisualizeSkeleton(
+    neuron_layers=['KC.*', 'MBON.*', 'DAN.*'],
+    
+    # Legend mode options:
+    legend_mode='layer',   # Default: one entry per layer (grouped)
+    # legend_mode='type',  # Group by neuron type within layers
+    # legend_mode='single', # Each neuron gets its own entry
+)
+```
+
+**Legend Modes:**
+
+| Mode       | Description                                              | Best For                           |
+| ---------- | -------------------------------------------------------- | ---------------------------------- |
+| `'layer'`  | One legend entry per layer (all neurons grouped)         | Clean overview, many neurons       |
+| `'type'`   | Separate entry for each neuron type within a layer       | Mixed types per layer              |
+| `'single'` | Individual entry for each neuron ({bodyId}_{layer_name}) | Tracking specific neurons, few IDs |
+
+### Color Expansion Methods
+
+When you have more layers than available colors, VisualizeSkeleton automatically expands the color palette using `expand_colors`:
+
+```python
+vs = VisualizeSkeleton(
+    neuron_layers=['layer1', 'layer2', ..., 'layer20'],  # 20 layers
+    neuron_colors=('#1f77b4', '#ff7f0e', '#2ca02c'),     # Only 3 colors
+    
+    # Color expansion method:
+    expand_colors='interpolation',  # Default: create smooth color gradient
+    # expand_colors='darken',       # Alternative: recycle with darkening
+    # expand_colors='cycle',        # Alternative: simple color cycling
+)
+```
+
+**Color Expansion Methods:**
+
+| Method            | Behavior                                                             | Brightness Range | Best For                      |
+| ----------------- | -------------------------------------------------------------------- | ---------------- | ----------------------------- |
+| `'interpolation'` | Creates smooth colormap from base palette, samples new colors evenly | 100% (full)      | Many layers, distinct colors  |
+| `'darken'`        | Recycles base colors with progressive darkening                      | 100% → 70%       | Fewer layers, consistent hues |
+| `'cycle'`         | Simple repetition of base colors without modification                | 100% (full)      | Color consistency, few cycles |
+
+**Interpolation Mode (Default):**
+- Builds a continuous colormap from your base palette
+- Samples colors evenly across the spectrum
+- Ensures visually distinct colors even with 20+ layers
+- Example: 3 base colors → 20 smoothly varying colors
+
+**Darken Mode:**
+- Cycles through base palette, darkening by 30% per cycle
+- Maintains color family (e.g., all blues, but darker)
+- Maximum darkening: 70% brightness (minimum)
+- Example with 3 colors for 9 layers:
+  - Colors 1-3: 100% brightness (original)
+  - Colors 4-6: 85% brightness
+  - Colors 7-9: 70% brightness
+
+**Cycle Mode:**
+- Simply repeats the base color palette
+- No modification to brightness or hue
+- Colors repeat exactly: color1, color2, color3, color1, color2, color3...
+- Best when you want consistent color families and have relatively few cycles
+
+### Legend Color Swatches
+
+**Automatic Opacity Handling:**
+- Legend color swatches always show **full opacity** colors for clarity
+- Neurons in the 3D plot use the specified `neuron_alpha` transparency
+- This ensures legend remains visible and color-identifiable even with low alpha
+
+Example:
+```python
+vs = VisualizeSkeleton(
+    neuron_layers=['MBON.*', 'DAN.*'],
+    neuron_alpha=0.2,  # Very transparent neurons in plot
+    # Legend swatches will still show solid, vivid colors
+)
+```
+
+**Custom Color Palettes:**
+```python
+# Define your own color palette to avoid auto-expansion
+custom_colors = [
+    '#e41a1c', '#377eb8', '#4daf4a', '#984ea3', '#ff7f00',
+    '#ffff33', '#a65628', '#f781bf', '#999999', '#66c2a5'
+]
+
+vs = VisualizeSkeleton(
+    neuron_layers=['layer1', 'layer2', ..., 'layer10'],
+    neuron_colors=custom_colors,  # No expansion needed
+)
+```
 
 ---
 

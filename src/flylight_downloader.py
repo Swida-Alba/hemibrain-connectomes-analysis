@@ -1428,7 +1428,7 @@ class FlyLightDownloader:
                         output_pptx=str(pptx_path),
                         images_per_slide=images_per_page,
                         slide_title="{subfolder}",  # Use line name as title
-                        label_fontsize=20,
+                        label_fontsize=12,
                         title_fontsize=24,
                         include_subfolders=True,
                         group_by_subfolder=True,

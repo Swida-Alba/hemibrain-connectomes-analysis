@@ -234,13 +234,13 @@ results = finder.find_novel_homologs(
 
 HomologFinder uses a hierarchical classification to assess profile quality before comparison:
 
-| Status | Criteria | Behavior | Log Message |
-|--------|----------|----------|-------------|
-| `NONE` | 0 partners | **SKIPPED** | Skipping source (0 partners) |
-| `RARE` | < 5 partners | Included with **WARNING** | WARNING: source has RARE status |
-| `INCOMPLETE` | < top_k partners | Included with Warning | Warning: source has INCOMPLETE status |
-| `INCOMPLETE_EXPANSION` | < top_m types | Included with Warning | Warning: source has INCOMPLETE_EXPANSION status |
-| `COMPLETE` | ≥ top_k partners & ≥ top_m types | Included normally | (normal processing) |
+| Status                 | Criteria                         | Behavior                  | Log Message                                     |
+| ---------------------- | -------------------------------- | ------------------------- | ----------------------------------------------- |
+| `NONE`                 | 0 partners                       | **SKIPPED**               | Skipping source (0 partners)                    |
+| `RARE`                 | < 5 partners                     | Included with **WARNING** | WARNING: source has RARE status                 |
+| `INCOMPLETE`           | < top_k partners                 | Included with Warning     | Warning: source has INCOMPLETE status           |
+| `INCOMPLETE_EXPANSION` | < top_m types                    | Included with Warning     | Warning: source has INCOMPLETE_EXPANSION status |
+| `COMPLETE`             | ≥ top_k partners & ≥ top_m types | Included normally         | (normal processing)                             |
 
 ### Status Tracking in Output
 
@@ -269,12 +269,12 @@ When `output_dir` is set, the `source_status_summary.json` file tracks:
 
 ## Similarity Metrics
 
-| Metric | Description | Range | Best For |
-|--------|-------------|-------|----------|
-| `jaccard` | Partner set overlap | 0-1 | Quick screening |
-| `cosine` | Weight vector similarity | 0-1 | Weight importance |
+| Metric               | Description               | Range   | Best For            |
+| -------------------- | ------------------------- | ------- | ------------------- |
+| `jaccard`            | Partner set overlap       | 0-1     | Quick screening     |
+| `cosine`             | Weight vector similarity  | 0-1     | Weight importance   |
 | `rank` / `rank_corr` | Spearman rank correlation | -1 to 1 | Rank order matching |
-| `combined` | Weighted average | 0-1 | General use |
+| `combined`           | Weighted average          | 0-1     | General use         |
 
 ### Custom Metric Weighting
 
@@ -294,11 +294,11 @@ When using a dict, results are sorted by the weighted combination of all specifi
 
 ### Interpretation
 
-| Score Range | Meaning |
-|-------------|---------|
-| > 0.7 | Strong match - likely same cell type |
-| 0.5 - 0.7 | Moderate match - possibly related |
-| < 0.5 | Weak match - likely different types |
+| Score Range | Meaning                              |
+| ----------- | ------------------------------------ |
+| > 0.7       | Strong match - likely same cell type |
+| 0.5 - 0.7   | Moderate match - possibly related    |
+| < 0.5       | Weak match - likely different types  |
 
 ## Output Format
 
@@ -307,11 +307,11 @@ When using a dict, results are sorted by the weighted combination of all specifi
 Sorted by `source_bodyId`, then `rank_corr` (descending):
 
 ```
-source_bodyId | source_type | target_bodyId | target_type | rank_corr | jaccard | cosine | source_status | target_status | adjacency_score
-------------- | ----------- | ------------- | ----------- | --------- | ------- | ------ | ------------- | ------------- | ---------------
-720575940...  | Mi1         | 720575940...  | Mi1         | 0.92      | 0.78    | 0.85   | COMPLETE      | COMPLETE      | 15
-720575940...  | Mi1         | 720575940...  | Mi4         | 0.71      | 0.52    | 0.68   | COMPLETE      | INCOMPLETE    | 8
-720575940...  | Mi1         | 720575940...  | Tm3         | 0.65      | 0.45    | 0.58   | RARE          | COMPLETE      | 12
+| source_bodyId | source_type | target_bodyId | target_type | rank_corr | jaccard | cosine | source_status | target_status | adjacency_score |
+| ------------- | ----------- | ------------- | ----------- | --------- | ------- | ------ | ------------- | ------------- | --------------- |
+| 720575940...  | Mi1         | 720575940...  | Mi1         | 0.92      | 0.78    | 0.85   | COMPLETE      | COMPLETE      | 15              |
+| 720575940...  | Mi1         | 720575940...  | Mi4         | 0.71      | 0.52    | 0.68   | COMPLETE      | INCOMPLETE    | 8               |
+| 720575940...  | Mi1         | 720575940...  | Tm3         | 0.65      | 0.45    | 0.58   | RARE          | COMPLETE      | 12              |
 ```
 
 **New Columns:**
@@ -324,10 +324,10 @@ source_bodyId | source_type | target_bodyId | target_type | rank_corr | jaccard 
 Aggregated type-level summary:
 
 ```
-query | source_dataset | target_dataset | source_type | target_type | avg_rank_corr | best_rank_corr | std_rank_corr | n_bodyid_comparisons
------ | -------------- | -------------- | ----------- | ----------- | ------------- | -------------- | ------------- | --------------------
-Mi1   | hemibrain      | flywire_FAFB   | Mi1         | Mi1         | 0.89          | 0.92           | 0.03          | 12
-Mi1   | hemibrain      | flywire_FAFB   | Mi1         | Mi4         | 0.65          | 0.71           | 0.08          | 12
+| query | source_dataset | target_dataset | source_type | target_type | avg_rank_corr | best_rank_corr | std_rank_corr | n_bodyid_comparisons |
+| ----- | -------------- | -------------- | ----------- | ----------- | ------------- | -------------- | ------------- | -------------------- |
+| Mi1   | hemibrain      | flywire_FAFB   | Mi1         | Mi1         | 0.89          | 0.92           | 0.03          | 12                   |
+| Mi1   | hemibrain      | flywire_FAFB   | Mi1         | Mi4         | 0.65          | 0.71           | 0.08          | 12                   |
 ```
 
 ### homolog_results.csv (Legacy Format)
@@ -366,7 +366,7 @@ When `output_dir` is set, results are automatically saved with **both bodyId-lev
 ├── overlaps/                     # Partner overlap details
 └── visualization/                # Skeleton visualizations (if enabled)
     ├── source_neurons/           # All source neurons together
-    │   └── all_sources.html      # Multi-neuron visualization (merge_neurons=False)
+    │   └── all_sources.html      # Multi-neuron visualization (legend_mode='single')
     ├── bodyid_level/             # Individual bodyId visualizations
     │   ├── {type}_{bodyId}.html  # Each source/target bodyId separately
     │   └── ...                   # neuron_alpha=0.6 for single neurons
@@ -479,21 +479,21 @@ HomologFinder(
 )
 ```
 
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `source` | str/int | None | Default source neuron (type or bodyId) |
-| `source_dataset` | str | None | Default source dataset |
-| `target_dataset` | str | None | Default target dataset |
-| `output_dir` | str | None | Output directory for results |
-| `saveas` | str | None | Subfolder name for results |
-| `top_k` | int | 15 | Top K partners per direction |
-| `top_m` | int | 5 | Minimum unique types |
-| `min_synapse_threshold` | int | 3 | Minimum synapse count |
-| `use_cache` | bool | True | Use connection cache |
-| `visualize_skeleton` | bool | False | Enable skeleton visualization |
-| `visualize_top_n` | int | 5 | Number of top candidates to visualize |
-| `similarity_metric` | str/dict | 'rank_corr' | Metric for sorting results (see below) |
-| `verbose` | bool | True | Enable verbose logging |
+| Parameter               | Type     | Default     | Description                            |
+| ----------------------- | -------- | ----------- | -------------------------------------- |
+| `source`                | str/int  | None        | Default source neuron (type or bodyId) |
+| `source_dataset`        | str      | None        | Default source dataset                 |
+| `target_dataset`        | str      | None        | Default target dataset                 |
+| `output_dir`            | str      | None        | Output directory for results           |
+| `saveas`                | str      | None        | Subfolder name for results             |
+| `top_k`                 | int      | 15          | Top K partners per direction           |
+| `top_m`                 | int      | 5           | Minimum unique types                   |
+| `min_synapse_threshold` | int      | 3           | Minimum synapse count                  |
+| `use_cache`             | bool     | True        | Use connection cache                   |
+| `visualize_skeleton`    | bool     | False       | Enable skeleton visualization          |
+| `visualize_top_n`       | int      | 5           | Number of top candidates to visualize  |
+| `similarity_metric`     | str/dict | 'rank_corr' | Metric for sorting results (see below) |
+| `verbose`               | bool     | True        | Enable verbose logging                 |
 
 **similarity_metric Options:**
 - String: `'rank_corr'`, `'jaccard'`, `'cosine'`, `'combined'`
@@ -605,25 +605,25 @@ else:
 
 The control test returns a dictionary with:
 
-| Key | Description |
-|-----|-------------|
-| `real_results` | DataFrame of homolog results with real profile |
-| `real_mean_score` | Mean similarity score from real profile |
-| `shuffled_mean_scores` | List of mean scores from each shuffle |
-| `p_value` | Proportion of shuffles with higher score than real |
-| `z_score` | Standard deviations above shuffle mean |
-| `effect_size` | Cohen's d effect size |
-| `is_significant` | True if p < 0.05 |
-| `summary` | Human-readable interpretation |
+| Key                    | Description                                        |
+| ---------------------- | -------------------------------------------------- |
+| `real_results`         | DataFrame of homolog results with real profile     |
+| `real_mean_score`      | Mean similarity score from real profile            |
+| `shuffled_mean_scores` | List of mean scores from each shuffle              |
+| `p_value`              | Proportion of shuffles with higher score than real |
+| `z_score`              | Standard deviations above shuffle mean             |
+| `effect_size`          | Cohen's d effect size                              |
+| `is_significant`       | True if p < 0.05                                   |
+| `summary`              | Human-readable interpretation                      |
 
 ### Interpretation Guide
 
-| P-value | Effect Size | Interpretation |
-|---------|-------------|----------------|
-| < 0.001 | > 0.8 | Highly significant, large effect |
-| < 0.01 | > 0.5 | Significant, medium effect |
-| < 0.05 | > 0.2 | Marginally significant, small effect |
-| ≥ 0.05 | any | Not significant, may be due to chance |
+| P-value | Effect Size | Interpretation                        |
+| ------- | ----------- | ------------------------------------- |
+| < 0.001 | > 0.8       | Highly significant, large effect      |
+| < 0.01  | > 0.5       | Significant, medium effect            |
+| < 0.05  | > 0.2       | Marginally significant, small effect  |
+| ≥ 0.05  | any         | Not significant, may be due to chance |
 
 ### Example Output
 

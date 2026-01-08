@@ -87,6 +87,7 @@ import sys
 import shutil
 import time
 import signal
+import gc
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import List
@@ -134,6 +135,16 @@ class WebDriverExportSession:
     - Loading HTML once and exporting multiple views by rotating camera
     - Exporting video frames without reopening browser
     
+    File Loading
+    ------------
+    Files are served via a local HTTP server for maximum reliability.
+    This approach works with files of any size (tested up to 200MB+).
+    
+    Export Method
+    -------------
+    Uses canvas.toDataURL() for fast, high-quality screenshots.
+    This method is memory-efficient and produces excellent quality output.
+    
     Usage:
     ------
     ```python
@@ -171,6 +182,11 @@ class WebDriverExportSession:
         self._render_wait = render_wait if render_wait is not None else 0.3
         self._render_wait_fixed = render_wait is not None  # Skip calibration if fixed
         self._initial_camera = None  # Store initial camera from HTML
+        self._screenshot_count = 0  # Track screenshot count for periodic memory cleanup
+        self._html_size_mb = 0.0  # Track loaded HTML file size for memory management
+        self._cleanup_interval = 15  # Default cleanup interval (frames)
+        self._http_server = None  # Local HTTP server for large files
+        self._http_server_port = None
         
     def __enter__(self):
         """Initialize the WebDriver and return self."""
@@ -181,32 +197,43 @@ class WebDriverExportSession:
         except ImportError:
             raise ImportError("selenium is required. Install with: pip install selenium webdriver-manager")
         
-        # Use base dimensions for window - scale via deviceScaleFactor to avoid flashing
-        # This prevents window resize flashing while still getting high-resolution output
-        base_width = self.width
-        base_height = self.height
+        # Scale the window size directly for high-resolution output
+        # This is more reliable than deviceScaleFactor for WebGL content
+        scaled_width = self.width * self.scale
+        scaled_height = self.height * self.scale
         
         chrome_options = ChromeOptions()
         chrome_options.add_argument('--no-sandbox')
         chrome_options.add_argument('--disable-dev-shm-usage')
-        chrome_options.add_argument(f'--window-size={base_width},{base_height}')
+        chrome_options.add_argument(f'--window-size={scaled_width},{scaled_height}')
         
         # Use new headless mode (Chrome 109+) which supports WebGL better than old headless
         # This replaces the offscreen/position hack which can be flaky on macOS
         chrome_options.add_argument('--headless=new')
         
+        # Enable high-quality rendering for WebGL
+        chrome_options.add_argument('--use-gl=angle')  # Use ANGLE for better WebGL
+        chrome_options.add_argument('--enable-webgl')
+        chrome_options.add_argument('--enable-webgl2')
+        chrome_options.add_argument('--disable-software-rasterizer')
+        
         # Disable animations and GPU compositing to reduce flashing
         chrome_options.add_argument('--disable-gpu-compositing')
         chrome_options.add_argument('--disable-smooth-scrolling')
         # Memory and stability settings for large HTML files (>100MB)
-        chrome_options.add_argument('--js-flags=--max-old-space-size=8192')  # 8GB JS heap
+        # --expose-gc enables window.gc() for explicit garbage collection
+        chrome_options.add_argument('--js-flags=--max-old-space-size=8192 --expose-gc')
         chrome_options.add_argument('--disable-features=RendererCodeIntegrity')
         chrome_options.add_argument('--disable-backgrounding-occluded-windows')
         chrome_options.add_argument('--disable-renderer-backgrounding')
         chrome_options.add_argument('--memory-pressure-off')
+        # Increase shared memory size (default /dev/shm is often too small)
+        chrome_options.add_argument('--shm-size=2gb')
         # GPU memory for large WebGL scenes
         chrome_options.add_argument('--enable-gpu-rasterization')
         chrome_options.add_argument('--ignore-gpu-blocklist')
+        # Limit GPU memory to prevent runaway allocation
+        chrome_options.add_argument('--gpu-memory-buffer-count=4')
         
         # Initialize ChromeDriver using webdriver-manager (cross-platform) or system Chrome
         # webdriver-manager automatically downloads and caches the correct ChromeDriver version
@@ -249,14 +276,13 @@ class WebDriverExportSession:
                     f"Original error: {e}"
                 )
         
-        # Set up viewport size once at initialization using CDP
-        # Use deviceScaleFactor for high-resolution output instead of scaling window size
-        # This prevents flashing by keeping window at fixed size
+        # Set up viewport size at initialization using CDP
+        # Use scaled dimensions directly for accurate high-resolution WebGL export
         try:
             self.driver.execute_cdp_cmd('Emulation.setDeviceMetricsOverride', {
-                'width': self.width,
-                'height': self.height,
-                'deviceScaleFactor': self.scale,  # Use scale factor for resolution
+                'width': self.width * self.scale,
+                'height': self.height * self.scale,
+                'deviceScaleFactor': 1,  # Use 1 since we already scaled the viewport
                 'mobile': False
             })
             self._viewport_configured = True
@@ -266,7 +292,10 @@ class WebDriverExportSession:
         return self
     
     def __exit__(self, exc_type, exc_val, exc_tb):
-        """Clean up WebDriver."""
+        """Clean up WebDriver and HTTP server."""
+        # Stop HTTP server if running
+        self._stop_http_server()
+        
         if self.driver:
             try:
                 self.driver.quit()
@@ -276,7 +305,10 @@ class WebDriverExportSession:
     
     def load_html(self, html_path, wait_for_render=True, render_wait=3):
         """
-        Load an HTML file into the browser.
+        Load an HTML file into the browser via local HTTP server.
+        
+        Uses a local HTTP server to serve the file, which is more reliable than
+        document.write() injection and works with files of any size.
         
         Parameters
         ----------
@@ -292,17 +324,34 @@ class WebDriverExportSession:
         from selenium.webdriver.common.by import By
         import time
         
-        # Set page load timeout for large HTML files
+        # Set page load and script timeouts for large HTML files
         self.driver.set_page_load_timeout(self.timeout)
         self.driver.set_script_timeout(self.timeout)
         
-        file_url = f'file://{os.path.abspath(html_path)}'
-        self.driver.get(file_url)
-        self._loaded_url = file_url
+        # Track HTML file size for adaptive memory management
+        # Larger files require more aggressive cleanup intervals
+        self._html_size_mb = os.path.getsize(html_path) / (1024 * 1024)
+        if self._html_size_mb > 30:
+            # Very large files (>30MB): cleanup every 5 frames
+            self._cleanup_interval = 5
+        elif self._html_size_mb > 10:
+            # Large files (>10MB): cleanup every 10 frames
+            self._cleanup_interval = 10
+        else:
+            # Normal files: cleanup every 15 frames
+            self._cleanup_interval = 15
+        
+        # Always use HTTP server for reliability with any file size
+        self._start_http_server_for_file(html_path)
+        url = f'http://127.0.0.1:{self._http_server_port}/{os.path.basename(html_path)}'
+        self.driver.get(url)
+        
+        self._loaded_url = os.path.abspath(html_path)
         
         if wait_for_render:
             wait = WebDriverWait(self.driver, self.timeout)
-            wait.until(EC.presence_of_element_located((By.CLASS_NAME, "plotly")))
+            # Wait for js-plotly-plot class (not just 'plotly') as this is added after render
+            wait.until(EC.presence_of_element_located((By.CLASS_NAME, "js-plotly-plot")))
             time.sleep(render_wait)
             
             # Set up the viewport and figure size ONCE to avoid flashing on every screenshot
@@ -320,16 +369,96 @@ class WebDriverExportSession:
             if not self._render_wait_fixed:
                 self._calibrate_render_wait()
     
+    def _start_http_server_for_file(self, html_path):
+        """
+        Start a local HTTP server to serve a large HTML file.
+        
+        This is used for files ≥50MB where document.write() injection
+        would exceed WebDriver protocol content-length limits.
+        
+        Parameters
+        ----------
+        html_path : str
+            Path to the HTML file to serve
+        """
+        import http.server
+        import socketserver
+        import threading
+        
+        # Stop any existing server
+        self._stop_http_server()
+        
+        # Get the directory containing the HTML file
+        html_dir = os.path.dirname(os.path.abspath(html_path))
+        
+        # Find an available port
+        for port in range(8765, 8865):
+            try:
+                # Create a handler that serves from the HTML file's directory
+                handler = lambda *args, directory=html_dir, **kwargs: \
+                    http.server.SimpleHTTPRequestHandler(*args, directory=directory, **kwargs)
+                
+                # Disable logging to avoid cluttering output
+                class QuietHandler(http.server.SimpleHTTPRequestHandler):
+                    def __init__(self, *args, **kwargs):
+                        super().__init__(*args, directory=html_dir, **kwargs)
+                    def log_message(self, format, *args):
+                        pass  # Suppress logging
+                
+                self._http_server = socketserver.TCPServer(("127.0.0.1", port), QuietHandler)
+                self._http_server_port = port
+                
+                # Start server in a daemon thread
+                server_thread = threading.Thread(target=self._http_server.serve_forever)
+                server_thread.daemon = True
+                server_thread.start()
+                
+                return
+            except OSError:
+                continue  # Port in use, try next
+        
+        raise RuntimeError("Could not find an available port for HTTP server")
+    
+    def _stop_http_server(self):
+        """Stop the local HTTP server if running."""
+        if self._http_server is not None:
+            try:
+                self._http_server.shutdown()
+                self._http_server.server_close()
+            except Exception:
+                pass
+            self._http_server = None
+            self._http_server_port = None
+
     def _setup_viewport_size(self):
         """
-        Initialize viewport settings without resizing the Plotly figure.
-        Resizing causes canvas flashing - instead we export at the canvas's natural size
-        and rely on deviceScaleFactor for resolution.
+        Resize the Plotly figure to the full scaled resolution for high-quality export.
+        This ensures the WebGL canvas renders at the target resolution.
         """
-        # Don't resize Plotly figure - this causes canvas flashing
-        # The deviceScaleFactor set in __enter__() handles resolution scaling
-        # The screenshot will capture whatever size the figure renders at
-        pass
+        import time
+        
+        # Resize the Plotly figure to fill the viewport at scaled resolution
+        scaled_width = self.width * self.scale
+        scaled_height = self.height * self.scale
+        
+        try:
+            self.driver.execute_script("""
+                var gd = document.querySelector('.js-plotly-plot');
+                if (gd && Plotly) {
+                    // Resize the figure to fill the viewport
+                    Plotly.relayout(gd, {
+                        width: arguments[0],
+                        height: arguments[1],
+                        'paper_bgcolor': 'white',
+                        'plot_bgcolor': 'white'
+                    });
+                }
+            """, scaled_width, scaled_height)
+            
+            # Wait for resize to complete
+            time.sleep(0.5)
+        except Exception:
+            pass  # Non-critical, continue with original size
     
     def _force_initial_draw(self):
         """
@@ -473,9 +602,13 @@ class WebDriverExportSession:
     
     def screenshot(self, output_path, convert_to_jpeg=False, jpeg_quality=100,
                    auto_crop=False, margin=20, background_color=(255, 255, 255),
-                   use_webgl_export=True):
+                   use_webgl_export=True, fast_mode=True, auto_fast_mode=True):
         """
-        Take a screenshot and save to file.
+        Take a screenshot and save to file using canvas.toDataURL().
+        
+        Export method:
+        1. WebGL canvas.toDataURL() - Fast, high-quality direct canvas capture
+        2. CDP screenshot - Chrome DevTools Protocol screenshot as fallback
         
         Parameters
         ----------
@@ -492,32 +625,107 @@ class WebDriverExportSession:
         background_color : tuple
             RGB tuple for background color detection (default white)
         use_webgl_export : bool, default True
-            If True, use WebGL canvas.toDataURL() for higher quality export.
+            If True, try WebGL export method for higher quality.
             Falls back to CDP screenshot if WebGL export fails.
+        fast_mode : bool, default True
+            Legacy parameter, always True. Uses canvas.toDataURL() directly.
+        auto_fast_mode : bool, default True
+            Legacy parameter, ignored. Canvas mode is always used.
         """
         from PIL import Image
         import base64
+        import time
+        
+        # Track screenshot count for periodic memory cleanup
+        self._screenshot_count += 1
+        
+        # Always use fast_mode (canvas.toDataURL) - it's fast and high quality
+        fast_mode = True
         
         img = None
         temp_png = output_path.rsplit('.', 1)[0] + '_temp.png'
+        scaled_width = self.width * self.scale
+        scaled_height = self.height * self.scale
         
-        # Method 1: Try WebGL canvas export
-        # We need to force a render right before capture because WebGL clears buffer after each frame
-        if use_webgl_export:
+        # Method 1: Try Plotly.toImage() - the official high-quality export API
+        # Skip this in fast_mode for better performance
+        if use_webgl_export and not fast_mode:
+            try:
+                # Use Plotly's toImage function which produces high-quality exports
+                # This function properly handles WebGL rendering and antialiasing
+                # Note: We store in window._lastImageData to allow explicit cleanup
+                img_data = self.driver.execute_async_script("""
+                    var callback = arguments[arguments.length - 1];
+                    var gd = document.querySelector('.js-plotly-plot');
+                    if (!gd || !Plotly) {
+                        callback(null);
+                        return;
+                    }
+                    
+                    // Force a render before capture
+                    if (gd._fullLayout && gd._fullLayout.scene && gd._fullLayout.scene._scene) {
+                        var scene = gd._fullLayout.scene._scene;
+                        if (scene.render) scene.render();
+                    }
+                    
+                    // Use Plotly.toImage for high-quality export
+                    Plotly.toImage(gd, {
+                        format: 'png',
+                        width: arguments[0],
+                        height: arguments[1],
+                        scale: 1  // We already scaled the dimensions
+                    }).then(function(dataUrl) {
+                        // Store temporarily for potential cleanup
+                        window._lastImageData = dataUrl;
+                        callback(dataUrl);
+                    }).catch(function(err) {
+                        callback(null);
+                    });
+                """, scaled_width, scaled_height)
+                
+                if img_data and img_data.startswith('data:image/png;base64,'):
+                    base64_data = img_data.split(',')[1]
+                    img_bytes = base64.b64decode(base64_data)
+                    
+                    # Immediately clear the data URL from browser memory
+                    try:
+                        self.driver.execute_script("window._lastImageData = null;")
+                    except:
+                        pass
+                    
+                    # Clear Python reference to large string
+                    img_data = None
+                    base64_data = None
+                    
+                    # Verify non-empty image
+                    if len(set(img_bytes[:1000])) > 1:
+                        with open(temp_png, 'wb') as f:
+                            f.write(img_bytes)
+                        img = Image.open(temp_png)
+                        
+                        # Clear the large bytes object
+                        img_bytes = None
+                        
+                        # Verify image has content
+                        import numpy as np
+                        arr = np.array(img)
+                        if arr.max() == 0:  # All black
+                            img = None
+            except Exception:
+                pass  # Will try next method
+        
+        # Method 2: Try WebGL canvas.toDataURL() with forced render
+        if img is None and use_webgl_export:
             try:
                 # Force render and immediately capture the WebGL canvas
                 canvas_data = self.driver.execute_script("""
                     var gd = document.querySelector('.js-plotly-plot');
                     if (!gd) return null;
                     
-                    // Try to get the scene and force a render
+                    // Force the scene to render
                     if (gd._fullLayout && gd._fullLayout.scene && gd._fullLayout.scene._scene) {
                         var scene = gd._fullLayout.scene._scene;
-                        
-                        // Force the scene to render
-                        if (scene.render) {
-                            scene.render();
-                        }
+                        if (scene.render) scene.render();
                         
                         // Get the canvas
                         if (scene.glplot && scene.glplot.canvas) {
@@ -535,41 +743,45 @@ class WebDriverExportSession:
                 """)
                 
                 if canvas_data and canvas_data.startswith('data:image/png;base64,'):
-                    # Decode base64 canvas data
                     base64_data = canvas_data.split(',')[1]
-                    img_data = base64.b64decode(base64_data)
+                    img_bytes = base64.b64decode(base64_data)
                     
-                    # Verify it's not blank (all zeros = black image)
-                    if len(set(img_data[:1000])) > 1:  # Quick check first 1000 bytes
+                    if len(set(img_bytes[:1000])) > 1:
                         with open(temp_png, 'wb') as f:
-                            f.write(img_data)
+                            f.write(img_bytes)
                         img = Image.open(temp_png)
-                        # Additional verification: check if image has content
+                        
                         import numpy as np
                         arr = np.array(img)
-                        if arr.max() > 0:  # Has non-black pixels
-                            pass  # img is valid, use it
-                        else:
-                            img = None  # Blank image, fall back to CDP
-                    else:
-                        img = None  # Blank data, fall back to CDP
-            except Exception as e:
-                # WebGL export failed, will fall back to CDP screenshot
-                pass
+                        if arr.max() == 0:
+                            img = None
+            except Exception:
+                pass  # Will fall back to CDP
         
-        # Method 2: Fall back to CDP screenshot (captures entire page)
+        # Method 3: Fall back to CDP screenshot (captures entire viewport)
         if img is None:
             try:
+                # Wait a moment for any pending renders
+                time.sleep(0.2)
+                
                 result = self.driver.execute_cdp_cmd('Page.captureScreenshot', {
                     'format': 'png',
-                    'captureBeyondViewport': False
+                    'captureBeyondViewport': False,
+                    'fromSurface': True,  # Capture from surface for better WebGL support
+                    'clip': {
+                        'x': 0,
+                        'y': 0,
+                        'width': scaled_width,
+                        'height': scaled_height,
+                        'scale': 1
+                    }
                 })
                 screenshot_data = base64.b64decode(result['data'])
                 with open(temp_png, 'wb') as f:
                     f.write(screenshot_data)
                 img = Image.open(temp_png)
-            except Exception as e:
-                # Fallback to regular screenshot
+            except Exception:
+                # Final fallback to regular screenshot
                 self.driver.save_screenshot(temp_png)
                 img = Image.open(temp_png)
         
@@ -591,6 +803,81 @@ class WebDriverExportSession:
         # Clean up temp file if it still exists
         if os.path.exists(temp_png):
             os.remove(temp_png)
+        
+        # Close PIL image to free memory
+        if img is not None:
+            try:
+                img.close()
+            except:
+                pass
+        img = None
+        
+        # Periodic memory cleanup to prevent Chrome crashes from accumulated WebGL resources
+        # Chrome WebGL accumulates texture/buffer memory that isn't freed automatically
+        # Interval is adaptive: more frequent for large HTML files (30MB+ = every 5 frames)
+        # Note: For very large files (>30MB), using fast_mode=True is recommended
+        if self._screenshot_count % self._cleanup_interval == 0:
+            self._cleanup_chrome_memory()
+            gc.collect()
+    
+    def _cleanup_chrome_memory(self):
+        """
+        Clean up Chrome memory to prevent crashes from accumulated WebGL resources.
+        
+        Chrome's WebGL implementation can accumulate texture and buffer memory
+        that isn't automatically garbage collected. This forces cleanup.
+        Also clears JavaScript variables that hold large data URLs.
+        """
+        try:
+            # Clear WebGL context caches and force garbage collection in browser
+            self.driver.execute_script("""
+                // Clear any global variables that might hold image data
+                if (window._lastImageData) {
+                    window._lastImageData = null;
+                }
+                
+                // Force WebGL context cleanup
+                var gd = document.querySelector('.js-plotly-plot');
+                if (gd && gd._fullLayout && gd._fullLayout.scene && gd._fullLayout.scene._scene) {
+                    var scene = gd._fullLayout.scene._scene;
+                    if (scene.glplot) {
+                        var gl = scene.glplot.gl;
+                        if (gl) {
+                            // Flush pending GL commands
+                            gl.flush();
+                            gl.finish();
+                            
+                            // Clear WebGL caches by triggering texture/buffer cleanup
+                            // This helps release GPU memory
+                            var numTextureUnits = gl.getParameter(gl.MAX_COMBINED_TEXTURE_IMAGE_UNITS);
+                            for (var i = 0; i < numTextureUnits; i++) {
+                                gl.activeTexture(gl.TEXTURE0 + i);
+                                gl.bindTexture(gl.TEXTURE_2D, null);
+                                gl.bindTexture(gl.TEXTURE_CUBE_MAP, null);
+                            }
+                            gl.bindBuffer(gl.ARRAY_BUFFER, null);
+                            gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, null);
+                            gl.bindRenderbuffer(gl.RENDERBUFFER, null);
+                            gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+                        }
+                    }
+                }
+                
+                // Clear Plotly's internal image cache if it exists
+                if (window.Plotly && window.Plotly.Plots && window.Plotly.Plots.resize) {
+                    // Trigger a resize to flush internal caches
+                    try {
+                        window.Plotly.Plots.resize(gd);
+                    } catch(e) {}
+                }
+                
+                // Request browser garbage collection if available (Chrome with --js-flags=--expose-gc)
+                if (window.gc) {
+                    window.gc();
+                }
+            """)
+        except Exception:
+            pass  # Non-critical, continue if cleanup fails
     
     def _auto_crop_image(self, img, margin=20, background_color=(255, 255, 255)):
         """
@@ -994,67 +1281,104 @@ def export_individuals_webdriver(
             safe_name = safe_name.replace('__', '_')
         return safe_name.rstrip('_')
     
-    try:
-        with WebDriverExportSession(
-            width=width, 
-            height=height, 
-            scale=scale, 
-            timeout=timeout
-        ) as session:
-            # Load HTML once
-            session.load_html(html_path, wait_for_render=True, render_wait=2)
-            
-            # Hide legend and clean up layout for export
-            session.update_layout({
-                'showlegend': False,
-                'title.text': '',
-                'margin': {'l': 0, 'r': 0, 'b': 0, 't': 0},
-                'scene.domain': {'x': [0.01, 0.99], 'y': [0.01, 0.99]}
-            })
-            
-            legend_names = list(legend_entries.keys())
-            progress_iter = tqdm(legend_names, desc='Exporting individuals') if verbose else legend_names
-            
-            for legend_name in progress_iter:
-                trace_indices = legend_entries[legend_name]
-                safe_name = _sanitize_filename(legend_name)
+    # Retry logic for Chrome crashes
+    max_retries = 3
+    last_error = None
+    
+    for retry_attempt in range(max_retries):
+        if retry_attempt > 0:
+            if verbose:
+                print(f'   🔄 Retry attempt {retry_attempt + 1}/{max_retries}...')
+            import time
+            time.sleep(2)  # Brief pause before retry
+            # Reset result for retry
+            result['files'] = {}
+            result['failed'] = []
+            result['success'] = True
+            result['error'] = None
+        
+        try:
+            with WebDriverExportSession(
+                width=width, 
+                height=height, 
+                scale=scale, 
+                timeout=timeout
+            ) as session:
+                # Load HTML once
+                session.load_html(html_path, wait_for_render=True, render_wait=2)
                 
-                # Set visibility: show this legend's traces + background
-                visible_indices = list(trace_indices) + list(background_indices)
-                session.set_trace_visibility(visible_indices, total_traces)
+                # Hide legend and clean up layout for export
+                session.update_layout({
+                    'showlegend': False,
+                    'title.text': '',
+                    'margin': {'l': 0, 'r': 0, 'b': 0, 't': 0},
+                    'scene.domain': {'x': [0.01, 0.99], 'y': [0.01, 0.99]}
+                })
                 
-                result['files'][safe_name] = []
+                legend_names = list(legend_entries.keys())
+                progress_iter = tqdm(legend_names, desc='Exporting individuals') if verbose else legend_names
                 
-                # Export each view
-                for view_name in views:
-                    camera = view_cameras.get(view_name, {})
+                for legend_name in progress_iter:
+                    trace_indices = legend_entries[legend_name]
+                    safe_name = _sanitize_filename(legend_name)
                     
-                    # Set camera position
-                    session.set_camera(
-                        eye=camera.get('eye'),
-                        up=camera.get('up'),
-                        center=camera.get('center')
-                    )
+                    # Set visibility: show this legend's traces + background
+                    visible_indices = list(trace_indices) + list(background_indices)
+                    session.set_trace_visibility(visible_indices, total_traces)
                     
-                    # Export PNG with auto-crop
-                    png_filename = f'{view_name}_{safe_name}.png'
-                    png_path = os.path.join(output_dir, png_filename)
-                    session.screenshot(png_path, auto_crop=auto_crop, margin=crop_margin)
+                    result['files'][safe_name] = []
                     
-                    # Verify export
-                    if os.path.exists(png_path) and os.path.getsize(png_path) > 1024:
-                        result['files'][safe_name].append((png_path, view_name))
-                    else:
-                        result['failed'].append(legend_name)
-                        if verbose:
-                            print(f'   ⚠️  PNG export failed for {legend_name} ({view_name})')
-                        break
+                    # Export each view
+                    for view_name in views:
+                        camera = view_cameras.get(view_name, {})
+                        
+                        # Set camera position
+                        session.set_camera(
+                            eye=camera.get('eye'),
+                            up=camera.get('up'),
+                            center=camera.get('center')
+                        )
+                        
+                        # Export PNG with auto-crop
+                        png_filename = f'{view_name}_{safe_name}.png'
+                        png_path = os.path.join(output_dir, png_filename)
+                        session.screenshot(png_path, auto_crop=auto_crop, margin=crop_margin)
+                        
+                        # Verify export
+                        if os.path.exists(png_path) and os.path.getsize(png_path) > 1024:
+                            result['files'][safe_name].append((png_path, view_name))
+                        else:
+                            result['failed'].append(legend_name)
+                            if verbose:
+                                print(f'   ⚠️  PNG export failed for {legend_name} ({view_name})')
+                            break
             
-    except Exception as e:
-        result['success'] = False
-        result['error'] = str(e)
-        if verbose:
-            print(f'   ⚠️  WebDriver export failed: {e}')
+            # If we got here without exception, export succeeded
+            break  # Exit retry loop on success
+            
+        except Exception as e:
+            last_error = e
+            error_msg = str(e)
+            # Check if this is a Chrome crash
+            is_chrome_crash = (
+                'Message: \n' in str(e) or 
+                error_msg == '' or
+                'chrome not reachable' in error_msg.lower() or
+                'session deleted' in error_msg.lower() or
+                'no such window' in error_msg.lower()
+            )
+            
+            if is_chrome_crash and retry_attempt < max_retries - 1:
+                if verbose:
+                    print(f'   ⚠️  Chrome crashed unexpectedly. Will retry...')
+                continue
+            else:
+                # Not a crash or out of retries
+                result['success'] = False
+                result['error'] = str(e)
+                if verbose:
+                    print(f'   ⚠️  WebDriver export failed: {e}')
+                break
     
     return result
 
@@ -1146,9 +1470,19 @@ class VisualizeSkeleton:
         - 'template': Dataset's native template (fast, no H5 transforms needed)
         - 'whole': Standard brain mesh (may require H5 transform download)
     
-    merge_neurons : bool, default=True
-        Merge neurons of same layer into single mesh. Significantly reduces file size
-        and rendering time for large populations.
+    legend_mode : str, default='layer'
+        Controls how neurons appear in the legend. Options:
+        - 'single': Each neuron gets its own legend entry ({bodyId}_{layer_name})
+        - 'type': Group by neuron type within each layer. If a layer has multiple types,
+                  each type gets a separate legend entry.
+        - 'layer': Merge all neurons in a layer into one legend entry.
+                   Auto-named as {type1}_{type2}_etc if 3+ types present.
+    
+    expand_colors : str, default='interpolation'
+        Method for generating extra colors when more layers than colors available.
+        - 'interpolation': Create a smooth colormap and sample extra colors (recommended)
+        - 'darken': Recycle colors with progressive darkening (100% to 70% brightness)
+        - 'cycle': Simply cycle through colors (color1, color2, ..., color1, color2, ...)
     
     min_synapse_num : int, default=10
         Minimum synapse count threshold for fetching/plotting connections.
@@ -1234,7 +1568,7 @@ class VisualizeSkeleton:
     - For FAFB: First run with auto_fix_extrusions takes ~30-60s for analysis,
       then results are cached in parquet format
     - Use higher simplification (0.95-0.99) for scenes with many neurons
-    - Set merge_neurons=False to see individual neurons in legend
+    - Set legend_mode='single' to see individual neurons in legend
     
     See Also
     --------
@@ -1385,19 +1719,37 @@ class VisualizeSkeleton:
     export_method: str = 'webdriver'
     '''
     PNG export method. Options:
-    - 'webdriver': Use Selenium WebDriver with Chrome (default, best quality with WebGL, requires Chrome version 109+)
+    - 'webdriver': Use Selenium WebDriver with Chrome (default, fast and high quality)
     - 'kaleido': Use kaleido engine (slower but reliable fallback if WebDriver fails)
     
-    Note: 'webdriver' requires selenium and webdriver-manager packages.
+    Note: 'webdriver' requires selenium and webdriver-manager packages and Chrome 109+.
     If WebDriver fails, the export automatically falls back to kaleido.
+    
+    The 'webdriver' method uses canvas.toDataURL() which is fast (~0.3s/frame at scale 1)
+    and produces high-quality output. Files are served via local HTTP server for reliability.
+    
+    Performance Guide:
+    ┌───────────────────────────────────────────────────────────────────────┐
+    │ Scale   │ webdriver       │ kaleido   │ Recommended                   │
+    ├─────────┼─────────────────┼───────────┼───────────────────────────────┤
+    │ 1-3     │ 0.3-0.9s ✓      │ 1.6-2.2s  │ webdriver (2-7x faster)       │
+    │ 4-10    │ 1.5-2.5s ✓      │ 2.4-3.8s  │ webdriver (faster, stable)    │
+    └───────────────────────────────────────────────────────────────────────┘
+    
+    Recommendations:
+    - General use: 'webdriver' (default, fast and reliable)
+    - Video export: 'webdriver' with scale≤3 (best throughput)
+    - Maximum reliability: 'kaleido' (1.5-3x slower but works without Chrome)
+    
+    Legacy note: 'webdriver-fast' is still accepted but maps to 'webdriver'.
     '''
 
-    webdriver_render_wait: float = None
+    webdriver_render_wait: float = 0
     '''
     Render wait time (seconds) between camera updates in WebDriver export.
-    If None (default), automatically calibrated based on machine performance.
-    Set to a specific value (e.g., 0.3, 0.5) to override auto-calibration.
-    Higher values = more stable but slower export.
+    Default: 0 (fastest, works well with modern Chrome).
+    Set to None for auto-calibration, or a larger value (e.g., 0.3, 0.5) if
+    export aborts mid-way through (not at the beginning).
     '''
 
     export_timeout: int = 60
@@ -1516,13 +1868,25 @@ class VisualizeSkeleton:
     multiple colors: list of tuples, each tuple including an alpha channel: [(R1, G1, B1, alpha1), (R2, G2, B2, alpha2), ...]
     '''
 
-    merge_neurons: bool = True
+    legend_mode: str = 'layer'
     '''
-    Whether to merge all neurons of the same type (layer) into a single 3D object.
-    True: Merge neurons into one mesh (tube mode) or trace (line mode).
-          Significantly reduces file size and rendering overhead for large populations.
-          Legend shows layer names (e.g., 'MBON14_etc').
-    False: Plot each neuron individually with separate legend entries.
+    Controls how neurons appear in the legend. Options:
+    - 'single': Each neuron gets its own legend entry ({bodyId}_{layer_name}).
+                Full detail for identifying individual neurons.
+    - 'type': Group by neuron type within each layer. If a layer has multiple
+              neuron types, each type gets a separate legend entry.
+    - 'layer': Merge all neurons in a layer into one legend entry.
+               Auto-named as {type1}_{type2}_etc if 3+ types present.
+    '''
+
+    expand_colors: str = 'interpolation'
+    '''
+    Method for generating extra colors when more layers than colors available.
+    - 'interpolation': Create a smooth colormap and sample extra colors (recommended).
+                       Ensures visually distinct colors even with many layers.
+    - 'darken': Recycle colors with progressive darkening (100% to 70% brightness).
+                Same base colors but darker on each cycle.
+    - 'cycle': Simple color cycling without modification. Same colors repeat.
     '''
 
     mirror_on_contralateral: bool = False
@@ -1827,7 +2191,7 @@ class VisualizeSkeleton:
             return self.html_size_cap
         
         # Auto-determine based on export method
-        if self.export_method == 'webdriver':
+        if self.export_method in ('webdriver', 'webdriver-fast'):
             return 200
         else:  # kaleido
             return 100
@@ -2163,53 +2527,86 @@ class VisualizeSkeleton:
         )
         
         try:
-            self._vprint(f'      🌐 Using WebDriver session for {len(views_to_export)} views...')
+            self._vprint(f'     Using WebDriver session for {len(views_to_export)} views...')
             
             # Get render_wait from attribute (None = auto-calibrate)
             render_wait = getattr(self, 'webdriver_render_wait', None)
             
-            with WebDriverExportSession(
-                width=1200, height=900, 
-                scale=self.export_scale, 
-                timeout=300,
-                render_wait=render_wait
-            ) as session:
-                # Load HTML once
-                session.load_html(temp_html, wait_for_render=True, render_wait=3)
-                self._vprint(f'      ✓ HTML loaded in browser (render_wait={session._render_wait:.2f}s)')
+            # Retry logic for Chrome crashes
+            max_retries = 3
+            last_error = None
+            
+            for retry_attempt in range(max_retries):
+                if retry_attempt > 0:
+                    self._vprint(f'      🔄 Retry attempt {retry_attempt + 1}/{max_retries}...')
+                    import time
+                    time.sleep(2)  # Brief pause before retry
                 
-                for view_name in views_to_export:
-                    if view_name not in view_cameras:
-                        self._vprint(f'      ⚠️  Skipping invalid view: {view_name}')
-                        continue
-                    
-                    camera = view_cameras[view_name]
-                    view_path = os.path.join(output_folder, f"{self.saveas}_{view_name}.png")
-                    
-                    try:
-                        # Rotate camera via JavaScript
-                        session.set_camera(
-                            eye=camera.get('eye'),
-                            up=camera.get('up'),
-                            center=camera.get('center')
-                        )
+                try:
+                    with WebDriverExportSession(
+                        width=1200, height=900, 
+                        scale=self.export_scale, 
+                        timeout=300,
+                        render_wait=render_wait
+                    ) as session:
+                        # Load HTML once
+                        session.load_html(temp_html, wait_for_render=True, render_wait=3)
+                        self._vprint(f'      ✓ HTML loaded in browser (render_wait={session._render_wait:.2f}s)')
                         
-                        # Take screenshot
-                        session.screenshot(view_path)
-                        
-                        # Verify file
-                        if os.path.exists(view_path):
-                            size_kb = os.path.getsize(view_path) / 1024
-                            if size_kb > 10:
-                                exported_views.append(view_name)
-                                self._vprint(f'      {view_name}: {size_kb:.1f}KB', level='full')
-                            else:
-                                self._vprint(f'      ⚠️  {view_name}: blank image ({size_kb:.1f}KB)')
-                        else:
-                            self._vprint(f'      ⚠️  {view_name}: no file created')
+                        for view_name in views_to_export:
+                            if view_name not in view_cameras:
+                                self._vprint(f'      ⚠️  Skipping invalid view: {view_name}')
+                                continue
                             
-                    except Exception as e:
-                        self._vprint(f'      ⚠️  {view_name} export failed: {e}')
+                            camera = view_cameras[view_name]
+                            view_path = os.path.join(output_folder, f"{self.saveas}_{view_name}.png")
+                            
+                            try:
+                                # Rotate camera via JavaScript
+                                session.set_camera(
+                                    eye=camera.get('eye'),
+                                    up=camera.get('up'),
+                                    center=camera.get('center')
+                                )
+                                
+                                # Take screenshot
+                                session.screenshot(view_path)
+                                
+                                # Verify file
+                                if os.path.exists(view_path):
+                                    size_kb = os.path.getsize(view_path) / 1024
+                                    if size_kb > 10:
+                                        exported_views.append(view_name)
+                                        self._vprint(f'      {view_name}: {size_kb:.1f}KB', level='full')
+                                    else:
+                                        self._vprint(f'      ⚠️  {view_name}: blank image ({size_kb:.1f}KB)')
+                                else:
+                                    self._vprint(f'      ⚠️  {view_name}: no file created')
+                                    
+                            except Exception as e:
+                                self._vprint(f'      ⚠️  {view_name} export failed: {e}')
+                        
+                        # If we got any views, consider it a success
+                        if exported_views:
+                            break  # Exit retry loop
+                            
+                except Exception as e:
+                    last_error = e
+                    error_msg = str(e)
+                    # Check if this is a Chrome crash
+                    is_chrome_crash = (
+                        'Message: \n' in str(e) or 
+                        error_msg == '' or
+                        'chrome not reachable' in error_msg.lower() or
+                        'session deleted' in error_msg.lower() or
+                        'no such window' in error_msg.lower()
+                    )
+                    
+                    if is_chrome_crash and retry_attempt < max_retries - 1:
+                        self._vprint(f'      ⚠️  Chrome crashed unexpectedly. Will retry...')
+                        continue
+                    else:
+                        raise  # Re-raise for outer exception handler
                 
         except Exception as e:
             self._vprint(f'      ⚠️  WebDriver session failed: {e}')
@@ -2919,7 +3316,288 @@ class VisualizeSkeleton:
                     sys.stdout = old_stdout
                     sys.stderr = old_stderr
 
+    def _validate_inputs(self):
+        """
+        Validate all input parameters before processing.
+        Raises ValueError with descriptive messages for invalid inputs.
+        """
+        errors = []
+        
+        # === String validations ===
+        if not isinstance(self.backend, str):
+            errors.append(f"backend must be a string, got {type(self.backend).__name__}")
+        elif self.backend not in ('plotly', 'k3d'):
+            errors.append(f"backend must be 'plotly' or 'k3d', got '{self.backend}'")
+            
+        if not isinstance(self.dataset, str):
+            errors.append(f"dataset must be a string, got {type(self.dataset).__name__}")
+        elif not self.dataset:
+            errors.append("dataset cannot be empty")
+            
+        if not isinstance(self.client_type, str):
+            errors.append(f"client_type must be a string, got {type(self.client_type).__name__}")
+        elif self.client_type not in ('neuprint', 'flywire'):
+            errors.append(f"client_type must be 'neuprint' or 'flywire', got '{self.client_type}'")
+            
+        if not isinstance(self.server, str):
+            errors.append(f"server must be a string, got {type(self.server).__name__}")
+            
+        if self.token is not None and not isinstance(self.token, str):
+            errors.append(f"token must be a string or None, got {type(self.token).__name__}")
+            
+        if self.version is not None and not isinstance(self.version, int):
+            errors.append(f"version must be an integer or None, got {type(self.version).__name__}")
+        elif self.version is not None and self.version < 0:
+            errors.append(f"version must be positive, got {self.version}")
+            
+        # === Path validations ===
+        if not isinstance(self.data_folder, str):
+            errors.append(f"data_folder must be a string, got {type(self.data_folder).__name__}")
+            
+        if self.output_dir is not None and not isinstance(self.output_dir, str):
+            errors.append(f"output_dir must be a string or None, got {type(self.output_dir).__name__}")
+            
+        if self.saveas is not None and not isinstance(self.saveas, str):
+            errors.append(f"saveas must be a string or None, got {type(self.saveas).__name__}")
+            
+        if self.layer_map_csv is not None:
+            if not isinstance(self.layer_map_csv, str):
+                errors.append(f"layer_map_csv must be a string or None, got {type(self.layer_map_csv).__name__}")
+            elif not os.path.exists(self.layer_map_csv):
+                errors.append(f"layer_map_csv file not found: {self.layer_map_csv}")
+        
+        # === Neuron layers validation ===
+        if not isinstance(self.neuron_layers, (str, list)):
+            errors.append(f"neuron_layers must be a string or list, got {type(self.neuron_layers).__name__}")
+        elif isinstance(self.neuron_layers, str) and not self.neuron_layers and self.layer_map_csv is None:
+            errors.append("neuron_layers cannot be empty (or provide layer_map_csv)")
+            
+        if not isinstance(self.custom_layer_names, list):
+            errors.append(f"custom_layer_names must be a list, got {type(self.custom_layer_names).__name__}")
+            
+        # === Boolean validations ===
+        bool_params = [
+            ('cache_neurons', self.cache_neurons),
+            ('cache_synapses', self.cache_synapses),
+            ('skip_synapse', self.skip_synapse),
+            ('include_timestamp', self.include_timestamp),
+            ('auto_fix_extrusions', self.auto_fix_extrusions),
+            ('smooth_skeleton', self.smooth_skeleton),
+        ]
+        for name, value in bool_params:
+            if not isinstance(value, bool):
+                errors.append(f"{name} must be a boolean, got {type(value).__name__}")
+        
+        # === Numeric validations ===
+        if not isinstance(self.min_synapse_num, int):
+            errors.append(f"min_synapse_num must be an integer, got {type(self.min_synapse_num).__name__}")
+        elif self.min_synapse_num < 0:
+            errors.append(f"min_synapse_num must be non-negative, got {self.min_synapse_num}")
+            
+        if not isinstance(self.export_scale, int):
+            errors.append(f"export_scale must be an integer, got {type(self.export_scale).__name__}")
+        elif self.export_scale < 1 or self.export_scale > 10:
+            errors.append(f"export_scale must be between 1 and 10, got {self.export_scale}")
+            
+        if not isinstance(self.export_timeout, int):
+            errors.append(f"export_timeout must be an integer, got {type(self.export_timeout).__name__}")
+        elif self.export_timeout < 1:
+            errors.append(f"export_timeout must be at least 1 second, got {self.export_timeout}")
+            
+        # === Float validations ===
+        if not isinstance(self.neuron_alpha, (int, float)):
+            errors.append(f"neuron_alpha must be a number, got {type(self.neuron_alpha).__name__}")
+        elif not 0 <= self.neuron_alpha <= 1:
+            errors.append(f"neuron_alpha must be between 0 and 1, got {self.neuron_alpha}")
+            
+        if not isinstance(self.synapse_alpha, (int, float)):
+            errors.append(f"synapse_alpha must be a number, got {type(self.synapse_alpha).__name__}")
+        elif not 0 <= self.synapse_alpha <= 1:
+            errors.append(f"synapse_alpha must be between 0 and 1, got {self.synapse_alpha}")
+            
+        # Optional floats (can be None)
+        if self.skeleton_mesh_simplification is not None:
+            if not isinstance(self.skeleton_mesh_simplification, (int, float)):
+                errors.append(f"skeleton_mesh_simplification must be a number or None, got {type(self.skeleton_mesh_simplification).__name__}")
+            elif not 0 <= self.skeleton_mesh_simplification <= 1:
+                errors.append(f"skeleton_mesh_simplification must be between 0 and 1, got {self.skeleton_mesh_simplification}")
+                
+        if self.soma_mesh_simplification is not None:
+            if not isinstance(self.soma_mesh_simplification, (int, float)):
+                errors.append(f"soma_mesh_simplification must be a number or None, got {type(self.soma_mesh_simplification).__name__}")
+            elif not 0 <= self.soma_mesh_simplification <= 1:
+                errors.append(f"soma_mesh_simplification must be between 0 and 1, got {self.soma_mesh_simplification}")
+                
+        if self.soma_radius_cap is not None:
+            if not isinstance(self.soma_radius_cap, (int, float)):
+                errors.append(f"soma_radius_cap must be a number or None, got {type(self.soma_radius_cap).__name__}")
+            elif self.soma_radius_cap <= 0:
+                errors.append(f"soma_radius_cap must be positive, got {self.soma_radius_cap}")
+                
+        if self.webdriver_render_wait is not None:
+            if not isinstance(self.webdriver_render_wait, (int, float)):
+                errors.append(f"webdriver_render_wait must be a number or None, got {type(self.webdriver_render_wait).__name__}")
+            elif self.webdriver_render_wait < 0:
+                errors.append(f"webdriver_render_wait must be non-negative, got {self.webdriver_render_wait}")
+        
+        # === Synapse size validation ===
+        if not isinstance(self.synapse_size, (int, float, str)):
+            errors.append(f"synapse_size must be a number or 'real', got {type(self.synapse_size).__name__}")
+        elif isinstance(self.synapse_size, str) and self.synapse_size != 'real':
+            errors.append(f"synapse_size string must be 'real', got '{self.synapse_size}'")
+        elif isinstance(self.synapse_size, (int, float)) and self.synapse_size < 0:
+            errors.append(f"synapse_size must be non-negative, got {self.synapse_size}")
+            
+        # === Mode validations (done in detail later, basic type check here) ===
+        if not isinstance(self.skeleton_mode, str):
+            errors.append(f"skeleton_mode must be a string, got {type(self.skeleton_mode).__name__}")
+            
+        if not isinstance(self.synapse_mode, str):
+            errors.append(f"synapse_mode must be a string, got {type(self.synapse_mode).__name__}")
+            
+        if not isinstance(self.brain_mesh, str):
+            errors.append(f"brain_mesh must be a string, got {type(self.brain_mesh).__name__}")
+            
+        if not isinstance(self.legend_mode, str):
+            errors.append(f"legend_mode must be a string, got {type(self.legend_mode).__name__}")
+            
+        if not isinstance(self.expand_colors, str):
+            errors.append(f"expand_colors must be a string, got {type(self.expand_colors).__name__}")
+            
+        if not isinstance(self.export_method, str):
+            errors.append(f"export_method must be a string, got {type(self.export_method).__name__}")
+        elif self.export_method not in ('webdriver', 'webdriver-fast', 'kaleido'):
+            errors.append(f"export_method must be 'webdriver' or 'kaleido', got '{self.export_method}'")
+            
+        # === export_views validation ===
+        valid_views = {'front', 'back', 'top', 'bottom', 'left', 'right', 'lateral', 'all'}
+        if isinstance(self.export_views, bool):
+            pass  # Valid
+        elif isinstance(self.export_views, list):
+            for view in self.export_views:
+                if not isinstance(view, str):
+                    errors.append(f"export_views list items must be strings, got {type(view).__name__}")
+                elif view.lower() not in valid_views:
+                    errors.append(f"Invalid view in export_views: '{view}'. Valid options: {sorted(valid_views)}")
+        else:
+            errors.append(f"export_views must be a boolean or list, got {type(self.export_views).__name__}")
+            
+        # === verbose validation ===
+        if self.verbose not in (True, False, 'full', 'simple'):
+            errors.append(f"verbose must be True, False, 'full', or 'simple', got {repr(self.verbose)}")
+            
+        # === Color validations (tuple/list check) ===
+        if not isinstance(self.neuron_colors, (tuple, list)):
+            errors.append(f"neuron_colors must be a tuple or list, got {type(self.neuron_colors).__name__}")
+        elif len(self.neuron_colors) == 0:
+            errors.append("neuron_colors cannot be empty")
+            
+        if not isinstance(self.synapse_colors, (tuple, list)):
+            errors.append(f"synapse_colors must be a tuple or list, got {type(self.synapse_colors).__name__}")
+        elif len(self.synapse_colors) == 0:
+            errors.append("synapse_colors cannot be empty")
+            
+        # === mesh_roi validation ===
+        if self.mesh_roi is not None and not isinstance(self.mesh_roi, list):
+            errors.append(f"mesh_roi must be a list or None, got {type(self.mesh_roi).__name__}")
+            
+        # === html_size_cap validation ===
+        if self.html_size_cap is not None:
+            if not isinstance(self.html_size_cap, int):
+                errors.append(f"html_size_cap must be an integer or None, got {type(self.html_size_cap).__name__}")
+            elif self.html_size_cap < 1:
+                errors.append(f"html_size_cap must be at least 1 MB, got {self.html_size_cap}")
+                
+        # === export_simplified_png validation ===
+        if not isinstance(self.export_simplified_png, (bool, int)):
+            errors.append(f"export_simplified_png must be a boolean or integer, got {type(self.export_simplified_png).__name__}")
+        elif isinstance(self.export_simplified_png, int) and self.export_simplified_png < 0:
+            errors.append(f"export_simplified_png threshold must be non-negative, got {self.export_simplified_png}")
+        
+        # === Additional boolean validations ===
+        additional_bools = [
+            ('force_API_fetching', self.force_API_fetching),
+            ('vnc_mesh', self.vnc_mesh),
+            ('mirror_on_contralateral', self.mirror_on_contralateral),
+            ('show_soma', self.show_soma),
+            ('show_fig', self.show_fig),
+            ('show_connectors', self.show_connectors),
+            ('FAFB_template_correction', self.FAFB_template_correction),
+        ]
+        for name, value in additional_bools:
+            if not isinstance(value, bool):
+                errors.append(f"{name} must be a boolean, got {type(value).__name__}")
+        
+        # === Additional float validations ===
+        if self.soma_region_radius is not None:
+            if not isinstance(self.soma_region_radius, (int, float)):
+                errors.append(f"soma_region_radius must be a number, got {type(self.soma_region_radius).__name__}")
+            elif self.soma_region_radius <= 0:
+                errors.append(f"soma_region_radius must be positive, got {self.soma_region_radius}")
+                
+        if self.roi_mesh_simplification is not None:
+            if not isinstance(self.roi_mesh_simplification, (int, float)):
+                errors.append(f"roi_mesh_simplification must be a number, got {type(self.roi_mesh_simplification).__name__}")
+            elif not 0 <= self.roi_mesh_simplification <= 1:
+                errors.append(f"roi_mesh_simplification must be between 0 and 1, got {self.roi_mesh_simplification}")
+        
+        # === String path validations ===
+        if not isinstance(self.transforms_dir, str):
+            errors.append(f"transforms_dir must be a string, got {type(self.transforms_dir).__name__}")
+            
+        # === Color string validations ===
+        if not isinstance(self.brain_mesh_color, str):
+            errors.append(f"brain_mesh_color must be a string, got {type(self.brain_mesh_color).__name__}")
+            
+        if not isinstance(self.vnc_mesh_color, str):
+            errors.append(f"vnc_mesh_color must be a string, got {type(self.vnc_mesh_color).__name__}")
+            
+        # === mesh_color validation (tuple/list with alpha) ===
+        if not isinstance(self.mesh_color, (tuple, list)):
+            errors.append(f"mesh_color must be a tuple or list, got {type(self.mesh_color).__name__}")
+        elif isinstance(self.mesh_color, (tuple, list)):
+            # Check if it's a single color or list of colors
+            if len(self.mesh_color) == 4 and all(isinstance(x, (int, float)) for x in self.mesh_color):
+                # Single color (R, G, B, alpha)
+                r, g, b, a = self.mesh_color
+                if not (0 <= r <= 255 and 0 <= g <= 255 and 0 <= b <= 255):
+                    errors.append(f"mesh_color RGB values must be 0-255, got {self.mesh_color[:3]}")
+                if not 0 <= a <= 1:
+                    errors.append(f"mesh_color alpha must be 0-1, got {a}")
+        
+        # === Raise all errors together ===
+        if errors:
+            error_msg = "VisualizeSkeleton input validation failed:\n  - " + "\n  - ".join(errors)
+            raise ValueError(error_msg)
+
     def __post_init__(self):
+        # Apply dataset-specific defaults BEFORE validation
+        if self.dataset and 'manc' in self.dataset.lower():
+            # For MANC, enable VNC mesh by default if not explicitly disabled
+            # We assume if the user passed False explicitly, they know what they are doing.
+            # But dataclasses don't track "default vs explicit" easily.
+            # So we'll just set it to True if it's currently False, assuming default was False.
+            # The default in field definition is False.
+            # EXCEPTION: If brain_mesh='none', we assume user wants no context meshes at all,
+            # so we do NOT enable VNC mesh by default.
+            if self.vnc_mesh is False and self.brain_mesh != 'none':
+                # We can't distinguish "User set False" vs "Default False".
+                # To follow user request "set vnc_mesh=True by default":
+                self.vnc_mesh = True
+        
+        # Check for elastix dependency if MANC 'whole' mode is requested
+        if 'manc' in self.dataset.lower() and self.brain_mesh == 'whole':
+            import shutil
+            if shutil.which('elastix') is None:
+                print('⚠️  Elastix not found: Cannot transform MANC to Male-CNS space.')
+                print('   automatically changing brain_mesh from "whole" to "template".')
+                print('   Tip: Install elastix or use male-cns dataset for full CNS context.')
+                self.brain_mesh = 'template'
+        
+        # === INPUT VALIDATION ===
+        # Validate all input parameters before processing
+        self._validate_inputs()
+        
         # Normalize verbose parameter
         if self.verbose is True:
             self.verbose = 'full'
@@ -2992,15 +3670,26 @@ class VisualizeSkeleton:
             if self.client is not None:
                 self._vprint(f'Using provided client for {self.dataset}', level='full')
             else:
-                # Check if global client exists
-                client_exists = False
+                # Check if global client exists AND matches our dataset
+                # This is critical: if a default client exists for a DIFFERENT dataset,
+                # we MUST create a new client for the correct dataset, otherwise
+                # fetch_skeletons will fail with "No neurons matching the given criteria found!"
+                use_existing_client = False
                 try:
-                    if neuprint.default_client() is not None:
-                        client_exists = True
+                    existing_client = neuprint.default_client()
+                    if existing_client is not None:
+                        # Check if datasets match (normalize for comparison)
+                        existing_ds = existing_client.dataset.lower().replace('_', ':').replace('.', '.')
+                        target_ds = self.dataset.lower().replace('_', ':').replace('.', '.')
+                        if existing_ds == target_ds:
+                            use_existing_client = True
+                            self._vprint(f'Using existing default client for {self.dataset}', level='full')
+                        else:
+                            self._vprint(f'Default client is for {existing_client.dataset}, need new client for {self.dataset}', level='full')
                 except RuntimeError:
                     pass
 
-                if not client_exists:
+                if not use_existing_client:
                     # Use TokenManager to get token
                     try:
                         from .utils.token_manager import token_manager
@@ -3011,12 +3700,16 @@ class VisualizeSkeleton:
                     if self.token:
                         self.client = Client(self.server, dataset=self.dataset, token=self.token)
                         self.client.fetch_version()
-                        self._vprint(f'Client initialized for {self.dataset}', level='full')
+                        # Set as default to avoid "multiple clients" error
+                        neuprint.set_default_client(self.client)
+                        self._vprint(f'Client initialized for {self.dataset} (set as default)', level='full')
                     elif os.environ.get('NEUPRINT_APPLICATION_CREDENTIALS'):
                         # Auto-detect from env
                         self.client = Client(self.server, dataset=self.dataset)
                         self.client.fetch_version()
-                        self._vprint(f'Client initialized from env for {self.dataset}', level='full')
+                        # Set as default to avoid "multiple clients" error
+                        neuprint.set_default_client(self.client)
+                        self._vprint(f'Client initialized from env for {self.dataset} (set as default)', level='full')
                     else:
                         # Only warn if we are not using local cache/files exclusively
                         # But we don't know that yet.
@@ -3065,8 +3758,13 @@ class VisualizeSkeleton:
         if self.synapse_mode not in ['scatter', 'sphere', 'cone', 'tetrahedron']:
             raise ValueError('synapse_mode can only be "scatter", "sphere", "cone", or "tetrahedron"')
         
-        # Set internal legend_mode based on merge_neurons for backward compatibility
-        self._legend_mode = 'merge' if self.merge_neurons else 'normal'
+        # Validate legend_mode
+        if self.legend_mode not in ['single', 'type', 'layer']:
+            raise ValueError('legend_mode must be "single", "type", or "layer"')
+        
+        # Validate expand_colors
+        if self.expand_colors not in ['interpolation', 'darken', 'cycle']:
+            raise ValueError('expand_colors must be "interpolation", "darken", or "cycle"')
         
         if self.skeleton_mode not in ['line','tube']:
             raise ValueError('skeleton_mode can only be "line" or "tube"')
@@ -3109,17 +3807,39 @@ class VisualizeSkeleton:
             if self.mesh_roi != original_rois:
                 self._vprint(f"   🔄 ROI expansion: {original_rois} → {self.mesh_roi}", level='simple')
         
-        # Ensure enough colors for all layers by cycling if needed
+        # Ensure enough colors for all layers by expanding if needed
         n_layers = len(self.neuron_layers)
         n_colors = len(self.neuron_colors)
         if n_layers <= n_colors: 
             self.neuron_colors = self.neuron_colors[:n_layers]
         else:
-            # Cycle colors to match number of layers
-            extended_colors = list(self.neuron_colors) * ((n_layers // n_colors) + 1)
-            self.neuron_colors = tuple(extended_colors[:n_layers])
-            self._vprint(f'\033[33m⚠️  Warning: {n_layers} layers but only {n_colors} colors available. Colors will be recycled.\033[0m')
-            self._vprint(f'\033[33m   💡 Tip: Use neuron_colors and synapse_colors parameters with custom palettes to specify more colors.\033[0m')
+            if self.expand_colors == 'interpolation':
+                # Create interpolated colors from base palette
+                extended_colors = self._interpolate_colors(self.neuron_colors, n_layers)
+                self._vprint(f'\033[33m⚠️  Warning: {n_layers} layers but only {n_colors} colors. Generated {n_layers} colors via interpolation.\033[0m')
+            elif self.expand_colors == 'darken':
+                # Recycle colors with progressive darkening (100% to 70% brightness)
+                n_cycles = (n_layers - 1) // n_colors
+                extended_colors = []
+                for i in range(n_layers):
+                    cycle_num = i // n_colors
+                    color_idx = i % n_colors
+                    base_color = self.neuron_colors[color_idx]
+                    # brightness goes from 100% to 70% over cycles
+                    if n_cycles > 0:
+                        brightness = 1.0 - (0.3 * cycle_num / n_cycles)
+                    else:
+                        brightness = 1.0
+                    darkened = self._darken_color(base_color, brightness)
+                    extended_colors.append(darkened)
+                self._vprint(f'\033[33m⚠️  Warning: {n_layers} layers but only {n_colors} colors. Recycling with darkening (100%→70%).\033[0m')
+            else:  # 'cycle' mode
+                # Simple cycling - just repeat the colors
+                extended_colors = [self.neuron_colors[i % n_colors] for i in range(n_layers)]
+                self._vprint(f'\033[33m⚠️  Warning: {n_layers} layers but only {n_colors} colors. Cycling colors (repeating pattern).\033[0m')
+            
+            self.neuron_colors = tuple(extended_colors)
+            self._vprint(f'\033[33m   💡 Tip: Use neuron_colors parameter with custom palette to specify more colors.\033[0m')
         
         # Same for synapse colors (one fewer than neuron layers for connections between layers)
         n_synapse_colors = len(self.synapse_colors)
@@ -3127,8 +3847,24 @@ class VisualizeSkeleton:
         if n_synapse_needed <= n_synapse_colors:
             self.synapse_colors = self.synapse_colors[:n_synapse_needed]
         else:
-            extended_synapse = list(self.synapse_colors) * ((n_synapse_needed // n_synapse_colors) + 1)
-            self.synapse_colors = tuple(extended_synapse[:n_synapse_needed])
+            if self.expand_colors == 'interpolation':
+                extended_synapse = self._interpolate_colors(self.synapse_colors, n_synapse_needed)
+            elif self.expand_colors == 'darken':
+                n_syn_cycles = (n_synapse_needed - 1) // n_synapse_colors
+                extended_synapse = []
+                for i in range(n_synapse_needed):
+                    cycle_num = i // n_synapse_colors
+                    color_idx = i % n_synapse_colors
+                    base_color = self.synapse_colors[color_idx]
+                    if n_syn_cycles > 0:
+                        brightness = 1.0 - (0.3 * cycle_num / n_syn_cycles)
+                    else:
+                        brightness = 1.0
+                    darkened = self._darken_color(base_color, brightness)
+                    extended_synapse.append(darkened)
+            else:  # 'cycle' mode
+                extended_synapse = [self.synapse_colors[i % n_synapse_colors] for i in range(n_synapse_needed)]
+            self.synapse_colors = tuple(extended_synapse)
         
         if self.skeleton_mode == 'line':
             self.show_skeleton_radius = False
@@ -3289,7 +4025,8 @@ class VisualizeSkeleton:
             f.write(f"  VNC Mesh:         {self.vnc_mesh}\n")
             if self.mesh_roi:
                 f.write(f"  Mesh ROI:         {self.mesh_roi}\n")
-            f.write(f"  Merge Neurons:    {self.merge_neurons}\n")
+            f.write(f"  Legend Mode:      {self.legend_mode}\n")
+            f.write(f"  Expand Colors:    {self.expand_colors}\n")
             f.write(f"  Show Soma:        {self.show_soma}\n")
             f.write("\n")
             
@@ -4724,10 +5461,19 @@ class VisualizeSkeleton:
                 
                 # Auto-fallback to API for any still missing (graceful degradation)
                 # Skip IDs that are already in mesh cache (they don't need skeleton processing)
+                # Build a type-robust lookup set for fafb_mesh_cache
+                mesh_cache_lookup = set()
+                for mid in fafb_mesh_cache.keys():
+                    mesh_cache_lookup.add(mid)
+                    if isinstance(mid, (int, np.integer)):
+                        mesh_cache_lookup.add(str(mid))
+                    elif isinstance(mid, str) and mid.isdigit():
+                        mesh_cache_lookup.add(int(mid))
+                
                 still_missing = [bid for bid in all_fafb_body_ids 
                                 if bid not in fafb_skeleton_cache 
                                 and str(bid) not in fafb_skeleton_cache
-                                and bid not in fafb_mesh_cache]  # Don't fetch if mesh cache has them
+                                and bid not in mesh_cache_lookup]  # Don't fetch if mesh cache has them
                 if still_missing:
                     self._vprint(f'  ⚠️  {len(still_missing)} neurons not in local cache/ZIP, auto-fetching via CAVE API...')
                     api_fetched = self._fetch_fafb_skeletons_via_api(still_missing)
@@ -4758,9 +5504,19 @@ class VisualizeSkeleton:
             mesh_missing_ids = layer_body_ids  # IDs that need processing
             
             if use_fafb_cache and fafb_mesh_cache:
-                # Separate cached vs missing
-                cached_mesh_neurons = [fafb_mesh_cache[bid] for bid in layer_body_ids if bid in fafb_mesh_cache]
-                mesh_missing_ids = [bid for bid in layer_body_ids if bid not in fafb_mesh_cache]
+                # Separate cached vs missing with type-robust matching
+                cached_mesh_neurons = []
+                mesh_missing_ids = []
+                for bid in layer_body_ids:
+                    # Check both int and str versions of the ID
+                    if bid in fafb_mesh_cache:
+                        cached_mesh_neurons.append(fafb_mesh_cache[bid])
+                    elif str(bid) in fafb_mesh_cache:
+                        cached_mesh_neurons.append(fafb_mesh_cache[str(bid)])
+                    elif isinstance(bid, str) and bid.isdigit() and int(bid) in fafb_mesh_cache:
+                        cached_mesh_neurons.append(fafb_mesh_cache[int(bid)])
+                    else:
+                        mesh_missing_ids.append(bid)
                 
                 if cached_mesh_neurons:
                     self._vprint(f'    ✓ {len(cached_mesh_neurons)}/{len(layer_body_ids)} from mesh cache', level='full', use_tqdm=True)
@@ -4768,6 +5524,17 @@ class VisualizeSkeleton:
             # Load from raw cache (for non-FAFB datasets)
             cache_result = self._load_cached_neurons(self.neuron_dfs[i])
             cached_neurons, missing_ids = cache_result
+            
+            # Check and fix MANC scaling for cached neurons (handling legacy cache)
+            if cached_neurons is not None and 'manc' in self.dataset.lower():
+                try:
+                    # Check first neuron
+                    bbox = cached_neurons[0].bbox if hasattr(cached_neurons[0], 'bbox') else None
+                    if bbox is not None and np.max(bbox) < 150000:
+                        cached_neurons = cached_neurons * 8
+                        self._vprint(f'  ℹ️  Applied 8x scaling to cached MANC skeletons', level='full')
+                except Exception as e:
+                    self._vprint(f'  ⚠️  Failed to check/apply scaling to cache: {e}', level='full')
             
             raw_neuron_vols = None
             
@@ -4778,8 +5545,13 @@ class VisualizeSkeleton:
                 if fafb_skeleton_cache:
                     neurons = []
                     for bid in fetch_ids:
+                        # Handle both int and string types for body ID lookup
                         if bid in fafb_skeleton_cache:
                             neurons.append(fafb_skeleton_cache[bid])
+                        elif str(bid) in fafb_skeleton_cache:
+                            neurons.append(fafb_skeleton_cache[str(bid)])
+                        elif isinstance(bid, str) and bid.isdigit() and int(bid) in fafb_skeleton_cache:
+                            neurons.append(fafb_skeleton_cache[int(bid)])
                     if neurons:
                         raw_neuron_vols = navis.NeuronList(neurons)
 
@@ -4848,6 +5620,19 @@ class VisualizeSkeleton:
                                         raw_neuron_vols = None
                                         break
                 
+                # Apply scaling for MANC datasets (Raw -> NM)
+                # MANC skeletons from NeuPrint are in 8nm voxels, but meshes are in nm
+                if raw_neuron_vols is not None and 'manc' in self.dataset.lower():
+                    # Check if scaling is needed (max coord < 150000 indicates raw units)
+                    # Typical MANC nm extent is ~300k-500k
+                    try:
+                        bbox = raw_neuron_vols[0].bbox if hasattr(raw_neuron_vols[0], 'bbox') else None
+                        if bbox is not None and np.max(bbox) < 150000:
+                            raw_neuron_vols = raw_neuron_vols * 8
+                            self._vprint(f'  ℹ️  Applied 8x scaling to fetched MANC skeletons', level='full')
+                    except Exception as e:
+                        self._vprint(f'  ⚠️  Failed to check/apply scaling: {e}', level='full')
+
                 # Save to raw cache (for non-FAFB datasets)
                 if raw_neuron_vols is not None and not is_fafb:
                     self._save_cached_neurons(self.neuron_dfs[i], raw_neuron_vols)
@@ -4899,13 +5684,22 @@ class VisualizeSkeleton:
                     cache_soma_simp = self.FAFB_MESH_CACHE_SOMA_SIMPLIFICATION
                     cache_soma_radius = self.FAFB_MESH_CACHE_SOMA_RADIUS
                     
+                    # Convert mesh_missing_ids to a set with both int and str versions for robust matching
+                    mesh_missing_ids_set = set()
+                    for mid in mesh_missing_ids:
+                        mesh_missing_ids_set.add(mid)
+                        if isinstance(mid, (int, np.integer)):
+                            mesh_missing_ids_set.add(str(mid))
+                        elif isinstance(mid, str) and mid.isdigit():
+                            mesh_missing_ids_set.add(int(mid))
+                    
                     # Setup progress bar if verbose
                     iterator = neuron_vols
                     if self.verbose == 'full' or self.verbose is True:
                         iterator = tqdm(neuron_vols, desc="Simplifying meshes (soma-aware)", leave=False)
 
                     for n in iterator:
-                        if hasattr(n, 'id') and n.id in mesh_missing_ids:
+                        if hasattr(n, 'id') and n.id in mesh_missing_ids_set:
                             # Get soma position before conversion (TreeNeuron has this info)
                             soma_pos = None
                             if hasattr(n, 'soma_pos') and n.soma_pos is not None:
@@ -5111,24 +5905,36 @@ class VisualizeSkeleton:
                         
                         all_mesh_neurons.extend(processed_neurons)
                     else:
-                        all_mesh_neurons.extend(neurons_list)
+                        # Cache path: convert TreeNeurons to MeshNeurons if needed
+                        converted_list = []
+                        for n in neurons_list:
+                            if isinstance(n, navis.MeshNeuron):
+                                converted_list.append(n)
+                            elif isinstance(n, navis.TreeNeuron):
+                                # Convert TreeNeuron to MeshNeuron
+                                try:
+                                    if hasattr(n, 'nodes') and 'radius' in n.nodes.columns:
+                                        invalid_mask = (n.nodes['radius'] <= 0) | (n.nodes['radius'].isna())
+                                        if invalid_mask.any():
+                                            n.nodes.loc[invalid_mask, 'radius'] = 1
+                                    elif hasattr(n, 'nodes'):
+                                        n.nodes['radius'] = 1
+                                    if hasattr(navis, 'conversion') and hasattr(navis.conversion, 'tree2meshneuron'):
+                                        mesh_n = navis.conversion.tree2meshneuron(n)
+                                        mesh_n.id = n.id if hasattr(n, 'id') else None
+                                        if hasattr(n, 'name'):
+                                            mesh_n.name = n.name
+                                        converted_list.append(mesh_n)
+                                    else:
+                                        converted_list.append(n)  # Keep original if conversion unavailable
+                                except Exception:
+                                    converted_list.append(n)  # Keep original if conversion fails
+                            else:
+                                converted_list.append(n)
+                        all_mesh_neurons.extend(converted_list)
                 
-                # Merge all neurons in this layer if merge_neurons=True
-                if self.merge_neurons and len(all_mesh_neurons) > 1:
-                    try:
-                        meshes = [m.trimesh for m in all_mesh_neurons if hasattr(m, 'trimesh')]
-                        if meshes:
-                            merged_mesh = trimesh.util.concatenate(meshes)
-                            merged_neuron = navis.MeshNeuron(merged_mesh)
-                            merged_neuron.name = layer_name
-                            neuron_vols = navis.NeuronList([merged_neuron])
-                            self._vprint(f'    ⚡ Merged {len(meshes)} meshes for layer: {layer_name}', level='full', use_tqdm=True)
-                        else:
-                            neuron_vols = navis.NeuronList(all_mesh_neurons) if all_mesh_neurons else neuron_vols
-                    except Exception as e:
-                        self._vprint(f'    ⚠️ Merge layer meshes failed: {e}', level='full', use_tqdm=True)
-                        neuron_vols = navis.NeuronList(all_mesh_neurons) if all_mesh_neurons else neuron_vols
-                elif all_mesh_neurons:
+                # Set neuron_vols from all_mesh_neurons (no mesh merging - legend grouping handles display)
+                if all_mesh_neurons:
                     neuron_vols = navis.NeuronList(all_mesh_neurons)
                 
                 # Mark FAFB as already simplified to skip generic simplification below
@@ -5280,116 +6086,6 @@ class VisualizeSkeleton:
                     self._vprint(f'    ⚠️ Simplification failed: {e}', level='full', use_tqdm=True)
                     pass  # Keep original neurons if simplification fails
 
-            # Merge neurons if requested (optimization)
-            # Also handle single neuron case when merge_neurons=True to ensure simplification is applied
-            num_neurons = len(neuron_vols) if isinstance(neuron_vols, (list, navis.NeuronList)) else 1
-            
-            if self.merge_neurons and num_neurons > 0:
-                if num_neurons > 1:
-                    layer_pbar.set_postfix_str(f"{layer_name} (meshing {num_neurons}...)")
-                
-                try:
-                    if self.skeleton_mode == 'tube':
-                        import trimesh
-                        # navis.conversion is already available via 'import navis' at module level
-                        
-                        # Convert all neurons to meshes
-                        meshes = []
-                        neurons_to_merge = neuron_vols if isinstance(neuron_vols, navis.NeuronList) else [neuron_vols]
-                        
-                        for n in neurons_to_merge:
-                            try:
-                                # Fix missing radii to avoid navis warning
-                                if hasattr(n, 'nodes') and 'radius' in n.nodes.columns:
-                                    # Check for invalid radii (<= 0 or NaN)
-                                    invalid_mask = (n.nodes['radius'] <= 0) | (n.nodes['radius'].isna())
-                                    if invalid_mask.any():
-                                        # Set default radius (e.g. 40 units) for visibility
-                                        n.nodes.loc[invalid_mask, 'radius'] = 1
-                                elif hasattr(n, 'nodes'):
-                                    # If radius column missing entirely, create it
-                                    n.nodes['radius'] = 1
-
-                                # Convert to mesh (TreeNeuron -> MeshNeuron)
-                                # Use navis.conversion.tree2meshneuron if available, or navis.MeshNeuron.from_tree
-                                # Or simply navis.MeshNeuron(n) which might work
-                                # Let's try navis.conversion.tree2meshneuron first as it's explicit
-                                if hasattr(navis, 'conversion') and hasattr(navis.conversion, 'tree2meshneuron'):
-                                    mesh_neuron = navis.conversion.tree2meshneuron(n)
-                                elif isinstance(n, navis.MeshNeuron):
-                                    mesh_neuron = n
-                                else:
-                                    # Fallback: try to create MeshNeuron directly or use other method
-                                    # navis.MeshNeuron(n) might not work directly for TreeNeuron
-                                    # Try navis.volume.from_object? No.
-                                    # Try n.mesh property?
-                                    # Actually, navis has a function to mesh neurons: navis.mesh_neurons (which failed before)
-                                    # Let's try to use the internal method if possible.
-                                    # Or use navis.TreeNeuron.to_mesh() if it exists? No.
-                                    
-                                    # Let's try a simpler approach:
-                                    # navis.plot3d generates meshes internally.
-                                    # But we want to merge them BEFORE plotting.
-                                    
-                                    # Try: mesh_neuron = navis.MeshNeuron(n) - this might work if n is compatible
-                                    # Or: mesh_neuron = n.convert_to_mesh() - hypothetical
-                                    
-                                    # Let's assume navis.conversion.tree2meshneuron works as per subagent
-                                    # If not, we catch exception.
-                                    mesh_neuron = navis.conversion.tree2meshneuron(n)
-                                
-                                if hasattr(mesh_neuron, 'trimesh'):
-                                    meshes.append(mesh_neuron.trimesh)
-                            except Exception as e:
-                                # print(f'Warning: Failed to mesh neuron {n.id}: {e}')
-                                pass
-                        
-                        if meshes:
-                            # Concatenate meshes
-                            merged_mesh = trimesh.util.concatenate(meshes)
-                            
-                            # Simplify if requested
-                            # Only simplify merged mesh if individual simplification was NOT performed
-                            # Or if we want to apply additional simplification (but usually not)
-                            # If we already simplified individuals, we skip merged simplification to avoid double simplification
-                            # unless fafb_already_simplified is True (which means we skipped individual simplification)
-                            
-                            should_simplify_merged = False
-                            if self.skeleton_mesh_simplification > 0:
-                                if fafb_already_simplified:
-                                    should_simplify_merged = True
-                                elif not (self.skeleton_mesh_simplification > 0 and self.skeleton_mode == 'tube' and not fafb_already_simplified):
-                                    # This condition mirrors the individual simplification block
-                                    # If individual simplification block was skipped, we might want to simplify here
-                                    should_simplify_merged = True
-                                else:
-                                    # Individual simplification was performed.
-                                    # Do we want to simplify again? Probably not.
-                                    should_simplify_merged = False
-                            
-                            if should_simplify_merged:
-                                n_faces = len(merged_mesh.faces)
-                                target_faces = max(100, int(n_faces * (1 - self.skeleton_mesh_simplification)))  # Keep at least 100 faces
-                                if target_faces < n_faces:
-                                    try:
-                                        # Use open3d for accurate simplification (trimesh 4.x fast_simplification only achieves ~60%)
-                                        merged_mesh = self._simplify_mesh_open3d(merged_mesh, target_faces)
-                                        
-                                        # Log simplification result
-                                        new_faces = len(merged_mesh.faces)
-                                        reduction = (1 - new_faces / n_faces) * 100
-                                        self._vprint(f'    ✓ Simplified merged mesh: {n_faces:,} → {new_faces:,} faces ({reduction:.1f}% reduction)', level='full')
-                                    except Exception as e:
-                                        self._vprint(f'    ⚠️ Merged mesh simplification failed: {e}', level='full')
-                                        pass  # Skip simplification if it fails
-                            
-                            # Convert back to navis object
-                            neuron_vols = navis.MeshNeuron(merged_mesh)
-                            neuron_vols.name = self.layer_names[i]
-                    # For line mode, traces are merged later in plotting
-                except Exception as e:
-                    tqdm.write(f'  ⚠️  Merge failed for layer {i}: {e}')
-
             # Update status and plot
             layer_pbar.set_postfix_str(f"{layer_name} (plotting...)")
             
@@ -5409,65 +6105,110 @@ class VisualizeSkeleton:
                         connectors=self.show_connectors if not isinstance(neuron_vols, navis.Volume) else False,
                     )
                 fig_traces = fig_layer.data
-                
-                # If merging was requested for line mode, we can optimize here by combining traces
-                if self.merge_neurons and self.skeleton_mode == 'line' and len(fig_traces) > 1:
-                    # Combine all scatter3d traces into one
-                    x_all, y_all, z_all = [], [], []
-                    for trace in fig_traces:
-                        if hasattr(trace, 'x') and trace.x is not None:
-                            x_all.extend(trace.x)
-                            x_all.append(None) # Add break between lines
-                            y_all.extend(trace.y)
-                            y_all.append(None)
-                            z_all.extend(trace.z)
-                            z_all.append(None)
-                    
-                    # Create single merged trace
-                    merged_trace = go.Scatter3d(
-                        x=x_all, y=y_all, z=z_all,
-                        mode='lines',
-                        line=dict(color=self.neuron_colors[i], width=1),
-                        opacity=self.neuron_alpha,
-                        name=self.layer_names[i]
-                    )
-                    fig_traces = [merged_trace]
 
-                for j,trace in enumerate(fig_traces):
+                # Build a mapping of neuron ID to type for 'type' legend mode
+                neuron_type_map = {}
+                if self.legend_mode == 'type' and self.neuron_dfs[i] is not None:
+                    ndf = self.neuron_dfs[i]
+                    type_col = None
+                    for col in ['type', 'cell_type', 'neuronType']:
+                        if col in ndf.columns:
+                            type_col = col
+                            break
+                    if type_col and 'bodyId' in ndf.columns:
+                        for _, row in ndf.iterrows():
+                            body_id = str(row['bodyId'])
+                            neuron_type = str(row[type_col]) if pd.notna(row[type_col]) else None
+                            if neuron_type:
+                                neuron_type_map[body_id] = neuron_type
+
+                # Track which legend groups we've shown (for type/layer modes)
+                shown_legend_groups = set()
+                # Track legend info for fixing opacity later
+                legend_color_map = {}  # legend_group -> (color, should_show)
+
+                for j, trace in enumerate(fig_traces):
                     # Enforce opacity for lines if not already set or if we want to override
                     if self.skeleton_mode == 'line':
                         trace.opacity = self.neuron_alpha
 
-                    if self._legend_mode == 'merge':
-                        if j == 0:
-                            trace.showlegend = True
-                        else:
-                            trace.showlegend = False
-                        trace.name = self.layer_names[i]
-                        trace.hovertemplate = '<b>%{fullData.name}</b><extra></extra>'  # show full name in hover tooltip
-                        trace.legendgroup = self.layer_names[i]
+                    # Get neuron_id from existing trace name (navis sets this to neuron ID)
+                    existing_name = getattr(trace, 'name', None)
+                    if existing_name:
+                        neuron_id = str(existing_name)
+                    elif j < len(neuron_vols):
+                        neuron_id = str(neuron_vols[j].id)
+                    else:
+                        neuron_id = f"neuron_{j}"
+
+                    if self.legend_mode == 'layer':
+                        # Group all neurons in layer under one legend entry
+                        legend_group = self.layer_names[i]
+                        trace.name = legend_group
+                        trace.legendgroup = legend_group
+                        should_show = legend_group not in shown_legend_groups
+                        trace.showlegend = should_show
+                        if should_show:
+                            legend_color_map[legend_group] = (self.neuron_colors[i], True)
+                        shown_legend_groups.add(legend_group)
+                        trace.hovertemplate = '<b>%{fullData.name}</b><extra></extra>'
                         trace.hoverinfo = 'name'
                         self.fig_3d.add_trace(trace)
-                    elif self._legend_mode == 'normal':
-                        # Get neuron_id from existing trace name (navis sets this to neuron ID)
-                        # or fall back to neuron_vols if available
-                        existing_name = getattr(trace, 'name', None)
-                        if existing_name:
-                            neuron_id = str(existing_name)
-                        elif j < len(neuron_vols):
-                            neuron_id = str(neuron_vols[j].id)
+
+                    elif self.legend_mode == 'type':
+                        # Group by neuron type
+                        neuron_type = neuron_type_map.get(neuron_id, None)
+                        if neuron_type:
+                            legend_group = f"{neuron_type}"
                         else:
-                            neuron_id = f"neuron_{j}"
-                        # Set trace name to {bodyId}_{layer_name} for proper identification
+                            # Fallback to layer name if type unknown
+                            legend_group = self.layer_names[i]
+                        trace.name = legend_group
+                        legend_group_key = f"layer{i}_{legend_group}"
+                        trace.legendgroup = legend_group_key  # Make unique per layer
+                        should_show = legend_group_key not in shown_legend_groups
+                        trace.showlegend = should_show
+                        if should_show:
+                            legend_color_map[legend_group_key] = (self.neuron_colors[i], True)
+                        shown_legend_groups.add(legend_group_key)
+                        trace.hovertemplate = '<b>%{fullData.name}</b><extra></extra>'
+                        trace.hoverinfo = 'name'
+                        self.fig_3d.add_trace(trace)
+
+                    elif self.legend_mode == 'single':
+                        # Each neuron gets its own legend entry
                         new_trace_name = f"{neuron_id}_{self.layer_names[i]}"
                         trace.name = new_trace_name
-                        trace.legendgroup = new_trace_name  # Set legendgroup to match name for consistent identification
-                        trace.showlegend = True  # Ensure trace appears in legend
+                        trace.legendgroup = new_trace_name
+                        trace.showlegend = True
+                        legend_color_map[new_trace_name] = (self.neuron_colors[i], True)
                         trace.hoverinfo = 'name'
                         trace.hovertemplate = '<b>%{fullData.name}</b><extra></extra>'
                         self.fig_3d.add_trace(trace)
                     else:
-                        raise ValueError(f'_legend_mode {self._legend_mode} not supported')
+                        raise ValueError(f'legend_mode {self.legend_mode} not supported')
+                
+                # Fix legend opacity: Add invisible marker traces with full opacity for legend display
+                # Only needed when neuron_alpha < 1.0 to ensure legend swatches show vivid colors
+                if self.neuron_alpha < 1.0 and legend_color_map:
+                    import plotly.graph_objects as go
+                    for legend_group, (color, _) in legend_color_map.items():
+                        # Add an invisible scatter point (no coords = not rendered) for legend only
+                        legend_trace = go.Scatter3d(
+                            x=[None], y=[None], z=[None],  # No coordinates = invisible in plot
+                            mode='markers',
+                            marker=dict(size=10, color=color, opacity=1.0),  # Full opacity for legend
+                            name=legend_group,
+                            legendgroup=legend_group,
+                            showlegend=True,
+                            hoverinfo='skip',
+                        )
+                        # Hide original traces from legend (but keep them visible in plot)
+                        for existing_trace in self.fig_3d.data:
+                            if getattr(existing_trace, 'legendgroup', None) == legend_group:
+                                existing_trace.showlegend = False
+                        # Add the legend-only trace
+                        self.fig_3d.add_trace(legend_trace)
             
             elif self.backend == 'k3d':
                 try:
@@ -6084,6 +6825,99 @@ class VisualizeSkeleton:
         cache_mesh_dir = os.path.join(self.script_path, 'cache', dataset_normalized, 'meshes')
         os.makedirs(cache_mesh_dir, exist_ok=True)
         return cache_mesh_dir
+    
+    def _darken_color(self, color, brightness):
+        """Darken a color by the given brightness factor.
+        
+        Parameters
+        ----------
+        color : str or tuple
+            Color in hex string format ('#RRGGBB') or RGB tuple (r, g, b)
+        brightness : float
+            Brightness factor from 0.0 (black) to 1.0 (original color)
+        
+        Returns
+        -------
+        str
+            Darkened color in hex format '#RRGGBB'
+        """
+        # Parse the color
+        if isinstance(color, str):
+            # Handle hex color like '#1f77b4'
+            if color.startswith('#'):
+                color = color[1:]
+            if len(color) == 6:
+                r = int(color[0:2], 16)
+                g = int(color[2:4], 16)
+                b = int(color[4:6], 16)
+            else:
+                # Fallback
+                return color if isinstance(color, str) else '#808080'
+        elif isinstance(color, (tuple, list)) and len(color) >= 3:
+            r, g, b = color[0], color[1], color[2]
+        else:
+            return '#808080'  # Fallback gray
+        
+        # Apply brightness (darken)
+        r = int(r * brightness)
+        g = int(g * brightness)
+        b = int(b * brightness)
+        
+        # Clamp values
+        r = max(0, min(255, r))
+        g = max(0, min(255, g))
+        b = max(0, min(255, b))
+        
+        return f'#{r:02x}{g:02x}{b:02x}'
+    
+    def _interpolate_colors(self, base_colors, n_needed):
+        """Generate n_needed colors by interpolating through a colormap built from base_colors.
+        
+        Parameters
+        ----------
+        base_colors : tuple or list
+            Base color palette to interpolate from (hex strings or RGB tuples)
+        n_needed : int
+            Number of colors needed
+        
+        Returns
+        -------
+        list
+            List of n_needed hex color strings
+        """
+        import numpy as np
+        from matplotlib.colors import LinearSegmentedColormap, to_hex, to_rgb
+        
+        # Convert base colors to RGB tuples
+        rgb_colors = []
+        for c in base_colors:
+            if isinstance(c, str):
+                if c.startswith('#'):
+                    c = c[1:]
+                if len(c) == 6:
+                    rgb_colors.append((int(c[0:2], 16)/255, int(c[2:4], 16)/255, int(c[4:6], 16)/255))
+                else:
+                    rgb_colors.append(to_rgb(c))
+            elif isinstance(c, (tuple, list)) and len(c) >= 3:
+                # Normalize if values > 1
+                if max(c[:3]) > 1:
+                    rgb_colors.append((c[0]/255, c[1]/255, c[2]/255))
+                else:
+                    rgb_colors.append((c[0], c[1], c[2]))
+            else:
+                rgb_colors.append((0.5, 0.5, 0.5))  # fallback gray
+        
+        # Create a colormap from base colors
+        cmap = LinearSegmentedColormap.from_list('custom', rgb_colors, N=256)
+        
+        # Sample n_needed colors evenly from the colormap
+        positions = np.linspace(0, 1, n_needed)
+        result = []
+        for pos in positions:
+            rgba = cmap(pos)
+            result.append(to_hex(rgba[:3]))
+        
+        return result
     
     def _expand_roi_names(self, roi_list, available_rois=None):
         """Expand ROI names to include bilateral (L/R) variants.
@@ -6749,14 +7583,23 @@ class VisualizeSkeleton:
         
         # VNC datasets
         elif 'manc' in dataset_lower:
-            # MANC (Male Adult Nerve Cord) - VNC only
-            # For VNC: 'whole' and 'template' both show VNC envelope
-            return {
-                'source': 'MANCraw',
-                'target': 'MANC',  # VNC template (no brain transform needed)
-                'template_obj': flybrains.MANC,
-                'mesh_name': 'MANC (VNC envelope)'
-            }
+            # MANC (Male Adult Nerve Cord)
+            if self.brain_mesh == 'whole':
+                # Transform to Male CNS (brain + VNC) space
+                return {
+                    'source': 'MANC',
+                    'target': 'JRCFIB2022M',
+                    'template_obj': flybrains.JRCFIB2022M,
+                    'mesh_name': 'JRCFIB2022M (male CNS: brain + VNC)'
+                }
+            else:
+                # Use native MANC template (VNC only)
+                return {
+                    'source': 'MANC',
+                    'target': 'MANC',
+                    'template_obj': flybrains.MANC,
+                    'mesh_name': 'MANC (VNC envelope)'
+                }
         
         # Brain + VNC datasets
         elif 'male-cns' in dataset_lower or 'malecns' in dataset_lower:
@@ -6811,8 +7654,8 @@ class VisualizeSkeleton:
     def _get_vnc_template_info(self):
         """Get VNC template information for current dataset.
         
-        Available for datasets with VNC data (requires flybrains >= 0.6.3):
-        - male-cns: JRCFIB2022M.mesh_vnc (VNC portion of male CNS)
+        Available for datasets with VNC data:
+        - male-cns: VNC portion of JRCFIB2022M (extracted geometrically, Y >= 210000)
         - manc: MANC template (native VNC mesh)
         
         Returns
@@ -6823,17 +7666,49 @@ class VisualizeSkeleton:
         """
         dataset_lower = self.dataset.lower()
         import flybrains
+        import trimesh
         
-        # Male CNS dataset - VNC mesh available via JRCFIB2022M.mesh_vnc (flybrains >= 0.6.3)
-        if 'male-cns' in dataset_lower or 'malecns' in dataset_lower:
+        # Male CNS and MANC datasets - extract VNC portion from JRCFIB2022M mesh
+        if 'male-cns' in dataset_lower or 'malecns' in dataset_lower or 'manc' in dataset_lower:
+            # Check if flybrains provides mesh_vnc (flybrains >= 0.6.3)
             if hasattr(flybrains.JRCFIB2022M, 'mesh_vnc'):
                 return {
                     'mesh': flybrains.JRCFIB2022M.mesh_vnc,
-                    'mesh_name': 'JRCFIB2022M VNC'
+                    'mesh_name': 'JRCFIB2022M (VNC)'
                 }
             else:
-                self._vprint('⚠️  VNC mesh not available (requires flybrains >= 0.6.3, upgrade with: pip install --upgrade flybrains)', level='simple')
-                return None
+                # Extract VNC portion geometrically
+                # VNC is in the posterior portion (higher Z values in JRCFIB2022M coordinates)
+                # Z cutoff ~340000 separates brain from VNC (Neck region)
+                try:
+                    full_mesh = flybrains.JRCFIB2022M.mesh
+                    vnc_z_cutoff = 340000  # Z coordinate separating brain from VNC
+                    
+                    # Get vertices in the VNC region (Z >= cutoff)
+                    vnc_mask = full_mesh.vertices[:, 2] >= vnc_z_cutoff
+                    
+                    # Extract submesh by filtering faces that have all vertices in VNC region
+                    vnc_faces = []
+                    for face in full_mesh.faces:
+                        if all(vnc_mask[v] for v in face):
+                            vnc_faces.append(face)
+                    
+                    if vnc_faces:
+                        # Create new mesh from VNC vertices only
+                        vnc_mesh_trimesh = trimesh.Trimesh(
+                            vertices=full_mesh.vertices,
+                            faces=vnc_faces
+                        )
+                        # Clean up unused vertices
+                        vnc_mesh_trimesh.remove_unreferenced_vertices()
+                        vnc_mesh = navis.Volume(vnc_mesh_trimesh, name='JRCFIB2022M_vnc')
+                        return {
+                            'mesh': vnc_mesh,
+                            'mesh_name': 'JRCFIB2022M (VNC)'
+                        }
+                except Exception as e:
+                    self._vprint(f'⚠️  VNC mesh extraction failed: {e}', level='simple')
+                    return None
         
         # MANC dataset - VNC only (has proper VNC mesh)
         elif 'manc' in dataset_lower:
@@ -7435,14 +8310,16 @@ class VisualizeSkeleton:
                         fig_mesh = navis.plot3d(roiunits[roi_i],backend='plotly')
                     mesh_traces = fig_mesh.data
                     for ti, trace in enumerate(mesh_traces):
-                        if self._legend_mode == 'merge':
-                            if ti == 0:
+                        if self.legend_mode == 'layer':
+                            # Group all ROI meshes under one legend entry
+                            if ti == 0 and roi_i == 0:
                                 trace.showlegend = True
                             else:
                                 trace.showlegend = False
                             trace.legendgroup = 'roi_mesh'
-                        elif self._legend_mode == 'normal':
-                            trace.showlegend = True
+                        else:
+                            # 'type' and 'single' modes: each ROI gets its own legend
+                            trace.showlegend = (ti == 0)  # Only show first trace for each ROI
                             trace.legendgroup = roi_names[roi_i]
                         trace.hovertemplate = '<b>%{fullData.name}</b><extra></extra>'  # show full name in hover tooltip
                         trace.hoverinfo = 'name'
@@ -7466,22 +8343,57 @@ class VisualizeSkeleton:
             template_info = self._get_template_info()
             mesh_display_name = template_info['mesh_name']
             
-            # For male-cns with brain_mesh='template', always use separate brain mesh
-            # (JRCFIB2022M.mesh contains both brain and VNC merged)
-            # VNC will be added separately only if vnc_mesh=True
+            # For male-cns with brain_mesh='template', use brain-only mesh if vnc_mesh is also True
+            # This allows independent show/hide of brain and VNC in the interactive HTML
+            # If vnc_mesh=False, show the full CNS mesh
             dataset_lower = self.dataset.lower()
             is_male_cns = 'male-cns' in dataset_lower or 'malecns' in dataset_lower
-            use_brain_only = is_male_cns and self.brain_mesh == 'template'
+            # Note: 'manc' is NOT treated as male-cns here because its native template is VNC-only,
+            # so we don't need to extract a "brain" portion from it.
+            
+            use_brain_only = is_male_cns and self.brain_mesh == 'template' and self.vnc_mesh
             
             if use_brain_only:
-                mesh_display_name = 'JRCFIB2022M (brain only)'
+                mesh_display_name = 'JRCFIB2022M (brain)'
             
             self._vprint(f'Plotting {mesh_display_name} mesh...', level='full')
             try:
                 import flybrains
+                import trimesh
                 
                 # Select appropriate mesh
-                if use_brain_only and hasattr(flybrains.JRCFIB2022M, 'mesh_brain'):
+                if use_brain_only:
+                    # For male-cns with vnc_mesh=True, extract brain-only portion
+                    # flybrains doesn't provide mesh_brain, so we clip the mesh geometrically
+                    # Brain is in the anterior portion (lower Z values in JRCFIB2022M coordinates)
+                    # Z cutoff ~340000 separates brain from VNC based on geometry
+                    full_mesh = flybrains.JRCFIB2022M.mesh
+                    brain_z_cutoff = 340000  # Z coordinate separating brain from VNC
+                    
+                    # Get vertices in the brain region (Z < cutoff)
+                    brain_mask = full_mesh.vertices[:, 2] < brain_z_cutoff
+                    
+                    # Extract submesh by filtering faces that have all vertices in brain region
+                    brain_faces = []
+                    for face in full_mesh.faces:
+                        if all(brain_mask[v] for v in face):
+                            brain_faces.append(face)
+                    
+                    if brain_faces:
+                        # Create new mesh from brain vertices only
+                        brain_mesh_trimesh = trimesh.Trimesh(
+                            vertices=full_mesh.vertices,
+                            faces=brain_faces
+                        )
+                        # Clean up unused vertices
+                        brain_mesh_trimesh.remove_unreferenced_vertices()
+                        brain_mesh = navis.Volume(brain_mesh_trimesh, name='JRCFIB2022M_brain')
+                        self._vprint(f'   Extracted brain mesh: {len(brain_mesh_trimesh.vertices)} vertices', level='full')
+                    else:
+                        # Fallback to full mesh if extraction fails
+                        brain_mesh = full_mesh
+                        self._vprint('   ⚠️  Brain mesh extraction failed, using full CNS mesh', level='full')
+                elif is_male_cns and hasattr(flybrains.JRCFIB2022M, 'mesh_brain'):
                     brain_mesh = flybrains.JRCFIB2022M.mesh_brain
                 else:
                     brain_mesh = template_info['template_obj'].mesh if hasattr(template_info['template_obj'], 'mesh') else template_info['template_obj']
@@ -7543,9 +8455,20 @@ class VisualizeSkeleton:
         if self.vnc_mesh:
             dataset_lower = self.dataset.lower()
             
-            # For MANC, the template mesh IS the VNC mesh, so skip if brain_mesh already shows it
-            if 'manc' in dataset_lower and self.brain_mesh in ['template', 'whole']:
-                self._vprint('ℹ️  VNC mesh already shown via brain_mesh (MANC template = VNC)', level='full')
+            # Check if VNC is already shown by brain_mesh (for male-cns/manc datasets using JRCFIB2022M)
+            is_male_cns = 'male-cns' in dataset_lower or 'malecns' in dataset_lower
+            is_manc = 'manc' in dataset_lower
+            
+            # use_brain_only logic from above (replicated here for clarity)
+            use_brain_only = is_male_cns and self.brain_mesh == 'template'
+            
+            # MANC with template mode: The "brain mesh" (template) IS the VNC mesh.
+            if is_manc and self.brain_mesh == 'template':
+                self._vprint('ℹ️  VNC mesh already shown as template', level='full')
+            
+            # If using JRCFIB2022M and NOT splitting brain (e.g. brain_mesh='whole'), VNC is already included
+            elif (is_male_cns or is_manc) and self.brain_mesh in ['template', 'whole'] and not use_brain_only:
+                self._vprint('ℹ️  VNC mesh already shown via brain_mesh', level='full')
             else:
                 vnc_info = self._get_vnc_template_info()
                 if vnc_info:
@@ -7593,10 +8516,18 @@ class VisualizeSkeleton:
             
             scene_camera_parameters = dict(
                 up=dict(x=0, y=-1, z=0),  # Y is up (inverted in some templates)
-                eye=dict(x=0, y=0, z=-2.0),  # Look from front
+                eye=dict(x=0, y=0, z=-2.5),  # Look from front
                 # center=dict(x=0, y=0, z=0), # Let Plotly auto-center
             )
             
+            # Fix for MANC dataset (VNC)
+            # Default Front (-Z) shows Tail. We want to look from Neck (+Z).
+            if 'manc' in self.dataset.lower():
+                 scene_camera_parameters = dict(
+                    up=dict(x=0, y=-1, z=0),  # Dorsal (-Y) is up
+                    eye=dict(x=0, y=0, z=2.5),  # Look from Anterior (+Z)
+                )
+
             # Fix for hemibrain template mode (JRCFIB2018F)
             # JRCFIB2018F has Y-axis pointing posterior→anterior, Z is Dorsal-Ventral.
             # To show Frontal view, we need to look from Anterior (positive Y axis).
@@ -7619,6 +8550,10 @@ class VisualizeSkeleton:
                     aspectmode='data',
                 ),
                 scene_camera=scene_camera_parameters,
+                # Legend settings: use constant sizing so alpha doesn't affect legend swatches
+                legend=dict(
+                    itemsizing='constant',  # Fixed legend swatch size regardless of trace properties
+                ),
             )
 
             # save figure
@@ -7671,6 +8606,20 @@ class VisualizeSkeleton:
                         'left': dict(eye=dict(x=-2.5, y=0, z=0), center=dict(x=0, y=0, z=0), up=dict(x=0, y=-1, z=0)),
                         'right': dict(eye=dict(x=2.5, y=0, z=0), center=dict(x=0, y=0, z=0), up=dict(x=0, y=-1, z=0)),
                     }
+
+                    # Adjust for MANC (Male Adult Nerve Cord)
+                    # User reports default Front view (-Z) shows Tail (Posterior).
+                    # This implies Tail is at -Z (closest to camera), so Anterior is at +Z.
+                    # Fix: Reverse Z axis for Front/Back views.
+                    if 'manc' in self.dataset.lower():
+                         view_cameras = {
+                            'front': dict(eye=dict(x=0, y=0, z=2.5), center=dict(x=0, y=0, z=0), up=dict(x=0, y=-1, z=0)),
+                            'back': dict(eye=dict(x=0, y=0, z=-2.5), center=dict(x=0, y=0, z=0), up=dict(x=0, y=-1, z=0)),
+                            'top': dict(eye=dict(x=0, y=-2.5, z=0), center=dict(x=0, y=0, z=0), up=dict(x=0, y=0, z=1)),
+                            'bottom': dict(eye=dict(x=0, y=2.5, z=0), center=dict(x=0, y=0, z=0), up=dict(x=0, y=0, z=1)),
+                            'left': dict(eye=dict(x=-2.5, y=0, z=0), center=dict(x=0, y=0, z=0), up=dict(x=0, y=-1, z=0)),
+                            'right': dict(eye=dict(x=2.5, y=0, z=0), center=dict(x=0, y=0, z=0), up=dict(x=0, y=-1, z=0)),
+                        }
 
                     # Adjust for hemibrain template (JRCFIB2018F)
                     # JRCFIB2018F coordinate system:
@@ -7734,7 +8683,7 @@ class VisualizeSkeleton:
                         html_size_cap = self._get_html_size_cap()
                         
                         # Auto-simplify for kaleido if HTML > size cap (prevents timeout)
-                        if self.export_method != 'webdriver' and html_size_mb > html_size_cap:
+                        if self.export_method not in ('webdriver', 'webdriver-fast') and html_size_mb > html_size_cap:
                             # Target 50% file size reduction
                             # HTML overhead (Plotly.js, layout, etc.) is ~20-30MB
                             # To get 50% total reduction, we need more aggressive mesh simplification
@@ -7776,7 +8725,7 @@ class VisualizeSkeleton:
                         use_kaleido_fallback = False
                         
                         # Choose export method
-                        if self.export_method == 'webdriver':
+                        if self.export_method in ('webdriver', 'webdriver-fast'):
                             # WebDriver method - OPTIMIZED: open browser once for all views
                             exported_views = self._export_views_with_webdriver_session(
                                 export_fig, views_to_export, view_cameras, views_folder
@@ -7902,8 +8851,10 @@ class VisualizeSkeleton:
         It iterates through the legend entries in the main figure and generates separate plots
         for each individual legend item by hiding other neuron traces (efficient, no duplication).
         
-        When merge_neurons=False: plots individual neurons
-        When merge_neurons=True: plots aggregated neuron types (one per layer)
+        Behavior varies by legend_mode:
+        - 'single': plots individual neurons (each neuron separate)
+        - 'type': plots by neuron type (grouped by type within layers)
+        - 'layer': plots by layer (all neurons in a layer grouped)
         
         Parameters
         ----------
@@ -7966,8 +8917,12 @@ class VisualizeSkeleton:
         actual_export_method = export_method if export_method is not None else self.export_method
         
         # Use self.export_scale if scale not specified
+        # For webdriver modes, cap inherited scale at 5 for stability (user can override explicitly)
         if scale is None:
             scale = self.export_scale
+            if actual_export_method in ('webdriver', 'webdriver-fast') and scale > 5:
+                scale = 5
+                self._vprint(f'   ℹ️  Capped inherited scale to 5 for webdriver mode (explicit scale= overrides)')
         
         # Normalize inputs
         if isinstance(output_format, str):
@@ -8154,7 +9109,7 @@ class VisualizeSkeleton:
         # ==============================================================================
         # OPTIMIZED WEBDRIVER EXPORT: Open browser once, toggle visibility via JavaScript
         # ==============================================================================
-        if actual_export_method == 'webdriver' and 'png' in output_format:
+        if actual_export_method in ('webdriver', 'webdriver-fast') and 'png' in output_format:
             self._vprint(f'   Using optimized WebDriver export (single browser session)')
             
             # Use simplified HTML if available from previous export (e.g., export_views)
@@ -9078,16 +10033,22 @@ class VisualizeSkeleton:
             self._vprint('   Kaleido can timeout on complex figures. WebDriver is more reliable for animations.')
         
         # Set default scale from self.export_scale if not specified in kwargs
-        # For video, cap at scale=3 for reasonable performance (scale=4 is very slow)
-        # Users can explicitly set scale=4 to override the cap
+        # For kaleido: cap at scale=3 for reasonable performance (scale=4 is very slow)
+        # For webdriver/webdriver-fast: cap at scale=5 for stability
+        # Users can explicitly set higher scale to override the cap
         if kwargs.get('scale') is None and kwargs.get('width') is None and kwargs.get('height') is None:
-            # Use min(self.export_scale, 3) - cap at 3 for video
-            default_scale = min(getattr(self, 'export_scale', 3), 3)
+            if actual_export_method in ('webdriver', 'webdriver-fast'):
+                # WebDriver can handle higher scales - cap at 5
+                default_scale = min(getattr(self, 'export_scale', 5), 5)
+            else:
+                # Kaleido - cap at 3
+                default_scale = min(getattr(self, 'export_scale', 3), 3)
             kwargs['scale'] = default_scale
         elif kwargs.get('scale') is not None:
-            # User explicitly provided scale - check if > 3 and warn
+            # User explicitly provided scale - check if > cap and warn
             user_scale = kwargs['scale']
-            if user_scale > 3:
+            cap = 5 if actual_export_method in ('webdriver', 'webdriver-fast') else 3
+            if user_scale > cap:
                 self._vprint(f'⚠️  Using scale={user_scale} for video export (uncapped). This may be slow.')
             elif user_scale > getattr(self, 'export_scale', 3):
                 # User requested higher than default, allow it
@@ -9203,11 +10164,21 @@ class VisualizeSkeleton:
             steps_to_write = np.linspace(360, 0, int(360/step), endpoint=False)
         
         # OPTIMIZATION: Skip image rendering if use_existing_images=True
+        # For WebDriver modes, also check for partial completion (resume support)
+        resume_mode = False
         if use_existing_images and os.path.exists(pic_folder):
-            existing_images = [f for f in os.listdir(pic_folder) if f.endswith('.jpeg')]
+            existing_images = [f for f in os.listdir(pic_folder) 
+                             if f.startswith('deg_') and f.endswith('.jpeg') 
+                             and os.path.getsize(os.path.join(pic_folder, f)) >= 1024]
             if len(existing_images) == len(steps_to_write):
                 self._vprint(f'✓ Using {len(existing_images)} existing images from {pic_folder}')
                 self._vprint(f'  Skipping image rendering (use_existing_images=True)')
+            elif len(existing_images) > 0 and actual_export_method in ('webdriver', 'webdriver-fast'):
+                # Partial completion - enable resume mode for WebDriver
+                self._vprint(f'🔄 Found {len(existing_images)}/{len(steps_to_write)} completed frames')
+                self._vprint(f'   Resuming from frame {len(existing_images) + 1}...')
+                resume_mode = True
+                use_existing_images = False  # Continue rendering
             else:
                 self._vprint(f'⚠️  Found {len(existing_images)} images but need {len(steps_to_write)}')
                 self._vprint(f'  Re-rendering images...')
@@ -9217,9 +10188,11 @@ class VisualizeSkeleton:
         
         # Render images if needed
         if not use_existing_images:
-            if os.path.exists(pic_folder):
+            if os.path.exists(pic_folder) and not resume_mode:
+                # Only delete folder if NOT in resume mode
                 shutil.rmtree(pic_folder)
-            os.makedirs(pic_folder)
+            if not os.path.exists(pic_folder):
+                os.makedirs(pic_folder)
             
             self._vprint(f'🎬 Rendering {len(steps_to_write)} frames at {fps} fps...')
             self._vprint(f'   Resolution: scale={kwargs.get("scale", "auto")}', end='')
@@ -9235,17 +10208,18 @@ class VisualizeSkeleton:
             t0 = time.time()
             current_scale = kwargs.get('scale', 2)
             frame_export_failed = False
+            use_kaleido_fallback = False
             
             # Choose export method
-            if actual_export_method == 'webdriver':
+            if actual_export_method in ('webdriver', 'webdriver-fast'):
                 # WebDriver method - efficient: open browser once for all frames
-                # Uses HTML's initial camera as "front view" reference
-                self._vprint(f'   Using WebDriver for frame export (opens browser once)...')
+                # Uses canvas.toDataURL() for fast, high-quality capture
+                self._vprint(f'   Using WebDriver for frame export (canvas.toDataURL)...')
                 
-                # Get render_wait from attribute (None = auto-calibrate)
+                # Get render_wait from attribute (None = auto-calibrate, 0 = fastest)
                 render_wait = getattr(self, 'webdriver_render_wait', None)
                 if render_wait is not None:
-                    self._vprint(f'   Render wait: {render_wait}s (fixed)')
+                    self._vprint(f'   Render wait: {render_wait}s')
                 
                 # Save figure to temp HTML
                 temp_html = os.path.join(pic_folder, '_temp_video.html')
@@ -9264,117 +10238,208 @@ class VisualizeSkeleton:
                         shutil.copy(temp_html, simplified_html_path)
                         self._vprint(f'   ✓ Saved simplified HTML: {os.path.basename(simplified_html_path)} ({html_size_mb:.1f}MB)')
                 
-                try:
-                    with WebDriverExportSession(
-                        width=kwargs['width'], height=kwargs['height'],
-                        scale=current_scale,
-                        timeout=300,
-                        render_wait=render_wait
-                    ) as session:
-                        session.load_html(temp_html, wait_for_render=True, render_wait=3)
-                        self._vprint(f'   ✓ HTML loaded in browser (render_wait={session._render_wait:.2f}s)')
-                        
-                        # Get initial camera from HTML - this defines "front view"
-                        initial_camera = session.get_current_camera()
-                        if initial_camera:
-                            initial_eye = initial_camera.get('eye', {'x': 0, 'y': 0, 'z': -view_distance})
-                            initial_up = initial_camera.get('up', {'x': 0, 'y': -1, 'z': 0})
-                            self._vprint(f'   Initial camera: eye=({initial_eye.get("x", 0):.2f}, {initial_eye.get("y", 0):.2f}, {initial_eye.get("z", 0):.2f})')
-                        else:
-                            initial_eye = {'x': 0, 'y': 0, 'z': -view_distance}
-                            initial_up = {'x': 0, 'y': -1, 'z': 0}
-                        
-                        # Compute view distance from initial camera
-                        cam_distance = np.sqrt(
-                            initial_eye.get('x', 0)**2 + 
-                            initial_eye.get('y', 0)**2 + 
-                            initial_eye.get('z', 0)**2
-                        )
-                        if cam_distance < 0.1:
-                            cam_distance = view_distance
-                        
-                        for i, deg in enumerate(steps_to_write):
-                            if frame_export_failed:
-                                break
-                            
-                            rad_i = np.deg2rad(deg)
-                            sin_val = np.sin(rad_i)
-                            cos_val = np.cos(rad_i)
-                            
-                            # Small offset to avoid gimbal lock
-                            offset = cam_distance * 0.01
-                            
-                            # Rotation logic - independent from kaleido
-                            # Rotate camera around the object based on rotation plane
-                            # Note: Initial camera is eye={0,0,-z}, up={0,-1,0}
-                            if rotate_plane == 'xy':
-                                # Horizontal rotation around Z axis
-                                eye = {
-                                    'x': cam_distance * sin_val,
-                                    'y': cam_distance * cos_val,
-                                    'z': offset
-                                }
-                                up = {'x': 0, 'y': 0, 'z': 1}
-                                
-                            elif rotate_plane == 'yz':
-                                # Vertical rotation around X axis (front→bottom→back→top)
-                                # At deg=0: eye={0, 0, -cam_distance}, up={0, -1, 0} (front)
-                                # At deg=90: eye={0, cam_distance, 0}, up={0, 0, -1} (bottom)
-                                # At deg=180: eye={0, 0, cam_distance}, up={0, 1, 0} (back)
-                                # At deg=270: eye={0, -cam_distance, 0}, up={0, 0, 1} (top)
-                                eye = {
-                                    'x': offset,
-                                    'y': cam_distance * sin_val,
-                                    'z': -cam_distance * cos_val
-                                }
-                                # Up vector rotates with camera (perpendicular to eye)
-                                up = {
-                                    'x': 0,
-                                    'y': -cos_val,
-                                    'z': -sin_val
-                                }
-                                
-                            elif rotate_plane == 'xz':
-                                # Horizontal rotation around Y axis
-                                eye = {
-                                    'x': cam_distance * sin_val,
-                                    'y': offset,
-                                    'z': -cam_distance * cos_val  # Negative to start from front
-                                }
-                                up = {'x': 0, 'y': -1, 'z': 0}
-                            
-                            # Rotate camera via JavaScript
-                            session.set_camera(eye=eye, up=up)
-                            
-                            # Take screenshot - NO auto_crop here; we'll do consistent cropping after all frames
-                            fig_path = os.path.join(pic_folder, f'deg_{deg:.1f}.jpeg')
-                            session.screenshot(fig_path, convert_to_jpeg=True, jpeg_quality=95,
-                                             auto_crop=False)  # Disable per-frame crop
-                            
-                            # Verify
-                            if not os.path.exists(fig_path) or os.path.getsize(fig_path) < 1024:
-                                self._vprint(f'\n⚠️  Frame {i+1} export failed')
-                                frame_export_failed = True
-                                break
-                            
-                            elapsed = time.time() - t0
-                            avg_time = elapsed / (i + 1)
-                            remaining = avg_time * (len(steps_to_write) - i - 1)
-                            print(f'\r  Frame {i+1}/{len(steps_to_write)} | '
-                                  f'Elapsed: {elapsed:.1f}s | '
-                                  f'ETA: {remaining:.1f}s | '
-                                  f'{avg_time:.2f}s/frame', end='    ', flush=True)
-                            
-                except Exception as e:
-                    self._vprint(f'\n⚠️  WebDriver export failed: {e}')
-                    frame_export_failed = True
-                finally:
-                    try:
-                        os.remove(temp_html)
-                    except:
-                        pass
+                # Retry logic for Chrome crashes - with RESUME capability
+                # Retries reset when progress is made past previous crash point
+                max_retries = 3
+                webdriver_success = False
+                last_error = None
+                resume_from_frame = 0  # Track where to resume from
+                last_crash_frame = -1  # Track where last crash occurred
+                consecutive_crashes_at_same_point = 0  # Only count crashes at same position
                 
-            else:
+                while consecutive_crashes_at_same_point < max_retries:
+                    # Check how many frames were completed before this attempt
+                    existing_frames = [f for f in os.listdir(pic_folder) 
+                                      if f.startswith('deg_') and f.endswith('.jpeg')
+                                      and os.path.getsize(os.path.join(pic_folder, f)) >= 1024]
+                    frames_completed = len(existing_frames)
+                    
+                    if frames_completed > resume_from_frame:
+                        # Progress was made - this is a resume, not a retry at same point
+                        resume_from_frame = frames_completed
+                        if consecutive_crashes_at_same_point > 0:
+                            self._vprint(f'\n   🔄 RESUMING from frame {frames_completed + 1} ({frames_completed} frames saved)...')
+                        
+                        # Brief pause before resume to let system resources settle
+                        time.sleep(2)
+                        time.sleep(2)
+                    
+                    try:
+                        with WebDriverExportSession(
+                            width=kwargs['width'], height=kwargs['height'],
+                            scale=current_scale,
+                            timeout=300,
+                            render_wait=render_wait
+                        ) as session:
+                            session.load_html(temp_html, wait_for_render=True, render_wait=3)
+                            self._vprint(f'   ✓ HTML loaded in browser (render_wait={session._render_wait:.2f}s)')
+                            
+                            # Get initial camera from HTML - this defines "front view"
+                            initial_camera = session.get_current_camera()
+                            if initial_camera:
+                                initial_eye = initial_camera.get('eye', {'x': 0, 'y': 0, 'z': -view_distance})
+                                initial_up = initial_camera.get('up', {'x': 0, 'y': -1, 'z': 0})
+                                self._vprint(f'   Initial camera: eye=({initial_eye.get("x", 0):.2f}, {initial_eye.get("y", 0):.2f}, {initial_eye.get("z", 0):.2f})')
+                            else:
+                                initial_eye = {'x': 0, 'y': 0, 'z': -view_distance}
+                                initial_up = {'x': 0, 'y': -1, 'z': 0}
+                            
+                            # Compute view distance from initial camera
+                            cam_distance = np.sqrt(
+                                initial_eye.get('x', 0)**2 + 
+                                initial_eye.get('y', 0)**2 + 
+                                initial_eye.get('z', 0)**2
+                            )
+                            if cam_distance < 0.1:
+                                cam_distance = view_distance
+                            
+                            for i, deg in enumerate(steps_to_write):
+                                if frame_export_failed:
+                                    break
+                                
+                                # Skip frames that are already completed (resume support)
+                                fig_path = os.path.join(pic_folder, f'deg_{deg:.1f}.jpeg')
+                                if os.path.exists(fig_path) and os.path.getsize(fig_path) >= 1024:
+                                    # Frame already exists and is valid, skip
+                                    continue
+                                
+                                rad_i = np.deg2rad(deg)
+                                sin_val = np.sin(rad_i)
+                                cos_val = np.cos(rad_i)
+                                
+                                # Small offset to avoid gimbal lock
+                                offset = cam_distance * 0.01
+                                
+                                # Rotation logic - independent from kaleido
+                                # Rotate camera around the object based on rotation plane
+                                # Note: Initial camera is eye={0,0,-z}, up={0,-1,0}
+                                if rotate_plane == 'xy':
+                                    # Horizontal rotation around Z axis
+                                    eye = {
+                                        'x': cam_distance * sin_val,
+                                        'y': cam_distance * cos_val,
+                                        'z': offset
+                                    }
+                                    up = {'x': 0, 'y': 0, 'z': 1}
+                                    
+                                elif rotate_plane == 'yz':
+                                    # Vertical rotation around X axis (front→bottom→back→top)
+                                    eye = {
+                                        'x': offset,
+                                        'y': cam_distance * sin_val,
+                                        'z': -cam_distance * cos_val
+                                    }
+                                    up = {
+                                        'x': 0,
+                                        'y': -cos_val,
+                                        'z': -sin_val
+                                    }
+                                    
+                                elif rotate_plane == 'xz':
+                                    # Horizontal rotation around Y axis
+                                    eye = {
+                                        'x': cam_distance * sin_val,
+                                        'y': offset,
+                                        'z': -cam_distance * cos_val
+                                    }
+                                    up = {'x': 0, 'y': -1, 'z': 0}
+                                
+                                # Rotate camera via JavaScript
+                                session.set_camera(eye=eye, up=up)
+                                
+                                # Take screenshot
+                                session.screenshot(fig_path, convert_to_jpeg=True, jpeg_quality=95,
+                                                 auto_crop=False)
+                                
+                                # Verify
+                                if not os.path.exists(fig_path) or os.path.getsize(fig_path) < 1024:
+                                    self._vprint(f'\n⚠️  Frame {i+1} export failed')
+                                    frame_export_failed = True
+                                    break
+                                
+                                # Count completed frames for progress display
+                                completed_count = len([f for f in os.listdir(pic_folder) 
+                                                      if f.startswith('deg_') and f.endswith('.jpeg') 
+                                                      and os.path.getsize(os.path.join(pic_folder, f)) >= 1024])
+                                
+                                elapsed = time.time() - t0
+                                avg_time = elapsed / max(1, completed_count - resume_from_frame)
+                                remaining = avg_time * (len(steps_to_write) - completed_count)
+                                print(f'\r  Frame {completed_count}/{len(steps_to_write)} | '
+                                      f'Elapsed: {elapsed:.1f}s | '
+                                      f'ETA: {remaining:.1f}s | '
+                                      f'{avg_time:.2f}s/frame', end='    ', flush=True)
+                        
+                        # Check if all frames completed
+                        final_frame_count = len([f for f in os.listdir(pic_folder) 
+                                                if f.startswith('deg_') and f.endswith('.jpeg')
+                                                and os.path.getsize(os.path.join(pic_folder, f)) >= 1024])
+                        
+                        if final_frame_count >= len(steps_to_write) and not frame_export_failed:
+                            webdriver_success = True
+                            break  # Exit retry loop on success
+                        elif frame_export_failed:
+                            # Frame export failed but not due to crash - don't retry
+                            break
+                            
+                    except Exception as e:
+                        last_error = e
+                        error_msg = str(e).lower()
+                        # Check if this is a Chrome crash (empty message or specific patterns)
+                        is_chrome_crash = (
+                            'Message: \n' in str(e) or 
+                            str(e) == '' or
+                            'chrome not reachable' in error_msg or
+                            'session deleted' in error_msg or
+                            'no such window' in error_msg or
+                            'tab crashed' in error_msg or
+                            'target window already closed' in error_msg or
+                            'disconnected' in error_msg
+                        )
+                        
+                        if is_chrome_crash:
+                            # Count how many frames were saved before crash
+                            frames_saved = len([f for f in os.listdir(pic_folder) 
+                                              if f.startswith('deg_') and f.endswith('.jpeg')
+                                              and os.path.getsize(os.path.join(pic_folder, f)) >= 1024])
+                            
+                            # Check if this crash is at a new position (progress was made)
+                            if frames_saved > last_crash_frame:
+                                # Progress was made! Reset retry counter
+                                consecutive_crashes_at_same_point = 1
+                                last_crash_frame = frames_saved
+                                self._vprint(f'\n   ⚠️  Chrome crashed unexpectedly at frame {frames_saved}. Will resume from there...')
+                            else:
+                                # Crashed at same position again
+                                consecutive_crashes_at_same_point += 1
+                                self._vprint(f'\n   ⚠️  Chrome crashed again at frame {frames_saved} (attempt {consecutive_crashes_at_same_point}/{max_retries})')
+                            
+                            # Do NOT delete frames - keep them for resume
+                            # Reset timer for next attempt's ETA calculation
+                            t0 = time.time()
+                            continue
+                        else:
+                            # Not a crash - some other error, don't retry
+                            break
+                
+                # Handle final result
+                if not webdriver_success:
+                    if last_error:
+                        self._vprint(f'\n⚠️  WebDriver export failed after {consecutive_crashes_at_same_point} consecutive crashes at same point: {last_error}')
+                    self._vprint(f'      Falling back to kaleido...')
+                    self._vprint(f'      💡 Tip: Set export_method="kaleido" for future use if WebDriver continues to fail.')
+                    use_kaleido_fallback = True
+                    frame_export_failed = False  # Reset to try kaleido
+                    # Reset timer for kaleido attempt
+                    t0 = time.time()
+                
+                # Clean up temp HTML
+                try:
+                    os.remove(temp_html)
+                except:
+                    pass
+                
+            if actual_export_method == 'kaleido' or use_kaleido_fallback:
                 # Default: kaleido export with timeout
                 # Check HTML size and auto-simplify if > size cap
                 html_size_mb = 0

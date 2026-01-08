@@ -75,17 +75,17 @@ File size and rendering optimizations:
    • 'tube' mode: renders full skeleton with radius (larger)
    • 'line' mode: renders skeleton lines only (much smaller)
 
-4. Neuron Merging and Simplification (NEW!):
-   • merge_neurons=True: Merges all neurons of a layer into one object
-   • mesh_simplification=0.9: Reduces mesh faces by 90%
-   • Result: Massive file size reduction for 'tube' mode (up to 90%)
+4. Legend Modes:
+   • legend_mode='single': Each neuron gets its own legend entry
+   • legend_mode='type': Group by neuron type within layer
+   • legend_mode='layer': All neurons in layer share one legend entry
 """)
 
 print('\nFile Size Comparison:')
 print('  skeleton_mode="tube", with synapses:     ~8-15 MB')
 print('  skeleton_mode="tube", ignore_synapses:   ~4-8 MB   (50% reduction)')
 print('  skeleton_mode="line", ignore_synapses:   ~2-4 MB   (75% reduction)')
-print('  merge_neurons=True, simplification=0.9:  ~1-2 MB   (90% reduction)')
+print('  simplification=0.9:                      ~1-2 MB   (90% reduction)')
 
 # =============================================================================
 # Demo 3: Enhanced export_video
@@ -163,9 +163,8 @@ vs = VisualizeSkeleton(
     # OPTIMIZATION 3: Minimal ROI meshes
     mesh_roi=['EB', 'PB'],
     
-    # OPTIMIZATION 4: Merge and Simplify (for tube mode)
-    # merge_neurons=True,
-    # mesh_simplification=0.9,
+    # OPTIMIZATION 4: Use mesh simplification (for tube mode)
+    # skeleton_mesh_simplification=0.9,
     
     saveas='optimized_plot'
 )
@@ -291,9 +290,11 @@ skeleton_mode : str, default 'tube'
     'tube': render skeleton with radius (larger files)
     'line': render skeleton lines only (smaller files)
 
-merge_neurons : bool, default False
-    Merge all neurons of a layer into a single 3D object.
-    Significantly reduces file size and rendering overhead.
+legend_mode : str, default 'layer'
+    Control how neurons appear in the legend:
+    'single': Each neuron gets its own legend entry
+    'type': Group by neuron type
+    'layer': All neurons in layer share one legend entry
 
 mesh_simplification : float, default 0.0
     Simplification factor (0.0 to 1.0) for merged meshes.

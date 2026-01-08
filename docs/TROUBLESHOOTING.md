@@ -82,6 +82,24 @@ pip install neuronbridge-python --no-deps
 
 ---
 
+#### NeuronBridge Client Initialization Error
+
+**Symptom:**
+```
+Failed to initialize NeuronBridge client
+```
+
+**Cause:** Network connectivity issues, proxy/VPN interference, or NeuronBridge service unavailable.
+
+**Solutions:**
+
+1. **Check network connection** - Ensure you have internet access
+2. **Disable VPN/proxy** - Try without VPN if you're using one
+3. **Retry** - The service may be temporarily unavailable
+4. **Check NeuronBridge status** - Visit https://neuronbridge.janelia.org/ to verify service is online
+
+---
+
 #### General Import Errors
 
 **Symptom:**
@@ -266,12 +284,12 @@ CRITICAL ERROR: FlyWire/BANC data preparation failed.
    | ------------------------------------------- | --------------------- | -------------------- |
    | `classification.csv.gz`                     | Neuron Classification | ✅ Yes                |
    | `connections_princeton_no_threshold.csv.gz` | Connectivity Data     | ✅ Yes                |
-   | `names.csv.gz`                              | Neuron Names          | Recommended          |
-   | `coordinates.csv.gz`                        | Soma Coordinates      | Recommended          |
-   | `neurons.csv.gz`                            | Neurotransmitters     | Recommended          |
-   | `cell_stats.csv.gz`                         | Cell Statistics       | Recommended          |
-   | `consolidated_cell_types.csv.gz`            | Cell Types            | Recommended          |
-   | `fafb_v783_princeton_synapse_table.csv.gz`  | Synapse Coordinates   | For visualization    |
+   | `names.csv.gz`                              | Neuron Names          | ✅ Yes                |
+   | `coordinates.csv.gz`                        | Soma Coordinates      | ✅ Yes                |
+   | `neurons.csv.gz`                            | Neurotransmitters     | ✅ Yes                |
+   | `cell_stats.csv.gz`                         | Cell Statistics       | ✅ Yes                |
+   | `consolidated_cell_types.csv.gz`            | Cell Types            | ✅ Yes                |
+   | `fafb_v783_princeton_synapse_table.csv.gz`  | Synapse Coordinates   | For 3D visualization |
    | `sk_lod1_783_healed.zip`                    | Skeletons             | For 3D visualization |
 
 4. **Run the converter:**
@@ -406,6 +424,67 @@ vs = VisualizeSkeleton(
 
 ---
 
+### Export Method Performance Guide
+
+Based on comprehensive benchmarking (5 trials per condition, scales 1-10), here are the recommended export methods:
+
+#### Benchmark Results Summary
+
+| Scale | kaleido | webdriver | webdriver-fast | **Fastest**    |
+| ----- | ------- | --------- | -------------- | -------------- |
+| 1     | 2.1s    | 0.7s      | **0.3s**       | webdriver-fast |
+| 2     | 1.6s    | 0.9s      | **0.5s**       | webdriver-fast |
+| 3     | 2.2s    | 1.1s      | **0.9s**       | webdriver-fast |
+| 4     | 2.5s    | **1.3s**  | 1.5s           | webdriver      |
+| 5     | 3.1s    | **1.4s**  | 2.2s           | webdriver      |
+| 6     | 2.4s    | **1.6s**  | 2.5s           | webdriver      |
+| 7     | 2.7s    | **1.7s**  | 2.3s           | webdriver      |
+
+
+#### Recommendations by Use Case
+
+| Use Case                       | Recommended Method             | Reason                                      |
+| ------------------------------ | ------------------------------ | ------------------------------------------- |
+| **Single PNG, scale 1-3**      | `webdriver-fast`               | 2-7x faster than kaleido                    |
+| **Single PNG, scale 4-7**      | `webdriver`                    | Most consistent, 1.5-2x faster than kaleido |
+| **Video export (many frames)** | `webdriver-fast` with scale ≤3 | Best throughput for batch processing        |
+| **Maximum reliability**        | `kaleido`                      | Most stable, but 1.5-3x slower              |
+
+#### Configuration Examples
+
+```python
+# Fast preview export (scale=1-3)
+vs = VisualizeSkeleton(
+    ...,
+    export_method='webdriver-fast',
+    export_scale=2
+)
+
+# High quality export (scale=4-7)
+vs = VisualizeSkeleton(
+    ...,
+    export_method='webdriver',
+    export_scale=5
+)
+
+# Video export (optimize for throughput)
+vs = VisualizeSkeleton(
+    ...,
+    export_method='webdriver-fast',
+    export_scale=3  # Good balance of quality and speed
+)
+vs.export_video(fps=30)
+
+# Maximum reliability (fallback)
+vs = VisualizeSkeleton(
+    ...,
+    export_method='kaleido',
+    export_timeout=120
+)
+```
+
+---
+
 ### Kaleido Export Errors
 
 #### Export Timeout
@@ -489,6 +568,61 @@ vs = VisualizeSkeleton(
 
 ### Memory & Performance Issues
 
+#### WebDriver Request Content-Length Error (Historical)
+
+**Symptom:**
+```
+WebDriverException: Message: request content-length too big or unknown
+```
+
+**Status:** ✅ Fixed in current version.
+
+**Solution (Automatic):** The current version always uses a local HTTP server to serve HTML files,
+which works reliably with files of any size (tested up to 200MB+).
+
+---
+
+#### Chrome Tab Crashes During Video Export (Historical)
+
+**Symptom:**
+```
+selenium.common.exceptions.WebDriverException: Message: tab crashed
+```
+
+**Status:** ✅ Fixed in current version.
+
+**Solution (Automatic):** The current version uses `canvas.toDataURL()` for screenshot capture,
+which is memory-efficient and doesn't cause Chrome to crash. Combined with automatic memory
+cleanup intervals for large files, video exports now complete reliably.
+
+---
+
+#### Video Export Aborts Mid-Way
+
+**Symptom:** Video or PNG export starts successfully but aborts somewhere in the middle
+(e.g., after 50-100 frames), not at the beginning.
+
+**Cause:** The default `webdriver_render_wait=0` may be too fast for some systems or
+complex figures, causing rendering to fall behind.
+
+**Solution:** Increase the render wait time:
+```python
+vs = VisualizeSkeleton(
+    ...,
+    webdriver_render_wait=0.3,  # Add delay between frames (try 0.3-0.5)
+)
+```
+
+Alternatively, use `None` for auto-calibration:
+```python
+vs = VisualizeSkeleton(
+    ...,
+    webdriver_render_wait=None,  # Auto-calibrate based on machine performance
+)
+```
+
+---
+
 #### Memory Error / Out of Memory
 
 **Symptom:**
@@ -570,6 +704,56 @@ MemoryError: Unable to allocate array
 **Workaround (if using old version):**
 - Update to latest version
 - Regenerate the network HTML
+
+---
+
+### Layout Issues After Loading
+
+**Symptom:** Nodes positioned incorrectly, overlapping, or layout looks broken after opening HTML file.
+
+**Solutions:**
+
+1. **Refresh the page**
+   - Press `F5` or `Ctrl+R` (macOS: `Cmd+R`)
+   - This forces the browser to re-render and re-calculate the layout
+
+2. **Click the Reset Layout button**
+   - Click the 🔄 **Reset** button in the Layout panel
+   - This re-runs the layout algorithm with animation
+
+3. **Try a different layout algorithm**
+   - Use the dropdown selector to switch layouts (e.g., Dagre → fCoSE)
+   - Some layouts work better for certain network structures
+
+---
+
+### Labels Not Visible
+
+**Symptom:** Node labels are missing or invisible.
+
+**Solutions:**
+
+1. **Toggle label visibility**
+   - Press `L` key to toggle label position (center ↔ outside)
+   - Or click 👁️ **Hide Labels** / **Show Labels** button
+
+2. **Increase font size**
+   - Use the Font Size slider (minimum 8px, default 12px)
+
+3. **Check opacity settings**
+   - In Color Palette panel, ensure node opacity > 0%
+
+---
+
+### Hidden Elements Won't Return
+
+**Symptom:** Pressed "Show All" but some nodes/edges still missing.
+
+**Solutions:**
+
+1. **Click Show All button**: Look for 👁️ **Show All Nodes** button
+2. **Clear edge filter**: Empty the "Hide Edges (weight)" input field
+3. **Refresh page**: As a last resort, reload the HTML file
 
 ---
 

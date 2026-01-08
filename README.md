@@ -35,16 +35,17 @@ A comprehensive Python toolkit for analyzing and visualizing connectome data fro
 
 ### 📖 Feature Documentation
 
-| Feature                | Guide                                                                   | Script                         |
-| ---------------------- | ----------------------------------------------------------------------- | ------------------------------ |
-| **Basic Usage**        | [Basic Usage Guide](docs/core-features/BasicUsage_Guide.md)             | `FindDirect.py`, `FindPath.py` |
-| **Score Calculations** | [Score Calculation Guide](docs/core-features/ScoreCalculation_Guide.md) | All pathfinding scripts        |
-| **EM↔LM Mapping**      | [NeuronBridge Guide](docs/core-features/NeuronBridge_Guide.md)          | `NeuronBridge_FindLines.py`    |
-| **Line Analysis**      | [Workflow Guide](docs/core-features/NeuronBridge_Workflow.md)           | `NeuronBridge_Colabel.py`      |
-| **FlyLight Images**    | [FlyLight Guide](docs/core-features/FlyLight_Guide.md)                  | `FlyLight_fetcher.py`          |
-| **Cross-Dataset**      | [Comparison Guide](docs/core-features/CrossDatasetComparison_Guide.md)  | `InterDatasetComparator.py`    |
-| **Homolog Finding**    | [Homolog Guide](docs/core-features/HomologFinding_Guide.md)             | `FindHomologs.py`              |
-| **3D Visualization**   | [3D Skeleton Guide](docs/visualizations/3D_Skeleton_Guide.md)           | `plot3dSkeleton.py`            |
+| Feature                | Guide                                                                       | Script                         |
+| ---------------------- | --------------------------------------------------------------------------- | ------------------------------ |
+| **Basic Usage**        | [Basic Usage Guide](docs/core-features/BasicUsage_Guide.md)                 | `FindDirect.py`, `FindPath.py` |
+| **Score Calculations** | [Score Calculation Guide](docs/core-features/ScoreCalculation_Guide.md)     | All pathfinding scripts        |
+| **EM↔LM Mapping**      | [NeuronBridge Guide](docs/core-features/NeuronBridge_Guide.md)              | `NeuronBridge_FindLines.py`    |
+| **Line Analysis**      | [Workflow Guide](docs/core-features/NeuronBridge_Workflow.md)               | `NeuronBridge_Colabel.py`      |
+| **FlyLight Images**    | [FlyLight Guide](docs/core-features/FlyLight_Guide.md)                      | `FlyLight_fetcher.py`          |
+| **Cross-Dataset**      | [Comparison Guide](docs/core-features/CrossDatasetComparison_Guide.md)      | `InterDatasetComparator.py`    |
+| **Homolog Finding**    | [Homolog Guide](docs/core-features/HomologFinding_Guide.md)                 | `FindHomologs.py`              |
+| **3D Visualization**   | [3D Skeleton Guide](docs/visualizations/3D_Skeleton_Guide.md)               | `plot3dSkeleton.py`            |
+| **Path Visualization** | [Interaction Guide](docs/visualizations/VisualizePath_Interaction_Guide.md) | `PlotPath.py`                  |
 
 ### 📂 Full Documentation Index
 
@@ -233,7 +234,7 @@ fc = FindNeuronConnection(
 - **Export/Import**: Save complete graph states including custom groups and NT settings
 - **Default opacity**: 50% for edges (vs 20%), 100% for nodes (vs 50%) - better visibility
 
-📖 **[Network Features Guide](docs/visualizations/VisualizePath_Network_Features.md)**
+📖 **[Network Features Guide](docs/visualizations/VisualizePath_Network_Features.md)** | **[Interaction Guide](docs/visualizations/VisualizePath_Interaction_Guide.md)**
 
 ### 🔐 Authentication Improvements
 - **token_info.txt recommended**: Store all API tokens in one file (NeuPrint, CAVE, NeuronBridge)

@@ -28,7 +28,7 @@ vs = VisualizeSkeleton(
     synapse_alpha = 0.6,
     skeleton_mode = 'tube',
     synapse_mode = 'cone',
-    merge_neurons=True,
+    legend_mode='layer',  # 'single', 'type', or 'layer'
     
     show_fig=True,
     
@@ -43,7 +43,7 @@ vs = VisualizeSkeleton(
 vs.plot_neurons()
 
 # Export PDF with individual neuron profiles, per-legend plots. 
-# set VisualizeSkeleton.merge_neurons=False to plot single neurons.
+# legend_mode='single' shows individual neurons, 'type' groups by type, 'layer' groups by layer.
 # plot_individuals() should be called AFTER plot_neurons() for correct figure references.
 
 vs.plot_individuals(

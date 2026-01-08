@@ -169,13 +169,16 @@ LIBRARY_TO_DATASET = {
     'FlyEM_Hemibrain_v1.2.1': 'hemibrain_v1_2_1',
     'FlyEM_Hemibrain_v1.2': 'hemibrain_v1_2_1',
     'FlyEM_Hemibrain': 'hemibrain_v1_2_1',
-    'FlyEM_MANC_v1.0': 'male-cns_v0_9',
-    'FlyEM_MANC': 'male-cns_v0_9',
+    'FlyEM_MANC_v1.2.1': 'manc_v1_2_1',
+    'FlyEM_MANC_v1.0': 'manc_v1_0',
+    'FlyEM_MANC': 'manc_v1_0',
     'FlyEM_Male_CNS_Brain_v0.9': 'male-cns_v0_9',
+    'FlyEM_Male_CNS_VNC_v0.9': 'male-cns_v0_9',
     'FlyEM_Male_CNS_v0.9': 'male-cns_v0_9',
     'FlyEM_Male_CNS': 'male-cns_v0_9',
     'FlyWire_FAFB': 'flywire_FAFB_v783',
     'FlyWire_FAFB_v783': 'flywire_FAFB_v783',
+    'FlyWire_FAFB_v783_realign': 'flywire_FAFB_v783',
     'FlyWire_BANC': 'flywire_BANC_v626',
     'FlyWire_BANC_v626': 'flywire_BANC_v626',
     'FlyEM_Optic_Lobe': 'optic-lobe_v1_1',
@@ -186,13 +189,16 @@ LIBRARY_TO_DATASET_NAME = {
     'FlyEM_Hemibrain_v1.2.1': 'hemibrain:v1.2.1',
     'FlyEM_Hemibrain_v1.2': 'hemibrain:v1.2.1',
     'FlyEM_Hemibrain': 'hemibrain:v1.2.1',
-    'FlyEM_MANC_v1.0': 'male-cns:v0.9',
-    'FlyEM_MANC': 'male-cns:v0.9',
+    'FlyEM_MANC_v1.2.1': 'manc:v1.2.1',
+    'FlyEM_MANC_v1.0': 'manc:v1.0',
+    'FlyEM_MANC': 'manc:v1.0',
     'FlyEM_Male_CNS_Brain_v0.9': 'male-cns:v0.9',
+    'FlyEM_Male_CNS_VNC_v0.9': 'male-cns:v0.9',
     'FlyEM_Male_CNS_v0.9': 'male-cns:v0.9',
     'FlyEM_Male_CNS': 'male-cns:v0.9',
     'FlyWire_FAFB': 'flywire_FAFB_v783',
     'FlyWire_FAFB_v783': 'flywire_FAFB_v783',
+    'FlyWire_FAFB_v783_realign': 'flywire_FAFB_v783',
     'FlyWire_BANC': 'flywire_BANC_v626',
     'FlyWire_BANC_v626': 'flywire_BANC_v626',
     'FlyEM_Optic_Lobe': 'optic-lobe:v1.1',
@@ -205,11 +211,54 @@ DATASET_ABBREVIATIONS = {
     'hemibrain:v1.2.1': 'HEMI',
     'male-cns_v0_9': 'MCNS',
     'male-cns:v0.9': 'MCNS',
+    'manc_v1_0': 'MANC',
+    'manc:v1.0': 'MANC',
+    'manc_v1_2_1': 'MANC',
+    'manc:v1.2.1': 'MANC',
     'flywire_FAFB_v783': 'FAFB',
     'flywire_BANC_v626': 'BANC',
     'optic-lobe_v1_1': 'OLOB',
     'optic-lobe:v1.1': 'OLOB',
 }
+
+
+def _to_int_bodyid(val):
+    """
+    Convert a bodyId value to integer, handling various input formats.
+    
+    Handles:
+    - Integer values (passthrough)
+    - String values like '5813128953' 
+    - Float values like 5813128953.0
+    - String floats like '5813128953.0'
+    
+    Returns the original value if conversion fails.
+    """
+    import numpy as np
+    
+    # Already an int
+    if isinstance(val, (int, np.integer)):
+        return int(val)
+    
+    # Float (including numpy float)
+    if isinstance(val, (float, np.floating)):
+        return int(val)
+    
+    # String
+    if isinstance(val, str):
+        # Try direct int conversion first (handles '5813128953')
+        try:
+            return int(val)
+        except ValueError:
+            pass
+        # Try float then int (handles '5813128953.0')
+        try:
+            return int(float(val))
+        except ValueError:
+            pass
+    
+    # Return original if conversion fails
+    return val
 
 
 # Line name prefixes for classification
@@ -3065,15 +3114,45 @@ class NeuronBridgeFinder:
         return line_stats
 
     def _init_client(self):
-        """Initialize the NeuronBridge client."""
+        """Initialize the NeuronBridge client with retry logic."""
+        import time
+        
+        max_retries = 3
+        retry_delays = [2, 5, 10]  # Seconds to wait before each retry
+        
         self._vprint("🔌 Initializing NeuronBridge client...")
-        try:
-            self._client = NBClient()
-            # Fix S3 URL version mismatch if needed
-            self._fix_store_prefixes()
-            self._vprint("  ✓ Client initialized successfully")
-        except Exception as e:
-            raise RuntimeError(f"Failed to initialize NeuronBridge client: {e}")
+        
+        for attempt in range(max_retries):
+            try:
+                # Clear any previous client state before retry
+                # Use getattr to safely check if _client exists and is not None
+                if getattr(self, '_client', None) is not None:
+                    try:
+                        del self._client
+                    except AttributeError:
+                        pass
+                    import gc
+                    gc.collect()
+                
+                self._client = NBClient()
+                # Fix S3 URL version mismatch if needed
+                self._fix_store_prefixes()
+                self._vprint("  ✓ Client initialized successfully")
+                return  # Success
+                
+            except Exception as e:
+                error_msg = str(e)
+                if attempt < max_retries - 1:
+                    wait_time = retry_delays[attempt]
+                    self._vprint(f"  ⚠️  Initialization failed (attempt {attempt + 1}/{max_retries}): {error_msg}")
+                    self._vprint(f"  ⏳ Waiting {wait_time}s before retry...")
+                    time.sleep(wait_time)
+                else:
+                    raise RuntimeError(
+                        f"Failed to initialize NeuronBridge client after {max_retries} attempts: {error_msg}\n"
+                        f"Please check your network connection and try again later.\n"
+                        f"See TROUBLESHOOTING.md for common solutions."
+                    )
     
     def _fix_store_prefixes(self):
         """
@@ -3101,6 +3180,29 @@ class NeuronBridgeFinder:
                                         new_url = new_url.replace('data-dev', 'data-prod')
                                     store.prefixes[key] = new_url
     
+    def _parse_library_name(self, library_name: str) -> Tuple[str, str]:
+        """
+        Parse a NeuronBridge library name into base name and version.
+        
+        Parameters
+        ----------
+        library_name : str
+            Library name like 'FlyEM_Hemibrain_v1.2.1' or 'FlyEM_MANC_v1.2.1'
+            
+        Returns
+        -------
+        Tuple[str, str]
+            (base_name, version) e.g. ('FlyEM_Hemibrain', '1.2.1') or ('FlyEM_MANC', '1.2.1')
+        """
+        if not library_name:
+            return ('', '')
+        
+        # Split on '_v' to get base and version
+        if '_v' in library_name:
+            parts = library_name.rsplit('_v', 1)
+            return (parts[0], parts[1] if len(parts) > 1 else '')
+        return (library_name, '')
+    
     def _get_dataset_from_library(self, library_name: str) -> Optional[str]:
         """
         Get local dataset folder name from NeuronBridge library name.
@@ -3122,10 +3224,40 @@ class NeuronBridgeFinder:
         if library_name in LIBRARY_TO_DATASET:
             return LIBRARY_TO_DATASET[library_name]
         
-        # Partial match (try prefixes)
+        # Try to parse and match by base name with different versions
+        base_name, version = self._parse_library_name(library_name)
+        if base_name and version:
+            # Look for any existing mapping with the same base name
+            for lib_pattern, dataset in LIBRARY_TO_DATASET.items():
+                pattern_base, _ = self._parse_library_name(lib_pattern)
+                if pattern_base == base_name:
+                    # Found a matching base - try to construct the dataset folder
+                    # Convert version to folder format (1.2.1 -> v1_2_1)
+                    version_folder = 'v' + version.replace('.', '_')
+                    # Extract dataset base name from the mapped folder
+                    dataset_base = dataset.rsplit('_v', 1)[0] if '_v' in dataset else dataset.replace('_', '-')
+                    new_dataset_folder = f"{dataset_base}_{version_folder}"
+                    
+                    # Print warning about unmapped library
+                    self._vprint(f"  ⚠️  UNMAPPED LIBRARY: '{library_name}'")
+                    self._vprint(f"      Attempting auto-mapping to: {new_dataset_folder}")
+                    self._vprint(f"      (Based on similar library: {lib_pattern} -> {dataset})")
+                    self._vprint(f"      Consider adding this to LIBRARY_TO_DATASET in neuronbridge_finder.py")
+                    
+                    return new_dataset_folder
+        
+        # Partial match (try prefixes) - legacy fallback
         for lib_pattern, dataset in LIBRARY_TO_DATASET.items():
             if library_name.startswith(lib_pattern.split('_v')[0]):
+                self._vprint(f"  ⚠️  PARTIAL MATCH: '{library_name}' -> {dataset}")
+                self._vprint(f"      Consider adding explicit mapping to LIBRARY_TO_DATASET")
                 return dataset
+        
+        # No match found - print explicit warning
+        self._vprint(f"  ⚠️  UNKNOWN LIBRARY: '{library_name}'")
+        self._vprint(f"      This library is not mapped to any local dataset.")
+        self._vprint(f"      To add support, update LIBRARY_TO_DATASET and LIBRARY_TO_DATASET_NAME")
+        self._vprint(f"      in src/neuronbridge_finder.py with the appropriate mappings.")
         
         return None
     
@@ -3150,12 +3282,96 @@ class NeuronBridgeFinder:
         if library_name in LIBRARY_TO_DATASET_NAME:
             return LIBRARY_TO_DATASET_NAME[library_name]
         
-        # Partial match (try prefixes)
+        # Try to parse and match by base name with different versions
+        base_name, version = self._parse_library_name(library_name)
+        if base_name and version:
+            # Look for any existing mapping with the same base name
+            for lib_pattern, dataset_name in LIBRARY_TO_DATASET_NAME.items():
+                pattern_base, _ = self._parse_library_name(lib_pattern)
+                if pattern_base == base_name:
+                    # Found a matching base - construct the dataset name
+                    # Extract dataset base from the mapped name (e.g., 'hemibrain' from 'hemibrain:v1.2.1')
+                    if ':v' in dataset_name:
+                        dataset_base = dataset_name.split(':v')[0]
+                        new_dataset_name = f"{dataset_base}:v{version}"
+                        return new_dataset_name
+                    elif '_v' in dataset_name:
+                        # Handle folder-style names
+                        dataset_base = dataset_name.rsplit('_v', 1)[0]
+                        return f"{dataset_base}:v{version}"
+        
+        # Partial match (try prefixes) - legacy fallback
         for lib_pattern, dataset_name in LIBRARY_TO_DATASET_NAME.items():
             if library_name.startswith(lib_pattern.split('_v')[0]):
                 return dataset_name
         
         return None
+    
+    def _ensure_datasets_loaded(self, datasets: List[str]) -> List[str]:
+        """
+        Ensure all required datasets are loaded, pulling from NeuPrint if needed.
+        
+        This method identifies unique datasets from NeuronBridge results and
+        ensures each one is available locally (loading from cache or pulling
+        from NeuPrint).
+        
+        Parameters
+        ----------
+        datasets : list of str
+            List of dataset names (e.g., ['hemibrain:v1.2.1', 'male-cns:v0.9', 'manc:v1.2.1'])
+            
+        Returns
+        -------
+        list of str
+            List of successfully loaded dataset folder names.
+        """
+        loaded = []
+        
+        for dataset in datasets:
+            # Convert dataset name to folder format
+            dataset_folder = dataset.replace(':', '_').replace('.', '_')
+            
+            # Check if already loaded in cache
+            if dataset_folder in self._neuron_dfs:
+                loaded.append(dataset_folder)
+                continue
+            
+            # Try to load from local file
+            if self.datasets_path:
+                neuron_df_path = os.path.join(
+                    self.datasets_path, dataset_folder, f"{dataset_folder}_allneurons_neuron_df.csv"
+                )
+                
+                if os.path.exists(neuron_df_path):
+                    try:
+                        df = pd.read_csv(neuron_df_path, dtype={'bodyId': str}, low_memory=False)
+                        self._neuron_dfs[dataset_folder] = df
+                        self._vprint(f"   ✓ Loaded {len(df):,} neurons from {dataset_folder}")
+                        loaded.append(dataset_folder)
+                        continue
+                    except Exception as e:
+                        self._vprint(f"   ⚠️ Could not load {dataset_folder}: {e}")
+            
+            # Try to pull from NeuPrint
+            self._vprint(f"   ⏳ {dataset}: not found locally, attempting to pull from NeuPrint...")
+            pulled_df = self._pull_and_load_dataset(dataset_folder)
+            
+            if pulled_df is not None and not pulled_df.empty:
+                self._vprint(f"   ✓ Pulled {len(pulled_df):,} neurons for {dataset}")
+                loaded.append(dataset_folder)
+            else:
+                # Try fallback via FindNeuronConnection
+                self._vprint(f"   ⏳ Trying FindNeuronConnection fallback for {dataset}...")
+                fnc_df = self._fetch_neuron_df_via_fnc(dataset_folder)
+                if fnc_df is not None and not fnc_df.empty:
+                    self._vprint(f"   ✓ Loaded {len(fnc_df):,} neurons via FNC for {dataset}")
+                    loaded.append(dataset_folder)
+                else:
+                    self._vprint(f"   ⚠️ Could not load dataset: {dataset}")
+                    self._vprint(f"      This dataset may not be available in NeuPrint.")
+                    self._vprint(f"      Neurons from this dataset will be skipped in visualization.")
+        
+        return loaded
     
     def _load_neuron_df_for_dataset(self, dataset: str) -> Optional[pd.DataFrame]:
         """
@@ -5268,8 +5484,18 @@ class NeuronBridgeFinder:
         mode_label = 'types' if visualize_by == 'type' else 'bodyIds'
         self._vprint(f"\n🎨 Visualizing top {top_n} {mode_label}...")
         
-        # Process by dataset
+        # Get all unique datasets from results
         datasets = combined_df['dataset'].unique()
+        
+        # Pre-load all required datasets (pull from NeuPrint if not available locally)
+        self._vprint(f"\n📦 Loading datasets for visualization...")
+        loaded_datasets = self._ensure_datasets_loaded(datasets)
+        
+        if not loaded_datasets:
+            self._vprint("   ⚠️  No datasets could be loaded for visualization")
+            return
+        
+        self._vprint(f"   ✓ {len(loaded_datasets)} dataset(s) ready for visualization")
         
         for dataset in datasets:
             ds_df = combined_df[combined_df['dataset'] == dataset].copy()
@@ -5320,8 +5546,8 @@ class NeuronBridgeFinder:
                 for rank_idx, type_name in enumerate(top_items, start=1):
                     # Case-sensitive type matching
                     type_neurons = ds_df[ds_df['type_label'] == type_name]['bodyId'].tolist()
-                    # Convert to int if possible
-                    type_neurons = [int(n) if str(n).isdigit() else n for n in type_neurons]
+                    # Convert to int (handles strings, floats, and string floats like '123.0')
+                    type_neurons = [_to_int_bodyid(n) for n in type_neurons]
                     
                     if len(type_neurons) > 0:
                         neuron_layers.append(type_neurons)
@@ -5336,7 +5562,7 @@ class NeuronBridgeFinder:
             
             else:  # visualize_by == 'bodyId'
                 # Get top N bodyIds by score, but group by type for visualization
-                # Each type becomes a layer, but merge_neurons=False shows individual neurons
+                # Each type becomes a layer, but legend_mode='single' shows individual neurons
                 score_col = 'score' if 'score' in ds_df.columns else None
                 
                 # Create type label (use 'unknown_{bodyId}' for untyped)
@@ -5367,7 +5593,8 @@ class NeuronBridgeFinder:
                 type_min_rank = {}  # Track minimum rank (best) for each type
                 for rank_idx, (_, row) in enumerate(ds_df_sorted.iterrows(), start=1):
                     bodyid = row['bodyId']
-                    bodyid_val = int(bodyid) if str(bodyid).isdigit() else bodyid
+                    # Convert to int (handles strings, floats, and string floats like '123.0')
+                    bodyid_val = _to_int_bodyid(bodyid)
                     type_label = row['type_label']
                     
                     if type_label not in type_to_bodyids:
@@ -5406,36 +5633,31 @@ class NeuronBridgeFinder:
                 continue
             
             # Check if at least some bodyIds can be found
-            # Handle type mismatch: bodyIds from NeuronBridge may be int, but local df may be str or vice versa
+            # Local dataset is loaded with dtype={'bodyId': str}, so convert to strings for comparison
             sample_ids = [bid for layer in neuron_layers for bid in layer[:3]]  # Sample bodyIds
             
-            # Determine the type of bodyId in the local DataFrame
-            sample_df_bid = local_neuron_df['bodyId'].iloc[0] if len(local_neuron_df) > 0 else None
-            if sample_df_bid is not None:
-                import numpy as np
-                if isinstance(sample_df_bid, (int, np.integer)):
-                    # DataFrame has int bodyIds, convert test_ids to int
-                    test_ids = [int(bid) if isinstance(bid, str) and str(bid).isdigit() else bid for bid in sample_ids]
-                else:
-                    # DataFrame has string bodyIds, convert test_ids to str
-                    test_ids = [str(bid) for bid in sample_ids]
-            else:
-                test_ids = [str(bid) for bid in sample_ids]
+            # Convert sample_ids to strings for comparison (local df uses strings)
+            # Use _to_int_bodyid first to normalize, then convert to string
+            test_ids = [str(_to_int_bodyid(bid)) for bid in sample_ids]
             
             found_count = local_neuron_df[local_neuron_df['bodyId'].isin(test_ids)].shape[0]
             
             if found_count == 0:
+                # Debug: show what we're looking for vs what exists
                 self._vprint(f"   ⚠️  Skipping visualization for {dataset}: bodyIds not found in local dataset")
+                self._vprint(f"      Looking for: {test_ids[:3]}")
+                sample_local = local_neuron_df['bodyId'].head(3).tolist()
+                self._vprint(f"      Sample local bodyIds: {sample_local}")
                 self._vprint(f"      (This can happen if NeuronBridge matches come from a different dataset version)")
                 continue
             
             try:
                 # Determine brain_mesh based on dataset
-                brain_mesh = 'whole'
+                brain_mesh = 'template'  # Use template for better performance
                 if 'vnc' in dataset.lower() or 'manc' in dataset.lower():
-                    brain_mesh = 'whole'
+                    brain_mesh = 'template'
                 elif 'cns' in dataset.lower():
-                    brain_mesh = 'whole'
+                    brain_mesh = 'template'
                 
                 # Set skeleton_mesh_simplification based on dataset
                 # FAFB/FlyWire needs more simplification (0.95) due to larger meshes
@@ -5445,12 +5667,25 @@ class NeuronBridgeFinder:
                 else:
                     skeleton_simplification = 0.9
                 
-                # Set merge_neurons based on visualize_by mode
-                merge_neurons = (visualize_by == 'type')
+                # Set legend_mode based on visualize_by mode
+                legend_mode = 'layer' if visualize_by == 'type' else 'single'
                 
-                # Determine whether to show VNC mesh based on region
-                # Only show VNC when region is 'VNC' or 'All'
-                show_vnc_mesh = self.region in ('VNC', 'All')
+                # Determine whether to show VNC mesh based on region and dataset
+                # Show VNC when dataset is manc, male-cns, or region is VNC/All
+                is_vnc_dataset = ('manc' in dataset.lower() or 'cns' in dataset.lower() 
+                                  or 'vnc' in dataset.lower())
+                show_vnc_mesh = is_vnc_dataset or self.region in ('VNC', 'All')
+                
+                # Determine export_views based on region setting
+                # - region='VNC': only bottom view (shows VNC from below)
+                # - region='All': both front and bottom views (shows brain + VNC)
+                # - region='Brain': only front view (standard brain view)
+                if self.region == 'VNC':
+                    export_views = ['bottom']
+                elif self.region == 'All':
+                    export_views = ['front', 'bottom']
+                else:  # 'Brain' or default
+                    export_views = ['front']
                 
                 # Custom folder name: plot3d_{dataset_folder} (VisualizeSkeleton prepends 'plot3d_')
                 custom_saveas = dataset_folder
@@ -5465,9 +5700,10 @@ class NeuronBridgeFinder:
                     skip_synapse=True,
                     neuron_alpha=0.3,
                     skeleton_mode='tube',
-                    merge_neurons=merge_neurons,  # True for type, False for bodyId
+                    legend_mode=legend_mode,  # 'layer' for type, 'single' for bodyId
                     brain_mesh=brain_mesh,
-                    vnc_mesh=show_vnc_mesh,  # Show VNC only when region is 'VNC' or 'All'
+                    vnc_mesh=show_vnc_mesh,  # Show VNC for manc, male-cns, or VNC region
+                    export_views=export_views,  # Region-based view selection
                     skeleton_mesh_simplification=skeleton_simplification,
                     roi_mesh_simplification=0.95,
                     cache_neurons=True,
@@ -5476,11 +5712,14 @@ class NeuronBridgeFinder:
                 )
                 vs.plot_neurons()
                 
-                # Generate individual profiles if requested (only front view)
+                # Generate individual profiles if requested
+                # Use region-appropriate views for individual profile generation
                 if generate_individual_profiles:
+                    # Use same views as export_views for consistency
+                    profile_views = export_views
                     vs.plot_individuals(
                         output_format='png',
-                        views='front',
+                        views=profile_views,
                         scale=3,
                         pdf_images_per_page=pdf_images_per_page,
                         pdf_title=f"{source_line} - {dataset}",
@@ -5529,8 +5768,8 @@ class NeuronBridgeFinder:
             Set to 0 to disable (default). Requires VisualizeSkeleton module.
         visualize_by : str
             How to organize visualization: 'type' or 'bodyId'.
-            - 'type': Group neurons by type (merge_neurons=True)
-            - 'bodyId': Show individual neurons (merge_neurons=False)
+            - 'type': Group neurons by type (legend_mode='layer')
+            - 'bodyId': Show individual neurons (legend_mode='single')
             Default: 'type'
         visualize_per_dataset : bool
             If True (default), create separate visualizations per dataset.
@@ -5646,9 +5885,14 @@ class NeuronBridgeFinder:
             cache_pbar.close()
             
             if cached_lines:
-                self._vprint(f"   ✓ Loaded {len(cached_lines)} from cache")
+                self._vprint(f"   ✓ Loaded {len(cached_lines)} line result(s) from cache")
             if uncached_lines:
                 self._vprint(f"   🌐 Need to fetch {len(uncached_lines)} from API")
+            
+            # Suppress dataset loading messages during cache processing
+            # (datasets will be loaded explicitly before visualization)
+            old_suppress = getattr(self, '_suppress_loading_msgs', False)
+            self._suppress_loading_msgs = True
             
             # Process cached results first
             for line_name, cached_data in cached_lines:
@@ -5666,6 +5910,9 @@ class NeuronBridgeFinder:
                         self._save_dataset_categorized_files(
                             cached_data, line_name, output_path, verbose=False
                         )
+            
+            # Restore loading message setting
+            self._suppress_loading_msgs = old_suppress
             
             # Phase 2: Fetch uncached data with progress bar
             if uncached_lines:
@@ -5793,16 +6040,54 @@ class NeuronBridgeFinder:
             
             # Visualize top N types per dataset if requested
             if visualize_top_n > 0 and output_path:
-                self._visualize_top_types(
-                    combined_df=combined_df,
-                    top_n=visualize_top_n,
-                    output_path=output_path,
-                    per_dataset=visualize_per_dataset,
-                    source_line=lines[0] if len(lines) == 1 else '_'.join(lines[:3]),
-                    visualize_by=visualize_by,
-                    generate_individual_profiles=generate_individual_profiles,
-                    pdf_images_per_page=pdf_images_per_page,
-                )
+                # For multiple lines, visualize each line separately
+                if len(lines) > 1:
+                    self._vprint(f"\n🎨 Visualizing each line separately (multiple lines detected)...")
+                    for line_name in lines:
+                        line_df = combined_df[combined_df['source_line'] == line_name]
+                        if line_df.empty:
+                            continue
+                        
+                        # Create line-specific output folder
+                        line_output_path = os.path.join(output_path, f'viz_{line_name}')
+                        os.makedirs(line_output_path, exist_ok=True)
+                        
+                        self._vprint(f"\n   📍 {line_name}: {len(line_df)} neurons")
+                        
+                        self._visualize_top_types(
+                            combined_df=line_df,
+                            top_n=visualize_top_n,
+                            output_path=line_output_path,
+                            per_dataset=visualize_per_dataset,
+                            source_line=line_name,
+                            visualize_by=visualize_by,
+                            generate_individual_profiles=generate_individual_profiles,
+                            pdf_images_per_page=pdf_images_per_page,
+                        )
+                    
+                    # Recommend colabeling analysis for multiple lines
+                    self._vprint(f"\n" + "="*70)
+                    self._vprint(f"💡 TIP: For {len(lines)} driver lines, consider running co-labeling analysis")
+                    self._vprint(f"   to find shared neuron types and understand overlap patterns:")
+                    self._vprint(f"")
+                    self._vprint(f"   >>> nbf.analyze_colabeling(")
+                    self._vprint(f"   ...     lines={lines},")
+                    self._vprint(f"   ...     output_dir='{output_dir}',")
+                    self._vprint(f"   ...     visualize_top_n={visualize_top_n},")
+                    self._vprint(f"   ... )")
+                    self._vprint(f"="*70)
+                else:
+                    # Single line - original behavior
+                    self._visualize_top_types(
+                        combined_df=combined_df,
+                        top_n=visualize_top_n,
+                        output_path=output_path,
+                        per_dataset=visualize_per_dataset,
+                        source_line=lines[0],
+                        visualize_by=visualize_by,
+                        generate_individual_profiles=generate_individual_profiles,
+                        pdf_images_per_page=pdf_images_per_page,
+                    )
             
             return combined_df
         

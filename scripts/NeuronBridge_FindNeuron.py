@@ -94,8 +94,8 @@ if __name__ == "__main__":
     visualize_top_n = 20
     
     # How to organize visualization: 'type' or 'bodyId'
-    # - 'type': Group neurons by type (merge_neurons=True, shows combined morphology)
-    # - 'bodyId': Show individual neurons grouped by type (merge_neurons=False)
+    # - 'type': Group neurons by type (legend_mode='layer', shows combined morphology)
+    # - 'bodyId': Show individual neurons grouped by type (legend_mode='single')
     #            Legend labels: r{rank}_{type}_x{N} where N is neuron count per type
     visualize_by = 'type'
     

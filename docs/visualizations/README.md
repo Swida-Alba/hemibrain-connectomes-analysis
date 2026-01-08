@@ -4,17 +4,23 @@ Comprehensive guides for all visualization types in the Hemibrain Connectomes An
 
 ## Quick Reference
 
-| Guide                                                         | Description                                              |
-| ------------------------------------------------------------- | -------------------------------------------------------- |
-| [VisualizePath Quick Reference](./VisualizePath_QuickRef.md)  | Quick start guide for VisualizePath                      |
-| [Network Features Guide](./VisualizePath_Network_Features.md) | **Complete guide to network features, groups, NT edges** |
-| [Heatmap Guide](./Heatmap_Guide.md)                           | Interactive connection matrix visualization              |
-| [Network Guide](./Network_Guide.md)                           | Basic network visualization                              |
-| [Sankey Guide](./Sankey_Guide.md)                             | Flow-based diagram guide                                 |
-| [3D Skeleton Guide](./3D_Skeleton_Guide.md)                   | 3D anatomical visualization                              |
+| Guide                                                         | Description                                          |
+| ------------------------------------------------------------- | ---------------------------------------------------- |
+| [VisualizePath Quick Reference](./VisualizePath_QuickRef.md)  | Quick start guide for VisualizePath                  |
+| [**Interaction Guide**](./VisualizePath_Interaction_Guide.md) | **Complete keyboard/mouse/button reference**         |
+| [Network Features Guide](./VisualizePath_Network_Features.md) | Complete guide to network features, groups, NT edges |
+| [Heatmap Guide](./Heatmap_Guide.md)                           | Interactive connection matrix visualization          |
+| [Network Guide](./Network_Guide.md)                           | Basic network visualization                          |
+| [Sankey Guide](./Sankey_Guide.md)                             | Flow-based diagram guide                             |
+| [3D Skeleton Guide](./3D_Skeleton_Guide.md)                   | 3D anatomical visualization                          |
 
 ## Recent Updates (2026)
 
+- **[Interaction Guide](./VisualizePath_Interaction_Guide.md)** - Complete interactive controls reference:
+  - Keyboard shortcuts (H, E, L, Shift+Click, Double-Click)
+  - Mouse actions for all visualization types
+  - Edit Mode operations
+  - Troubleshooting common issues
 - **[Network Features Guide](./VisualizePath_Network_Features.md)** - Complete network documentation including:
   - NT (Neurotransmitter) edge groups with color coding
   - Custom group creation and management
@@ -25,14 +31,15 @@ Comprehensive guides for all visualization types in the Hemibrain Connectomes An
 ## Feature Reference
 
 ### Network Features
-| Feature           | Documentation                                                                                 |
-| ----------------- | --------------------------------------------------------------------------------------------- |
-| NT Edge Groups    | [Network Features Guide](./VisualizePath_Network_Features.md#nt-neurotransmitter-edge-groups) |
-| Custom Groups     | [Network Features Guide](./VisualizePath_Network_Features.md#custom-groups)                   |
-| Export/Import     | [Network Features Guide](./VisualizePath_Network_Features.md#exportimport)                    |
-| Edit Mode         | [Network Features Guide](./VisualizePath_Network_Features.md#edit-mode)                       |
-| Layout Algorithms | [Layout Algorithms Quick Ref](./LayoutAlgorithms_QuickRef.md)                                 |
-| Edge Filtering    | [Network Edge Filter](./NETWORK_EDGE_FILTER.md)                                               |
+| Feature                  | Documentation                                                                                 |
+| ------------------------ | --------------------------------------------------------------------------------------------- |
+| **Interactive Controls** | [Interaction Guide](./VisualizePath_Interaction_Guide.md)                                     |
+| NT Edge Groups           | [Network Features Guide](./VisualizePath_Network_Features.md#nt-neurotransmitter-edge-groups) |
+| Custom Groups            | [Network Features Guide](./VisualizePath_Network_Features.md#custom-groups)                   |
+| Export/Import            | [Network Features Guide](./VisualizePath_Network_Features.md#exportimport)                    |
+| Edit Mode                | [Network Features Guide](./VisualizePath_Network_Features.md#edit-mode)                       |
+| Layout Algorithms        | [Layout Algorithms Quick Ref](./LayoutAlgorithms_QuickRef.md)                                 |
+| Edge Filtering           | [Network Edge Filter](./NETWORK_EDGE_FILTER.md)                                               |
 
 ### Heatmap Features
 | Feature         | Documentation                                            |
