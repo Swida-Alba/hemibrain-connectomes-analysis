@@ -8962,6 +8962,18 @@ class VisualizeSkeleton:
             'right': dict(eye=dict(x=2.5, y=0, z=0), center=dict(x=0, y=0, z=0), up=dict(x=0, y=-1, z=0)),
         }
         
+        # Adjust for MANC (Male Adult Nerve Cord)
+        # Fix Front view (-Z shows Tail) -> Should look from +Z (Neck)
+        if 'manc' in self.dataset.lower():
+             view_cameras = {
+                'front': dict(eye=dict(x=0, y=0, z=2.5), center=dict(x=0, y=0, z=0), up=dict(x=0, y=-1, z=0)),
+                'back': dict(eye=dict(x=0, y=0, z=-2.5), center=dict(x=0, y=0, z=0), up=dict(x=0, y=-1, z=0)),
+                'top': dict(eye=dict(x=0, y=-2.5, z=0), center=dict(x=0, y=0, z=0), up=dict(x=0, y=0, z=1)),
+                'bottom': dict(eye=dict(x=0, y=2.5, z=0), center=dict(x=0, y=0, z=0), up=dict(x=0, y=0, z=1)),
+                'left': dict(eye=dict(x=-2.5, y=0, z=0), center=dict(x=0, y=0, z=0), up=dict(x=0, y=-1, z=0)),
+                'right': dict(eye=dict(x=2.5, y=0, z=0), center=dict(x=0, y=0, z=0), up=dict(x=0, y=-1, z=0)),
+            }
+
         # Adjust for hemibrain template (JRCFIB2018F) - front/back swapped due to Y-axis orientation
         # JRCFIB2018F coordinate system:
         #   X-axis: Left-Right (as normal fly brain)
@@ -10018,7 +10030,10 @@ class VisualizeSkeleton:
         actual_export_method = export_method if export_method else self.export_method
         
         if view_direction is None:
-            view_direction = (1, -1)
+            if 'manc' in self.dataset.lower():
+                view_direction = (1, 1)  # MANC: +Z is front
+            else:
+                view_direction = (1, -1)
         if view_distance is None:
             view_distance = 2.2
         
@@ -10142,6 +10157,16 @@ class VisualizeSkeleton:
                 up=dict(x=0, y=0, z=-1),
                 eye=dict(x=0, y=view_distance, z=0),  # +Y is front (anterior)
             )
+        
+        # Adjust for MANC (Male Adult Nerve Cord)
+        if 'manc' in self.dataset.lower():
+             # MANC: Anterior is +Z, Posterior is -Z. Dorsal is -Y.
+             # "Front" view should be looking from Anterior -> Posterior, so eye at +Z.
+             scene_camera_parameters = dict(
+                up=dict(x=0, y=-1, z=0),
+                eye=dict(x=0, y=0, z=view_distance),
+            )
+
         
         fig_new.update_layout(
             sliders=[],  # Remove sliders for cleaner video
@@ -10337,10 +10362,11 @@ class VisualizeSkeleton:
                                     
                                 elif rotate_plane == 'xz':
                                     # Horizontal rotation around Y axis
+                                    z_sign = 1 if 'manc' in self.dataset.lower() else -1
                                     eye = {
                                         'x': cam_distance * sin_val,
                                         'y': offset,
-                                        'z': -cam_distance * cos_val
+                                        'z': z_sign * cam_distance * cos_val
                                     }
                                     up = {'x': 0, 'y': -1, 'z': 0}
                                 
