@@ -303,7 +303,7 @@ class WebDriverExportSession:
                 pass
         return False
     
-    def load_html(self, html_path, wait_for_render=True, render_wait=3):
+    def load_html(self, html_path, wait_for_render=True, render_wait=3, background_color='white'):
         """
         Load an HTML file into the browser via local HTTP server.
         
@@ -318,6 +318,8 @@ class WebDriverExportSession:
             If True, wait for Plotly to render
         render_wait : float
             Additional seconds to wait after Plotly detected
+        background_color : str
+            Background color for the page body (to match plot background)
         """
         from selenium.webdriver.support.ui import WebDriverWait
         from selenium.webdriver.support import expected_conditions as EC
@@ -346,6 +348,11 @@ class WebDriverExportSession:
         url = f'http://127.0.0.1:{self._http_server_port}/{os.path.basename(html_path)}'
         self.driver.get(url)
         
+        # Ensure no body margin/padding and set background color
+        # This prevents white margins around the plot
+        js_bg = f"document.body.style.margin = '0'; document.body.style.padding = '0'; document.body.style.backgroundColor = '{background_color}';"
+        self.driver.execute_script(js_bg)
+        
         self._loaded_url = os.path.abspath(html_path)
         
         if wait_for_render:
@@ -354,9 +361,12 @@ class WebDriverExportSession:
             wait.until(EC.presence_of_element_located((By.CLASS_NAME, "js-plotly-plot")))
             time.sleep(render_wait)
             
+            # Re-apply background color styling just in case page load reset it
+            self.driver.execute_script(js_bg)
+            
             # Set up the viewport and figure size ONCE to avoid flashing on every screenshot
             # This must be done after Plotly is loaded
-            self._setup_viewport_size()
+            self._setup_viewport_size(background_color)
             
             # Force an initial draw to ensure WebGL canvas has content
             # This prevents blank images on first screenshot
@@ -430,7 +440,7 @@ class WebDriverExportSession:
             self._http_server = None
             self._http_server_port = None
 
-    def _setup_viewport_size(self):
+    def _setup_viewport_size(self, background_color='white'):
         """
         Resize the Plotly figure to the full scaled resolution for high-quality export.
         This ensures the WebGL canvas renders at the target resolution.
@@ -449,11 +459,11 @@ class WebDriverExportSession:
                     Plotly.relayout(gd, {
                         width: arguments[0],
                         height: arguments[1],
-                        'paper_bgcolor': 'white',
-                        'plot_bgcolor': 'white'
+                        'paper_bgcolor': arguments[2],
+                        'plot_bgcolor': arguments[2]
                     });
                 }
-            """, scaled_width, scaled_height)
+            """, scaled_width, scaled_height, background_color)
             
             # Wait for resize to complete
             time.sleep(0.5)
@@ -1210,7 +1220,8 @@ def export_individuals_webdriver(
     timeout: int = 60,
     verbose: bool = True,
     auto_crop: bool = True,
-    crop_margin: int = 30
+    crop_margin: int = 30,
+    background_color: str = 'white'
 ) -> dict:
     """
     Export individual neuron plots efficiently using WebDriver.
@@ -1304,15 +1315,18 @@ def export_individuals_webdriver(
                 scale=scale, 
                 timeout=timeout
             ) as session:
-                # Load HTML once
-                session.load_html(html_path, wait_for_render=True, render_wait=2)
+                # Load HTML once with background color support
+                session.load_html(html_path, wait_for_render=True, render_wait=2, background_color=background_color)
                 
                 # Hide legend and clean up layout for export
+                # Remove interactive UI elements (view selector, controls hint)
                 session.update_layout({
                     'showlegend': False,
                     'title.text': '',
                     'margin': {'l': 0, 'r': 0, 'b': 0, 't': 0},
-                    'scene.domain': {'x': [0.01, 0.99], 'y': [0.01, 0.99]}
+                    'scene.domain': {'x': [0, 1], 'y': [0, 1]},  # Full viewport, no margin
+                    'updatemenus': [],  # Remove view selection dropdown
+                    'annotations': []   # Remove controls hint text
                 })
                 
                 legend_names = list(legend_entries.keys())
@@ -1342,7 +1356,13 @@ def export_individuals_webdriver(
                         # Export PNG with auto-crop
                         png_filename = f'{view_name}_{safe_name}.png'
                         png_path = os.path.join(output_dir, png_filename)
-                        session.screenshot(png_path, auto_crop=auto_crop, margin=crop_margin)
+                        
+                        # Convert background string to RGB tuple for screenshot
+                        bg_rgb = (255, 255, 255)
+                        if background_color.lower().strip() == 'black':
+                            bg_rgb = (0, 0, 0)
+                        
+                        session.screenshot(png_path, auto_crop=auto_crop, margin=crop_margin, background_color=bg_rgb)
                         
                         # Verify export
                         if os.path.exists(png_path) and os.path.getsize(png_path) > 1024:
@@ -1799,6 +1819,40 @@ class VisualizeSkeleton:
     include_timestamp: bool = True
     '''Whether to include timestamp in the output folder name. Default True for unique folders.'''
 
+    interactive_html: bool = True
+    '''
+    Enable interactive controls in exported HTML files.
+    
+    When True (default):
+    - Displays the Plotly mode bar (toolbar) with pan/zoom/rotate buttons
+    - Adds a "View" dropdown menu for preset camera angles (Front, Back, Top, Bottom, Left, Right)
+    - Enables scroll zoom
+    - Shows download button for saving PNG
+    - Displays camera angle indicator (azimuth/elevation)
+    
+    When False:
+    - Hides the mode bar for cleaner appearance
+    - No view selection dropdown
+    - Simpler HTML file (slightly smaller)
+    
+    Note: Mouse controls (drag to rotate, scroll to zoom) always work regardless of this setting.
+    '''
+
+    background_color: str = 'white'
+    '''
+    Background color for HTML and exported PNG/video views.
+    
+    Options:
+    - 'white' (default): White background, good for publications and printing
+    - 'black': Black background, good for presentations and dark mode
+    - Any valid CSS color: '#f0f0f0', 'rgb(240,240,240)', 'lightgray', etc.
+    
+    The background color is applied to:
+    - Interactive HTML files
+    - Exported PNG images
+    - Video frames
+    '''
+
     neuron_colors: tuple = bokeh.palettes.Category10[10]
     '''
     colors of neuron layers to plot \n
@@ -2073,12 +2127,22 @@ class VisualizeSkeleton:
     See https://github.com/navis-org/navis-flybrains
     '''
     
-    brain_mesh_color: str = 'rgba(200, 230, 240, 0.1)'
+    brain_mesh_color: str = 'auto'
     ''' 
-    Color of the brain/VNC mesh, works with brain_mesh = 'template' or 'whole'\n
-    Format: 'rgba(r, g, b, a)' where a=transparency (0=transparent, 1=opaque)\n
-    Example: 'rgba(200, 230, 240, 0.1)' for light blue semi-transparent\n
-    See https://plotly.com/python/discrete-color/
+    Color of the brain/VNC mesh, works with brain_mesh = 'template' or 'whole'
+    
+    Options:
+    - 'auto' (default): Automatically selects optimal color based on background_color:
+        • White background: 'rgba(200, 230, 240, 0.1)' (light blue, 10% opacity)
+        • Black background: 'rgba(60, 60, 70, 0.1)' (dark gray, 10% opacity)
+    - Custom RGBA string: 'rgba(r, g, b, a)' where a=transparency (0=transparent, 1=opaque)
+    
+    For dark backgrounds, recommended settings to minimize mesh fragment highlights:
+    - Use low alpha (0.05-0.15) for subtle appearance
+    - Use dark gray/blue tones: 'rgba(40, 40, 50, 0.1)'
+    - Avoid bright colors that create visual noise
+    
+    Example: 'rgba(60, 60, 70, 0.1)' for subtle dark mesh on black background
     '''
     
     vnc_mesh: bool = False
@@ -2094,13 +2158,49 @@ class VisualizeSkeleton:
     Default: False\n
     '''
     
-    vnc_mesh_color: str = 'rgba(200, 240, 200, 0.1)'
+    vnc_mesh_color: str = 'auto'
     '''
-    Color of the VNC mesh, works with vnc_mesh = True\n
-    Format: 'rgba(r, g, b, a)' where a=transparency (0=transparent, 1=opaque)\n
-    Example: 'rgba(200, 240, 200, 0.1)' for light green semi-transparent\n
-    Default: light green to distinguish from brain mesh\n
+    Color of the VNC mesh, works with vnc_mesh = True
+    
+    Options:
+    - 'auto' (default): Automatically selects optimal color based on background_color:
+        • White background: 'rgba(200, 240, 200, 0.1)' (light green, 10% opacity)
+        • Black background: 'rgba(50, 60, 50, 0.1)' (dark green-gray, 10% opacity)
+    - Custom RGBA string: 'rgba(r, g, b, a)' where a=transparency
+    
+    Default: Distinguishes from brain mesh with slightly different hue
     '''
+
+    def _get_effective_mesh_color(self, mesh_type='brain'):
+        """
+        Get the effective mesh color, resolving 'auto' based on background.
+        
+        Parameters
+        ----------
+        mesh_type : str
+            'brain' or 'vnc' to select which mesh color to resolve
+            
+        Returns
+        -------
+        str
+            RGBA color string
+        """
+        if mesh_type == 'brain':
+            color = self.brain_mesh_color
+            if color == 'auto':
+                if self._is_dark_background():
+                    return 'rgba(60, 60, 70, 0.1)'  # Subtle dark gray for dark backgrounds
+                else:
+                    return 'rgba(200, 230, 240, 0.1)'  # Light blue for light backgrounds
+            return color
+        else:  # vnc
+            color = self.vnc_mesh_color
+            if color == 'auto':
+                if self._is_dark_background():
+                    return 'rgba(50, 60, 50, 0.1)'  # Subtle dark green-gray for dark backgrounds
+                else:
+                    return 'rgba(200, 240, 200, 0.1)'  # Light green for light backgrounds
+            return color
 
     def list_available_rois(self, refresh=False, fetch_online=True):
         """List all available ROIs for the current dataset.
@@ -2173,6 +2273,160 @@ class VisualizeSkeleton:
                 tqdm.write(msg, **kwargs)
         else:
             print(msg, **kwargs)
+
+    def _add_view_selection_menu(self):
+        """
+        Add interactive view selection dropdown and camera angle display to the figure.
+        
+        Adds a dropdown menu with preset camera positions (Front, Back, Top, Bottom, Left, Right)
+        and annotations showing current camera angles. The camera presets are adjusted based on
+        the dataset coordinate system.
+        """
+        # Define camera positions based on dataset
+        # Default: Standard fly brain - X: Left-Right, Y: Dorsal-Ventral, Z: Anterior-Posterior
+        view_cameras = {
+            'Front': dict(eye=dict(x=0, y=0, z=-2.5), center=dict(x=0, y=0, z=0), up=dict(x=0, y=-1, z=0)),
+            'Back': dict(eye=dict(x=0, y=0, z=2.5), center=dict(x=0, y=0, z=0), up=dict(x=0, y=-1, z=0)),
+            'Top': dict(eye=dict(x=0, y=-2.5, z=0), center=dict(x=0, y=0, z=0), up=dict(x=0, y=0, z=1)),
+            'Bottom': dict(eye=dict(x=0, y=2.5, z=0), center=dict(x=0, y=0, z=0), up=dict(x=0, y=0, z=-1)),
+            'Left': dict(eye=dict(x=-2.5, y=0, z=0), center=dict(x=0, y=0, z=0), up=dict(x=0, y=-1, z=0)),
+            'Right': dict(eye=dict(x=2.5, y=0, z=0), center=dict(x=0, y=0, z=0), up=dict(x=0, y=-1, z=0)),
+        }
+        
+        # Adjust for MANC (Male Adult Nerve Cord)
+        if 'manc' in self.dataset.lower():
+            view_cameras = {
+                'Front': dict(eye=dict(x=0, y=0, z=2.5), center=dict(x=0, y=0, z=0), up=dict(x=0, y=-1, z=0)),
+                'Back': dict(eye=dict(x=0, y=0, z=-2.5), center=dict(x=0, y=0, z=0), up=dict(x=0, y=-1, z=0)),
+                'Top': dict(eye=dict(x=0, y=-2.5, z=0), center=dict(x=0, y=0, z=0), up=dict(x=0, y=0, z=1)),
+                'Bottom': dict(eye=dict(x=0, y=2.5, z=0), center=dict(x=0, y=0, z=0), up=dict(x=0, y=0, z=1)),
+                'Left': dict(eye=dict(x=-2.5, y=0, z=0), center=dict(x=0, y=0, z=0), up=dict(x=0, y=-1, z=0)),
+                'Right': dict(eye=dict(x=2.5, y=0, z=0), center=dict(x=0, y=0, z=0), up=dict(x=0, y=-1, z=0)),
+            }
+        
+        # Adjust for hemibrain template (JRCFIB2018F)
+        if 'hemibrain' in self.dataset.lower() and self.brain_mesh == 'template':
+            view_cameras = {
+                'Front': dict(eye=dict(x=0, y=2.5, z=0), center=dict(x=0, y=0, z=0), up=dict(x=0, y=0, z=-1)),
+                'Back': dict(eye=dict(x=0, y=-2.5, z=0), center=dict(x=0, y=0, z=0), up=dict(x=0, y=0, z=-1)),
+                'Top': dict(eye=dict(x=0, y=0, z=-2.5), center=dict(x=0, y=0, z=0), up=dict(x=0, y=1, z=0)),
+                'Bottom': dict(eye=dict(x=0, y=0, z=2.5), center=dict(x=0, y=0, z=0), up=dict(x=0, y=1, z=0)),
+                'Left': dict(eye=dict(x=-2.5, y=0, z=0), center=dict(x=0, y=0, z=0), up=dict(x=0, y=0, z=-1)),
+                'Right': dict(eye=dict(x=2.5, y=0, z=0), center=dict(x=0, y=0, z=0), up=dict(x=0, y=0, z=-1)),
+            }
+        
+        # Create dropdown buttons for view selection
+        view_buttons = []
+        for view_name, camera in view_cameras.items():
+            view_buttons.append(
+                dict(
+                    args=[{'scene.camera': camera}],
+                    label=view_name,
+                    method='relayout'
+                )
+            )
+        
+        # Determine text color based on background
+        is_dark_bg = self._is_dark_background()
+        text_color = 'white' if is_dark_bg else 'black'
+        hint_color = 'lightgray' if is_dark_bg else 'gray'
+        dropdown_bg = 'rgba(50,50,50,0.9)' if is_dark_bg else 'rgba(255,255,255,0.9)'
+        hint_bg = 'rgba(50,50,50,0.7)' if is_dark_bg else 'rgba(255,255,255,0.7)'
+        
+        # Add dropdown menu for view selection
+        self.fig_3d.update_layout(
+            updatemenus=[
+                dict(
+                    type='dropdown',
+                    showactive=True,
+                    active=0,  # Default to Front view
+                    buttons=view_buttons,
+                    x=0.07,  # Offset to make room for title
+                    y=0.98,
+                    xanchor='left',
+                    yanchor='top',
+                    bgcolor=dropdown_bg,
+                    bordercolor='rgba(128,128,128,0.5)',
+                    borderwidth=1,
+                    font=dict(size=12, color=text_color),
+                    pad=dict(l=5, r=5, t=5, b=5),
+                )
+            ],
+            # Add annotations: title for dropdown and controls hint
+            annotations=[
+                # Title for view selection dropdown
+                dict(
+                    text="<b>View:</b>",
+                    x=0.01, y=0.975,
+                    xref='paper', yref='paper',
+                    xanchor='left', yanchor='top',
+                    showarrow=False,
+                    font=dict(size=12, color=text_color),
+                ),
+                # Controls hint at bottom
+                dict(
+                    text="🖱️ Drag: Rotate | Scroll: Zoom | Shift+Drag: Pan",
+                    x=0.5, y=0.01,
+                    xref='paper', yref='paper',
+                    xanchor='center', yanchor='bottom',
+                    showarrow=False,
+                    font=dict(size=10, color=hint_color),
+                    bgcolor=hint_bg,
+                    borderpad=3,
+                )
+            ],
+        )
+
+    def _is_dark_background(self, color=None):
+        """
+        Check if the background color is dark.
+        
+        Parameters
+        ----------
+        color : str, optional
+            Color to check. If None, uses self.background_color.
+        
+        Returns True if the background color is considered dark (for text contrast).
+        """
+        bg = (color if color is not None else self.background_color).lower().strip()
+        
+        # Common dark color names
+        dark_colors = {'black', 'darkgray', 'darkgrey', 'dimgray', 'dimgrey', 
+                       'gray', 'grey', 'darkblue', 'navy', 'darkgreen', 'darkred',
+                       'maroon', 'purple', 'indigo', 'midnightblue', 'darkslategray',
+                       'darkslategrey', 'darkolivegreen', 'darkmagenta', 'darkcyan'}
+        
+        if bg in dark_colors:
+            return True
+        
+        # Check hex colors
+        if bg.startswith('#'):
+            try:
+                hex_color = bg.lstrip('#')
+                if len(hex_color) == 3:
+                    hex_color = ''.join([c*2 for c in hex_color])
+                r, g, b = int(hex_color[0:2], 16), int(hex_color[2:4], 16), int(hex_color[4:6], 16)
+                # Calculate luminance
+                luminance = (0.299 * r + 0.587 * g + 0.114 * b) / 255
+                return luminance < 0.5
+            except:
+                pass
+        
+        # Check rgb/rgba colors
+        if bg.startswith('rgb'):
+            try:
+                import re
+                numbers = re.findall(r'[\d.]+', bg)
+                r, g, b = float(numbers[0]), float(numbers[1]), float(numbers[2])
+                if r <= 1 and g <= 1 and b <= 1:  # Normalized
+                    r, g, b = r * 255, g * 255, b * 255
+                luminance = (0.299 * r + 0.587 * g + 0.114 * b) / 255
+                return luminance < 0.5
+            except:
+                pass
+        
+        # Default: assume light background
+        return False
 
     def _get_html_size_cap(self):
         """
@@ -2477,7 +2731,7 @@ class VisualizeSkeleton:
         try:
             # Direct WebDriver call using the session class (no multiprocessing)
             with WebDriverExportSession(width=width, height=height, scale=scale, timeout=timeout) as session:
-                session.load_html(html_path, wait_for_render=True, render_wait=3)
+                session.load_html(html_path, wait_for_render=True, render_wait=3, background_color=self.background_color)
                 session.screenshot(output_path)
             
             # Verify file
@@ -2550,7 +2804,7 @@ class VisualizeSkeleton:
                         render_wait=render_wait
                     ) as session:
                         # Load HTML once
-                        session.load_html(temp_html, wait_for_render=True, render_wait=3)
+                        session.load_html(temp_html, wait_for_render=True, render_wait=3, background_color=self.background_color)
                         self._vprint(f'      ✓ HTML loaded in browser (render_wait={session._render_wait:.2f}s)')
                         
                         for view_name in views_to_export:
@@ -2629,7 +2883,7 @@ class VisualizeSkeleton:
                             timeout=300,
                             render_wait=render_wait
                         ) as session:
-                            session.load_html(existing_html, wait_for_render=True, render_wait=3)
+                            session.load_html(existing_html, wait_for_render=True, render_wait=3, background_color=self.background_color)
                             self._vprint(f'      ✓ Existing simplified HTML loaded in browser')
                             
                             for view_name in views_to_export:
@@ -2693,7 +2947,7 @@ class VisualizeSkeleton:
                                 timeout=300,
                                 render_wait=render_wait
                             ) as session:
-                                session.load_html(simplified_html_path, wait_for_render=True, render_wait=3)
+                                session.load_html(simplified_html_path, wait_for_render=True, render_wait=3, background_color=self.background_color)
                                 self._vprint(f'      ✓ Simplified HTML loaded in browser')
                                 
                                 for view_name in views_to_export:
@@ -8412,7 +8666,7 @@ class VisualizeSkeleton:
                         trace.showlegend = True
                         trace.name = mesh_display_name
                         trace.hoverinfo = 'none'
-                        trace.color = self.brain_mesh_color
+                        trace.color = self._get_effective_mesh_color('brain')
                     self.fig_3d.add_traces(brain_traces)
                 elif self.backend == 'k3d':
                     with self._suppress_output():
@@ -8438,7 +8692,7 @@ class VisualizeSkeleton:
                                 trace.showlegend = True
                                 trace.name = mesh_display_name
                                 trace.hoverinfo = 'none'
-                                trace.color = self.brain_mesh_color
+                                trace.color = self._get_effective_mesh_color('brain')
                             self.fig_3d.add_traces(brain_traces)
                         elif self.backend == 'k3d':
                             with self._suppress_output():
@@ -8485,7 +8739,7 @@ class VisualizeSkeleton:
                                 trace.showlegend = True
                                 trace.name = vnc_display_name
                                 trace.hoverinfo = 'none'
-                                trace.color = self.vnc_mesh_color
+                                trace.color = self._get_effective_mesh_color('vnc')
                             self.fig_3d.add_traces(vnc_traces)
                         elif self.backend == 'k3d':
                             with self._suppress_output():
@@ -8540,6 +8794,8 @@ class VisualizeSkeleton:
             self.fig_3d.update_layout(
                 colorway = self.synapse_colors,
                 sliders=sliders,
+                paper_bgcolor=self.background_color,
+                plot_bgcolor=self.background_color,
                 scene=dict(
                     dragmode='orbit',
                     xaxis={'visible':False}, 
@@ -8548,11 +8804,14 @@ class VisualizeSkeleton:
                     # Use 'data' aspectmode to ensure equal axis scaling
                     # This prevents distortion when no meshes are plotted
                     aspectmode='data',
+                    bgcolor=self.background_color,
                 ),
                 scene_camera=scene_camera_parameters,
                 # Legend settings: use constant sizing so alpha doesn't affect legend swatches
                 legend=dict(
                     itemsizing='constant',  # Fixed legend swatch size regardless of trace properties
+                    font=dict(color='white' if self._is_dark_background() else 'black'),
+                    bgcolor='rgba(0,0,0,0)',  # Transparent legend background
                 ),
             )
 
@@ -8565,6 +8824,29 @@ class VisualizeSkeleton:
             
             self._vprint(f'saving figure to \033[34m{self.fig_path}.html\033[0m...', end='')
             
+            # Configure interactive controls based on interactive_html setting
+            if self.interactive_html:
+                # Add view selection dropdown menu to the figure
+                self._add_view_selection_menu()
+                
+                # Interactive config: show toolbar, enable scroll zoom, customize buttons
+                html_config = {
+                    'displayModeBar': True,
+                    'displaylogo': False,  # Hide Plotly logo
+                    'scrollZoom': True,
+                    'modeBarButtonsToRemove': ['sendDataToCloud', 'lasso2d', 'select2d'],
+                    'toImageButtonOptions': {
+                        'format': 'png',
+                        'filename': self.saveas,
+                        'height': 1800,
+                        'width': 2400,
+                        'scale': 2
+                    }
+                }
+            else:
+                # Minimal config: hide toolbar for cleaner appearance
+                html_config = {'displayModeBar': False}
+            
             # Optimization: use 'cdn' for smaller file size (loads plotly.js from CDN)
             # This reduces HTML file size significantly compared to 'directory' or including full plotly.js
             # Fix: Set auto_open=False to prevent hanging, handle opening manually
@@ -8573,7 +8855,7 @@ class VisualizeSkeleton:
                 self.fig_path+'.html',
                 auto_open=False, 
                 # include_plotlyjs='cdn',  # Reverted to default to avoid potential issues
-                config={'displayModeBar': False}  # Remove toolbar to reduce overhead
+                config=html_config
             )
             
             if self.show_fig:
@@ -8643,7 +8925,15 @@ class VisualizeSkeleton:
                     self.fig_3d.update_layout(
                         margin=dict(l=0, r=0, b=0, t=0),
                         sliders=[],      # Remove sliders
-                        updatemenus=[],  # Remove any buttons
+                        updatemenus=[],  # Remove view selection dropdown
+                        annotations=[],  # Remove controls hint and view label
+                        paper_bgcolor=self.background_color,
+                        plot_bgcolor=self.background_color,
+                        scene=dict(bgcolor=self.background_color),
+                        legend=dict(
+                            bgcolor=self.background_color,
+                            font=dict(color='white' if self._is_dark_background() else 'black'),
+                        ),
                     )
                     
                     import shutil
@@ -9156,7 +9446,8 @@ class VisualizeSkeleton:
                 timeout=300,
                 verbose=True,
                 auto_crop=auto_crop,
-                crop_margin=crop_margin
+                crop_margin=crop_margin,
+                background_color=self.background_color
             )
             
             # Clean up temp HTML (but not the permanent simplified HTML)
@@ -9195,6 +9486,11 @@ class VisualizeSkeleton:
                         title=dict(text='', x=0.5),
                         margin=dict(l=0, r=0, b=0, t=0),
                         showlegend=False,
+                        updatemenus=[],  # Remove view selection dropdown
+                        annotations=[],  # Remove controls hint
+                        paper_bgcolor=self.background_color,
+                        plot_bgcolor=self.background_color,
+                        scene=dict(bgcolor=self.background_color),
                     )
                     
                     html_filename = f'{safe_name}.html'
@@ -9232,9 +9528,13 @@ class VisualizeSkeleton:
                     margin=dict(l=0, r=0, b=0, t=0),
                     sliders=[],
                     updatemenus=[],
+                    annotations=[],  # Remove controls hint
                     showlegend=False,
+                    paper_bgcolor=self.background_color,
+                    plot_bgcolor=self.background_color,
                     scene=dict(
-                        domain=dict(x=[0.01, 0.99], y=[0.01, 0.99])
+                        domain=dict(x=[0, 1], y=[0, 1]),  # Full viewport, no margin
+                        bgcolor=self.background_color,
                     ),
                 )
                 
@@ -9316,6 +9616,7 @@ class VisualizeSkeleton:
                         organize_by='view',  # Organize by view for single-view PDF
                         views=views,
                         pdf_suffix='',
+                        background_color=self.background_color,
                     )
                     if pdf_path:
                         self._vprint(f'   ✅ PDF saved: {pdf_path}')
@@ -9330,6 +9631,7 @@ class VisualizeSkeleton:
                         organize_by='view',
                         views=views,
                         pdf_suffix='_by_view',
+                        background_color=self.background_color,
                     )
                     if pdf_path_view:
                         self._vprint(f'   ✅ PDF saved: {pdf_path_view}')
@@ -9343,6 +9645,7 @@ class VisualizeSkeleton:
                         organize_by='name',
                         views=views,
                         pdf_suffix='_by_name',
+                        background_color=self.background_color,
                     )
                     if pdf_path_name:
                         self._vprint(f'   ✅ PDF saved: {pdf_path_name}')
@@ -9359,6 +9662,7 @@ class VisualizeSkeleton:
                         organize_by='view',
                         views=views,
                         pptx_suffix='',
+                        background_color=self.background_color,
                     )
                     if pptx_path:
                         self._vprint(f'   ✅ PPTX saved: {pptx_path}')
@@ -9373,6 +9677,7 @@ class VisualizeSkeleton:
                         organize_by='view',
                         views=views,
                         pptx_suffix='_by_view',
+                        background_color=self.background_color,
                     )
                     if pptx_path_view:
                         self._vprint(f'   ✅ PPTX saved: {pptx_path_view}')
@@ -9386,6 +9691,7 @@ class VisualizeSkeleton:
                         organize_by='name',
                         views=views,
                         pptx_suffix='_by_name',
+                        background_color=self.background_color,
                     )
                     if pptx_path_name:
                         self._vprint(f'   ✅ PPTX saved: {pptx_path_name}')
@@ -9409,6 +9715,7 @@ class VisualizeSkeleton:
         organize_by: str = 'name',
         views: list = None,
         pdf_suffix: str = '',
+        background_color: str = 'white',
     ) -> str | None:
         """
         Create a PDF summary from individual profile PNG images.
@@ -9502,6 +9809,34 @@ class VisualizeSkeleton:
         margin = 0.3 * inch  # Reduced from 0.5 to minimize blank space
         title_height = 20  # Reduced from 25 to minimize blank space
         
+        # Determine if dark background for text color
+        is_dark_bg = self._is_dark_background(background_color)
+        text_color = (1, 1, 1) if is_dark_bg else (0, 0, 0)  # RGB 0-1 for reportlab
+        
+        # Parse background color for reportlab
+        def parse_color_for_reportlab(color_str):
+            """Convert CSS color to reportlab RGB tuple (0-1 range)."""
+            color_str = color_str.lower().strip()
+            if color_str == 'black':
+                return (0, 0, 0)
+            elif color_str == 'white':
+                return (1, 1, 1)
+            elif color_str.startswith('#'):
+                hex_color = color_str.lstrip('#')
+                if len(hex_color) == 3:
+                    hex_color = ''.join([c*2 for c in hex_color])
+                r, g, b = tuple(int(hex_color[i:i+2], 16) / 255 for i in (0, 2, 4))
+                return (r, g, b)
+            elif color_str.startswith('rgb'):
+                import re
+                nums = re.findall(r'\d+', color_str)
+                if len(nums) >= 3:
+                    return tuple(int(n) / 255 for n in nums[:3])
+            # Default to white for unknown colors
+            return (1, 1, 1)
+        
+        bg_color = parse_color_for_reportlab(background_color)
+        
         # Calculate cell dimensions
         usable_width = page_width - 2 * margin
         usable_height = page_height - 2 * margin - title_height
@@ -9523,7 +9858,12 @@ class VisualizeSkeleton:
             total_pages_for_category = (len(category_images) + images_per_full_page - 1) // images_per_full_page
             
             for page_idx in range(total_pages_for_category):
+                # Draw background rectangle
+                c.setFillColorRGB(*bg_color)
+                c.rect(0, 0, page_width, page_height, fill=True, stroke=False)
+                
                 # Page title with category info
+                c.setFillColorRGB(*text_color)
                 c.setFont("Helvetica-Bold", 14)
                 if organize_by == 'view':
                     # Use '{view} view' as title when organized by view
@@ -9580,6 +9920,7 @@ class VisualizeSkeleton:
                             )
                             
                             # Draw label on TOP of image
+                            c.setFillColorRGB(*text_color)
                             c.setFont("Helvetica", 12)
                             label = str(legend_name)
                             if view_name and organize_by != 'view':
@@ -9609,7 +9950,7 @@ class VisualizeSkeleton:
         pptx_suffix: str = '',
         label_fontsize: int = 20,
         title_fontsize: int = 24,
-        font_color: tuple = (0, 0, 0),
+        background_color: str = 'white',
     ) -> str | None:
         """
         Create a PPTX summary from individual profile PNG images.
@@ -9635,6 +9976,8 @@ class VisualizeSkeleton:
             Font size for image labels in points.
         title_fontsize : int, default 24
             Font size for slide titles in points.
+        background_color : str, default 'white'
+            Background color for slides. Supports 'black', 'white', hex codes, etc.
             
         Returns
         -------
@@ -9645,6 +9988,7 @@ class VisualizeSkeleton:
             from pptx import Presentation
             from pptx.util import Inches, Pt
             from pptx.enum.text import PP_ALIGN
+            from pptx.dml.color import RGBColor
         except ImportError:
             self._vprint('⚠️  PPTX generation requires python-pptx.')
             self._vprint('   Install with: pip install python-pptx')
@@ -9696,6 +10040,34 @@ class VisualizeSkeleton:
         # Output path
         pptx_path = os.path.join(output_dir, f'individual_profiles_summary{pptx_suffix}.pptx')
         
+        # Determine if dark background for text color
+        is_dark_bg = self._is_dark_background(background_color)
+        font_color = RGBColor(255, 255, 255) if is_dark_bg else RGBColor(0, 0, 0)
+        
+        # Parse background color for pptx
+        def parse_color_for_pptx(color_str):
+            """Convert CSS color to pptx RGBColor."""
+            color_str = color_str.lower().strip()
+            if color_str == 'black':
+                return RGBColor(0, 0, 0)
+            elif color_str == 'white':
+                return RGBColor(255, 255, 255)
+            elif color_str.startswith('#'):
+                hex_color = color_str.lstrip('#')
+                if len(hex_color) == 3:
+                    hex_color = ''.join([c*2 for c in hex_color])
+                r, g, b = tuple(int(hex_color[i:i+2], 16) for i in (0, 2, 4))
+                return RGBColor(r, g, b)
+            elif color_str.startswith('rgb'):
+                import re
+                nums = re.findall(r'\d+', color_str)
+                if len(nums) >= 3:
+                    return RGBColor(int(nums[0]), int(nums[1]), int(nums[2]))
+            # Default to white for unknown colors
+            return RGBColor(255, 255, 255)
+        
+        bg_color = parse_color_for_pptx(background_color)
+        
         # Slide setup (widescreen 16:9)
         slide_width, slide_height = 13.333, 7.5
         cols, rows = images_per_page
@@ -9728,6 +10100,12 @@ class VisualizeSkeleton:
             for page_idx in range(total_pages_for_category):
                 slide = prs.slides.add_slide(blank_layout)
                 
+                # Set slide background color
+                background = slide.background
+                fill = background.fill
+                fill.solid()
+                fill.fore_color.rgb = bg_color
+                
                 # Build title
                 if organize_by == 'view':
                     slide_title = f"{category_name} view"
@@ -9748,6 +10126,7 @@ class VisualizeSkeleton:
                 p.text = slide_title
                 p.font.size = Pt(title_fontsize)
                 p.font.bold = True
+                p.font.color.rgb = font_color
                 p.alignment = PP_ALIGN.CENTER
                 
                 # Get images for this page
@@ -9810,8 +10189,7 @@ class VisualizeSkeleton:
                             p = tf.paragraphs[0]
                             p.text = label
                             p.font.size = Pt(label_fontsize)
-                            from pptx.dml.color import RGBColor
-                            p.font.color.rgb = RGBColor(*font_color)
+                            p.font.color.rgb = font_color
                             p.alignment = PP_ALIGN.CENTER
                             
                     except Exception as e:
@@ -10142,7 +10520,7 @@ class VisualizeSkeleton:
                 trace.marker.size = synapse_size
         
         fig_layout = go.Layout(
-            margin=dict(l=1, r=1, b=1, t=1, pad=0),
+            margin=dict(l=0, r=0, b=0, t=0, pad=0),
         )
         fig_new = go.Figure(data=fig_traces, layout=fig_layout)
         
@@ -10170,13 +10548,22 @@ class VisualizeSkeleton:
         
         fig_new.update_layout(
             sliders=[],  # Remove sliders for cleaner video
+            updatemenus=[],  # Remove view selection dropdown
+            annotations=[],  # Remove controls hint
+            paper_bgcolor=self.background_color,
+            plot_bgcolor=self.background_color,
             scene=dict(
                 dragmode='orbit',
                 xaxis={'visible':False}, 
                 yaxis={'visible':False},
                 zaxis={'visible':False},
+                bgcolor=self.background_color,
             ),
             scene_camera=scene_camera_parameters,
+            legend=dict(
+                bgcolor=self.background_color,
+                font=dict(color='white' if self._is_dark_background() else 'black'),
+            ),
         )
         
         # Set up image folder
@@ -10296,7 +10683,7 @@ class VisualizeSkeleton:
                             timeout=300,
                             render_wait=render_wait
                         ) as session:
-                            session.load_html(temp_html, wait_for_render=True, render_wait=3)
+                            session.load_html(temp_html, wait_for_render=True, render_wait=3, background_color=self.background_color)
                             self._vprint(f'   ✓ HTML loaded in browser (render_wait={session._render_wait:.2f}s)')
                             
                             # Get initial camera from HTML - this defines "front view"
@@ -10373,9 +10760,14 @@ class VisualizeSkeleton:
                                 # Rotate camera via JavaScript
                                 session.set_camera(eye=eye, up=up)
                                 
+                                # Convert background string to RGB tuple for screenshot
+                                bg_rgb = (255, 255, 255)
+                                if self.background_color.lower().strip() == 'black':
+                                    bg_rgb = (0, 0, 0)
+                                
                                 # Take screenshot
                                 session.screenshot(fig_path, convert_to_jpeg=True, jpeg_quality=95,
-                                                 auto_crop=False)
+                                                 auto_crop=False, background_color=bg_rgb)
                                 
                                 # Verify
                                 if not os.path.exists(fig_path) or os.path.getsize(fig_path) < 1024:
