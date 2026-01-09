@@ -29,7 +29,7 @@ A comprehensive Python toolkit for analyzing and visualizing connectome data fro
 | --------------------------------------------------------------- | ----------------------------------- |
 | **[Quick Start](QUICK_START.md)**                               | First-time setup and basic examples |
 | **[Installation](docs/INSTALLATION.md)**                        | Detailed installation instructions  |
-| **[Authentication](docs/INSTALLATION.md#authentication-setup)** | **Set up your API tokens**          |
+| **[Authentication](docs/INSTALLATION.md#authentication-setup)** | **Set up NeuPrint and CAVE tokens** |
 | **[Troubleshooting](docs/TROUBLESHOOTING.md)**                  | Common issues and solutions         |
 | **[Basic Usage](#basic-usage)**                                 | Core script tutorials               |
 

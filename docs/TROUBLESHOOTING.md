@@ -230,17 +230,19 @@ AuthError: Invalid token
 
 **Solutions:**
 
-1. **Create token_info.txt** in project root:
+1. **Create token_info_local.txt** in project root (recommended):
    ```
-   TOKEN=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
+   NEUPRINT_TOKEN='eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...'
    ```
 
 2. **Or set environment variable:**
    ```bash
-   export NEUPRINT_TOKEN=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
+   export NEUPRINT_TOKEN='eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...'
    ```
 
 3. **Get a new token** from https://neuprint.janelia.org/account
+
+**Note:** For backwards compatibility, `NEUPRINT_APPLICATION_CREDENTIALS` is also supported.
 
 ---
 

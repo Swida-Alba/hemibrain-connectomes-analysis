@@ -5,12 +5,17 @@ This guide provides a quick overview of how to perform common tasks using the Dr
 ## Prerequisites
 
 1. **Install the toolkit** - See [Installation Guide](docs/INSTALLATION.md)
-2. **Set up authentication** - Create `token_info.txt` with your API tokens (recommended):
+2. **Set up authentication** - Copy `token_info.txt` to `token_info_local.txt` and add your API tokens:
    ```
-   NEUPRINT_APPLICATION_TOKEN=your_neuprint_token_here
-   CAVE_TOKEN=your_cave_token_here
-   NEURONBRIDGE_API_KEY=your_neuronbridge_key_here
+   NEUPRINT_TOKEN='your_neuprint_token_here'
+   CAVE_TOKEN='your_cave_token_here'
    ```
+   
+   **Token Requirements:**
+   - `NEUPRINT_TOKEN`: **Required** for NeuPrint datasets (hemibrain, male-cns, MANC, optic-lobe)
+   - `CAVE_TOKEN`: **Required** for FlyWire datasets (FAFB, BANC)
+   - NeuronBridge API requires **no authentication**
+   
    📖 **[Authentication Setup](docs/INSTALLATION.md#authentication-setup)**
 
 ## 1. Connection Path Finding

@@ -95,6 +95,7 @@ To access NeuPrint and FlyWire datasets, you need to configure your authenticati
 1.  **Get your tokens:**
     *   **NeuPrint Token:** Log in to [neuprint.janelia.org](https://neuprint.janelia.org/account) and copy your token.
     *   **CAVE Token (FlyWire/FAFB):** Log in to [codex.flywire.ai](https://codex.flywire.ai/auth_token) and copy your token.
+    *   **NeuronBridge:** No authentication required - NeuronBridge API is publicly accessible.
 
 2.  **Configure local tokens:**
     The project uses a local file `token_info_local.txt` to store your secrets. This file is gitignored to prevent accidental commits.
@@ -105,11 +106,16 @@ To access NeuPrint and FlyWire datasets, you need to configure your authenticati
         ```
     *   Edit `token_info_local.txt` and paste your tokens:
         ```text
-        NEUPRINT_TOKEN='your_actual_token_here'
-        CAVE_TOKEN='your_actual_token_here'
+        NEUPRINT_TOKEN='your_actual_neuprint_token_here'
+        CAVE_TOKEN='your_actual_cave_token_here'
         ```
 
     Alternatively, you can set environment variables `NEUPRINT_TOKEN` and `CAVE_TOKEN`.
+
+**Token Requirements:**
+- `NEUPRINT_TOKEN`: **Required** for accessing all NeuPrint datasets (hemibrain, male-cns, MANC, optic-lobe)
+- `CAVE_TOKEN`: **Required** for accessing FlyWire datasets (FAFB, BANC)
+- NeuronBridge API: **No token required** (publicly accessible)
 ## Core Dependencies
 
 The following packages are **required**:

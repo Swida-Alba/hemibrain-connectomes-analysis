@@ -1,5 +1,7 @@
 # VisualizeSkeleton Optimizations (November 2024)
 
+> **Note:** This document uses `NEUPRINT_APPLICATION_CREDENTIALS` for historical reasons. The current recommended environment variable is `NEUPRINT_TOKEN`. Both are supported for backwards compatibility.
+
 ## Summary
 
 Optimized VisualizeSkeleton implementation based on official navis and neuprint documentation with improved resource management and better API integration.

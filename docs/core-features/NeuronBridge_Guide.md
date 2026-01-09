@@ -43,20 +43,20 @@ This module wraps the NeuronBridge API to provide:
 
 ## Two Directions: EM→LM and LM→EM
 
-| Direction | Use Case | Script | Key Method |
-|-----------|----------|--------|------------|
-| **EM → LM** | "What driver lines label my EM neurons?" | `NeuronBridge_FindLines.py` | `find_lines_batch()` |
+| Direction   | Use Case                                       | Script                       | Key Method             |
+| ----------- | ---------------------------------------------- | ---------------------------- | ---------------------- |
+| **EM → LM** | "What driver lines label my EM neurons?"       | `NeuronBridge_FindLines.py`  | `find_lines_batch()`   |
 | **LM → EM** | "What EM neurons does this driver line label?" | `NeuronBridge_FindNeuron.py` | `find_neurons_batch()` |
 
 ### Quick Comparison
 
-| Aspect | EM→LM (FindLines) | LM→EM (FindNeuron) |
-|--------|-------------------|---------------------|
-| **Input** | Neuron type/bodyId | Driver line name |
-| **Output** | Ranked driver lines | Matched EM neurons |
-| **Key Metric** | `weighted_score` | `score` per neuron |
-| **Visualization** | FlyLight images | 3D skeletons |
-| **Primary Use** | Design experiments | Validate line coverage |
+| Aspect            | EM→LM (FindLines)   | LM→EM (FindNeuron)     |
+| ----------------- | ------------------- | ---------------------- |
+| **Input**         | Neuron type/bodyId  | Driver line name       |
+| **Output**        | Ranked driver lines | Matched EM neurons     |
+| **Key Metric**    | `weighted_score`    | `score` per neuron     |
+| **Visualization** | FlyLight images     | 3D skeletons           |
+| **Primary Use**   | Design experiments  | Validate line coverage |
 
 ---
 
@@ -67,6 +67,10 @@ The NeuronBridge module requires the `neuronbridge-python` package:
 ```bash
 pip install neuronbridge-python
 ```
+
+**Authentication:** NeuronBridge API is publicly accessible and requires **no authentication token**. 
+
+However, if you want to use local dataset features (type lookups, enrichment with neuron metadata), you can provide a NeuPrint token. Note that accessing NeuPrint datasets directly (e.g., via `FindPath.py`) **requires** a NEUPRINT_TOKEN - it's only the NeuronBridge API itself that doesn't need authentication.
 
 For FlyLight image downloads, optionally install boto3 for faster S3 access:
 
@@ -135,29 +139,34 @@ class NeuronBridgeFinder:
     max_api_images_per_line: int = 10
 ```
 
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `datasets_path` | `str` or `None` | Auto-detect | Path to the datasets folder containing neuron_df CSV files. Used for enriching results with local neuron metadata. |
-| `use_cache` | `bool` | `True` | Whether to cache API results locally. Cached results are stored as CSV files and reused on subsequent calls. |
-| `cache_folder` | `str` or `None` | Auto-detect | Folder for cached results. Default: `cache/neuronbridge/` in the project directory. |
-| `verbose` | `bool` | `True` | Print progress messages during operations. |
-| `separate_splitgal4` | `bool` | `False` | **NEW**: If True, separate results into GAL4/LexA and Split-GAL4 categories. When enabled, `download_top_n_img` applies separately to each category (see [Line Type Separation](#line-type-separation)). |
-| `neuprint_token` | `str` or `None` | `None` | **NEW**: NeuPrint API token for pulling missing datasets. If not set, checks `NEUPRINT_TOKEN` or `NEUPRINT_APPLICATION_CREDENTIALS` environment variables. Get your token at: https://neuprint.janelia.org/account |
-| `neuprint_server` | `str` | `'https://neuprint.janelia.org'` | **NEW**: NeuPrint server URL. |
-| `match_type` | `str` | `'cds'` | **NEW**: Default match algorithm for all operations: `'cds'` (Color Depth MIP Search), `'pppm'` (Pattern Matching), or `'both'`. Can be overridden at method level. |
-| `region` | `str` | `'All'` | **NEW**: Filter images by anatomical region: `'Brain'`, `'VNC'`, or `'All'`. Filters out images from non-matching regions to reduce processing time and improve specificity. |
-| `max_api_images_per_line` | `int` | `10` | **NEW**: Maximum LM images to process per driver line for API calls. Use `-1` for unlimited. Images are pre-filtered by match_type availability before limiting. |
+| Parameter                 | Type            | Default                          | Description                                                                                                                                                                                                                                                                                                                                                                                             |
+| ------------------------- | --------------- | -------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `datasets_path`           | `str` or `None` | Auto-detect                      | Path to the datasets folder containing neuron_df CSV files. Used for enriching results with local neuron metadata.                                                                                                                                                                                                                                                                                      |
+| `use_cache`               | `bool`          | `True`                           | Whether to cache API results locally. Cached results are stored as CSV files and reused on subsequent calls.                                                                                                                                                                                                                                                                                            |
+| `cache_folder`            | `str` or `None` | Auto-detect                      | Folder for cached results. Default: `cache/neuronbridge/` in the project directory.                                                                                                                                                                                                                                                                                                                     |
+| `verbose`                 | `bool`          | `True`                           | Print progress messages during operations.                                                                                                                                                                                                                                                                                                                                                              |
+| `separate_splitgal4`      | `bool`          | `False`                          | **NEW**: If True, separate results into GAL4/LexA and Split-GAL4 categories. When enabled, `download_top_n_img` applies separately to each category (see [Line Type Separation](#line-type-separation)).                                                                                                                                                                                                |
+| `neuprint_token`          | `str` or `None` | `None`                           | **OPTIONAL** (for NeuronBridge only): NeuPrint API token for local dataset enrichment features. Not required for basic NeuronBridge API calls. If not set, checks `NEUPRINT_TOKEN` environment variable. **Note:** While optional for NeuronBridge, this token is **required** for direct NeuPrint data acces and NeuronBridge data enrichment. Get your token at: https://neuprint.janelia.org/account |
+| `neuprint_server`         | `str`           | `'https://neuprint.janelia.org'` | **NEW**: NeuPrint server URL.                                                                                                                                                                                                                                                                                                                                                                           |
+| `match_type`              | `str`           | `'cds'`                          | **NEW**: Default match algorithm for all operations: `'cds'` (Color Depth MIP Search), `'pppm'` (Pattern Matching), or `'both'`. Can be overridden at method level.                                                                                                                                                                                                                                     |
+| `region`                  | `str`           | `'All'`                          | **NEW**: Filter images by anatomical region: `'Brain'`, `'VNC'`, or `'All'`. Filters out images from non-matching regions to reduce processing time and improve specificity.                                                                                                                                                                                                                            |
+| `max_api_images_per_line` | `int`           | `10`                             | **NEW**: Maximum LM images to process per driver line for API calls. Use `-1` for unlimited. Images are pre-filtered by match_type availability before limiting.                                                                                                                                                                                                                                        |
 
-**Setting up NeuPrint Token** (required for pulling missing datasets):
+**Setting up NeuPrint Token** (optional - for enhanced features only):
 
 ```python
-# Option 1: Pass token directly
+# Option 1: Pass token directly (optional)
 nbf = NeuronBridgeFinder(neuprint_token='your_token_here')
 
-# Option 2: Set environment variable (recommended)
+# Option 2: Set environment variable (optional, recommended if needed)
 # In terminal: export NEUPRINT_TOKEN="your_token_here"
 nbf = NeuronBridgeFinder()
+
+# Option 3: No token - basic NeuronBridge features work fine without it
+nbf = NeuronBridgeFinder()
 ```
+
+**Important:** The NeuPrint token is optional for NeuronBridge API calls (finding lines, finding neurons, image downloads), but **required** for direct NeuPrint dataset access (e.g., pathfinding with `FindPath.py` or `FindDirect.py`). The token enables local dataset enrichment features in NeuronBridge, but the NeuronBridge API itself works without authentication.
 
 **Region Filtering** (filter images by anatomical area):
 
@@ -307,17 +316,17 @@ results = nbf.analyze_colabeling(
 
 **Parameters**:
 
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `lines` | `str` or `list` | Required | Driver lines to analyze (at least 2 required) |
-| `match_type` | `str` | `'cds'` | Match algorithm for neuron lookup |
-| `top_n_neurons` | `int` | `-1` | Top N neurons to consider per line (-1 = all) |
-| `min_score` | `float` | `0.0` | Visualization threshold only (does NOT filter expression matrix) |
-| `min_type_avg_score` | `float` | `0.0` | Type filtering for similarity matrix/clustering ONLY (does NOT filter expression matrix) |
-| `similarity_methods` | `list` | `['jaccard', 'weighted_jaccard']` | Similarity methods for co-labeling |
-| `output_dir` | `str` | `None` | Output directory for results |
-| `generate_report` | `bool` | `True` | Generate HTML analysis report |
-| `visualize` | `bool` | `True` | Generate heatmap visualizations |
+| Parameter            | Type            | Default                           | Description                                                                              |
+| -------------------- | --------------- | --------------------------------- | ---------------------------------------------------------------------------------------- |
+| `lines`              | `str` or `list` | Required                          | Driver lines to analyze (at least 2 required)                                            |
+| `match_type`         | `str`           | `'cds'`                           | Match algorithm for neuron lookup                                                        |
+| `top_n_neurons`      | `int`           | `-1`                              | Top N neurons to consider per line (-1 = all)                                            |
+| `min_score`          | `float`         | `0.0`                             | Visualization threshold only (does NOT filter expression matrix)                         |
+| `min_type_avg_score` | `float`         | `0.0`                             | Type filtering for similarity matrix/clustering ONLY (does NOT filter expression matrix) |
+| `similarity_methods` | `list`          | `['jaccard', 'weighted_jaccard']` | Similarity methods for co-labeling                                                       |
+| `output_dir`         | `str`           | `None`                            | Output directory for results                                                             |
+| `generate_report`    | `bool`          | `True`                            | Generate HTML analysis report                                                            |
+| `visualize`          | `bool`          | `True`                            | Generate heatmap visualizations                                                          |
 
 **Similarity Methods**:
 - `'jaccard'`: Binary Jaccard similarity (|A ∩ B| / |A ∪ B|) based on type presence/absence
@@ -344,19 +353,19 @@ results = nbf.analyze_colabeling(
 
 **Line Summary Columns**:
 
-| Column | Description |
-|--------|-------------|
-| `line` | Driver line name |
-| `n_neurons` | Total number of neurons matched |
-| `n_types` | Number of unique types labeled |
-| `mean_score` | Mean NeuronBridge match score |
-| `max_score` | Maximum match score (50000 = perfect match) |
-| `n_neurons_HMS` | Neurons above Half Max Score (score ≥ max_score/2) |
-| `n_types_HMS` | Unique types above Half Max Score |
-| `n_neurons_MS` | Neurons at Max Score (within 0.1% tolerance) |
-| `n_types_MS` | Unique types at Max Score |
-| `Qf` | Quality Factor = max_score / n_types_HMS. Higher = more selective |
-| `colabel_sparsity` | Uniqueness of labeling pattern (0-1, higher = more unique) |
+| Column             | Description                                                       |
+| ------------------ | ----------------------------------------------------------------- |
+| `line`             | Driver line name                                                  |
+| `n_neurons`        | Total number of neurons matched                                   |
+| `n_types`          | Number of unique types labeled                                    |
+| `mean_score`       | Mean NeuronBridge match score                                     |
+| `max_score`        | Maximum match score (50000 = perfect match)                       |
+| `n_neurons_HMS`    | Neurons above Half Max Score (score ≥ max_score/2)                |
+| `n_types_HMS`      | Unique types above Half Max Score                                 |
+| `n_neurons_MS`     | Neurons at Max Score (within 0.1% tolerance)                      |
+| `n_types_MS`       | Unique types at Max Score                                         |
+| `Qf`               | Quality Factor = max_score / n_types_HMS. Higher = more selective |
+| `colabel_sparsity` | Uniqueness of labeling pattern (0-1, higher = more unique)        |
 
 **Quality Metrics Explained**:
 - **Half Max Score (HMS)** metrics show how many neurons/types have high-confidence matches (score ≥ 50% of max)
@@ -412,11 +421,11 @@ lines_df = nbf.id_to_lines(
 )
 ```
 
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `body_id` | `int` | Required | The EM body ID to search for. |
-| `match_type` | `str` | `'cds'` | Match algorithm: `'cds'` (Color Depth Search), `'pppm'` (PatchPerPixMatch), or `'both'`. |
-| `expected_dataset` | `str` or `None` | `None` | Expected dataset name (e.g., `'male-cns:v0.9'`). Filters results to match this dataset when body ID exists in multiple datasets. |
+| Parameter          | Type            | Default  | Description                                                                                                                      |
+| ------------------ | --------------- | -------- | -------------------------------------------------------------------------------------------------------------------------------- |
+| `body_id`          | `int`           | Required | The EM body ID to search for.                                                                                                    |
+| `match_type`       | `str`           | `'cds'`  | Match algorithm: `'cds'` (Color Depth Search), `'pppm'` (PatchPerPixMatch), or `'both'`.                                         |
+| `expected_dataset` | `str` or `None` | `None`   | Expected dataset name (e.g., `'male-cns:v0.9'`). Filters results to match this dataset when body ID exists in multiple datasets. |
 
 **Returns**: `pd.DataFrame` with columns:
 - `line`: Driver line name (e.g., 'LH173', 'SS01015')
@@ -439,11 +448,11 @@ neurons_df = nbf.line_to_neuron(
 )
 ```
 
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `line_name` | `str` | Required | The driver line name to search for (e.g., 'LH173', 'VT037867'). |
-| `match_type` | `str` | `'cds'` | Match algorithm: `'cds'`, `'pppm'`, or `'both'`. |
-| `top_n` | `int` | `-1` | Maximum matches to return. `-1` for all. |
+| Parameter    | Type  | Default  | Description                                                     |
+| ------------ | ----- | -------- | --------------------------------------------------------------- |
+| `line_name`  | `str` | Required | The driver line name to search for (e.g., 'LH173', 'VT037867'). |
+| `match_type` | `str` | `'cds'`  | Match algorithm: `'cds'`, `'pppm'`, or `'both'`.                |
+| `top_n`      | `int` | `-1`     | Maximum matches to return. `-1` for all.                        |
 
 **Returns**: `pd.DataFrame` with columns:
 - `bodyId`: EM body ID
@@ -481,11 +490,11 @@ results = nbf.neuron_to_lines(
 )
 ```
 
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `query` | `str`, `int`, or `list` | Required | Query to search: body ID (int), neuron type/instance (str), or list of queries. Supports regex patterns. |
-| `dataset` | `str`, `list`, or `None` | `None` | Dataset(s) to search. Can be a single string, list of datasets, or `None` to search all available datasets. |
-| `match_type` | `str` | `'cds'` | Match algorithm: `'cds'`, `'pppm'`, or `'both'`. |
+| Parameter    | Type                     | Default  | Description                                                                                                 |
+| ------------ | ------------------------ | -------- | ----------------------------------------------------------------------------------------------------------- |
+| `query`      | `str`, `int`, or `list`  | Required | Query to search: body ID (int), neuron type/instance (str), or list of queries. Supports regex patterns.    |
+| `dataset`    | `str`, `list`, or `None` | `None`   | Dataset(s) to search. Can be a single string, list of datasets, or `None` to search all available datasets. |
+| `match_type` | `str`                    | `'cds'`  | Match algorithm: `'cds'`, `'pppm'`, or `'both'`.                                                            |
 
 **Returns**: `Dict[str, pd.DataFrame]` mapping body IDs to DataFrames of matching lines.
 
@@ -516,22 +525,22 @@ results = nbf.find_lines_batch(
 )
 ```
 
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `queries` | `str`, `int`, or `list` | Required | Neuron query(s). Can be comma-separated string, body ID, or list. |
-| `dataset` | `str`, `list`, or `None` | `None` | Dataset(s) to search. Use list for multiple datasets. |
-| `match_type` | `str` or `None` | `None` | Match algorithm: `'cds'`, `'pppm'`, or `'both'`. If `None`, uses instance-level `match_type`. |
-| `output_dir` | `str` or `None` | `None` | Directory to save results. Creates timestamped subfolder. |
-| `download_images` | `str` or `None` | `'flylight'` | Image source: `'neuronbridge'`, `'flylight'`, `'both'`, or `None`. |
-| `download_img_for_top_n_lines` | `int` or `None` | `10` | Download images for top N lines only (by aggregate score/rank). |
-| `image_formats` | `str` or `list` | `['png', 'jpg']` | File formats to download. |
-| `image_types` | `str` or `list` | `'all'` | Image types: `'mip'`, `'cdm'`, `'aligned'`, `'all'`, etc. |
-| `max_download_images_per_line` | `int` or `None` | `20` | Maximum images to download per line. |
-| `flylight_category` | `str` or `list` | `['GAL4/LEXA', 'SplitGAL4']` | FlyLight collection category. MCFO automatically used as fallback. |
-| `organize_by_region` | `bool` | `False` | Organize images into Brain/VNC subfolders. |
-| `simple_mode` | `bool` | `False` | Apply filename filtering to reduce download volume (see [Simple Mode](#simple-mode)). |
-| `pdf_images_per_page` | `tuple` | `(5, 3)` | (columns, rows) - images per page in PDF summary. |
-| `pdf_landscape` | `bool` | `True` | Use landscape orientation for PDF. |
+| Parameter                      | Type                     | Default                      | Description                                                                                   |
+| ------------------------------ | ------------------------ | ---------------------------- | --------------------------------------------------------------------------------------------- |
+| `queries`                      | `str`, `int`, or `list`  | Required                     | Neuron query(s). Can be comma-separated string, body ID, or list.                             |
+| `dataset`                      | `str`, `list`, or `None` | `None`                       | Dataset(s) to search. Use list for multiple datasets.                                         |
+| `match_type`                   | `str` or `None`          | `None`                       | Match algorithm: `'cds'`, `'pppm'`, or `'both'`. If `None`, uses instance-level `match_type`. |
+| `output_dir`                   | `str` or `None`          | `None`                       | Directory to save results. Creates timestamped subfolder.                                     |
+| `download_images`              | `str` or `None`          | `'flylight'`                 | Image source: `'neuronbridge'`, `'flylight'`, `'both'`, or `None`.                            |
+| `download_img_for_top_n_lines` | `int` or `None`          | `10`                         | Download images for top N lines only (by aggregate score/rank).                               |
+| `image_formats`                | `str` or `list`          | `['png', 'jpg']`             | File formats to download.                                                                     |
+| `image_types`                  | `str` or `list`          | `'all'`                      | Image types: `'mip'`, `'cdm'`, `'aligned'`, `'all'`, etc.                                     |
+| `max_download_images_per_line` | `int` or `None`          | `20`                         | Maximum images to download per line.                                                          |
+| `flylight_category`            | `str` or `list`          | `['GAL4/LEXA', 'SplitGAL4']` | FlyLight collection category. MCFO automatically used as fallback.                            |
+| `organize_by_region`           | `bool`                   | `False`                      | Organize images into Brain/VNC subfolders.                                                    |
+| `simple_mode`                  | `bool`                   | `False`                      | Apply filename filtering to reduce download volume (see [Simple Mode](#simple-mode)).         |
+| `pdf_images_per_page`          | `tuple`                  | `(5, 3)`                     | (columns, rows) - images per page in PDF summary.                                             |
+| `pdf_landscape`                | `bool`                   | `True`                       | Use landscape orientation for PDF.                                                            |
 
 **Returns**: `pd.DataFrame` with combined results including:
 - All columns from `id_to_lines()`
@@ -562,21 +571,21 @@ output/findlines_aMe12_20241223_123456/
 
 Summary files are sorted by `weighted_score` descending, prioritizing lines that label MORE of the queried neurons:
 
-| Column | Description |
-|--------|-------------|
-| `line` | Driver line name (e.g., VT000770, SS00001) |
-| `agg_mean_score` | Average NeuronBridge match score across all matched neurons |
-| `agg_max_score` | Maximum NeuronBridge match score for this line |
-| `match_count` | Number of UNIQUE bodyIds labeled by this line |
-| `matched_bodyIds` | Comma-separated list of unique bodyIds |
-| `matched_types` | Comma-separated list of unique neuron types labeled |
-| `coverage_ratio` | match_count / total_query_neurons (fraction of queried neurons labeled) |
-| `weighted_score` | **agg_mean_score × coverage_ratio** (PRIMARY SORTING KEY) |
-| `datasets_labeled` | Number of datasets where this line labels queried neurons |
-| `matched_datasets` | Comma-separated list of matched dataset names |
-| `min_score_per_dataset` | Minimum of max scores across datasets |
-| `cross_dataset_score` | Mean of max scores across datasets |
-| `line_type` | 'gal4_lexa' or 'split_gal4' (when separate_splitgal4=True) |
+| Column                  | Description                                                             |
+| ----------------------- | ----------------------------------------------------------------------- |
+| `line`                  | Driver line name (e.g., VT000770, SS00001)                              |
+| `agg_mean_score`        | Average NeuronBridge match score across all matched neurons             |
+| `agg_max_score`         | Maximum NeuronBridge match score for this line                          |
+| `match_count`           | Number of UNIQUE bodyIds labeled by this line                           |
+| `matched_bodyIds`       | Comma-separated list of unique bodyIds                                  |
+| `matched_types`         | Comma-separated list of unique neuron types labeled                     |
+| `coverage_ratio`        | match_count / total_query_neurons (fraction of queried neurons labeled) |
+| `weighted_score`        | **agg_mean_score × coverage_ratio** (PRIMARY SORTING KEY)               |
+| `datasets_labeled`      | Number of datasets where this line labels queried neurons               |
+| `matched_datasets`      | Comma-separated list of matched dataset names                           |
+| `min_score_per_dataset` | Minimum of max scores across datasets                                   |
+| `cross_dataset_score`   | Mean of max scores across datasets                                      |
+| `line_type`             | 'gal4_lexa' or 'split_gal4' (when separate_splitgal4=True)              |
 
 **Weighted Score Calculation**:
 
@@ -610,15 +619,15 @@ Querying 'aMe12,MBON01' together finds lines labeling BOTH types.
 
 The type summary file aggregates results by neuron type and sorts by `avg_score` (descending), making it easy to identify the strongest candidate types:
 
-| Column | Description |
-|--------|-------------|
-| `type_label` | Neuron type name |
-| `labeled_N` | Number of neurons labeled by matching lines |
-| `avg_score` | Average match score (used for sorting/ranking) |
-| `max_score` | Maximum match score |
-| `std_score` | Standard deviation of scores |
+| Column               | Description                                      |
+| -------------------- | ------------------------------------------------ |
+| `type_label`         | Neuron type name                                 |
+| `labeled_N`          | Number of neurons labeled by matching lines      |
+| `avg_score`          | Average match score (used for sorting/ranking)   |
+| `max_score`          | Maximum match score                              |
+| `std_score`          | Standard deviation of scores                     |
 | `typed_N_in_dataset` | Total neurons of this type in the source dataset |
-| `lines` | Comma-separated list of matching driver lines |
+| `lines`              | Comma-separated list of matching driver lines    |
 
 This sorted format ensures that `top_n` type visualizations and selections use the strongest matches.
 
@@ -637,12 +646,12 @@ results = nbf.find_neurons_batch(
 )
 ```
 
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `line_names` | `str` or `list` | Required | Driver line name(s). Can be comma-separated. |
-| `top_n` | `int` | `-1` | Maximum matches per line. `-1` for all. |
-| `match_type` | `str` or `None` | `None` | Match algorithm. If `None`, uses instance-level `match_type`. |
-| `output_dir` | `str` or `None` | `None` | Directory to save results. |
+| Parameter    | Type            | Default  | Description                                                   |
+| ------------ | --------------- | -------- | ------------------------------------------------------------- |
+| `line_names` | `str` or `list` | Required | Driver line name(s). Can be comma-separated.                  |
+| `top_n`      | `int`           | `-1`     | Maximum matches per line. `-1` for all.                       |
+| `match_type` | `str` or `None` | `None`   | Match algorithm. If `None`, uses instance-level `match_type`. |
+| `output_dir` | `str` or `None` | `None`   | Directory to save results.                                    |
 
 ---
 
@@ -663,14 +672,14 @@ files = nbf.download_line_images(
 )
 ```
 
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `line_names` | `str` or `list` | Required | Driver line name(s). |
-| `output_dir` | `str` | Required | Directory to save images. |
-| `source` | `str` | `'neuronbridge'` | Image source: `'neuronbridge'` or `'flylight'`. |
-| `formats` | `str` or `list` | `'png'` | File formats. |
-| `image_types` | `str` or `list` | `'cdm'` | Image types. |
-| `max_files` | `int` or `None` | `None` | Maximum files per line. |
+| Parameter     | Type            | Default          | Description                                     |
+| ------------- | --------------- | ---------------- | ----------------------------------------------- |
+| `line_names`  | `str` or `list` | Required         | Driver line name(s).                            |
+| `output_dir`  | `str`           | Required         | Directory to save images.                       |
+| `source`      | `str`           | `'neuronbridge'` | Image source: `'neuronbridge'` or `'flylight'`. |
+| `formats`     | `str` or `list` | `'png'`          | File formats.                                   |
+| `image_types` | `str` or `list` | `'cdm'`          | Image types.                                    |
+| `max_files`   | `int` or `None` | `None`           | Maximum files per line.                         |
 
 ---
 
@@ -693,12 +702,12 @@ results = nbf.find_neurons_batch(
 
 ### Visualization Parameters
 
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `visualize_top_n` | `int` | `0` | Number of top types/bodyIds to visualize (0 = disabled). |
-| `visualize_by` | `str` | `'type'` | Grouping mode: `'type'` or `'bodyId'`. |
-| `generate_individual_profiles` | `bool` | `False` | Generate per-neuron PNG profiles and PDF summary. |
-| `pdf_images_per_page` | `tuple` | `(3, 2)` | PDF layout as (columns, rows). |
+| Parameter                      | Type    | Default  | Description                                              |
+| ------------------------------ | ------- | -------- | -------------------------------------------------------- |
+| `visualize_top_n`              | `int`   | `0`      | Number of top types/bodyIds to visualize (0 = disabled). |
+| `visualize_by`                 | `str`   | `'type'` | Grouping mode: `'type'` or `'bodyId'`.                   |
+| `generate_individual_profiles` | `bool`  | `False`  | Generate per-neuron PNG profiles and PDF summary.        |
+| `pdf_images_per_page`          | `tuple` | `(3, 2)` | PDF layout as (columns, rows).                           |
 
 ### Grouping Modes
 
@@ -804,14 +813,14 @@ This ensures lines that rank well in both algorithms appear first.
 
 ### Supported EM Datasets
 
-| Dataset | Format | Description |
-|---------|--------|-------------|
-| `hemibrain:v1.2.1` | NeuPrint | Hemibrain connectome |
-| `male-cns:v0.9` | NeuPrint | Male CNS (brain + VNC) |
-| `flywire_FAFB_v783` | FlyWire | FlyWire FAFB full brain |
-| `flywire_BANC_v626` | FlyWire | FlyWire BANC VNC |
-| `vnc:v0.5` | NeuPrint | VNC (older version) |
-| `manc:v1.2.1` | NeuPrint | MANC dataset |
+| Dataset             | Format   | Description             |
+| ------------------- | -------- | ----------------------- |
+| `hemibrain:v1.2.1`  | NeuPrint | Hemibrain connectome    |
+| `male-cns:v0.9`     | NeuPrint | Male CNS (brain + VNC)  |
+| `flywire_FAFB_v783` | FlyWire  | FlyWire FAFB full brain |
+| `flywire_BANC_v626` | FlyWire  | FlyWire BANC VNC        |
+| `vnc:v0.5`          | NeuPrint | VNC (older version)     |
+| `manc:v1.2.1`       | NeuPrint | MANC dataset            |
 
 ### Dataset Name Normalization
 
@@ -955,12 +964,12 @@ MB011B     0.88
 
 Simple mode (`simple_mode=True`) reduces download volume by applying filename-based filtering:
 
-| Collection | Filter | Effect |
-|------------|--------|--------|
-| Split-GAL4 | `20x` AND `multichannel`, excluding `image1`/`image2` | ~95% reduction |
-| VT GAL4 | Files with `total` in filename | ~90% reduction |
-| Gen1 R-lines | CDM and MIP files only | Keeps representative images |
-| MCFO | Keep all files | Full stochastic labeling data |
+| Collection   | Filter                                                | Effect                        |
+| ------------ | ----------------------------------------------------- | ----------------------------- |
+| Split-GAL4   | `20x` AND `multichannel`, excluding `image1`/`image2` | ~95% reduction                |
+| VT GAL4      | Files with `total` in filename                        | ~90% reduction                |
+| Gen1 R-lines | CDM and MIP files only                                | Keeps representative images   |
+| MCFO         | Keep all files                                        | Full stochastic labeling data |
 
 This is useful when you only need representative images rather than all available imagery.
 
