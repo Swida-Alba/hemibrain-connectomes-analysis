@@ -708,6 +708,74 @@ results = nbf.find_neurons_batch(
 | `visualize_by`                 | `str`   | `'type'` | Grouping mode: `'type'` or `'bodyId'`.                   |
 | `generate_individual_profiles` | `bool`  | `False`  | Generate per-neuron PNG profiles and PDF summary.        |
 | `pdf_images_per_page`          | `tuple` | `(3, 2)` | PDF layout as (columns, rows).                           |
+| `type_filter`                  | `dict`  | `None`   | Filter types by name pattern (see below).                |
+| `datasets_to_visualize`        | `str/list` | `'all'` | Constrain which datasets to visualize.                  |
+
+### Type Filtering
+
+Filter which neuron types to visualize by name pattern. The filter gets ALL types first, applies the filter, then takes top N from filtered results. **Original ranks are preserved** in the output labels.
+
+```python
+# Filter types containing 'DN'
+results = nbf.find_neurons_batch(
+    'SS29633',
+    visualize_top_n=12,
+    type_filter={'contains': 'DN'}
+)
+
+# Filter types starting with 'AN' or 'DN'
+results = nbf.find_neurons_batch(
+    'SS29633',
+    visualize_top_n=12,
+    type_filter={'startswith': ['AN', 'DN']}  # OR logic within key
+)
+
+# Combine multiple filters (AND logic across keys)
+results = nbf.find_neurons_batch(
+    'SS29633',
+    visualize_top_n=12,
+    type_filter={'contains': 'B', 'startswith': 'AN'}  # Must match BOTH
+)
+
+# Use regex for complex patterns
+results = nbf.find_neurons_batch(
+    'SS29633',
+    visualize_top_n=12,
+    type_filter={'regex': r'^[AD]N\d+'}
+)
+```
+
+**Filter Types:**
+| Key | Description | Example |
+| --- | ----------- | ------- |
+| `contains` | Type name contains pattern | `{'contains': 'DN'}` |
+| `startswith` | Type name starts with pattern | `{'startswith': 'AN'}` |
+| `endswith` | Type name ends with pattern | `{'endswith': '_R'}` |
+| `regex` | Match regex pattern | `{'regex': r'^DN[a-z]\d+'}` |
+
+**Filter Logic:**
+- Multiple values within same key: **OR** (match any)
+- Multiple keys: **AND** (must match all)
+
+### Dataset Filtering
+
+Constrain which datasets to visualize:
+
+```python
+# Visualize only hemibrain and MANC
+results = nbf.find_neurons_batch(
+    'LH173',
+    visualize_top_n=20,
+    datasets_to_visualize=['hemibrain:v1.2.1', 'manc:v1.0']
+)
+
+# Visualize only male-cns
+results = nbf.find_neurons_batch(
+    'SS29633',
+    visualize_top_n=12,
+    datasets_to_visualize='male-cns:v0.9'
+)
+```
 
 ### Grouping Modes
 
@@ -782,6 +850,34 @@ results = nbf.find_neurons_batch(
 
 # Results include neurons grouped by type in 3D viewer
 # Individual profiles saved to plot3d_{dataset}/individual_profiles/
+```
+
+### Example: Filter and Visualize Specific Types
+
+```python
+from src.neuronbridge_finder import NeuronBridgeFinder
+
+nbf = NeuronBridgeFinder(verbose=True)
+
+# Find neurons and filter to only visualize descending neurons (DN)
+results = nbf.find_neurons_batch(
+    queries='SS29633',
+    match_type='cds',
+    output_dir='./ss29633_analysis',
+    visualize_top_n=12,
+    type_filter={'startswith': 'DN'},  # Only DN types
+    datasets_to_visualize='male-cns:v0.9'  # Only MANC
+)
+
+# Or filter ascending neurons (AN) with preserved original ranks
+# If AN07B072_a was rank 4 in full results, it stays r4 in visualization
+results = nbf.find_neurons_batch(
+    queries='SS29633',
+    match_type='cds',
+    output_dir='./ss29633_an_analysis',
+    visualize_top_n=12,
+    type_filter={'startswith': 'AN'}
+)
 ```
 
 ---

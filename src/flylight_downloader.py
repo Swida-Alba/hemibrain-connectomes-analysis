@@ -14,6 +14,22 @@ Key Features:
     - Filter by collection: Gen1 GAL4, Gen1 MCFO, Split-GAL4, VT GAL4, etc.
     - List available files without downloading
     - Automatic directory structure preservation
+    - Image summary generation (PDF/PPTX) with configurable layout and styling
+
+Usage:
+    >>> from flylight_downloader import FlyLightDownloader
+    >>> # Basic download
+    >>> downloader = FlyLightDownloader(output_dir='./downloads')
+    >>> downloader.download('R10A06')
+    
+    >>> # Download with PPTX summary of 4x2 images on black background
+    >>> downloader = FlyLightDownloader(output_dir='./downloads', verbose='pbar')
+    >>> downloader.download(
+    ...     'SS00731', 
+    ...     generate_summary='pptx', 
+    ...     summary_images_per_page=(4, 2),
+    ...     background_color='black'
+    ... )
 
 Data Sources:
 
@@ -73,6 +89,10 @@ from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Optional, List, Dict, Any, Union, Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
+try:
+    from tqdm import tqdm
+except ImportError:
+    tqdm = None
 
 try:
     import boto3
@@ -252,7 +272,11 @@ class FlyLightDownloader:
         image_types: Image types to include ('mip', 'cdm', 'aligned', etc.)
         region: Anatomical region filter ('Brain', 'VNC', or 'All')
         max_workers: Number of parallel download threads
-        verbose: Print progress messages
+        verbose: Print progress messages. 
+                 - True: full output
+                 - 'pbar': use tqdm progress bar and condensed output
+                 - 'simple': simplified text output
+                 - False: no output
         use_boto3: Use boto3 for downloads (faster) if available
         simple_mode: Apply filename filtering to reduce download volume
         
@@ -288,7 +312,7 @@ class FlyLightDownloader:
     image_types: Union[str, List[str]] = 'all'
     region: str = 'All'  # 'Brain', 'VNC', or 'All' - filter by anatomical region
     max_workers: int = 4
-    verbose: bool = True
+    verbose: Union[bool, str] = 'pbar'
     use_boto3: bool = True
     include_vt_lines: bool = True  # Also search VT lines via HTTP CDN
     simple_mode: bool = True  # Apply filename filtering to reduce download volume
@@ -381,8 +405,19 @@ class FlyLightDownloader:
     
     def _log(self, message: str):
         """Print message if verbose mode is enabled."""
-        if self.verbose:
-            print(message)
+        if not self.verbose and self.verbose != 'False':
+            return
+        
+        # 'pbar' mode: condense output (suppress file-level logs)
+        if self.verbose == 'pbar':
+            # Suppress "Downloading..." messages or other file-level details
+            if "Downloading" in message or "Saved:" in message:
+                return
+            # Allow summary/error messages
+        
+        # 'simple' mode: standard output for now, maybe condensed later
+        
+        print(message)
     
     def _is_vt_line(self, line_name: str) -> bool:
         """Check if a line name is a VT line (served from HTTP CDN)."""
@@ -1242,6 +1277,7 @@ class FlyLightDownloader:
         generate_summary: Union[bool, str, List[str]] = None,
         summary_images_per_page: tuple = (3, 2),
         add_timestamp: bool = True,
+        background_color: Union[str, tuple] = 'black',
     ) -> List[Path]:
         """
         Download files for driver line(s).
@@ -1267,6 +1303,7 @@ class FlyLightDownloader:
                 Options: 'pdf', 'pptx', ['pdf', 'pptx'], False/None to disable
             summary_images_per_page: (columns, rows) for summary layout. Default: (5, 3)
             add_timestamp: If True, add timestamp to output folder name. Default: False
+            background_color: Background color for summary slides/pages. Default: 'black'
             
         Returns:
             List of paths to downloaded files
@@ -1327,7 +1364,11 @@ class FlyLightDownloader:
                     for f in files
                 }
                 
-                for future in as_completed(futures):
+                iterator = as_completed(futures)
+                if self.verbose == 'pbar' and tqdm:
+                    iterator = tqdm(iterator, total=len(files), desc=f"Downloading {combined_name}", unit="file")
+                
+                for future in iterator:
                     result = future.result()
                     if result:
                         downloaded.append(result)
@@ -1335,7 +1376,11 @@ class FlyLightDownloader:
                             on_file_downloaded(result, combined_name)
         else:
             # Sequential download
-            for f in files:
+            iterator = files
+            if self.verbose == 'pbar' and tqdm:
+                iterator = tqdm(files, desc=f"Downloading {combined_name}", unit="file")
+                
+            for f in iterator:
                 result = self.download_file(f, str(output_path), flat_structure)
                 if result:
                     downloaded.append(result)
@@ -1352,7 +1397,8 @@ class FlyLightDownloader:
                 line_name=combined_name,
                 timestamp=timestamp,
                 generate_summary=generate_summary,
-                images_per_page=summary_images_per_page
+                images_per_page=summary_images_per_page,
+                background_color=background_color
             )
         
         return downloaded
@@ -1364,7 +1410,8 @@ class FlyLightDownloader:
         line_name: str,
         timestamp: str,
         generate_summary: Union[bool, str, List[str]],
-        images_per_page: tuple = (5, 3)
+        images_per_page: tuple = (5, 3),
+        background_color: Union[str, tuple] = 'black'
     ) -> None:
         """
         Generate PDF/PPTX image summary from downloaded files.
@@ -1376,6 +1423,7 @@ class FlyLightDownloader:
             timestamp: Timestamp string for filename
             generate_summary: Format(s) to generate: 'pdf', 'pptx', ['pdf', 'pptx']
             images_per_page: (columns, rows) layout for summary
+            background_color: Background color for summary. Default: 'black'
         """
         # Filter image files only
         image_files = [f for f in downloaded_files if f.suffix.lower() in ['.png', '.jpg', '.jpeg']]
@@ -1409,7 +1457,8 @@ class FlyLightDownloader:
                         images_per_page=images_per_page,
                         title_font_size=24,
                         margin=0.3,
-                        verbose=self.verbose
+                        verbose=self.verbose,
+                        background_color=background_color
                     )
                     self._log(f"   ✅ PDF summary: {pdf_path.name}")
                 except ImportError:
@@ -1419,7 +1468,12 @@ class FlyLightDownloader:
             
             elif fmt.lower() == 'pptx':
                 try:
-                    from visualize_skeleton import img2pptx
+                    try:
+                        from utils.report_utils import img2pptx
+                    except ImportError:
+                        # Fallback for when running directly or different path structure
+                        from src.utils.report_utils import img2pptx
+                        
                     pptx_path = output_dir / f"{line_name}_{timestamp}_summary.pptx"
                     # Use directory path with subfolder grouping to separate lines on different pages
                     # This matches the PDF behavior where each line starts on a new page
@@ -1432,10 +1486,13 @@ class FlyLightDownloader:
                         title_fontsize=24,
                         include_subfolders=True,
                         group_by_subfolder=True,
+                        background_color=background_color,
+                        font_color=(255, 255, 255) if background_color in ['black', '#000000', (0,0,0)] else (0,0,0)
                     )
                     self._log(f"   ✅ PPTX summary: {pptx_path.name}")
-                except ImportError:
-                    self._log(f"   ⚠️  PPTX generation requires visualize_skeleton module")
+                except ImportError as e:
+                    self._log(f"   ⚠️  PPTX generation failed (ImportError): {e}")
+                    self._log(f"      Please ensure 'python-pptx' is installed and src/utils/report_utils.py is accessible.")
                 except Exception as e:
                     self._log(f"   ⚠️  PPTX generation failed: {e}")
     
@@ -1531,7 +1588,7 @@ def download_flylight_images(
     image_types: Union[str, List[str]] = 'mip',
     max_files: Optional[int] = None,
     simple_mode: bool = False,
-    verbose: bool = True
+    verbose: Union[bool, str] = True
 ) -> List[Path]:
     """
     Convenience function to download FlyLight images for a driver line.
@@ -1545,7 +1602,7 @@ def download_flylight_images(
         simple_mode: Apply filename filtering to reduce download volume:
             - Split-GAL4: only '20x' AND 'multichannel' files, excluding 'image1'/'image2'
             - GAL4/LexA: only 'total' files
-        verbose: Print progress
+        verbose: Print progress (True, False, 'pbar', 'simple')
         
     Returns:
         List of paths to downloaded files
@@ -1553,7 +1610,7 @@ def download_flylight_images(
     Example:
         >>> download_flylight_images('R10A06', formats='png', image_types='cdm')
         >>> download_flylight_images('VT037867', formats=['png', 'json'], image_types='all')
-        >>> download_flylight_images('SS01015', simple_mode=True)  # Reduced download
+        >>> download_flylight_images('SS01015', simple_mode=True, verbose='pbar')
     """
     downloader = FlyLightDownloader(
         output_dir=output_dir,
@@ -1571,7 +1628,7 @@ def list_flylight_files(
     formats: Union[str, List[str]] = 'all',
     image_types: Union[str, List[str]] = 'all',
     simple_mode: bool = False,
-    verbose: bool = True
+    verbose: Union[bool, str] = True
 ) -> List[FlyLightFile]:
     """
     List available FlyLight files for a driver line without downloading.
@@ -1583,7 +1640,7 @@ def list_flylight_files(
         simple_mode: Apply filename filtering to reduce file list:
             - Split-GAL4: only '20x' AND 'multichannel' files, excluding 'image1'/'image2'
             - GAL4/LexA: only 'total' files
-        verbose: Print progress
+        verbose: Print progress (True, False, 'pbar', 'simple')
         
     Returns:
         List of FlyLightFile objects

@@ -2164,8 +2164,8 @@ class VisualizeSkeleton:
     
     Options:
     - 'auto' (default): Automatically selects optimal color based on background_color:
-        • White background: 'rgba(200, 240, 200, 0.1)' (light green, 10% opacity)
-        • Black background: 'rgba(50, 60, 50, 0.1)' (dark green-gray, 10% opacity)
+        • White background: 'rgba(200, 230, 240, 0.1)' (light green, 10% opacity)
+        • Black background: 'rgba(60, 60, 70, 0.1)' (dark green-gray, 10% opacity)
     - Custom RGBA string: 'rgba(r, g, b, a)' where a=transparency
     
     Default: Distinguishes from brain mesh with slightly different hue
@@ -2197,9 +2197,9 @@ class VisualizeSkeleton:
             color = self.vnc_mesh_color
             if color == 'auto':
                 if self._is_dark_background():
-                    return 'rgba(50, 60, 50, 0.1)'  # Subtle dark green-gray for dark backgrounds
+                    return 'rgba(60, 60, 70, 0.1)'  # Subtle dark green-gray for dark backgrounds
                 else:
-                    return 'rgba(200, 240, 200, 0.1)'  # Light green for light backgrounds
+                    return 'rgba(200, 230, 240, 0.1)'  # Light green for light backgrounds
             return color
 
     def list_available_rois(self, refresh=False, fetch_online=True):
@@ -12206,6 +12206,7 @@ def video2gif(
     return output_gif
 
 
+
 def img2pptx(
     input_path: str | list,
     output_pptx: str = None,
@@ -12223,495 +12224,38 @@ def img2pptx(
     group_by_subfolder: bool = True,
     font_color: tuple = (0, 0, 0),
     font: str = 'Arial',
+    background_color: tuple | str = None,
 ) -> str:
     """
     Aggregate images to PowerPoint (PPTX) with proper layout, or convert PDF pages to PPTX.
     
-    This is a static helper function that can be called independently.
-    Supports:
-    - List of image files → PPTX with grid layout
-    - Single PDF file → PPTX with one slide per page
-    - Directory of images → PPTX with grid layout
-    - Directory with subfolders → PPTX with images from all subfolders
-    
-    Parameters
-    ----------
-    input_path : str or list
-        Path(s) to input files. Can be:
-        - A single PDF file path (converts pages to slides)
-        - A single directory path (aggregates all images in the folder)
-        - A list of image file paths (aggregates into PPTX)
-    output_pptx : str, optional
-        Path for the output PPTX file. If None, auto-generated based on input.
-    images_per_slide : tuple, default (4, 3)
-        (columns, rows) - number of images per slide when aggregating images.
-        Not used for PDF conversion.
-    slide_title : str, optional
-        Title to add to each slide. For image aggregation, can use {page} placeholder
-        for page number, {subfolder} for subfolder name. For PDF, defaults to showing page numbers.
-    slide_size : str, default 'widescreen'
-        Slide dimensions:
-        - 'widescreen': 13.333" x 7.5" (16:9)
-        - 'standard': 10" x 7.5" (4:3)
-        - 'a4': 11.69" x 8.27" (A4 landscape)
-    margin : float, default 0.3
-        Margin in inches from slide edges.
-    title_height : int, default 0
-        Height reserved for title in points (pt). Set to 0 to disable title space.
-        Recommended: 20-30 for visible titles.
-    label_fontsize : int, default 20
-        Font size in points for image labels.
-    title_fontsize : int, default 24
-        Font size in points for slide titles.
-    label_position : str, default 'below'
-        Position of image labels:
-        - 'below': Label below the image (default)
-        - 'above': Label above the image  
-        - 'overlay': Label overlaid on bottom of image without background
-        - 'none': No labels
-    label_overlay_alpha : float, default 0.7
-        Alpha (opacity) for overlay label background (0.0-1.0). Only used when label_position='overlay'.
-        Note: Background shape is no longer added, this parameter is preserved for compatibility.
-    cell_padding : float, default 0
-        Padding within each cell in inches.
-    include_subfolders : bool, default False
-        If True and input_path is a directory, recursively include images from all subfolders.
-    group_by_subfolder : bool, default True
-        If True and include_subfolders=True, create separate slides for each subfolder.
-        The subfolder name will be used as slide title (or appended to slide_title).
-        If False, all images are mixed together regardless of subfolder.
-    font_color : tuple, default (0, 0, 0)
-        RGB color tuple for label text (r, g, b), each value 0-255. Default is black.
-    font : str, default 'Arial'
-        Font name for titles and labels.
-    
-    Returns
-    -------
-    str
-        Path to the created PPTX file.
-    
-    Examples
-    --------
-    # Convert PDF to PPTX
-    from visualize_skeleton import img2pptx
-    img2pptx('/path/to/document.pdf')
-    
-    # Aggregate images from a folder
-    img2pptx('/path/to/image_folder/', images_per_slide=(3, 2))
-    
-    # Aggregate images from folder and all subfolders
-    img2pptx('/path/to/image_folder/', include_subfolders=True, group_by_subfolder=True)
-    
-    # Aggregate specific images with overlay labels
-    img2pptx(['/path/to/img1.png', '/path/to/img2.png'], 
-             output_pptx='/path/to/output.pptx',
-             label_position='overlay',
-             label_fontsize=16)
-    
-    # Custom layout with title template
-    img2pptx('/path/to/images/', 
-             include_subfolders=True,
-             images_per_slide=(2, 2),
-             slide_title='{subfolder} - Page {page}')
+    This function has been moved to src/utils/report_utils.py.
+    This wrapper is provided for backward compatibility.
     """
     try:
-        from pptx import Presentation
-        from pptx.util import Inches, Pt
-        from pptx.enum.text import PP_ALIGN
+        from utils.report_utils import img2pptx as _img2pptx
     except ImportError:
-        raise ImportError(
-            "python-pptx is required for PPTX generation.\n"
-            "Install with: pip install python-pptx"
-        )
-    
-    from PIL import Image
-    import io
-    
-    # Natural sort function for proper ordering
-    def natural_sort_key(s):
-        import re
-        return [int(c) if c.isdigit() else c.lower() for c in re.split(r'(\d+)', str(s))]
-    
-    # Slide size presets (width, height in inches)
-    size_presets = {
-        'widescreen': (13.333, 7.5),
-        'standard': (10, 7.5),
-        'a4': (11.69, 8.27),
-    }
-    
-    if slide_size in size_presets:
-        slide_width, slide_height = size_presets[slide_size]
-    else:
-        slide_width, slide_height = size_presets['widescreen']
-    
-    # Calculate label height based on fontsize
-    label_height_inches = (label_fontsize / 72) * 1.5  # 1.5x line height
-    
-    # Convert title_height from points to inches
-    title_height_inches = title_height / 72 if title_height > 0 else 0
-    
-    # Handle font color (convert 0-1 float to 0-255 int if needed)
-    r, g, b = font_color
-    if all(isinstance(c, (int, float)) and c <= 1.0 for c in font_color) and not all(c == 0 for c in font_color):
-        # Heuristic: if all values are <= 1.0 (and not all 0), assume float 0-1 and convert to 0-255
-        print(f"ℹ️  Converting font_color {font_color} from 0-1 range to 0-255 range.")
-        r, g, b = [int(c * 255) for c in font_color]
-    else:
-        r, g, b = [int(c) for c in font_color]
-    
-    font_color_rgb = (r, g, b)
-    
-    # Determine input type and gather files
-    is_pdf = False
-    image_files = []  # List of (path, subfolder_name) tuples
-    pdf_path = None
-    valid_extensions = {'.png', '.jpg', '.jpeg', '.gif', '.bmp', '.tiff', '.tif'}
-    
-    def collect_images_from_dir(dir_path, subfolder_name=''):
-        """Collect images from a directory, optionally recursively."""
-        collected = []
-        for f in sorted(os.listdir(dir_path), key=natural_sort_key):
-            full_path = os.path.join(dir_path, f)
-            if os.path.isfile(full_path) and os.path.splitext(f)[1].lower() in valid_extensions:
-                collected.append((full_path, subfolder_name))
-            elif os.path.isdir(full_path) and include_subfolders:
-                # Recursively collect from subfolder
-                sub_name = f if group_by_subfolder else subfolder_name
-                collected.extend(collect_images_from_dir(full_path, sub_name))
-        return collected
-    
-    if isinstance(input_path, str):
-        if input_path.lower().endswith('.pdf'):
-            is_pdf = True
-            pdf_path = input_path
-            if not os.path.exists(pdf_path):
-                raise FileNotFoundError(f"PDF file not found: {pdf_path}")
-        elif os.path.isdir(input_path):
-            # Directory of images
-            image_files = collect_images_from_dir(input_path, '')
-            if not image_files:
-                raise ValueError(f"No image files found in directory: {input_path}")
-        else:
-            # Single image file
-            if os.path.exists(input_path):
-                image_files = [(input_path, '')]
-            else:
-                raise FileNotFoundError(f"File not found: {input_path}")
-    elif isinstance(input_path, list):
-        # List of image paths
-        for p in input_path:
-            if os.path.exists(p):
-                image_files.append((p, ''))
-            else:
-                print(f"⚠️  Skipping missing file: {p}")
-        if not image_files:
-            raise ValueError("No valid image files provided")
-        image_files = sorted(image_files, key=lambda x: natural_sort_key(x[0]))
-    
-    # Set output path
-    if output_pptx is None:
-        if is_pdf:
-            output_pptx = os.path.splitext(pdf_path)[0] + '.pptx'
-        elif isinstance(input_path, str) and os.path.isdir(input_path):
-            output_pptx = os.path.join(input_path, 'aggregated_images.pptx')
-        else:
-            base_dir = os.path.dirname(image_files[0][0]) if image_files else '.'
-            output_pptx = os.path.join(base_dir, 'aggregated_images.pptx')
-    
-    # Create presentation
-    prs = Presentation()
-    prs.slide_width = Inches(slide_width)
-    prs.slide_height = Inches(slide_height)
-    
-    # Get blank layout
-    blank_layout = prs.slide_layouts[6]  # Blank slide
-    
-    if is_pdf:
-        # Convert PDF pages to PPTX slides
-        print(f'📄 Converting PDF to PPTX...')
-        print(f'   Input: {pdf_path}')
-        
         try:
-            import fitz  # PyMuPDF
+            from src.utils.report_utils import img2pptx as _img2pptx
         except ImportError:
-            raise ImportError(
-                "PyMuPDF is required for PDF conversion.\n"
-                "Install with: pip install pymupdf"
-            )
-        
-        pdf_doc = fitz.open(pdf_path)
-        num_pages = len(pdf_doc)
-        print(f'   Pages: {num_pages}')
-        
-        for page_num in range(num_pages):
-            page = pdf_doc[page_num]
-            
-            # Render page to image with good quality
-            zoom = 2.0  # 2x zoom for better quality
-            mat = fitz.Matrix(zoom, zoom)
-            pix = page.get_pixmap(matrix=mat, alpha=False)
-            
-            # Convert to PIL Image
-            img_data = pix.tobytes("png")
-            img = Image.open(io.BytesIO(img_data))
-            
-            # Create slide
-            slide = prs.slides.add_slide(blank_layout)
-            
-            # Add title if specified
-            content_top = margin
-            if slide_title:
-                title_text = slide_title.format(page=page_num + 1, subfolder='')
-                txBox = slide.shapes.add_textbox(
-                    Inches(margin), 
-                    Inches(margin / 2),
-                    Inches(slide_width - 2 * margin),
-                    Inches(title_height_inches)
-                )
-                tf = txBox.text_frame
-                p = tf.paragraphs[0]
-                p.text = title_text
-                p.font.size = Pt(title_fontsize)
-                p.font.bold = True
-                p.alignment = PP_ALIGN.CENTER
-                content_top = margin + title_height_inches
-            
-            # Calculate image placement (fit to slide)
-            usable_width = slide_width - 2 * margin
-            usable_height = slide_height - content_top - margin
-            
-            img_width, img_height = img.size
-            scale_w = usable_width / (img_width / 72)  # Convert pixels to inches
-            scale_h = usable_height / (img_height / 72)
-            scale_factor = min(scale_w, scale_h, 1.0)
-            
-            final_width = (img_width / 72) * scale_factor
-            final_height = (img_height / 72) * scale_factor
-            
-            # Center on slide
-            left = (slide_width - final_width) / 2
-            top = content_top + (usable_height - final_height) / 2
-            
-            # Save image temporarily and add to slide
-            with io.BytesIO() as img_buffer:
-                img.save(img_buffer, format='PNG')
-                img_buffer.seek(0)
-                slide.shapes.add_picture(
-                    img_buffer,
-                    Inches(left),
-                    Inches(top),
-                    Inches(final_width),
-                    Inches(final_height)
-                )
-            
-            print(f'\r   Processing page {page_num + 1}/{num_pages}...', end='', flush=True)
-        
-        pdf_doc.close()
-        print(f'\n✅ PPTX created: {output_pptx}')
-        print(f'   Slides: {num_pages}')
+             raise ImportError("Could not import img2pptx from utils.report_utils. Please ensure the file exists.")
     
-    else:
-        # Aggregate images to PPTX with grid layout
-        print(f'📊 Aggregating images to PPTX...')
-        print(f'   Images: {len(image_files)}')
-        print(f'   Layout: {images_per_slide[0]} columns × {images_per_slide[1]} rows')
-        if include_subfolders:
-            subfolders = set(sf for _, sf in image_files if sf)
-            if subfolders:
-                print(f'   Subfolders: {len(subfolders)}')
-        
-        cols, rows = images_per_slide
-        images_per_page = cols * rows
-        
-        # Group images by subfolder if needed
-        if group_by_subfolder and include_subfolders:
-            # Group by subfolder
-            from collections import OrderedDict
-            grouped_images = OrderedDict()
-            for img_path, subfolder in image_files:
-                key = subfolder if subfolder else '_root_'
-                if key not in grouped_images:
-                    grouped_images[key] = []
-                grouped_images[key].append(img_path)
-        else:
-            # All images in one group
-            grouped_images = {'': [img_path for img_path, _ in image_files]}
-        
-        # Calculate cell dimensions (account for label position)
-        # Reserve space for title if title_height is set (> 0)
-        has_title_space = title_height > 0
-        content_top = margin if not has_title_space else margin + title_height_inches
-        usable_width = slide_width - 2 * margin
-        usable_height = slide_height - content_top - margin
-        cell_width = usable_width / cols
-        cell_height = usable_height / rows
-        
-        total_slides = 0
-        total_images_added = 0
-        
-        for group_name, group_images in grouped_images.items():
-            num_slides_for_group = (len(group_images) + images_per_page - 1) // images_per_page
-            
-            for slide_idx in range(num_slides_for_group):
-                slide = prs.slides.add_slide(blank_layout)
-                
-                # Build title text
-                if slide_title:
-                    subfolder_display = group_name if group_name != '_root_' else ''
-                    title_text = slide_title.format(page=slide_idx + 1, subfolder=subfolder_display)
-                elif group_name and group_name != '_root_':
-                    title_text = group_name
-                    if num_slides_for_group > 1:
-                        title_text += f" ({slide_idx + 1}/{num_slides_for_group})"
-                else:
-                    title_text = None
-                
-                # Add title
-                if title_text:
-                    txBox = slide.shapes.add_textbox(
-                        Inches(margin),
-                        Inches(margin / 2),
-                        Inches(slide_width - 2 * margin),
-                        Inches(title_height_inches)
-                    )
-                    tf = txBox.text_frame
-                    p = tf.paragraphs[0]
-                    p.text = title_text
-                    p.font.name = font
-                    p.font.size = Pt(title_fontsize)
-                    p.font.bold = True
-                    p.alignment = PP_ALIGN.CENTER
-                
-                # Get images for this slide
-                start_idx = slide_idx * images_per_page
-                end_idx = min(start_idx + images_per_page, len(group_images))
-                slide_images = group_images[start_idx:end_idx]
-                
-                for i, img_path in enumerate(slide_images):
-                    row = i // cols
-                    col = i % cols
-                    
-                    # Calculate cell position
-                    cell_left = margin + col * cell_width
-                    cell_top = content_top + row * cell_height
-                    
-                    try:
-                        with Image.open(img_path) as img:
-                            img_width, img_height = img.size
-                            
-                            # Calculate space for label based on position
-                            if label_position == 'none' or label_position == 'overlay':
-                                label_space = 0
-                            else:
-                                label_space = label_height_inches
-                            
-                            # Calculate scaling to fit in cell with padding
-                            max_width = cell_width - 2 * cell_padding
-                            max_height = cell_height - 2 * cell_padding - label_space
-                            
-                            scale_w = max_width / (img_width / 96)  # Assume 96 DPI
-                            scale_h = max_height / (img_height / 96)
-                            scale_factor = min(scale_w, scale_h)
-                            
-                            final_width = (img_width / 96) * scale_factor
-                            final_height = (img_height / 96) * scale_factor
-                            
-                            # Calculate image position based on label position
-                            if label_position == 'above':
-                                img_top = cell_top + label_space + (cell_height - label_space - final_height) / 2
-                            else:  # below, overlay, none
-                                img_top = cell_top + (cell_height - label_space - final_height) / 2
-                            
-                            img_left = cell_left + (cell_width - final_width) / 2
-                            
-                            # Add image
-                            slide.shapes.add_picture(
-                                img_path,
-                                Inches(img_left),
-                                Inches(img_top),
-                                Inches(final_width),
-                                Inches(final_height)
-                            )
-                            
-                            # Add label if not 'none'
-                            if label_position != 'none':
-                                # Import RGBColor for font color
-                                from pptx.dml.color import RGBColor
-                                
-                                # Get label text (filename without extension)
-                                label = os.path.splitext(os.path.basename(img_path))[0]
-                                max_label_chars = int(cell_width * 10)  # Approximate chars that fit
-                                if len(label) > max_label_chars:
-                                    label = label[:max_label_chars-3] + '...'
-                                
-                                if label_position == 'overlay':
-                                    # Overlay on bottom of image without background
-                                    label_top = img_top + final_height - label_height_inches
-                                    label_left = img_left
-                                    label_width = final_width
-                                    
-                                    # Add textbox without background shape
-                                    txBox = slide.shapes.add_textbox(
-                                        Inches(label_left),
-                                        Inches(label_top),
-                                        Inches(label_width),
-                                        Inches(label_height_inches)
-                                    )
-                                    tf = txBox.text_frame
-                                    p = tf.paragraphs[0]
-                                    p.text = label
-                                    p.font.name = font
-                                    p.font.size = Pt(label_fontsize)
-                                    p.font.color.rgb = RGBColor(*font_color_rgb)
-                                    p.alignment = PP_ALIGN.CENTER
-                                    
-                                elif label_position == 'above':
-                                    txBox = slide.shapes.add_textbox(
-                                        Inches(cell_left),
-                                        Inches(cell_top + cell_padding),
-                                        Inches(cell_width),
-                                        Inches(label_height_inches)
-                                    )
-                                    tf = txBox.text_frame
-                                    p = tf.paragraphs[0]
-                                    p.text = label
-                                    p.font.name = font
-                                    p.font.size = Pt(label_fontsize)
-                                    p.font.color.rgb = RGBColor(*font_color_rgb)
-                                    p.alignment = PP_ALIGN.CENTER
-                                    
-                                else:  # below
-                                    txBox = slide.shapes.add_textbox(
-                                        Inches(cell_left),
-                                        Inches(cell_top + cell_height - label_height_inches - cell_padding),
-                                        Inches(cell_width),
-                                        Inches(label_height_inches)
-                                    )
-                                    tf = txBox.text_frame
-                                    p = tf.paragraphs[0]
-                                    p.text = label
-                                    p.font.name = font
-                                    p.font.size = Pt(label_fontsize)
-                                    p.font.color.rgb = RGBColor(*font_color_rgb)
-                                    p.alignment = PP_ALIGN.CENTER
-                            
-                            total_images_added += 1
-                            
-                    except Exception as e:
-                        print(f'⚠️  Could not process {img_path}: {e}')
-                
-                total_slides += 1
-                print(f'\r   Creating slide {total_slides}...', end='', flush=True)
-        
-        print(f'\n✅ PPTX created: {output_pptx}')
-        print(f'   Slides: {total_slides}')
-        print(f'   Images: {total_images_added}')
-    
-    # Save presentation
-    prs.save(output_pptx)
-    
-    # Report file size
-    output_size = os.path.getsize(output_pptx) / (1024 * 1024)
-    print(f'   File size: {output_size:.2f} MB')
-    
-    return output_pptx
+    return _img2pptx(
+        input_path=input_path,
+        output_pptx=output_pptx,
+        images_per_slide=images_per_slide,
+        slide_title=slide_title,
+        slide_size=slide_size,
+        margin=margin,
+        title_height=title_height,
+        label_fontsize=label_fontsize,
+        title_fontsize=title_fontsize,
+        label_position=label_position,
+        label_overlay_alpha=label_overlay_alpha,
+        cell_padding=cell_padding,
+        include_subfolders=include_subfolders,
+        group_by_subfolder=group_by_subfolder,
+        font_color=font_color,
+        font=font,
+        background_color=background_color
+    )

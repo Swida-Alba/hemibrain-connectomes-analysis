@@ -5396,10 +5396,91 @@ class NeuronBridgeFinder:
         
         return 1  # Default if lookup fails
     
+    def _apply_type_filter(
+        self,
+        type_list: List[Tuple[int, str]],
+        type_filter: Optional[Dict[str, Union[str, List[str]]]]
+    ) -> List[Tuple[int, str]]:
+        """
+        Filter type names based on filter criteria while preserving original ranks.
+        
+        Filter logic:
+        - Multiple values within a key (list): OR logic (match any)
+        - Across different keys: AND logic (must match all filter types)
+        
+        Parameters
+        ----------
+        type_list : list of (rank, type_name) tuples
+            List of types with their original ranks (before filtering)
+        type_filter : dict, optional
+            Filter criteria with keys: 'contains', 'startswith', 'endswith', 'regex'
+            Each value can be a string or list of strings.
+            Example: {'contains': ['DN', 'AN'], 'startswith': 'M'}
+            
+        Returns
+        -------
+        list of (rank, type_name) tuples
+            Filtered list preserving original ranks
+        """
+        if type_filter is None or not type_filter:
+            return type_list
+        
+        import re
+        
+        def matches_filter(type_name: str) -> bool:
+            """Check if type_name matches all filter criteria."""
+            # Each key must be satisfied (AND logic across keys)
+            for filter_type, filter_values in type_filter.items():
+                # Convert single value to list for uniform processing
+                if isinstance(filter_values, str):
+                    filter_values = [filter_values]
+                
+                # OR logic within a key: match any value
+                matched = False
+                
+                if filter_type == 'contains':
+                    for val in filter_values:
+                        if val in type_name:
+                            matched = True
+                            break
+                elif filter_type == 'startswith':
+                    for val in filter_values:
+                        if type_name.startswith(val):
+                            matched = True
+                            break
+                elif filter_type == 'endswith':
+                    for val in filter_values:
+                        if type_name.endswith(val):
+                            matched = True
+                            break
+                elif filter_type == 'regex':
+                    for val in filter_values:
+                        try:
+                            if re.search(val, type_name):
+                                matched = True
+                                break
+                        except re.error:
+                            self._vprint(f"   ⚠️  Invalid regex pattern: {val}")
+                            continue
+                else:
+                    # Unknown filter type, skip
+                    self._vprint(f"   ⚠️  Unknown filter type: {filter_type}")
+                    matched = True  # Don't fail on unknown types
+                
+                if not matched:
+                    return False  # AND logic: all keys must match
+            
+            return True
+        
+        # Filter while preserving ranks
+        filtered = [(rank, name) for rank, name in type_list if matches_filter(name)]
+        
+        return filtered
+    
     def _get_top_types_fallback(
         self,
         ds_df: pd.DataFrame,
-        top_n: int
+        top_n: Optional[int] = None
     ) -> List[str]:
         """
         Fallback method to get top N types by score when labeling_info is not available.
@@ -5408,8 +5489,8 @@ class NeuronBridgeFinder:
         ----------
         ds_df : pd.DataFrame
             Dataset-filtered DataFrame with 'type_label' and 'score' columns
-        top_n : int
-            Number of top types to return
+        top_n : int, optional
+            Number of top types to return. If None, returns all types sorted by score.
             
         Returns
         -------
@@ -5423,11 +5504,15 @@ class NeuronBridgeFinder:
                 avg_score=(score_col, 'mean'),
                 count=('bodyId', 'count')
             ).reset_index()
-            type_stats = type_stats.sort_values('avg_score', ascending=False).head(top_n)
+            type_stats = type_stats.sort_values('avg_score', ascending=False)
+            if top_n is not None:
+                type_stats = type_stats.head(top_n)
             return type_stats['type_label'].tolist()
         else:
             # Fallback to count-based if no score column
-            type_counts = ds_df['type_label'].value_counts().head(top_n)
+            type_counts = ds_df['type_label'].value_counts()
+            if top_n is not None:
+                type_counts = type_counts.head(top_n)
             return type_counts.index.tolist()
     
     def _visualize_top_types(
@@ -5441,6 +5526,8 @@ class NeuronBridgeFinder:
         generate_individual_profiles: Union[bool, List[str]] = None,
         pdf_images_per_page: Tuple[int, int] = (4, 3),
         labeling_info: Optional[pd.DataFrame] = None,
+        type_filter: Optional[Dict[str, Union[str, List[str]]]] = None,
+        datasets_to_visualize: Union[str, List[str]] = 'all',
     ) -> None:
         """
         Visualize top N types/bodyIds per dataset using VisualizeSkeleton.
@@ -5467,6 +5554,16 @@ class NeuronBridgeFinder:
         labeling_info : pd.DataFrame, optional
             DataFrame with case-sensitive types and dataset column for filtering.
             Columns: type, dataset, {line1_score}, {line2_score}, ...
+        type_filter : dict, optional
+            Filter neuron types by name pattern. When specified, gets ALL types
+            first, applies filter, then takes top N from filtered results.
+            Keys: 'contains', 'startswith', 'endswith', 'regex'
+            Values: str or list of str
+            Logic: OR within same key, AND across keys
+            Original ranks are preserved in output labels (r{N} reflects rank
+            before filtering, allowing tracking of original ranking position).
+        datasets_to_visualize : str or list, default 'all'
+            Constrain which datasets to visualize. 'all' for all datasets.
         """
         try:
             from visualize_skeleton import VisualizeSkeleton
@@ -5485,7 +5582,34 @@ class NeuronBridgeFinder:
         self._vprint(f"\n🎨 Visualizing top {top_n} {mode_label}...")
         
         # Get all unique datasets from results
-        datasets = combined_df['dataset'].unique()
+        all_datasets = combined_df['dataset'].unique().tolist()
+        
+        # Apply datasets_to_visualize filter
+        if datasets_to_visualize is None or datasets_to_visualize == 'all':
+            datasets = all_datasets
+        elif isinstance(datasets_to_visualize, str):
+            # Single dataset specified
+            datasets = [d for d in all_datasets if d == datasets_to_visualize]
+            if not datasets:
+                self._vprint(f"   ⚠️  Dataset '{datasets_to_visualize}' not found in results")
+                self._vprint(f"   Available datasets: {all_datasets}")
+                return
+        else:
+            # List of datasets specified
+            datasets = [d for d in all_datasets if d in datasets_to_visualize]
+            if not datasets:
+                self._vprint(f"   ⚠️  None of the specified datasets found in results")
+                self._vprint(f"   Requested: {datasets_to_visualize}")
+                self._vprint(f"   Available: {all_datasets}")
+                return
+            skipped = [d for d in datasets_to_visualize if d not in all_datasets]
+            if skipped:
+                self._vprint(f"   ⚠️  Skipping unavailable datasets: {skipped}")
+        
+        if type_filter:
+            self._vprint(f"   🔍 Type filter: {type_filter}")
+        if datasets_to_visualize not in (None, 'all'):
+            self._vprint(f"   📂 Visualizing datasets: {datasets}")
         
         # Pre-load all required datasets (pull from NeuPrint if not available locally)
         self._vprint(f"\n📦 Loading datasets for visualization...")
@@ -5520,30 +5644,52 @@ class NeuronBridgeFinder:
                 
                 # Get top N types using labeling_info if available (case-sensitive, properly sorted)
                 # Otherwise fallback to avg_score
+                # If type_filter is set, get ALL types first, then filter, then take top N
+                get_all_types = type_filter is not None and type_filter
+                
                 if labeling_info is not None and not labeling_info.empty and 'dataset' in labeling_info.columns:
                     # Filter labeling_info for this dataset
                     ds_labeling = labeling_info[labeling_info['dataset'] == dataset].copy()
                     if not ds_labeling.empty:
                         # labeling_info is already sorted by quality (complete types first, then by min_score)
-                        # Take top N types (case-sensitive)
-                        top_items = ds_labeling['type'].head(top_n).tolist()
-                        self._vprint(f"   📋 Using labeling_info for {dataset}: {len(top_items)} types")
+                        if get_all_types:
+                            # Get all types for filtering
+                            all_types = ds_labeling['type'].tolist()
+                        else:
+                            # Get only top N types
+                            all_types = ds_labeling['type'].head(top_n).tolist()
+                        self._vprint(f"   📋 Using labeling_info for {dataset}: {len(all_types)} candidate types")
                     else:
                         # Fallback if no labeling info for this dataset
-                        top_items = self._get_top_types_fallback(ds_df, top_n)
+                        all_types = self._get_top_types_fallback(ds_df, None if get_all_types else top_n)
                 else:
                     # Fallback to score-based ranking
-                    top_items = self._get_top_types_fallback(ds_df, top_n)
+                    all_types = self._get_top_types_fallback(ds_df, None if get_all_types else top_n)
                 
-                if not top_items:
+                if not all_types:
                     continue
                 
+                # Create list of (original_rank, type_name) tuples
+                ranked_types = [(i, name) for i, name in enumerate(all_types, start=1)]
+                
+                # Apply type filter if specified
+                if type_filter:
+                    filtered_types = self._apply_type_filter(ranked_types, type_filter)
+                    if not filtered_types:
+                        self._vprint(f"   ⚠️  {dataset}: No types match filter criteria")
+                        continue
+                    self._vprint(f"   🔍 Filter applied: {len(filtered_types)}/{len(ranked_types)} types match")
+                    # Take top N from filtered results (preserving original ranks)
+                    top_ranked_types = filtered_types[:top_n]
+                else:
+                    top_ranked_types = ranked_types[:top_n]
+                
                 # Build neuron_layers as nested list (one sublist per type)
-                # Use r{rank}_{type}_x{N} format for legend names
+                # Use r{rank}_{type}_x{N} format for legend names (rank is ORIGINAL rank before filtering)
                 neuron_layers = []
                 layer_names = []
                 
-                for rank_idx, type_name in enumerate(top_items, start=1):
+                for original_rank, type_name in top_ranked_types:
                     # Case-sensitive type matching
                     type_neurons = ds_df[ds_df['type_label'] == type_name]['bodyId'].tolist()
                     # Convert to int (handles strings, floats, and string floats like '123.0')
@@ -5551,9 +5697,9 @@ class NeuronBridgeFinder:
                     
                     if len(type_neurons) > 0:
                         neuron_layers.append(type_neurons)
-                        # Create legend name: r{rank}_{type}_x{N}
+                        # Create legend name: r{rank}_{type}_x{N} - using ORIGINAL rank
                         n_neurons = len(type_neurons)
-                        layer_names.append(f"r{rank_idx}_{type_name}_x{n_neurons}")
+                        layer_names.append(f"r{original_rank}_{type_name}_x{n_neurons}")
                 
                 if not neuron_layers:
                     continue
@@ -5581,13 +5727,13 @@ class NeuronBridgeFinder:
                     continue
                 ds_df = ds_df_typed
                 
-                # Get top N bodyIds by score
+                # Sort by score - get ALL bodyIds first if filter is set, then filter, then limit
                 if score_col:
-                    ds_df_sorted = ds_df.sort_values(score_col, ascending=False).head(top_n)
+                    ds_df_sorted = ds_df.sort_values(score_col, ascending=False)
                 else:
-                    ds_df_sorted = ds_df.head(top_n)
+                    ds_df_sorted = ds_df
                 
-                # Group the top N bodyIds by type for layer organization
+                # Group ALL bodyIds by type for layer organization
                 # Track the minimum rank (best score position) for each type for sorting
                 type_to_bodyids = {}
                 type_min_rank = {}  # Track minimum rank (best) for each type
@@ -5605,8 +5751,23 @@ class NeuronBridgeFinder:
                 # Sort types by their minimum rank (best ranked type first)
                 sorted_types = sorted(type_to_bodyids.keys(), key=lambda t: type_min_rank[t])
                 
+                # Apply type filter if specified
+                if type_filter:
+                    # Create list of (rank, type_name) tuples for filtering
+                    ranked_types = [(type_min_rank[t], t) for t in sorted_types]
+                    filtered_types = self._apply_type_filter(ranked_types, type_filter)
+                    if not filtered_types:
+                        self._vprint(f"   ⚠️  {dataset}: No types match filter criteria")
+                        continue
+                    self._vprint(f"   🔍 Filter applied: {len(filtered_types)}/{len(ranked_types)} types match")
+                    # Take top N from filtered results, extract type names
+                    sorted_types = [t for _, t in filtered_types[:top_n]]
+                else:
+                    # No filter - just take top N types
+                    sorted_types = sorted_types[:top_n]
+                
                 # Build neuron_layers: one layer per type, containing all bodyIds of that type
-                # Use r{rank}_{type}_x{N} format for legend names
+                # Use r{rank}_{type}_x{N} format for legend names (rank is ORIGINAL rank before filtering)
                 neuron_layers = []
                 layer_names = []
                 
@@ -5614,6 +5775,7 @@ class NeuronBridgeFinder:
                     bodyids = type_to_bodyids[type_label]
                     neuron_layers.append(bodyids)
                     # Layer name: r{rank}_{type}_x{N} where rank is the best (min) rank for this type
+                    # This is the ORIGINAL rank from score ranking, preserved after filtering
                     rank = type_min_rank[type_label]
                     n_neurons = len(bodyids)
                     layer_names.append(f"r{rank}_{type_label}_x{n_neurons}")
@@ -5745,6 +5907,8 @@ class NeuronBridgeFinder:
         visualize_per_dataset: bool = True,
         generate_individual_profiles: Union[bool, List[str]] = None,
         pdf_images_per_page: Tuple[int, int] = (4, 3),
+        type_filter: Optional[Dict[str, Union[str, List[str]]]] = None,
+        datasets_to_visualize: Union[str, List[str]] = 'all',
     ) -> pd.DataFrame:
         """
         Find EM neurons for multiple driver lines with automatic saving.
@@ -5779,6 +5943,19 @@ class NeuronBridgeFinder:
             Set to False or None to disable generation. Default: None.
         pdf_images_per_page : tuple
             (columns, rows) for PDF layout. Default: (4, 3).
+        type_filter : dict, optional
+            Filter neuron types for visualization by name pattern.
+            Keys: 'contains', 'startswith', 'endswith', 'regex'
+            Values: str or list of str patterns
+            Multiple patterns within same key use OR logic.
+            Multiple keys use AND logic.
+            Ranks are preserved from original ranking before filtering.
+            Example: {'contains': 'DN', 'startswith': ['IN', 'DN']}
+        datasets_to_visualize : str or list, default 'all'
+            Constrain which datasets to visualize.
+            - 'all' or None: Visualize all datasets found in results
+            - List of dataset names: Only visualize specified datasets
+            - Single dataset name: Only visualize that dataset
             
         Returns
         -------
@@ -5797,6 +5974,13 @@ class NeuronBridgeFinder:
         -------
         >>> nbf = NeuronBridgeFinder()
         >>> results = nbf.find_neurons_batch('LH173,VT037867', output_dir='./output')
+        >>> # With type filtering
+        >>> results = nbf.find_neurons_batch(
+        ...     'SS29633',
+        ...     visualize_top_n=20,
+        ...     type_filter={'contains': 'DN'},
+        ...     datasets_to_visualize=['manc:v1.0']
+        ... )
         """
         # Use class-level match_type if not specified
         if match_type is None:
@@ -5843,7 +6027,9 @@ class NeuronBridgeFinder:
                     'visualize_by': visualize_by,
                     'visualize_per_dataset': visualize_per_dataset,
                     'generate_individual_profiles': generate_individual_profiles,
-                    'pdf_images_per_page': pdf_images_per_page
+                    'pdf_images_per_page': pdf_images_per_page,
+                    'type_filter': type_filter,
+                    'datasets_to_visualize': datasets_to_visualize
                 }
             )
             self._vprint(f"   💾 Parameters: parameters.json")
@@ -6063,6 +6249,8 @@ class NeuronBridgeFinder:
                             visualize_by=visualize_by,
                             generate_individual_profiles=generate_individual_profiles,
                             pdf_images_per_page=pdf_images_per_page,
+                            type_filter=type_filter,
+                            datasets_to_visualize=datasets_to_visualize,
                         )
                     
                     # Recommend colabeling analysis for multiple lines
@@ -6087,6 +6275,8 @@ class NeuronBridgeFinder:
                         visualize_by=visualize_by,
                         generate_individual_profiles=generate_individual_profiles,
                         pdf_images_per_page=pdf_images_per_page,
+                        type_filter=type_filter,
+                        datasets_to_visualize=datasets_to_visualize,
                     )
             
             return combined_df
@@ -8632,7 +8822,8 @@ def create_image_pdf(
     title_font_size: int = 14,
     margin: float = 0.5,
     line_order: Optional[List[str]] = None,
-    verbose: bool = True
+    verbose: bool = True,
+    background_color: Union[str, Tuple[float, float, float]] = None
 ) -> Optional[str]:
     """
     Create a PDF file from downloaded images, organized by line name.
@@ -8665,6 +8856,9 @@ def create_image_pdf(
         If None, lines are sorted alphabetically.
     verbose : bool
         Print progress messages. Default: True
+    background_color : str or tuple, optional
+        Background color for PDF pages. Can be named color ('black', 'white'),
+        hex string ('#000000'), or RGB tuple (0-1). Default: None (white)
         
     Returns
     -------
@@ -8677,7 +8871,8 @@ def create_image_pdf(
     ...     images_dir='/path/to/images',
     ...     output_pdf='/path/to/summary.pdf',
     ...     images_per_page=(5, 3),
-    ...     landscape=True
+    ...     landscape=True,
+    ...     background_color='black'
     ... )
     """
     try:
@@ -8685,6 +8880,7 @@ def create_image_pdf(
         from reportlab.lib.units import inch
         from reportlab.pdfgen import canvas
         from reportlab.lib.utils import ImageReader
+        from reportlab.lib import colors
         from PIL import Image
         HAS_REPORTLAB = True
     except ImportError:
@@ -8797,7 +8993,35 @@ def create_image_pdf(
         num_pages = (len(images) + images_per_full_page - 1) // images_per_full_page
         
         for page_idx in range(num_pages):
+            # Apply background color
+            text_color = colors.black
+            if background_color:
+                try:
+                    # Parse color
+                    if isinstance(background_color, str):
+                        if background_color.startswith('#'):
+                            bg_col = colors.HexColor(background_color)
+                        else:
+                            bg_col = getattr(colors, background_color, colors.white)
+                    elif isinstance(background_color, (tuple, list)) and len(background_color) >= 3:
+                        bg_col = colors.Color(*background_color[:3])
+                    else:
+                        bg_col = colors.white
+                    
+                    c.setFillColor(bg_col)
+                    c.rect(0, 0, page_width, page_height, fill=1, stroke=0)
+                    
+                    # Set text color contrast
+                    # Simple luminance check
+                    if hasattr(bg_col, 'red'):
+                        luminance = bg_col.red*0.299 + bg_col.green*0.587 + bg_col.blue*0.114
+                        if luminance < 0.5:
+                             text_color = colors.white
+                except Exception:
+                    pass
+
             # Draw title
+            c.setFillColor(text_color)
             c.setFont("Helvetica-Bold", title_font_size)
             title = line_name
             if num_pages > 1:

@@ -117,6 +117,34 @@ if __name__ == "__main__":
     # Default: (3, 2) = 3 columns x 2 rows = 6 images per page/slide
     pdf_images_per_page = (3, 2)
     
+    # ==========================================================================
+    # VISUALIZATION FILTERING - Filter which types/datasets to visualize
+    # ==========================================================================
+    
+    # Filter neuron types for visualization by name pattern
+    # Uses a dict with filter type as key and pattern(s) as value
+    # Filter types: 'contains', 'startswith', 'endswith', 'regex'
+    # - Multiple patterns within same filter key: OR logic (match any)
+    # - Across different filter keys: AND logic (must match all)
+    # - The rank r{N} preserves original ranking BEFORE filtering
+    # - Gets ALL types first, filters, then takes top N from filtered results
+    # Examples:
+    #   type_filter = {'contains': 'DN'}           # Types containing 'DN'
+    #   type_filter = {'startswith': ['DN', 'AN']} # Types starting with 'DN' OR 'AN'
+    #   type_filter = {'endswith': '_R'}           # Types ending with '_R'
+    #   type_filter = {'regex': r'DN[a-z]\d+'}     # Types matching regex pattern
+    #   type_filter = {'contains': 'DN', 'startswith': 'M'}  # Both conditions (AND)
+    # Set to None or {} to disable filtering (visualize all top types)
+    type_filter = None
+    
+    # Constrain which datasets to visualize
+    # Options:
+    #   - 'all' or None: Visualize all datasets found in results (default)
+    #   - List of dataset names: ['hemibrain:v1.2.1', 'manc:v1.0']
+    #   - Single dataset string: 'hemibrain:v1.2.1'
+    # Dataset names should match exactly as they appear in the results
+    datasets_to_visualize = 'all'
+    
     
     # ==========================================================================
     # EXECUTION - No need to edit below this line
@@ -144,6 +172,8 @@ if __name__ == "__main__":
         visualize_per_dataset=visualize_per_dataset,
         generate_individual_profiles=generate_individual_profiles,
         pdf_images_per_page=pdf_images_per_page,
+        type_filter=type_filter,
+        datasets_to_visualize=datasets_to_visualize,
     )
     
     # Display summary
