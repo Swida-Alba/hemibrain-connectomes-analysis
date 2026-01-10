@@ -5525,6 +5525,7 @@ class NeuronBridgeFinder:
         visualize_by: str = 'type',
         generate_individual_profiles: Union[bool, List[str]] = None,
         pdf_images_per_page: Tuple[int, int] = (4, 3),
+        background_color: str = 'white',
         labeling_info: Optional[pd.DataFrame] = None,
         type_filter: Optional[Dict[str, Union[str, List[str]]]] = None,
         datasets_to_visualize: Union[str, List[str]] = 'all',
@@ -5551,6 +5552,8 @@ class NeuronBridgeFinder:
             Set to False or None to disable generation
         pdf_images_per_page : tuple
             (columns, rows) for PDF layout
+        background_color : str, default 'white'
+            Background color for 3D visualization
         labeling_info : pd.DataFrame, optional
             DataFrame with case-sensitive types and dataset column for filtering.
             Columns: type, dataset, {line1_score}, {line2_score}, ...
@@ -5868,6 +5871,7 @@ class NeuronBridgeFinder:
                     export_views=export_views,  # Region-based view selection
                     skeleton_mesh_simplification=skeleton_simplification,
                     roi_mesh_simplification=0.95,
+                    background_color=background_color,
                     cache_neurons=True,
                     show_fig=False,
                     verbose='full',  # Full verbose to see simplification logs
@@ -5907,6 +5911,7 @@ class NeuronBridgeFinder:
         visualize_per_dataset: bool = True,
         generate_individual_profiles: Union[bool, List[str]] = None,
         pdf_images_per_page: Tuple[int, int] = (4, 3),
+        background_color: str = 'white',
         type_filter: Optional[Dict[str, Union[str, List[str]]]] = None,
         datasets_to_visualize: Union[str, List[str]] = 'all',
     ) -> pd.DataFrame:
@@ -5943,6 +5948,9 @@ class NeuronBridgeFinder:
             Set to False or None to disable generation. Default: None.
         pdf_images_per_page : tuple
             (columns, rows) for PDF layout. Default: (4, 3).
+        background_color : str, default 'white'
+            Background color for 3D visualization. Can be 'white', 'black',
+            or any CSS color (e.g., '#f0f0f0', 'lightgray').
         type_filter : dict, optional
             Filter neuron types for visualization by name pattern.
             Keys: 'contains', 'startswith', 'endswith', 'regex'
@@ -6249,6 +6257,7 @@ class NeuronBridgeFinder:
                             visualize_by=visualize_by,
                             generate_individual_profiles=generate_individual_profiles,
                             pdf_images_per_page=pdf_images_per_page,
+                            background_color=background_color,
                             type_filter=type_filter,
                             datasets_to_visualize=datasets_to_visualize,
                         )
@@ -6275,6 +6284,7 @@ class NeuronBridgeFinder:
                         visualize_by=visualize_by,
                         generate_individual_profiles=generate_individual_profiles,
                         pdf_images_per_page=pdf_images_per_page,
+                        background_color=background_color,
                         type_filter=type_filter,
                         datasets_to_visualize=datasets_to_visualize,
                     )

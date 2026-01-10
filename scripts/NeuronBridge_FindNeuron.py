@@ -117,6 +117,11 @@ if __name__ == "__main__":
     # Default: (3, 2) = 3 columns x 2 rows = 6 images per page/slide
     pdf_images_per_page = (3, 2)
     
+    # Background color for 3D visualization
+    # Options: 'white', 'black', or any CSS color (e.g., '#f0f0f0', 'lightgray')
+    # Default: 'white'
+    background_color = 'white'
+    
     # ==========================================================================
     # VISUALIZATION FILTERING - Filter which types/datasets to visualize
     # ==========================================================================
@@ -172,6 +177,7 @@ if __name__ == "__main__":
         visualize_per_dataset=visualize_per_dataset,
         generate_individual_profiles=generate_individual_profiles,
         pdf_images_per_page=pdf_images_per_page,
+        background_color=background_color,
         type_filter=type_filter,
         datasets_to_visualize=datasets_to_visualize,
     )

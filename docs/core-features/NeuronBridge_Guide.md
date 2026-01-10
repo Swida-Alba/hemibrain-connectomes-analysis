@@ -702,14 +702,15 @@ results = nbf.find_neurons_batch(
 
 ### Visualization Parameters
 
-| Parameter                      | Type       | Default  | Description                                              |
-| ------------------------------ | ---------- | -------- | -------------------------------------------------------- |
-| `visualize_top_n`              | `int`      | `0`      | Number of top types/bodyIds to visualize (0 = disabled). |
-| `visualize_by`                 | `str`      | `'type'` | Grouping mode: `'type'` or `'bodyId'`.                   |
-| `generate_individual_profiles` | `bool`     | `False`  | Generate per-neuron PNG profiles and PDF summary.        |
-| `pdf_images_per_page`          | `tuple`    | `(3, 2)` | PDF layout as (columns, rows).                           |
-| `type_filter`                  | `dict`     | `None`   | Filter types by name pattern (see below).                |
-| `datasets_to_visualize`        | `str/list` | `'all'`  | Constrain which datasets to visualize.                   |
+| Parameter                      | Type       | Default   | Description                                              |
+| ------------------------------ | ---------- | --------- | -------------------------------------------------------- |
+| `visualize_top_n`              | `int`      | `0`       | Number of top types/bodyIds to visualize (0 = disabled). |
+| `visualize_by`                 | `str`      | `'type'`  | Grouping mode: `'type'` or `'bodyId'`.                   |
+| `generate_individual_profiles` | `bool`     | `False`   | Generate per-neuron PNG profiles and PDF summary.        |
+| `pdf_images_per_page`          | `tuple`    | `(3, 2)`  | PDF layout as (columns, rows).                           |
+| `background_color`             | `str`      | `'white'` | Background color: 'white', 'black', or CSS color.        |
+| `type_filter`                  | `dict`     | `None`    | Filter types by name pattern (see below).                |
+| `datasets_to_visualize`        | `str/list` | `'all'`   | Constrain which datasets to visualize.                   |
 
 ### Type Filtering
 
