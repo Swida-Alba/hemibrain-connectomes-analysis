@@ -1208,15 +1208,51 @@ class FlyLightDownloader:
         
         return all_filtered
     
-    def _download_file_http(self, file: FlyLightFile, local_path: Path) -> bool:
-        """Download a file using HTTP."""
-        try:
-            local_path.parent.mkdir(parents=True, exist_ok=True)
-            urllib.request.urlretrieve(file.url, str(local_path))
-            return True
-        except Exception as e:
-            self._log(f"❌ Error downloading {file.filename}: {e}")
-            return False
+    def _download_file_http(self, file: FlyLightFile, local_path: Path, max_retries: int = 3) -> bool:
+        """
+        Download a file using HTTP with retry logic for transient errors.
+        
+        Args:
+            file: FlyLightFile object to download
+            local_path: Local path to save the file
+            max_retries: Maximum number of retry attempts (default: 3)
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        import time
+        import ssl
+        
+        local_path.parent.mkdir(parents=True, exist_ok=True)
+        
+        for attempt in range(max_retries):
+            try:
+                urllib.request.urlretrieve(file.url, str(local_path))
+                return True
+            except ssl.SSLError as e:
+                # SSL errors (e.g., UNEXPECTED_EOF_WHILE_READING) - retry with backoff
+                if attempt < max_retries - 1:
+                    wait_time = 2 ** attempt  # Exponential backoff: 1, 2, 4 seconds
+                    self._log(f"⚠️  SSL error downloading {file.filename}, retrying in {wait_time}s... (attempt {attempt + 1}/{max_retries})")
+                    time.sleep(wait_time)
+                else:
+                    self._log(f"❌ SSL error downloading {file.filename} after {max_retries} attempts: {e}")
+                    return False
+            except urllib.error.URLError as e:
+                # Network errors - retry with backoff
+                if attempt < max_retries - 1:
+                    wait_time = 2 ** attempt
+                    self._log(f"⚠️  Network error downloading {file.filename}, retrying in {wait_time}s... (attempt {attempt + 1}/{max_retries})")
+                    time.sleep(wait_time)
+                else:
+                    self._log(f"❌ Network error downloading {file.filename} after {max_retries} attempts: {e}")
+                    return False
+            except Exception as e:
+                # Other errors - don't retry
+                self._log(f"❌ Error downloading {file.filename}: {e}")
+                return False
+        
+        return False
     
     def _download_file_boto3(self, file: FlyLightFile, local_path: Path) -> bool:
         """Download a file using boto3."""

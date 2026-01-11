@@ -36,6 +36,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Union, Tuple, Any
 import numpy as np
 import pandas as pd
+from tqdm import tqdm
 
 
 # ============================================================================
@@ -3564,32 +3565,132 @@ class ConnectivityProfiler:
         self,
         neurons: List[Union[str, int]],
         dataset: str,
-        force_refresh: bool = False
+        force_refresh: bool = False,
+        skip_profile_cache: bool = False,
+        show_progress: bool = True
     ) -> Dict[Union[str, int], ConnectivityProfile]:
         """
         Batch extraction for multiple neurons.
         
         More efficient than calling get_profile repeatedly for large queries.
+        Uses the connection cache with O(1) index lookups.
         
         Args:
             neurons: List of neuron types or bodyIds
             dataset: Dataset identifier
             force_refresh: Bypass cache if True
+            skip_profile_cache: Skip individual profile disk caching (faster for large batches)
+            show_progress: Show progress bar
         
         Returns:
             Dict mapping neuron identifier to ConnectivityProfile
         """
         results = {}
         
-        for neuron in neurons:
+        # Ensure connection cache is loaded first
+        self._get_cached_conn_df(dataset)
+        
+        for neuron in tqdm(neurons, desc="Building profiles from cache", 
+                          disable=not show_progress, unit="neuron"):
             try:
-                profile = self.get_profile(neuron, dataset, force_refresh)
-                results[neuron] = profile
+                if skip_profile_cache:
+                    # Build profile directly from connection cache (no disk cache check)
+                    profile = self._build_profile_from_cache_direct(neuron, dataset)
+                else:
+                    profile = self.get_profile(neuron, dataset, force_refresh)
+                if profile is not None:
+                    results[neuron] = profile
             except Exception as e:
                 self._log(f"Warning: Failed to extract profile for {neuron}: {e}")
         
         return results
     
+    def _build_profile_from_cache_direct(
+        self,
+        neuron: Union[str, int],
+        dataset: str
+    ) -> Optional[ConnectivityProfile]:
+        """
+        Build profile directly from connection cache without disk caching.
+        
+        This is faster for large batch operations where individual profile
+        caching would create too much overhead.
+        
+        Args:
+            neuron: Neuron bodyId (int) or type (str)
+            dataset: Dataset identifier
+        
+        Returns:
+            ConnectivityProfile or None
+        """
+        # Query connections from cache
+        upstream_df, downstream_df = self._query_connections_local(neuron, dataset)
+        
+        # If no local data, try NeuPrint as fallback (for non-local datasets)
+        if upstream_df.empty and downstream_df.empty:
+            dataset_lower = dataset.lower()
+            if 'flywire' not in dataset_lower and 'fafb' not in dataset_lower and 'banc' not in dataset_lower:
+                upstream_df, downstream_df = self._query_connections_neuprint(neuron, dataset)
+        
+        if upstream_df.empty and downstream_df.empty:
+            return None
+        
+        # Count neurons aggregated
+        neurons_aggregated = 1
+        if isinstance(neuron, list):
+            neurons_aggregated = len(neuron)
+        elif isinstance(neuron, str) and not upstream_df.empty:
+            if 'neuron_bodyId' in upstream_df.columns:
+                neurons_aggregated = upstream_df['neuron_bodyId'].nunique()
+            elif not downstream_df.empty and 'neuron_bodyId' in downstream_df.columns:
+                neurons_aggregated = downstream_df['neuron_bodyId'].nunique()
+        
+        # Process connections (simplified - no 2-hop expansion for batch mode)
+        (up_partners, up_ranks, up_untyped_count, up_untyped_frac, 
+         up_total_weight, up_actual_count, up_unique_types,
+         up_type_mapping, up_k_used, up_untyped_bodyids, up_typed_bodyids) = self._process_connections(
+            upstream_df, 'upstream', self.config.top_k_bodyid
+        )
+        
+        (down_partners, down_ranks, down_untyped_count, down_untyped_frac,
+         down_total_weight, down_actual_count, down_unique_types,
+         down_type_mapping, down_k_used, down_untyped_bodyids, down_typed_bodyids) = self._process_connections(
+            downstream_df, 'downstream', self.config.top_k_bodyid
+        )
+        
+        # Create profile (without 2-hop data for efficiency)
+        profile_type = neuron if isinstance(neuron, str) else None
+        profile = ConnectivityProfile(
+            neuron_id=neuron,
+            dataset=dataset,
+            neuron_type=profile_type,
+            upstream_partners=up_partners,
+            downstream_partners=down_partners,
+            upstream_ranks=up_ranks,
+            downstream_ranks=down_ranks,
+            upstream_top_k=self.config.top_k_bodyid,
+            downstream_top_k=self.config.top_k_bodyid,
+            total_upstream_weight=up_total_weight,
+            total_downstream_weight=down_total_weight,
+            num_neurons_aggregated=neurons_aggregated,
+            untyped_upstream_count=up_untyped_count,
+            untyped_downstream_count=down_untyped_count,
+            untyped_upstream_weight_fraction=up_untyped_frac,
+            untyped_downstream_weight_fraction=down_untyped_frac,
+            actual_upstream_count=up_actual_count,
+            actual_downstream_count=down_actual_count,
+            unique_types_upstream=up_unique_types,
+            unique_types_downstream=down_unique_types,
+            partner_type_mapping_upstream=up_type_mapping if up_type_mapping else None,
+            partner_type_mapping_downstream=down_type_mapping if down_type_mapping else None,
+            top_k_bodyid_used=max(up_k_used, down_k_used),
+            top_m_type_target=self.config.top_m_type,
+            typed_upstream_bodyids=up_typed_bodyids if up_typed_bodyids else None,
+            typed_downstream_bodyids=down_typed_bodyids if down_typed_bodyids else None,
+        )
+        
+        return profile
+
     def get_profiles_for_type_across_datasets(
         self,
         neuron_type: str,
@@ -3714,6 +3815,212 @@ class ConnectivityProfiler:
                 self._log(f"Warning: Could not get bodyIds for {neuron_type} in {dataset}: {e}")
                 return []
     
+    def get_type_for_bodyid(
+        self,
+        bodyid: int,
+        dataset: str
+    ) -> Optional[str]:
+        """
+        Get the type name for a given bodyId in a dataset.
+        
+        Args:
+            bodyid: The bodyId to look up
+            dataset: Dataset identifier
+        
+        Returns:
+            Type name as string, or None if not found
+        """
+        dataset_lower = dataset.lower()
+        
+        if 'flywire' in dataset_lower or 'fafb' in dataset_lower or 'banc' in dataset_lower:
+            # Local dataset - load neurons file
+            src_dir = Path(__file__).parent.parent
+            project_root = src_dir.parent
+            datasets_folder = project_root / 'datasets'
+            safe_name = dataset.replace(':', '_').replace('.', '_')
+            dataset_path = datasets_folder / safe_name
+            
+            neurons_files = [
+                dataset_path / f'{safe_name}_allneurons_neuron_df.parquet',
+                dataset_path / f'{safe_name}_allneurons_neuron_df.csv',
+                dataset_path / f'{safe_name}_neurons.parquet',
+                dataset_path / f'{safe_name}_neurons.csv',
+                dataset_path / 'neurons.parquet',
+                dataset_path / 'neurons.csv',
+            ]
+            
+            for neurons_file in neurons_files:
+                if neurons_file.exists():
+                    try:
+                        if str(neurons_file).endswith('.parquet'):
+                            df = pd.read_parquet(neurons_file)
+                        else:
+                            df = pd.read_csv(neurons_file)
+                        
+                        # Find bodyId column
+                        bid_col = None
+                        for col in ['bodyId', 'pt_root_id', 'root_id', 'body_id']:
+                            if col in df.columns:
+                                bid_col = col
+                                break
+                        
+                        # Find type column
+                        type_col = None
+                        for col in ['type', 'cell_type', 'celltype']:
+                            if col in df.columns:
+                                type_col = col
+                                break
+                        
+                        if bid_col and type_col:
+                            mask = df[bid_col] == bodyid
+                            matches = df.loc[mask, type_col]
+                            if not matches.empty:
+                                return str(matches.iloc[0])
+                    except Exception as e:
+                        pass
+            
+            return None
+        
+        else:
+            # NeuPrint query
+            client = self._get_client_for_dataset(dataset)
+            if client is None:
+                return None
+            
+            try:
+                query = f"""
+                MATCH (n:Neuron)
+                WHERE n.bodyId = {bodyid}
+                RETURN n.type AS type
+                """
+                result = client.fetch_custom(query)
+                if not result.empty and result['type'].iloc[0]:
+                    return str(result['type'].iloc[0])
+                return None
+            except Exception as e:
+                return None
+
+    def get_types_for_bodyids(
+        self,
+        bodyids: List[int],
+        dataset: str
+    ) -> Dict[int, Optional[str]]:
+        """
+        Get type names for multiple bodyIds efficiently (batch operation).
+        
+        This is much more efficient than calling get_type_for_bodyid multiple times
+        as it performs a single query/file read for all bodyIds.
+        
+        Args:
+            bodyids: List of bodyIds to look up
+            dataset: Dataset identifier
+        
+        Returns:
+            Dictionary mapping bodyId -> type name (or None if not found)
+        """
+        if not bodyids:
+            return {}
+        
+        result_map = {}
+        dataset_lower = dataset.lower()
+        
+        if 'flywire' in dataset_lower or 'fafb' in dataset_lower or 'banc' in dataset_lower:
+            # Local dataset - load neurons file once
+            src_dir = Path(__file__).parent.parent
+            project_root = src_dir.parent
+            datasets_folder = project_root / 'datasets'
+            safe_name = dataset.replace(':', '_').replace('.', '_')
+            dataset_path = datasets_folder / safe_name
+            
+            neurons_files = [
+                dataset_path / f'{safe_name}_allneurons_neuron_df.parquet',
+                dataset_path / f'{safe_name}_allneurons_neuron_df.csv',
+                dataset_path / f'{safe_name}_neurons.parquet',
+                dataset_path / f'{safe_name}_neurons.csv',
+                dataset_path / 'neurons.parquet',
+                dataset_path / 'neurons.csv',
+            ]
+            
+            for neurons_file in neurons_files:
+                if neurons_file.exists():
+                    try:
+                        if str(neurons_file).endswith('.parquet'):
+                            df = pd.read_parquet(neurons_file)
+                        else:
+                            df = pd.read_csv(neurons_file)
+                        
+                        # Find bodyId column
+                        bid_col = None
+                        for col in ['bodyId', 'pt_root_id', 'root_id', 'body_id']:
+                            if col in df.columns:
+                                bid_col = col
+                                break
+                        
+                        # Find type column
+                        type_col = None
+                        for col in ['type', 'cell_type', 'celltype']:
+                            if col in df.columns:
+                                type_col = col
+                                break
+                        
+                        if bid_col and type_col:
+                            # Create lookup dictionary
+                            df[bid_col] = df[bid_col].astype(str)
+                            type_lookup = df.set_index(bid_col)[type_col].to_dict()
+                            
+                            # Map all bodyIds
+                            for bid in bodyids:
+                                bid_str = str(bid)
+                                if bid_str in type_lookup:
+                                    result_map[bid] = str(type_lookup[bid_str])
+                                else:
+                                    result_map[bid] = None
+                            return result_map
+                    except Exception as e:
+                        pass
+            
+            # File not found - return all None
+            for bid in bodyids:
+                result_map[bid] = None
+            return result_map
+        
+        else:
+            # NeuPrint query - batch query
+            client = self._get_client_for_dataset(dataset)
+            if client is None:
+                for bid in bodyids:
+                    result_map[bid] = None
+                return result_map
+            
+            try:
+                # Query all bodyIds at once
+                bodyids_str = ', '.join(str(b) for b in bodyids)
+                query = f"""
+                MATCH (n:Neuron)
+                WHERE n.bodyId IN [{bodyids_str}]
+                RETURN n.bodyId AS bodyId, n.type AS type
+                """
+                df = client.fetch_custom(query)
+                
+                # Build lookup from results
+                if not df.empty:
+                    for _, row in df.iterrows():
+                        bid = int(row['bodyId'])
+                        ntype = row['type']
+                        result_map[bid] = str(ntype) if ntype else None
+                
+                # Fill in any missing bodyIds with None
+                for bid in bodyids:
+                    if bid not in result_map:
+                        result_map[bid] = None
+                
+                return result_map
+            except Exception as e:
+                # On error, return all None
+                for bid in bodyids:
+                    result_map[bid] = None
+                return result_map
+
     def get_type_profile_from_bodyids(
         self,
         neuron_type: str,

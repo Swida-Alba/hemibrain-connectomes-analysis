@@ -7522,6 +7522,7 @@ class ConnectivityProfileComparer:
         verbose: bool = True,
         use_cache: bool = True,
         group_map_csv: Optional[str] = None,
+        skip_bodyId_level: Union[bool, str] = 'auto',
     ):
         """
         Initialize ConnectivityProfileComparer.
@@ -7550,6 +7551,12 @@ class ConnectivityProfileComparer:
                 - 'group': custom group name (neurons with same group value are grouped)
                 - 'id_type_instance': neuron identifier (bodyId, type, or instance name)
                 When provided, this overrides `query` parameter.
+            skip_bodyId_level: Whether to skip bodyId-level computations (Steps 3 & 4).
+                - False: Always compute bodyId-level matrices (bodyId-level metrics will be used to compute the average inter- and intra-type similarities)
+                - True: Always skip bodyId-level matrices  
+                - 'auto': Skip if n_bodyId_profiles > 1000 (default, avoids O(n²) explosion)
+                    For 10,000 bodyIds with direction='both', this would require: 50 million pairs × 3 directions = 150M similarity computations.
+                    Estimated time: several hours
         """
         self.group_map_csv = group_map_csv
         
@@ -7571,6 +7578,7 @@ class ConnectivityProfileComparer:
         self.show_figures = show_figures
         self.verbose = verbose
         self.use_cache = use_cache
+        self.skip_bodyId_level = skip_bodyId_level
         
         # Generate query name for output folder
         self.query_name = self._generate_query_name()
@@ -7596,6 +7604,63 @@ class ConnectivityProfileComparer:
         """Print message if verbose."""
         if self.verbose:
             print(f"[ConnectivityProfileComparer] {msg}")
+    
+    def _format_query_for_log(self, query: List, max_items: int = 5) -> str:
+        """
+        Format query list for logging, truncating if too long.
+        
+        Args:
+            query: List of query items
+            max_items: Maximum items to show before truncating (default: 5)
+            
+        Returns:
+            Formatted string representation
+        """
+        if not isinstance(query, list):
+            return str(query)
+        
+        n = len(query)
+        if n <= max_items * 2:
+            # Short enough to show fully
+            return str(query)
+        
+        # Show first and last few items with count
+        first_items = query[:max_items]
+        last_items = query[-max_items:]
+        middle_count = n - max_items * 2
+        
+        first_str = ', '.join(str(x) for x in first_items)
+        last_str = ', '.join(str(x) for x in last_items)
+        
+        return f"[{first_str}, ... ({middle_count} more) ..., {last_str}] ({n} total items)"
+    
+    def _sort_types_string_first(self, types: List[str]) -> List[str]:
+        """
+        Sort types with string types first, numeric types (untyped neurons) last.
+        
+        Numeric-like strings represent bodyIds of untyped neurons.
+        
+        Args:
+            types: List of type names (may include numeric strings)
+            
+        Returns:
+            Sorted list with string types first, then numeric types
+        """
+        string_types = []
+        numeric_types = []
+        
+        for t in types:
+            if str(t).isdigit():
+                numeric_types.append(t)
+            else:
+                string_types.append(t)
+        
+        # Sort each group alphabetically
+        string_types.sort()
+        numeric_types.sort()
+        
+        # Combine: strings first, then numeric
+        return string_types + numeric_types
     
     def _ensure_connection_cache_complete(self) -> bool:
         """
@@ -7862,25 +7927,36 @@ class ConnectivityProfileComparer:
             return neurons
         
         # Simple list format - original behavior
+        # First, collect all numeric items (bodyIds) to do batch lookup
+        bodyid_items = []
+        type_items = []
+        
         for item in self.query:
-            item_str = str(item)
-            
-            # Check if it's a bodyId (numeric)
             try:
                 bid = int(item)
-                # It's a bodyId - get its type
-                ntype = self.profiler.get_type_for_bodyid(bid, self.dataset)
-                if ntype:
-                    if ntype not in neurons:
-                        neurons[ntype] = []
-                    neurons[ntype].append(bid)
-                else:
-                    # Unknown type, use bodyId as label
-                    neurons[item_str] = [bid]
-                continue
+                bodyid_items.append(bid)
             except (ValueError, TypeError):
-                pass
-            
+                type_items.append(str(item))
+        
+        # Batch lookup types for all bodyIds at once (much more efficient)
+        bodyid_to_type = {}
+        if bodyid_items:
+            self._log(f"Looking up types for {len(bodyid_items)} bodyIds...")
+            bodyid_to_type = self.profiler.get_types_for_bodyids(bodyid_items, self.dataset)
+        
+        # Process bodyIds
+        for bid in bodyid_items:
+            ntype = bodyid_to_type.get(bid)
+            if ntype:
+                if ntype not in neurons:
+                    neurons[ntype] = []
+                neurons[ntype].append(bid)
+            else:
+                # Unknown type, use bodyId as label
+                neurons[str(bid)] = [bid]
+        
+        # Process type names/patterns
+        for item_str in type_items:
             # It's a type name or pattern - get all bodyIds for this type
             body_ids = self.profiler.get_bodyids_for_type(item_str, self.dataset)
             if body_ids:
@@ -7895,6 +7971,10 @@ class ConnectivityProfileComparer:
         """
         Extract both type-aggregated profiles and individual bodyId profiles.
         
+        Uses batch processing with the connection cache for efficiency.
+        All profiles are built directly from the in-memory connection cache
+        without individual disk I/O for each profile.
+        
         Returns:
             Tuple of:
             - type_profiles: Dictionary mapping type_label -> aggregated ConnectivityProfile
@@ -7905,21 +7985,61 @@ class ConnectivityProfileComparer:
         type_profiles = {}
         bodyid_profiles = {}  # Key: (type_label, bodyId)
         
-        self._log(f"Extracting profiles for {len(neurons)} types/groups...")
+        # Count total bodyIds for progress tracking
+        total_bodyids = sum(len(ids) for ids in neurons.values())
+        self._log(f"Extracting profiles for {len(neurons)} types/groups ({total_bodyids} total bodyIds)...")
         
-        for label, neuron_ids in tqdm(neurons.items(), desc="Extracting profiles", disable=not self.verbose):
+        # Collect all unique bodyIds to extract
+        all_bodyids = []
+        bodyid_to_labels = {}  # Maps bodyId -> list of type labels
+        
+        for label, neuron_ids in neurons.items():
+            for nid in neuron_ids:
+                if isinstance(nid, int) or (isinstance(nid, str) and nid.isdigit()):
+                    bid = int(nid) if isinstance(nid, str) else nid
+                    all_bodyids.append(bid)
+                    if bid not in bodyid_to_labels:
+                        bodyid_to_labels[bid] = []
+                    bodyid_to_labels[bid].append(label)
+                else:
+                    # Non-numeric (type name) - handle separately
+                    all_bodyids.append(nid)
+                    if nid not in bodyid_to_labels:
+                        bodyid_to_labels[nid] = []
+                    bodyid_to_labels[nid].append(label)
+        
+        # Use batch extraction with progress bar - builds profiles directly from connection cache
+        # skip_profile_cache=True for large batches (>100) to avoid disk I/O overhead
+        skip_cache = total_bodyids > 100
+        all_profiles = self.profiler.get_profiles_batch(
+            all_bodyids, 
+            self.dataset, 
+            force_refresh=False,
+            skip_profile_cache=skip_cache,
+            show_progress=self.verbose
+        )
+        
+        # Organize profiles by type label
+        for nid, profile in all_profiles.items():
+            if profile is None:
+                continue
+            
+            labels = bodyid_to_labels.get(nid, [])
+            bid = profile.neuron_id if isinstance(profile.neuron_id, int) else nid
+            
+            for label in labels:
+                bodyid_profiles[(label, bid)] = profile
+        
+        # Create aggregated type profiles
+        self._log("Aggregating type-level profiles...")
+        for label, neuron_ids in tqdm(neurons.items(), desc="Aggregating types", 
+                                       disable=not self.verbose, unit="type"):
             individual_profiles = []
             
             for nid in neuron_ids:
-                try:
-                    # Get individual bodyId profile
-                    profile = self.profiler.get_profile(nid, self.dataset)
-                    if profile is not None:
-                        bid = profile.neuron_id if isinstance(profile.neuron_id, int) else nid
-                        bodyid_profiles[(label, bid)] = profile
-                        individual_profiles.append(profile)
-                except Exception as e:
-                    self._log(f"Warning: Could not extract profile for {nid}: {e}")
+                bid = int(nid) if isinstance(nid, str) and nid.isdigit() else nid
+                if (label, bid) in bodyid_profiles:
+                    individual_profiles.append(bodyid_profiles[(label, bid)])
             
             # Create aggregated type profile
             if len(individual_profiles) == 1:
@@ -8031,48 +8151,58 @@ class ConnectivityProfileComparer:
         
         all_matrices = {}
         
+        # Calculate total number of unique pairs to compute (for progress bar)
+        total_pairs = n * (n - 1) // 2
+        
         for direction in directions:
             dir_name = 'combined' if direction == 'both' else direction
             
             # Initialize matrices for all metrics
             metric_matrices = {m: np.zeros((n, n)) for m in metrics}
             
-            self._log(f"Computing {dir_name} similarity matrices ({n}x{n}, {len(metrics)} metrics)...")
+            self._log(f"Computing {dir_name} similarity matrices ({n}x{n}, {total_pairs} pairs, {len(metrics)} metrics)...")
             
-            for i in range(n):
-                for j in range(n):
-                    if i == j:
-                        # Self-similarity = 1.0 for all metrics
-                        for m in metrics:
-                            metric_matrices[m][i, j] = 1.0
-                    elif i < j:
-                        profile_a = profiles[labels[i]]
-                        profile_b = profiles[labels[j]]
-                        
-                        scores = ProfileComparator.combined_score(
-                            profile_a, profile_b, direction=direction
-                        )
-                        
-                        # Extract all metrics
-                        metric_matrices['jaccard'][i, j] = scores['jaccard']
-                        metric_matrices['jaccard'][j, i] = scores['jaccard']
-                        
-                        metric_matrices['cosine'][i, j] = scores['cosine']
-                        metric_matrices['cosine'][j, i] = scores['cosine']
-                        
-                        rank_val = scores['rank'] if not np.isnan(scores['rank']) else 0.0
-                        metric_matrices['rank_corr'][i, j] = rank_val
-                        metric_matrices['rank_corr'][j, i] = rank_val
-                        
-                        rank_norm = scores['rank_norm'] if not np.isnan(scores.get('rank_norm', np.nan)) else 0.5
-                        metric_matrices['rank_corr_union'][i, j] = rank_norm
-                        metric_matrices['rank_corr_union'][j, i] = rank_norm
+            # Use progress bar for pairwise comparisons
+            pair_count = 0
+            with tqdm(total=total_pairs, desc=f"  {dir_name} similarities", disable=not self.verbose) as pbar:
+                for i in range(n):
+                    for j in range(n):
+                        if i == j:
+                            # Self-similarity = 1.0 for all metrics
+                            for m in metrics:
+                                metric_matrices[m][i, j] = 1.0
+                        elif i < j:
+                            profile_a = profiles[labels[i]]
+                            profile_b = profiles[labels[j]]
+                            
+                            scores = ProfileComparator.combined_score(
+                                profile_a, profile_b, direction=direction
+                            )
+                            
+                            # Extract all metrics
+                            metric_matrices['jaccard'][i, j] = scores['jaccard']
+                            metric_matrices['jaccard'][j, i] = scores['jaccard']
+                            
+                            metric_matrices['cosine'][i, j] = scores['cosine']
+                            metric_matrices['cosine'][j, i] = scores['cosine']
+                            
+                            rank_val = scores['rank'] if not np.isnan(scores['rank']) else 0.0
+                            metric_matrices['rank_corr'][i, j] = rank_val
+                            metric_matrices['rank_corr'][j, i] = rank_val
+                            
+                            rank_norm = scores['rank_norm'] if not np.isnan(scores.get('rank_norm', np.nan)) else 0.5
+                            metric_matrices['rank_corr_union'][i, j] = rank_norm
+                            metric_matrices['rank_corr_union'][j, i] = rank_norm
+                            
+                            pbar.update(1)
             
             # Convert to DataFrames
             all_matrices[dir_name] = {
                 m: pd.DataFrame(metric_matrices[m], index=labels, columns=labels)
                 for m in metrics
             }
+        
+        return all_matrices
         
         return all_matrices
     
@@ -8101,39 +8231,45 @@ class ConnectivityProfileComparer:
         
         all_matrices = {}
         
+        # Calculate total number of unique pairs
+        total_pairs = n * (n - 1) // 2
+        
         for direction in directions:
             dir_name = 'combined' if direction == 'both' else direction
             
             metric_matrices = {m: np.zeros((n, n)) for m in metrics}
             
-            self._log(f"Computing bodyId-level {dir_name} similarity matrices ({n}x{n})...")
+            self._log(f"Computing bodyId-level {dir_name} similarity matrices ({n}x{n}, {total_pairs} pairs)...")
             
-            for i in range(n):
-                for j in range(n):
-                    if i == j:
-                        for m in metrics:
-                            metric_matrices[m][i, j] = 1.0
-                    elif i < j:
-                        profile_a = bodyid_profiles[keys[i]]
-                        profile_b = bodyid_profiles[keys[j]]
-                        
-                        scores = ProfileComparator.combined_score(
-                            profile_a, profile_b, direction=direction
-                        )
-                        
-                        metric_matrices['jaccard'][i, j] = scores['jaccard']
-                        metric_matrices['jaccard'][j, i] = scores['jaccard']
-                        
-                        metric_matrices['cosine'][i, j] = scores['cosine']
-                        metric_matrices['cosine'][j, i] = scores['cosine']
-                        
-                        rank_val = scores['rank'] if not np.isnan(scores['rank']) else 0.0
-                        metric_matrices['rank_corr'][i, j] = rank_val
-                        metric_matrices['rank_corr'][j, i] = rank_val
-                        
-                        rank_norm = scores['rank_norm'] if not np.isnan(scores.get('rank_norm', np.nan)) else 0.5
-                        metric_matrices['rank_corr_union'][i, j] = rank_norm
-                        metric_matrices['rank_corr_union'][j, i] = rank_norm
+            with tqdm(total=total_pairs, desc=f"  bodyId {dir_name}", disable=not self.verbose) as pbar:
+                for i in range(n):
+                    for j in range(n):
+                        if i == j:
+                            for m in metrics:
+                                metric_matrices[m][i, j] = 1.0
+                        elif i < j:
+                            profile_a = bodyid_profiles[keys[i]]
+                            profile_b = bodyid_profiles[keys[j]]
+                            
+                            scores = ProfileComparator.combined_score(
+                                profile_a, profile_b, direction=direction
+                            )
+                            
+                            metric_matrices['jaccard'][i, j] = scores['jaccard']
+                            metric_matrices['jaccard'][j, i] = scores['jaccard']
+                            
+                            metric_matrices['cosine'][i, j] = scores['cosine']
+                            metric_matrices['cosine'][j, i] = scores['cosine']
+                            
+                            rank_val = scores['rank'] if not np.isnan(scores['rank']) else 0.0
+                            metric_matrices['rank_corr'][i, j] = rank_val
+                            metric_matrices['rank_corr'][j, i] = rank_val
+                            
+                            rank_norm = scores['rank_norm'] if not np.isnan(scores.get('rank_norm', np.nan)) else 0.5
+                            metric_matrices['rank_corr_union'][i, j] = rank_norm
+                            metric_matrices['rank_corr_union'][j, i] = rank_norm
+                            
+                            pbar.update(1)
             
             all_matrices[dir_name] = {
                 m: pd.DataFrame(metric_matrices[m], index=labels, columns=labels)
@@ -8587,7 +8723,7 @@ class ConnectivityProfileComparer:
         
         Output Structure:
             1. Type-Level: Compares aggregated (mean-pooled) type profiles
-            2. BodyId-Level:
+            2. BodyId-Level (if not skipped via skip_bodyId_level parameter):
                - Direct bodyId-to-bodyId similarity (labels: {bodyId}_{type})
                - Type-avg-bodyId: Type similarities averaged from bodyId pairs
                  (diagonal = intra-type avg, off-diagonal = inter-type avg)
@@ -8600,11 +8736,12 @@ class ConnectivityProfileComparer:
             - matrices_saved: List of saved matrix file paths
             - heatmaps_generated: List of generated heatmap paths
             - type_matrices: Type-level similarity matrices
-            - bodyid_matrices: BodyId-level similarity matrices
-            - type_avg_matrices: Type-averaged-from-bodyId matrices
+            - bodyid_matrices: BodyId-level similarity matrices (empty dict if skipped)
+            - type_avg_matrices: Type-averaged-from-bodyId matrices (empty dict if skipped)
+            - bodyid_level_skipped: Boolean indicating if bodyId computation was skipped
         """
         self._log(f"Starting connectivity profile comparison for {self.dataset}")
-        self._log(f"Query: {self.query}")
+        self._log(f"Query: {self._format_query_for_log(self.query)}")
         
         # Step 0: Ensure connection cache is complete BEFORE profile extraction
         if self.use_cache:
@@ -8618,17 +8755,35 @@ class ConnectivityProfileComparer:
             self._log("Error: Need at least 2 type profiles to compare")
             return {'n_type_profiles': len(type_profiles), 'error': 'Insufficient profiles'}
         
+        # Determine whether to skip bodyId-level computation
+        n_bodyid = len(bodyid_profiles)
+        if self.skip_bodyId_level == 'auto':
+            do_skip_bodyid = n_bodyid > 1000
+            if do_skip_bodyid:
+                n_pairs = n_bodyid * (n_bodyid - 1) // 2
+                self._log(f"⚠️  Auto-skipping bodyId-level computation: {n_bodyid} profiles would require {n_pairs:,} pairwise comparisons")
+                self._log(f"   Use skip_bodyId_level=False to force computation (may take hours)")
+        else:
+            do_skip_bodyid = bool(self.skip_bodyId_level)
+            if do_skip_bodyid:
+                self._log(f"Skipping bodyId-level computation (skip_bodyId_level={self.skip_bodyId_level})")
+        
         # Step 2: Compute type-level similarity matrices (aggregated profiles)
         self._log("Computing type-level similarity matrices (aggregated profiles)...")
         type_matrices = self._compute_similarity_matrices(type_profiles)
         
-        # Step 3: Compute bodyId-level similarity matrices
-        self._log("Computing bodyId-level similarity matrices...")
-        bodyid_matrices = self._compute_bodyid_similarity_matrices(bodyid_profiles)
-        
-        # Step 4: Compute type-avg-bodyId matrices (average bodyId similarities per type pair)
-        self._log("Computing type-avg-bodyId similarity matrices...")
-        type_avg_matrices = self._compute_type_avg_bodyid_matrices(bodyid_profiles)
+        # Steps 3-4: Compute bodyId-level matrices (if not skipped)
+        if do_skip_bodyid:
+            bodyid_matrices = {}
+            type_avg_matrices = {}
+        else:
+            # Step 3: Compute bodyId-level similarity matrices
+            self._log("Computing bodyId-level similarity matrices...")
+            bodyid_matrices = self._compute_bodyid_similarity_matrices(bodyid_profiles)
+            
+            # Step 4: Compute type-avg-bodyId matrices (average bodyId similarities per type pair)
+            self._log("Computing type-avg-bodyId similarity matrices...")
+            type_avg_matrices = self._compute_type_avg_bodyid_matrices(bodyid_profiles)
         
         # Step 5: Save all results
         saved_files = self._save_results(
@@ -8645,11 +8800,14 @@ class ConnectivityProfileComparer:
         self._log(f"Output: {output_path}")
         self._log(f"Type profiles compared: {len(type_profiles)}")
         self._log(f"BodyId profiles compared: {len(bodyid_profiles)}")
-        self._log(f"Types: {sorted(type_profiles.keys())}")
+        if do_skip_bodyid:
+            self._log(f"BodyId-level matrices: SKIPPED (n={n_bodyid} > 1000)")
+        self._log(f"Types ({len(type_profiles)} total): {self._format_query_for_log(self._sort_types_string_first(list(type_profiles.keys())))}")
         self._log("")
         self._log("Output includes:")
         self._log("  - type_level/: Type-aggregated similarity matrices & heatmaps")
-        self._log("  - bodyid_level/: BodyId similarity + type-avg-bodyId matrices & heatmaps")
+        if not do_skip_bodyid:
+            self._log("  - bodyid_level/: BodyId similarity + type-avg-bodyId matrices & heatmaps")
         self._log("  - profiles/individual/: Individual bodyId connectivity profiles")
         self._log("  - profiles/aggregated/: Type-aggregated connectivity profiles")
         
@@ -8663,6 +8821,7 @@ class ConnectivityProfileComparer:
             'type_matrices': type_matrices,
             'bodyid_matrices': bodyid_matrices,
             'type_avg_matrices': type_avg_matrices,
+            'bodyid_level_skipped': do_skip_bodyid,
         }
     
     def compare_intra_inter_type(self) -> Dict[str, pd.DataFrame]:
