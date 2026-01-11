@@ -109,6 +109,7 @@ Essential functionality documentation:
 - **✨ Homolog Finding**: Find homologous neurons across datasets
 - **✨ Cross-Dataset Comparison**: Compare connectivity across multiple datasets
 - **✨ Connectivity Profile Verification**: Verify neuron types using connectivity fingerprints
+- **✨ [Connectivity Profiling](./CONNECTIVITY_PROFILING.md)**: Intra-dataset profile comparison with heatmap visualization (NEW)
 - **Path Finding**: Multi-hop connection discovery
 - **Custom Groups**: Flexible neuron grouping for custom analysis
 - **Cache System**: High-performance local storage (10-100x speedup)
@@ -171,6 +172,7 @@ Advanced technical documentation:
 - **✨ [Homolog Finding](./core-features/HomologFinding_Guide.md)**: Find homologs across datasets
 - **✨ [Cross-Dataset Comparison](./core-features/CrossDatasetComparison_Guide.md)**: Multi-dataset analysis
 - **✨ [Connectivity Profile Verification](./core-features/ConnectivityProfileVerification_Guide.md)**: Verify neuron types across datasets
+- **✨ [Connectivity Profiling](./CONNECTIVITY_PROFILING.md)**: Intra-dataset profile comparison with heatmaps (NEW)
 - **[Cache System Guide](./core-features/CacheSystem_Guide.md)**: Caching for 10-100x speedup
 - **[Path Finding](./core-features/FindAllPath_Documentation.md)**: Multi-hop path discovery
 - **[Custom Groups](./core-features/CustomGroups_Feature.md)**: Flexible neuron grouping
@@ -187,6 +189,7 @@ Advanced technical documentation:
 | **Compare across datasets** | **[Cross-Dataset Comparison](./core-features/CrossDatasetComparison_Guide.md)**      |
 | **Verify neuron types**     | **[Profile Verification](./core-features/ConnectivityProfileVerification_Guide.md)** |
 | **Find homologs**           | **[Homolog Finding](./core-features/HomologFinding_Guide.md)**                       |
+| **Intra-dataset profiling** | **[Connectivity Profiling](./CONNECTIVITY_PROFILING.md)**                            |
 | Custom neuron groups        | [Custom Groups](./core-features/CustomGroups_Feature.md)                             |
 | Forward-only paths          | [Forward-Only Guide](./core-features/ForwardOnly_Guide.md)                           |
 | Filter connections          | [Connection Filters](./core-features/README.md#filtering)                            |

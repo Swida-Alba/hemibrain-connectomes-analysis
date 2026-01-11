@@ -148,6 +148,370 @@ def clear_neuron_cache(dataset: str = None):
         del _NEURON_DF_CACHE[dataset]
 
 
+# ============================================================================
+# Neuron Query Helper Functions
+# ============================================================================
+# These functions provide convenient access to neuron info by various identifiers
+# Similar query syntax as FindNeuronConnection: bodyIds, types, instances, regex
+
+def _get_neuron_df(dataset: str = 'male-cns:v0.9', verbose: bool = False) -> pd.DataFrame:
+    """
+    Load the neuron DataFrame for a dataset from local cache/files.
+    
+    Args:
+        dataset: Dataset identifier (e.g., 'male-cns:v0.9', 'hemibrain:v1.2.1')
+        verbose: Print loading messages
+    
+    Returns:
+        DataFrame with neuron information
+    
+    Raises:
+        FileNotFoundError: If dataset files are not found locally
+    """
+    # Normalize dataset name
+    dataset_normalized = dataset.replace(':', '_').replace('.', '_')
+    
+    # Special handling for FlyWire/FAFB/BANC
+    if 'flywire' in dataset.lower() or 'fafb' in dataset.lower() or 'banc' in dataset.lower():
+        cache_key = f"fafb_{dataset}"
+        if cache_key in _NEURON_DF_CACHE:
+            return _NEURON_DF_CACHE[cache_key]['neuron_df'].copy()
+        
+        # Try to load from local files
+        try:
+            import fafb_utils
+            project_root = os.path.dirname(os.path.dirname(__file__))
+            data_dir = os.path.join(project_root, "datasets", dataset_normalized)
+            if not os.path.exists(data_dir):
+                data_dir = os.path.join(project_root, "datasets", "flywire_FAFB_v783")
+            
+            if os.path.exists(data_dir):
+                neuron_file, _ = fafb_utils.prepare_fafb_data(data_dir)
+                full_neuron_df = _load_dataframe_fast(neuron_file, dtype_overrides={'bodyId': str})
+                if 'bodyId' in full_neuron_df.columns:
+                    full_neuron_df['bodyId'] = full_neuron_df['bodyId'].astype(str)
+                _NEURON_DF_CACHE[cache_key] = {'neuron_df': full_neuron_df}
+                return full_neuron_df.copy()
+        except Exception as e:
+            raise FileNotFoundError(f"Could not load FlyWire/FAFB data: {e}")
+        
+        raise FileNotFoundError(f"Dataset '{dataset}' not found locally")
+    
+    # Standard neuprint datasets
+    project_root = os.path.dirname(os.path.dirname(__file__))
+    dataset_dir = os.path.join(project_root, "datasets", dataset_normalized)
+    
+    if os.path.exists(dataset_dir):
+        dataset_path_body = os.path.join(dataset_dir, f"{dataset_normalized}_allneurons")
+    else:
+        dataset_path_body = os.path.join(project_root, "datasets", f"{dataset_normalized}_allneurons")
+    
+    neuron_csv = dataset_path_body + '_neuron_df.csv'
+    if not os.path.exists(neuron_csv):
+        raise FileNotFoundError(
+            f"Dataset '{dataset}' not found locally at {neuron_csv}. "
+            f"Run pull_dataset('{dataset}') to download it first."
+        )
+    
+    ndf, _ = _get_cached_neuron_df(dataset_normalized, dataset_path_body)
+    return ndf
+
+
+def get_types(
+    query,
+    dataset: str = 'male-cns:v0.9',
+    verbose: bool = True
+) -> tuple:
+    """
+    Get neuron types for a query (bodyIds/types/instances/regex patterns).
+    
+    Similar to FindNeuronConnection query syntax, this function searches local
+    data files and returns type information for matching neurons.
+    
+    Args:
+        query: Neuron query - can be:
+            - Single identifier: 'aMe12', 720575940610453042
+            - List of identifiers: ['Mi1', 'Tm3', 720575940610453042]
+            - Regex pattern: 'aMe.*', 'Mi[1-9]'
+            - Mixed: ['aMe.*', 'Mi1', 720575940610453042]
+        dataset: Dataset identifier (default: 'male-cns:v0.9')
+        verbose: Print search progress messages
+    
+    Returns:
+        tuple: (type_list, map_dict, dataset)
+            - type_list: List of unique types found
+            - map_dict: Dict mapping {type: [input_items_that_matched]}
+            - dataset: The dataset used (normalized)
+    
+    Examples:
+        >>> type_list, map_dict, ds = get_types('aMe.*')
+        >>> print(type_list)  # ['aMe12', 'aMe17a', 'aMe17b', ...]
+        
+        >>> type_list, map_dict, ds = get_types(['Mi1', 'Tm3'])
+        >>> print(map_dict)  # {'Mi1': ['Mi1'], 'Tm3': ['Tm3']}
+        
+        >>> type_list, map_dict, ds = get_types(720575940610453042)
+        >>> print(type_list)  # ['SomeType']
+    """
+    # Normalize query to list
+    if not isinstance(query, list):
+        query = [query]
+    
+    # Load neuron DataFrame
+    ndf = _get_neuron_df(dataset, verbose=verbose)
+    bodyId_alltypes = ndf['bodyId'].tolist()
+    
+    # Process each query item
+    type_set = set()
+    map_dict = {}  # type -> [input_items]
+    
+    for item in query:
+        # Get matching bodyIds
+        bodyId_list, search_info = _process_single_neuron(item, ndf, bodyId_alltypes, verbose=verbose)
+        
+        if bodyId_list:
+            # Get types for these bodyIds
+            matched_df = ndf[ndf['bodyId'].isin(bodyId_list)]
+            types_found = matched_df['type'].dropna().unique().tolist()
+            
+            for t in types_found:
+                type_set.add(t)
+                if t not in map_dict:
+                    map_dict[t] = []
+                map_dict[t].append(item)
+    
+    type_list = sorted(list(type_set))
+    dataset_normalized = dataset.replace(':', '_').replace('.', '_')
+    
+    if verbose:
+        print(f"Found {len(type_list)} unique types from {len(query)} query items")
+    
+    return type_list, map_dict, dataset_normalized
+
+
+def get_bodyIds(
+    query,
+    dataset: str = 'male-cns:v0.9',
+    verbose: bool = True
+) -> tuple:
+    """
+    Get bodyIds for a query (bodyIds/types/instances/regex patterns).
+    
+    Similar to FindNeuronConnection query syntax, this function searches local
+    data files and returns bodyId information for matching neurons.
+    
+    Args:
+        query: Neuron query - can be:
+            - Single identifier: 'aMe12', 720575940610453042
+            - List of identifiers: ['Mi1', 'Tm3', 720575940610453042]
+            - Regex pattern: 'aMe.*', 'Mi[1-9]'
+            - Mixed: ['aMe.*', 'Mi1', 720575940610453042]
+        dataset: Dataset identifier (default: 'male-cns:v0.9')
+        verbose: Print search progress messages
+    
+    Returns:
+        tuple: (bodyId_list, map_dict, dataset)
+            - bodyId_list: List of all bodyIds found
+            - map_dict: Dict mapping {bodyId: input_item_that_matched}
+            - dataset: The dataset used (normalized)
+    
+    Examples:
+        >>> bodyIds, map_dict, ds = get_bodyIds('aMe12')
+        >>> print(len(bodyIds))  # Number of aMe12 neurons
+        
+        >>> bodyIds, map_dict, ds = get_bodyIds(['Mi1', 'Tm3'])
+        >>> print(len(bodyIds))  # Total Mi1 + Tm3 neurons
+    """
+    # Normalize query to list
+    if not isinstance(query, list):
+        query = [query]
+    
+    # Load neuron DataFrame
+    ndf = _get_neuron_df(dataset, verbose=verbose)
+    bodyId_alltypes = ndf['bodyId'].tolist()
+    
+    # Process each query item
+    all_bodyIds = []
+    map_dict = {}  # bodyId -> input_item
+    
+    for item in query:
+        # Get matching bodyIds
+        bodyId_list, search_info = _process_single_neuron(item, ndf, bodyId_alltypes, verbose=verbose)
+        
+        for bid in bodyId_list:
+            all_bodyIds.append(bid)
+            map_dict[bid] = item
+    
+    # Remove duplicates while preserving order
+    seen = set()
+    bodyId_list = []
+    for bid in all_bodyIds:
+        if bid not in seen:
+            seen.add(bid)
+            bodyId_list.append(bid)
+    
+    dataset_normalized = dataset.replace(':', '_').replace('.', '_')
+    
+    if verbose:
+        print(f"Found {len(bodyId_list)} unique bodyIds from {len(query)} query items")
+    
+    return bodyId_list, map_dict, dataset_normalized
+
+
+def get_instances(
+    query,
+    dataset: str = 'male-cns:v0.9',
+    verbose: bool = True
+) -> tuple:
+    """
+    Get neuron instances for a query (bodyIds/types/instances/regex patterns).
+    
+    Similar to FindNeuronConnection query syntax, this function searches local
+    data files and returns instance information for matching neurons.
+    
+    Args:
+        query: Neuron query - can be:
+            - Single identifier: 'aMe12', 720575940610453042
+            - List of identifiers: ['Mi1', 'Tm3', 720575940610453042]
+            - Regex pattern: 'aMe.*', 'Mi[1-9]'
+            - Mixed: ['aMe.*', 'Mi1', 720575940610453042]
+        dataset: Dataset identifier (default: 'male-cns:v0.9')
+        verbose: Print search progress messages
+    
+    Returns:
+        tuple: (instance_list, map_dict, dataset)
+            - instance_list: List of unique instances found
+            - map_dict: Dict mapping {instance: [input_items_that_matched]}
+            - dataset: The dataset used (normalized)
+    
+    Examples:
+        >>> instances, map_dict, ds = get_instances('aMe12')
+        >>> print(instances)  # ['aMe12_L', 'aMe12_R', ...]
+        
+        >>> instances, map_dict, ds = get_instances(['Mi1', 'Tm3'])
+    """
+    # Normalize query to list
+    if not isinstance(query, list):
+        query = [query]
+    
+    # Load neuron DataFrame
+    ndf = _get_neuron_df(dataset, verbose=verbose)
+    bodyId_alltypes = ndf['bodyId'].tolist()
+    
+    # Check if instance column exists
+    if 'instance' not in ndf.columns:
+        if verbose:
+            print(f"Warning: 'instance' column not found in dataset '{dataset}'")
+        dataset_normalized = dataset.replace(':', '_').replace('.', '_')
+        return [], {}, dataset_normalized
+    
+    # Process each query item
+    instance_set = set()
+    map_dict = {}  # instance -> [input_items]
+    
+    for item in query:
+        # Get matching bodyIds
+        bodyId_list, search_info = _process_single_neuron(item, ndf, bodyId_alltypes, verbose=verbose)
+        
+        if bodyId_list:
+            # Get instances for these bodyIds
+            matched_df = ndf[ndf['bodyId'].isin(bodyId_list)]
+            instances_found = matched_df['instance'].dropna().unique().tolist()
+            
+            for inst in instances_found:
+                instance_set.add(inst)
+                if inst not in map_dict:
+                    map_dict[inst] = []
+                map_dict[inst].append(item)
+    
+    instance_list = sorted(list(instance_set))
+    dataset_normalized = dataset.replace(':', '_').replace('.', '_')
+    
+    if verbose:
+        print(f"Found {len(instance_list)} unique instances from {len(query)} query items")
+    
+    return instance_list, map_dict, dataset_normalized
+
+
+def get_info(
+    query,
+    dataset: str = 'male-cns:v0.9',
+    columns: list = None,
+    verbose: bool = True
+) -> pd.DataFrame:
+    """
+    Get full neuron information for a query (similar to getNeurons but simpler).
+    
+    This is a lightweight version of getNeurons() that returns just the 
+    neuron DataFrame without ROI counts or criteria objects.
+    
+    Args:
+        query: Neuron query - can be:
+            - Single identifier: 'aMe12', 720575940610453042
+            - List of identifiers: ['Mi1', 'Tm3', 720575940610453042]
+            - Regex pattern: 'aMe.*', 'Mi[1-9]'
+            - Mixed: ['aMe.*', 'Mi1', 720575940610453042]
+            - None: Return all neurons in dataset
+        dataset: Dataset identifier (default: 'male-cns:v0.9')
+        columns: List of columns to return. If None, returns all columns.
+        verbose: Print search progress messages
+    
+    Returns:
+        pd.DataFrame: Neuron information for matching neurons
+    
+    Examples:
+        >>> df = get_info('aMe.*')
+        >>> print(df[['bodyId', 'type', 'instance']].head())
+        
+        >>> df = get_info(['Mi1', 'Tm3'], columns=['bodyId', 'type', 'instance', 'soma'])
+        
+        >>> df = get_info(None)  # Get all neurons in dataset
+    """
+    # Load neuron DataFrame
+    ndf = _get_neuron_df(dataset, verbose=verbose)
+    
+    # Return all neurons if query is None
+    if query is None:
+        result = ndf.copy()
+        if columns:
+            available_cols = [c for c in columns if c in result.columns]
+            result = result[available_cols]
+        if verbose:
+            print(f"Returning all {len(result)} neurons from dataset '{dataset}'")
+        return result
+    
+    # Normalize query to list
+    if not isinstance(query, list):
+        query = [query]
+    
+    bodyId_alltypes = ndf['bodyId'].tolist()
+    
+    # Process each query item and collect bodyIds
+    all_bodyIds = []
+    for item in query:
+        bodyId_list, _ = _process_single_neuron(item, ndf, bodyId_alltypes, verbose=verbose)
+        all_bodyIds.extend(bodyId_list)
+    
+    # Remove duplicates
+    unique_bodyIds = list(dict.fromkeys(all_bodyIds))
+    
+    # Filter DataFrame
+    result = ndf[ndf['bodyId'].isin(unique_bodyIds)].copy()
+    
+    # Select columns if specified
+    if columns:
+        available_cols = [c for c in columns if c in result.columns]
+        missing_cols = [c for c in columns if c not in result.columns]
+        if missing_cols and verbose:
+            print(f"Warning: Columns not found: {missing_cols}")
+        result = result[available_cols]
+    
+    if verbose:
+        print(f"Returning info for {len(result)} neurons")
+    
+    return result
+
+
 class CreateHeatmap:
     """
     A class for creating and managing heatmap visualizations of connection matrices.

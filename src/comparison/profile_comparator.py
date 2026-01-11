@@ -27,10 +27,12 @@ Example:
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Union, Any, TYPE_CHECKING
+from datetime import datetime
 import os
 import warnings
 import math
 import heapq
+import json
 
 import numpy as np
 import pandas as pd
@@ -43,10 +45,10 @@ except ImportError:
     def tqdm(iterable, *args, **kwargs):
         return iterable
 
-from .connectivity_profiler import ConnectivityProfile
+from .connectivity_profiler import ConnectivityProfile, ConnectivityProfiler, ProfilerConfig
 
 if TYPE_CHECKING:
-    from .connectivity_profiler import ConnectivityStatus, ConnectivityProfiler
+    from .connectivity_profiler import ConnectivityStatus
 
 
 # ============================================================================
@@ -6406,12 +6408,17 @@ class HomologFinder:
         """
         Generate 3D skeleton visualizations for top homolog candidates.
         
+        Optimized pipeline using neuron_layers and plot_individuals() for efficient
+        batch visualization instead of creating separate VisualizeSkeleton instances.
+        
         Creates three types of visualizations:
-        1. bodyId_level/: Individual target bodyIds (single neuron plots)
-        2. type_level/: Target types (may include multiple neurons per type)
+        1. bodyId_level/: Individual target bodyIds with independent profiles via plot_individuals()
+        2. type_level/: Target types with independent profiles per type via plot_individuals()
         3. source_neurons/: All source neurons plotted together
         
-        Uses VisualizeSkeleton module to create interactive HTML and PNG files.
+        Uses VisualizeSkeleton module to create interactive HTML + PNG exports.
+        The plot_individuals() method efficiently generates separate visualizations
+        for each layer by toggling visibility rather than re-fetching data.
         
         Args:
             results_df: Results DataFrame with homolog matches
@@ -6421,6 +6428,7 @@ class HomologFinder:
             visualization_dir: Directory to save visualization files
             top_n: Number of top candidates to visualize
             files_saved: List to append saved file names to
+            type_summary: Optional type-level summary DataFrame
         """
         try:
             # Import VisualizeSkeleton from coana module
@@ -6438,7 +6446,6 @@ class HomologFinder:
             self._log(f"Generating 3D visualizations for top {top_n} candidates...")
 
             # Use original dataset names for VisualizeSkeleton to ensure correct NeuPrint connection
-            # (e.g. 'hemibrain:v1.2.1' must be preserved, not converted to 'hemibrain_v1_2_1')
             vis_source_dataset = source_dataset
             vis_target_dataset = target_dataset
             
@@ -6451,7 +6458,7 @@ class HomologFinder:
             type_dir.mkdir(parents=True, exist_ok=True)
             source_dir.mkdir(parents=True, exist_ok=True)
             
-            # Determine target column name
+            # Determine target column names
             target_col = 'target_type' if 'target_type' in results_df.columns else 'target'
             target_bodyid_col = 'target_bodyId' if 'target_bodyId' in results_df.columns else None
             
@@ -6461,7 +6468,6 @@ class HomologFinder:
                     if 'source_bodyId' in results_df.columns:
                         per_source_matches = []
                         for _, group in results_df.groupby('source_bodyId'):
-                            # Sort best-to-worst for stable top-N per source
                             if 'rank_corr' in group.columns:
                                 sorted_group = group.sort_values('rank_corr', ascending=False, na_position='last')
                             else:
@@ -6473,13 +6479,11 @@ class HomologFinder:
                         else:
                             top_matches = results_df.iloc[0:0]
                     else:
-                        # Fallback when source_bodyId is unavailable
                         if 'rank_corr' in results_df.columns:
                             top_matches = results_df.nlargest(top_n, 'rank_corr')
                         else:
                             top_matches = results_df.head(top_n)
 
-                    # Union of targets across sources to avoid duplicate visualizations
                     top_matches = top_matches.drop_duplicates(subset=[target_bodyid_col], keep='first')
                 else:
                     top_matches = results_df.head(top_n)
@@ -6487,171 +6491,269 @@ class HomologFinder:
                 top_matches = results_df
             
             # =====================================================================
-            # 1. BodyId-level visualizations: Individual target bodyIds
+            # 1. BodyId-level visualizations: Batch all bodyIds as separate layers
+            #    Using plot_individuals() for efficient per-neuron exports
             # =====================================================================
-            if target_bodyid_col:
-                self._log(f"  Creating bodyId-level visualizations...")
+            if target_bodyid_col and not top_matches.empty:
+                self._log(f"  Creating bodyId-level visualizations (batch mode with plot_individuals)...")
+                
+                # Collect all bodyIds as separate layers (one bodyId per layer)
+                bodyid_layers = []
+                bodyid_layer_names = []
+                
                 for idx, row in top_matches.iterrows():
                     target_type = row.get(target_col, '')
                     target_bodyid = row.get(target_bodyid_col)
-                    rank_corr = row.get('rank_corr', 0)
                     
                     if not target_bodyid:
                         continue
                     
-                    # Single neuron - use bodyId
-                    layers = [int(target_bodyid)]
-                    safe_name = f"{target_type}_{target_bodyid}".replace('/', '_').replace(':', '_').replace('*', '_')
-                    
+                    try:
+                        bodyid_layers.append(int(target_bodyid))
+                        # Custom layer name: type_bodyid for clear identification
+                        safe_name = f"{target_type}_{target_bodyid}".replace('/', '_').replace(':', '_').replace('*', '_')
+                        bodyid_layer_names.append(safe_name)
+                    except (ValueError, TypeError):
+                        continue
+                
+                if bodyid_layers:
                     try:
                         # Get correct client for target dataset
                         target_client = self.clients.get(vis_target_dataset)
                         if target_client:
                             set_default_client(target_client)
                         
-                        vs = VisualizeSkeleton(
+                        # Create single VisualizeSkeleton with all bodyIds as separate layers
+                        # legend_mode='layer' ensures each bodyId gets its own legend entry
+                        vs_bodyid = VisualizeSkeleton(
                             dataset=vis_target_dataset,
-                            neuron_layers=layers,
-                            saveas=safe_name,
-                            data_folder=str(bodyid_dir),
+                            neuron_layers=bodyid_layers,  # Each bodyId as separate layer
+                            custom_layer_names=bodyid_layer_names,
+                            output_dir=str(bodyid_dir),
                             show_fig=False,
+                            export_views=False,  # We'll use plot_individuals() instead
                             brain_mesh='whole',
-                            neuron_alpha=0.6,  # Higher alpha for single neuron
-                            legend_mode='single',  # Show individual neurons
+                            neuron_alpha=0.3,  # Lower alpha for combined view
+                            legend_mode='layer',  # Each layer (bodyId) gets own legend
                             verbose='simple',
-                            client=target_client,  # Pass correct client
+                            client=target_client,
+                            skip_synapse=True,
+                            cache_neurons=True,
                         )
-                        vs.plot_neurons()
+                        
+                        # Plot all neurons together first (required for plot_individuals)
+                        vs_bodyid.plot_neurons()
+                        
+                        # Generate individual plots for each bodyId using plot_individuals()
+                        # This efficiently toggles visibility rather than re-fetching data
+                        vs_bodyid.plot_individuals(
+                            output_format=['png', 'html'],
+                            views=['front'],
+                            summary_format=['pdf'],  # Generate PDF summary
+                            neuron_alpha=0.8,  # Higher alpha for individual views
+                        )
                         
                         if files_saved is not None:
-                            files_saved.append(f'visualization/bodyId_level/{safe_name}.html')
-                            files_saved.append(f'visualization/bodyId_level/{safe_name}.png')
+                            for name in bodyid_layer_names:
+                                files_saved.append(f'visualization/bodyId_level/individual_profiles/front_{name}.png')
+                                files_saved.append(f'visualization/bodyId_level/individual_profiles/{name}.html')
+                            files_saved.append('visualization/bodyId_level/individual_profiles.pdf')
                         
-                        self._log(f"    Saved: bodyId_level/{safe_name}.html (rank_corr={rank_corr:.3f})")
+                        self._log(f"    Saved: bodyId_level/ ({len(bodyid_layers)} neurons, batch mode with plot_individuals)")
                         
                     except Exception as e:
-                        self._log(f"    Warning: Could not visualize bodyId {target_bodyid}: {e}")
+                        self._log(f"    Warning: BodyId batch visualization failed: {e}, falling back to individual mode...")
+                        # Fallback to individual visualization (original method)
+                        self._visualize_bodyids_individual(
+                            top_matches, target_col, target_bodyid_col, 
+                            vis_target_dataset, bodyid_dir, files_saved
+                        )
             
             # =====================================================================
-            # 2. Type-level visualizations: Use type names (fetches all neurons of type)
+            # 2. Type-level visualizations: Batch all types as separate layers
+            #    Each layer contains all bodyIds of that type, using plot_individuals()
             # =====================================================================
             if type_summary is not None and not type_summary.empty:
                 ts = type_summary
-                type_col = 'target_type' if 'target_type' in ts.columns else ('target' if 'target' in ts.columns else None)
-                if type_col:
+                type_col_name = 'target_type' if 'target_type' in ts.columns else ('target' if 'target' in ts.columns else None)
+                if type_col_name:
                     top_type_rows = ts.head(top_n) if top_n and top_n > 0 else ts
-                    unique_types = top_type_rows[type_col].dropna().unique()
+                    unique_types = top_type_rows[type_col_name].dropna().unique().tolist()
                 else:
                     unique_types = []
             else:
-                unique_types = top_matches[target_col].dropna().unique()
+                unique_types = top_matches[target_col].dropna().unique().tolist()
 
-            self._log(f"  Creating type-level visualizations for {len(unique_types)} types...")
-            
-            for target_type in unique_types:
-                if not target_type:
-                    continue
+            if unique_types:
+                self._log(f"  Creating type-level visualizations for {len(unique_types)} types (batch mode with plot_individuals)...")
                 
-                # Get best rank_corr for this type
-                type_rows = results_df[results_df[target_col] == target_type]
-                best_rank_corr = type_rows['rank_corr'].max() if 'rank_corr' in type_rows.columns else 0
-                bodyid_layers: List[Union[int, str]] = []
-
-                if target_bodyid_col:
-                    bodyids_for_type = type_rows[target_bodyid_col].dropna().unique().tolist()
-                    if bodyids_for_type:
-                        try:
-                            bodyid_layers = [int(bid) for bid in bodyids_for_type]
-                        except (ValueError, TypeError):
-                            bodyid_layers = [str(bid) for bid in bodyids_for_type]
-
-                # Prefer explicit bodyIds from results; fall back to type name lookup
-                if bodyid_layers:
-                    # Group bodyIds so the type renders as a single combined layer
-                    layers = [bodyid_layers] if len(bodyid_layers) > 1 else bodyid_layers
-                else:
-                    layers = [str(target_type)]
-                safe_name = f"{target_type}".replace('/', '_').replace(':', '_').replace('*', '_')
+                # Build type layers: each layer is a list of bodyIds for that type (grouped)
+                type_layers = []
+                type_layer_names = []
                 
-                try:
-                    # Get correct client for target dataset
-                    target_client = self.clients.get(vis_target_dataset)
-                    if target_client:
-                        set_default_client(target_client)
+                for target_type in unique_types:
+                    if not target_type:
+                        continue
                     
-                    vs = VisualizeSkeleton(
-                        dataset=vis_target_dataset,
-                        neuron_layers=layers,
-                        saveas=safe_name,
-                        data_folder=str(type_dir),
-                        show_fig=False,
-                        brain_mesh='whole',
-                        verbose='simple',
-                        client=target_client,  # Pass correct client
-                    )
-                    vs.plot_neurons()
+                    # Get all bodyIds for this type from results
+                    type_rows = results_df[results_df[target_col] == target_type]
                     
-                    if files_saved is not None:
-                        files_saved.append(f'visualization/type_level/{safe_name}.html')
-                        files_saved.append(f'visualization/type_level/{safe_name}.png')
+                    if target_bodyid_col:
+                        bodyids_for_type = type_rows[target_bodyid_col].dropna().unique().tolist()
+                        if bodyids_for_type:
+                            try:
+                                bodyid_list = [int(bid) for bid in bodyids_for_type]
+                                # Multiple bodyIds for type -> group them as single layer
+                                if len(bodyid_list) > 1:
+                                    type_layers.append(bodyid_list)
+                                else:
+                                    type_layers.append(bodyid_list[0])
+                            except (ValueError, TypeError):
+                                type_layers.append(str(target_type))
+                        else:
+                            type_layers.append(str(target_type))
+                    else:
+                        type_layers.append(str(target_type))
                     
-                    bodyid_note = f", bodyIds={len(bodyid_layers)}" if bodyid_layers else ""
-                    self._log(f"    Saved: type_level/{safe_name}.html (best_rank_corr={best_rank_corr:.3f}{bodyid_note})")
-                    
-                except Exception as e:
-                    self._log(f"    Warning: Could not visualize type {target_type}: {e}")
+                    safe_name = str(target_type).replace('/', '_').replace(':', '_').replace('*', '_')
+                    type_layer_names.append(safe_name)
+                
+                if type_layers:
+                    try:
+                        # Get correct client for target dataset
+                        target_client = self.clients.get(vis_target_dataset)
+                        if target_client:
+                            set_default_client(target_client)
+                        
+                        # Create single VisualizeSkeleton with all types as separate layers
+                        vs_type = VisualizeSkeleton(
+                            dataset=vis_target_dataset,
+                            neuron_layers=type_layers,
+                            custom_layer_names=type_layer_names,
+                            output_dir=str(type_dir),
+                            show_fig=False,
+                            export_views=False,
+                            brain_mesh='whole',
+                            neuron_alpha=0.2,  # Lower alpha for type groups in combined view
+                            legend_mode='layer',  # Each type gets own legend
+                            verbose='simple',
+                            client=target_client,
+                            skip_synapse=True,
+                            cache_neurons=True,
+                        )
+                        
+                        # Plot all types together first
+                        vs_type.plot_neurons()
+                        
+                        # Generate individual plots for each type
+                        vs_type.plot_individuals(
+                            output_format=['png', 'html'],
+                            views=['front'],
+                            summary_format=['pdf'],
+                            neuron_alpha=0.6,
+                        )
+                        
+                        if files_saved is not None:
+                            for name in type_layer_names:
+                                files_saved.append(f'visualization/type_level/individual_profiles/front_{name}.png')
+                                files_saved.append(f'visualization/type_level/individual_profiles/{name}.html')
+                            files_saved.append('visualization/type_level/individual_profiles.pdf')
+                        
+                        self._log(f"    Saved: type_level/ ({len(type_layers)} types, batch mode with plot_individuals)")
+                        
+                    except Exception as e:
+                        self._log(f"    Warning: Type batch visualization failed: {e}, falling back to individual mode...")
+                        # Fallback to individual visualization
+                        self._visualize_types_individual(
+                            unique_types, results_df, target_col, target_bodyid_col,
+                            vis_target_dataset, type_dir, files_saved
+                        )
             
             # =====================================================================
             # 3. Source neurons visualization: All source neurons together
             # =====================================================================
             self._log(f"  Creating source neurons visualization...")
             
-            # Collect all source bodyIds
             if 'source_bodyId' in results_df.columns:
                 source_bodyids = results_df['source_bodyId'].dropna().unique().tolist()
             else:
-                # Fall back to query as the source
                 source_bodyids = [query]
             
             if source_bodyids:
-                # Convert to int if they look like bodyIds
                 try:
                     source_layers = [int(bid) for bid in source_bodyids]
                 except (ValueError, TypeError):
-                    # They might be type names
                     source_layers = [str(bid) for bid in source_bodyids]
 
-                # Group multiple neurons so they render as a single combined layer
-                if len(source_layers) > 1:
-                    source_layers = [source_layers]
-                
                 safe_name = f"source_{query}".replace('/', '_').replace(':', '_').replace('*', '_')
                 
                 try:
-                    # Get correct client for source dataset
                     source_client = self.clients.get(vis_source_dataset)
                     if source_client:
                         set_default_client(source_client)
                     
-                    vs = VisualizeSkeleton(
-                        dataset=vis_source_dataset,
-                        neuron_layers=source_layers,
-                        saveas=safe_name,
-                        data_folder=str(source_dir),
-                        show_fig=False,
-                        brain_mesh='whole',
-                        legend_mode='single',  # Show individual neurons
-                        neuron_alpha=0.6 if len(source_layers) == 1 else 0.2,  # Higher alpha for single neuron
-                        verbose='simple',
-                        client=source_client,  # Pass correct client
-                    )
-                    vs.plot_neurons()
-                    
-                    if files_saved is not None:
-                        files_saved.append(f'visualization/source_neurons/{safe_name}.html')
-                        files_saved.append(f'visualization/source_neurons/{safe_name}.png')
-                    
-                    self._log(f"    Saved: source_neurons/{safe_name}.html ({len(source_layers)} neurons)")
+                    # For source neurons, use separate layers to enable plot_individuals if multiple
+                    if len(source_layers) > 1:
+                        # Each source neuron as separate layer for individual exports
+                        source_layer_names = [f"source_{bid}" for bid in source_bodyids]
+                        vs_source = VisualizeSkeleton(
+                            dataset=vis_source_dataset,
+                            neuron_layers=source_layers,
+                            custom_layer_names=source_layer_names,
+                            saveas=safe_name,
+                            output_dir=str(source_dir),
+                            show_fig=False,
+                            export_views=True,  # Export combined view
+                            brain_mesh='whole',
+                            legend_mode='layer',
+                            neuron_alpha=0.3,
+                            verbose='simple',
+                            client=source_client,
+                            skip_synapse=True,
+                            cache_neurons=True,
+                        )
+                        vs_source.plot_neurons()
+                        
+                        # Also generate individual source neuron plots
+                        vs_source.plot_individuals(
+                            output_format=['png', 'html'],
+                            views=['front'],
+                            summary_format=['pdf'],
+                            neuron_alpha=0.8,
+                        )
+                        
+                        if files_saved is not None:
+                            files_saved.append(f'visualization/source_neurons/{safe_name}.html')
+                            files_saved.append(f'visualization/source_neurons/{safe_name}.png')
+                            for name in source_layer_names:
+                                files_saved.append(f'visualization/source_neurons/individual_profiles/front_{name}.png')
+                                files_saved.append(f'visualization/source_neurons/individual_profiles/{name}.html')
+                        
+                        self._log(f"    Saved: source_neurons/{safe_name}.html ({len(source_layers)} neurons with individual profiles)")
+                    else:
+                        # Single source neuron - simple plot
+                        vs_source = VisualizeSkeleton(
+                            dataset=vis_source_dataset,
+                            neuron_layers=source_layers,
+                            saveas=safe_name,
+                            output_dir=str(source_dir),
+                            show_fig=False,
+                            export_views=True,
+                            brain_mesh='whole',
+                            legend_mode='single',
+                            neuron_alpha=0.6,
+                            verbose='simple',
+                            client=source_client,
+                            skip_synapse=True,
+                            cache_neurons=True,
+                        )
+                        vs_source.plot_neurons()
+                        
+                        if files_saved is not None:
+                            files_saved.append(f'visualization/source_neurons/{safe_name}.html')
+                            files_saved.append(f'visualization/source_neurons/{safe_name}.png')
+                        
+                        self._log(f"    Saved: source_neurons/{safe_name}.html (1 neuron)")
                     
                 except Exception as e:
                     self._log(f"    Warning: Could not visualize source neurons: {e}")
@@ -6660,6 +6762,122 @@ class HomologFinder:
             self._log(f"Warning: Could not import VisualizeSkeleton for visualization: {e}")
         except Exception as e:
             self._log(f"Warning: Visualization failed: {e}")
+    
+    def _visualize_bodyids_individual(
+        self,
+        top_matches: pd.DataFrame,
+        target_col: str,
+        target_bodyid_col: str,
+        vis_target_dataset: str,
+        bodyid_dir: 'Path',
+        files_saved: List[str]
+    ):
+        """Fallback method: visualize bodyIds individually (original approach)."""
+        from coana import VisualizeSkeleton
+        from neuprint import set_default_client
+        
+        target_client = self.clients.get(vis_target_dataset)
+        if target_client:
+            set_default_client(target_client)
+        
+        for idx, row in top_matches.iterrows():
+            target_type = row.get(target_col, '')
+            target_bodyid = row.get(target_bodyid_col)
+            rank_corr = row.get('rank_corr', 0)
+            
+            if not target_bodyid:
+                continue
+            
+            layers = [int(target_bodyid)]
+            safe_name = f"{target_type}_{target_bodyid}".replace('/', '_').replace(':', '_').replace('*', '_')
+            
+            try:
+                vs = VisualizeSkeleton(
+                    dataset=vis_target_dataset,
+                    neuron_layers=layers,
+                    saveas=safe_name,
+                    output_dir=str(bodyid_dir),
+                    show_fig=False,
+                    brain_mesh='whole',
+                    neuron_alpha=0.6,
+                    legend_mode='single',
+                    verbose='simple',
+                    client=target_client,
+                )
+                vs.plot_neurons()
+                
+                if files_saved is not None:
+                    files_saved.append(f'visualization/bodyId_level/{safe_name}.html')
+                    files_saved.append(f'visualization/bodyId_level/{safe_name}.png')
+                
+                self._log(f"    Saved: bodyId_level/{safe_name}.html (rank_corr={rank_corr:.3f})")
+                
+            except Exception as e:
+                self._log(f"    Warning: Could not visualize bodyId {target_bodyid}: {e}")
+    
+    def _visualize_types_individual(
+        self,
+        unique_types: list,
+        results_df: pd.DataFrame,
+        target_col: str,
+        target_bodyid_col: str,
+        vis_target_dataset: str,
+        type_dir: 'Path',
+        files_saved: List[str]
+    ):
+        """Fallback method: visualize types individually (original approach)."""
+        from coana import VisualizeSkeleton
+        from neuprint import set_default_client
+        
+        target_client = self.clients.get(vis_target_dataset)
+        if target_client:
+            set_default_client(target_client)
+        
+        for target_type in unique_types:
+            if not target_type:
+                continue
+            
+            type_rows = results_df[results_df[target_col] == target_type]
+            best_rank_corr = type_rows['rank_corr'].max() if 'rank_corr' in type_rows.columns else 0
+            
+            bodyid_layers = []
+            if target_bodyid_col:
+                bodyids_for_type = type_rows[target_bodyid_col].dropna().unique().tolist()
+                if bodyids_for_type:
+                    try:
+                        bodyid_layers = [int(bid) for bid in bodyids_for_type]
+                    except (ValueError, TypeError):
+                        bodyid_layers = [str(bid) for bid in bodyids_for_type]
+
+            if bodyid_layers:
+                layers = [bodyid_layers] if len(bodyid_layers) > 1 else bodyid_layers
+            else:
+                layers = [str(target_type)]
+            
+            safe_name = f"{target_type}".replace('/', '_').replace(':', '_').replace('*', '_')
+            
+            try:
+                vs = VisualizeSkeleton(
+                    dataset=vis_target_dataset,
+                    neuron_layers=layers,
+                    saveas=safe_name,
+                    output_dir=str(type_dir),
+                    show_fig=False,
+                    brain_mesh='whole',
+                    verbose='simple',
+                    client=target_client,
+                )
+                vs.plot_neurons()
+                
+                if files_saved is not None:
+                    files_saved.append(f'visualization/type_level/{safe_name}.html')
+                    files_saved.append(f'visualization/type_level/{safe_name}.png')
+                
+                bodyid_note = f", bodyIds={len(bodyid_layers)}" if bodyid_layers else ""
+                self._log(f"    Saved: type_level/{safe_name}.html (best_rank_corr={best_rank_corr:.3f}{bodyid_note})")
+                
+            except Exception as e:
+                self._log(f"    Warning: Could not visualize type {target_type}: {e}")
     
     def _profile_to_dataframe(
         self,
@@ -7208,3 +7426,1360 @@ class HomologFinder:
         results_df = results_df.sort_values('rank_corr', ascending=False).head(top_n)
         
         return results_df
+
+
+# ============================================================================
+# Connectivity Profile Comparer Class
+# ============================================================================
+
+class ConnectivityProfileComparer:
+    """
+    Compare connectivity profiles within a single dataset.
+    
+    This class provides functionality for intra-dataset connectivity profile
+    comparison, supporting bodyId-level or type-level comparisons with 
+    interactive heatmap visualization.
+    
+    Key Features:
+        - Flexible query input: simple list, nested list with custom names, or CSV file
+        - Nested list format: [['GroupName', [id1, id2]], ['Group2', [id3, 'type']]]
+        - CSV file support: group_map_csv parameter (similar to VisualizeSkeleton's layer_map_csv)
+        - Mean-pooled aggregation for type-level profiles
+        - Outputs ALL metrics: jaccard, cosine, rank_corr, rank_corr_union
+        - Separate heatmap files for EACH metric (not just one with switching)
+        - Separate upstream/downstream and combined analysis
+        - Interactive heatmap via VisualizePath with native Ward clustering
+        - Auto-generated output folder: connectivity_profiling_{query_name}_{timestamp}
+        - Saves individual and aggregated connectivity profiles
+    
+    Query Input Formats:
+        1. Simple list: ['Mi1', 'Tm3', 720575940610453042]
+        2. Nested list with custom group names (like VisualizeSkeleton's neuron_layers):
+           [['DN1p', ['DN1pA', 'DN1pB']], ['DN2', ['DN2']], ['l-LNv', [12345]]]
+        3. CSV file via group_map_csv parameter (like VisualizeSkeleton's layer_map_csv):
+           CSV format: columns 'group' and 'id_type_instance'
+    
+    Aggregation Strategies:
+        - 'bodyid': Compare individual bodyId profiles directly
+        - 'type': Aggregate profiles by neuron type using mean pooling
+    
+    Output Structure:
+        {output_dir}/connectivity_profiling_{query_name}_{timestamp}/
+        ├── parameters.json
+        ├── README.txt
+        ├── results/
+        │   ├── similarity_jaccard_{direction}.csv
+        │   ├── similarity_cosine_{direction}.csv
+        │   ├── similarity_rank_corr_{direction}.csv
+        │   └── similarity_rank_corr_union_{direction}.csv
+        ├── profiles/
+        │   ├── profiles_summary.json
+        │   ├── individual/          # Raw profiles per bodyId
+        │   └── aggregated/          # Type-aggregated profiles
+        └── visualization/
+            ├── heatmap_{direction}_jaccard.html
+            ├── heatmap_{direction}_cosine.html
+            ├── heatmap_{direction}_rank_corr.html
+            └── heatmap_{direction}_rank_corr_union.html
+    
+    Example:
+        >>> # Simple list format
+        >>> comparer = ConnectivityProfileComparer(
+        ...     query=['Mi1', 'Tm3', 'aMe12'],
+        ...     dataset='male-cns:v0.9',
+        ...     aggregation_level='type',
+        ...     output_dir='./results'
+        ... )
+        >>> results = comparer.run()
+        
+        >>> # Nested list with custom group names
+        >>> comparer = ConnectivityProfileComparer(
+        ...     query=[['Clock Neurons', ['DN1p', 'DN2']], 
+        ...            ['Visual', ['Mi1', 'Tm3']]],
+        ...     dataset='male-cns:v0.9'
+        ... )
+        
+        >>> # Using CSV file for group mapping
+        >>> comparer = ConnectivityProfileComparer(
+        ...     query=[],  # Will be overridden by CSV
+        ...     dataset='male-cns:v0.9',
+        ...     group_map_csv='my_groups.csv'
+        ... )
+    """
+    
+    def __init__(
+        self,
+        query: Union[str, int, List[Union[str, int, List]]],
+        dataset: str,
+        aggregation_level: str = 'type',
+        top_k: int = 15,
+        top_m: int = 5,
+        min_synapse_threshold: int = 3,
+        direction: str = 'both',
+        output_dir: Optional[str] = None,
+        generate_heatmaps: bool = True,
+        show_figures: bool = False,
+        verbose: bool = True,
+        use_cache: bool = True,
+        group_map_csv: Optional[str] = None,
+    ):
+        """
+        Initialize ConnectivityProfileComparer.
+        
+        Args:
+            query: Neuron query - supports multiple formats:
+                - Single type/bodyId: 'Mi1' or 720575940610453042
+                - List of types/bodyIds: ['Mi1', 'Tm3', 'aMe12']
+                - Patterns with wildcards: ['Mi.*', 'Tm.*']
+                - Nested list with custom group names (like VisualizeSkeleton):
+                  [['Group1', [bodyId1, bodyId2]], ['Group2', [bodyId3, 'type1']]]
+                  Each group is ['GroupName', [list_of_ids_or_types]]
+            dataset: Dataset identifier (e.g., 'male-cns:v0.9')
+            aggregation_level: 'bodyid' or 'type'
+            top_k: Top K partners per direction (default: 15)
+            top_m: Minimum unique types to ensure (default: 5)
+            min_synapse_threshold: Minimum synapses for connections
+            direction: 'upstream', 'downstream', or 'both'
+            output_dir: Parent directory to save results (subfolder auto-generated)
+            generate_heatmaps: Generate interactive heatmap visualizations
+            show_figures: Open visualizations in browser
+            verbose: Print progress messages
+            use_cache: Enable profile caching
+            group_map_csv: Path to CSV file for group mapping (like VisualizeSkeleton's layer_map_csv)
+                CSV format: columns 'group' and 'id_type_instance'
+                - 'group': custom group name (neurons with same group value are grouped)
+                - 'id_type_instance': neuron identifier (bodyId, type, or instance name)
+                When provided, this overrides `query` parameter.
+        """
+        self.group_map_csv = group_map_csv
+        
+        # Parse group_map_csv if provided (overrides query)
+        if group_map_csv is not None:
+            self.query, self._custom_group_names = self._parse_group_map_csv(group_map_csv)
+        else:
+            # Normalize query and detect nested list format
+            self.query, self._custom_group_names = self._normalize_query(query)
+        
+        self.dataset = dataset
+        self.aggregation_level = aggregation_level
+        self.top_k = top_k
+        self.top_m = top_m
+        self.min_synapse_threshold = min_synapse_threshold
+        self.direction = direction
+        self.output_dir = output_dir
+        self.generate_heatmaps = generate_heatmaps
+        self.show_figures = show_figures
+        self.verbose = verbose
+        self.use_cache = use_cache
+        
+        # Generate query name for output folder
+        self.query_name = self._generate_query_name()
+        
+        # Initialize profiler
+        config = ProfilerConfig(
+            top_k_bodyid=top_k,
+            top_m_type=top_m,
+            min_synapse_threshold=min_synapse_threshold,
+            use_cache=use_cache
+        )
+        
+        self.profiler = ConnectivityProfiler(
+            datasets=[dataset],
+            config=config,
+            verbose=verbose
+        )
+        
+        # Storage for profiles and results
+        self.profiles: Dict[str, ConnectivityProfile] = {}
+        
+    def _log(self, msg: str):
+        """Print message if verbose."""
+        if self.verbose:
+            print(f"[ConnectivityProfileComparer] {msg}")
+    
+    def _ensure_connection_cache_complete(self) -> bool:
+        """
+        Ensure connection cache is complete for the dataset.
+        
+        This method calls FNC's build_connection_cache which:
+        - Checks which neurons are already cached (O(1) lookup)
+        - Only fetches missing neurons (incremental)
+        - Uses progress bar for long operations
+        
+        Cache Hierarchy (must be built in order):
+        -----------------------------------------
+        Level 0: datasets/{dataset}/*_neuron_df - Authoritative neuron list  
+        Level 1: cache/{dataset}/neuron_index.parquet - Tracks cached neurons
+        Level 2: cache/{dataset}/connections.parquet - Connection data
+        Level 3: Connectivity profiles (built after this check)
+        
+        Returns:
+            True if cache is ready, False otherwise
+        """
+        try:
+            # Import FindNeuronConnection - try relative first (src.coana), then absolute
+            try:
+                from ..coana import FindNeuronConnection
+            except ImportError:
+                try:
+                    from coana import FindNeuronConnection
+                except ImportError:
+                    import sys
+                    from pathlib import Path
+                    sys.path.insert(0, str(Path(__file__).parent.parent))
+                    from coana import FindNeuronConnection
+            
+            # Initialize FindNeuronConnection
+            # Use 'simple' mode to show loading progress
+            fnc = FindNeuronConnection(
+                dataset=self.dataset,
+                use_cache=True,
+                verbose_mode='simple',
+                simple_fetch=True
+            )
+            
+            # Build connection cache - incremental (skips already cached neurons)
+            self._log("Building/verifying connection cache...")
+            result = fnc.build_connection_cache(batch_size=1000, quiet=False)
+            
+            total_neurons = result.get('total_neurons', 0)
+            already_cached = result.get('already_cached', 0)
+            newly_cached = result.get('newly_cached', 0)
+            total_connections = result.get('total_connections', 0)
+            
+            # Clear FNC's in-memory cache to free memory
+            fnc._conn_df_cache = None
+            fnc._conn_index = {}
+            fnc._conn_index_post = {}
+            
+            # Also clear the module-level cache for this dataset
+            safe_name = self.dataset.replace(':', '_').replace('.', '_')
+            
+            modules_to_check = ['coana', 'src.coana', 'src.comparison.coana']
+            for mod_name in modules_to_check:
+                try:
+                    import sys
+                    if mod_name in sys.modules:
+                        mod = sys.modules[mod_name]
+                        if hasattr(mod, '_FNC_CACHE'):
+                            if safe_name in mod._FNC_CACHE:
+                                mod._FNC_CACHE[safe_name] = {}
+                except Exception:
+                    pass
+            
+            del fnc
+            import gc
+            gc.collect()
+            
+            if total_neurons > 0:
+                if newly_cached == 0:
+                    self._log(f"Connection cache complete: {already_cached:,} neurons, {total_connections:,} connections")
+                else:
+                    self._log(f"Connection cache updated: +{newly_cached:,} neurons (total: {total_connections:,} connections)")
+                return True
+            else:
+                self._log("WARNING: No neurons found in dataset")
+                return False
+            
+        except Exception as e:
+            self._log(f"WARNING: Could not ensure connection cache: {e}")
+            return False
+    
+    def _normalize_query(
+        self, 
+        query: Union[str, int, List]
+    ) -> Tuple[List, Optional[List[str]]]:
+        """
+        Normalize query input and detect nested list format.
+        
+        Supports multiple formats:
+        - Single type/bodyId: 'Mi1' or 720575940610453042
+        - List of types/bodyIds: ['Mi1', 'Tm3', 'aMe12']
+        - Nested list with custom names: [['Group1', [id1, id2]], ['Group2', [id3]]]
+        
+        Args:
+            query: Raw query input
+            
+        Returns:
+            Tuple of (normalized_query, custom_group_names)
+            - normalized_query: List of items to query
+            - custom_group_names: List of custom names if nested format, else None
+        """
+        # Single item
+        if isinstance(query, (str, int)):
+            return [query], None
+        
+        # Empty list
+        if not query:
+            return [], None
+        
+        # Check for nested list format: [['name', [ids]], ...]
+        # First element should be a list with 2 elements: [name, [ids]]
+        if (isinstance(query, list) and 
+            len(query) > 0 and 
+            isinstance(query[0], list) and 
+            len(query[0]) == 2 and 
+            isinstance(query[0][0], str) and 
+            isinstance(query[0][1], list)):
+            
+            # Nested format detected
+            normalized = []
+            group_names = []
+            
+            for item in query:
+                if (isinstance(item, list) and 
+                    len(item) == 2 and 
+                    isinstance(item[0], str) and 
+                    isinstance(item[1], list)):
+                    group_name = item[0]
+                    ids = item[1]
+                    group_names.append(group_name)
+                    normalized.append(ids)  # Keep as list for aggregation
+                else:
+                    # Invalid format - treat as single item
+                    self._log(f"Warning: Invalid nested format item: {item}")
+            
+            return normalized, group_names
+        
+        # Simple list format
+        return list(query), None
+    
+    def _parse_group_map_csv(self, csv_path: str) -> Tuple[List, List[str]]:
+        """
+        Parse group_map_csv file to construct query with custom group names.
+        
+        CSV format: columns 'group' and 'id_type_instance'
+        Rows with the same 'group' value are grouped together.
+        
+        Args:
+            csv_path: Path to CSV file
+            
+        Returns:
+            Tuple of (normalized_query, custom_group_names)
+        """
+        import pandas as pd
+        
+        if not os.path.exists(csv_path):
+            raise FileNotFoundError(f"group_map_csv not found: {csv_path}")
+        
+        self._log(f"Loading group map from: {csv_path}")
+        
+        df = pd.read_csv(csv_path)
+        
+        # Validate columns
+        required_cols = ['group', 'id_type_instance']
+        for col in required_cols:
+            if col not in df.columns:
+                raise ValueError(f"group_map_csv must have column '{col}'. Found: {list(df.columns)}")
+        
+        # Group by group name
+        group_data = df.groupby('group', sort=False)['id_type_instance'].apply(list).to_dict()
+        
+        normalized = []
+        group_names = []
+        
+        for group_name, identifiers in group_data.items():
+            # Convert identifiers: if it looks like a bodyId (all digits), convert to int
+            processed_ids = []
+            for id_val in identifiers:
+                id_str = str(id_val).strip()
+                if id_str.isdigit():
+                    processed_ids.append(int(id_str))
+                else:
+                    processed_ids.append(id_str)
+            
+            group_names.append(str(group_name))
+            normalized.append(processed_ids)
+        
+        self._log(f"Loaded {len(group_names)} groups from CSV:")
+        for name, ids in zip(group_names, normalized):
+            n_count = len(ids) if isinstance(ids, list) else 1
+            self._log(f"  {name}: {n_count} identifiers")
+        
+        return normalized, group_names
+
+    def _generate_query_name(self) -> str:
+        """
+        Generate a filesystem-safe name from the query.
+        
+        Returns:
+            String like 'Mi1_Tm3_etc' or 'Mi1' for single query
+        """
+        if not self.query:
+            return "unnamed"
+        
+        # Use custom group names if available
+        if self._custom_group_names:
+            first = str(self._custom_group_names[0])
+        else:
+            # Get first item, clean it
+            first_item = self.query[0]
+            if isinstance(first_item, list):
+                first_item = first_item[0] if first_item else "group"
+            first = str(first_item).replace('.*', '').replace('*', '')
+        
+        first = first.replace(':', '_').replace('.', '_').replace('/', '_')
+        
+        n_items = len(self._custom_group_names) if self._custom_group_names else len(self.query)
+        
+        if n_items == 1:
+            return first
+        else:
+            return f"{first}_etc"
+    
+    def _get_output_path(self) -> Path:
+        """Generate the full output path with timestamp."""
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        folder_name = f"connectivity_profiling_{self.query_name}_{timestamp}"
+        
+        if self.output_dir:
+            return Path(self.output_dir) / folder_name
+        else:
+            return Path.home() / 'connectome_analysis' / 'connectivity_profiling' / folder_name
+    
+    def _get_neurons_to_compare(self) -> Dict[str, List]:
+        """
+        Get the neurons/groups to compare based on query.
+        
+        Handles:
+        - Simple list: ['Mi1', 'Tm3'] -> auto-determine labels
+        - Nested list with custom names: [['Group1', [ids]], ...] via _custom_group_names
+        - group_map_csv: same as nested list format
+        
+        Returns:
+            Dictionary mapping label -> list of identifiers
+        """
+        neurons = {}
+        
+        # If custom group names are set (from nested list or group_map_csv)
+        if self._custom_group_names:
+            for idx, (group_name, ids) in enumerate(zip(self._custom_group_names, self.query)):
+                # ids should be a list of bodyIds/types
+                if isinstance(ids, list):
+                    neurons[group_name] = ids
+                else:
+                    neurons[group_name] = [ids]
+            return neurons
+        
+        # Simple list format - original behavior
+        for item in self.query:
+            item_str = str(item)
+            
+            # Check if it's a bodyId (numeric)
+            try:
+                bid = int(item)
+                # It's a bodyId - get its type
+                ntype = self.profiler.get_type_for_bodyid(bid, self.dataset)
+                if ntype:
+                    if ntype not in neurons:
+                        neurons[ntype] = []
+                    neurons[ntype].append(bid)
+                else:
+                    # Unknown type, use bodyId as label
+                    neurons[item_str] = [bid]
+                continue
+            except (ValueError, TypeError):
+                pass
+            
+            # It's a type name or pattern - get all bodyIds for this type
+            body_ids = self.profiler.get_bodyids_for_type(item_str, self.dataset)
+            if body_ids:
+                neurons[item_str] = body_ids
+            else:
+                # Single type with no bodyIds found
+                neurons[item_str] = [item_str]
+        
+        return neurons
+    
+    def _extract_all_profiles(self) -> Tuple[Dict[str, ConnectivityProfile], Dict[Tuple[str, int], ConnectivityProfile]]:
+        """
+        Extract both type-aggregated profiles and individual bodyId profiles.
+        
+        Returns:
+            Tuple of:
+            - type_profiles: Dictionary mapping type_label -> aggregated ConnectivityProfile
+            - bodyid_profiles: Dictionary mapping (type_label, bodyId) -> individual ConnectivityProfile
+        """
+        neurons = self._get_neurons_to_compare()  # {type_label: [bodyIds]}
+        
+        type_profiles = {}
+        bodyid_profiles = {}  # Key: (type_label, bodyId)
+        
+        self._log(f"Extracting profiles for {len(neurons)} types/groups...")
+        
+        for label, neuron_ids in tqdm(neurons.items(), desc="Extracting profiles", disable=not self.verbose):
+            individual_profiles = []
+            
+            for nid in neuron_ids:
+                try:
+                    # Get individual bodyId profile
+                    profile = self.profiler.get_profile(nid, self.dataset)
+                    if profile is not None:
+                        bid = profile.neuron_id if isinstance(profile.neuron_id, int) else nid
+                        bodyid_profiles[(label, bid)] = profile
+                        individual_profiles.append(profile)
+                except Exception as e:
+                    self._log(f"Warning: Could not extract profile for {nid}: {e}")
+            
+            # Create aggregated type profile
+            if len(individual_profiles) == 1:
+                type_profiles[label] = individual_profiles[0]
+            elif len(individual_profiles) > 1:
+                type_profiles[label] = self._aggregate_profiles_from_list(individual_profiles, label)
+        
+        self._log(f"Extracted {len(type_profiles)} type profiles, {len(bodyid_profiles)} bodyId profiles")
+        return type_profiles, bodyid_profiles
+    
+    def _aggregate_profiles_from_list(
+        self,
+        profiles: List[ConnectivityProfile],
+        label: str
+    ) -> Optional[ConnectivityProfile]:
+        """
+        Aggregate a list of profiles using mean pooling.
+        
+        Args:
+            profiles: List of ConnectivityProfile objects
+            label: Label for the aggregated profile
+        
+        Returns:
+            Aggregated ConnectivityProfile or None
+        """
+        if not profiles:
+            return None
+        
+        if len(profiles) == 1:
+            return profiles[0]
+        
+        # Mean pooling of weights
+        upstream_weights: Dict[str, List[float]] = {}
+        downstream_weights: Dict[str, List[float]] = {}
+        
+        for profile in profiles:
+            for partner, weight in profile.upstream_partners.items():
+                if partner not in upstream_weights:
+                    upstream_weights[partner] = []
+                upstream_weights[partner].append(weight)
+            
+            for partner, weight in profile.downstream_partners.items():
+                if partner not in downstream_weights:
+                    downstream_weights[partner] = []
+                downstream_weights[partner].append(weight)
+        
+        # Compute mean weights
+        up_mean = {k: np.mean(v) for k, v in upstream_weights.items()}
+        down_mean = {k: np.mean(v) for k, v in downstream_weights.items()}
+        
+        # Compute ranks from mean weights
+        up_ranks = self._compute_ranks(up_mean)
+        down_ranks = self._compute_ranks(down_mean)
+        
+        # Create aggregated profile
+        return ConnectivityProfile(
+            neuron_id=label,
+            dataset=self.dataset,
+            neuron_type=label,
+            upstream_partners=up_mean,
+            downstream_partners=down_mean,
+            upstream_ranks=up_ranks,
+            downstream_ranks=down_ranks,
+            upstream_top_k=len(up_mean),
+            downstream_top_k=len(down_mean),
+            total_upstream_weight=sum(up_mean.values()),
+            total_downstream_weight=sum(down_mean.values()),
+            num_neurons_aggregated=len(profiles),
+            actual_upstream_count=len(up_mean),
+            actual_downstream_count=len(down_mean),
+            unique_types_upstream=len(up_mean),
+            unique_types_downstream=len(down_mean),
+        )
+    
+    @staticmethod
+    def _compute_ranks(weights: Dict[str, float]) -> Dict[str, int]:
+        """Compute ranks from weights (higher weight = lower rank)."""
+        if not weights:
+            return {}
+        sorted_partners = sorted(weights.items(), key=lambda x: x[1], reverse=True)
+        return {partner: rank + 1 for rank, (partner, _) in enumerate(sorted_partners)}
+    
+    def _compute_similarity_matrices(
+        self,
+        profiles: Dict[str, ConnectivityProfile]
+    ) -> Dict[str, Dict[str, pd.DataFrame]]:
+        """
+        Compute pairwise similarity matrices for all profiles using ALL metrics.
+        
+        Outputs ALL metrics like FindHomologs.py:
+        - jaccard: Set-based overlap (0-1)
+        - cosine: Weight vector similarity (0-1)
+        - rank_corr: Spearman correlation (-1 to 1)
+        - rank_corr_union: Normalized rank correlation (0-1)
+        
+        Args:
+            profiles: Dictionary mapping label -> ConnectivityProfile
+        
+        Returns:
+            Nested dictionary: {direction: {metric: DataFrame}}
+            - direction: 'combined', 'upstream', 'downstream'
+            - metric: 'jaccard', 'cosine', 'rank_corr', 'rank_corr_union'
+        """
+        labels = sorted(profiles.keys())
+        n = len(labels)
+        
+        directions = ['both', 'upstream', 'downstream'] if self.direction == 'both' else [self.direction]
+        metrics = ['jaccard', 'cosine', 'rank_corr', 'rank_corr_union']
+        
+        all_matrices = {}
+        
+        for direction in directions:
+            dir_name = 'combined' if direction == 'both' else direction
+            
+            # Initialize matrices for all metrics
+            metric_matrices = {m: np.zeros((n, n)) for m in metrics}
+            
+            self._log(f"Computing {dir_name} similarity matrices ({n}x{n}, {len(metrics)} metrics)...")
+            
+            for i in range(n):
+                for j in range(n):
+                    if i == j:
+                        # Self-similarity = 1.0 for all metrics
+                        for m in metrics:
+                            metric_matrices[m][i, j] = 1.0
+                    elif i < j:
+                        profile_a = profiles[labels[i]]
+                        profile_b = profiles[labels[j]]
+                        
+                        scores = ProfileComparator.combined_score(
+                            profile_a, profile_b, direction=direction
+                        )
+                        
+                        # Extract all metrics
+                        metric_matrices['jaccard'][i, j] = scores['jaccard']
+                        metric_matrices['jaccard'][j, i] = scores['jaccard']
+                        
+                        metric_matrices['cosine'][i, j] = scores['cosine']
+                        metric_matrices['cosine'][j, i] = scores['cosine']
+                        
+                        rank_val = scores['rank'] if not np.isnan(scores['rank']) else 0.0
+                        metric_matrices['rank_corr'][i, j] = rank_val
+                        metric_matrices['rank_corr'][j, i] = rank_val
+                        
+                        rank_norm = scores['rank_norm'] if not np.isnan(scores.get('rank_norm', np.nan)) else 0.5
+                        metric_matrices['rank_corr_union'][i, j] = rank_norm
+                        metric_matrices['rank_corr_union'][j, i] = rank_norm
+            
+            # Convert to DataFrames
+            all_matrices[dir_name] = {
+                m: pd.DataFrame(metric_matrices[m], index=labels, columns=labels)
+                for m in metrics
+            }
+        
+        return all_matrices
+    
+    def _compute_bodyid_similarity_matrices(
+        self,
+        bodyid_profiles: Dict[Tuple[str, int], ConnectivityProfile]
+    ) -> Dict[str, Dict[str, pd.DataFrame]]:
+        """
+        Compute pairwise similarity matrices for bodyId-level profiles.
+        
+        Labels are formatted as {bodyId}_{type} for clarity.
+        
+        Args:
+            bodyid_profiles: Dictionary mapping (type_label, bodyId) -> ConnectivityProfile
+        
+        Returns:
+            Nested dictionary: {direction: {metric: DataFrame}}
+        """
+        # Create labels as {bodyId}_{type}
+        keys = sorted(bodyid_profiles.keys(), key=lambda x: (x[0], x[1]))  # Sort by type, then bodyId
+        labels = [f"{bid}_{type_label}" for type_label, bid in keys]
+        n = len(labels)
+        
+        directions = ['both', 'upstream', 'downstream'] if self.direction == 'both' else [self.direction]
+        metrics = ['jaccard', 'cosine', 'rank_corr', 'rank_corr_union']
+        
+        all_matrices = {}
+        
+        for direction in directions:
+            dir_name = 'combined' if direction == 'both' else direction
+            
+            metric_matrices = {m: np.zeros((n, n)) for m in metrics}
+            
+            self._log(f"Computing bodyId-level {dir_name} similarity matrices ({n}x{n})...")
+            
+            for i in range(n):
+                for j in range(n):
+                    if i == j:
+                        for m in metrics:
+                            metric_matrices[m][i, j] = 1.0
+                    elif i < j:
+                        profile_a = bodyid_profiles[keys[i]]
+                        profile_b = bodyid_profiles[keys[j]]
+                        
+                        scores = ProfileComparator.combined_score(
+                            profile_a, profile_b, direction=direction
+                        )
+                        
+                        metric_matrices['jaccard'][i, j] = scores['jaccard']
+                        metric_matrices['jaccard'][j, i] = scores['jaccard']
+                        
+                        metric_matrices['cosine'][i, j] = scores['cosine']
+                        metric_matrices['cosine'][j, i] = scores['cosine']
+                        
+                        rank_val = scores['rank'] if not np.isnan(scores['rank']) else 0.0
+                        metric_matrices['rank_corr'][i, j] = rank_val
+                        metric_matrices['rank_corr'][j, i] = rank_val
+                        
+                        rank_norm = scores['rank_norm'] if not np.isnan(scores.get('rank_norm', np.nan)) else 0.5
+                        metric_matrices['rank_corr_union'][i, j] = rank_norm
+                        metric_matrices['rank_corr_union'][j, i] = rank_norm
+            
+            all_matrices[dir_name] = {
+                m: pd.DataFrame(metric_matrices[m], index=labels, columns=labels)
+                for m in metrics
+            }
+        
+        return all_matrices
+    
+    def _compute_type_avg_bodyid_matrices(
+        self,
+        bodyid_profiles: Dict[Tuple[str, int], ConnectivityProfile]
+    ) -> Dict[str, Dict[str, pd.DataFrame]]:
+        """
+        Compute type-level similarity matrices by averaging bodyId-level comparisons.
+        
+        For each pair of types (A, B):
+        - If A == B (intra-type): average similarity across all bodyId pairs within type
+        - If A != B (inter-type): average similarity across all bodyId pairs between types
+        
+        Args:
+            bodyid_profiles: Dictionary mapping (type_label, bodyId) -> ConnectivityProfile
+        
+        Returns:
+            Nested dictionary: {direction: {metric: DataFrame}}
+        """
+        # Group bodyIds by type
+        type_bodyids: Dict[str, List[int]] = {}
+        for (type_label, bid), profile in bodyid_profiles.items():
+            if type_label not in type_bodyids:
+                type_bodyids[type_label] = []
+            type_bodyids[type_label].append(bid)
+        
+        type_labels = sorted(type_bodyids.keys())
+        n = len(type_labels)
+        
+        directions = ['both', 'upstream', 'downstream'] if self.direction == 'both' else [self.direction]
+        metrics = ['jaccard', 'cosine', 'rank_corr', 'rank_corr_union']
+        
+        all_matrices = {}
+        
+        for direction in directions:
+            dir_name = 'combined' if direction == 'both' else direction
+            
+            metric_matrices = {m: np.zeros((n, n)) for m in metrics}
+            
+            self._log(f"Computing type-avg-bodyId {dir_name} similarity matrices ({n}x{n})...")
+            
+            for i, type_a in enumerate(type_labels):
+                for j, type_b in enumerate(type_labels):
+                    if i == j:
+                        # Intra-type: average similarity within type (excluding self-comparisons)
+                        bids = type_bodyids[type_a]
+                        if len(bids) < 2:
+                            # Only one bodyId - no intra-type comparison possible
+                            for m in metrics:
+                                metric_matrices[m][i, j] = 1.0
+                        else:
+                            scores_list = {m: [] for m in metrics}
+                            for idx_a, bid_a in enumerate(bids):
+                                for bid_b in bids[idx_a+1:]:
+                                    key_a = (type_a, bid_a)
+                                    key_b = (type_a, bid_b)
+                                    if key_a in bodyid_profiles and key_b in bodyid_profiles:
+                                        scores = ProfileComparator.combined_score(
+                                            bodyid_profiles[key_a],
+                                            bodyid_profiles[key_b],
+                                            direction=direction
+                                        )
+                                        scores_list['jaccard'].append(scores['jaccard'])
+                                        scores_list['cosine'].append(scores['cosine'])
+                                        scores_list['rank_corr'].append(
+                                            scores['rank'] if not np.isnan(scores['rank']) else 0.0
+                                        )
+                                        scores_list['rank_corr_union'].append(
+                                            scores['rank_norm'] if not np.isnan(scores.get('rank_norm', np.nan)) else 0.5
+                                        )
+                            
+                            for m in metrics:
+                                if scores_list[m]:
+                                    metric_matrices[m][i, j] = np.mean(scores_list[m])
+                                else:
+                                    metric_matrices[m][i, j] = 1.0  # Default for single bodyId
+                    elif i < j:
+                        # Inter-type: average similarity between types
+                        bids_a = type_bodyids[type_a]
+                        bids_b = type_bodyids[type_b]
+                        
+                        scores_list = {m: [] for m in metrics}
+                        for bid_a in bids_a:
+                            for bid_b in bids_b:
+                                key_a = (type_a, bid_a)
+                                key_b = (type_b, bid_b)
+                                if key_a in bodyid_profiles and key_b in bodyid_profiles:
+                                    scores = ProfileComparator.combined_score(
+                                        bodyid_profiles[key_a],
+                                        bodyid_profiles[key_b],
+                                        direction=direction
+                                    )
+                                    scores_list['jaccard'].append(scores['jaccard'])
+                                    scores_list['cosine'].append(scores['cosine'])
+                                    scores_list['rank_corr'].append(
+                                        scores['rank'] if not np.isnan(scores['rank']) else 0.0
+                                    )
+                                    scores_list['rank_corr_union'].append(
+                                        scores['rank_norm'] if not np.isnan(scores.get('rank_norm', np.nan)) else 0.5
+                                    )
+                        
+                        for m in metrics:
+                            if scores_list[m]:
+                                avg_score = np.mean(scores_list[m])
+                                metric_matrices[m][i, j] = avg_score
+                                metric_matrices[m][j, i] = avg_score
+                            else:
+                                metric_matrices[m][i, j] = 0.0
+                                metric_matrices[m][j, i] = 0.0
+            
+            all_matrices[dir_name] = {
+                m: pd.DataFrame(metric_matrices[m], index=type_labels, columns=type_labels)
+                for m in metrics
+            }
+        
+        return all_matrices
+
+    def _save_results(
+        self,
+        type_profiles: Dict[str, ConnectivityProfile],
+        bodyid_profiles: Dict[Tuple[str, int], ConnectivityProfile],
+        type_matrices: Dict[str, Dict[str, pd.DataFrame]],
+        bodyid_matrices: Dict[str, Dict[str, pd.DataFrame]],
+        type_avg_matrices: Dict[str, Dict[str, pd.DataFrame]]
+    ) -> Dict[str, List[str]]:
+        """
+        Save results to output directory with separated type-level and bodyId-level outputs.
+        
+        Output Structure:
+            {output_dir}/connectivity_profiling_{query_name}_{timestamp}/
+            ├── parameters.json
+            ├── README.txt
+            ├── profiles/
+            │   ├── individual/          # Individual bodyId profiles
+            │   └── aggregated/          # Type-aggregated profiles
+            ├── type_level/
+            │   ├── results/             # Type-aggregated similarity matrices
+            │   └── visualization/       # Type-level heatmaps
+            └── bodyid_level/
+                ├── results/             # BodyId similarity matrices + type-avg-bodyId matrices
+                └── visualization/       # BodyId heatmaps + type-avg heatmaps
+        
+        Args:
+            type_profiles: Dictionary mapping type_label -> aggregated ConnectivityProfile
+            bodyid_profiles: Dictionary mapping (type_label, bodyId) -> individual ConnectivityProfile
+            type_matrices: Type-level similarity matrices (aggregated profiles)
+            bodyid_matrices: BodyId-level similarity matrices
+            type_avg_matrices: Type-level matrices from averaged bodyId comparisons
+        
+        Returns:
+            Dictionary with lists of saved file paths
+        """
+        output_path = self._get_output_path()
+        output_path.mkdir(parents=True, exist_ok=True)
+        
+        # Create main directory structure
+        profiles_dir = output_path / 'profiles'
+        individual_dir = profiles_dir / 'individual'
+        aggregated_dir = profiles_dir / 'aggregated'
+        
+        type_level_dir = output_path / 'type_level'
+        type_results_dir = type_level_dir / 'results'
+        type_viz_dir = type_level_dir / 'visualization'
+        
+        bodyid_level_dir = output_path / 'bodyid_level'
+        bodyid_results_dir = bodyid_level_dir / 'results'
+        bodyid_viz_dir = bodyid_level_dir / 'visualization'
+        
+        # Create all directories
+        for d in [individual_dir, aggregated_dir, type_results_dir, type_viz_dir, 
+                  bodyid_results_dir, bodyid_viz_dir]:
+            d.mkdir(parents=True, exist_ok=True)
+        
+        saved_files = {
+            'matrices_saved': [], 
+            'heatmaps_generated': [], 
+            'profiles_saved': [],
+            'output_path': str(output_path)
+        }
+        
+        metrics_list = ['jaccard', 'cosine', 'rank_corr', 'rank_corr_union']
+        directions_available = list(type_matrices.keys())
+        
+        # Save parameters
+        params = {
+            'query': self.query if not self._custom_group_names else 
+                      [{'group': n, 'ids': ids} for n, ids in zip(self._custom_group_names, self.query)],
+            'custom_group_names': self._custom_group_names,
+            'group_map_csv': self.group_map_csv,
+            'query_name': self.query_name,
+            'dataset': self.dataset,
+            'top_k': self.top_k,
+            'top_m': self.top_m,
+            'min_synapse_threshold': self.min_synapse_threshold,
+            'direction': self.direction,
+            'metrics_computed': metrics_list,
+            'directions_computed': directions_available,
+            'n_type_profiles': len(type_profiles),
+            'n_bodyid_profiles': len(bodyid_profiles),
+            'type_labels': sorted(type_profiles.keys()),
+            'timestamp': datetime.now().isoformat(),
+        }
+        
+        with open(output_path / 'parameters.json', 'w') as f:
+            json.dump(params, f, indent=2, default=str)
+        
+        # Save README
+        query_display = self._custom_group_names if self._custom_group_names else self.query
+        readme_lines = [
+            "Connectivity Profile Comparison Results",
+            "=" * 40,
+            f"Query: {query_display}",
+            f"Dataset: {self.dataset}",
+            f"Type Profiles: {len(type_profiles)}",
+            f"BodyId Profiles: {len(bodyid_profiles)}",
+            f"Metrics: {', '.join(metrics_list)}",
+            f"Directions: {', '.join(directions_available)}",
+            "",
+            "Output Structure:",
+            "├── parameters.json",
+            "├── README.txt",
+            "├── profiles/",
+            "│   ├── individual/          # Individual bodyId profiles (connectivity)",
+            "│   └── aggregated/          # Type-aggregated profiles",
+            "├── type_level/",
+            "│   ├── results/             # Type-aggregated similarity matrices",
+            "│   └── visualization/       # Type-level heatmaps",
+            "└── bodyid_level/",
+            "    ├── results/",
+            "    │   ├── bodyid_similarity_{metric}_{direction}.csv",
+            "    │   └── type_avg_bodyid_similarity_{metric}_{direction}.csv",
+            "    └── visualization/",
+            "        ├── heatmap_bodyid_{direction}_{metric}.html",
+            "        └── heatmap_type_avg_{direction}_{metric}.html",
+            "",
+            "Notes:",
+            "- type_level: Compares aggregated (mean-pooled) type profiles",
+            "- bodyid_level/bodyid_*: Direct bodyId-to-bodyId comparisons",
+            "- bodyid_level/type_avg_*: Type similarities averaged from bodyId pairs",
+            "  (diagonal = intra-type avg, off-diagonal = inter-type avg)",
+            "",
+            f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+        ]
+        
+        with open(output_path / 'README.txt', 'w') as f:
+            f.write('\n'.join(readme_lines))
+        
+        # === Save Type-Level Results ===
+        self._log("Saving type-level results...")
+        for direction, metric_matrices in type_matrices.items():
+            for metric, matrix in metric_matrices.items():
+                csv_path = type_results_dir / f'type_similarity_{metric}_{direction}.csv'
+                matrix.to_csv(csv_path)
+                saved_files['matrices_saved'].append(str(csv_path))
+        
+        # === Save BodyId-Level Results ===
+        self._log("Saving bodyId-level results...")
+        for direction, metric_matrices in bodyid_matrices.items():
+            for metric, matrix in metric_matrices.items():
+                csv_path = bodyid_results_dir / f'bodyid_similarity_{metric}_{direction}.csv'
+                matrix.to_csv(csv_path)
+                saved_files['matrices_saved'].append(str(csv_path))
+        
+        # === Save Type-Avg-BodyId Results ===
+        self._log("Saving type-avg-bodyId results...")
+        for direction, metric_matrices in type_avg_matrices.items():
+            for metric, matrix in metric_matrices.items():
+                csv_path = bodyid_results_dir / f'type_avg_bodyid_similarity_{metric}_{direction}.csv'
+                matrix.to_csv(csv_path)
+                saved_files['matrices_saved'].append(str(csv_path))
+        
+        self._log(f"Saved {len(saved_files['matrices_saved'])} similarity matrices")
+        
+        # === Save Individual BodyId Profiles ===
+        self._log("Saving individual connectivity profiles...")
+        for (type_label, bid), profile in bodyid_profiles.items():
+            safe_label = f"{bid}_{type_label}".replace('/', '_').replace(':', '_').replace('.', '_')
+            
+            profile_data = {
+                'bodyId': bid,
+                'type': type_label,
+                'dataset': profile.dataset,
+                'upstream_partners': {str(k): float(v) for k, v in profile.upstream_partners.items()},
+                'downstream_partners': {str(k): float(v) for k, v in profile.downstream_partners.items()},
+                'upstream_ranks': {str(k): int(v) for k, v in (profile.upstream_ranks or {}).items()},
+                'downstream_ranks': {str(k): int(v) for k, v in (profile.downstream_ranks or {}).items()},
+                'total_upstream_weight': float(profile.total_upstream_weight),
+                'total_downstream_weight': float(profile.total_downstream_weight),
+            }
+            
+            profile_path = individual_dir / f'{safe_label}_profile.json'
+            with open(profile_path, 'w') as f:
+                json.dump(profile_data, f, indent=2)
+            saved_files['profiles_saved'].append(str(profile_path))
+        
+        # === Save Aggregated Type Profiles ===
+        for type_label, profile in type_profiles.items():
+            safe_label = str(type_label).replace('/', '_').replace(':', '_').replace('.', '_')
+            
+            profile_data = {
+                'type': type_label,
+                'dataset': profile.dataset,
+                'num_neurons_aggregated': profile.num_neurons_aggregated,
+                'upstream_partners': {str(k): float(v) for k, v in profile.upstream_partners.items()},
+                'downstream_partners': {str(k): float(v) for k, v in profile.downstream_partners.items()},
+                'upstream_ranks': {str(k): int(v) for k, v in (profile.upstream_ranks or {}).items()},
+                'downstream_ranks': {str(k): int(v) for k, v in (profile.downstream_ranks or {}).items()},
+                'total_upstream_weight': float(profile.total_upstream_weight),
+                'total_downstream_weight': float(profile.total_downstream_weight),
+            }
+            
+            profile_path = aggregated_dir / f'{safe_label}_profile.json'
+            with open(profile_path, 'w') as f:
+                json.dump(profile_data, f, indent=2)
+            saved_files['profiles_saved'].append(str(profile_path))
+        
+        self._log(f"Saved {len(saved_files['profiles_saved'])} connectivity profiles")
+        
+        # === Generate Heatmaps ===
+        if self.generate_heatmaps:
+            # Type-level heatmaps
+            self._log("Generating type-level heatmaps...")
+            self._generate_heatmaps_vispath(type_matrices, type_viz_dir, saved_files, prefix='type')
+            
+            # BodyId-level heatmaps  
+            self._log("Generating bodyId-level heatmaps...")
+            self._generate_heatmaps_vispath(bodyid_matrices, bodyid_viz_dir, saved_files, prefix='bodyid')
+            
+            # Type-avg-bodyId heatmaps
+            self._log("Generating type-avg-bodyId heatmaps...")
+            self._generate_heatmaps_vispath(type_avg_matrices, bodyid_viz_dir, saved_files, prefix='type_avg')
+        
+        return saved_files
+    
+    def _generate_heatmaps_vispath(
+        self,
+        matrices: Dict[str, Dict[str, pd.DataFrame]],
+        viz_dir: Path,
+        saved_files: Dict[str, List[str]],
+        prefix: str = ''
+    ):
+        """
+        Generate heatmaps using VisualizePath with native clustering support.
+        
+        Creates one heatmap per (direction × metric) combination for ALL metrics:
+        - jaccard: Set-based overlap
+        - cosine: Weight vector similarity  
+        - rank_corr: Spearman correlation
+        - rank_corr_union: Normalized rank correlation
+        
+        Args:
+            matrices: Nested dict {direction: {metric: DataFrame}}
+            viz_dir: Directory to save heatmaps
+            saved_files: Dict to append saved file paths to
+            prefix: Prefix for filenames (e.g., 'type', 'bodyid', 'type_avg')
+        """
+        try:
+            # Import VisualizePath's heatmap function
+            import sys
+            vispath_path = Path(__file__).parent.parent.parent / 'vispath-subproject' / 'src'
+            if str(vispath_path) not in sys.path:
+                sys.path.insert(0, str(vispath_path))
+            
+            from vispath_pkg.vispath import VisConnMatInteractive
+            
+            # Metric display names for titles
+            metric_names = {
+                'jaccard': 'Jaccard Similarity',
+                'cosine': 'Cosine Similarity',
+                'rank_corr': 'Rank Correlation',
+                'rank_corr_union': 'Rank Correlation (Normalized)',
+            }
+            
+            prefix_display = {
+                'type': 'Type-Level',
+                'bodyid': 'BodyId-Level',
+                'type_avg': 'Type-Avg-BodyId',
+            }.get(prefix, prefix.title() if prefix else '')
+            
+            # Generate heatmap for each direction × metric combination
+            for direction, metric_matrices in matrices.items():
+                for metric_key, matrix in metric_matrices.items():
+                    if matrix is None:
+                        continue
+                    
+                    # File naming: heatmap_{prefix}_{direction}_{metric}.html
+                    filename = f'heatmap_{prefix}_{direction}_{metric_key}.html' if prefix else f'heatmap_{direction}_{metric_key}.html'
+                    html_path = viz_dir / filename
+                    
+                    metric_display = metric_names.get(metric_key, metric_key)
+                    title = f"{prefix_display} {metric_display} - {direction.title()}" if prefix_display else f"{metric_display} - {direction.title()}"
+                    
+                    VisConnMatInteractive(
+                        cmat=matrix,
+                        filename=str(html_path),
+                        title=title,
+                        matrices_dict=None,
+                        showfig=self.show_figures,
+                        verbose=self.verbose,
+                        init_clustered=True,
+                    )
+                    
+                    saved_files['heatmaps_generated'].append(str(html_path))
+                
+        except ImportError as e:
+            self._log(f"Warning: Could not import VisualizePath for heatmaps: {e}")
+            self._generate_heatmaps_fallback(matrices, viz_dir, saved_files, prefix)
+        except Exception as e:
+            self._log(f"Warning: VisualizePath heatmap generation failed: {e}")
+            self._generate_heatmaps_fallback(matrices, viz_dir, saved_files, prefix)
+    
+    def _generate_heatmaps_fallback(
+        self,
+        matrices: Dict[str, Dict[str, pd.DataFrame]],
+        viz_dir: Path,
+        saved_files: Dict[str, List[str]],
+        prefix: str = ''
+    ):
+        """Fallback heatmap generation using interactive_heatmap module."""
+        try:
+            from .interactive_heatmap import generate_interactive_heatmap
+            
+            for direction, metric_matrices in matrices.items():
+                filename = f'heatmap_{prefix}_{direction}.html' if prefix else f'heatmap_{direction}.html'
+                html_path = viz_dir / filename
+                title = f"Connectivity Profile Similarity - {prefix.replace('_', ' ').title()} {direction.title()}" if prefix else f"Connectivity Profile Similarity - {direction.title()}"
+                
+                generate_interactive_heatmap(
+                    matrices_dict=metric_matrices,
+                    filename=str(html_path),
+                    title=title,
+                    showfig=self.show_figures,
+                    verbose=self.verbose
+                )
+                saved_files['heatmaps_generated'].append(str(html_path))
+                self._log(f"Generated heatmap (fallback): {html_path}")
+        except Exception as e:
+            self._log(f"Error generating heatmaps: {e}")
+    
+    def run(self) -> Dict[str, Any]:
+        """
+        Run the connectivity profile comparison analysis.
+        
+        Performs both type-level and bodyId-level comparisons:
+        
+        Output Structure:
+            1. Type-Level: Compares aggregated (mean-pooled) type profiles
+            2. BodyId-Level:
+               - Direct bodyId-to-bodyId similarity (labels: {bodyId}_{type})
+               - Type-avg-bodyId: Type similarities averaged from bodyId pairs
+                 (diagonal = intra-type avg, off-diagonal = inter-type avg)
+        
+        Returns:
+            Dictionary with results summary including:
+            - n_type_profiles: Number of type profiles
+            - n_bodyid_profiles: Number of bodyId profiles  
+            - output_path: Path to output directory
+            - matrices_saved: List of saved matrix file paths
+            - heatmaps_generated: List of generated heatmap paths
+            - type_matrices: Type-level similarity matrices
+            - bodyid_matrices: BodyId-level similarity matrices
+            - type_avg_matrices: Type-averaged-from-bodyId matrices
+        """
+        self._log(f"Starting connectivity profile comparison for {self.dataset}")
+        self._log(f"Query: {self.query}")
+        
+        # Step 0: Ensure connection cache is complete BEFORE profile extraction
+        if self.use_cache:
+            self._ensure_connection_cache_complete()
+        
+        # Step 1: Extract both type-aggregated and individual bodyId profiles
+        self._log("Extracting type-aggregated and bodyId-level profiles...")
+        type_profiles, bodyid_profiles = self._extract_all_profiles()
+        
+        if len(type_profiles) < 2:
+            self._log("Error: Need at least 2 type profiles to compare")
+            return {'n_type_profiles': len(type_profiles), 'error': 'Insufficient profiles'}
+        
+        # Step 2: Compute type-level similarity matrices (aggregated profiles)
+        self._log("Computing type-level similarity matrices (aggregated profiles)...")
+        type_matrices = self._compute_similarity_matrices(type_profiles)
+        
+        # Step 3: Compute bodyId-level similarity matrices
+        self._log("Computing bodyId-level similarity matrices...")
+        bodyid_matrices = self._compute_bodyid_similarity_matrices(bodyid_profiles)
+        
+        # Step 4: Compute type-avg-bodyId matrices (average bodyId similarities per type pair)
+        self._log("Computing type-avg-bodyId similarity matrices...")
+        type_avg_matrices = self._compute_type_avg_bodyid_matrices(bodyid_profiles)
+        
+        # Step 5: Save all results
+        saved_files = self._save_results(
+            type_profiles, bodyid_profiles,
+            type_matrices, bodyid_matrices, type_avg_matrices
+        )
+        
+        # Print summary
+        output_path = saved_files.get('output_path', '')
+        self._log("")
+        self._log("=" * 60)
+        self._log("CONNECTIVITY PROFILING COMPLETE")
+        self._log("=" * 60)
+        self._log(f"Output: {output_path}")
+        self._log(f"Type profiles compared: {len(type_profiles)}")
+        self._log(f"BodyId profiles compared: {len(bodyid_profiles)}")
+        self._log(f"Types: {sorted(type_profiles.keys())}")
+        self._log("")
+        self._log("Output includes:")
+        self._log("  - type_level/: Type-aggregated similarity matrices & heatmaps")
+        self._log("  - bodyid_level/: BodyId similarity + type-avg-bodyId matrices & heatmaps")
+        self._log("  - profiles/individual/: Individual bodyId connectivity profiles")
+        self._log("  - profiles/aggregated/: Type-aggregated connectivity profiles")
+        
+        return {
+            'n_type_profiles': len(type_profiles),
+            'n_bodyid_profiles': len(bodyid_profiles),
+            'output_path': output_path,
+            'type_labels': sorted(type_profiles.keys()),
+            'matrices_saved': saved_files['matrices_saved'],
+            'heatmaps_generated': saved_files.get('heatmaps_generated', []),
+            'type_matrices': type_matrices,
+            'bodyid_matrices': bodyid_matrices,
+            'type_avg_matrices': type_avg_matrices,
+        }
+    
+    def compare_intra_inter_type(self) -> Dict[str, pd.DataFrame]:
+        """
+        Perform intra-type and inter-type comparisons for the query neuron types.
+        
+        This is only meaningful when query contains neuron type names.
+        - Intra-type: Similarity between bodyIds within the same type
+        - Inter-type: Similarity between bodyIds of different types
+        
+        Returns:
+            Dictionary with 'intra_type' and 'inter_type' DataFrames
+        """
+        # Filter query to only include neuron types (not body IDs)
+        neuron_types = [q for q in self.query if not str(q).isdigit()]
+        
+        if not neuron_types:
+            self._log("No neuron types in query - cannot perform intra/inter-type comparison")
+            return {'intra_type': pd.DataFrame(), 'inter_type': pd.DataFrame()}
+        
+        # Ensure connection cache is complete before profile extraction
+        if self.use_cache:
+            self._ensure_connection_cache_complete()
+        
+        self._log(f"Computing intra-type and inter-type comparisons for: {neuron_types}")
+        
+        intra_results = []
+        inter_results = []
+        
+        # Get bodyIds for each type
+        type_bodyids = {}
+        for ntype in neuron_types:
+            body_ids = self.profiler.get_bodyids_for_type(ntype, self.dataset)
+            if body_ids:
+                type_bodyids[ntype] = body_ids
+        
+        # Extract all profiles
+        all_profiles = {}
+        for ntype, body_ids in type_bodyids.items():
+            for bid in body_ids:
+                try:
+                    profile = self.profiler.get_profile(bid, self.dataset)
+                    if profile is not None:
+                        all_profiles[(ntype, bid)] = profile
+                except Exception:
+                    continue
+        
+        self._log(f"Extracted {len(all_profiles)} bodyId profiles")
+        
+        # Intra-type comparisons
+        for ntype, body_ids in type_bodyids.items():
+            for i, bid_a in enumerate(body_ids):
+                for bid_b in body_ids[i+1:]:
+                    key_a = (ntype, bid_a)
+                    key_b = (ntype, bid_b)
+                    
+                    if key_a in all_profiles and key_b in all_profiles:
+                        scores = ProfileComparator.combined_score(
+                            all_profiles[key_a],
+                            all_profiles[key_b],
+                            direction=self.direction if self.direction != 'both' else 'both'
+                        )
+                        intra_results.append({
+                            'type': ntype,
+                            'bodyId_a': bid_a,
+                            'bodyId_b': bid_b,
+                            'jaccard': scores['jaccard'],
+                            'cosine': scores['cosine'],
+                            'rank_correlation': scores['rank'],
+                            'combined': scores['combined'],
+                        })
+        
+        # Inter-type comparisons (sample to avoid explosion)
+        type_list = list(type_bodyids.keys())
+        for i, type_a in enumerate(type_list):
+            for type_b in type_list[i+1:]:
+                # Sample up to 5 bodyIds per type for inter-type comparison
+                sample_a = type_bodyids[type_a][:5]
+                sample_b = type_bodyids[type_b][:5]
+                
+                for bid_a in sample_a:
+                    for bid_b in sample_b:
+                        key_a = (type_a, bid_a)
+                        key_b = (type_b, bid_b)
+                        
+                        if key_a in all_profiles and key_b in all_profiles:
+                            scores = ProfileComparator.combined_score(
+                                all_profiles[key_a],
+                                all_profiles[key_b],
+                                direction=self.direction if self.direction != 'both' else 'both'
+                            )
+                            inter_results.append({
+                                'type_a': type_a,
+                                'type_b': type_b,
+                                'bodyId_a': bid_a,
+                                'bodyId_b': bid_b,
+                                'jaccard': scores['jaccard'],
+                                'cosine': scores['cosine'],
+                                'rank_correlation': scores['rank'],
+                                'combined': scores['combined'],
+                            })
+        
+        intra_df = pd.DataFrame(intra_results)
+        inter_df = pd.DataFrame(inter_results)
+        
+        # Save results
+        results_dir = self._get_output_path() / 'results'
+        results_dir.mkdir(parents=True, exist_ok=True)
+        
+        if not intra_df.empty:
+            intra_df.to_csv(results_dir / 'intra_type_comparisons.csv', index=False)
+        if not inter_df.empty:
+            inter_df.to_csv(results_dir / 'inter_type_comparisons.csv', index=False)
+        
+        self._log(f"Saved intra/inter type comparisons to {results_dir}")
+        
+        return {
+            'intra_type': intra_df,
+            'inter_type': inter_df,
+        }

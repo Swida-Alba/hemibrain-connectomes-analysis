@@ -8283,7 +8283,7 @@ def visualize_network(
     return vp.visualize_network()
 
 
-def VisConnMatInteractive(cmat, filename, title='', color_scale=[[0, 'rgb(255,255,255)'], [1, 'rgb(104,55,164)']], showfig=True, fontsize=12, conn_df=None, matrices_dict=None, verbose=True, zmin=None, zmax=None, init_width=None, init_height=None):
+def VisConnMatInteractive(cmat, filename, title='', color_scale=[[0, 'rgb(255,255,255)'], [1, 'rgb(104,55,164)']], showfig=True, fontsize=12, conn_df=None, matrices_dict=None, verbose=True, zmin=None, zmax=None, init_width=None, init_height=None, init_clustered=True):
     '''Create interactive heatmap with comprehensive controls similar to network visualization
     
     Features:
@@ -8325,6 +8325,10 @@ def VisConnMatInteractive(cmat, filename, title='', color_scale=[[0, 'rgb(255,25
         Initial width of the heatmap in pixels. If None, auto-calculated based on matrix size.
     init_height : int, optional
         Initial height of the heatmap in pixels. If None, auto-calculated based on matrix size.
+    init_clustered : bool, optional
+        Whether to show clustered ordering by default. Default True.
+        Set to True for similarity matrices (connectivity profiling).
+        Set to False to show original ordering by default.
     '''
     
     # Helper function for verbose printing
@@ -8841,13 +8845,13 @@ def VisConnMatInteractive(cmat, filename, title='', color_scale=[[0, 'rgb(255,25
                     <div style="margin-bottom: 8px;">
                         <label style="font-size: 10px; display: block; margin-bottom: 2px;">Ordering:</label>
                         <div class="button-group">
-                            <button id="btn-original" class="active" onclick="toggleClustering('original')">Original</button>
-                            <button id="btn-clustered" onclick="toggleClustering('clustered')">Clustered</button>
+                            <button id="btn-original" class="{'' if init_clustered and clustering_successful else 'active'}" onclick="toggleClustering('original')">Original</button>
+                            <button id="btn-clustered" class="{'active' if init_clustered and clustering_successful else ''}" onclick="toggleClustering('clustered')">Clustered</button>
                         </div>
                     </div>
                     
                     <!-- Clustering Method Selection -->
-                    <div id="clusteringMethodSection" style="margin-bottom: 8px; display: none;">
+                    <div id="clusteringMethodSection" style="margin-bottom: 8px; display: {'block' if init_clustered and clustering_successful else 'none'};">
                         <label style="font-size: 10px; display: block; margin-bottom: 2px;">Clustering Method:</label>
                         <select id="clusteringMethodSelect" onchange="updateClusteringMethod()" style="width: 100%; font-size: 10px; padding: 4px;">
                             <option value="ward">Ward (Compact Clusters)</option>
@@ -9120,6 +9124,7 @@ def VisConnMatInteractive(cmat, filename, title='', color_scale=[[0, 'rgb(255,25
         const useLazyTransforms = {json.dumps(use_lazy_transforms)};
         
         // Track current row/column order (for interactive reordering)
+        // If init_clustered is true and clustering succeeded, start with clustered order
         let currentXLabels = xLabels.slice();
         let currentYLabels = yLabels.slice();
         
@@ -9162,7 +9167,7 @@ def VisConnMatInteractive(cmat, filename, title='', color_scale=[[0, 'rgb(255,25
         let ignoredValues = new Set();  // Set of values to ignore when displaying cell values
         let contrastThreshold = 0.5;  // Luminance threshold for contrast color (0-1, default: 0.5)
         let reverseContrast = false;  // Whether to reverse black/white contrast colors
-        let useClusteredOrder = false;  // Track current ordering mode
+        let useClusteredOrder = {json.dumps(init_clustered and clustering_successful)};  // Track current ordering mode (use init_clustered parameter)
         let currentClusteringMethod = 'ward';  // Current clustering method (ward, average, complete, single)
         let isTransposed = false;  // Track if matrix is transposed
         const metricType = '{metric_type}';
@@ -11345,6 +11350,8 @@ def VisConnMatInteractive(cmat, filename, title='', color_scale=[[0, 'rgb(255,25
             if (saved) {{
                 loadSettings(false);  // Silent load on initialization
             }} else {{
+                // createHeatmap() will apply clustering automatically if useClusteredOrder=true
+                // No need to pre-set currentYLabels/currentXLabels here
                 createHeatmap();
             }}
         }});
@@ -11360,5 +11367,3 @@ def VisConnMatInteractive(cmat, filename, title='', color_scale=[[0, 'rgb(255,25
     if showfig:
         import webbrowser
         webbrowser.open('file://' + os.path.abspath(filename))
-
-

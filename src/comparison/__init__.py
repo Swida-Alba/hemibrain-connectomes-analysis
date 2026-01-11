@@ -73,6 +73,7 @@ from .profile_comparator import (
     ComparisonResult,
     DEFAULT_SCORE_WEIGHTS,
     HomologFinder,
+    ConnectivityProfileComparer,
 )
 from .cross_dataset_verifier import (
     CrossDatasetVerifier,
@@ -110,6 +111,7 @@ __all__ = [
     'ComparisonResult',
     'DEFAULT_SCORE_WEIGHTS',
     'HomologFinder',
+    'ConnectivityProfileComparer',
     'CrossDatasetVerifier',
     'VerificationResult',
     'ProfileVisualizer',
