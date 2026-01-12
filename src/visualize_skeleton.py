@@ -116,6 +116,18 @@ from neuprint import Client, fetch_synapse_connections, SynapseCriteria, fetch_m
 import plotly.graph_objects as go
 import bokeh.palettes
 
+# Import color utilities
+from utils.color_utils import (
+    standardize_color,
+    standardize_color_list,
+    is_dark_color,
+    darken_color,
+    interpolate_colors,
+    color_to_rgba_string,
+    color_to_hex,
+    extract_rgba_tuple,
+)
+
 # Timeout exception for PNG export
 class PNGExportTimeout(Exception):
     """Raised when PNG export times out."""
@@ -1853,25 +1865,77 @@ class VisualizeSkeleton:
     - Video frames
     '''
 
-    neuron_colors: tuple = bokeh.palettes.Category10[10]
+    neuron_colors: tuple | list | str = bokeh.palettes.Category10[10]
     '''
-    colors of neuron layers to plot \n
-    list of colors, each item for each layer, i.e., item i for layer i, and item i can be a list of colors for each neuron in layer i, or a single color for all neurons in layer i \n
-    if you want to assign different colors to different neurons in the same layer, the color list should be the same length as the number of neurons in the layer. \n
-    color format: 'red', '#ff0000', (255,0,0), or a dict mapping bodyId to color, {bodyId: color}. \n
-    See https://navis.readthedocs.io/en/latest/source/tutorials/generated/navis.plot3d.html#navis.plot3d for more details.
+    Colors for neuron layers. Supports multiple input formats that are automatically
+    standardized to rgba format internally.
+    
+    Supported Formats
+    -----------------
+    - **Named colors**: 'red', 'blue', 'lightgray', 'darkslategray', etc.
+    - **Hex colors**: '#ff0000', '#f00', '#FF0000FF' (with alpha)
+    - **RGB tuples**: (255, 0, 0) or (1.0, 0.0, 0.0) (normalized 0-1)
+    - **RGBA tuples**: (255, 0, 0, 0.5) or (1.0, 0.0, 0.0, 0.5)
+    - **CSS rgb/rgba strings**: 'rgb(255, 0, 0)', 'rgba(255, 0, 0, 0.5)'
+    - **Bokeh palettes**: bokeh.palettes.Category10[10], Category20[20], etc.
+    - **Matplotlib colormap names**: 'viridis', 'plasma', etc. (requires matplotlib)
+    
+    Usage
+    -----
+    - List/tuple of colors: Each color corresponds to a neuron layer
+    - Single color: Applied to all layers
+    - If fewer colors than layers, colors are expanded via `expand_colors` method
+    
+    Examples
+    --------
+    >>> neuron_colors = ['red', 'blue', 'green']  # Named colors
+    >>> neuron_colors = ['#ff0000', '#00ff00', '#0000ff']  # Hex colors
+    >>> neuron_colors = [(255, 0, 0), (0, 255, 0)]  # RGB tuples
+    >>> neuron_colors = [(255, 0, 0, 0.5), (0, 255, 0, 0.8)]  # RGBA tuples
+    >>> neuron_colors = bokeh.palettes.Category20[20]  # Bokeh palette
+    >>> neuron_colors = 'rgba(255, 0, 0, 0.5)'  # Single RGBA color for all
     '''
 
-    neuron_alpha: float = 0.3
-    '''alpha of neuron, only works when the radius of neuron exists (show_skeleton_radius=True)'''
+    neuron_alpha: float = 0.2
+    '''Alpha (transparency) for neurons. 0.0 = transparent, 1.0 = opaque.
+    
+    This is a single value applied uniformly to all neuron layers.
+    
+    **Override Behavior**: If `neuron_colors` contains colors with explicit
+    alpha channels (e.g., 'rgba(255,0,0,0.5)', '#ff000080', or (255,0,0,0.5)),
+    those alpha values will be used instead and this setting is ignored.
+    A warning will be shown when this happens.
+    
+    **Per-Layer Alpha**: Since `neuron_alpha` only supports a single value,
+    use `neuron_colors` with embedded alpha to set different transparencies
+    per layer:
+        neuron_colors = ['rgba(255,0,0,0.3)', 'rgba(0,255,0,0.7)', 'rgba(0,0,255,0.5)']
+    
+    Note: Only applies when skeleton_mode='tube'. For skeleton_mode='line',
+    alpha is always taken from the color values.
+    '''
 
-    synapse_colors: tuple = bokeh.palettes.Category10[10]
-    '''colors of synapse layers to plot'''
+    synapse_colors: tuple | list | str = bokeh.palettes.Category10[10]
+    '''
+    Colors for synapse connections between layers. Same format options as neuron_colors.
+    
+    Supported Formats
+    -----------------
+    - **Named colors**: 'red', 'blue', 'lightgray', etc.
+    - **Hex colors**: '#ff0000', '#f00', '#FF0000FF' (with alpha)
+    - **RGB tuples**: (255, 0, 0) or (1.0, 0.0, 0.0) (normalized 0-1)
+    - **RGBA tuples**: (255, 0, 0, 0.5) or (1.0, 0.0, 0.0, 0.5)
+    - **CSS rgb/rgba strings**: 'rgb(255, 0, 0)', 'rgba(255, 0, 0, 0.5)'
+    - **Bokeh palettes**: bokeh.palettes.Category10[10], etc.
+    
+    Note: Number of synapse colors needed = number of neuron layers - 1
+    (for connections between adjacent layers)
+    '''
 
     synapse_size: int | str = 1
     '''
     size of synapse\n
-    when synapse_mode='scatter': size in pixels (1-10 recommended)\n
+    when synapse_mode='scatter': size in pixels (1–3 recommended)\n
     when synapse_mode='sphere'/'cone'/'tetrahedron': multiplier of the real distance between pre- and post-synaptic sites.\n
     e.g., 1 or 'real' = exact distance size. 2 = 2x distance size.\n
     '''
@@ -1889,7 +1953,21 @@ class VisualizeSkeleton:
     '''
     
     synapse_alpha: float = 0.6
-    '''alpha of synapse, only works when synapse_mode='sphere' '''
+    '''Alpha (transparency) for synapses. 0.0 = transparent, 1.0 = opaque.
+    
+    This is a single value applied uniformly to all synapse layers.
+    Only works when synapse_mode='sphere'.
+    
+    **Override Behavior**: If `synapse_colors` contains colors with explicit
+    alpha channels (e.g., 'rgba(255,0,0,0.5)', '#ff000080', or (255,0,0,0.5)),
+    those alpha values will be used instead and this setting is ignored.
+    A warning will be shown when this happens.
+    
+    **Per-Layer Alpha**: Since `synapse_alpha` only supports a single value,
+    use `synapse_colors` with embedded alpha to set different transparencies
+    per synapse layer:
+        synapse_colors = ['rgba(255,0,0,0.3)', 'rgba(0,255,0,0.7)']
+    '''
 
     mesh_roi: list = field(default_factory=list)
     '''
@@ -1915,11 +1993,28 @@ class VisualizeSkeleton:
     Use brain_mesh parameter to show whole brain/hemibrain envelope.\n
     '''
 
-    mesh_color: tuple | list = (100, 100, 100, 0.1)
+    mesh_color: tuple | list | str = (100, 100, 100, 0.1)
     '''
-    color of brain meshes, single color or list of colors matching the length of mesh_roi
-    single color: tuple including an alpha channel: (R, G, B, alpha)
-    multiple colors: list of tuples, each tuple including an alpha channel: [(R1, G1, B1, alpha1), (R2, G2, B2, alpha2), ...]
+    Colors for brain ROI meshes. Supports multiple input formats.
+    
+    Supported Formats
+    -----------------
+    - **Single RGBA tuple**: (R, G, B, alpha) where R,G,B are 0-255, alpha is 0-1
+      Applied to all ROI meshes. Example: (100, 100, 100, 0.1)
+    - **List of colors**: Each color for corresponding ROI in mesh_roi
+      Example: [(255, 0, 0, 0.2), (0, 255, 0, 0.2)]
+    - **Named colors with alpha**: Can use set_alpha() on named colors
+    - **CSS rgba strings**: 'rgba(100, 100, 100, 0.1)'
+    - **Hex with alpha**: '#64646419' (hex alpha at end)
+    
+    Note: Alpha channel is important for mesh transparency.
+    Recommended alpha: 0.05-0.2 for subtle background meshes
+    
+    Examples
+    --------
+    >>> mesh_color = (100, 100, 100, 0.1)  # Gray with 10% opacity (default)
+    >>> mesh_color = 'rgba(100, 0, 100, 0.05)'  # Purple with 5% opacity
+    >>> mesh_color = [(255, 0, 0, 0.2), (0, 0, 255, 0.2)]  # Red and blue for 2 ROIs
     '''
 
     legend_mode: str = 'layer'
@@ -2127,22 +2222,31 @@ class VisualizeSkeleton:
     See https://github.com/navis-org/navis-flybrains
     '''
     
-    brain_mesh_color: str = 'auto'
-    ''' 
-    Color of the brain/VNC mesh, works with brain_mesh = 'template' or 'whole'
+    brain_mesh_color: str | tuple | list = 'auto'
+    '''
+    Color of the brain/VNC mesh. Supports multiple input formats.
     
-    Options:
-    - 'auto' (default): Automatically selects optimal color based on background_color:
+    Supported Formats
+    -----------------
+    - **'auto'** (default): Automatically selects optimal color based on background_color:
         • White background: 'rgba(200, 230, 240, 0.1)' (light blue, 10% opacity)
         • Black background: 'rgba(60, 60, 70, 0.1)' (dark gray, 10% opacity)
-    - Custom RGBA string: 'rgba(r, g, b, a)' where a=transparency (0=transparent, 1=opaque)
+    - **Named colors**: 'lightblue', 'gray', etc. (alpha can be set separately)
+    - **Hex colors**: '#c8e6f0' (use with alpha in tuple form for transparency)
+    - **RGB/RGBA tuples**: (200, 230, 240, 0.1) - R,G,B 0-255, alpha 0-1
+    - **CSS rgba strings**: 'rgba(200, 230, 240, 0.1)'
     
-    For dark backgrounds, recommended settings to minimize mesh fragment highlights:
-    - Use low alpha (0.05-0.15) for subtle appearance
-    - Use dark gray/blue tones: 'rgba(40, 40, 50, 0.1)'
-    - Avoid bright colors that create visual noise
+    Recommendations
+    ---------------
+    - White background: Light blue/gray with 5-15% opacity
+    - Black background: Dark gray with 5-15% opacity to avoid mesh fragment highlights
     
-    Example: 'rgba(60, 60, 70, 0.1)' for subtle dark mesh on black background
+    Examples
+    --------
+    >>> brain_mesh_color = 'auto'  # Adaptive (default)
+    >>> brain_mesh_color = 'rgba(200, 230, 240, 0.1)'  # Light blue, 10% opacity
+    >>> brain_mesh_color = (60, 60, 70, 0.1)  # Dark gray tuple
+    >>> brain_mesh_color = 'rgba(40, 40, 50, 0.05)'  # Very subtle for dark backgrounds
     '''
     
     vnc_mesh: bool = False
@@ -2158,17 +2262,21 @@ class VisualizeSkeleton:
     Default: False\n
     '''
     
-    vnc_mesh_color: str = 'auto'
+    vnc_mesh_color: str | tuple | list = 'auto'
     '''
-    Color of the VNC mesh, works with vnc_mesh = True
+    Color of the VNC mesh. Supports multiple input formats (same as brain_mesh_color).
     
-    Options:
-    - 'auto' (default): Automatically selects optimal color based on background_color:
+    Supported Formats
+    -----------------
+    - **'auto'** (default): Automatically selects optimal color based on background_color:
         • White background: 'rgba(200, 230, 240, 0.1)' (light green, 10% opacity)
         • Black background: 'rgba(60, 60, 70, 0.1)' (dark green-gray, 10% opacity)
-    - Custom RGBA string: 'rgba(r, g, b, a)' where a=transparency
+    - **Named colors**: 'lightgreen', 'gray', etc.
+    - **Hex colors**: '#c8f0e6'
+    - **RGB/RGBA tuples**: (200, 240, 230, 0.1)
+    - **CSS rgba strings**: 'rgba(200, 240, 230, 0.1)'
     
-    Default: Distinguishes from brain mesh with slightly different hue
+    Note: Default 'auto' uses slightly different hue from brain_mesh_color to distinguish.
     '''
 
     def _get_effective_mesh_color(self, mesh_type='brain'):
@@ -3740,16 +3848,25 @@ class VisualizeSkeleton:
         if self.verbose not in (True, False, 'full', 'simple'):
             errors.append(f"verbose must be True, False, 'full', or 'simple', got {repr(self.verbose)}")
             
-        # === Color validations (tuple/list check) ===
-        if not isinstance(self.neuron_colors, (tuple, list)):
-            errors.append(f"neuron_colors must be a tuple or list, got {type(self.neuron_colors).__name__}")
-        elif len(self.neuron_colors) == 0:
-            errors.append("neuron_colors cannot be empty")
+        # === Color validations (now more flexible - accepts multiple formats) ===
+        # neuron_colors: can be tuple, list, or single color string
+        if isinstance(self.neuron_colors, str):
+            # Single color string - will be wrapped in a list later
+            pass  # Valid
+        elif isinstance(self.neuron_colors, (tuple, list)):
+            if len(self.neuron_colors) == 0:
+                errors.append("neuron_colors cannot be empty")
+        else:
+            errors.append(f"neuron_colors must be a tuple, list, or color string, got {type(self.neuron_colors).__name__}")
             
-        if not isinstance(self.synapse_colors, (tuple, list)):
-            errors.append(f"synapse_colors must be a tuple or list, got {type(self.synapse_colors).__name__}")
-        elif len(self.synapse_colors) == 0:
-            errors.append("synapse_colors cannot be empty")
+        # synapse_colors: same flexibility
+        if isinstance(self.synapse_colors, str):
+            pass  # Valid - single color string
+        elif isinstance(self.synapse_colors, (tuple, list)):
+            if len(self.synapse_colors) == 0:
+                errors.append("synapse_colors cannot be empty")
+        else:
+            errors.append(f"synapse_colors must be a tuple, list, or color string, got {type(self.synapse_colors).__name__}")
             
         # === mesh_roi validation ===
         if self.mesh_roi is not None and not isinstance(self.mesh_roi, list):
@@ -3799,25 +3916,38 @@ class VisualizeSkeleton:
         if not isinstance(self.transforms_dir, str):
             errors.append(f"transforms_dir must be a string, got {type(self.transforms_dir).__name__}")
             
-        # === Color string validations ===
-        if not isinstance(self.brain_mesh_color, str):
-            errors.append(f"brain_mesh_color must be a string, got {type(self.brain_mesh_color).__name__}")
+        # === Color validations for brain_mesh_color and vnc_mesh_color (flexible formats) ===
+        # These now accept: 'auto', named colors, hex, rgba strings, tuples
+        def _validate_mesh_color(color, name):
+            """Helper to validate flexible color format."""
+            if isinstance(color, str):
+                return  # Strings are validated later when standardizing
+            elif isinstance(color, (tuple, list)):
+                if len(color) >= 3:
+                    return  # Valid tuple format
+                errors.append(f"{name} tuple must have at least 3 values (RGB), got {len(color)}")
+            else:
+                errors.append(f"{name} must be a string, tuple, or list, got {type(color).__name__}")
+        
+        _validate_mesh_color(self.brain_mesh_color, 'brain_mesh_color')
+        _validate_mesh_color(self.vnc_mesh_color, 'vnc_mesh_color')
             
-        if not isinstance(self.vnc_mesh_color, str):
-            errors.append(f"vnc_mesh_color must be a string, got {type(self.vnc_mesh_color).__name__}")
-            
-        # === mesh_color validation (tuple/list with alpha) ===
-        if not isinstance(self.mesh_color, (tuple, list)):
-            errors.append(f"mesh_color must be a tuple or list, got {type(self.mesh_color).__name__}")
+        # === mesh_color validation (flexible formats now) ===
+        if isinstance(self.mesh_color, str):
+            pass  # Will be standardized later
         elif isinstance(self.mesh_color, (tuple, list)):
             # Check if it's a single color or list of colors
-            if len(self.mesh_color) == 4 and all(isinstance(x, (int, float)) for x in self.mesh_color):
-                # Single color (R, G, B, alpha)
-                r, g, b, a = self.mesh_color
-                if not (0 <= r <= 255 and 0 <= g <= 255 and 0 <= b <= 255):
-                    errors.append(f"mesh_color RGB values must be 0-255, got {self.mesh_color[:3]}")
-                if not 0 <= a <= 1:
-                    errors.append(f"mesh_color alpha must be 0-1, got {a}")
+            if len(self.mesh_color) >= 3:
+                # Could be (R, G, B, alpha) or [(color1), (color2), ...]
+                if all(isinstance(x, (int, float)) for x in self.mesh_color):
+                    # Single color tuple
+                    if len(self.mesh_color) >= 4:
+                        r, g, b, a = self.mesh_color[0], self.mesh_color[1], self.mesh_color[2], self.mesh_color[3]
+                        if not 0 <= a <= 1:
+                            errors.append(f"mesh_color alpha must be 0-1, got {a}")
+                # else: list of colors, validated later when standardizing
+        else:
+            errors.append(f"mesh_color must be a tuple, list, or string, got {type(self.mesh_color).__name__}")
         
         # === Raise all errors together ===
         if errors:
@@ -4060,6 +4190,43 @@ class VisualizeSkeleton:
             self.mesh_roi = self._expand_roi_names(self.mesh_roi)
             if self.mesh_roi != original_rois:
                 self._vprint(f"   🔄 ROI expansion: {original_rois} → {self.mesh_roi}", level='simple')
+        
+        # === Standardize color inputs ===
+        # Standardize neuron_colors to a list of rgba strings
+        # Check if neuron_colors have explicit alpha values that override neuron_alpha
+        self._neuron_colors_have_explicit_alpha = self._colors_have_explicit_alpha(self.neuron_colors)
+        if self._neuron_colors_have_explicit_alpha:
+            self._vprint(
+                f"\033[33m⚠️  Warning: neuron_colors contains explicit alpha values. "
+                f"These will override neuron_alpha={self.neuron_alpha}. "
+                f"To use uniform alpha, remove alpha from colors.\033[0m",
+                level='simple'
+            )
+            # Use alpha=1.0 as placeholder, the explicit alpha from colors will be preserved
+            self.neuron_colors = self._standardize_color_input(self.neuron_colors, 'neuron_colors', default_alpha=1.0)
+        else:
+            self.neuron_colors = self._standardize_color_input(self.neuron_colors, 'neuron_colors', self.neuron_alpha)
+        
+        # Standardize synapse_colors
+        # Check if synapse_colors have explicit alpha values that override synapse_alpha
+        self._synapse_colors_have_explicit_alpha = self._colors_have_explicit_alpha(self.synapse_colors)
+        if self._synapse_colors_have_explicit_alpha:
+            self._vprint(
+                f"\033[33m⚠️  Warning: synapse_colors contains explicit alpha values. "
+                f"These will override synapse_alpha={self.synapse_alpha}. "
+                f"To use uniform alpha, remove alpha from colors.\033[0m",
+                level='simple'
+            )
+            self.synapse_colors = self._standardize_color_input(self.synapse_colors, 'synapse_colors', default_alpha=1.0)
+        else:
+            self.synapse_colors = self._standardize_color_input(self.synapse_colors, 'synapse_colors', self.synapse_alpha)
+        # Standardize mesh_color (for ROI meshes)
+        self.mesh_color = self._standardize_mesh_color_input(self.mesh_color)
+        # Standardize brain_mesh_color and vnc_mesh_color if not 'auto'
+        if isinstance(self.brain_mesh_color, (tuple, list)):
+            self.brain_mesh_color = standardize_color(self.brain_mesh_color, default_alpha=0.1)
+        if isinstance(self.vnc_mesh_color, (tuple, list)):
+            self.vnc_mesh_color = standardize_color(self.vnc_mesh_color, default_alpha=0.1)
         
         # Ensure enough colors for all layers by expanding if needed
         n_layers = len(self.neuron_layers)
@@ -6346,13 +6513,22 @@ class VisualizeSkeleton:
             # Determine soma rendering
             show_soma_here = self.show_soma if not isinstance(neuron_vols, navis.Volume) else False
             
+            # Determine alpha: use color's alpha if explicit, otherwise use neuron_alpha
+            if self._neuron_colors_have_explicit_alpha:
+                layer_neuron_alpha = self._extract_alpha_from_color(self.neuron_colors[i])
+            else:
+                layer_neuron_alpha = self.neuron_alpha
+            
             if self.backend == 'plotly':
+                # Convert rgba color to hex for navis compatibility
+                layer_color_hex = self._rgba_to_hex(self.neuron_colors[i])
+                
                 with self._suppress_output():
                     fig_layer = navis.plot3d(
                         neuron_vols,
                         backend='plotly',
-                        color=self.neuron_colors[i],
-                        alpha=self.neuron_alpha,
+                        color=layer_color_hex,
+                        alpha=layer_neuron_alpha,
                         soma=show_soma_here,
                         # fig=self.fig_3d,
                         radius=self.show_skeleton_radius,
@@ -6384,7 +6560,7 @@ class VisualizeSkeleton:
                 for j, trace in enumerate(fig_traces):
                     # Enforce opacity for lines if not already set or if we want to override
                     if self.skeleton_mode == 'line':
-                        trace.opacity = self.neuron_alpha
+                        trace.opacity = layer_neuron_alpha  # Use layer-specific alpha
 
                     # Get neuron_id from existing trace name (navis sets this to neuron ID)
                     existing_name = getattr(trace, 'name', None)
@@ -6467,12 +6643,15 @@ class VisualizeSkeleton:
             elif self.backend == 'k3d':
                 try:
                     # navis.plot3d with k3d backend returns a k3d.Plot object
+                    # Convert rgba color to hex for navis compatibility
+                    layer_color_hex = self._rgba_to_hex(self.neuron_colors[i])
+                    
                     with self._suppress_output():
                         temp_plot = navis.plot3d(
                             neuron_vols,
                             backend='k3d',
-                            color=self.neuron_colors[i],
-                            alpha=self.neuron_alpha,
+                            color=layer_color_hex,
+                            alpha=layer_neuron_alpha,  # Use layer-specific alpha (from color or neuron_alpha)
                             soma=show_soma_here,
                             radius=self.show_skeleton_radius,
                             connectors=self.show_connectors if not isinstance(neuron_vols, navis.Volume) else False,
@@ -6980,11 +7159,17 @@ class VisualizeSkeleton:
                             # Single color
                             colors_to_pass = to_int_color(c_val)
 
+                        # Determine opacity: use color's alpha if explicit, otherwise use synapse_alpha
+                        if self._synapse_colors_have_explicit_alpha:
+                            k3d_synapse_opacity = self._extract_alpha_from_color(self.synapse_colors[i])
+                        else:
+                            k3d_synapse_opacity = self.synapse_alpha
+
                         pts = k3d.points(
                             positions=xyz_df[['x', 'y', 'z']].values.astype(np.float32),
                             point_size=float(self.synapse_size) if self.synapse_mode == 'scatter' else float(self.synapse_size)/10.0,
                             color=colors_to_pass,
-                            opacity=self.synapse_alpha,
+                            opacity=k3d_synapse_opacity,
                             name=f'synapses {i} -> {i+1} ({len(conn_df)})'
                         )
                         self.fig_3d += pts
@@ -7032,13 +7217,19 @@ class VisualizeSkeleton:
                     # Cone and Sphere (diameter)
                     current_size = (dists * multiplier) / 2.0
                 
+                # Determine opacity: use color's alpha if explicit, otherwise use synapse_alpha
+                if self._synapse_colors_have_explicit_alpha:
+                    synapse_opacity = self._extract_alpha_from_color(self.synapse_colors[i])
+                else:
+                    synapse_opacity = self.synapse_alpha
+                
                 mesh = sv.build_synapse_mesh(
                     pre_coords, 
                     post_coords, 
                     mode=self.synapse_mode, 
                     size=current_size, 
                     color=self.synapse_colors[i], 
-                    opacity=self.synapse_alpha,
+                    opacity=synapse_opacity,
                     name=f'synapses {i} -> {i+1} ({len(conn_df)})'
                 )
                 mesh.hoverinfo = 'name'
@@ -7080,37 +7271,303 @@ class VisualizeSkeleton:
         os.makedirs(cache_mesh_dir, exist_ok=True)
         return cache_mesh_dir
     
+    def _colors_have_explicit_alpha(self, colors) -> bool:
+        """
+        Check if any color in the input has an explicit alpha channel.
+        
+        Used to determine if user-provided colors should override the separate
+        neuron_alpha/synapse_alpha settings.
+        
+        Parameters
+        ----------
+        colors : str, tuple, list
+            Color input in any format
+            
+        Returns
+        -------
+        bool
+            True if any color has explicit alpha, False otherwise
+            
+        Notes
+        -----
+        Explicit alpha is detected in these formats:
+        - RGBA tuple: (255, 0, 0, 0.5) - 4th value
+        - Hex with alpha: '#ff000080' or '#f008' - 8 or 4 chars
+        - CSS rgba string: 'rgba(255, 0, 0, 0.5)'
+        - Named colors with alpha modifier (not common, but supported)
+        
+        Colors without explicit alpha (returns False):
+        - RGB tuple: (255, 0, 0) - only 3 values  
+        - Standard hex: '#ff0000' or '#f00' - 6 or 3 chars
+        - CSS rgb string: 'rgb(255, 0, 0)'
+        - Named colors: 'red', 'blue'
+        - Bokeh palettes: typically hex without alpha
+        """
+        def _single_color_has_alpha(color) -> bool:
+            """Check if a single color value has explicit alpha."""
+            if isinstance(color, str):
+                color_stripped = color.strip().lower()
+                
+                # Check rgba() string
+                if color_stripped.startswith('rgba('):
+                    return True
+                
+                # Check hex with alpha (8 chars for #RRGGBBAA or 4 chars for #RGBA)
+                if color_stripped.startswith('#'):
+                    hex_part = color_stripped[1:]
+                    if len(hex_part) == 8 or len(hex_part) == 4:
+                        return True
+                elif len(color_stripped) in [8, 4] and all(c in '0123456789abcdef' for c in color_stripped):
+                    # Hex without # prefix
+                    return True
+                    
+                return False
+            
+            elif isinstance(color, (tuple, list)):
+                # RGBA has 4 values
+                if len(color) == 4 and all(isinstance(x, (int, float)) for x in color):
+                    return True
+                return False
+            
+            return False
+        
+        # Handle single color
+        if isinstance(colors, str):
+            return _single_color_has_alpha(colors)
+        
+        # Handle single RGBA tuple
+        if isinstance(colors, tuple):
+            if len(colors) == 4 and all(isinstance(x, (int, float)) for x in colors):
+                return True
+            # Tuple of colors - check each
+            for c in colors:
+                if _single_color_has_alpha(c):
+                    return True
+            return False
+        
+        # Handle list of colors
+        if isinstance(colors, list):
+            # Check if it's a single RGB(A) color disguised as list
+            if len(colors) in [3, 4] and all(isinstance(x, (int, float)) for x in colors):
+                return len(colors) == 4
+            # List of colors
+            for c in colors:
+                if _single_color_has_alpha(c):
+                    return True
+            return False
+        
+        return False
+    
+    def _extract_alpha_from_color(self, color_str: str) -> float:
+        """
+        Extract the alpha value from a standardized rgba color string.
+        
+        Parameters
+        ----------
+        color_str : str
+            Standardized color string in 'rgba(r, g, b, a)' format
+            
+        Returns
+        -------
+        float
+            Alpha value between 0.0 and 1.0
+            
+        Examples
+        --------
+        >>> self._extract_alpha_from_color('rgba(255, 0, 0, 0.5)')
+        0.5
+        >>> self._extract_alpha_from_color('rgba(128, 128, 128, 1.0)')
+        1.0
+        """
+        import re
+        match = re.match(r'rgba\s*\(\s*\d+\s*,\s*\d+\s*,\s*\d+\s*,\s*([\d.]+)\s*\)', color_str)
+        if match:
+            return float(match.group(1))
+        return 1.0  # Default to fully opaque if parsing fails
+    
+    def _rgba_to_hex(self, color_str: str) -> str:
+        """
+        Convert a standardized rgba color string to hex format for navis compatibility.
+        
+        Parameters
+        ----------
+        color_str : str
+            Standardized color string in 'rgba(r, g, b, a)' format
+            
+        Returns
+        -------
+        str
+            Hex color string like '#ff0000'
+            
+        Examples
+        --------
+        >>> self._rgba_to_hex('rgba(255, 0, 0, 0.5)')
+        '#ff0000'
+        >>> self._rgba_to_hex('rgba(128, 128, 128, 1.0)')
+        '#808080'
+        """
+        import re
+        match = re.match(r'rgba\s*\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*[\d.]+\s*\)', color_str)
+        if match:
+            r, g, b = int(match.group(1)), int(match.group(2)), int(match.group(3))
+            return f'#{r:02x}{g:02x}{b:02x}'
+        # Fallback: try to use color_to_hex from color_utils
+        try:
+            return color_to_hex(color_str)
+        except:
+            return '#808080'  # Default gray
+    
+    def _standardize_color_input(self, colors, name='colors', default_alpha=1.0):
+        """
+        Standardize color input to a list of rgba strings.
+        
+        Accepts multiple input formats and converts them to a consistent
+        list of 'rgba(r, g, b, a)' strings for internal use.
+        
+        Parameters
+        ----------
+        colors : str, tuple, list
+            Color input in any supported format:
+            - Single color string: 'red', '#ff0000', 'rgba(255, 0, 0, 0.5)'
+            - Tuple/list of colors: ['red', 'blue'], [(255, 0, 0), (0, 0, 255)]
+            - Bokeh palette: bokeh.palettes.Category10[10]
+        name : str
+            Name of the parameter (for error messages)
+        default_alpha : float
+            Default alpha value if not specified in colors
+            
+        Returns
+        -------
+        list
+            List of standardized rgba color strings
+        """
+        # Handle single color string - wrap in list
+        if isinstance(colors, str):
+            try:
+                std_color = standardize_color(colors, default_alpha=default_alpha)
+                return [std_color]
+            except ValueError as e:
+                self._vprint(f"⚠️  Warning: Could not parse {name} '{colors}': {e}", level='simple')
+                return ['rgba(128, 128, 128, 1.0)']  # Fallback gray
+        
+        # Handle tuple that might be a single RGB(A) color
+        if isinstance(colors, tuple):
+            # Check if it's a single color (3-4 numeric values)
+            if len(colors) in [3, 4] and all(isinstance(x, (int, float)) for x in colors):
+                try:
+                    std_color = standardize_color(colors, default_alpha=default_alpha)
+                    return [std_color]
+                except ValueError:
+                    pass
+            # Otherwise treat as list of colors
+            colors = list(colors)
+        
+        # Handle list of colors
+        if isinstance(colors, list):
+            result = []
+            for i, c in enumerate(colors):
+                try:
+                    std_color = standardize_color(c, default_alpha=default_alpha)
+                    result.append(std_color)
+                except ValueError as e:
+                    self._vprint(f"⚠️  Warning: Could not parse {name}[{i}] '{c}': {e}", level='simple')
+                    result.append('rgba(128, 128, 128, 1.0)')  # Fallback gray
+            return result if result else ['rgba(128, 128, 128, 1.0)']
+        
+        # Fallback
+        return ['rgba(128, 128, 128, 1.0)']
+    
+    def _standardize_mesh_color_input(self, color):
+        """
+        Standardize mesh_color input (can be single color or list of colors).
+        
+        Parameters
+        ----------
+        color : str, tuple, list
+            Single color or list of colors
+            
+        Returns
+        -------
+        str or list
+            Standardized color(s) - single rgba string or list of rgba strings
+        """
+        # Handle string input
+        if isinstance(color, str):
+            try:
+                return standardize_color(color, default_alpha=0.1)
+            except ValueError:
+                return 'rgba(100, 100, 100, 0.1)'  # Default gray
+        
+        # Handle tuple input
+        if isinstance(color, tuple):
+            # Check if it's a single RGBA color
+            if len(color) >= 3 and all(isinstance(x, (int, float)) for x in color):
+                try:
+                    default_alpha = color[3] if len(color) > 3 else 0.1
+                    return standardize_color(color[:min(len(color), 4)], default_alpha=default_alpha)
+                except ValueError:
+                    return 'rgba(100, 100, 100, 0.1)'
+            # Tuple of colors
+            return [self._standardize_mesh_color_input(c) for c in color]
+        
+        # Handle list input (list of colors for multiple ROIs)
+        if isinstance(color, list):
+            # Check if it might be a single RGB color (list of 3-4 numbers)
+            if len(color) in [3, 4] and all(isinstance(x, (int, float)) for x in color):
+                try:
+                    default_alpha = color[3] if len(color) > 3 else 0.1
+                    return standardize_color(color[:min(len(color), 4)], default_alpha=default_alpha)
+                except ValueError:
+                    return 'rgba(100, 100, 100, 0.1)'
+            # List of colors
+            return [self._standardize_mesh_color_input(c) for c in color]
+        
+        # Fallback
+        return 'rgba(100, 100, 100, 0.1)'
+
     def _darken_color(self, color, brightness):
         """Darken a color by the given brightness factor.
         
         Parameters
         ----------
         color : str or tuple
-            Color in hex string format ('#RRGGBB') or RGB tuple (r, g, b)
+            Color in any supported format (now uses standardize_color internally):
+            - Hex string: '#RRGGBB', '#RGB'
+            - RGB tuple: (r, g, b)
+            - RGBA tuple: (r, g, b, a)
+            - CSS string: 'rgb(r, g, b)', 'rgba(r, g, b, a)'
+            - Named color: 'red', 'blue', etc.
         brightness : float
             Brightness factor from 0.0 (black) to 1.0 (original color)
         
         Returns
         -------
         str
-            Darkened color in hex format '#RRGGBB'
+            Darkened color in rgba format
         """
-        # Parse the color
-        if isinstance(color, str):
-            # Handle hex color like '#1f77b4'
-            if color.startswith('#'):
-                color = color[1:]
-            if len(color) == 6:
-                r = int(color[0:2], 16)
-                g = int(color[2:4], 16)
-                b = int(color[4:6], 16)
+        # Use the standardize_color utility to parse any format
+        try:
+            rgba = extract_rgba_tuple(color)
+            r, g, b, a = rgba
+        except ValueError:
+            # Fallback to manual parsing for legacy support
+            if isinstance(color, str):
+                if color.startswith('#'):
+                    hex_str = color.lstrip('#')
+                    if len(hex_str) == 6:
+                        r = int(hex_str[0:2], 16)
+                        g = int(hex_str[2:4], 16)
+                        b = int(hex_str[4:6], 16)
+                        a = 1.0
+                    else:
+                        return 'rgba(128, 128, 128, 1.0)'
+                else:
+                    return 'rgba(128, 128, 128, 1.0)'
+            elif isinstance(color, (tuple, list)) and len(color) >= 3:
+                r, g, b = int(color[0]), int(color[1]), int(color[2])
+                a = color[3] if len(color) > 3 else 1.0
             else:
-                # Fallback
-                return color if isinstance(color, str) else '#808080'
-        elif isinstance(color, (tuple, list)) and len(color) >= 3:
-            r, g, b = color[0], color[1], color[2]
-        else:
-            return '#808080'  # Fallback gray
+                return 'rgba(128, 128, 128, 1.0)'
         
         # Apply brightness (darken)
         r = int(r * brightness)
@@ -7122,7 +7579,7 @@ class VisualizeSkeleton:
         g = max(0, min(255, g))
         b = max(0, min(255, b))
         
-        return f'#{r:02x}{g:02x}{b:02x}'
+        return f'rgba({r}, {g}, {b}, {a})'
     
     def _interpolate_colors(self, base_colors, n_needed):
         """Generate n_needed colors by interpolating through a colormap built from base_colors.
@@ -7130,38 +7587,41 @@ class VisualizeSkeleton:
         Parameters
         ----------
         base_colors : tuple or list
-            Base color palette to interpolate from (hex strings or RGB tuples)
+            Base color palette to interpolate from. Accepts any format supported by
+            standardize_color: hex strings, RGB tuples, RGBA tuples, named colors, rgba strings
         n_needed : int
             Number of colors needed
         
         Returns
         -------
         list
-            List of n_needed hex color strings
+            List of n_needed rgba color strings
         """
         import numpy as np
-        from matplotlib.colors import LinearSegmentedColormap, to_hex, to_rgb
+        from matplotlib.colors import LinearSegmentedColormap, to_hex
         
-        # Convert base colors to RGB tuples
+        # Convert base colors to normalized RGB tuples using our standardize_color utility
         rgb_colors = []
+        alphas = []
         for c in base_colors:
-            if isinstance(c, str):
-                if c.startswith('#'):
-                    c = c[1:]
-                if len(c) == 6:
-                    rgb_colors.append((int(c[0:2], 16)/255, int(c[2:4], 16)/255, int(c[4:6], 16)/255))
-                else:
-                    rgb_colors.append(to_rgb(c))
-            elif isinstance(c, (tuple, list)) and len(c) >= 3:
-                # Normalize if values > 1
-                if max(c[:3]) > 1:
-                    rgb_colors.append((c[0]/255, c[1]/255, c[2]/255))
-                else:
-                    rgb_colors.append((c[0], c[1], c[2]))
-            else:
+            try:
+                rgba = extract_rgba_tuple(c)
+                # Normalize to 0-1 for matplotlib
+                rgb_colors.append((rgba[0]/255, rgba[1]/255, rgba[2]/255))
+                alphas.append(rgba[3])
+            except ValueError:
                 rgb_colors.append((0.5, 0.5, 0.5))  # fallback gray
+                alphas.append(1.0)
         
-        # Create a colormap from base colors
+        # Use average alpha from base colors
+        avg_alpha = sum(alphas) / len(alphas) if alphas else 1.0
+        
+        # Handle single color case - just repeat the color n_needed times
+        if len(rgb_colors) == 1:
+            r, g, b = int(rgb_colors[0][0]*255), int(rgb_colors[0][1]*255), int(rgb_colors[0][2]*255)
+            return [f'rgba({r}, {g}, {b}, {avg_alpha})' for _ in range(n_needed)]
+        
+        # Create a colormap from base colors (requires at least 2 colors)
         cmap = LinearSegmentedColormap.from_list('custom', rgb_colors, N=256)
         
         # Sample n_needed colors evenly from the colormap
@@ -7169,7 +7629,8 @@ class VisualizeSkeleton:
         result = []
         for pos in positions:
             rgba = cmap(pos)
-            result.append(to_hex(rgba[:3]))
+            r, g, b = int(rgba[0]*255), int(rgba[1]*255), int(rgba[2]*255)
+            result.append(f'rgba({r}, {g}, {b}, {avg_alpha})')
         
         return result
     
