@@ -10363,10 +10363,14 @@ class VisualizeSkeleton:
         Output Files
         ------------
         - {output_dir}/pics_{fps}fps_{rotate_plane}/ : Cached frame images
-        - {output_dir}/{name}_video_forward.mp4 : Forward rotation video
-        - {output_dir}/{name}_video_backward.mp4 : Reverse rotation video
-        - {output_dir}/{name}_video_forward.gif : Forward rotation GIF (if export_gif=True)
-        - {output_dir}/{name}_video_backward.gif : Reverse rotation GIF (if export_gif=True)
+        - {output_dir}/{name}_video_h_forward.mp4 : Forward rotation video (horizontal)
+        - {output_dir}/{name}_video_h_backward.mp4 : Reverse rotation video (horizontal)
+        - {output_dir}/{name}_video_v_forward.mp4 : Forward rotation video (vertical)
+        - {output_dir}/{name}_video_v_backward.mp4 : Reverse rotation video (vertical)
+        - {output_dir}/{name}_video_h_forward.gif : Forward rotation GIF (horizontal, if export_gif=True)
+        - {output_dir}/{name}_video_h_backward.gif : Reverse rotation GIF (horizontal, if export_gif=True)
+        - {output_dir}/{name}_video_v_forward.gif : Forward rotation GIF (vertical, if export_gif=True)
+        - {output_dir}/{name}_video_v_backward.gif : Reverse rotation GIF (vertical, if export_gif=True)
         
         Examples
         --------
@@ -11076,8 +11080,11 @@ class VisualizeSkeleton:
         
         self._vprint(f'   Video resolution: {width}x{height}')
 
+        # Add rotation direction indicator to filename
+        rotation_suffix = 'h' if rotate_plane == 'xz' else 'v' if rotate_plane == 'yz' else rotate_plane
+        
         # Forward video - OPTIMIZED with faster codec
-        video_path_forward = os.path.join(save_folder, f'{saveas}_video_forward.mp4')
+        video_path_forward = os.path.join(save_folder, f'{saveas}_video_{rotation_suffix}_forward.mp4')
         # Use H.264 codec for better compression and compatibility
         fourcc = cv2.VideoWriter_fourcc(*'avc1')  # H.264 codec (faster than mp4v)
         out = cv2.VideoWriter(video_path_forward, fourcc, fps, frameSize=(width, height))
@@ -11093,7 +11100,7 @@ class VisualizeSkeleton:
         print(f'\n✓ Forward video: {video_path_forward} ({t1-t0:.1f}s)')
         
         # Backward video
-        video_path_backward = os.path.join(save_folder, f'{saveas}_video_backward.mp4')
+        video_path_backward = os.path.join(save_folder, f'{saveas}_video_{rotation_suffix}_backward.mp4')
         out = cv2.VideoWriter(video_path_backward, fourcc, fps, frameSize=(width, height))
         
         t0 = time.time()
@@ -11497,8 +11504,11 @@ def export_video_from_html(html_file, fps=30, degree_per_frame=1.0, rotate='hori
     
     fourcc = cv2.VideoWriter_fourcc(*'avc1')
     
+    # Add rotation direction indicator to filename
+    rotation_suffix = 'h' if rotate_plane == 'xz' else 'v' if rotate_plane == 'yz' else rotate_plane
+    
     # Forward video
-    video_path_forward = os.path.join(save_folder, f'{saveas}_video_forward.mp4')
+    video_path_forward = os.path.join(save_folder, f'{saveas}_video_{rotation_suffix}_forward.mp4')
     out = cv2.VideoWriter(video_path_forward, fourcc, fps, frameSize=(width, height))
     for deg in steps_to_write:
         img = cv2.imread(os.path.join(pic_folder, f'deg_{deg:.1f}.jpeg'))
@@ -11507,7 +11517,7 @@ def export_video_from_html(html_file, fps=30, degree_per_frame=1.0, rotate='hori
     print(f'✓ Forward video: {video_path_forward}')
     
     # Backward video
-    video_path_backward = os.path.join(save_folder, f'{saveas}_video_backward.mp4')
+    video_path_backward = os.path.join(save_folder, f'{saveas}_video_{rotation_suffix}_backward.mp4')
     out = cv2.VideoWriter(video_path_backward, fourcc, fps, frameSize=(width, height))
     for deg in steps_to_write[::-1]:
         img = cv2.imread(os.path.join(pic_folder, f'deg_{deg:.1f}.jpeg'))
