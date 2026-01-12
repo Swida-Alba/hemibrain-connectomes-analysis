@@ -1,10 +1,7 @@
-# *Drosophila* Connectome Analysis Toolkit (DROCAT) v4.4.0
+# *Drosophila* Connectome Analysis Toolkit (DROCAT) v4.4.1
 
 A comprehensive Python toolkit for analyzing and visualizing connectome data from **all NeuPrint databases and FlyWire datasets**. Features type-based pathfinding algorithms, interactive network visualizations with NT grouping, 3D neuron morphology rendering, and EM↔LM driver line mapping.
 
-**NEW in v4.4.0**: Local FAFB/BANC dataset support (10-100x faster!), priority-based neuron search, NT visualization & grouping, and token_info.txt authentication.
-
-[![Python Version](https://img.shields.io/badge/python-3.8%2B-blue)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 ---
@@ -137,7 +134,8 @@ conda activate drocat
 # Install dependencies
 pip install -r requirements.txt  # Linux/macOS
 # or
-pip install -r requirements-windows.txt  # Windows
+pip install -r requirements-windows.txt # Windows
+pip install neuronbridge-python --no-deps
 ```
 
 ### Get NeuPrint Token
