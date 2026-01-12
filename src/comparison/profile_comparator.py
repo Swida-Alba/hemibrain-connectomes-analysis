@@ -8317,6 +8317,7 @@ class ConnectivityProfileComparer:
             
             self._log(f"Computing type-avg-bodyId {dir_name} similarity matrices ({n}x{n})...")
             
+            pbar = tqdm(total=n, desc=f"Type-avg-bodyId {dir_name}", disable=not self.verbose)
             for i, type_a in enumerate(type_labels):
                 for j, type_b in enumerate(type_labels):
                     if i == j:
@@ -8385,6 +8386,10 @@ class ConnectivityProfileComparer:
                             else:
                                 metric_matrices[m][i, j] = 0.0
                                 metric_matrices[m][j, i] = 0.0
+                
+                pbar.update(1)
+            
+            pbar.close()
             
             all_matrices[dir_name] = {
                 m: pd.DataFrame(metric_matrices[m], index=type_labels, columns=type_labels)
@@ -8655,7 +8660,15 @@ class ConnectivityProfileComparer:
                 'type_avg': 'Type-Avg-BodyId',
             }.get(prefix, prefix.title() if prefix else '')
             
+            # Count total heatmaps to generate
+            total_heatmaps = sum(
+                1 for direction, metric_matrices in matrices.items()
+                for metric_key, matrix in metric_matrices.items()
+                if matrix is not None
+            )
+            
             # Generate heatmap for each direction × metric combination
+            pbar = tqdm(total=total_heatmaps, desc=f"Generating {prefix_display} heatmaps", disable=not self.verbose)
             for direction, metric_matrices in matrices.items():
                 for metric_key, matrix in metric_matrices.items():
                     if matrix is None:
@@ -8674,11 +8687,14 @@ class ConnectivityProfileComparer:
                         title=title,
                         matrices_dict=None,
                         showfig=self.show_figures,
-                        verbose=self.verbose,
+                        verbose=False,  # Suppress individual clustering messages
                         init_clustered=True,
                     )
                     
                     saved_files['heatmaps_generated'].append(str(html_path))
+                    pbar.update(1)
+            
+            pbar.close()
                 
         except ImportError as e:
             self._log(f"Warning: Could not import VisualizePath for heatmaps: {e}")
