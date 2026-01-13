@@ -81,10 +81,114 @@ navis_roi_meshes_json/
 vs = VisualizeSkeleton(
     dataset='hemibrain:v1.2.1',
     neuron_layers=['EB', 'PB'],
-    mesh_roi=['EB', 'PB', 'FB', 'NO']  # Central complex
+    mesh_roi=['EB', 'PB', 'FB', 'NO'],  # Central complex
+    mesh_color='gray',                   # Color for ROI meshes
+    mesh_alpha=0.1,                      # Transparency (0.0-1.0)
 )
 vs.plot_neurons()
 ```
+
+### Custom ROI Mesh Colors
+```python
+vs = VisualizeSkeleton(
+    dataset='hemibrain:v1.2.1',
+    neuron_layers=['KC.*'],
+    mesh_roi=['MB(R)', 'CA(R)', 'PED(R)'],
+    mesh_color=['red', 'green', 'blue'],       # Per-ROI colors
+    mesh_alpha=0.15,                           # Uniform transparency
+    brain_mesh_color='rgba(200,200,200,0.05)', # Separate brain mesh color
+)
+```
+
+**Note:** `mesh_color`/`mesh_alpha` apply to ROI meshes only. Brain and VNC mesh colors are set separately via `brain_mesh_color` and `vnc_mesh_color`.
+
+**ROI Expansion:** Base names like `'AME'` auto-expand to `['AME(L)', 'AME(R)']` with merged legends.
+
+---
+
+### Quick ROI Selection with Keywords/Patterns
+
+```python
+# Single ROI (string input)
+vs = VisualizeSkeleton(
+    neuron_layers=['EB'],
+    mesh_roi='EB',  # Auto-converted to ['EB']
+)
+
+# Load all primary brain regions
+vs = VisualizeSkeleton(
+    neuron_layers=['KC.*'],
+    mesh_roi=['primary'],  # ~50-100 major ROIs
+)
+
+# Load ALL available ROIs
+vs = VisualizeSkeleton(
+    neuron_layers=['EB'],
+    mesh_roi=['all'],  # Every ROI in the dataset
+)
+
+# Use regex patterns
+vs = VisualizeSkeleton(
+    neuron_layers=['LC.*'],
+    mesh_roi=['ME.*', 'LO.*'],  # Match patterns
+)
+
+# Nested lists for color grouping
+vs = VisualizeSkeleton(
+    neuron_layers=['KC.*'],
+    mesh_roi=['AME', ['aL', 'bL', 'gL'], 'EB'],  # Lobes share color
+    mesh_color=['red', 'green', 'blue'],
+)
+```
+
+| Pattern       | Matches                                             |
+| ------------- | --------------------------------------------------- |
+| `'primary'`   | Major brain regions (MB, AL, LH, optic lobes, etc.) |
+| `'all'`       | All available ROIs for the dataset                  |
+| `'ME.*'`      | All ROIs starting with 'ME'                         |
+| `'.*\\(R\\)'` | All right-hemisphere ROIs                           |
+
+**FAFB Note:** FAFB/FlyWire uses male-cns ROI meshes (auto-transformed).  
+**Finding ROIs:** Check `cache/{dataset}/available_rois.json` or use `vs.list_available_rois()`.
+
+---
+
+### Legend Mode Options
+
+```python
+vs = VisualizeSkeleton(
+    neuron_layers=['KC.*', 'MBON.*'],
+    legend_mode='type',    # 'layer', 'type', or 'single'
+)
+```
+
+| Mode       | Description                                      | Colors             |
+| ---------- | ------------------------------------------------ | ------------------ |
+| `'layer'`  | One legend entry per layer (all neurons grouped) | Layer colors       |
+| `'type'`   | Separate entry per neuron type (toggleable)      | Keeps layer colors |
+| `'single'` | Individual entry per neuron (toggleable)         | Keeps layer colors |
+
+---
+
+### Per-Neuron Colors via CSV
+
+Use `layer_map_csv` with optional `color` column:
+
+```csv
+layer,id_type_instance,color
+PN,1234567890,red
+PN,1234567891,#00FF00
+KC,KC_gamma,blue
+```
+
+```python
+vs = VisualizeSkeleton(
+    layer_map_csv='my_neurons.csv',
+    legend_mode='type',
+)
+```
+
+---
 
 ### Work with Multiple Datasets
 ```python

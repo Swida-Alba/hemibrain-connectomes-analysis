@@ -107,6 +107,28 @@ vs.plot_neurons()
 vs.export_video(fps=30, degree_per_frame=1.0, rotate='horizontal')
 ```
 
+### Using CSV Layer Maps
+
+Define layers and optionally per-neuron colors in a CSV file:
+
+```csv
+layer,id_type_instance,color
+Inputs,1234567890,red
+Inputs,1234567891,#FF4444
+Outputs,KC_gamma_s1,blue
+Outputs,KC_gamma_s2,
+```
+
+```python
+vs = VisualizeSkeleton(
+    layer_map_csv='my_neurons.csv',  # CSV with layer, id_type_instance, optional color
+    legend_mode='type',              # Each type gets separate legend entry
+    # neuron_layers is overridden by layer_map_csv
+)
+```
+
+The `color` column is optional. If omitted or empty, neurons use the default layer color.
+
 ### Video Export
 
 Export rotating 3D visualization to MP4 video:
@@ -257,11 +279,35 @@ vs = VisualizeSkeleton(
 
 **Legend Modes:**
 
-| Mode       | Description                                              | Best For                           |
-| ---------- | -------------------------------------------------------- | ---------------------------------- |
-| `'layer'`  | One legend entry per layer (all neurons grouped)         | Clean overview, many neurons       |
-| `'type'`   | Separate entry for each neuron type within a layer       | Mixed types per layer              |
-| `'single'` | Individual entry for each neuron ({bodyId}_{layer_name}) | Tracking specific neurons, few IDs |
+| Mode       | Description                                              | Best For                              |
+| ---------- | -------------------------------------------------------- | ------------------------------------- |
+| `'layer'`  | One legend entry per layer (all neurons grouped)         | Clean overview, many neurons          |
+| `'type'`   | Separate entry for each neuron type (keeps layer colors) | Mixed types per layer, toggling types |
+| `'single'` | Individual entry for each neuron ({bodyId}_{layer_name}) | Tracking specific neurons, few IDs    |
+
+**Note:** In `'type'` and `'single'` modes, neurons **keep their layer colors** (from `neuron_colors`) but get separate legend entries. This allows you to toggle visibility of individual types/neurons while maintaining consistent coloring within each layer.
+
+### Per-Neuron Colors via CSV
+
+When using `layer_map_csv`, you can specify per-neuron colors using an optional `color` column:
+
+```csv
+layer,id_type_instance,color
+PN_layer,1234567890,red
+PN_layer,1234567891,#00FF00
+KC_layer,KC_gamma_s1,blue
+KC_layer,KC_gamma_s2,rgba(255,128,0,0.9)
+```
+
+```python
+vs = VisualizeSkeleton(
+    dataset='hemibrain:v1.2.1',
+    layer_map_csv='my_neurons.csv',   # CSV with optional 'color' column
+    legend_mode='type',               # Each type gets separate legend entry
+)
+```
+
+The `color` column accepts any valid color format: named colors, hex codes, RGB tuples, or rgba strings. Colors override the default layer color for specific neurons.
 
 ### Color Expansion Methods
 
@@ -590,6 +636,101 @@ plot_navis_3d(
     roi_opacity=0.2  # Semi-transparent
 )
 ```
+
+#### ROI Mesh Colors and Transparency
+
+**Using VisualizeSkeleton:**
+```python
+vs = VisualizeSkeleton(
+    dataset='hemibrain:v1.2.1',
+    neuron_layers=['KC.*'],
+    mesh_roi=['MB(R)', 'CA(R)', 'PED(R)'],
+    
+    # Color options for ROI meshes
+    mesh_color='gray',                  # Named color (uses mesh_alpha)
+    mesh_color=(100, 100, 100),         # RGB tuple (uses mesh_alpha)
+    mesh_color='rgba(100,100,100,0.2)', # RGBA with explicit alpha (overrides mesh_alpha)
+    mesh_color=['red', 'green', 'blue'],# Per-ROI colors
+    
+    # Transparency for ROI meshes
+    mesh_alpha=0.1,                     # 0.0=transparent, 1.0=opaque (default: 0.1)
+)
+```
+
+**Note:** `mesh_color` and `mesh_alpha` apply only to ROI meshes (specified in `mesh_roi`).
+Brain envelope and VNC outline meshes use separate color settings:
+- `brain_mesh_color`: Color for the brain mesh (default: 'auto')
+- `vnc_mesh_color`: Color for the VNC mesh (default: 'auto')
+
+**Alpha Override Behavior:**
+- If `mesh_color` contains explicit alpha (e.g., RGBA tuple, `rgba()` string, or hex with alpha), those alpha values override `mesh_alpha`
+- Per-ROI alpha: Use `mesh_color` with embedded alpha for different transparencies per ROI:
+  ```python
+  mesh_color=['rgba(255,0,0,0.1)', 'rgba(0,255,0,0.2)', 'rgba(0,0,255,0.05)']
+  ```
+
+**Automatic ROI Expansion:**
+When you specify a base ROI name like `'AME'`, it's automatically expanded to bilateral variants `['AME(L)', 'AME(R)']` if available:
+- Colors are expanded to match: `mesh_color='red'` → both sides get red
+- **Merged legends**: Expanded ROIs share a single legend entry (e.g., "brain regions [AME]")
+- Toggle the legend to show/hide all bilateral variants together
+
+```python
+# These are equivalent:
+mesh_roi=['AME'],              # Auto-expands to ['AME(L)', 'AME(R)']
+mesh_roi=['AME(L)', 'AME(R)'], # Explicit bilateral specification
+```
+
+**Case-Sensitive ROI Names (macOS/Windows):**
+Some ROI names differ only in case (e.g., `'AL'` = Antennal Lobe, `'aL'` = alpha Lobe). On case-insensitive filesystems, these are handled automatically with encoded filenames to prevent collisions.
+
+**Special Keywords and Regex Patterns:**
+Use keywords or regex patterns for convenient ROI selection:
+
+```python
+# Single ROI (string input automatically converted to list)
+mesh_roi='EB'
+
+# 'primary': Load all primary brain regions (major ROIs)
+mesh_roi=['primary']
+
+# 'all': Load ALL available ROIs for the dataset
+mesh_roi=['all']
+
+# Regex patterns: Match ROIs by pattern
+mesh_roi=['ME.*']          # All ROIs starting with 'ME'
+mesh_roi=['.*\\(R\\)']     # All right-hemisphere ROIs
+mesh_roi=['MB.*', 'AL.*']  # Multiple patterns
+
+# Mixed: Combine literal names, keywords, and patterns
+mesh_roi=['EB', 'FB', 'ME.*']  # Central complex + medulla regions
+
+# Nested lists for color grouping (ROIs share same color & legend)
+mesh_roi=['AME', ['aL', 'bL', 'gL', "a'L", "b'L"], 'EB']
+mesh_color=['red', 'green', 'blue']  # 'green' applies to all nested ROIs
+```
+
+| Keyword/Pattern | Description                                     | Example Output                            |
+| --------------- | ----------------------------------------------- | ----------------------------------------- |
+| `'primary'`     | Major brain regions (MB, AL, optic lobes, etc.) | ~50-100 ROIs depending on dataset         |
+| `'all'`         | Every available ROI in the dataset              | All ROIs from `available_rois.json`       |
+| `'ME.*'`        | Regex: ROIs starting with 'ME'                  | `ME(L)`, `ME(R)`, `ME_glomerulus(L)`, ... |
+| `'.*\\(L\\)'`   | Regex: All left-hemisphere ROIs                 | `AL(L)`, `MB(L)`, `LH(L)`, ...            |
+
+**Note:** Regex patterns use Python's `re` module. The pattern is automatically anchored (`^...$`).
+
+**FAFB/FlyWire Note:**
+FAFB/FlyWire datasets do not have native ROI meshes. When visualizing FAFB data,
+ROI meshes from male-cns are automatically transformed to FAFB coordinates.
+This allows ROI context visualization but may have minor alignment differences.
+
+#### Finding Available ROIs
+
+- **Programmatically**: Use `vs.list_available_rois()` method
+- **Cached list**: Check `cache/{dataset}/available_rois.json`
+  - hemibrain: `cache/hemibrain_v1_2_1/available_rois.json`
+  - male-cns: `cache/male-cns_v0_9/available_rois.json`
+  - FAFB: Uses `cache/male-cns_v0_9/available_rois.json` (transformed)
 
 #### Available ROIs
 Major brain regions include:

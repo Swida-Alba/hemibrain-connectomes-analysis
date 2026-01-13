@@ -1969,52 +1969,113 @@ class VisualizeSkeleton:
         synapse_colors = ['rgba(255,0,0,0.3)', 'rgba(0,255,0,0.7)']
     '''
 
-    mesh_roi: list = field(default_factory=list)
+    mesh_roi: list | str = field(default_factory=list)
     '''
-    Meshes of brain ROIs to plot.\n
-    \n
-    **Auto-expansion:** ROI names without (L)/(R) suffix are automatically expanded
-    to include both bilateral variants if available. For example:\n
-    - 'LH' → ['LH(L)', 'LH(R)']\n
-    - 'AL' → ['AL(L)', 'AL(R)']\n
-    - 'EB' → ['EB'] (unpaired, no expansion)\n
-    \n
-    Examples:\n
-    - mesh_roi=['LH', 'AL', 'EB'] → plots LH(L), LH(R), AL(L), AL(R), EB\n
-    - mesh_roi=['LH(R)'] → plots only LH(R) (explicit side, no expansion)\n
-    \n
-    Set mesh_roi=None to hide all ROI meshes.\n
-    Use list_available_rois() to see all available ROIs for current dataset.\n
-    \n
-    Common ROIs (hemibrain):\n
-    - Central brain: EB, FB, PB, NO (unpaired)\n
-    - Bilateral: LH, AL, MB, CA, AOTU, SMP, SLP, CRE, etc.\n
-    \n
-    Use brain_mesh parameter to show whole brain/hemibrain envelope.\n
+    Meshes of brain ROIs to plot. Accepts a list of ROI names, special keywords,
+    regex patterns, or nested lists for color grouping. Also accepts a single string.
+    
+    Input Formats
+    -------------
+    - **Single ROI**: 'EB' or ['EB']
+    - **Multiple ROIs**: ['LH', 'AL', 'EB']
+    - **Special Keywords**:
+        - 'primary': All primary brain regions (~50-100 major ROIs)
+        - 'all': Every available ROI for the current dataset
+    - **Regex patterns**: 'ME.*' matches all ROIs starting with 'ME'
+    - **Nested lists for color grouping**: ['AME', ['aL', 'bL', 'gL'], 'EB']
+        ROIs in nested lists share the same color and legend entry.
+    
+    Auto-Expansion
+    --------------
+    ROI names without (L)/(R) suffix are automatically expanded to include
+    both bilateral variants if available:
+    - 'LH' → ['LH(L)', 'LH(R)']
+    - 'AL' → ['AL(L)', 'AL(R)']
+    - 'EB' → ['EB'] (unpaired, no expansion)
+    
+    Examples
+    --------
+    >>> mesh_roi = 'EB'                    # Single ROI
+    >>> mesh_roi = ['LH', 'AL', 'EB']      # Multiple ROIs
+    >>> mesh_roi = ['primary']             # All primary brain regions
+    >>> mesh_roi = ['all']                 # All available ROIs
+    >>> mesh_roi = ['ME.*', 'LO.*']        # Regex patterns
+    >>> mesh_roi = ['AME', ['aL', 'bL', 'gL'], 'EB']  # Nested for shared color
+    >>> mesh_roi = ['.*\\(R\\)']            # All right-hemisphere ROIs
+    
+    FAFB/FlyWire Note
+    -----------------
+    FAFB/FlyWire datasets do not have native ROI meshes. When visualizing FAFB data,
+    ROI meshes from male-cns are automatically transformed to FAFB coordinates.
+    This allows ROI context visualization but may have minor alignment differences.
+    
+    Finding Available ROIs
+    ----------------------
+    - Use `vs.list_available_rois()` to query available ROIs programmatically
+    - Check the cached list at: `cache/{dataset}/available_rois.json`
+    - For FAFB: Uses `cache/male-cns_v0_9/available_rois.json` (transformed)
+    
+    Common ROIs
+    -----------
+    - Central Complex (unpaired): EB, FB, PB, NO, AB
+    - Mushroom Body: CA, PED, aL, bL, gL, a'L, b'L (bilateral)
+    - Optic Lobe: ME, LO, LOP, AME (bilateral)
+    - Antennal Lobe: AL (bilateral)
+    - Lateral Horn: LH (bilateral)
+    
+    Set mesh_roi=None or [] to hide all ROI meshes.
+    Use brain_mesh parameter to show whole brain/hemibrain envelope.
     '''
 
-    mesh_color: tuple | list | str = (100, 100, 100, 0.1)
+    mesh_color: tuple | list | str = (100, 100, 100)
     '''
     Colors for brain ROI meshes. Supports multiple input formats.
     
     Supported Formats
     -----------------
-    - **Single RGBA tuple**: (R, G, B, alpha) where R,G,B are 0-255, alpha is 0-1
-      Applied to all ROI meshes. Example: (100, 100, 100, 0.1)
+    - **Named colors**: 'red', 'blue', 'lightgray', etc.
+    - **Hex colors**: '#ff0000', '#f00', '#FF0000FF' (with alpha)
+    - **RGB tuples**: (255, 0, 0) or (1.0, 0.0, 0.0) (normalized 0-1)
+    - **RGBA tuples**: (255, 0, 0, 0.5) or (1.0, 0.0, 0.0, 0.5)
+    - **CSS rgb/rgba strings**: 'rgb(255, 0, 0)', 'rgba(255, 0, 0, 0.5)'
+    - **Bokeh palettes**: bokeh.palettes.Category10[10], etc.
     - **List of colors**: Each color for corresponding ROI in mesh_roi
-      Example: [(255, 0, 0, 0.2), (0, 255, 0, 0.2)]
-    - **Named colors with alpha**: Can use set_alpha() on named colors
-    - **CSS rgba strings**: 'rgba(100, 100, 100, 0.1)'
-    - **Hex with alpha**: '#64646419' (hex alpha at end)
     
-    Note: Alpha channel is important for mesh transparency.
-    Recommended alpha: 0.05-0.2 for subtle background meshes
+    **Override Behavior**: If `mesh_color` contains colors with explicit
+    alpha channels (e.g., 'rgba(100,100,100,0.1)', '#64646419', or (100,100,100,0.1)),
+    those alpha values will be used instead and `mesh_alpha` is ignored for those colors.
+    A warning will be shown when this happens.
+    
+    Note: ROI mesh colors are separate from brain_mesh_color and vnc_mesh_color.
+    Use brain_mesh_color and vnc_mesh_color to customize the brain/VNC outline meshes.
     
     Examples
     --------
-    >>> mesh_color = (100, 100, 100, 0.1)  # Gray with 10% opacity (default)
-    >>> mesh_color = 'rgba(100, 0, 100, 0.05)'  # Purple with 5% opacity
+    >>> mesh_color = (100, 100, 100)  # Gray (uses mesh_alpha for transparency)
+    >>> mesh_color = 'gray'  # Named color
+    >>> mesh_color = 'rgba(100, 0, 100, 0.05)'  # Purple with explicit 5% opacity
     >>> mesh_color = [(255, 0, 0, 0.2), (0, 0, 255, 0.2)]  # Red and blue for 2 ROIs
+    '''
+
+    mesh_alpha: float = 0.1
+    '''Alpha (transparency) for ROI meshes. 0.0 = transparent, 1.0 = opaque.
+    
+    This is a single value applied uniformly to all ROI meshes.
+    
+    **Override Behavior**: If `mesh_color` contains colors with explicit
+    alpha channels (e.g., 'rgba(100,100,100,0.1)', '#64646419', or (100,100,100,0.1)),
+    those alpha values will be used instead and this setting is ignored.
+    A warning will be shown when this happens.
+    
+    **Per-ROI Alpha**: Since `mesh_alpha` only supports a single value,
+    use `mesh_color` with embedded alpha to set different transparencies
+    per ROI:
+        mesh_color = ['rgba(255,0,0,0.1)', 'rgba(0,255,0,0.2)', 'rgba(0,0,255,0.05)']
+    
+    Note: This setting only affects ROI meshes (mesh_roi). Brain mesh and VNC mesh
+    transparency are controlled by brain_mesh_color and vnc_mesh_color respectively.
+    
+    Recommended values: 0.05-0.2 for subtle background meshes.
     '''
 
     legend_mode: str = 'layer'
@@ -3529,11 +3590,14 @@ class VisualizeSkeleton:
         Parse layer_map_csv file to construct neuron_layers and custom_layer_names.
         
         The CSV must have columns 'layer' and 'id_type_instance'.
+        Optionally can have a 'color' column for per-neuron color overrides.
         Rows with the same 'layer' value are grouped together into a single layer.
         
         This method overrides self.neuron_layers and self.custom_layer_names.
+        If 'color' column exists, populates self._neuron_color_overrides.
         """
         import pandas as pd
+        from .utils.color_utils import standardize_color
         
         csv_path = self.layer_map_csv
         if not os.path.exists(csv_path):
@@ -3548,6 +3612,33 @@ class VisualizeSkeleton:
         for col in required_cols:
             if col not in df.columns:
                 raise ValueError(f"layer_map_csv must have column '{col}'. Found: {list(df.columns)}")
+        
+        # Check for optional color column
+        has_color_col = 'color' in df.columns
+        if has_color_col:
+            self._vprint(f"  Found 'color' column - will apply per-neuron colors", level='simple')
+        
+        # Build per-neuron color overrides if color column exists
+        self._neuron_color_overrides = {}  # bodyId/type -> rgba_string
+        if has_color_col:
+            for _, row in df.iterrows():
+                id_val = row['id_type_instance']
+                color_val = row['color']
+                if pd.notna(color_val) and str(color_val).strip():
+                    # Normalize id
+                    id_str = str(id_val).strip()
+                    id_key = int(id_str) if id_str.isdigit() else id_str
+                    # Standardize color
+                    try:
+                        rgba_str = standardize_color(str(color_val).strip(), default_alpha=self.neuron_alpha)
+                        self._neuron_color_overrides[id_key] = rgba_str
+                        # Also store string version for lookup flexibility
+                        self._neuron_color_overrides[str(id_key)] = rgba_str
+                    except Exception as e:
+                        self._vprint(f"  ⚠️ Failed to parse color '{color_val}' for {id_val}: {e}", level='full')
+            
+            if self._neuron_color_overrides:
+                self._vprint(f"  Loaded {len(self._neuron_color_overrides) // 2} per-neuron color overrides", level='simple')
         
         # Group by layer name to create neuron_layers
         layer_groups = df.groupby('layer', sort=False)['id_type_instance'].apply(list).to_dict()
@@ -3731,8 +3822,16 @@ class VisualizeSkeleton:
         # === Neuron layers validation ===
         if not isinstance(self.neuron_layers, (str, list)):
             errors.append(f"neuron_layers must be a string or list, got {type(self.neuron_layers).__name__}")
-        elif isinstance(self.neuron_layers, str) and not self.neuron_layers and self.layer_map_csv is None:
-            errors.append("neuron_layers cannot be empty (or provide layer_map_csv)")
+        else:
+            # Check if neuron_layers is empty (empty string or empty list)
+            is_empty = (isinstance(self.neuron_layers, str) and not self.neuron_layers) or \
+                       (isinstance(self.neuron_layers, list) and len(self.neuron_layers) == 0)
+            
+            if is_empty and self.layer_map_csv is None:
+                # Allow empty neuron_layers if mesh_roi or brain_mesh is specified (mesh-only mode)
+                has_mesh = self.mesh_roi or (self.brain_mesh and self.brain_mesh.lower() != 'none') or self.vnc_mesh
+                if not has_mesh:
+                    errors.append("neuron_layers cannot be empty (or provide layer_map_csv, mesh_roi, or brain_mesh)")
             
         if not isinstance(self.custom_layer_names, list):
             errors.append(f"custom_layer_names must be a list, got {type(self.custom_layer_names).__name__}")
@@ -3869,8 +3968,8 @@ class VisualizeSkeleton:
             errors.append(f"synapse_colors must be a tuple, list, or color string, got {type(self.synapse_colors).__name__}")
             
         # === mesh_roi validation ===
-        if self.mesh_roi is not None and not isinstance(self.mesh_roi, list):
-            errors.append(f"mesh_roi must be a list or None, got {type(self.mesh_roi).__name__}")
+        if self.mesh_roi is not None and not isinstance(self.mesh_roi, (list, str)):
+            errors.append(f"mesh_roi must be a list, string, or None, got {type(self.mesh_roi).__name__}")
             
         # === html_size_cap validation ===
         if self.html_size_cap is not None:
@@ -4166,10 +4265,15 @@ class VisualizeSkeleton:
         
         # convert neuron_layers str to list, if is str
         if type(self.neuron_layers) is str:
-            self.neuron_layers = self.neuron_layers.replace(' ','').split('->')
-            for i,layer in enumerate(self.neuron_layers): # convert bodyId str to int
-                if layer.isnumeric():
-                    self.neuron_layers[i] = int(layer)
+            if self.neuron_layers.strip():
+                # Non-empty string: parse by '->' separator
+                self.neuron_layers = self.neuron_layers.replace(' ','').split('->')
+                for i,layer in enumerate(self.neuron_layers): # convert bodyId str to int
+                    if layer.isnumeric():
+                        self.neuron_layers[i] = int(layer)
+            else:
+                # Empty string: convert to empty list for mesh-only mode
+                self.neuron_layers = []
         
         if self.synapse_mode == 'scatter' and self.synapse_size == 0:
             self.synapse_size = 2
@@ -4183,13 +4287,53 @@ class VisualizeSkeleton:
         if self.mesh_roi == None:
             self.mesh_roi = []
         
+        # Convert single string to list for mesh_roi
+        if isinstance(self.mesh_roi, str):
+            self.mesh_roi = [self.mesh_roi]
+        
+        # Initialize nested ROI groups (will be populated if nested lists are used)
+        self._nested_roi_groups = {}
+        
+        # Handle nested lists in mesh_roi for color grouping
+        # e.g., ['AME', ['aL', 'bL', 'gL'], 'EB'] -> flattened list with same colors for grouped ROIs
+        if self.mesh_roi:
+            self.mesh_roi, self.mesh_color, self._nested_roi_groups = self._flatten_nested_roi_groups(
+                self.mesh_roi, self.mesh_color
+            )
+        
+        # Expand special keywords and regex patterns in mesh_roi
+        # 'primary' -> all primary ROIs, 'all' -> all available ROIs
+        # 'ME.*' -> all ROIs matching regex pattern
+        if self.mesh_roi:
+            self.mesh_roi = self._expand_mesh_roi_patterns(self.mesh_roi)
+        
         # Expand ROI names to include bilateral (L/R) variants
         # e.g., 'LH' -> ['LH(L)', 'LH(R)']
+        # Also expand colors to match the expanded ROIs
         if self.mesh_roi:
             original_rois = list(self.mesh_roi)
-            self.mesh_roi = self._expand_roi_names(self.mesh_roi)
+            original_colors = self.mesh_color if isinstance(self.mesh_color, list) else self.mesh_color
+            
+            # Use the new function that expands both ROIs and colors together
+            expanded_rois, expanded_colors = self._expand_roi_names_with_colors(
+                self.mesh_roi, 
+                self.mesh_color
+            )
+            
+            self.mesh_roi = expanded_rois
+            # Only update mesh_color if it was a list (preserving single color behavior)
+            if isinstance(original_colors, list):
+                self.mesh_color = expanded_colors
+            elif len(set(expanded_colors)) == 1:
+                # If all expanded colors are the same, keep as single color
+                self.mesh_color = expanded_colors[0]
+            else:
+                self.mesh_color = expanded_colors
+            
             if self.mesh_roi != original_rois:
                 self._vprint(f"   🔄 ROI expansion: {original_rois} → {self.mesh_roi}", level='simple')
+                if isinstance(original_colors, list) and len(original_colors) != len(expanded_colors):
+                    self._vprint(f"   🔄 Color expansion: {len(original_colors)} colors → {len(expanded_colors)} colors", level='full')
         
         # === Standardize color inputs ===
         # Standardize neuron_colors to a list of rgba strings
@@ -4220,8 +4364,33 @@ class VisualizeSkeleton:
             self.synapse_colors = self._standardize_color_input(self.synapse_colors, 'synapse_colors', default_alpha=1.0)
         else:
             self.synapse_colors = self._standardize_color_input(self.synapse_colors, 'synapse_colors', self.synapse_alpha)
+        
         # Standardize mesh_color (for ROI meshes)
-        self.mesh_color = self._standardize_mesh_color_input(self.mesh_color)
+        # Store original for detecting custom colors
+        self._original_mesh_color = self.mesh_color
+        
+        # Check if mesh_color has explicit alpha values that override mesh_alpha
+        self._mesh_colors_have_explicit_alpha = self._colors_have_explicit_alpha(self.mesh_color)
+        if self._mesh_colors_have_explicit_alpha:
+            self._vprint(
+                f"\033[33m⚠️  Warning: mesh_color contains explicit alpha values. "
+                f"These will override mesh_alpha={self.mesh_alpha}. "
+                f"To use uniform alpha, remove alpha from colors.\033[0m",
+                level='simple'
+            )
+            # Use alpha=1.0 as placeholder, the explicit alpha from colors will be preserved
+            self.mesh_color = self._standardize_mesh_color_input(self.mesh_color, default_alpha=1.0)
+        else:
+            self.mesh_color = self._standardize_mesh_color_input(self.mesh_color, default_alpha=self.mesh_alpha)
+        
+        # Warn if custom mesh colors are provided that brain/VNC mesh colors are separate
+        if self._is_custom_mesh_color_specified() and self.mesh_roi:
+            self._vprint(
+                f"\033[34mℹ️  Note: mesh_color applies to ROI meshes only. "
+                f"Brain mesh and VNC mesh colors are controlled by brain_mesh_color and vnc_mesh_color.\033[0m",
+                level='simple'
+            )
+        
         # Standardize brain_mesh_color and vnc_mesh_color if not 'auto'
         if isinstance(self.brain_mesh_color, (tuple, list)):
             self.brain_mesh_color = standardize_color(self.brain_mesh_color, default_alpha=0.1)
@@ -4353,14 +4522,40 @@ class VisualizeSkeleton:
             self.layer_names = self.custom_layer_names
             
         if self.saveas is None:
-            # Limit saveas to at most 2 layer names to avoid "file name too long" errors
-            n_layers = len(self.layer_names)
-            if n_layers <= 2:
+            # Generate saveas from layer names
+            # Use exact names for ≤3 layers, first 2 + etc{remaining} for >3 layers
+            n_layers = len(self.layer_names) if self.layer_names else 0
+            if n_layers == 0:
+                # Mesh-only mode without neurons
+                if self.mesh_roi:
+                    n_rois = len(self.mesh_roi)
+                    if n_rois == 0:
+                        self.saveas = "brain_mesh"
+                    elif n_rois <= 3:
+                        # Use all ROI names for ≤3 ROIs
+                        roi_names = []
+                        for roi in self.mesh_roi[:3]:
+                            # Clean up ROI name for filename (remove parentheses)
+                            roi_clean = str(roi).replace('(', '').replace(')', '')
+                            roi_names.append(roi_clean)
+                        self.saveas = '_'.join(roi_names) + '_mesh'
+                    else:
+                        # Use first 2 ROI names + count for >3 ROIs
+                        roi_names = []
+                        for roi in self.mesh_roi[:2]:
+                            roi_clean = str(roi).replace('(', '').replace(')', '')
+                            roi_names.append(roi_clean)
+                        self.saveas = '_'.join(roi_names) + f'_etc{n_rois - 2}_mesh'
+                else:
+                    self.saveas = "brain_mesh"
+            elif n_layers <= 3:
+                # Use all layer names for ≤3 layers
                 self.saveas = '_'.join(self.layer_names)
             else:
-                # Use first 2 names + count indicator
+                # Use first 2 names + count of remaining layers for >3 layers
                 first_two = '_'.join(self.layer_names[:2])
-                self.saveas = f"{first_two}_etc{n_layers}"
+                remaining = n_layers - 2
+                self.saveas = f"{first_two}_etc{remaining}"
         
         # Ensure saveas doesn't exceed reasonable length (max 80 chars)
         if len(self.saveas) > 80:
@@ -5901,6 +6096,10 @@ class VisualizeSkeleton:
                     fafb_skeleton_cache.update(api_fetched)
         
         
+        # Note: For legend_mode='type', neurons keep their layer colors but get separate legend entries
+        # Per-neuron colors from CSV are stored in self._neuron_color_overrides (bodyId -> color)
+        self._type_color_map = {}  # Not used anymore - types keep layer colors
+        
         # Main progress bar for layers - always show when verbose is enabled
         layer_pbar = tqdm(range(n_layers), desc="Processing layers", 
                           disable=not self.verbose, leave=True, file=sys.stdout)
@@ -6586,32 +6785,63 @@ class VisualizeSkeleton:
                         self.fig_3d.add_trace(trace)
 
                     elif self.legend_mode == 'type':
-                        # Group by neuron type
+                        # Group by neuron type - each type gets separate legend but keeps layer color
                         neuron_type = neuron_type_map.get(neuron_id, None)
                         if neuron_type:
                             legend_group = f"{neuron_type}"
                         else:
                             # Fallback to layer name if type unknown
                             legend_group = self.layer_names[i]
+                        
+                        # Check for per-neuron color override from CSV
+                        neuron_color = self.neuron_colors[i]  # Default to layer color
+                        if hasattr(self, '_neuron_color_overrides') and self._neuron_color_overrides:
+                            override = self._neuron_color_overrides.get(neuron_id) or self._neuron_color_overrides.get(int(neuron_id) if neuron_id.isdigit() else neuron_id)
+                            if override:
+                                neuron_color = override
+                                # Re-color the trace
+                                override_hex = self._rgba_to_hex(neuron_color)
+                                override_alpha = self._extract_alpha_from_color(neuron_color)
+                                if hasattr(trace, 'line') and trace.line is not None:
+                                    trace.line.color = override_hex
+                                if hasattr(trace, 'marker') and trace.marker is not None:
+                                    trace.marker.color = override_hex
+                                trace.opacity = override_alpha
+                        
                         trace.name = legend_group
-                        legend_group_key = f"layer{i}_{legend_group}"
-                        trace.legendgroup = legend_group_key  # Make unique per layer
-                        should_show = legend_group_key not in shown_legend_groups
+                        trace.legendgroup = legend_group  # Same type shares legend group
+                        should_show = legend_group not in shown_legend_groups
                         trace.showlegend = should_show
                         if should_show:
-                            legend_color_map[legend_group_key] = (self.neuron_colors[i], True)
-                        shown_legend_groups.add(legend_group_key)
+                            legend_color_map[legend_group] = (neuron_color, True)
+                        shown_legend_groups.add(legend_group)
                         trace.hovertemplate = '<b>%{fullData.name}</b><extra></extra>'
                         trace.hoverinfo = 'name'
                         self.fig_3d.add_trace(trace)
 
                     elif self.legend_mode == 'single':
-                        # Each neuron gets its own legend entry
+                        # Each neuron gets its own legend entry with layer color
                         new_trace_name = f"{neuron_id}_{self.layer_names[i]}"
+                        
+                        # Check for per-neuron color override from CSV
+                        neuron_color = self.neuron_colors[i]  # Default to layer color
+                        if hasattr(self, '_neuron_color_overrides') and self._neuron_color_overrides:
+                            override = self._neuron_color_overrides.get(neuron_id) or self._neuron_color_overrides.get(int(neuron_id) if neuron_id.isdigit() else neuron_id)
+                            if override:
+                                neuron_color = override
+                                # Re-color the trace
+                                override_hex = self._rgba_to_hex(neuron_color)
+                                override_alpha = self._extract_alpha_from_color(neuron_color)
+                                if hasattr(trace, 'line') and trace.line is not None:
+                                    trace.line.color = override_hex
+                                if hasattr(trace, 'marker') and trace.marker is not None:
+                                    trace.marker.color = override_hex
+                                trace.opacity = override_alpha
+                        
                         trace.name = new_trace_name
                         trace.legendgroup = new_trace_name
                         trace.showlegend = True
-                        legend_color_map[new_trace_name] = (self.neuron_colors[i], True)
+                        legend_color_map[new_trace_name] = (neuron_color, True)
                         trace.hoverinfo = 'name'
                         trace.hovertemplate = '<b>%{fullData.name}</b><extra></extra>'
                         self.fig_3d.add_trace(trace)
@@ -7276,6 +7506,115 @@ class VisualizeSkeleton:
         os.makedirs(cache_mesh_dir, exist_ok=True)
         return cache_mesh_dir
     
+    def _roi_to_filename(self, roi_name: str) -> str:
+        """Convert ROI name to a case-safe filename for storage.
+        
+        macOS and Windows filesystems are case-insensitive by default, so 'aL(L)' and 
+        'AL(L)' would be treated as the same file. This function creates unique filenames
+        by encoding lowercase letters with an underscore prefix.
+        
+        Parameters
+        ----------
+        roi_name : str
+            The ROI name (e.g., 'AL(L)', 'aL(L)', 'LH(R)')
+            
+        Returns
+        -------
+        str
+            Filesystem-safe filename with .json extension (e.g., 'AL(L).json', '_a_L(L).json')
+            
+        Notes
+        -----
+        Encoding scheme:
+        - Lowercase letters are prefixed with '_' (underscore)
+        - Example: 'aL(L)' -> '_aL(L).json' (the 'a' gets underscore prefix)
+        - Example: 'AL(L)' -> 'AL(L).json' (no lowercase, no encoding)
+        - This preserves readability while ensuring unique filenames on case-insensitive systems
+        """
+        # Always encode lowercase letters to ensure unique filenames
+        if any(c.islower() for c in roi_name):
+            encoded_name = ''
+            for char in roi_name:
+                if char.islower():
+                    encoded_name += f'_{char}'
+                else:
+                    encoded_name += char
+            return encoded_name + '.json'
+        else:
+            return roi_name + '.json'
+    
+    def _filename_to_roi(self, filename: str) -> str:
+        """Convert a case-safe filename back to ROI name.
+        
+        Reverse of _roi_to_filename.
+        
+        Parameters
+        ----------
+        filename : str
+            The filename (e.g., 'AL(L).json', '_a_L(L).json')
+            
+        Returns
+        -------
+        str
+            Original ROI name (e.g., 'AL(L)', 'aL(L)')
+        """
+        # Remove .json extension
+        name = filename[:-5] if filename.endswith('.json') else filename
+        
+        # Decode underscore-prefixed lowercase letters
+        decoded = ''
+        i = 0
+        while i < len(name):
+            if i < len(name) - 1 and name[i] == '_' and name[i + 1].islower():
+                decoded += name[i + 1]
+                i += 2
+            else:
+                decoded += name[i]
+                i += 1
+        return decoded
+    
+    def _get_mesh_file_path(self, mesh_dir: str, roi_name: str) -> str:
+        """Get the mesh file path for an ROI, handling case-sensitivity.
+        
+        Tries to find the mesh file using case-safe encoding first, then falls back
+        to the legacy direct naming for backward compatibility (only for all-uppercase ROI names).
+        
+        Parameters
+        ----------
+        mesh_dir : str
+            Directory containing mesh files
+        roi_name : str
+            ROI name to look up
+            
+        Returns
+        -------
+        str
+            Path to the mesh file (may or may not exist)
+            
+        Notes
+        -----
+        On case-insensitive filesystems (macOS, Windows), 'aL(L).json' and 'AL(L).json' 
+        would be treated as the same file. To avoid this:
+        - ROI names with lowercase letters ONLY use encoded filenames (e.g., '_aL(L).json')
+        - ROI names that are all uppercase can use legacy fallback for backward compatibility
+        """
+        has_lowercase = any(c.islower() for c in roi_name)
+        
+        # Get encoded filename path
+        encoded_file = os.path.join(mesh_dir, self._roi_to_filename(roi_name))
+        if os.path.exists(encoded_file):
+            return encoded_file
+        
+        # Only use legacy fallback for all-uppercase ROI names
+        # This prevents case-insensitive filesystem issues where 'aL(L).json' would match 'AL(L).json'
+        if not has_lowercase:
+            legacy_file = os.path.join(mesh_dir, roi_name + '.json')
+            if os.path.exists(legacy_file):
+                return legacy_file
+        
+        # If neither exists, return the encoded path for new files
+        return encoded_file
+
     def _colors_have_explicit_alpha(self, colors) -> bool:
         """
         Check if any color in the input has an explicit alpha channel.
@@ -7512,7 +7851,7 @@ class VisualizeSkeleton:
         # Fallback
         return ['rgba(128, 128, 128, 1.0)']
     
-    def _standardize_mesh_color_input(self, color):
+    def _standardize_mesh_color_input(self, color, default_alpha=0.1):
         """
         Standardize mesh_color input (can be single color or list of colors).
         
@@ -7520,6 +7859,8 @@ class VisualizeSkeleton:
         ----------
         color : str, tuple, list
             Single color or list of colors
+        default_alpha : float
+            Default alpha value to use if not specified in color
             
         Returns
         -------
@@ -7529,36 +7870,68 @@ class VisualizeSkeleton:
         # Handle string input
         if isinstance(color, str):
             try:
-                return standardize_color(color, default_alpha=0.1)
+                return standardize_color(color, default_alpha=default_alpha)
             except ValueError:
-                return 'rgba(100, 100, 100, 0.1)'  # Default gray
+                return f'rgba(100, 100, 100, {default_alpha})'  # Default gray
         
         # Handle tuple input
         if isinstance(color, tuple):
             # Check if it's a single RGBA color
             if len(color) >= 3 and all(isinstance(x, (int, float)) for x in color):
                 try:
-                    default_alpha = color[3] if len(color) > 3 else 0.1
-                    return standardize_color(color[:min(len(color), 4)], default_alpha=default_alpha)
+                    # Use explicit alpha from tuple if present, otherwise use default_alpha
+                    alpha = color[3] if len(color) > 3 else default_alpha
+                    return standardize_color(color[:min(len(color), 4)], default_alpha=alpha)
                 except ValueError:
-                    return 'rgba(100, 100, 100, 0.1)'
+                    return f'rgba(100, 100, 100, {default_alpha})'
             # Tuple of colors
-            return [self._standardize_mesh_color_input(c) for c in color]
+            return [self._standardize_mesh_color_input(c, default_alpha=default_alpha) for c in color]
         
         # Handle list input (list of colors for multiple ROIs)
         if isinstance(color, list):
             # Check if it might be a single RGB color (list of 3-4 numbers)
             if len(color) in [3, 4] and all(isinstance(x, (int, float)) for x in color):
                 try:
-                    default_alpha = color[3] if len(color) > 3 else 0.1
-                    return standardize_color(color[:min(len(color), 4)], default_alpha=default_alpha)
+                    alpha = color[3] if len(color) > 3 else default_alpha
+                    return standardize_color(color[:min(len(color), 4)], default_alpha=alpha)
                 except ValueError:
-                    return 'rgba(100, 100, 100, 0.1)'
+                    return f'rgba(100, 100, 100, {default_alpha})'
             # List of colors
-            return [self._standardize_mesh_color_input(c) for c in color]
+            return [self._standardize_mesh_color_input(c, default_alpha=default_alpha) for c in color]
         
         # Fallback
-        return 'rgba(100, 100, 100, 0.1)'
+        return f'rgba(100, 100, 100, {default_alpha})'
+
+    def _is_custom_mesh_color_specified(self) -> bool:
+        """
+        Check if the user specified a custom mesh_color (not the default).
+        
+        Returns
+        -------
+        bool
+            True if mesh_color was customized from default, False otherwise
+        """
+        default_color = (100, 100, 100)  # Default RGB without alpha
+        
+        # Get the original mesh_color before standardization
+        # We check if it differs from the default gray
+        if hasattr(self, '_original_mesh_color'):
+            original = self._original_mesh_color
+        else:
+            original = self.mesh_color
+        
+        # If it's the default tuple, it's not custom
+        if isinstance(original, tuple) and len(original) in [3, 4]:
+            if original[:3] == default_color:
+                return False
+        
+        # If it's a standardized rgba string matching default, it's not custom
+        if isinstance(original, str):
+            if 'rgba(100, 100, 100,' in original or 'rgb(100, 100, 100)' in original:
+                return False
+        
+        # Otherwise, it's custom
+        return True
 
     def _darken_color(self, color, brightness):
         """Darken a color by the given brightness factor.
@@ -7668,6 +8041,91 @@ class VisualizeSkeleton:
             result.append(f'rgba({r}, {g}, {b}, {avg_alpha})')
         
         return result
+
+    def _flatten_nested_roi_groups(self, roi_list, color_input):
+        """Flatten nested ROI lists while assigning same color to grouped ROIs.
+        
+        Supports nested lists for grouping ROIs that should share the same color:
+        e.g., ['AME', ['aL', 'bL', 'gL'], 'EB'] -> 
+              flat list with same color for all ROIs in the nested list.
+        
+        Parameters
+        ----------
+        roi_list : list
+            List of ROI names, potentially with nested lists for grouping.
+            e.g., ['AME', ['aL', 'bL', 'gL', "a'L", "b'L"], 'EB', 'PB']
+        color_input : str, list, or tuple
+            Colors for each ROI group. Can be a single color (applies to all),
+            or a list matching the number of top-level items in roi_list.
+            
+        Returns
+        -------
+        tuple
+            (flattened_rois, expanded_colors, nested_groups)
+            - flattened_rois: Flat list of all ROI names
+            - expanded_colors: List of colors matching flattened_rois
+            - nested_groups: Dict mapping ROI -> group label for legend grouping
+            
+        Examples
+        --------
+        >>> _flatten_nested_roi_groups(['AME', ['aL', 'bL'], 'EB'], ['red', 'green', 'blue'])
+        (['AME', 'aL', 'bL', 'EB'], ['red', 'green', 'green', 'blue'], 
+         {'AME': 'AME', 'aL': 'MB_lobes', 'bL': 'MB_lobes', 'EB': 'EB'})
+        """
+        if not roi_list:
+            return roi_list, color_input, {}
+        
+        # Normalize color_input to a list matching roi_list length
+        if isinstance(color_input, str):
+            colors = [color_input] * len(roi_list)
+        elif isinstance(color_input, (tuple, list)):
+            # Check if it's a single color tuple (RGB/RGBA with numeric values) or a list/tuple of colors
+            # RGB/RGBA tuple: (255, 0, 0) or (1.0, 0.5, 0.0, 0.5)
+            # List of colors: ['red', 'blue'] or ('#ff0000', '#0000ff') or [(255,0,0), (0,0,255)]
+            is_single_rgb_color = (
+                len(color_input) in [3, 4] and 
+                all(isinstance(x, (int, float)) for x in color_input)
+            )
+            
+            if is_single_rgb_color:
+                # Single RGB/RGBA color tuple - apply to all ROIs
+                colors = [color_input] * len(roi_list)
+            else:
+                # List/tuple of colors (strings, hex codes, or color tuples)
+                colors = list(color_input)
+                # Extend if needed
+                while len(colors) < len(roi_list):
+                    colors.append(colors[-1] if colors else 'gray')
+        else:
+            colors = ['gray'] * len(roi_list)
+        
+        flattened_rois = []
+        expanded_colors = []
+        nested_groups = {}
+        
+        for i, item in enumerate(roi_list):
+            color = colors[i] if i < len(colors) else colors[-1]
+            
+            if isinstance(item, list):
+                # Nested list - all items share the same color and legend group
+                # Create a group label from the items
+                group_label = '+'.join(str(r) for r in item[:3])  # Use first 3 names
+                if len(item) > 3:
+                    group_label += f'+{len(item)-3}more'
+                
+                for roi in item:
+                    flattened_rois.append(roi)
+                    expanded_colors.append(color)
+                    nested_groups[roi] = group_label
+                    
+                self._vprint(f"   🔗 Grouped [{', '.join(str(r) for r in item)}] → same color", level='simple')
+            else:
+                # Single ROI
+                flattened_rois.append(item)
+                expanded_colors.append(color)
+                nested_groups[item] = str(item)
+        
+        return flattened_rois, expanded_colors, nested_groups
     
     def _expand_roi_names(self, roi_list, available_rois=None):
         """Expand ROI names to include bilateral (L/R) variants.
@@ -7772,6 +8230,288 @@ class VisualizeSkeleton:
                     seen.add(roi)
                 if available_set:
                     self._vprint(f"   ⚠️  ROI '{roi}' not found in available ROIs (will try to load anyway)", level='full')
+        
+        return expanded
+
+    def _expand_roi_names_with_colors(self, roi_list, color_list, available_rois=None):
+        """Expand ROI names AND their corresponding colors to include bilateral (L/R) variants.
+        
+        When a user specifies 'LH' with color 'red', this function will automatically expand
+        to ['LH(L)', 'LH(R)'] with colors ['red', 'red']. This ensures colors match expanded ROIs.
+        
+        Also builds a mapping from expanded ROI → original ROI for legend grouping.
+        
+        Parameters
+        ----------
+        roi_list : list
+            List of ROI names to expand
+        color_list : list or single color
+            Colors corresponding to each ROI. If a single color, applies to all.
+            If a list shorter than roi_list, extra ROIs get the last color.
+        available_rois : list, optional
+            List of available ROI names. If None, will be fetched from cache/API.
+            
+        Returns
+        -------
+        tuple
+            (expanded_rois, expanded_colors) - Both lists with matching lengths
+            
+        Side Effects
+        -------------
+        Sets self._roi_legend_group_map: dict mapping expanded ROI → original ROI for legend grouping
+            
+        Examples
+        --------
+        >>> _expand_roi_names_with_colors(['LH', 'EB'], ['red', 'blue'])
+        (['LH(L)', 'LH(R)', 'EB'], ['red', 'red', 'blue'])
+        # Also sets _roi_legend_group_map = {'LH(L)': 'LH', 'LH(R)': 'LH', 'EB': 'EB'}
+        
+        >>> _expand_roi_names_with_colors(['LH'], 'green')  # Single color
+        (['LH(L)', 'LH(R)'], ['green', 'green'])
+        """
+        if not roi_list:
+            self._roi_legend_group_map = {}
+            return roi_list, color_list
+        
+        # Normalize color_list to a list
+        if not isinstance(color_list, list):
+            color_list = [color_list] * len(roi_list)
+        
+        # Ensure color_list matches roi_list length
+        if len(color_list) < len(roi_list):
+            # Extend with the last color
+            last_color = color_list[-1] if color_list else None
+            color_list = list(color_list) + [last_color] * (len(roi_list) - len(color_list))
+        
+        # Get available ROIs if not provided
+        if available_rois is None:
+            is_fafb = 'flywire' in self.dataset.lower() or 'fafb' in self.dataset.lower()
+            if is_fafb:
+                malecns_cache = os.path.join(self.script_path, 'cache', 'male-cns_v0_9', 'available_rois.json')
+                if os.path.exists(malecns_cache):
+                    import json
+                    with open(malecns_cache, 'r') as f:
+                        available_rois = json.load(f)
+                else:
+                    available_rois = self._get_available_rois(use_cache=True, fetch_online=False)
+            else:
+                available_rois = self._get_available_rois(use_cache=True, fetch_online=False)
+        
+        available_set = set(available_rois) if available_rois else set()
+        
+        # Get pre-existing nested groups if available (from _flatten_nested_roi_groups)
+        nested_groups = getattr(self, '_nested_roi_groups', {})
+        
+        expanded_rois = []
+        expanded_colors = []
+        legend_group_map = {}  # expanded_roi -> original_roi (for legend grouping)
+        seen = set()
+        
+        for i, roi in enumerate(roi_list):
+            color = color_list[i] if i < len(color_list) else color_list[-1]
+            
+            # Determine the legend group for this ROI
+            # Use nested group if available, otherwise use the ROI itself
+            base_legend_group = nested_groups.get(roi, roi)
+            
+            # Check if ROI already has (L) or (R) suffix
+            if roi.endswith('(L)') or roi.endswith('(R)'):
+                if roi not in seen:
+                    expanded_rois.append(roi)
+                    expanded_colors.append(color)
+                    legend_group_map[roi] = base_legend_group
+                    seen.add(roi)
+                continue
+            
+            # Check if the ROI exists as-is (like 'EB' which is unpaired)
+            if roi in available_set:
+                if roi not in seen:
+                    expanded_rois.append(roi)
+                    expanded_colors.append(color)
+                    legend_group_map[roi] = base_legend_group
+                    seen.add(roi)
+                continue
+            
+            # Try to expand to bilateral variants
+            left_variant = f'{roi}(L)'
+            right_variant = f'{roi}(R)'
+            
+            found_left = left_variant in available_set
+            found_right = right_variant in available_set
+            
+            if found_left and found_right:
+                # Both sides exist, expand to both with same color
+                if left_variant not in seen:
+                    expanded_rois.append(left_variant)
+                    expanded_colors.append(color)
+                    legend_group_map[left_variant] = base_legend_group
+                    seen.add(left_variant)
+                if right_variant not in seen:
+                    expanded_rois.append(right_variant)
+                    expanded_colors.append(color)
+                    legend_group_map[right_variant] = base_legend_group
+                    seen.add(right_variant)
+            elif found_left:
+                if left_variant not in seen:
+                    expanded_rois.append(left_variant)
+                    expanded_colors.append(color)
+                    legend_group_map[left_variant] = base_legend_group
+                    seen.add(left_variant)
+            elif found_right:
+                if right_variant not in seen:
+                    expanded_rois.append(right_variant)
+                    expanded_colors.append(color)
+                    legend_group_map[right_variant] = base_legend_group
+                    seen.add(right_variant)
+            else:
+                # No bilateral variants found, keep original
+                if roi not in seen:
+                    expanded_rois.append(roi)
+                    expanded_colors.append(color)
+                    legend_group_map[roi] = base_legend_group
+                    seen.add(roi)
+        
+        # Store the legend group map as instance attribute
+        self._roi_legend_group_map = legend_group_map
+        
+        return expanded_rois, expanded_colors
+
+    def _expand_mesh_roi_patterns(self, roi_list):
+        """Expand special keywords and regex patterns in mesh_roi list.
+        
+        Supports:
+        - 'primary': All primary ROIs (major brain regions)
+        - 'all': All available ROIs for the current dataset
+        - Regex patterns: 'ME.*' matches all ROIs starting with 'ME'
+        
+        Parameters
+        ----------
+        roi_list : list
+            List of ROI names, keywords, or regex patterns
+            
+        Returns
+        -------
+        list
+            Expanded list of ROI names
+            
+        Examples
+        --------
+        >>> _expand_mesh_roi_patterns(['primary'])
+        ['AL(L)', 'AL(R)', 'EB', 'FB', ...]  # All primary ROIs
+        
+        >>> _expand_mesh_roi_patterns(['ME.*'])
+        ['ME(L)', 'ME(R)', 'ME_glomerulus(L)', ...]  # All ROIs matching ME.*
+        
+        >>> _expand_mesh_roi_patterns(['LH', 'ME.*', 'EB'])
+        ['LH', 'ME(L)', 'ME(R)', ..., 'EB']  # Mixed: literal + regex
+        """
+        import re
+        
+        if not roi_list:
+            return roi_list
+        
+        # Convert single string to list
+        if isinstance(roi_list, str):
+            roi_list = [roi_list]
+        
+        # Get available ROIs for pattern matching
+        available_rois = self._get_available_rois(use_cache=True, fetch_online=True)
+        available_set = set(available_rois) if available_rois else set()
+        
+        # Define primary ROIs - major brain regions that are commonly used
+        # These are regions that typically exist across datasets
+        primary_roi_patterns = [
+            # Central Complex
+            'EB', 'FB', 'PB', 'NO', 'AB',
+            # Mushroom Body  
+            'MB.*', 'CA.*', 'PED.*',
+            # Antennal Lobe
+            'AL\\(.*\\)',
+            # Lateral Horn
+            'LH\\(.*\\)',
+            # Optic Lobe
+            'ME\\(.*\\)', 'LO\\(.*\\)', 'LOP\\(.*\\)', 'AME\\(.*\\)',
+            # Subesophageal Zone
+            'SEZ.*', 'GNG.*',
+            # Other major regions
+            'CRE.*', 'SCL.*', 'ICL.*', 'IB.*', 'ATL.*', 'AVLP.*', 'PVLP.*',
+            'PLP.*', 'WED.*', 'SLP.*', 'SIP.*', 'SMP.*', 'CAN.*',
+            'FLA.*', 'EPA.*', 'GOR.*', 'SPS.*', 'IPS.*',
+        ]
+        
+        expanded = []
+        seen = set()
+        
+        for item in roi_list:
+            item_str = str(item).strip()
+            
+            # Handle special keywords
+            if item_str.lower() == 'all':
+                # Add all available ROIs
+                for roi in sorted(available_rois):
+                    if roi not in seen:
+                        expanded.append(roi)
+                        seen.add(roi)
+                self._vprint(f"   🌐 'all': Added {len(available_rois)} ROIs", level='simple')
+                continue
+                
+            elif item_str.lower() == 'primary':
+                # Add ROIs matching primary patterns
+                primary_count = 0
+                for pattern in primary_roi_patterns:
+                    try:
+                        regex = re.compile(f'^{pattern}$')
+                        for roi in available_rois:
+                            if regex.match(roi) and roi not in seen:
+                                expanded.append(roi)
+                                seen.add(roi)
+                                primary_count += 1
+                    except re.error:
+                        # If pattern is invalid regex, try exact match
+                        if pattern in available_set and pattern not in seen:
+                            expanded.append(pattern)
+                            seen.add(pattern)
+                            primary_count += 1
+                self._vprint(f"   🏛️ 'primary': Added {primary_count} primary ROIs", level='simple')
+                continue
+            
+            # Check if it's a regex pattern (contains regex special chars)
+            # Common regex patterns: .* .+ [abc] ^ $ etc.
+            is_regex = any(c in item_str for c in ['*', '+', '?', '[', ']', '^', '$', '|', '\\'])
+            
+            if is_regex:
+                # Treat as regex pattern
+                try:
+                    # Anchor the pattern if not already anchored
+                    pattern = item_str
+                    if not pattern.startswith('^'):
+                        pattern = '^' + pattern
+                    if not pattern.endswith('$'):
+                        pattern = pattern + '$'
+                    
+                    regex = re.compile(pattern)
+                    matched = []
+                    for roi in available_rois:
+                        if regex.match(roi) and roi not in seen:
+                            expanded.append(roi)
+                            seen.add(roi)
+                            matched.append(roi)
+                    
+                    if matched:
+                        self._vprint(f"   🔍 '{item_str}': Matched {len(matched)} ROIs", level='simple')
+                    else:
+                        self._vprint(f"   ⚠️ '{item_str}': No matching ROIs found", level='simple')
+                        
+                except re.error as e:
+                    self._vprint(f"   ⚠️ Invalid regex '{item_str}': {e}, treating as literal", level='simple')
+                    if item_str not in seen:
+                        expanded.append(item_str)
+                        seen.add(item_str)
+            else:
+                # Literal ROI name
+                if item_str not in seen:
+                    expanded.append(item_str)
+                    seen.add(item_str)
         
         return expanded
 
@@ -8701,6 +9441,9 @@ class VisualizeSkeleton:
         if self.mesh_roi is None:
             return
         
+        # Reset the shown ROI legend groups tracker
+        self._shown_roi_legend_groups = set()
+        
         # Check if we have any work to do (ROI meshes, brain mesh, or VNC mesh)
         has_roi_meshes = len(self.mesh_roi) > 0
         has_brain_mesh = self.brain_mesh in ['template', 'whole']
@@ -8740,16 +9483,22 @@ class VisualizeSkeleton:
         # Use mesh_roi list directly (no auto-mirroring suffix expansion)
         final_mesh_roi = self.mesh_roi
         
-        # Handle colors
+        # Handle colors - mesh_color is already standardized to rgba strings
         final_mesh_colors = []
         for i, roi in enumerate(final_mesh_roi):
             if isinstance(self.mesh_color, list):
                 if i < len(self.mesh_color):
                     color = self.mesh_color[i]
                 else:
-                    color = (100, 100, 100, 0.2)
+                    # Fallback to default gray with current mesh_alpha
+                    color = f'rgba(100, 100, 100, {self.mesh_alpha})'
             else:
                 color = self.mesh_color
+            
+            # Ensure color is a string (standardize if needed)
+            if not isinstance(color, str):
+                color = standardize_color(color, default_alpha=self.mesh_alpha)
+            
             final_mesh_colors.append(color)
         
         for i, roi in enumerate(final_mesh_roi):
@@ -8761,8 +9510,8 @@ class VisualizeSkeleton:
             # Determine if this is FlyWire/FAFB
             is_flywire = 'flywire' in self.dataset.lower() or 'fafb' in self.dataset.lower()
 
-            # Try dataset-specific directory first
-            mesh_file = os.path.join(mesh_dir, roi + '.json')
+            # Try dataset-specific directory first (with case-safe filename)
+            mesh_file = self._get_mesh_file_path(mesh_dir, roi)
             
             # For FAFB: Check for pre-transformed ROI mesh cache first
             # Transformed meshes are stored in cache/{dataset}/meshes_transformed/{TARGET}/
@@ -8772,7 +9521,7 @@ class VisualizeSkeleton:
                 # Determine target space based on brain_mesh mode
                 target_space = 'JRC2018F' if self.brain_mesh == 'whole' else 'FLYWIRE'
                 transformed_cache_dir = os.path.join(self._get_cache_path('meshes_transformed'), target_space)
-                transformed_mesh_file = os.path.join(transformed_cache_dir, roi + '.json')
+                transformed_mesh_file = self._get_mesh_file_path(transformed_cache_dir, roi)
                 
                 if os.path.exists(transformed_mesh_file):
                     # Load pre-transformed mesh - no further transform needed
@@ -8830,6 +9579,7 @@ class VisualizeSkeleton:
             # Standard logic for non-FlyWire or if file exists
             # Fallback to primary_rois if not found (only for non-FlyWire or if we want to support it)
             if not os.path.exists(mesh_file) and not is_flywire:
+                # Try legacy fallback path (doesn't use case-safe encoding)
                 mesh_file_fallback = os.path.join(self.script_path, 'navis_roi_meshes_json', 'primary_rois', roi + '.json')
                 if os.path.exists(mesh_file_fallback):
                     mesh_file = mesh_file_fallback
@@ -8921,7 +9671,8 @@ class VisualizeSkeleton:
                                 # Use target space name for cache directory (FLYWIRE or JRC2018F)
                                 transformed_cache_dir = os.path.join(self._get_cache_path('meshes_transformed'), target)
                                 os.makedirs(transformed_cache_dir, exist_ok=True)
-                                transformed_mesh_file = os.path.join(transformed_cache_dir, roi + '.json')
+                                # Use case-safe filename for transformed mesh
+                                transformed_mesh_file = os.path.join(transformed_cache_dir, self._roi_to_filename(roi))
                                 try:
                                     mesh.to_json(transformed_mesh_file)
                                     self._vprint(f'  💾 Cached transformed ROI to {transformed_mesh_file}', level='full')
@@ -9053,12 +9804,29 @@ class VisualizeSkeleton:
         if roiunits:
             self._vprint('plotting mesh of brain regions...', level='full')
             for roi_i in range(len(roiunits)):
-                roiunits[roi_i].color = roi_colors[roi_i]
+                # Colors are now standardized to rgba strings, convert to hex + alpha for navis
+                color_str = roi_colors[roi_i]
+                
+                # Safeguard: If color is not a string (could be tuple/list from unexpected path),
+                # standardize it now
+                if not isinstance(color_str, str):
+                    color_str = standardize_color(color_str, default_alpha=self.mesh_alpha)
+                
+                # Extract hex color and alpha from standardized rgba string
+                color_hex = self._rgba_to_hex(color_str)
+                alpha = self._extract_alpha_from_color(color_str)
                 
                 if self.backend == 'plotly':
                     with self._suppress_output():
-                        fig_mesh = navis.plot3d(roiunits[roi_i],backend='plotly')
+                        fig_mesh = navis.plot3d(roiunits[roi_i], backend='plotly', color=color_hex, alpha=alpha)
                     mesh_traces = fig_mesh.data
+                    
+                    # Get the legend group for this ROI (original ROI name if expanded)
+                    roi_name = roi_names[roi_i]
+                    legend_group = roi_name
+                    if hasattr(self, '_roi_legend_group_map') and self._roi_legend_group_map:
+                        legend_group = self._roi_legend_group_map.get(roi_name, roi_name)
+                    
                     for ti, trace in enumerate(mesh_traces):
                         if self.legend_mode == 'layer':
                             # Group all ROI meshes under one legend entry
@@ -9068,17 +9836,27 @@ class VisualizeSkeleton:
                                 trace.showlegend = False
                             trace.legendgroup = 'roi_mesh'
                         else:
-                            # 'type' and 'single' modes: each ROI gets its own legend
-                            trace.showlegend = (ti == 0)  # Only show first trace for each ROI
-                            trace.legendgroup = roi_names[roi_i]
+                            # 'type' and 'single' modes: group expanded ROIs under original ROI name
+                            # Track which legend groups we've already shown
+                            if not hasattr(self, '_shown_roi_legend_groups'):
+                                self._shown_roi_legend_groups = set()
+                            
+                            trace.legendgroup = legend_group
+                            # Only show legend for first trace of first ROI in each legend group
+                            should_show = (ti == 0) and (legend_group not in self._shown_roi_legend_groups)
+                            trace.showlegend = should_show
+                            if ti == 0:
+                                self._shown_roi_legend_groups.add(legend_group)
+                        
                         trace.hovertemplate = '<b>%{fullData.name}</b><extra></extra>'  # show full name in hover tooltip
                         trace.hoverinfo = 'name'
-                        trace.name = 'brain regions [' + roi_names[roi_i] + '...]'
+                        # Use original legend group name for display, but include actual ROI in hover
+                        trace.name = f'brain regions [{legend_group}]'
                     self.fig_3d.add_traces(mesh_traces)
                 elif self.backend == 'k3d':
                     try:
                         with self._suppress_output():
-                            temp_plot = navis.plot3d(roiunits[roi_i], backend='k3d', inline=False)
+                            temp_plot = navis.plot3d(roiunits[roi_i], backend='k3d', inline=False, color=color_hex, alpha=alpha)
                         for obj in temp_plot.objects:
                             obj.name = f'brain regions [{roi_names[roi_i]}...]'
                             self.fig_3d += obj

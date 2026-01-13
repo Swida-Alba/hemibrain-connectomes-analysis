@@ -99,6 +99,15 @@ if __name__ == "__main__":
     #            Legend labels: r{rank}_{type}_x{N} where N is neuron count per type
     visualize_by = 'type'
     
+    # Metric to sort types by for visualization ranking
+    # Options:
+    #   - 'max_score': Maximum score among neurons of each type (default)
+    #   - 'median_score': Median score of neurons per type
+    #   - 'Q3_score': 75th percentile (Q3) score of neurons per type
+    #   - 'Q1_score': 25th percentile (Q1) score of neurons per type
+    #   - 'avg_score': Average score of neurons per type
+    sort_by = 'max_score'
+    
     # Create separate visualization per dataset (True) or combined (False)
     visualize_per_dataset = True
     
@@ -180,6 +189,7 @@ if __name__ == "__main__":
         background_color=background_color,
         type_filter=type_filter,
         datasets_to_visualize=datasets_to_visualize,
+        sort_by=sort_by,
     )
     
     # Display summary

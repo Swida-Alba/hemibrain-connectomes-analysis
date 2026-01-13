@@ -165,9 +165,6 @@ if __name__ == "__main__":
     # Output directory (set to None for stdout only)
     output_dir = '../local_data/neuronbridge_finding'
     
-    # Path to datasets folder for neuron lookup (None = auto-detect)
-    datasets_path = None
-    
     # Enable result caching
     use_cache = True
     
@@ -243,7 +240,6 @@ if __name__ == "__main__":
     
     # Initialize finder
     finder = NeuronBridgeFinder(
-        datasets_path=datasets_path,
         use_cache=use_cache,
         verbose=verbose,
         separate_splitgal4=separate_splitgal4,

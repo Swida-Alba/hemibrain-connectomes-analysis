@@ -126,12 +126,29 @@ FLYLIGHT_COLLECTIONS = [
     'Gen1',                 # Gen1 CDM images (R-lines)
     'Split-GAL4 Omnibus Broad',    # Split-GAL4 broad collection
     'Split-GAL4 Omnibus Rescreen', # Split-GAL4 rescreen collection
-    # Paper-specific collections:
+    # Paper-specific Split-GAL4 collections:
+    'Ascending Neurons 2023',
+    'Aso 2021',
+    'Aso&Rubin 2016',
     'Descending Neurons 2018',
     'Descending Neurons 2025',
+    'Dorsal VNC 2023',
+    'Hulse et al. 2021',           # Central Complex
+    'Isaacson et al 2023',
     'Lateral Horn 2019',
+    'Lillvis 2022',
+    'Lillvis 2023',
     'MB Paper 2014',
+    'Namiki 2021',
+    'Nern et al 2023',
+    'Nern et al 2024',             # Optic lobe Split-GAL4 lines (SS27796, etc.)
+    'Rubin & Aso 2023',
+    'Rubin et al 2025',
+    'Schretter et al 2024',
+    'Schretter et al. 2020',
     'SEZ 2021',
+    'Wolff 2018',
+    'Wolff et al 2024',
 ]
 
 # Collection categories for easier filtering
@@ -144,11 +161,29 @@ COLLECTION_CATEGORIES = {
     'SPLITGAL4': [
         'Split-GAL4 Omnibus Broad',    # SS-lines broad collection
         'Split-GAL4 Omnibus Rescreen', # SS-lines rescreen
-        'Lateral Horn 2019',           # LH paper Split-GAL4
-        'Descending Neurons 2018',     # DN paper
-        'Descending Neurons 2025',     # DN paper 2025
-        'SEZ 2021',                    # SEZ paper
-        'MB Paper 2014',               # MB paper
+        # Paper-specific Split-GAL4 collections:
+        'Ascending Neurons 2023',
+        'Aso 2021',
+        'Aso&Rubin 2016',
+        'Descending Neurons 2018',
+        'Descending Neurons 2025',
+        'Dorsal VNC 2023',
+        'Hulse et al. 2021',           # Central Complex
+        'Isaacson et al 2023',
+        'Lateral Horn 2019',
+        'Lillvis 2022',
+        'Lillvis 2023',
+        'MB Paper 2014',
+        'Namiki 2021',
+        'Nern et al 2023',
+        'Nern et al 2024',             # Optic lobe Split-GAL4 lines
+        'Rubin & Aso 2023',
+        'Rubin et al 2025',
+        'Schretter et al 2024',
+        'Schretter et al. 2020',
+        'SEZ 2021',
+        'Wolff 2018',
+        'Wolff et al 2024',
     ],
     'MCFO': [
         'Annotator Gen1 MCFO',  # R-lines with MCFO labeling
@@ -168,9 +203,143 @@ _CATEGORY_LOOKUP = {k.upper().replace('-', '').replace('_', ''): k for k in COLL
 # Reverse mapping: collection folder -> category
 COLLECTION_TO_CATEGORY = {}
 for category, collections in COLLECTION_CATEGORIES.items():
-    if category != 'All':
+    if category.upper() != 'ALL':  # Skip 'ALL' to avoid overwriting specific categories
         for coll in collections:
             COLLECTION_TO_CATEGORY[coll] = category
+
+# Cache for dynamically discovered collections
+_DISCOVERED_COLLECTIONS_CACHE: Optional[List[str]] = None
+
+
+def discover_s3_collections(refresh: bool = False, verbose: bool = False) -> List[str]:
+    """
+    Dynamically discover all available collections from the FlyLight S3 bucket.
+    
+    This function queries the S3 bucket to get all top-level folders (collections)
+    instead of relying on a hardcoded list. Results are cached for efficiency.
+    
+    Args:
+        refresh: If True, force a refresh of the cache
+        verbose: Print discovery progress
+        
+    Returns:
+        List of collection names (folder prefixes without trailing slash)
+    """
+    global _DISCOVERED_COLLECTIONS_CACHE
+    
+    if _DISCOVERED_COLLECTIONS_CACHE is not None and not refresh:
+        return _DISCOVERED_COLLECTIONS_CACHE
+    
+    collections = []
+    
+    # Try boto3 first
+    if HAS_BOTO3:
+        try:
+            s3 = boto3.client(
+                's3',
+                region_name=FLYLIGHT_REGION,
+                config=Config(signature_version=UNSIGNED)
+            )
+            
+            result = s3.list_objects_v2(
+                Bucket=FLYLIGHT_BUCKET,
+                Delimiter='/'
+            )
+            
+            for prefix in result.get('CommonPrefixes', []):
+                folder = prefix['Prefix'].rstrip('/')
+                # Skip non-collection folders
+                if folder not in ['content']:
+                    collections.append(folder)
+            
+            if verbose:
+                print(f"✅ Discovered {len(collections)} collections from S3")
+                
+        except Exception as e:
+            if verbose:
+                print(f"⚠️  Failed to discover collections via boto3: {e}")
+    
+    # Fallback to HTTP if boto3 failed or not available
+    if not collections:
+        try:
+            url = f"https://s3.amazonaws.com/{FLYLIGHT_BUCKET}?delimiter=/"
+            with urllib.request.urlopen(url, timeout=30) as response:
+                content = response.read().decode('utf-8')
+            
+            # Parse XML response
+            root = ET.fromstring(content)
+            ns = {'s3': 'http://s3.amazonaws.com/doc/2006-03-01/'}
+            
+            for prefix in root.findall('.//s3:CommonPrefixes/s3:Prefix', ns):
+                if prefix.text:
+                    folder = prefix.text.rstrip('/')
+                    if folder not in ['content']:
+                        collections.append(folder)
+            
+            if verbose:
+                print(f"✅ Discovered {len(collections)} collections via HTTP")
+                
+        except Exception as e:
+            if verbose:
+                print(f"⚠️  Failed to discover collections via HTTP: {e}")
+            # Fall back to hardcoded list
+            collections = FLYLIGHT_COLLECTIONS.copy()
+            if verbose:
+                print(f"   Using hardcoded list of {len(collections)} collections")
+    
+    _DISCOVERED_COLLECTIONS_CACHE = collections
+    return collections
+
+
+def update_collection_categories(discovered: List[str]) -> Dict[str, List[str]]:
+    """
+    Update COLLECTION_CATEGORIES with newly discovered collections.
+    
+    Attempts to categorize new collections based on naming patterns.
+    Collections that can't be categorized are added to SPLITGAL4 by default
+    (most paper-specific collections are Split-GAL4).
+    
+    Args:
+        discovered: List of discovered collection names
+        
+    Returns:
+        Updated categories dict
+    """
+    global COLLECTION_TO_CATEGORY
+    
+    known = set(FLYLIGHT_COLLECTIONS)
+    new_collections = [c for c in discovered if c not in known]
+    
+    if not new_collections:
+        return COLLECTION_CATEGORIES
+    
+    # Add new collections to appropriate categories
+    for coll in new_collections:
+        coll_lower = coll.lower()
+        
+        # Determine category based on naming patterns
+        if 'mcfo' in coll_lower:
+            if coll not in COLLECTION_CATEGORIES['MCFO']:
+                COLLECTION_CATEGORIES['MCFO'].append(coll)
+            category = 'MCFO'
+        elif 'gen1' in coll_lower and 'mcfo' not in coll_lower:
+            if coll not in COLLECTION_CATEGORIES['GAL4/LEXA']:
+                COLLECTION_CATEGORIES['GAL4/LEXA'].append(coll)
+            category = 'GAL4/LEXA'
+        else:
+            # Default: assume Split-GAL4 (most paper collections are Split-GAL4)
+            if coll not in COLLECTION_CATEGORIES['SPLITGAL4']:
+                COLLECTION_CATEGORIES['SPLITGAL4'].append(coll)
+            category = 'SPLITGAL4'
+        
+        # Update reverse mapping
+        COLLECTION_TO_CATEGORY[coll] = category
+    
+    # Update ALL category
+    COLLECTION_CATEGORIES['ALL'] = discovered
+    
+    return COLLECTION_CATEGORIES
+
 
 # File format extensions
 FILE_FORMATS = {
@@ -316,6 +485,8 @@ class FlyLightDownloader:
     use_boto3: bool = True
     include_vt_lines: bool = True  # Also search VT lines via HTTP CDN
     simple_mode: bool = True  # Apply filename filtering to reduce download volume
+    auto_discover: bool = True  # Auto-discover collections from S3 bucket
+    simple_mode_min_files: int = 2  # Minimum files to return per line when simple_mode filters all
     
     # Internal state
     _s3_client: Any = field(default=None, repr=False, init=False)
@@ -360,6 +531,13 @@ class FlyLightDownloader:
     
     def _resolve_collections(self):
         """Resolve collections from category if not explicitly provided."""
+        # Auto-discover collections if enabled
+        if self.auto_discover:
+            discovered = discover_s3_collections(verbose=self.verbose)
+            if discovered:
+                # Update categories with newly discovered collections
+                update_collection_categories(discovered)
+        
         if self.collections is not None:
             # Use explicitly specified collections
             self._resolved_collections = self.collections
@@ -389,10 +567,10 @@ class FlyLightDownloader:
             else:
                 if self.verbose:
                     print(f"⚠️ No valid categories found, using all collections")
-                self._resolved_collections = FLYLIGHT_COLLECTIONS
+                self._resolved_collections = discover_s3_collections() if self.auto_discover else FLYLIGHT_COLLECTIONS
         else:
-            # Default: all collections
-            self._resolved_collections = None  # None means search all
+            # Default: all collections (use discovered if available)
+            self._resolved_collections = discover_s3_collections() if self.auto_discover else None
     
     def get_collection_category(self, collection_name: str) -> str:
         """Get the category for a given collection name."""
@@ -1053,8 +1231,12 @@ class FlyLightDownloader:
             # Search S3 bucket for Split-GAL4, SS-lines, etc.
             collections_to_search = self._resolved_collections or FLYLIGHT_COLLECTIONS
             
-            # MCFO collections that commonly overlap - always search both
+            # Collections that commonly overlap - always search all of them
+            # MCFO collections: always search both as they commonly overlap
+            # Split-GAL4 collections: search all when simple_mode is enabled, since 
+            # different collections may have different resolution images (20x vs 63x)
             mcfo_collections = {'Annotator Gen1 MCFO', 'Gen1 MCFO'}
+            splitgal4_collections = {c for c in COLLECTION_CATEGORIES.get('SPLITGAL4', [])}
             
             for i, collection in enumerate(collections_to_search):
                 self._log(f"   Searching {collection}...")
@@ -1079,12 +1261,18 @@ class FlyLightDownloader:
                 all_files.extend(files)
                 
                 # Early exit logic - skip remaining collections if we have files,
-                # BUT always check both MCFO collections since they commonly overlap
+                # BUT always check overlapping collection types:
+                # - MCFO collections commonly overlap
+                # - Split-GAL4 collections when simple_mode is enabled (different resolutions)
                 if all_files and len(collections_to_search) > 3:
-                    # Check if the next collection is also MCFO
-                    next_collections = [c for c in collections_to_search[i+1:] if c in mcfo_collections]
-                    if next_collections:
-                        continue  # Keep searching MCFO collections
+                    remaining = collections_to_search[i+1:]
+                    # Check if any remaining collection is MCFO
+                    next_mcfo = [c for c in remaining if c in mcfo_collections]
+                    # Check if any remaining collection is Split-GAL4 AND we're in simple_mode
+                    next_splitgal4 = [c for c in remaining if c in splitgal4_collections] if self.simple_mode else []
+                    
+                    if next_mcfo or next_splitgal4:
+                        continue  # Keep searching overlapping collections
                     self._log(f"   ✓ Found files in {collection}, skipping remaining collections")
                     break
         
@@ -1128,8 +1316,14 @@ class FlyLightDownloader:
             coll_lower = coll.lower()
             filename_lower = f.filename.lower()
             
+            # Get the category for this collection to determine filter rules
+            collection_category = COLLECTION_TO_CATEGORY.get(coll, 'Other').upper()
+            
             # Split-GAL4: only include '20x' AND 'multichannel', exclude 'image1'/'image2'
-            if any(x in coll_lower for x in ['splitgal4', 'split-gal4', 'split_gal4', 'omnibus']):
+            # Check both category mapping and string patterns for backward compatibility
+            is_splitgal4 = (collection_category == 'SPLITGAL4' or
+                           any(x in coll_lower for x in ['splitgal4', 'split-gal4', 'split_gal4', 'omnibus']))
+            if is_splitgal4:
                 if '20x' in filename_lower and 'multichannel' in filename_lower:
                     # Exclude duplicate images (image1, image2, etc.)
                     if 'image1' not in filename_lower and 'image2' not in filename_lower:
@@ -1179,23 +1373,76 @@ class FlyLightDownloader:
         else:
             line_names = line_name
         
-        # Collect files from all lines
-        all_filtered = []
+        # Collect files from all lines, tracking per-line for fallback
+        from collections import defaultdict
+        files_by_line_pre_simple = defaultdict(list)  # Before simple_mode filter
+        
         for name in line_names:
             all_files = self.list_files(name)
             filtered = [f for f in all_files if self._matches_filters(f)]
             self._log(f"   {len(filtered)} files match format/type filters for '{name}'")
-            all_filtered.extend(filtered)
+            files_by_line_pre_simple[name] = filtered
         
         # Apply simple_mode filtering if enabled
         use_simple = apply_simple_mode if apply_simple_mode is not None else self.simple_mode
+        
+        all_filtered = []
+        lines_with_fallback = []  # Track lines that needed fallback
+        
         if use_simple:
-            all_filtered = self.apply_simple_mode_filter(all_filtered)
+            for name, pre_files in files_by_line_pre_simple.items():
+                if not pre_files:
+                    continue
+                    
+                # Apply simple_mode filter
+                post_files = self.apply_simple_mode_filter(pre_files)
+                
+                # Fallback: if simple_mode filtered out ALL files, include some anyway
+                if not post_files and pre_files and self.simple_mode_min_files > 0:
+                    # Prioritize multichannel MIP files, then any MIP, then any file
+                    fallback = []
+                    
+                    # First priority: multichannel_mip files (any resolution)
+                    for f in pre_files:
+                        if 'multichannel_mip' in f.filename.lower():
+                            fallback.append(f)
+                            if len(fallback) >= self.simple_mode_min_files:
+                                break
+                    
+                    # Second priority: any MIP files
+                    if len(fallback) < self.simple_mode_min_files:
+                        for f in pre_files:
+                            if f not in fallback and '_mip' in f.filename.lower():
+                                fallback.append(f)
+                                if len(fallback) >= self.simple_mode_min_files:
+                                    break
+                    
+                    # Last resort: any file
+                    if len(fallback) < self.simple_mode_min_files:
+                        for f in pre_files:
+                            if f not in fallback:
+                                fallback.append(f)
+                                if len(fallback) >= self.simple_mode_min_files:
+                                    break
+                    
+                    post_files = fallback
+                    lines_with_fallback.append(name)
+                
+                all_filtered.extend(post_files)
+            
+            # Warn user about fallback
+            if lines_with_fallback and self.verbose:
+                self._log(f"   ⚠️ Simple mode filter too strict for {len(lines_with_fallback)} line(s): "
+                         f"{', '.join(lines_with_fallback[:5])}{'...' if len(lines_with_fallback) > 5 else ''}")
+                self._log(f"      → Included {self.simple_mode_min_files} fallback file(s) per line (may not match 20x/multichannel criteria)")
+        else:
+            # No simple_mode filtering
+            for pre_files in files_by_line_pre_simple.values():
+                all_filtered.extend(pre_files)
         
         # Apply max_files_per_line limit if specified
         if max_files_per_line:
             # Group files by line name and limit each group
-            from collections import defaultdict
             files_by_line = defaultdict(list)
             for f in all_filtered:
                 files_by_line[f.line_name].append(f)

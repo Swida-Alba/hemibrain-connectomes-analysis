@@ -5355,7 +5355,8 @@ class NeuronBridgeFinder:
         neurons_df: pd.DataFrame,
         line_name: str,
         output_path: str,
-        verbose: bool = True
+        verbose: bool = True,
+        sort_by: str = 'max_score'
     ) -> None:
         """
         Save dataset-categorized neuron files and type summary files.
@@ -5390,7 +5391,7 @@ class NeuronBridgeFinder:
                 self._vprint(f"   💾 Saved: {ds_neurons_file}")
             
             # Create type summary
-            type_summary = self._create_type_summary(ds_df, dataset)
+            type_summary = self._create_type_summary(ds_df, dataset, sort_by=sort_by)
             if not type_summary.empty:
                 ds_types_file = os.path.join(output_path, f'{line_name}_{ds_filename}_types.csv')
                 type_summary.to_csv(ds_types_file, index=False)
@@ -5400,7 +5401,8 @@ class NeuronBridgeFinder:
     def _create_type_summary(
         self,
         neurons_df: pd.DataFrame,
-        dataset: str
+        dataset: str,
+        sort_by: str = 'max_score'
     ) -> pd.DataFrame:
         """
         Create a type summary DataFrame with labeled_N and typed_N_in_dataset.
@@ -5411,6 +5413,8 @@ class NeuronBridgeFinder:
             DataFrame with matched neurons
         dataset : str
             Dataset name for looking up total type counts
+        sort_by : str, default 'max_score'
+            Score metric to sort by: 'max_score', 'median_score', 'Q3_score', 'Q1_score', 'avg_score'
             
         Returns
         -------
@@ -5435,12 +5439,20 @@ class NeuronBridgeFinder:
         if score_col:
             type_stats = neurons_df.groupby('type_label').agg(
                 labeled_N=('bodyId', 'count'),
+                max_score=(score_col, 'max'),
+                median_score=(score_col, 'median'),
+                Q3_score=(score_col, lambda x: x.quantile(0.75)),
+                Q1_score=(score_col, lambda x: x.quantile(0.25)),
                 avg_score=(score_col, 'mean')
             ).reset_index()
         else:
             type_stats = neurons_df.groupby('type_label').agg(
                 labeled_N=('bodyId', 'count')
             ).reset_index()
+            type_stats['max_score'] = None
+            type_stats['median_score'] = None
+            type_stats['Q3_score'] = None
+            type_stats['Q1_score'] = None
             type_stats['avg_score'] = None
         
         type_stats = type_stats.rename(columns={'type_label': 'type'})
@@ -5450,17 +5462,23 @@ class NeuronBridgeFinder:
             lambda t: self._get_type_count_in_dataset(t, dataset)
         )
         
-        # Sort by avg_score descending (primary), then by labeled_N descending (secondary)
+        # Sort by specified metric descending (primary), then by labeled_N descending (secondary)
         # This ensures top-N types are the ones with highest match scores
         if score_col:
-            type_stats = type_stats.sort_values(['avg_score', 'labeled_N'], ascending=[False, False])
+            # Use sort_by if it's a valid column, otherwise default to max_score
+            sort_column = sort_by if sort_by in type_stats.columns else 'max_score'
+            type_stats = type_stats.sort_values([sort_column, 'labeled_N'], ascending=[False, False])
         else:
             type_stats = type_stats.sort_values('labeled_N', ascending=False)
         
-        # Reorder columns
+        # Reorder columns: max, median, Q3, Q1, avg
         cols = ['type', 'labeled_N', 'typed_N_in_dataset']
         if score_col:
-            cols.insert(2, 'avg_score')
+            cols.insert(2, 'max_score')
+            cols.insert(3, 'median_score')
+            cols.insert(4, 'Q3_score')
+            cols.insert(5, 'Q1_score')
+            cols.insert(6, 'avg_score')
         type_stats = type_stats[cols]
         
         return type_stats
@@ -5593,7 +5611,8 @@ class NeuronBridgeFinder:
     def _get_top_types_fallback(
         self,
         ds_df: pd.DataFrame,
-        top_n: Optional[int] = None
+        top_n: Optional[int] = None,
+        sort_by: str = 'max_score'
     ) -> List[str]:
         """
         Fallback method to get top N types by score when labeling_info is not available.
@@ -5604,6 +5623,8 @@ class NeuronBridgeFinder:
             Dataset-filtered DataFrame with 'type_label' and 'score' columns
         top_n : int, optional
             Number of top types to return. If None, returns all types sorted by score.
+        sort_by : str, default 'max_score'
+            Score metric to sort by: 'max_score', 'avg_score', 'median_score', 'Q3_score', 'Q1_score'
             
         Returns
         -------
@@ -5613,11 +5634,24 @@ class NeuronBridgeFinder:
         score_col = 'score' if 'score' in ds_df.columns else None
         
         if score_col:
+            # Calculate all score metrics
             type_stats = ds_df.groupby('type_label').agg(
+                max_score=(score_col, 'max'),
+                median_score=(score_col, 'median'),
+                Q3_score=(score_col, lambda x: x.quantile(0.75)),
+                Q1_score=(score_col, lambda x: x.quantile(0.25)),
                 avg_score=(score_col, 'mean'),
                 count=('bodyId', 'count')
             ).reset_index()
-            type_stats = type_stats.sort_values('avg_score', ascending=False)
+            
+            # Determine sort column
+            if sort_by in type_stats.columns:
+                sort_column = sort_by
+            else:
+                # Default to max_score if invalid sort_by
+                sort_column = 'max_score'
+            
+            type_stats = type_stats.sort_values(sort_column, ascending=False)
             if top_n is not None:
                 type_stats = type_stats.head(top_n)
             return type_stats['type_label'].tolist()
@@ -5642,6 +5676,7 @@ class NeuronBridgeFinder:
         labeling_info: Optional[pd.DataFrame] = None,
         type_filter: Optional[Dict[str, Union[str, List[str]]]] = None,
         datasets_to_visualize: Union[str, List[str]] = 'all',
+        sort_by: str = 'max_score',
     ) -> None:
         """
         Visualize top N types/bodyIds per dataset using VisualizeSkeleton.
@@ -5680,6 +5715,13 @@ class NeuronBridgeFinder:
             before filtering, allowing tracking of original ranking position).
         datasets_to_visualize : str or list, default 'all'
             Constrain which datasets to visualize. 'all' for all datasets.
+        sort_by : str, default 'max_score'
+            Score metric to sort types by when ranking for top N selection:
+            - 'max_score': Maximum score among neurons of this type (default)
+            - 'median_score': Median score among neurons of this type
+            - 'Q3_score': 75th percentile (Q3) score among neurons of this type
+            - 'Q1_score': 25th percentile (Q1) score among neurons of this type
+            - 'avg_score': Average score among neurons of this type
         """
         try:
             from visualize_skeleton import VisualizeSkeleton
@@ -5759,7 +5801,7 @@ class NeuronBridgeFinder:
                 ds_df = ds_df_typed
                 
                 # Get top N types using labeling_info if available (case-sensitive, properly sorted)
-                # Otherwise fallback to avg_score
+                # Otherwise fallback to score-based ranking using sort_by metric
                 # If type_filter is set, get ALL types first, then filter, then take top N
                 get_all_types = type_filter is not None and type_filter
                 
@@ -5777,10 +5819,10 @@ class NeuronBridgeFinder:
                         self._vprint(f"   📋 Using labeling_info for {dataset}: {len(all_types)} candidate types")
                     else:
                         # Fallback if no labeling info for this dataset
-                        all_types = self._get_top_types_fallback(ds_df, None if get_all_types else top_n)
+                        all_types = self._get_top_types_fallback(ds_df, None if get_all_types else top_n, sort_by=sort_by)
                 else:
                     # Fallback to score-based ranking
-                    all_types = self._get_top_types_fallback(ds_df, None if get_all_types else top_n)
+                    all_types = self._get_top_types_fallback(ds_df, None if get_all_types else top_n, sort_by=sort_by)
                 
                 if not all_types:
                     continue
@@ -6027,6 +6069,7 @@ class NeuronBridgeFinder:
         background_color: str = 'white',
         type_filter: Optional[Dict[str, Union[str, List[str]]]] = None,
         datasets_to_visualize: Union[str, List[str]] = 'all',
+        sort_by: str = 'max_score',
     ) -> pd.DataFrame:
         """
         Find EM neurons for multiple driver lines with automatic saving.
@@ -6077,6 +6120,13 @@ class NeuronBridgeFinder:
             - 'all' or None: Visualize all datasets found in results
             - List of dataset names: Only visualize specified datasets
             - Single dataset name: Only visualize that dataset
+        sort_by : str, default 'max_score'
+            Score metric to sort types by when ranking for visualization top N selection:
+            - 'max_score': Maximum score among neurons of this type (default)
+            - 'median_score': Median score among neurons of this type
+            - 'Q3_score': 75th percentile (Q3) score among neurons of this type
+            - 'Q1_score': 25th percentile (Q1) score among neurons of this type
+            - 'avg_score': Average score among neurons of this type
             
         Returns
         -------
@@ -6088,7 +6138,8 @@ class NeuronBridgeFinder:
         When output_dir is specified:
         - {line}_neurons.csv: All matched neurons for the line
         - {line}_{dataset}_neurons.csv: Neurons categorized by dataset
-        - {line}_{dataset}_types.csv: Type summary with labeled_N and typed_N_in_dataset
+        - {line}_{dataset}_types.csv: Type summary with labeled_N, max_score, median_score, 
+          Q3_score, Q1_score, avg_score, and typed_N_in_dataset
         - all_neurons.csv: Combined results from all searches
             
         Example
@@ -6215,7 +6266,7 @@ class NeuronBridgeFinder:
                     # Save dataset-categorized files
                     if 'dataset' in cached_data.columns:
                         self._save_dataset_categorized_files(
-                            cached_data, line_name, output_path, verbose=False
+                            cached_data, line_name, output_path, verbose=False, sort_by=sort_by
                         )
             
             # Restore loading message setting
@@ -6260,7 +6311,7 @@ class NeuronBridgeFinder:
                             # Save dataset-categorized files
                             if 'dataset' in neurons_df.columns:
                                 self._save_dataset_categorized_files(
-                                    neurons_df, line_name, output_path, verbose=False
+                                    neurons_df, line_name, output_path, verbose=False, sort_by=sort_by
                                 )
                         
                     except Exception as e:
@@ -6307,7 +6358,7 @@ class NeuronBridgeFinder:
                         # Save dataset-categorized files
                         if 'dataset' in neurons_df.columns:
                             self._save_dataset_categorized_files(
-                                neurons_df, line_name, output_path, verbose=True
+                                neurons_df, line_name, output_path, verbose=True, sort_by=sort_by
                             )
                         
                 except Exception as e:
@@ -6373,6 +6424,7 @@ class NeuronBridgeFinder:
                             background_color=background_color,
                             type_filter=type_filter,
                             datasets_to_visualize=datasets_to_visualize,
+                            sort_by=sort_by,
                         )
                     
                     # Recommend colabeling analysis for multiple lines
@@ -6400,6 +6452,7 @@ class NeuronBridgeFinder:
                         background_color=background_color,
                         type_filter=type_filter,
                         datasets_to_visualize=datasets_to_visualize,
+                        sort_by=sort_by,
                     )
             
             return combined_df
@@ -6424,6 +6477,7 @@ class NeuronBridgeFinder:
         background_color: str = 'white',
         type_filter: Optional[Dict[str, Union[str, List[str]]]] = None,
         datasets_to_visualize: Union[str, List[str]] = 'all',
+        sort_by: str = 'max_score',
     ) -> Dict[str, Any]:
         """
         Analyze co-labeling patterns among given driver lines.
@@ -6508,6 +6562,13 @@ class NeuronBridgeFinder:
             - 'all' or None: Visualize all datasets found in results
             - List of dataset names: Only visualize specified datasets
             - Single dataset name: Only visualize that dataset
+        sort_by : str, default 'max_score'
+            Metric to sort types by for visualization ranking:
+            - 'max_score': Maximum score among neurons of each type
+            - 'median_score': Median score of neurons per type
+            - 'Q3_score': 75th percentile (Q3) score among neurons of this type
+            - 'Q1_score': 25th percentile (Q1) score among neurons of this type
+            - 'avg_score': Average score of neurons per type
             
         Returns
         -------
@@ -6696,7 +6757,7 @@ class NeuronBridgeFinder:
                         neurons_df.to_csv(neurons_csv, index=False)
                         
                         # Split by dataset and save dataset-specific files with type summaries
-                        self._save_dataset_categorized_files(neurons_df, safe_name, neurons_dir, verbose=False)
+                        self._save_dataset_categorized_files(neurons_df, safe_name, neurons_dir, verbose=False, sort_by=sort_by)
                 
                 self._vprint(f"   💾 Line neurons: {neurons_dir}/ ({len(line_neurons_dict)} lines, split by dataset)")
         
@@ -6888,6 +6949,7 @@ class NeuronBridgeFinder:
                 labeling_info=labeling_info,  # Pass case-sensitive type info for per-dataset filtering
                 type_filter=type_filter,
                 datasets_to_visualize=datasets_to_visualize,
+                sort_by=sort_by,
             )
         
         # Summary
