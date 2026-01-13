@@ -111,6 +111,41 @@ if __name__ == "__main__":
     # Default: (3, 2) = 3 columns x 2 rows = 6 images per page
     pdf_images_per_page = (3, 2)
     
+    # Background color for 3D visualization
+    # Options: 'white', 'black', or any CSS color (e.g., '#f0f0f0', 'lightgray')
+    # Default: 'white'
+    background_color = 'white'
+    
+    # ==========================================================================
+    # VISUALIZATION FILTERING - Filter which types/datasets to visualize
+    # ==========================================================================
+    
+    # Filter neuron types for visualization by name pattern
+    # Uses a dict with filter type as key and pattern(s) as value
+    # Filter types: 'contains', 'startswith', 'endswith', 'regex'
+    # Multiple patterns can be combined (OR logic within same filter, AND across filters)
+    # The rank r{N} will be preserved from the original ranking before filtering
+    # Examples:
+    #   type_filter = {'contains': 'DN'}           # Types containing 'DN'
+    #   type_filter = {'startswith': ['DN', 'IN']} # Types starting with 'DN' or 'IN'
+    #   type_filter = {'endswith': '_R'}           # Types ending with '_R'
+    #   type_filter = {'regex': r'DN[a-z]\d+'}     # Types matching regex pattern
+    #   type_filter = {'contains': 'DN', 'endswith': '_R'}  # Both conditions (AND)
+    # Set to None or {} to disable filtering (visualize all top types)
+    # Note: This filter applies to:
+    #   - 3D skeleton visualization (types shown)
+    #   - expression_matrix_viz.csv and expression_matrix_merged_viz.csv
+    #   - Expression matrix HTML heatmaps
+    type_filter = {}
+    
+    # Constrain which datasets to visualize
+    # Options:
+    #   - 'all' or None: Visualize all datasets found in results (default)
+    #   - List of dataset names: ['hemibrain:v1.2.1', 'manc:v1.0']
+    #   - Single dataset: 'hemibrain:v1.2.1'
+    # Dataset names should match exactly as they appear in the results
+    datasets_to_visualize = None
+    
     # ==========================================================================
     # SCORE FILTERING - Filter low-confidence neurons and types
     # ==========================================================================
