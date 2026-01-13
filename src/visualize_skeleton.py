@@ -6619,15 +6619,19 @@ class VisualizeSkeleton:
                         raise ValueError(f'legend_mode {self.legend_mode} not supported')
                 
                 # Fix legend opacity: Add invisible marker traces with full opacity for legend display
-                # Only needed when neuron_alpha < 1.0 to ensure legend swatches show vivid colors
-                if self.neuron_alpha < 1.0 and legend_color_map:
+                # Needed when alpha < 1.0 (either from neuron_alpha or explicit alpha in colors)
+                # to ensure legend color patches are clearly visible
+                needs_legend_fix = (layer_neuron_alpha < 1.0 or self._neuron_colors_have_explicit_alpha) and legend_color_map
+                if needs_legend_fix:
                     import plotly.graph_objects as go
                     for legend_group, (color, _) in legend_color_map.items():
+                        # Get opaque version of color for legend display
+                        opaque_color = self._get_opaque_color(color)
                         # Add an invisible scatter point (no coords = not rendered) for legend only
                         legend_trace = go.Scatter3d(
                             x=[None], y=[None], z=[None],  # No coordinates = invisible in plot
                             mode='markers',
-                            marker=dict(size=10, color=color, opacity=1.0),  # Full opacity for legend
+                            marker=dict(size=10, color=opaque_color, opacity=1.0),  # Full opacity for legend
                             name=legend_group,
                             legendgroup=legend_group,
                             showlegend=True,
@@ -7238,7 +7242,8 @@ class VisualizeSkeleton:
                 mesh.showlegend = False
                 self.fig_3d.add_trace(mesh)
 
-                # Add dummy scatter trace for legend
+                # Add dummy scatter trace for legend with opaque color for visibility
+                opaque_synapse_color = self._get_opaque_color(self.synapse_colors[i])
                 dummy_legend = go.Scatter3d(
                     x=[None], y=[None], z=[None],
                     mode='markers',
@@ -7247,7 +7252,7 @@ class VisualizeSkeleton:
                     showlegend=True,
                     marker=dict(
                         size=10,
-                        color=self.synapse_colors[i],
+                        color=opaque_synapse_color,  # Use opaque color for legend visibility
                         symbol='circle'
                     )
                 )
@@ -7416,6 +7421,36 @@ class VisualizeSkeleton:
             return color_to_hex(color_str)
         except:
             return '#808080'  # Default gray
+    
+    def _get_opaque_color(self, color_str: str) -> str:
+        """
+        Get opaque version of a color (alpha=1.0) for legend display.
+        
+        Used to ensure legend color patches are fully visible regardless
+        of the actual alpha used for plotting.
+        
+        Parameters
+        ----------
+        color_str : str
+            Standardized color string in 'rgba(r, g, b, a)' format
+            
+        Returns
+        -------
+        str
+            RGBA color string with alpha=1.0
+            
+        Examples
+        --------
+        >>> self._get_opaque_color('rgba(255, 0, 0, 0.2)')
+        'rgba(255, 0, 0, 1.0)'
+        """
+        import re
+        match = re.match(r'rgba\s*\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*[\d.]+\s*\)', color_str)
+        if match:
+            r, g, b = int(match.group(1)), int(match.group(2)), int(match.group(3))
+            return f'rgba({r}, {g}, {b}, 1.0)'
+        # Fallback: return as-is
+        return color_str
     
     def _standardize_color_input(self, colors, name='colors', default_alpha=1.0):
         """
