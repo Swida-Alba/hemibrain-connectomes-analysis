@@ -1426,7 +1426,8 @@ class NeuronBridgeFinder:
             zmin=zmin,
             zmax=zmax,
             showfig=False,
-            verbose=self.verbose
+            verbose=self.verbose,
+            init_clustered=False
         )
         
         self._vprint(f"   📊 Created heatmap: {full_path}")
@@ -1722,7 +1723,8 @@ class NeuronBridgeFinder:
         queried_types: Optional[List[str]] = None,
         title: str = "Line × Type Expression Matrix",
         color_scale: str = 'green',
-        top_n_types: int = 100
+        top_n_types: int = 100,
+        type_filter: Optional[Dict[str, Union[str, List[str]]]] = None
     ) -> str:
         """
         Visualize the expression matrix (lines × types) as a heatmap.
@@ -1742,6 +1744,30 @@ class NeuronBridgeFinder:
         top_n_types : int
             Maximum number of types to display (default: 100).
             Types are sorted by total expression score across all lines.
+        type_filter : dict, optional
+            Filter neuron types by name pattern for visualization.
+            Uses a dict with filter type as key and pattern(s) as value.
+            
+            Filter types:
+            - 'contains': Match types containing the pattern
+            - 'startswith': Match types starting with the pattern
+            - 'endswith': Match types ending with the pattern
+            - 'regex': Match types matching the regex pattern
+            
+            Values: str or list of str patterns
+            Multiple patterns within same key use OR logic.
+            Multiple keys use AND logic.
+            The rank r{N} will be preserved from the original ranking before filtering.
+            
+            Examples:
+            - type_filter = {'contains': 'DN'}  # Types containing 'DN'
+            - type_filter = {'startswith': ['DN', 'IN']}  # Types starting with 'DN' or 'IN'
+            - type_filter = {'endswith': '_R'}  # Types ending with '_R'
+            - type_filter = {'regex': r'DN[a-z]\\d+'}  # Types matching regex pattern
+            - type_filter = {'contains': 'DN', 'endswith': '_R'}  # Both conditions (AND)
+            
+            Set to None or {} to disable filtering (visualize all top types).
+            Does not affect the full data CSV - only the viz CSV and heatmap.
             
         Returns
         -------
@@ -1773,7 +1799,35 @@ class NeuronBridgeFinder:
         
         # Transpose first to get types as rows
         # Preserve input order (already sorted by co-labeling quality)
-        expression_transposed = expression_df.T
+        expression_transposed = expression_df.T.copy()
+        
+        # Save full data CSV first (before any filtering/truncation)
+        full_csv_path = os.path.join(output_path, 'expression_matrix.csv')
+        expression_transposed.to_csv(full_csv_path)
+        self._vprint(f"   💾 Saved full expression matrix: {full_csv_path}")
+        
+        # Apply type_filter if specified
+        total_types_before_filter = len(expression_transposed)
+        if type_filter:
+            # For prefixed types (e.g., 'HEMI_aMe12'), extract base type name for filtering
+            # Create ranked type list with both full name and base name for filtering
+            def extract_base_type(prefixed_type: str) -> str:
+                """Extract base type name from prefixed type (e.g., 'MCNS_aMe12' -> 'aMe12')."""
+                parts = prefixed_type.split('_', 1)
+                if len(parts) > 1:
+                    return parts[1]  # Return everything after first underscore
+                return prefixed_type  # Return as-is if no underscore
+            
+            # Create ranked type list using BASE type names for filtering
+            ranked_types = [(i, extract_base_type(name)) for i, name in enumerate(expression_transposed.index, start=1)]
+            filtered_base_types = self._apply_type_filter(ranked_types, type_filter)
+            filtered_base_names = set(name for _, name in filtered_base_types)
+            
+            # Keep full prefixed names whose base type matches
+            expression_transposed = expression_transposed.loc[
+                [idx for idx in expression_transposed.index if extract_base_type(idx) in filtered_base_names]
+            ]
+            self._vprint(f"   🔍 Type filter applied: {len(expression_transposed)}/{total_types_before_filter} types match")
         
         # Limit to top N types by total expression score
         total_types = len(expression_transposed)
@@ -1789,11 +1843,21 @@ class NeuronBridgeFinder:
             expression_transposed = self._sort_expression_matrix(
                 expression_transposed.T, as_types_rows=True
             )
-            self._vprint(f"   📊 Showing top {top_n_types} types (of {total_types} total, filtered by expression score)")
+            self._vprint(f"   📊 Showing top {top_n_types} types (of {total_types} after filter)")
             # Add filter info to title
             title = f"{title} [Top {top_n_types} types]"
         else:
             self._vprint(f"   📊 Showing all {total_types} types")
+        
+        # Save viz data CSV (filtered/truncated version)
+        viz_csv_path = os.path.join(output_path, 'expression_matrix_viz.csv')
+        expression_transposed.to_csv(viz_csv_path)
+        self._vprint(f"   💾 Saved viz expression matrix: {viz_csv_path}")
+        
+        # Handle empty dataframe gracefully
+        if expression_transposed.empty:
+            self._vprint(f"   ⚠️ No types to visualize after filtering - skipping heatmap creation")
+            return ""
         
         # Resolve color scale preset to Plotly format
         color_scales = {
@@ -1825,7 +1889,8 @@ class NeuronBridgeFinder:
             showfig=False,
             verbose=self.verbose,
             init_width=init_width,
-            init_height=init_height
+            init_height=init_height,
+            init_clustered=False
         )
         
         self._vprint(f"   📊 Created expression matrix heatmap: {filename}")
@@ -1839,7 +1904,8 @@ class NeuronBridgeFinder:
         title: str = "Line × Type Expression Matrix (Merged)",
         color_scale: str = 'green',
         top_n_types: int = 100,
-        aggregation: str = 'max'
+        aggregation: str = 'max',
+        type_filter: Optional[Dict[str, Union[str, List[str]]]] = None
     ) -> str:
         """
         Visualize the expression matrix with same neuron types merged across datasets.
@@ -1864,6 +1930,30 @@ class NeuronBridgeFinder:
             Maximum number of types to display (default: 100).
         aggregation : str
             How to aggregate scores across datasets: 'max' (default), 'mean', 'sum'.
+        type_filter : dict, optional
+            Filter neuron types by name pattern for visualization.
+            Uses a dict with filter type as key and pattern(s) as value.
+            
+            Filter types:
+            - 'contains': Match types containing the pattern
+            - 'startswith': Match types starting with the pattern
+            - 'endswith': Match types ending with the pattern
+            - 'regex': Match types matching the regex pattern
+            
+            Values: str or list of str patterns
+            Multiple patterns within same key use OR logic.
+            Multiple keys use AND logic.
+            The rank r{N} will be preserved from the original ranking before filtering.
+            
+            Examples:
+            - type_filter = {'contains': 'DN'}  # Types containing 'DN'
+            - type_filter = {'startswith': ['DN', 'IN']}  # Types starting with 'DN' or 'IN'
+            - type_filter = {'endswith': '_R'}  # Types ending with '_R'
+            - type_filter = {'regex': r'DN[a-z]\\d+'}  # Types matching regex pattern
+            - type_filter = {'contains': 'DN', 'endswith': '_R'}  # Both conditions (AND)
+            
+            Set to None or {} to disable filtering (visualize all top types).
+            Does not affect the full data CSV - only the viz CSV and heatmap.
             
         Returns
         -------
@@ -1934,7 +2024,7 @@ class NeuronBridgeFinder:
         self._vprint(f"   📊 Merged {original_types} prefixed types → {merged_types} base types (aggregation: {aggregation})")
         
         # Step 3: Transpose to get types as rows
-        expression_transposed = merged_df.T
+        expression_transposed = merged_df.T.copy()
         
         # Step 4: Sort by co-labeling quality (same logic as original)
         n_lines = len(expression_transposed.columns)
@@ -1952,7 +2042,24 @@ class NeuronBridgeFinder:
         sorted_index = sort_df.sort_values(['is_complete', 'min_score', 'nonzero_count', 'total_score']).index
         expression_transposed = expression_transposed.loc[sorted_index]
         
-        # Step 5: Limit to top N types
+        # Save FULL merged data CSV (before any filtering/truncation)
+        full_csv_path = os.path.join(output_path, 'expression_matrix_merged.csv')
+        expression_transposed.to_csv(full_csv_path)
+        self._vprint(f"   💾 Saved full merged expression matrix: {full_csv_path}")
+        
+        # Step 5: Apply type_filter if specified
+        total_types_before_filter = len(expression_transposed)
+        if type_filter:
+            # Create ranked type list for filtering (using merged type names)
+            ranked_types = [(i, name) for i, name in enumerate(expression_transposed.index, start=1)]
+            filtered_types = self._apply_type_filter(ranked_types, type_filter)
+            filtered_type_names = [name for _, name in filtered_types]
+            expression_transposed = expression_transposed.loc[
+                [idx for idx in expression_transposed.index if idx in filtered_type_names]
+            ]
+            self._vprint(f"   🔍 Type filter applied: {len(expression_transposed)}/{total_types_before_filter} merged types match")
+        
+        # Step 6: Limit to top N types
         total_types = len(expression_transposed)
         if total_types > top_n_types:
             type_totals = expression_transposed.sum(axis=1)
@@ -1975,12 +2082,22 @@ class NeuronBridgeFinder:
             sorted_index = sort_df.sort_values(['is_complete', 'min_score', 'nonzero_count', 'total_score']).index
             expression_transposed = expression_transposed.loc[sorted_index]
             
-            self._vprint(f"   📊 Showing top {top_n_types} merged types (of {total_types} total)")
+            self._vprint(f"   📊 Showing top {top_n_types} merged types (of {total_types} after filter)")
             title = f"{title} [Top {top_n_types} types]"
         else:
             self._vprint(f"   📊 Showing all {total_types} merged types")
         
-        # Step 6: Resolve color scale
+        # Save viz data CSV (filtered/truncated version)
+        viz_csv_path = os.path.join(output_path, 'expression_matrix_merged_viz.csv')
+        expression_transposed.to_csv(viz_csv_path)
+        self._vprint(f"   💾 Saved viz merged expression matrix: {viz_csv_path}")
+        
+        # Handle empty dataframe gracefully
+        if expression_transposed.empty:
+            self._vprint(f"   ⚠️ No types to visualize after filtering - skipping merged heatmap creation")
+            return ""
+        
+        # Step 7: Resolve color scale
         color_scales = {
             'green': [[0, 'rgb(255,255,255)'], [1, 'rgb(14,83,13)']],
             'purple': [[0, 'rgb(255,255,255)'], [1, 'rgb(104,55,164)']],
@@ -2006,13 +2123,9 @@ class NeuronBridgeFinder:
             showfig=False,
             verbose=self.verbose,
             init_width=init_width,
-            init_height=init_height
+            init_height=init_height,
+            init_clustered=False
         )
-        
-        # Also save the merged CSV
-        csv_filename = os.path.join(output_path, 'expression_matrix_merged.csv')
-        expression_transposed.to_csv(csv_filename)
-        self._vprint(f"   💾 Saved merged expression matrix CSV: {csv_filename}")
         
         self._vprint(f"   📊 Created merged expression matrix heatmap: {filename}")
         return filename
@@ -6307,7 +6420,10 @@ class NeuronBridgeFinder:
         generate_individual_profiles: Union[bool, List[str]] = None,
         pdf_images_per_page: Tuple[int, int] = (3, 2),
         min_score: float = 20000.0,
-        min_type_avg_score: float = 10000.0
+        min_type_avg_score: float = 10000.0,
+        background_color: str = 'white',
+        type_filter: Optional[Dict[str, Union[str, List[str]]]] = None,
+        datasets_to_visualize: Union[str, List[str]] = 'all',
     ) -> Dict[str, Any]:
         """
         Analyze co-labeling patterns among given driver lines.
@@ -6354,6 +6470,44 @@ class NeuronBridgeFinder:
             Minimum average score threshold for types in similarity matrix. Default: 20000.0
             Types with average score < threshold may be excluded from clustering.
             Note: Expression matrix includes ALL types regardless of this threshold.
+        background_color : str, default 'white'
+            Background color for 3D visualization. Can be 'white', 'black',
+            or any CSS color (e.g., '#f0f0f0', 'lightgray').
+        type_filter : dict, optional
+            Filter neuron types for visualization by name pattern.
+            Uses a dict with filter type as key and pattern(s) as value.
+            
+            Filter types:
+            - 'contains': Match types containing the pattern
+            - 'startswith': Match types starting with the pattern
+            - 'endswith': Match types ending with the pattern
+            - 'regex': Match types matching the regex pattern
+            
+            Values: str or list of str patterns
+            Multiple patterns within same key use OR logic.
+            Multiple keys use AND logic.
+            The rank r{N} will be preserved from the original ranking before filtering.
+            
+            Examples:
+            - type_filter = {'contains': 'DN'}  # Types containing 'DN'
+            - type_filter = {'startswith': ['DN', 'IN']}  # Types starting with 'DN' or 'IN'
+            - type_filter = {'endswith': '_R'}  # Types ending with '_R'
+            - type_filter = {'regex': r'DN[a-z]\d+'}  # Types matching regex pattern
+            - type_filter = {'contains': 'DN', 'endswith': '_R'}  # Both conditions (AND)
+            
+            Set to None or {} to disable filtering (visualize all top types).
+            
+            Applies to:
+            - 3D skeleton visualization (types shown)
+            - expression_matrix_viz.csv and expression_matrix_merged_viz.csv
+            - Expression matrix HTML heatmaps
+            
+            Note: Full data is always saved separately (without filtering).
+        datasets_to_visualize : str or list, default 'all'
+            Constrain which datasets to visualize for 3D skeleton.
+            - 'all' or None: Visualize all datasets found in results
+            - List of dataset names: Only visualize specified datasets
+            - Single dataset name: Only visualize that dataset
             
         Returns
         -------
@@ -6370,10 +6524,14 @@ class NeuronBridgeFinder:
             
         Output Files (when output_dir is provided)
         ------------------------------------------
-        - expression_matrix.csv: Type × Line matrix with match scores
+        - expression_matrix.csv: Full Type × Line matrix with match scores
           (types prefixed with dataset abbreviation: HEMI_, MCNS_, FAFB_)
-        - labeling_info.csv: Case-sensitive types with dataset column for per-dataset filtering
+        - expression_matrix_viz.csv: Truncated/filtered matrix for visualization
         - expression_matrix.html: Interactive heatmap visualization
+        - expression_matrix_merged.csv: Full merged matrix (types across datasets)
+        - expression_matrix_merged_viz.csv: Truncated/filtered merged matrix
+        - expression_matrix_merged.html: Interactive merged heatmap
+        - labeling_info.csv: Case-sensitive types with dataset column for per-dataset filtering
         - colabeling_matrix_{method}.csv: Line × Line similarity matrix
         - colabeling_matrix_{method}.html: Interactive heatmap
         - line_labeled_neurons/{line}_neurons.csv: Per-line neuron details
@@ -6385,7 +6543,9 @@ class NeuronBridgeFinder:
         >>> nbf = NeuronBridgeFinder()
         >>> results = nbf.analyze_colabeling(
         ...     lines=['LH173', 'VT037867', 'SS00731'],
-        ...     output_dir='./colabel_analysis'
+        ...     output_dir='./colabel_analysis',
+        ...     type_filter={'contains': 'DN'},
+        ...     background_color='black'
         ... )
         >>> print(results['line_summary'])
         """
@@ -6454,7 +6614,10 @@ class NeuronBridgeFinder:
                     'generate_individual_profiles': generate_individual_profiles,
                     'pdf_images_per_page': pdf_images_per_page,
                     'min_score': min_score,
-                    'min_type_avg_score': min_type_avg_score
+                    'min_type_avg_score': min_type_avg_score,
+                    'background_color': background_color,
+                    'type_filter': type_filter,
+                    'datasets_to_visualize': datasets_to_visualize,
                 }
             )
             self._vprint(f"   💾 Parameters: parameters.json")
@@ -6511,12 +6674,9 @@ class NeuronBridgeFinder:
             if dfs:
                 combined_neurons_df = pd.concat(dfs, ignore_index=True)
         
-        # Save expression matrix, labeling_info, and per-line neuron details
+        # Save labeling_info and per-line neuron details
+        # Note: expression_matrix.csv is saved in visualize_expression_matrix (with both full and viz versions)
         if output_path:
-            expr_csv = os.path.join(output_path, 'expression_matrix.csv')
-            expression_transposed.to_csv(expr_csv)
-            self._vprint(f"   💾 Expression matrix: {expr_csv}")
-            
             # Save labeling_info.csv (case-sensitive types with dataset column)
             if not labeling_info.empty:
                 labeling_csv = os.path.join(output_path, 'labeling_info.csv')
@@ -6588,7 +6748,8 @@ class NeuronBridgeFinder:
                 expression_df=expression_transposed.T,
                 output_path=output_path,
                 queried_types=[],
-                title=f"Expression Matrix ({len(line_list)} Lines × Types)"
+                title=f"Expression Matrix ({len(line_list)} Lines × Types)",
+                type_filter=type_filter
             )
             
             # Create merged dataset version (same types across datasets combined)
@@ -6597,7 +6758,8 @@ class NeuronBridgeFinder:
                 output_path=output_path,
                 queried_types=[],
                 title=f"Expression Matrix ({len(line_list)} Lines × Types) - Merged Datasets",
-                aggregation='max'  # Use max score across datasets for same type
+                aggregation='max',  # Use max score across datasets for same type
+                type_filter=type_filter
             )
             
             # Visualize labeling distribution (mountain-shaped histogram)
@@ -6722,7 +6884,10 @@ class NeuronBridgeFinder:
                 visualize_by='type',  # Default to type-based visualization
                 generate_individual_profiles=generate_individual_profiles,
                 pdf_images_per_page=pdf_images_per_page,
+                background_color=background_color,
                 labeling_info=labeling_info,  # Pass case-sensitive type info for per-dataset filtering
+                type_filter=type_filter,
+                datasets_to_visualize=datasets_to_visualize,
             )
         
         # Summary

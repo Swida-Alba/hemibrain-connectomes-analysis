@@ -10087,10 +10087,16 @@ class VisualizeSkeleton:
         self.fig_3d.update_layout(original_layout)
         
         # Normalize summary_format
-        if isinstance(summary_format, str):
+        if summary_format is True:
+            # Default to PDF when True
+            summary_format = ['pdf']
+        elif isinstance(summary_format, str):
             summary_format = [summary_format.lower()]
-        else:
+        elif summary_format:
             summary_format = [f.lower() for f in summary_format]
+        else:
+            # False or None - no summary
+            summary_format = []
         
         # Generate PDF/PPTX summaries if PNG images were created
         if 'png' in output_format and generated_files['png']:
