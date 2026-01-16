@@ -11,20 +11,18 @@ from coana import FindNeuronConnection
 
 if __name__ == '__main__':
     
-    neurons_network = ['aMe.*']
-    
     fc = FindNeuronConnection(
         # Token automatically loaded from token_info.txt (recommended) or set token='' here
         output_dir='../local_data/connection_data',
         # dataset='flywire_FAFB_v783',  # Combined dataset and version in one parameter
         dataset = 'male-cns:v0.9',
         # dataset='hemibrain:v1.2.1',
-        sourceNeurons=neurons_network,  # [] = all neurons; or list of types/instances like ['L3.*_R']
-        targetNeurons=neurons_network,  # pd.read_excel('targetNeurons.xlsx', header=None).iloc[:,0].tolist()
+        sourceNeurons=['aMe.*'],  # [] = all neurons; or list of types/instances like ['L3.*_R']
+        targetNeurons=[],  # pd.read_excel('targetNeurons.xlsx', header=None).iloc[:,0].tolist()
         exclude_intra_type_connections=False,
         custom_source_name='',  # Custom name for source neurons (useful when using [] or reading from file)
         custom_target_name='',  # Custom name for target neurons
-        min_synapse_num=1,
+        min_synapse_num=3,
         min_ratio=0.0,  # Minimum connection ratio (weight/post) - direct ratio without 0.3 scaling
         min_traversal_probability=0.0,  # Minimum traversal probability (ratio/0.3, capped at 1.0)
         filter_by='bodyId',  # 'bodyId' or 'type' level filtering

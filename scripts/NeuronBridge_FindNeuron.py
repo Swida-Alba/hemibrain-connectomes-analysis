@@ -91,7 +91,7 @@ if __name__ == "__main__":
     # Visualize top N types/bodyIds per dataset using 3D skeleton (0 = disabled)
     # This creates interactive HTML visualizations showing the top N neuron types or bodyIds
     # Output folder: plot3d_{dataset}/ (no timestamp, overwrites previous)
-    visualize_top_n = 20
+    visualize_top_n = 12
     
     # How to organize visualization: 'type' or 'bodyId'
     # - 'type': Group neurons by type (legend_mode='layer', shows combined morphology)
@@ -157,7 +157,7 @@ if __name__ == "__main__":
     #   - List of dataset names: ['hemibrain:v1.2.1', 'manc:v1.0']
     #   - Single dataset string: 'hemibrain:v1.2.1'
     # Dataset names should match exactly as they appear in the results
-    datasets_to_visualize = 'all'
+    datasets_to_visualize = None
     
     
     # ==========================================================================

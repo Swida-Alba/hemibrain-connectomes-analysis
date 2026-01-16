@@ -52,18 +52,19 @@ def main():
     finder = HomologFinder(
         token='',
 
-        source='aMe12', # MTe07
-        source_dataset='flywire_FAFB_v783',
-        target_dataset='male-cns:v0.9',
+        source='aMe12',
+        source_dataset='male-cns:v0.9',
+        target_dataset='hemibrain:v1.2.1',
+        # Alternative: search across different datasets
         # source='aMe12',
-        # source_dataset='male-cns:v0.9',
-        # target_dataset='flywire_FAFB_v783',
+        # source_dataset='flywire_FAFB_v783',
+        # target_dataset='male-cns:v0.9',
         
-        output_dir='/Users/apple/Local/connection_data',
+        output_dir='../../local_data/homolog_finding',
         visualize_skeleton=True,  # Enable to visualize top candidates
-        visualize_top_n=1,         # Number of candidates to visualize
+        visualize_top_n=5,         # Number of candidates to visualize
         verbose=True,
-        similarity_metric='jaccard',
+        similarity_metric='rank_union',
         top_n=30,
         vector_prefiltering=True,
     )

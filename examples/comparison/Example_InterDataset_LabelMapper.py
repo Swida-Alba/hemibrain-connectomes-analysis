@@ -21,11 +21,11 @@ import sys
 from typing import Dict, List
 
 # Add src to path for imports
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../../')))
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../../src')))
 
-from src.comparison.comparison_parameters import ComparisonParameters
-from src.comparison.comparison_analyzer import ComparisonAnalyzer
-from src.comparison.label_mapper import LabelMapper
+from comparison.comparison_parameters import ComparisonParameters
+from comparison.comparison_analyzer import ComparisonAnalyzer
+from comparison.label_mapper import LabelMapper
 
 def run_label_mapper_example():
     print("=== Starting LabelMapper Example ===\n")
@@ -107,7 +107,7 @@ Another_Group,123456789,987654321"""
         
         max_interlayer=1,
         thresholds=[10],
-        output_folder='./comparison_output_mapper_example',
+        output_folder='../../local_data/dataset_comparison',
         saveas='label_mapper_demo'
     )
     

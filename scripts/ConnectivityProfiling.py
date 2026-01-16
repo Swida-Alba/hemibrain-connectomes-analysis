@@ -59,8 +59,9 @@ from statvis import get_types
 
 if __name__ == "__main__":
     
-    type_list, _, _ = get_types('aMe.*', dataset='male-cns:v0.9')
-    print(type_list)
+    # Optional: get types matching a pattern
+    # type_list, _, _ = get_types('aMe.*', dataset='male-cns:v0.9')
+    # print(type_list)
     
     # Create comparer instance with all settings
     
@@ -71,6 +72,7 @@ if __name__ == "__main__":
         
         # --- Dataset ---
         dataset='male-cns:v0.9',
+        # dataset='flywire_FAFB_v783',
         
         # --- Profile Construction ---
         top_k=15,  # Top K partners per direction
@@ -90,6 +92,8 @@ if __name__ == "__main__":
         
         # --- Other ---
         verbose=True,
+        
+        skip_bodyId_level=False,  # Set to True to skip bodyId-level analysis for speed
     )
     
     # Run comparison

@@ -90,33 +90,31 @@ def run_comprehensive_comparison():
         # Token - empty means load from NEUPRINT_APPLICATION_TOKEN env var
         token='',
         # Output settings
-        output_folder='/Users/apple/Local/connection_data',
+        output_folder='../../local_data/dataset_comparison',
         saveas=None,  # Auto-generate timestamp folder
         
         # Datasets to compare
-        # datasets=['male-cns:v0.9', 'flywire_FAFB_v783', 'hemibrain:v1.2.1', 'flywire_BANC_v626',],
-        # datasets_nickname=['male-CNS', 'FAFB', 'hemibrain', 'BANC'],
+        datasets=['male-cns:v0.9', 'flywire_FAFB_v783'],
+        datasets_nickname=['male-CNS', 'FAFB'],
+        # Alternative: compare more datasets
+        # datasets=['male-cns:v0.9', 'flywire_FAFB_v783', 'hemibrain:v1.2.1'],
+        # datasets_nickname=['male-CNS', 'FAFB', 'hemibrain'],
         
-        datasets=['flywire_FAFB_v783', 'flywire_BANC_v626','male-cns:v0.9'],
-        datasets_nickname=['FAFB', 'BANC', 'male-cns'],
+        # Source neurons - example with specific types
+        source_neurons=['aMe12'],
+        # Or use target_map for unified naming:
+        # source_neurons=target_map,
         
-        # Source neurons - aMe12 medulla neurons
-        # source_neurons=['aMe12','aMe26','aMe10','aMe5','aMe9'],
-        # source_neurons=['aMe12'],
-        source_neurons = ['L1','L2','L3'],
-        # source_neurons=neurons_network,
+        # Target neurons
+        target_neurons=['PPL101'],
+        # Or use target_map for unified naming:
+        # target_neurons=target_map,
         
-        # Target neurons - PPL101 dopaminergic neurons
-        # target_neurons=['PPL101'],
-        target_neurons=target_map,
-        
-        # target_neurons=neurons_network,
-        
-        # Allow 1 intermediate layer (source → inter → target)
-        max_interlayer=3,
+        # Allow intermediate layers (source → inter → target)
+        max_interlayer=2,
         
         # Multiple thresholds to analyze sensitivity
-        thresholds=[3,5,10],
+        thresholds=[3, 5, 10],
         
         # Top edges to include in analysis
         top_edges=500,
@@ -124,15 +122,15 @@ def run_comprehensive_comparison():
         # Comparison mode: 'path' (path-based filtering) or 'edge' (edge-based filtering)
         # - 'path': Discovers edges through paths; may miss strong edges on weak paths
         # - 'edge': Evaluates each edge independently by weight
-        comparison_mode='edge',  # Change to 'edge' to use edge-based comparison
+        comparison_mode='path',  # Change to 'edge' to use edge-based comparison
         
         skip_bodyId=True,
         
         # Performance Settings (for parallel processing)
         # -----------------------------------------------------------------
         parallel=True,                # Enable parallel processing
-        max_workers=12,             # Auto-detect optimal worker count
-        pathfinding='Bidirectional', # 'MemoizedDFS', 'Bidirectional', 'DP', 'DFS'
+        max_workers=12,               # Auto-detect optimal worker count
+        pathfinding='Bidirectional',  # 'MemoizedDFS', 'Bidirectional', 'DP', 'DFS'
     )
     
     # =========================================================================

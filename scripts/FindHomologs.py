@@ -37,21 +37,20 @@ from pathlib import Path
 # Add repo src/ to path to force loading the in-repo comparison module (avoids picking up any older installed version)
 sys.path.insert(0, str(Path(__file__).parent.parent / 'src'))
 
-import pandas as pd
 from comparison.profile_comparator import HomologFinder
 
 if __name__ == "__main__":
     # Token automatically loaded from token_info.txt (recommended) or set token='' here
     finder = HomologFinder(
-        source='VP2_adPN', # type or bodyId
+        source='aMe12', # type or bodyId
         source_dataset='male-cns:v0.9',
-        target_dataset='male-cns:v0.9',
+        target_dataset='hemibrain:v1.2.1',
         
         output_dir='../local_data/homolog_finding',
         visualize_skeleton=True,  # Enable to visualize top candidates
         visualize_top_n=5,         # Number of candidates to visualize
         verbose=True,
-        similarity_metric='jaccard',
+        similarity_metric='rank_union',
         top_n=30,
         vector_prefiltering=True,
     )

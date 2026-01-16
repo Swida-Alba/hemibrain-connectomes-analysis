@@ -97,6 +97,13 @@ if __name__ == "__main__":
     # Add timestamp to output folder name (creates {line_name}_{timestamp}/)
     add_timestamp = True
     
+    # Background color for summary (PDF/PPTX)
+    # Options: 'black' (default), 'white', '#000000', '#FFFFFF', etc.
+    background_color = 'black'
+    
+    # Verbose output: True for full output, 'pbar' for progress bar only
+    verbose = True
+    
     # ==========================================================================
     # EXECUTION - No need to edit below this line
     # ==========================================================================
@@ -119,6 +126,7 @@ if __name__ == "__main__":
         generate_summary=generate_summary,
         summary_images_per_page=summary_images_per_page,
         add_timestamp=add_timestamp,
+        background_color=background_color,
     )
     
     # Summary

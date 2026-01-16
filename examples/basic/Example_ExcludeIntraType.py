@@ -32,12 +32,12 @@ if __name__ == '__main__':
     fc_mbon = FindNeuronConnection(
         # Your neuprint token from https://neuprint.janelia.org/account
         token='',
-        data_folder='/path/to/your/data/folder',
+        output_dir='../../local_data/connection_data',
         dataset='hemibrain:v1.2.1',
         
         # Search for connections between all MBON types
-        sourceNeurons=[['MBON.*']],
-        targetNeurons=[['MBON.*']],
+        sourceNeurons=['MBON.*'],
+        targetNeurons=['MBON.*'],
         
         # Custom names for clarity
         custom_source_name='All_MBONs',
@@ -75,12 +75,12 @@ if __name__ == '__main__':
     
     fc_kc_dan = FindNeuronConnection(
         token='',
-        data_folder='/path/to/your/data/folder',
+        output_dir='../../local_data/connection_data',
         dataset='hemibrain:v1.2.1',
         
         # Find multi-hop paths from Kenyon Cells to DANs
-        sourceNeurons=[['KC.*']],
-        targetNeurons=[['DAN.*']],
+        sourceNeurons=['KC.*'],
+        targetNeurons=['DAN.*'],
         
         custom_source_name='Kenyon_Cells',
         custom_target_name='DANs',
@@ -100,8 +100,7 @@ if __name__ == '__main__':
         
         # Visualization
         showfig=True,
-        network_layout='layered',  # Good for hierarchical paths
-        pathN_to_show=20,  # Show top 20 paths
+        network_layout='distributed',  # Good for paths
         
         # Performance
         use_cache=True,
@@ -125,10 +124,10 @@ if __name__ == '__main__':
     print("\n[Run 1] Including intra-type connections...")
     fc_with = FindNeuronConnection(
         token='',
-        data_folder='/path/to/your/data/folder',
+        output_dir='../../local_data/connection_data',
         dataset='hemibrain:v1.2.1',
-        sourceNeurons=[['MBON01', 'MBON03', 'MBON05']],
-        targetNeurons=[['MBON01', 'MBON03', 'MBON05']],
+        sourceNeurons=['MBON01', 'MBON03', 'MBON05'],
+        targetNeurons=['MBON01', 'MBON03', 'MBON05'],
         custom_source_name='Selected_MBONs',
         custom_target_name='Selected_MBONs',
         exclude_intra_type_connections=False,  # Include intra-type
@@ -143,10 +142,10 @@ if __name__ == '__main__':
     print("\n[Run 2] Excluding intra-type connections...")
     fc_without = FindNeuronConnection(
         token='',
-        data_folder='/path/to/your/data/folder',
+        output_dir='../../local_data/connection_data',
         dataset='hemibrain:v1.2.1',
-        sourceNeurons=[['MBON01', 'MBON03', 'MBON05']],
-        targetNeurons=[['MBON01', 'MBON03', 'MBON05']],
+        sourceNeurons=['MBON01', 'MBON03', 'MBON05'],
+        targetNeurons=['MBON01', 'MBON03', 'MBON05'],
         custom_source_name='Selected_MBONs',
         custom_target_name='Selected_MBONs',
         exclude_intra_type_connections=True,  # Exclude intra-type

@@ -38,7 +38,7 @@ print('='*80)
 print('DEMO 1: Fetch ROI List from NeuPrint Online Database')
 print('='*80)
 
-cache_dir = Path(__file__).parent.parent.parent / 'navis_roi_meshes_json'
+cache_dir = Path(__file__).parent.parent.parent / 'cache' / 'navis_roi_meshes_json'
 cache_file = cache_dir / 'hemibrain_v1_2_1_available_rois.json'
 
 if token:

@@ -19,8 +19,12 @@ Key Features:
     - 3D skeleton visualization of top co-labeled neuron types
 
 Output Files:
-    - expression_matrix.csv: Type × Line matrix with match scores
+    - expression_matrix.csv: Full Type × Line matrix with match scores
+    - expression_matrix_viz.csv: Truncated/filtered matrix for visualization
     - expression_matrix.html: Interactive heatmap visualization
+    - expression_matrix_merged.csv: Full merged matrix (types across datasets)
+    - expression_matrix_merged_viz.csv: Truncated/filtered merged matrix
+    - expression_matrix_merged.html: Interactive merged heatmap
     - colabeling_matrix_{method}.csv: Line × Line similarity matrix
     - colabeling_matrix_{method}.html: Interactive similarity heatmap
     - line_labeled_neurons/{line}_neurons.csv: Per-line neuron details
@@ -123,8 +127,10 @@ if __name__ == "__main__":
     # Filter neuron types for visualization by name pattern
     # Uses a dict with filter type as key and pattern(s) as value
     # Filter types: 'contains', 'startswith', 'endswith', 'regex'
-    # Multiple patterns can be combined (OR logic within same filter, AND across filters)
-    # The rank r{N} will be preserved from the original ranking before filtering
+    # - Multiple patterns within same filter key: OR logic (match any)
+    # - Across different filter keys: AND logic (must match all)
+    # - The rank r{N} preserves original ranking BEFORE filtering
+    # - Gets ALL types first, filters, then takes top N from filtered results
     # Examples:
     #   type_filter = {'contains': 'DN'}           # Types containing 'DN'
     #   type_filter = {'startswith': ['DN', 'IN']} # Types starting with 'DN' or 'IN'
@@ -136,7 +142,7 @@ if __name__ == "__main__":
     #   - 3D skeleton visualization (types shown)
     #   - expression_matrix_viz.csv and expression_matrix_merged_viz.csv
     #   - Expression matrix HTML heatmaps
-    type_filter = {}
+    type_filter = None
     
     # Constrain which datasets to visualize
     # Options:
@@ -202,7 +208,10 @@ if __name__ == "__main__":
         generate_individual_profiles=generate_individual_profiles,
         pdf_images_per_page=pdf_images_per_page,
         min_score=min_score,
-        min_type_avg_score=min_type_avg_score
+        min_type_avg_score=min_type_avg_score,
+        background_color=background_color,
+        type_filter=type_filter,
+        datasets_to_visualize=datasets_to_visualize,
     )
     
     # Display summary

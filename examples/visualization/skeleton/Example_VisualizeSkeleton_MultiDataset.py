@@ -16,7 +16,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent / 'src'))
 
 import statvis as sv
-from coana import VisualizeSkeleton
+from visualize_skeleton import VisualizeSkeleton
 
 # =============================================================================
 # Test 1: Hemibrain dataset with dataset-specific mesh caching
@@ -39,11 +39,10 @@ server_client, dataset = sv.LogInHemibrain(token=TOKEN, dataset='hemibrain:v1.2.
 # Create VisualizeSkeleton instance
 vs_hemibrain = VisualizeSkeleton(
     dataset='hemibrain:v1.2.1',
-    data_folder='/tmp/connection_data',  # Use /tmp for testing
+    output_dir='../../../local_data/plot_3d',  # Use local_data for testing
     neuron_layers=['EB'],  # Simple single layer for testing
     custom_layer_names=['Ellipsoid Body Neurons'],
     neuron_alpha=0.3,
-    saveas='hemibrain_EB_test',
     min_synapse_num=1,
     synapse_size=2,
     synapse_alpha=0.6,
@@ -81,11 +80,10 @@ server_client_ol, dataset_ol = sv.LogInHemibrain(token=TOKEN, dataset='optic-lob
 # Create VisualizeSkeleton instance for optic-lobe
 vs_optic_lobe = VisualizeSkeleton(
     dataset='optic-lobe:v1.1',
-    data_folder='/tmp/connection_data',
+    output_dir='../../../local_data/plot_3d',
     neuron_layers=['LNd'],  # Optic lobe neurons
     custom_layer_names=['Optic Lobe LNd Neurons'],
     neuron_alpha=0.3,
-    saveas='optic_lobe_LNd_test',
     min_synapse_num=1,
     synapse_size=2,
     synapse_alpha=0.6,
@@ -129,7 +127,7 @@ Example code to test:
 ------------------------
 vs_whole_brain = VisualizeSkeleton(
     dataset='hemibrain:v1.2.1',
-    data_folder='/tmp/connection_data',
+    output_dir='../../../local_data/plot_3d',
     neuron_layers=['EB'],
     mesh_roi=['EB'],
     brain_mesh='whole',  # This will trigger transform check

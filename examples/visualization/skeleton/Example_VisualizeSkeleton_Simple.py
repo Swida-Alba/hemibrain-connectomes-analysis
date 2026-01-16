@@ -17,7 +17,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent / 'src'))
 
 import os
-from coana import VisualizeSkeleton
+from visualize_skeleton import VisualizeSkeleton
 
 print('='*80)
 print('VISUALIZESKELETON SIMPLE DEMONSTRATION')

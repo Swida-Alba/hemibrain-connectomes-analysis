@@ -4,7 +4,7 @@ import bokeh.palettes as bp
 
 # Add src directory to Python path
 sys.path.insert(0, str(Path(__file__).parent.parent / 'src'))
-from coana import VisualizeSkeleton
+from visualize_skeleton import VisualizeSkeleton
 
 # please provide your own neuprint token, which can be found at https://neuprint.janelia.org/account
 # dataset = 'hemibrain:v1.2.1'
@@ -19,8 +19,10 @@ vs = VisualizeSkeleton(
     # dataset = 'hemibrain:v1.2.1',
     token = '',
     output_dir='../local_data/plot_3d',
-    neuron_layers = ['aMe12', 'MeVPLo2'], # or in the format: 'VA1d_adPN -> LHCENT3 -> MBON01'
-    custom_layer_names = ['commissural_1', 'commissural_2'],  # Optional custom names for layers
+    neuron_layers = ['aMe12', 'aMe9', 'aMe10'], # or in the format: 'VA1d_adPN -> LHCENT3 -> MBON01'
+    custom_layer_names = [],  # Optional custom names for layers
+    # layer_map_csv = 'path/to/mapping.csv',  # Optional CSV file mapping neurons to layers
+    neuron_colors=bp.Category20[20],
     skip_synapse = True,
     neuron_alpha = 0.2,
     min_synapse_num = 3,
@@ -28,16 +30,22 @@ vs = VisualizeSkeleton(
     synapse_alpha = 0.6,
     skeleton_mode = 'tube',
     synapse_mode = 'cone',
-    legend_mode='layer',  # 'single', 'type', or 'layer'
+    legend_mode='type',  # 'single', 'type', or 'layer'
     
+    export_views=True,
     show_fig=True,
+    
+    background_color='white',  # Background color: 'white' (default), 'black', or any CSS color
     
     mesh_roi = ['EB', 'LH', 'AL'],
     # mesh_color=(1,1,1,0),
     brain_mesh='template',
-    vnc_mesh=False, #
+    vnc_mesh=False,
     cache_neurons=True,
     cache_synapses=True,
+    
+    export_method='webdriver',  # 'webdriver' (default, fast, requires Chrome browser version 109+), or 'kaleido' (slower fallback, stable)
+    export_scale=3,
 )
 
 vs.plot_neurons()
@@ -48,8 +56,8 @@ vs.plot_neurons()
 
 vs.plot_individuals(
     pdf_images_per_page=(3, 2),  # (columns, rows)
-    views='front',
-    scale=3,
+    views=['front'],
+    summary_format=['pdf', 'pptx'],  # 'pdf', 'pptx', or ['pdf', 'pptx'] for both
 )
 
 # Export rotating video: degree_per_frame controls rotation speed
@@ -59,7 +67,7 @@ vs.plot_individuals(
 vs.export_video(
     fps=30, 
     degree_per_frame=1.0, 
-    rotate='vertical', 
+    rotate='horizontal', 
     scale=3,
     export_gif=True,      # Enable GIF export (default: True)
     gif_scale=0.2,        # GIF resolution scale (default: 0.2)

@@ -129,6 +129,9 @@ def run_comprehensive_comparison():
         thresholds=[3, 5, 10, 15, 20],
         # thresholds = list(range(1,21)),
         
+        # Automatic type mapping across datasets (experimental)
+        auto_type_mapping=False,
+        
         # Top edges to include in analysis
         top_edges=500,
         
