@@ -71,6 +71,19 @@ except ImportError:
         HAS_LABELMAPPER = False
         LabelMapper = None  # type: ignore
 
+# Try to import CrossDatasetTypeMapper for type name merging
+try:
+    from comparison.cross_dataset_type_mapper import CrossDatasetTypeMapper, get_type_mapper
+    HAS_TYPE_MAPPER = True
+except ImportError:
+    try:
+        from src.comparison.cross_dataset_type_mapper import CrossDatasetTypeMapper, get_type_mapper
+        HAS_TYPE_MAPPER = True
+    except ImportError:
+        HAS_TYPE_MAPPER = False
+        CrossDatasetTypeMapper = None  # type: ignore
+        get_type_mapper = None  # type: ignore
+
 # Try to import neuronbridge
 # Apply patch to fix API compatibility issue with pydantic validation
 # (NeuronBridge API added new fields 'defaultSearchLibrary' that the Python client doesn't recognize)
@@ -1905,13 +1918,17 @@ class NeuronBridgeFinder:
         color_scale: str = 'green',
         top_n_types: int = 100,
         aggregation: str = 'max',
-        type_filter: Optional[Dict[str, Union[str, List[str]]]] = None
+        type_filter: Optional[Dict[str, Union[str, List[str]]]] = None,
+        use_auto_type_mapping: bool = True,
     ) -> str:
         """
         Visualize the expression matrix with same neuron types merged across datasets.
         
         Types from different datasets (e.g., 'MCNS_aMe12', 'FAFB_aMe12', 'HEMI_aMe12')
         are merged into a single row (e.g., 'aMe12') using the specified aggregation.
+        
+        When use_auto_type_mapping=True (default), types with different names across
+        datasets are also merged (e.g., 'MCNS_MeVPLo2' and 'FAFB_MTe07' → 'MeVPLo2').
         
         Parameters
         ----------
@@ -1954,6 +1971,9 @@ class NeuronBridgeFinder:
             
             Set to None or {} to disable filtering (visualize all top types).
             Does not affect the full data CSV - only the viz CSV and heatmap.
+        use_auto_type_mapping : bool, default True
+            Use CrossDatasetTypeMapper to merge types that have different names
+            across datasets (e.g., 'MeVPLo2' in male-cns = 'MTe07' in FAFB).
             
         Returns
         -------
@@ -1983,10 +2003,28 @@ class NeuronBridgeFinder:
         
         os.makedirs(output_path, exist_ok=True)
         
-        # Step 1: Extract base type names from prefixed columns
-        # e.g., 'MCNS_aMe12' -> 'aMe12', 'FAFB_Dm4' -> 'Dm4'
+        # Step 1: Build merge mapping
+        # Try to use auto type mapping for smarter merging
+        merge_mapping = {}
+        type_mapper = None
+        aggregated_types = []  # Track types that are being aggregated due to N-to-1/1-to-N
+        
+        if use_auto_type_mapping and HAS_TYPE_MAPPER and get_type_mapper is not None:
+            try:
+                type_mapper = get_type_mapper()
+                if type_mapper and type_mapper._loaded:
+                    merge_mapping = type_mapper.get_merge_mapping_for_types(
+                        list(expression_df.columns),
+                        verbose=self.verbose,
+                    )
+            except Exception as e:
+                self._vprint(f"   ⚠️ Auto type mapping not available: {e}")
+        
+        # Fallback: simple prefix stripping if no mapper available
         def extract_base_type(prefixed_type: str) -> str:
             """Extract base type name from prefixed type (e.g., 'MCNS_aMe12' -> 'aMe12')."""
+            if prefixed_type in merge_mapping:
+                return merge_mapping[prefixed_type]
             parts = prefixed_type.split('_', 1)
             if len(parts) > 1:
                 return parts[1]  # Return everything after first underscore
@@ -1999,6 +2037,25 @@ class NeuronBridgeFinder:
             if base_type not in base_type_to_columns:
                 base_type_to_columns[base_type] = []
             base_type_to_columns[base_type].append(col)
+        
+        # Track types that got merged from different original names
+        for base_type, columns in base_type_to_columns.items():
+            # Check if columns have different original base names (after prefix)
+            original_names = set()
+            for col in columns:
+                parts = col.split('_', 1)
+                if len(parts) > 1:
+                    original_names.add(parts[1])
+            if len(original_names) > 1:
+                aggregated_types.append((base_type, original_names, columns))
+        
+        if aggregated_types and self.verbose:
+            self._vprint(f"   🔗 Auto type mapping merged {len(aggregated_types)} type groups:")
+            for base_type, orig_names, cols in aggregated_types[:5]:
+                self._vprint(f"      • {sorted(orig_names)} → '{base_type}'")
+            if len(aggregated_types) > 5:
+                self._vprint(f"      ... and {len(aggregated_types) - 5} more")
+            self._vprint(f"   💡 To disable merging, set use_auto_type_mapping=False")
         
         # Step 2: Merge columns by base type using specified aggregation
         merged_data = {}
@@ -5397,6 +5454,210 @@ class NeuronBridgeFinder:
                 type_summary.to_csv(ds_types_file, index=False)
                 if verbose:
                     self._vprint(f"   💾 Saved: {ds_types_file}")
+        
+        # Also create the type-mapped summary CSV
+        self._save_type_mapped_csv(neurons_df, line_name, output_path, verbose=verbose, sort_by=sort_by)
+    
+    def _save_type_mapped_csv(
+        self,
+        neurons_df: pd.DataFrame,
+        line_name: str,
+        output_path: str,
+        verbose: bool = True,
+        sort_by: str = 'max_score'
+    ) -> None:
+        """
+        Create a cross-dataset type-mapped summary CSV.
+        
+        This file maps types across datasets using CrossDatasetTypeMapper to show
+        which types from different datasets correspond to each other.
+        
+        Creates:
+        - {line}_type_mapped.csv: Type mapping with columns for each dataset
+        
+        Parameters
+        ----------
+        neurons_df : pd.DataFrame
+            DataFrame with matched neurons (must have 'dataset' and 'type' columns)
+        line_name : str
+            Driver line name
+        output_path : str
+            Output directory path
+        verbose : bool
+            Whether to print progress messages
+        sort_by : str
+            Score metric to sort by: 'max_score', 'median_score', etc.
+        """
+        if not HAS_TYPE_MAPPER:
+            return
+        
+        if 'dataset' not in neurons_df.columns or 'type' not in neurons_df.columns:
+            return
+        
+        try:
+            # Get type mapper instance
+            mapper = get_type_mapper()
+            if mapper is None:
+                return
+            
+            # Get list of datasets in the data
+            datasets = sorted(neurons_df['dataset'].unique())
+            if len(datasets) < 2:
+                # No need for type mapping with single dataset
+                return
+            
+            # Build a mapping table for all types across datasets
+            # First, collect all unique (dataset, type) pairs with their counts and scores
+            rows = []
+            
+            # Group by type and dataset
+            for dataset in datasets:
+                ds_df = neurons_df[neurons_df['dataset'] == dataset]
+                if 'type' not in ds_df.columns:
+                    continue
+                
+                # Create type summary for this dataset
+                type_summary = self._create_type_summary(ds_df, dataset, sort_by=sort_by)
+                if type_summary.empty:
+                    continue
+                
+                for _, row in type_summary.iterrows():
+                    type_name = row['type']
+                    if not type_name or pd.isna(type_name):
+                        continue
+                    
+                    # Get canonical type for merging
+                    canonical = mapper.get_canonical_type(type_name, source_dataset=dataset)
+                    
+                    rows.append({
+                        'canonical_type': canonical,
+                        'dataset': dataset,
+                        'original_type': type_name,
+                        'labeled_N': row.get('labeled_N', 0),
+                        'max_score': row.get('max_score'),
+                        'median_score': row.get('median_score'),
+                        'typed_N_in_dataset': row.get('typed_N_in_dataset', 0),
+                    })
+            
+            if not rows:
+                return
+            
+            # Convert to DataFrame and pivot to wide format
+            df = pd.DataFrame(rows)
+            
+            # Create summary grouped by canonical type
+            summary_rows = []
+            for canonical, group in df.groupby('canonical_type'):
+                summary_row = {'canonical_type': canonical}
+                total_labeled = 0
+                max_max_score = None
+                
+                for dataset in datasets:
+                    ds_group = group[group['dataset'] == dataset]
+                    ds_filename = dataset.replace(':', '_').replace('.', '_')
+                    
+                    if len(ds_group) > 0:
+                        # Use the first (or only) matching row
+                        ds_row = ds_group.iloc[0]
+                        summary_row[f'{ds_filename}_type'] = ds_row['original_type']
+                        summary_row[f'{ds_filename}_N'] = ds_row['labeled_N']
+                        summary_row[f'{ds_filename}_max_score'] = ds_row['max_score']
+                        total_labeled += ds_row['labeled_N']
+                        if ds_row['max_score'] is not None:
+                            if max_max_score is None or ds_row['max_score'] > max_max_score:
+                                max_max_score = ds_row['max_score']
+                    else:
+                        summary_row[f'{ds_filename}_type'] = ''
+                        summary_row[f'{ds_filename}_N'] = 0
+                        summary_row[f'{ds_filename}_max_score'] = None
+                
+                summary_row['total_labeled_N'] = total_labeled
+                summary_row['best_max_score'] = max_max_score
+                summary_rows.append(summary_row)
+            
+            if not summary_rows:
+                return
+            
+            # Create final DataFrame
+            result_df = pd.DataFrame(summary_rows)
+            
+            # Sort by best_max_score descending, then by total_labeled_N descending
+            if 'best_max_score' in result_df.columns:
+                result_df = result_df.sort_values(
+                    ['best_max_score', 'total_labeled_N'],
+                    ascending=[False, False]
+                )
+            else:
+                result_df = result_df.sort_values('total_labeled_N', ascending=False)
+            
+            # Reorder columns in the user-requested order:
+            # male-cns type (canonical), best_max_score, FAFB type, hemibrain type, manc type,
+            # then all scores, then all labeled_N counts
+            
+            # Define dataset order priority for columns
+            dataset_order = [
+                'male-cns_v0_9',
+                'flywire_FAFB_v783',
+                'hemibrain_v1_2_1',
+                'manc_v1_0',
+                'manc_v1_2_1',
+                'flywire_BANC_v626',
+            ]
+            
+            # Get available datasets in the data
+            available_ds = []
+            for ds_prefix in dataset_order:
+                if f'{ds_prefix}_type' in result_df.columns:
+                    available_ds.append(ds_prefix)
+            
+            # Add any other datasets not in the priority list
+            for col in result_df.columns:
+                if col.endswith('_type') and col != 'canonical_type':
+                    ds_prefix = col.replace('_type', '')
+                    if ds_prefix not in available_ds:
+                        available_ds.append(ds_prefix)
+            
+            # Build ordered columns:
+            # 1. canonical_type (male-cns type)
+            # 2. best_max_score
+            # 3. Dataset types in order (FAFB, hemibrain, manc, etc.)
+            # 4. Dataset max scores in order
+            # 5. Dataset labeled_N counts in order
+            # 6. total_labeled_N
+            ordered_cols = ['canonical_type', 'best_max_score']
+            
+            # Add type columns (skip male-cns since canonical_type IS the male-cns type)
+            for ds_prefix in available_ds:
+                if ds_prefix != 'male-cns_v0_9':  # canonical_type already represents male-cns
+                    if f'{ds_prefix}_type' in result_df.columns:
+                        ordered_cols.append(f'{ds_prefix}_type')
+            
+            # Add max_score columns
+            for ds_prefix in available_ds:
+                if f'{ds_prefix}_max_score' in result_df.columns:
+                    ordered_cols.append(f'{ds_prefix}_max_score')
+            
+            # Add labeled_N columns
+            for ds_prefix in available_ds:
+                if f'{ds_prefix}_N' in result_df.columns:
+                    ordered_cols.append(f'{ds_prefix}_N')
+            
+            # Add total
+            ordered_cols.append('total_labeled_N')
+            
+            # Only include columns that exist
+            ordered_cols = [c for c in ordered_cols if c in result_df.columns]
+            result_df = result_df[ordered_cols]
+            
+            # Save the type-mapped CSV
+            type_mapped_file = os.path.join(output_path, f'{line_name}_type_mapped.csv')
+            result_df.to_csv(type_mapped_file, index=False)
+            if verbose:
+                self._vprint(f"   💾 Saved: {type_mapped_file}")
+            
+        except Exception as e:
+            if verbose:
+                self._vprint(f"   ⚠️ Could not create type-mapped CSV: {e}")
     
     def _create_type_summary(
         self,

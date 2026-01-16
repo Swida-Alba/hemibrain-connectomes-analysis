@@ -1542,25 +1542,38 @@ def _generate_conservation_network(analyzer, dataset_names: List[str], threshold
     if not edge_data:
         return '<div class="card"><p>No connections at this threshold.</p></div>'
     
+    # Helper to extract canonical name from display name like "MeVPaMe1(MTe46)" -> "MeVPaMe1"
+    def get_canonical_name(display_name: str) -> str:
+        if '(' in display_name:
+            return display_name.split('(')[0]
+        return display_name
+    
     # Helper function to check if a node label matches any pattern
+    # For merged display names like "MeVPaMe1(MTe46)", also check the canonical part
     def matches_patterns(label: str, patterns: set) -> bool:
         import re
-        for pattern in patterns:
-            # Handle regex patterns (containing .* or other regex chars)
-            # vs simple glob patterns (containing just *)
-            if '.*' in pattern:
-                # Already a regex pattern (e.g., "aMe.*"), use directly
-                regex_pattern = pattern
-            elif '*' in pattern:
-                # Simple glob pattern (e.g., "aMe*"), convert * to .*
-                # Escape special regex chars except *
-                regex_pattern = re.escape(pattern).replace(r'\*', '.*')
-            else:
-                # Exact match pattern, escape for regex
-                regex_pattern = re.escape(pattern)
-            
-            if re.match(f'^{regex_pattern}$', label, re.IGNORECASE):
-                return True
+        # Get canonical name for matching (handles merged display names)
+        canonical = get_canonical_name(label)
+        # Check both the full label and canonical name
+        names_to_check = [label, canonical] if canonical != label else [label]
+        
+        for name in names_to_check:
+            for pattern in patterns:
+                # Handle regex patterns (containing .* or other regex chars)
+                # vs simple glob patterns (containing just *)
+                if '.*' in pattern:
+                    # Already a regex pattern (e.g., "aMe.*"), use directly
+                    regex_pattern = pattern
+                elif '*' in pattern:
+                    # Simple glob pattern (e.g., "aMe*"), convert * to .*
+                    # Escape special regex chars except *
+                    regex_pattern = re.escape(pattern).replace(r'\*', '.*')
+                else:
+                    # Exact match pattern, escape for regex
+                    regex_pattern = re.escape(pattern)
+                
+                if re.match(f'^{regex_pattern}$', name, re.IGNORECASE):
+                    return True
         return False
     
     # First pass: collect all nodes and their initial roles (intermediate)
@@ -1702,8 +1715,40 @@ def _generate_conservation_network(analyzer, dataset_names: List[str], threshold
     
     # Ensure ALL source and target neurons are present in the network (even if isolated)
     # This fixes the issue where target neurons drop out if they have no connections
+    # BUT: only add exact neuron names, NOT patterns with wildcards (*, .*)
+    # ALSO: Don't add if the neuron is already represented in a merged node (e.g., MeVPLo2 in MeVPLo2(MTe07))
+    
+    def is_represented_in_nodes(label: str, node_ids: dict) -> bool:
+        """Check if a label is already represented in existing nodes.
+        
+        Returns True if:
+        - label is directly in node_ids
+        - label appears at the start of a merged node name like 'MeVPLo2(MTe07)'
+        - label appears inside parentheses of a merged node
+        """
+        if label in node_ids:
+            return True
+        # Check for merged names like 'MeVPLo2(MTe07)' where label could be MeVPLo2 or MTe07
+        for existing_label in node_ids.keys():
+            # Check if label is the base name (before parentheses)
+            if existing_label.startswith(label + '('):
+                return True
+            # Check if label is inside parentheses
+            if '(' in existing_label and ')' in existing_label:
+                paren_start = existing_label.index('(')
+                paren_end = existing_label.index(')')
+                inner = existing_label[paren_start + 1:paren_end]
+                # Handle multiple names separated by /
+                inner_names = [n.strip() for n in inner.split('/')]
+                if label in inner_names:
+                    return True
+        return False
+    
     for label in source_neurons:
-        if label not in node_ids:
+        # Skip patterns - they're not actual neuron names
+        if '*' in label or '.*' in label:
+            continue
+        if not is_represented_in_nodes(label, node_ids):
             node_ids[label] = node_counter
             nodes.append({
                 'id': node_counter,
@@ -1714,7 +1759,10 @@ def _generate_conservation_network(analyzer, dataset_names: List[str], threshold
             node_counter += 1
             
     for label in target_neurons:
-        if label not in node_ids:
+        # Skip patterns - they're not actual neuron names
+        if '*' in label or '.*' in label:
+            continue
+        if not is_represented_in_nodes(label, node_ids):
             node_ids[label] = node_counter
             nodes.append({
                 'id': node_counter,
@@ -1900,24 +1948,36 @@ def _generate_dataset_network(analyzer, dataset: str, thresholds: List[int],
         except:
             pass
     
+    # Helper to extract canonical name from display name like "MeVPaMe1(MTe46)" -> "MeVPaMe1"
+    def get_canonical_name(display_name: str) -> str:
+        if '(' in display_name:
+            return display_name.split('(')[0]
+        return display_name
+    
     def matches_patterns(label: str, patterns: set) -> bool:
         import re
-        for pattern in patterns:
-            # Handle regex patterns (containing .* or other regex chars)
-            # vs simple glob patterns (containing just *)
-            if '.*' in pattern:
-                # Already a regex pattern (e.g., "aMe.*"), use directly
-                regex_pattern = pattern
-            elif '*' in pattern:
-                # Simple glob pattern (e.g., "aMe*"), convert * to .*
-                # Escape special regex chars except *
-                regex_pattern = re.escape(pattern).replace(r'\*', '.*')
-            else:
-                # Exact match pattern, escape for regex
-                regex_pattern = re.escape(pattern)
-            
-            if re.match(f'^{regex_pattern}$', label, re.IGNORECASE):
-                return True
+        # Get canonical name for matching (handles merged display names)
+        canonical = get_canonical_name(label)
+        # Check both the full label and canonical name
+        names_to_check = [label, canonical] if canonical != label else [label]
+        
+        for name in names_to_check:
+            for pattern in patterns:
+                # Handle regex patterns (containing .* or other regex chars)
+                # vs simple glob patterns (containing just *)
+                if '.*' in pattern:
+                    # Already a regex pattern (e.g., "aMe.*"), use directly
+                    regex_pattern = pattern
+                elif '*' in pattern:
+                    # Simple glob pattern (e.g., "aMe*"), convert * to .*
+                    # Escape special regex chars except *
+                    regex_pattern = re.escape(pattern).replace(r'\*', '.*')
+                else:
+                    # Exact match pattern, escape for regex
+                    regex_pattern = re.escape(pattern)
+                
+                if re.match(f'^{regex_pattern}$', name, re.IGNORECASE):
+                    return True
         return False
     
     # Determine node roles
@@ -2811,8 +2871,10 @@ def _generate_conservation_section(analyzer, dataset_names: List[str], threshold
     try:
         from .visualizations import ComparisonVisualizer
         vis = ComparisonVisualizer()
+        # Use type-mapped results for proper cross-dataset comparison
+        mapped_results = analyzer.get_mapped_results()
         plotly_json = vis.plot_conservation_across_thresholds_plotly(
-            analyzer.raw_results,
+            mapped_results,
             thresholds,
             align_func=analyzer.get_aligned_data,
             nickname_map=nickname_map,

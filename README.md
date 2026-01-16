@@ -1,4 +1,4 @@
-# *Drosophila* Connectome Analysis Toolkit (DROCAT) v4.4.1
+# *Drosophila* Connectome Analysis Toolkit (DROCAT) v4.4.2
 
 A comprehensive Python toolkit for analyzing and visualizing connectome data from **all NeuPrint databases and FlyWire datasets**. Features type-based pathfinding algorithms, interactive network visualizations with NT grouping, 3D neuron morphology rendering, and EM↔LM driver line mapping.
 
@@ -40,6 +40,7 @@ A comprehensive Python toolkit for analyzing and visualizing connectome data fro
 | **Line Analysis**      | [Workflow Guide](docs/core-features/NeuronBridge_Workflow.md)               | `NeuronBridge_Colabel.py`      |
 | **FlyLight Images**    | [FlyLight Guide](docs/core-features/FlyLight_Guide.md)                      | `FlyLight_fetcher.py`          |
 | **Cross-Dataset**      | [Comparison Guide](docs/core-features/CrossDatasetComparison_Guide.md)      | `InterDatasetComparator.py`    |
+| **Auto Type Mapping**  | [Type Mapping Guide](docs/AUTO_TYPE_MAPPING.md)                             | Cross-dataset comparisons      |
 | **Homolog Finding**    | [Homolog Guide](docs/core-features/HomologFinding_Guide.md)                 | `FindHomologs.py`              |
 | **3D Visualization**   | [3D Skeleton Guide](docs/visualizations/3D_Skeleton_Guide.md)               | `plot3dSkeleton.py`            |
 | **Path Visualization** | [Interaction Guide](docs/visualizations/VisualizePath_Interaction_Guide.md) | `PlotPath.py`                  |

@@ -102,6 +102,18 @@ Outputs are saved in a user-defined output folder (default: `comparison_output/`
 *   **`interactive_heatmap.html`**: An interactive heatmap visualizing the connection weights across datasets for all neuron pairs.
 *   **`dataset_data/`**: A folder containing the raw `FindNeuronConnection` outputs (see Section 1) for each dataset and threshold analyzed. This allows for deep-diving into individual dataset results.
 
+#### Auto Type Mapping (v4.4.2+)
+When `auto_type_mapping=True` (default), the analyzer automatically maps neuron types across datasets using the male-cns neuron_df type mapping columns. This enables proper comparison of types that have different names in different datasets (e.g., `MeVPLo2` in male-cns = `MTe07` in FAFB).
+
+*   **`auto_type_mapping.csv`**: Cross-dataset type mapping table showing:
+    *   `canonical_type`: The canonical (male-cns) type name used for comparison
+    *   Per-dataset columns showing the mapped type name for each dataset
+    *   Only includes types where names differ across datasets
+*   **`auto_type_mapping_conflicts.csv`**: Lists N-to-1 and 1-to-N type mappings that may affect aggregation:
+    *   N-to-1: Multiple types in one dataset map to a single type in another
+    *   1-to-N: A single type splits into multiple types across datasets
+*   **`label_map.json`**: JSON export of manual label mappings (if LabelMapper was used)
+
 ---
 
 ## 5. NeuronBridgeFinder (Co-Labeling Analysis)
@@ -138,6 +150,11 @@ Outputs are saved in a timestamped folder: `colabel_{lines}_{timestamp}`.
 *   **`line_labeled_neurons/`**: Per-line neuron details split by dataset.
 *   **`parameters.json`**: Analysis parameters for reproducibility.
 *   **`colabeling_report.html`**: Comprehensive HTML report with embedded visualizations.
+*   **`{line}_type_mapped.csv`**: (v4.4.2+) Cross-dataset type mapping summary for each line, showing:
+    *   `canonical_type`: Male-cns canonical type name
+    *   `best_max_score`: Highest max score across all datasets
+    *   Per-dataset columns: `{dataset}_type`, `{dataset}_max_score`, `{dataset}_N`
+    *   Useful for identifying equivalent types across datasets (e.g., `MeVPLo2` = `MTe07`)
 
 ### Expression Matrix Columns
 - Row index: Neuron type (with or without dataset prefix)
@@ -151,3 +168,56 @@ Outputs are saved in a timestamped folder: `colabel_{lines}_{timestamp}`.
 | Purpose     | Distinguish dataset source | Type identity only            |
 | Aggregation | None                       | Max score across datasets     |
 | Use case    | Dataset-specific analysis  | Cross-dataset type comparison |
+
+---
+
+## 6. ConnectivityProfileComparer (Connectivity Profile Analysis)
+
+The `ConnectivityProfileComparer` class (in `src/comparison/profile_comparator.py`) compares connectivity profiles within or across datasets.
+
+### Folder Structure
+Outputs are saved in a timestamped folder: `{query_name}_{timestamp}/` or for cross-dataset: `{datasetA}_vs_{datasetB}_{timestamp}_cross_dataset/`.
+
+### Key Output Files
+
+#### Intra-Dataset Comparison
+*   **`type_level/`**: Type-aggregated similarity matrices
+    *   `{direction}_jaccard.csv`: Jaccard similarity matrix
+    *   `{direction}_cosine.csv`: Cosine similarity matrix
+    *   `{direction}_rank_corr.csv`: Spearman rank correlation matrix
+    *   `{direction}_rank_corr_union.csv`: Normalized rank correlation matrix
+    *   Corresponding `_heatmap.png` files for visualization
+*   **`bodyid_level/`**: BodyId-level similarity matrices (if not skipped)
+*   **`type_avg_from_bodyid/`**: Type similarities averaged from bodyId pairs
+*   **`profiles/`**: Individual connectivity profiles in JSON format
+*   **`metadata.json`**: Analysis parameters and configuration
+
+#### Cross-Dataset Comparison (v4.4.2+)
+When using dict query format `{'datasetA': [...], 'datasetB': [...]}`:
+*   **`cross_dataset/`**: N×M similarity matrices comparing types across datasets
+    *   `{direction}_{metric}.csv`: Similarity matrix (rows = dataset A types, cols = dataset B types)
+    *   `{direction}_{metric}_heatmap.png`: Visualization
+*   **`profiles/{dataset}/`**: Profiles organized by source dataset
+*   **`metadata.json`**: Includes `use_auto_type_mapping` setting
+
+### Auto Type Mapping
+When `use_auto_type_mapping=True` (default for cross-dataset), partner types are standardized to their canonical (male-cns) names before comparison. This allows proper matching of types like `MTe07` (FAFB) ↔ `MeVPLo2` (male-cns).
+
+---
+
+## 7. CrossDatasetTypeMapper (Type Mapping Utility)
+
+The `CrossDatasetTypeMapper` class (in `src/comparison/cross_dataset_type_mapper.py`) provides automatic type name mapping across datasets.
+
+### Usage
+This utility is used internally by `ComparisonAnalyzer`, `HomologFinder`, `ConnectivityProfileComparer`, and `NeuronBridgeFinder` when `auto_type_mapping=True`.
+
+### Mapping Source
+Type mappings are derived from the `male-cns_v0_9_allneurons_neuron_df.csv` file which contains columns:
+*   `type`: Male-cns type name (canonical)
+*   `flywireType`: Corresponding FAFB/FlyWire type name
+*   `hemibrainType`: Corresponding Hemibrain type name
+*   `mancType`: Corresponding MANC type name
+
+### Priority Order
+When resolving types, the priority is: male-cns > flywire > manc > hemibrain > optic-lobe

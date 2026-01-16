@@ -1,0 +1,1253 @@
+"""
+CrossDatasetTypeMapper - Automatic type name mapping across datasets.
+
+This module provides automatic type name mapping using the male-cns neuron_df file
+which contains cross-dataset type columns (flywireType, hemibrainType, mancType).
+
+The mapping is bodyId-based: each neuron in male-cns has its own type AND the
+corresponding type name in other datasets. This allows for accurate cross-dataset
+comparison even when type names differ.
+
+Key Features:
+- Auto-loads type mappings from male-cns_v0_9_allneurons_neuron_df.csv
+- Handles 1-to-1, N-to-1, and 1-to-N type relationships
+- Warns about N-to-1 aggregations that should be avoided
+- Priority-based resolution: male-cns > flywire > manc > hemibrain > optic-lobe
+- Graceful handling of missing mappings
+- Integration with LabelMapper (LabelMapper has higher priority)
+"""
+
+import os
+import warnings
+from pathlib import Path
+from typing import Dict, List, Optional, Set, Tuple, Union
+from collections import defaultdict
+import pandas as pd
+
+from comparison.label_mapper import LabelMapper
+
+# Dataset priority for type name resolution (lower index = higher priority)
+DATASET_PRIORITY = [
+    'male-cns:v0.9',
+    'male-cns_v0_9',
+    'flywire_FAFB_v783',
+    'flywire_BANC_v626',
+    'flywire_FAFB',
+    'flywire_BANC',
+    'manc:v1.0',
+    'manc:v1.2.1',
+    'manc_v1_0',
+    'manc_v1_2_1',
+    'hemibrain:v1.2.1',
+    'hemibrain_v1_2_1',
+    'optic-lobe:v1.1',
+    'optic-lobe_v1_1',
+]
+
+# Mapping from dataset names to neuron_df column names
+DATASET_TO_TYPE_COL = {
+    'male-cns:v0.9': 'type',
+    'male-cns_v0_9': 'type',
+    'flywire_FAFB_v783': 'flywireType',
+    'flywire_BANC_v626': 'flywireType',  # BANC uses same flywireType col
+    'flywire_FAFB': 'flywireType',
+    'flywire_BANC': 'flywireType',
+    'manc:v1.0': 'mancType',
+    'manc:v1.2.1': 'mancType',
+    'manc_v1_0': 'mancType',
+    'manc_v1_2_1': 'mancType',
+    'hemibrain:v1.2.1': 'hemibrainType',
+    'hemibrain_v1_2_1': 'hemibrainType',
+    # optic-lobe not in male-cns mapping
+}
+
+
+class TypeMappingWarning(UserWarning):
+    """Warning for type mapping issues like N-to-1 relationships."""
+    pass
+
+
+class TypeMappingConflict:
+    """Represents a type mapping conflict (N-to-1 or 1-to-N relationship)."""
+    
+    def __init__(
+        self,
+        source_dataset: str,
+        target_dataset: str,
+        source_type: str,
+        target_types: Set[str],
+        relationship: str,  # 'N-to-1' or '1-to-N'
+    ):
+        self.source_dataset = source_dataset
+        self.target_dataset = target_dataset
+        self.source_type = source_type
+        self.target_types = target_types
+        self.relationship = relationship
+    
+    def __repr__(self):
+        return (f"TypeMappingConflict({self.source_type} in {self.source_dataset} "
+                f"-> {self.target_types} in {self.target_dataset}, {self.relationship})")
+
+
+class CrossDatasetTypeMapper:
+    """
+    Automatic cross-dataset type name mapping using male-cns neuron_df.
+    
+    This class provides:
+    1. Loading of type mapping from male-cns neuron_df
+    2. Resolution of type names across datasets
+    3. Detection and warning for N-to-1/1-to-N relationships
+    4. Priority-based type name selection
+    
+    Example:
+        >>> mapper = CrossDatasetTypeMapper(workspace_path='/path/to/project')
+        >>> 
+        >>> # Get equivalent type in target dataset
+        >>> flywire_type = mapper.get_mapped_type('aMe12', 'male-cns:v0.9', 'flywire_FAFB_v783')
+        >>> 
+        >>> # Resolve a type name to all equivalent types across datasets
+        >>> type_map = mapper.resolve_type_across_datasets('MeVPLo2', ['male-cns:v0.9', 'flywire_FAFB_v783'])
+        >>> 
+        >>> # Get canonical display name
+        >>> display_name = mapper.get_display_name('MeVPLo2', datasets=['male-cns:v0.9', 'flywire_FAFB_v783'])
+    """
+    
+    def __init__(
+        self,
+        workspace_path: Optional[str] = None,
+        neuron_df_path: Optional[str] = None,
+        verbose: bool = True,
+    ):
+        """
+        Initialize CrossDatasetTypeMapper.
+        
+        Args:
+            workspace_path: Path to the project workspace (containing datasets/ folder).
+                           If None, will try to auto-detect from file location.
+            neuron_df_path: Explicit path to the male-cns neuron_df file.
+                           If provided, overrides workspace_path detection.
+            verbose: Print loading and warning messages.
+        """
+        self.verbose = verbose
+        self._neuron_df: Optional[pd.DataFrame] = None
+        self._loaded = False
+        
+        # Type mappings: {source_dataset: {source_type: {target_dataset: target_type}}}
+        self._type_mappings: Dict[str, Dict[str, Dict[str, str]]] = {}
+        
+        # Reverse mappings for lookup
+        self._reverse_mappings: Dict[str, Dict[str, str]] = {}  # {dataset: {type: canonical_type}}
+        
+        # Conflict tracking
+        self._conflicts: List[TypeMappingConflict] = []
+        self._n_to_1_types: Dict[str, Set[str]] = defaultdict(set)  # {target_type: {source_types}}
+        
+        # Dataset types index: {dataset: {type: set(bodyIds)}}
+        self._dataset_types: Dict[str, Dict[str, Set[str]]] = defaultdict(lambda: defaultdict(set))
+        
+        # Determine path to neuron_df
+        if neuron_df_path:
+            self._neuron_df_path = neuron_df_path
+        else:
+            if workspace_path is None:
+                # Try to auto-detect from this file's location
+                workspace_path = str(Path(__file__).parent.parent.parent)
+            
+            self._neuron_df_path = os.path.join(
+                workspace_path, 
+                'datasets', 
+                'male-cns_v0_9', 
+                'male-cns_v0_9_allneurons_neuron_df.csv'
+            )
+        
+        self._workspace_path = workspace_path
+    
+    def _log(self, message: str, level: str = 'info'):
+        """Print message if verbose mode enabled."""
+        if self.verbose:
+            prefix = '⚠️ ' if level == 'warn' else ''
+            print(f"[TypeMapper] {prefix}{message}")
+    
+    def load(self, force_reload: bool = False) -> bool:
+        """
+        Load type mappings from neuron_df file.
+        
+        Args:
+            force_reload: Reload even if already loaded.
+            
+        Returns:
+            True if loading succeeded, False otherwise.
+        """
+        if self._loaded and not force_reload:
+            return True
+        
+        if not os.path.exists(self._neuron_df_path):
+            self._log(f"Neuron DF file not found: {self._neuron_df_path}", level='warn')
+            self._log("Auto type mapping will be disabled. Initialize male-cns dataset first.", level='warn')
+            return False
+        
+        try:
+            self._log(f"Loading type mappings from {os.path.basename(self._neuron_df_path)}...")
+            
+            # Read only the columns we need for efficiency
+            cols_needed = ['bodyId', 'type', 'flywireType', 'hemibrainType', 'mancType']
+            self._neuron_df = pd.read_csv(
+                self._neuron_df_path,
+                usecols=lambda c: c in cols_needed,
+                dtype={'bodyId': str},
+                low_memory=False,
+            )
+            
+            # Build mappings
+            self._build_type_mappings()
+            self._loaded = True
+            
+            self._log(f"Loaded {len(self._neuron_df):,} neurons with type mappings")
+            return True
+            
+        except Exception as e:
+            self._log(f"Error loading neuron_df: {e}", level='warn')
+            return False
+    
+    def _build_type_mappings(self):
+        """Build internal type mapping dictionaries."""
+        if self._neuron_df is None:
+            return
+        
+        df = self._neuron_df.copy()
+        
+        # Clean up: fill NaN with empty string, strip whitespace
+        for col in ['type', 'flywireType', 'hemibrainType', 'mancType']:
+            if col in df.columns:
+                df[col] = df[col].fillna('').astype(str).str.strip()
+        
+        # Build per-row mappings
+        # Each row represents one bodyId with its type in each dataset
+        male_cns_types = set()
+        flywire_types = set()
+        hemibrain_types = set()
+        manc_types = set()
+        
+        # Track: mcns_type -> {flywire_types}, etc.
+        mcns_to_flywire: Dict[str, Set[str]] = defaultdict(set)
+        mcns_to_hemibrain: Dict[str, Set[str]] = defaultdict(set)
+        mcns_to_manc: Dict[str, Set[str]] = defaultdict(set)
+        
+        # Reverse mappings
+        flywire_to_mcns: Dict[str, Set[str]] = defaultdict(set)
+        hemibrain_to_mcns: Dict[str, Set[str]] = defaultdict(set)
+        manc_to_mcns: Dict[str, Set[str]] = defaultdict(set)
+        
+        for _, row in df.iterrows():
+            mcns_type = row.get('type', '')
+            flywire_type = row.get('flywireType', '')
+            hemibrain_type = row.get('hemibrainType', '')
+            manc_type = row.get('mancType', '')
+            body_id = row.get('bodyId', '')
+            
+            # Skip empty types
+            if not mcns_type:
+                continue
+            
+            male_cns_types.add(mcns_type)
+            self._dataset_types['male-cns:v0.9'][mcns_type].add(body_id)
+            
+            if flywire_type:
+                flywire_types.add(flywire_type)
+                mcns_to_flywire[mcns_type].add(flywire_type)
+                flywire_to_mcns[flywire_type].add(mcns_type)
+                self._dataset_types['flywire_FAFB_v783'][flywire_type].add(body_id)
+                self._dataset_types['flywire_BANC_v626'][flywire_type].add(body_id)
+            
+            if hemibrain_type:
+                hemibrain_types.add(hemibrain_type)
+                mcns_to_hemibrain[mcns_type].add(hemibrain_type)
+                hemibrain_to_mcns[hemibrain_type].add(mcns_type)
+                self._dataset_types['hemibrain:v1.2.1'][hemibrain_type].add(body_id)
+            
+            if manc_type:
+                manc_types.add(manc_type)
+                mcns_to_manc[mcns_type].add(manc_type)
+                manc_to_mcns[manc_type].add(mcns_type)
+                self._dataset_types['manc:v1.0'][manc_type].add(body_id)
+                self._dataset_types['manc:v1.2.1'][manc_type].add(body_id)
+        
+        # Build final mappings (only 1-to-1 or 1-to-N that we can handle)
+        self._type_mappings = {
+            'male-cns:v0.9': {},
+            'flywire_FAFB_v783': {},
+            'flywire_BANC_v626': {},
+            'hemibrain:v1.2.1': {},
+            'manc:v1.0': {},
+            'manc:v1.2.1': {},
+        }
+        
+        # Process male-cns to other datasets
+        for mcns_type in male_cns_types:
+            self._type_mappings['male-cns:v0.9'][mcns_type] = {}
+            
+            # Flywire mapping
+            fw_types = mcns_to_flywire.get(mcns_type, set())
+            if len(fw_types) == 1:
+                fw_type = next(iter(fw_types))
+                self._type_mappings['male-cns:v0.9'][mcns_type]['flywire_FAFB_v783'] = fw_type
+                self._type_mappings['male-cns:v0.9'][mcns_type]['flywire_BANC_v626'] = fw_type
+            elif len(fw_types) > 1:
+                # N-to-1 from male-cns perspective (one mcns type maps to multiple flywire types)
+                # This means the mcns type is a superset - we can still use it but warn
+                self._conflicts.append(TypeMappingConflict(
+                    source_dataset='male-cns:v0.9',
+                    target_dataset='flywire_FAFB_v783',
+                    source_type=mcns_type,
+                    target_types=fw_types,
+                    relationship='1-to-N',
+                ))
+            
+            # Hemibrain mapping
+            hb_types = mcns_to_hemibrain.get(mcns_type, set())
+            if len(hb_types) == 1:
+                hb_type = next(iter(hb_types))
+                self._type_mappings['male-cns:v0.9'][mcns_type]['hemibrain:v1.2.1'] = hb_type
+            elif len(hb_types) > 1:
+                self._conflicts.append(TypeMappingConflict(
+                    source_dataset='male-cns:v0.9',
+                    target_dataset='hemibrain:v1.2.1',
+                    source_type=mcns_type,
+                    target_types=hb_types,
+                    relationship='1-to-N',
+                ))
+            
+            # MANC mapping
+            manc_types_mapped = mcns_to_manc.get(mcns_type, set())
+            if len(manc_types_mapped) == 1:
+                manc_type = next(iter(manc_types_mapped))
+                self._type_mappings['male-cns:v0.9'][mcns_type]['manc:v1.0'] = manc_type
+                self._type_mappings['male-cns:v0.9'][mcns_type]['manc:v1.2.1'] = manc_type
+            elif len(manc_types_mapped) > 1:
+                self._conflicts.append(TypeMappingConflict(
+                    source_dataset='male-cns:v0.9',
+                    target_dataset='manc:v1.0',
+                    source_type=mcns_type,
+                    target_types=manc_types_mapped,
+                    relationship='1-to-N',
+                ))
+        
+        # Process reverse mappings (flywire/hemibrain/manc to male-cns)
+        for fw_type in flywire_types:
+            mcns_types = flywire_to_mcns.get(fw_type, set())
+            if len(mcns_types) == 1:
+                mcns_type = next(iter(mcns_types))
+                self._type_mappings['flywire_FAFB_v783'][fw_type] = {'male-cns:v0.9': mcns_type}
+                self._type_mappings['flywire_BANC_v626'][fw_type] = {'male-cns:v0.9': mcns_type}
+                
+                # Also populate hemibrain/manc mappings transitively
+                if mcns_type in self._type_mappings['male-cns:v0.9']:
+                    for target_ds, target_type in self._type_mappings['male-cns:v0.9'][mcns_type].items():
+                        if target_ds not in ['flywire_FAFB_v783', 'flywire_BANC_v626']:
+                            if fw_type not in self._type_mappings['flywire_FAFB_v783']:
+                                self._type_mappings['flywire_FAFB_v783'][fw_type] = {}
+                            self._type_mappings['flywire_FAFB_v783'][fw_type][target_ds] = target_type
+                            if fw_type not in self._type_mappings['flywire_BANC_v626']:
+                                self._type_mappings['flywire_BANC_v626'][fw_type] = {}
+                            self._type_mappings['flywire_BANC_v626'][fw_type][target_ds] = target_type
+            elif len(mcns_types) > 1:
+                # N-to-1: multiple mcns types map to same flywire type
+                # This should NOT be aggregated
+                self._conflicts.append(TypeMappingConflict(
+                    source_dataset='flywire_FAFB_v783',
+                    target_dataset='male-cns:v0.9',
+                    source_type=fw_type,
+                    target_types=mcns_types,
+                    relationship='N-to-1',
+                ))
+                self._n_to_1_types['flywire_FAFB_v783'].add(fw_type)
+                for mt in mcns_types:
+                    self._n_to_1_types['male-cns:v0.9'].add(mt)
+        
+        # Similarly for hemibrain
+        for hb_type in hemibrain_types:
+            mcns_types = hemibrain_to_mcns.get(hb_type, set())
+            if len(mcns_types) == 1:
+                mcns_type = next(iter(mcns_types))
+                self._type_mappings['hemibrain:v1.2.1'][hb_type] = {'male-cns:v0.9': mcns_type}
+                
+                # Transitive mappings
+                if mcns_type in self._type_mappings['male-cns:v0.9']:
+                    for target_ds, target_type in self._type_mappings['male-cns:v0.9'][mcns_type].items():
+                        if target_ds != 'hemibrain:v1.2.1':
+                            if hb_type not in self._type_mappings['hemibrain:v1.2.1']:
+                                self._type_mappings['hemibrain:v1.2.1'][hb_type] = {}
+                            self._type_mappings['hemibrain:v1.2.1'][hb_type][target_ds] = target_type
+            elif len(mcns_types) > 1:
+                self._conflicts.append(TypeMappingConflict(
+                    source_dataset='hemibrain:v1.2.1',
+                    target_dataset='male-cns:v0.9',
+                    source_type=hb_type,
+                    target_types=mcns_types,
+                    relationship='N-to-1',
+                ))
+                self._n_to_1_types['hemibrain:v1.2.1'].add(hb_type)
+                for mt in mcns_types:
+                    self._n_to_1_types['male-cns:v0.9'].add(mt)
+        
+        # Build reverse lookup for fast type resolution
+        self._build_reverse_lookup()
+        
+        # Store conflict counts for later reference (don't print now)
+        self._n_to_1_count = sum(1 for c in self._conflicts if c.relationship == 'N-to-1')
+        self._one_to_n_count = sum(1 for c in self._conflicts if c.relationship == '1-to-N')
+    
+    def _build_reverse_lookup(self):
+        """Build reverse lookup tables for fast type name resolution."""
+        # For each dataset, map type names to their canonical form (male-cns name)
+        for src_dataset, type_maps in self._type_mappings.items():
+            if src_dataset not in self._reverse_mappings:
+                self._reverse_mappings[src_dataset] = {}
+            
+            for src_type, target_maps in type_maps.items():
+                # The src_type in src_dataset maps to these target types
+                mcns_type = target_maps.get('male-cns:v0.9', src_type) if src_dataset != 'male-cns:v0.9' else src_type
+                self._reverse_mappings[src_dataset][src_type] = mcns_type
+    
+    def get_mapped_type(
+        self, 
+        type_name: str, 
+        source_dataset: str, 
+        target_dataset: str
+    ) -> Optional[str]:
+        """
+        Get the equivalent type name in target dataset.
+        
+        Args:
+            type_name: Type name in source dataset.
+            source_dataset: Source dataset name.
+            target_dataset: Target dataset name.
+            
+        Returns:
+            Mapped type name, or None if no mapping exists.
+        """
+        if not self._loaded:
+            if not self.load():
+                return None
+        
+        # Normalize dataset names
+        src_ds = self._normalize_dataset_name(source_dataset)
+        tgt_ds = self._normalize_dataset_name(target_dataset)
+        
+        if src_ds == tgt_ds:
+            return type_name
+        
+        if src_ds in self._type_mappings:
+            if type_name in self._type_mappings[src_ds]:
+                return self._type_mappings[src_ds][type_name].get(tgt_ds)
+        
+        return None
+    
+    def _normalize_dataset_name(self, dataset: str) -> str:
+        """Normalize dataset name to standard format."""
+        # Handle version suffixes and underscores
+        ds_lower = dataset.lower()
+        
+        if 'male-cns' in ds_lower or 'male_cns' in ds_lower:
+            return 'male-cns:v0.9'
+        elif 'banc' in ds_lower:
+            return 'flywire_BANC_v626'
+        elif 'fafb' in ds_lower or ('flywire' in ds_lower and 'banc' not in ds_lower):
+            return 'flywire_FAFB_v783'
+        elif 'hemibrain' in ds_lower:
+            return 'hemibrain:v1.2.1'
+        elif 'manc' in ds_lower:
+            if 'v1.2' in ds_lower or 'v1_2' in ds_lower:
+                return 'manc:v1.2.1'
+            return 'manc:v1.0'
+        elif 'optic' in ds_lower:
+            return 'optic-lobe:v1.1'
+        
+        return dataset
+    
+    def resolve_type_across_datasets(
+        self,
+        type_name: str,
+        datasets: List[str],
+        source_dataset: Optional[str] = None,
+    ) -> Dict[str, Optional[str]]:
+        """
+        Resolve a type name to equivalent types in multiple datasets.
+        
+        Args:
+            type_name: Type name to resolve.
+            datasets: List of target datasets.
+            source_dataset: Optional source dataset hint. If None, will auto-detect.
+            
+        Returns:
+            Dict mapping dataset -> equivalent type name (or None if not found).
+        """
+        if not self._loaded:
+            if not self.load():
+                return {ds: None for ds in datasets}
+        
+        result = {}
+        
+        # Determine source dataset if not provided
+        if source_dataset is None:
+            source_dataset = self._detect_type_source(type_name)
+        
+        if source_dataset:
+            src_ds = self._normalize_dataset_name(source_dataset)
+            for ds in datasets:
+                tgt_ds = self._normalize_dataset_name(ds)
+                if tgt_ds == src_ds:
+                    result[ds] = type_name
+                else:
+                    result[ds] = self.get_mapped_type(type_name, source_dataset, ds)
+        else:
+            # Type not found in any known dataset
+            for ds in datasets:
+                result[ds] = None
+        
+        return result
+    
+    def _detect_type_source(self, type_name: str) -> Optional[str]:
+        """
+        Detect which dataset a type name belongs to based on priority.
+        
+        Args:
+            type_name: Type name to look up.
+            
+        Returns:
+            Dataset name where type was found, or None.
+        """
+        if not self._loaded:
+            return None
+        
+        # Check in priority order
+        for dataset in DATASET_PRIORITY:
+            norm_ds = self._normalize_dataset_name(dataset)
+            if norm_ds in self._type_mappings:
+                if type_name in self._type_mappings[norm_ds]:
+                    return norm_ds
+            
+            # Also check the dataset_types index
+            if norm_ds in self._dataset_types:
+                if type_name in self._dataset_types[norm_ds]:
+                    return norm_ds
+        
+        return None
+    
+    def get_display_name(
+        self,
+        type_name: str,
+        datasets: List[str],
+        source_dataset: Optional[str] = None,
+    ) -> str:
+        """
+        Get a display name for a type showing mappings across datasets.
+        
+        Format: {mcns_name}({flywire_name}/{hemibrain_name}) if different.
+        
+        Args:
+            type_name: Type name to display.
+            datasets: Datasets being compared.
+            source_dataset: Source dataset for the type.
+            
+        Returns:
+            Display name with mapping info.
+        """
+        mappings = self.resolve_type_across_datasets(type_name, datasets, source_dataset)
+        
+        # Get male-cns name as canonical
+        mcns_name = mappings.get('male-cns:v0.9') or mappings.get('male-cns_v0_9')
+        
+        if not mcns_name:
+            # Use the original type name
+            mcns_name = type_name
+        
+        # Collect different names from other datasets
+        other_names = set()
+        for ds, mapped_name in mappings.items():
+            if mapped_name and mapped_name != mcns_name:
+                other_names.add(mapped_name)
+        
+        if other_names:
+            # Format: mcns_name(other1/other2)
+            others_str = '/'.join(sorted(other_names))
+            return f"{mcns_name}({others_str})"
+        
+        return mcns_name
+    
+    def is_n_to_1_type(self, type_name: str, dataset: str) -> bool:
+        """
+        Check if a type is involved in an N-to-1 mapping.
+        
+        These types should not be aggregated across datasets.
+        
+        Args:
+            type_name: Type name to check.
+            dataset: Dataset the type belongs to.
+            
+        Returns:
+            True if the type is part of an N-to-1 mapping.
+        """
+        if not self._loaded:
+            self.load()
+        
+        norm_ds = self._normalize_dataset_name(dataset)
+        return type_name in self._n_to_1_types.get(norm_ds, set())
+    
+    def get_n_to_1_conflicts(self) -> List[TypeMappingConflict]:
+        """Get all N-to-1 type mapping conflicts."""
+        return [c for c in self._conflicts if c.relationship == 'N-to-1']
+    
+    def get_1_to_n_conflicts(self) -> List[TypeMappingConflict]:
+        """Get all 1-to-N type mapping conflicts."""
+        return [c for c in self._conflicts if c.relationship == '1-to-N']
+    
+    def warn_if_conflicting(self, type_name: str, datasets: List[str]) -> bool:
+        """
+        Warn if type has conflicting mappings and return True if warned.
+        
+        Args:
+            type_name: Type name to check.
+            datasets: Datasets being compared.
+            
+        Returns:
+            True if a warning was issued.
+        """
+        for dataset in datasets:
+            if self.is_n_to_1_type(type_name, dataset):
+                # Find the specific conflict
+                for conflict in self._conflicts:
+                    if conflict.source_type == type_name or type_name in conflict.target_types:
+                        msg = (
+                            f"Type '{type_name}' is involved in an N-to-1 mapping: "
+                            f"{conflict.target_types} in {conflict.target_dataset} all map to "
+                            f"'{conflict.source_type}' in {conflict.source_dataset}. "
+                            f"Consider using LabelMapper to specify explicit mappings for these types."
+                        )
+                        warnings.warn(msg, TypeMappingWarning, stacklevel=3)
+                        return True
+        return False
+    
+    def check_type_name_conflict(
+        self,
+        type_name: str,
+        datasets: List[str],
+    ) -> Optional[Tuple[str, str, str]]:
+        """
+        Check if a type name exists in multiple datasets but with different mappings.
+        
+        This catches cases like: 'aMe12' exists in both male-cns and FAFB,
+        but the mapping says male-cns:aMe12 should map to FAFB:aMe122.
+        
+        Args:
+            type_name: Type name to check.
+            datasets: Datasets to check across.
+            
+        Returns:
+            Tuple of (queried_type, actual_mapped_type, conflict_dataset) if conflict exists,
+            None otherwise.
+        """
+        if not self._loaded:
+            self.load()
+        
+        # Find which datasets have this type name directly
+        datasets_with_type = []
+        for ds in datasets:
+            norm_ds = self._normalize_dataset_name(ds)
+            if norm_ds in self._dataset_types and type_name in self._dataset_types[norm_ds]:
+                datasets_with_type.append(norm_ds)
+        
+        if len(datasets_with_type) <= 1:
+            return None
+        
+        # Check if they're actually the same type (mapped)
+        # Use the highest priority dataset as source
+        source_ds = None
+        for priority_ds in DATASET_PRIORITY:
+            norm_ds = self._normalize_dataset_name(priority_ds)
+            if norm_ds in datasets_with_type:
+                source_ds = norm_ds
+                break
+        
+        if not source_ds:
+            return None
+        
+        # Check mappings to other datasets that have the same type name
+        for other_ds in datasets_with_type:
+            if other_ds == source_ds:
+                continue
+            
+            mapped_type = self.get_mapped_type(type_name, source_ds, other_ds)
+            
+            if mapped_type and mapped_type != type_name:
+                # Conflict: same type name exists in both datasets,
+                # but the mapping says they should be different
+                return (type_name, mapped_type, other_ds)
+        
+        return None
+    
+    def export_mapping(
+        self, 
+        output_path: str, 
+        filter_types: Optional[Set[str]] = None,
+        datasets: Optional[List[str]] = None,
+        only_different: bool = True,
+    ) -> None:
+        """
+        Export type mappings to a CSV file.
+        
+        Args:
+            output_path: Path to save the CSV file.
+            filter_types: Optional set of type names to include. If provided,
+                only exports mappings where ANY column contains a type in this set.
+                If None, exports all mappings.
+            datasets: Optional list of datasets to include in output columns.
+                If None, includes all datasets.
+            only_different: If True (default), only exports rows where types differ
+                across datasets (i.e., actual mappings, not 1-to-1 identical types).
+        """
+        if not self._loaded:
+            if not self.load():
+                raise RuntimeError("Cannot export: mappings not loaded")
+        
+        rows = []
+        
+        # Determine which columns/datasets to include
+        all_datasets = ['male-cns:v0.9', 'flywire_FAFB_v783', 'flywire_BANC_v626', 
+                        'hemibrain:v1.2.1', 'manc:v1.0', 'manc:v1.2.1']
+        if datasets:
+            # Only include specified datasets, in the order they appear in all_datasets
+            output_datasets = [d for d in all_datasets if d in datasets]
+        else:
+            output_datasets = all_datasets
+        
+        if len(output_datasets) < 2:
+            self._log(f"Not enough datasets to export mapping (need >= 2, got {len(output_datasets)})")
+            return
+        
+        # Start from male-cns types and export their mappings
+        mcns_mappings = self._type_mappings.get('male-cns:v0.9', {})
+        
+        for mcns_type, target_maps in mcns_mappings.items():
+            row = {}
+            for ds in output_datasets:
+                if ds == 'male-cns:v0.9':
+                    row[ds] = mcns_type
+                else:
+                    row[ds] = target_maps.get(ds, '')
+            
+            # Filter if filter_types is provided
+            if filter_types is not None:
+                # Check if any type in this row is in filter_types
+                row_types = {v for v in row.values() if v}
+                if not row_types.intersection(filter_types):
+                    continue  # Skip this row
+            
+            # Filter out identical mappings if only_different is True
+            if only_different:
+                # Get non-empty values
+                non_empty_values = [v for v in row.values() if v]
+                if len(non_empty_values) <= 1:
+                    continue  # Only one type present, not a meaningful mapping
+                # Check if all non-empty values are the same (1-to-1 identical)
+                unique_values = set(non_empty_values)
+                if len(unique_values) == 1:
+                    continue  # All same type name, not a cross-dataset mapping
+            
+            rows.append(row)
+        
+        df = pd.DataFrame(rows, columns=output_datasets)
+        if not df.empty:
+            # Sort by first column
+            df = df.sort_values(output_datasets[0])
+        df.to_csv(output_path, index=False)
+        
+        filter_parts = []
+        if filter_types:
+            filter_parts.append(f"filtered to {len(filter_types)} result types")
+        if only_different:
+            filter_parts.append("only different mappings")
+        if datasets:
+            filter_parts.append(f"{len(output_datasets)} datasets")
+        filter_msg = f" ({', '.join(filter_parts)})" if filter_parts else " (complete)"
+        self._log(f"Exported {len(rows)} type mappings to {output_path}{filter_msg}")
+    
+    def export_conflicts(
+        self, 
+        output_path: str, 
+        filter_types: Optional[Set[str]] = None,
+    ) -> None:
+        """
+        Export conflict information to a CSV file.
+        
+        Args:
+            output_path: Path to save the CSV file.
+            filter_types: Optional set of type names to include. If provided,
+                only exports conflicts where source_type or any target_type 
+                is in this set. If None, exports all conflicts.
+        """
+        if not self._conflicts:
+            self._log("No conflicts to export")
+            return
+        
+        rows = []
+        for conflict in self._conflicts:
+            # Filter if filter_types is provided
+            if filter_types is not None:
+                conflict_types = {conflict.source_type} | conflict.target_types
+                if not conflict_types.intersection(filter_types):
+                    continue  # Skip this conflict
+            
+            rows.append({
+                'source_dataset': conflict.source_dataset,
+                'source_type': conflict.source_type,
+                'target_dataset': conflict.target_dataset,
+                'target_types': ', '.join(sorted(conflict.target_types)),
+                'relationship': conflict.relationship,
+            })
+        
+        if not rows:
+            self._log("No conflicts to export (all filtered out)")
+            return
+        
+        df = pd.DataFrame(rows)
+        df.to_csv(output_path, index=False)
+        
+        filter_msg = f" (filtered to result types)" if filter_types else " (complete)"
+        self._log(f"Exported {len(rows)} conflicts to {output_path}{filter_msg}")
+    
+    def to_label_mapper(
+        self,
+        types: List[str],
+        datasets: List[str],
+        role: str = 'source',
+    ) -> 'LabelMapper':
+        """
+        Convert type mappings to a LabelMapper for specific types.
+        
+        Args:
+            types: List of type names to include.
+            datasets: Datasets to include in mapping.
+            role: 'source', 'target', or 'intermediate'.
+            
+        Returns:
+            LabelMapper with the type mappings.
+        """
+        from .label_mapper import LabelMapper
+        
+        mapping_dict = {}
+        labels = []
+        
+        for type_name in types:
+            source_ds = self._detect_type_source(type_name)
+            mappings = self.resolve_type_across_datasets(type_name, datasets, source_ds)
+            
+            # Use male-cns name as label if available
+            mcns_name = mappings.get('male-cns:v0.9') or mappings.get('male-cns_v0_9') or type_name
+            labels.append(mcns_name)
+            
+            # Build dataset mapping
+            for ds in datasets:
+                mapped_type = mappings.get(ds)
+                if mapped_type:
+                    if ds not in mapping_dict:
+                        mapping_dict[ds] = []
+                    # LabelMapper expects grouped format: [[types_for_label1], [types_for_label2], ...]
+                    # We need to align indices
+                    idx = len(labels) - 1
+                    while len(mapping_dict[ds]) < idx:
+                        mapping_dict[ds].append([])
+                    if len(mapping_dict[ds]) == idx:
+                        mapping_dict[ds].append([mapped_type])
+                    else:
+                        mapping_dict[ds][idx].append(mapped_type)
+        
+        # Create LabelMapper based on role
+        if role == 'source':
+            return LabelMapper(source_mapping_dict=mapping_dict, source_labels=labels)
+        elif role == 'target':
+            return LabelMapper(target_mapping_dict=mapping_dict, target_labels=labels)
+        else:
+            return LabelMapper(intermediate_mapping_dict=mapping_dict, intermediate_labels=labels)
+
+
+    def get_source_target_mapping_summary(
+        self,
+        neurons: List[str],
+        datasets: List[str],
+    ) -> Dict[str, any]:
+        """
+        Generate a summary of source/target neuron mappings for display.
+        
+        Returns a dict with:
+        - 'per_dataset': {dataset: {original_type: mapped_type}}
+        - 'different_mappings': [(type, {dataset: mapped_type})] where mapping differs
+        - 'n_to_1_warnings': [(type, source_ds, target_ds, conflicting_types)]
+        - 'one_to_n_warnings': [(type, source_ds, target_ds, split_types)]
+        """
+        if not self._loaded:
+            self.load()
+        
+        per_dataset = {ds: {} for ds in datasets}
+        different_mappings = []
+        n_to_1_warnings = []
+        one_to_n_warnings = []
+        
+        for neuron in neurons:
+            # Skip non-string or regex patterns
+            if not isinstance(neuron, str):
+                for ds in datasets:
+                    per_dataset[ds][neuron] = neuron
+                continue
+            
+            if '*' in neuron or ('.' in neuron and '.*' in neuron):
+                for ds in datasets:
+                    per_dataset[ds][neuron] = neuron
+                continue
+            
+            # Detect source dataset for this type
+            source_ds = self._detect_type_source(neuron)
+            
+            if not source_ds:
+                # Type not found, use as-is
+                for ds in datasets:
+                    per_dataset[ds][neuron] = neuron
+                continue
+            
+            # Resolve to each dataset
+            mappings_for_type = {}
+            has_different = False
+            
+            for ds in datasets:
+                norm_ds = self._normalize_dataset_name(ds)
+                if norm_ds == source_ds:
+                    per_dataset[ds][neuron] = neuron
+                    mappings_for_type[ds] = neuron
+                else:
+                    mapped = self.get_mapped_type(neuron, source_ds, ds)
+                    if mapped and mapped != neuron:
+                        per_dataset[ds][neuron] = mapped
+                        mappings_for_type[ds] = mapped
+                        has_different = True
+                    else:
+                        per_dataset[ds][neuron] = mapped if mapped else neuron
+                        mappings_for_type[ds] = mapped if mapped else neuron
+            
+            if has_different:
+                different_mappings.append((neuron, mappings_for_type))
+            
+            # Check for N-to-1 conflicts
+            for conflict in self._conflicts:
+                if conflict.relationship == 'N-to-1':
+                    if neuron == conflict.source_type or neuron in conflict.target_types:
+                        n_to_1_warnings.append((
+                            neuron,
+                            conflict.source_dataset,
+                            conflict.target_dataset,
+                            conflict.target_types,
+                        ))
+                        break
+                elif conflict.relationship == '1-to-N':
+                    if neuron == conflict.source_type:
+                        one_to_n_warnings.append((
+                            neuron,
+                            conflict.source_dataset,
+                            conflict.target_dataset,
+                            conflict.target_types,
+                        ))
+                        break
+        
+        return {
+            'per_dataset': per_dataset,
+            'different_mappings': different_mappings,
+            'n_to_1_warnings': n_to_1_warnings,
+            'one_to_n_warnings': one_to_n_warnings,
+        }
+    
+    def get_intermediate_mapping_summary(
+        self,
+        types_used: Set[str],
+        datasets: List[str],
+    ) -> Dict[str, any]:
+        """
+        Generate a summary of intermediate neuron type mappings.
+        
+        Returns counts and file path info for logging.
+        """
+        if not self._loaded:
+            self.load()
+        
+        mapped_count = 0
+        n_to_1_count = 0
+        one_to_n_count = 0
+        
+        for type_name in types_used:
+            if not isinstance(type_name, str):
+                continue
+            if '*' in type_name or ('.' in type_name and '.*' in type_name):
+                continue
+            
+            source_ds = self._detect_type_source(type_name)
+            if not source_ds:
+                continue
+            
+            # Check if any dataset has different mapping
+            for ds in datasets:
+                norm_ds = self._normalize_dataset_name(ds)
+                if norm_ds != source_ds:
+                    mapped = self.get_mapped_type(type_name, source_ds, ds)
+                    if mapped and mapped != type_name:
+                        mapped_count += 1
+                        break
+            
+            # Check conflicts
+            for conflict in self._conflicts:
+                if conflict.relationship == 'N-to-1':
+                    if type_name == conflict.source_type or type_name in conflict.target_types:
+                        n_to_1_count += 1
+                        break
+                elif conflict.relationship == '1-to-N':
+                    if type_name == conflict.source_type:
+                        one_to_n_count += 1
+                        break
+        
+        return {
+            'total_types': len(types_used),
+            'mapped_count': mapped_count,
+            'n_to_1_count': n_to_1_count,
+            'one_to_n_count': one_to_n_count,
+        }
+    
+    def get_canonical_type(self, type_name: str, source_dataset: Optional[str] = None) -> str:
+        """
+        Get the canonical (male-cns) type name for cross-dataset merging.
+        
+        This is used by NeuronBridge to merge types across datasets.
+        Types from different datasets (e.g., 'MTe07' from FAFB, 'MeVPLo2' from male-cns)
+        are unified to a single canonical name (the male-cns name).
+        
+        Args:
+            type_name: Type name from any dataset.
+            source_dataset: Optional source dataset hint.
+            
+        Returns:
+            Canonical type name (male-cns name if mapping exists, else original).
+        """
+        if not self._loaded:
+            self.load()
+        
+        # Skip empty or pattern types
+        if not type_name or not isinstance(type_name, str):
+            return type_name
+        if '*' in type_name or ('.' in type_name and '.*' in type_name):
+            return type_name
+        
+        # Detect source dataset
+        if source_dataset is None:
+            source_dataset = self._detect_type_source(type_name)
+        
+        if not source_dataset:
+            return type_name
+        
+        # If already from male-cns, return as-is
+        norm_src = self._normalize_dataset_name(source_dataset)
+        if norm_src == 'male-cns:v0.9':
+            return type_name
+        
+        # Get male-cns mapping
+        mapped = self.get_mapped_type(type_name, norm_src, 'male-cns:v0.9')
+        return mapped if mapped else type_name
+    
+    def get_merge_mapping_for_types(
+        self,
+        prefixed_types: List[str],
+        queried_name: Optional[str] = None,
+        verbose: bool = False,
+    ) -> Dict[str, str]:
+        """
+        Build a merge mapping for prefixed type names (e.g., 'MCNS_aMe12', 'FAFB_MTe07').
+        
+        This is used by NeuronBridge to properly merge types across datasets,
+        accounting for cases where the same neuron has different type names
+        in different datasets.
+        
+        The merged type name format is:
+          {queried_name}({datasetA_name}/{datasetB_name})
+        
+        If no queried_name is provided, uses male-cns name as the main name:
+          {mcns_name}({datasetA_name}/{datasetB_name})
+        
+        Args:
+            prefixed_types: List of prefixed type names (e.g., 'MCNS_aMe12', 'FAFB_MTe07').
+            queried_name: Optional queried name to use as main display name.
+            verbose: Print merge info.
+            
+        Returns:
+            Dict mapping prefixed_type -> merged_display_name.
+            E.g., {'MCNS_aMe12': 'aMe12', 'FAFB_aMe12': 'aMe12', 
+                   'MCNS_MeVPLo2': 'MeVPLo2(MTe07)', 'FAFB_MTe07': 'MeVPLo2(MTe07)'}
+        """
+        if not self._loaded:
+            self.load()
+        
+        merge_map = {}
+        aggregation_warnings = []  # Track N-to-1 and 1-to-N aggregations
+        
+        # Group prefixed types by their canonical name to build display names
+        canonical_groups: Dict[str, List[Tuple[str, str, str]]] = defaultdict(list)  # canonical -> [(prefixed, prefix, base_type)]
+        
+        # Parse prefixed types and map to canonical
+        for prefixed in prefixed_types:
+            parts = prefixed.split('_', 1)
+            if len(parts) < 2:
+                merge_map[prefixed] = prefixed
+                continue
+            
+            prefix, base_type = parts
+            
+            # Determine source dataset from prefix
+            source_ds = None
+            prefix_upper = prefix.upper()
+            if prefix_upper in ['MCNS', 'MALECNS', 'MALE-CNS']:
+                source_ds = 'male-cns:v0.9'
+            elif prefix_upper in ['FAFB', 'FLYWIRE', 'FW']:
+                source_ds = 'flywire_FAFB_v783'
+            elif prefix_upper in ['BANC']:
+                source_ds = 'flywire_BANC_v626'
+            elif prefix_upper in ['HEMI', 'HEMIBRAIN', 'HB']:
+                source_ds = 'hemibrain:v1.2.1'
+            elif prefix_upper in ['MANC']:
+                source_ds = 'manc:v1.0'
+            
+            if source_ds is None:
+                merge_map[prefixed] = base_type
+                continue
+            
+            # Get canonical name (male-cns name)
+            canonical = self.get_canonical_type(base_type, source_ds)
+            
+            # Group by canonical
+            canonical_groups[canonical].append((prefixed, prefix, base_type))
+            
+            # Track aggregation warnings
+            if canonical != base_type:
+                # Check if this is an N-to-1 or 1-to-N case
+                for conflict in self._conflicts:
+                    if base_type == conflict.source_type or base_type in conflict.target_types:
+                        aggregation_warnings.append((prefixed, base_type, canonical, conflict))
+                        break
+        
+        # Build merged display names: {main_name}({other_names})
+        for canonical, group_items in canonical_groups.items():
+            # Collect all distinct type names (excluding canonical if present)
+            all_names = set()
+            has_canonical_as_base = False
+            for prefixed, prefix, base_type in group_items:
+                all_names.add(base_type)
+                if base_type == canonical:
+                    has_canonical_as_base = True
+            
+            # Determine main name: queried_name if provided, else male-cns canonical
+            main_name = queried_name if queried_name else canonical
+            
+            # Collect "other" names (names that differ from main_name)
+            other_names = {name for name in all_names if name != main_name and name != canonical}
+            
+            # Build display name
+            if other_names:
+                # Format: main_name(name1/name2)
+                others_str = '/'.join(sorted(other_names))
+                display_name = f"{main_name}({others_str})"
+            else:
+                display_name = main_name
+            
+            # Assign display name to all prefixed types in this group
+            for prefixed, prefix, base_type in group_items:
+                merge_map[prefixed] = display_name
+        
+        if verbose and aggregation_warnings:
+            self._log(f"Type merging found {len(aggregation_warnings)} cross-dataset mappings")
+            for prefixed, orig, canonical, conflict in aggregation_warnings[:5]:
+                if conflict.relationship == 'N-to-1':
+                    self._log(f"  {prefixed}: '{orig}' → '{canonical}' (N-to-1 aggregation)")
+                else:
+                    self._log(f"  {prefixed}: '{orig}' → '{canonical}' (1-to-N aggregation)")
+            if len(aggregation_warnings) > 5:
+                self._log(f"  ... and {len(aggregation_warnings) - 5} more")
+        
+        return merge_map
+    
+    def standardize_partner_types(
+        self,
+        partner_types: Dict[str, float],
+        source_dataset: str,
+    ) -> Dict[str, float]:
+        """
+        Standardize partner type names for cross-dataset comparison.
+        
+        Maps all type names to their canonical (male-cns) names.
+        Weights from types that map to the same canonical name are summed.
+        
+        This is used during cross-dataset homolog finding to ensure that
+        partner types like 'MTe07' (FAFB) and 'MeVPLo2' (male-cns) are
+        recognized as the same type.
+        
+        Args:
+            partner_types: Dict[type_name -> weight] of partner connections.
+            source_dataset: Dataset the types come from.
+            
+        Returns:
+            Dict[canonical_type -> weight] with standardized type names.
+        """
+        if not self._loaded:
+            self.load()
+        
+        norm_ds = self._normalize_dataset_name(source_dataset)
+        
+        # If already male-cns, return as-is
+        if norm_ds == 'male-cns:v0.9':
+            return partner_types.copy()
+        
+        standardized: Dict[str, float] = {}
+        
+        for type_name, weight in partner_types.items():
+            if not type_name or not isinstance(type_name, str):
+                # Keep empty/invalid types as-is
+                standardized[type_name] = standardized.get(type_name, 0.0) + weight
+                continue
+            
+            # Skip 2hop prefix handling
+            if type_name.startswith('2hop:'):
+                base_type = type_name[5:]
+                canonical = self.get_canonical_type(base_type, source_dataset)
+                canonical_key = f"2hop:{canonical}"
+                standardized[canonical_key] = standardized.get(canonical_key, 0.0) + weight
+            else:
+                canonical = self.get_canonical_type(type_name, source_dataset)
+                standardized[canonical] = standardized.get(canonical, 0.0) + weight
+        
+        return standardized
+
+
+# Module-level singleton for easy access
+_global_type_mapper: Optional[CrossDatasetTypeMapper] = None
+
+
+def get_type_mapper(workspace_path: Optional[str] = None, force_reload: bool = False) -> CrossDatasetTypeMapper:
+    """
+    Get the global CrossDatasetTypeMapper instance.
+    
+    Args:
+        workspace_path: Optional workspace path for initialization.
+        force_reload: Force reloading of mappings.
+        
+    Returns:
+        CrossDatasetTypeMapper instance.
+    """
+    global _global_type_mapper
+    
+    if _global_type_mapper is None or force_reload:
+        _global_type_mapper = CrossDatasetTypeMapper(workspace_path=workspace_path, verbose=False)
+        _global_type_mapper.load()
+    
+    return _global_type_mapper

@@ -1370,7 +1370,19 @@ class FindNeuronConnection:
         if hasattr(self, '_dataset_safe'):
             if self._dataset_safe not in _FNC_CACHE:
                 _FNC_CACHE[self._dataset_safe] = {}
-            _FNC_CACHE[self._dataset_safe]['conn_df'] = self._conn_df_cache
+            
+            # Ensure conn_df stored in _FNC_CACHE is always pandas DataFrame
+            # (other modules like connectivity_profiler expect pandas)
+            conn_df_for_cache = self._conn_df_cache
+            if conn_df_for_cache is not None:
+                try:
+                    import polars as pl
+                    if isinstance(conn_df_for_cache, pl.DataFrame):
+                        conn_df_for_cache = conn_df_for_cache.to_pandas()
+                except ImportError:
+                    pass
+            
+            _FNC_CACHE[self._dataset_safe]['conn_df'] = conn_df_for_cache
             _FNC_CACHE[self._dataset_safe]['conn_index'] = self._conn_index
             _FNC_CACHE[self._dataset_safe]['conn_index_post'] = self._conn_index_post
     

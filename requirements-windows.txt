@@ -72,6 +72,11 @@ open3d==0.19.0             # 3D mesh processing - REQUIRED for accurate mesh sim
                            # Note: trimesh 4.x uses fast-simplification which only achieves ~60%
                            # reduction on neuron tube meshes. open3d achieves exact target (90%+).
 
+# System Utilities
+# -----------------------------------------------------------------------------
+psutil>=5.9.0              # System monitoring utilities (memory usage tracking)
+xlsxwriter>=3.1.0          # Excel file generation (.xlsx)
+
 # NeuronBridge API (EM↔LM Integration) - Windows-compatible installation
 # -----------------------------------------------------------------------------
 # neuronbridge-python dependencies (excluding memray which doesn't support Windows)

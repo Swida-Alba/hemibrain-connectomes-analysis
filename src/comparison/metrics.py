@@ -361,7 +361,8 @@ class ComparisonMetrics:
         thresholds: List[int],
         label_mapper: Optional[Any] = None,
         show_progress: bool = True,
-        path_data_func: Optional[callable] = None
+        path_data_func: Optional[callable] = None,
+        type_mapper: Optional[Any] = None
     ) -> pd.DataFrame:
         """
         Calculate similarity metrics across all thresholds.
@@ -374,6 +375,7 @@ class ComparisonMetrics:
             show_progress: Whether to show progress bar (default True)
             path_data_func: Optional callable(threshold) -> DataFrame that returns
                            aligned path data for computing path rank correlation
+            type_mapper: Optional CrossDatasetTypeMapper for type unification
             
         Returns:
             DataFrame with similarity metrics per threshold per dataset pair
@@ -398,7 +400,7 @@ class ComparisonMetrics:
                 threshold_iter.set_postfix({"t": threshold})
             
             # Align data at this threshold
-            aligned = self._align_results_at_threshold(results, datasets, threshold, label_mapper)
+            aligned = self._align_results_at_threshold(results, datasets, threshold, label_mapper, type_mapper)
             
             if aligned.empty:
                 continue
@@ -428,21 +430,28 @@ class ComparisonMetrics:
         results: Dict[str, Dict[int, pd.DataFrame]],
         datasets: List[str],
         threshold: int,
-        label_mapper: Optional[Any] = None
+        label_mapper: Optional[Any] = None,
+        type_mapper: Optional[Any] = None,
     ) -> pd.DataFrame:
         """
         Align results from different datasets at a specific threshold.
+        
+        When type_mapper is provided, edges are merged using canonical (male-cns)
+        type names so that equivalent types across datasets (e.g., MeVPaMe1 in
+        male-cns and MTe46 in flywire) are correctly aligned.
         
         Args:
             results: Nested dict {dataset: {threshold: DataFrame}}
             datasets: List of dataset identifiers
             threshold: Threshold to align at
-            label_mapper: Optional LabelMapper
+            label_mapper: Optional LabelMapper for custom labels
+            type_mapper: Optional CrossDatasetTypeMapper for type unification
             
         Returns:
             Aligned DataFrame with edge index and weight columns per dataset
         """
         dfs = []
+        edge_display_names = {}  # canonical_edge -> display_name
         
         for dataset in datasets:
             if dataset not in results or threshold not in results[dataset]:
@@ -474,6 +483,36 @@ class ComparisonMetrics:
                 agg_df = df.groupby([pre_col, post_col]).size().reset_index(name='count')
                 weight_col = 'count'
             
+            # Apply type mapping if provided - standardize edge names to canonical form
+            if type_mapper is not None and pre_col in ['type_pre', 'std_label_pre']:
+                canonical_pre_list = []
+                canonical_post_list = []
+                
+                for _, row in agg_df.iterrows():
+                    original_pre = str(row[pre_col])
+                    original_post = str(row[post_col])
+                    
+                    # Get canonical names (male-cns names)
+                    canonical_pre = type_mapper.get_canonical_type(original_pre, dataset)
+                    canonical_post = type_mapper.get_canonical_type(original_post, dataset)
+                    
+                    canonical_pre_list.append(canonical_pre)
+                    canonical_post_list.append(canonical_post)
+                    
+                    # Track display names for later (collect all dataset-specific names)
+                    for canonical, original in [(canonical_pre, original_pre), (canonical_post, original_post)]:
+                        if canonical not in edge_display_names:
+                            edge_display_names[canonical] = {canonical}  # Include canonical itself
+                        if original != canonical:
+                            edge_display_names[canonical].add(original)
+                
+                agg_df['canonical_pre'] = canonical_pre_list
+                agg_df['canonical_post'] = canonical_post_list
+                
+                # Re-aggregate by canonical edge (in case multiple original edges map to same canonical)
+                agg_df = agg_df.groupby(['canonical_pre', 'canonical_post'])[weight_col].sum().reset_index()
+                pre_col, post_col = 'canonical_pre', 'canonical_post'
+            
             # Create edge index
             agg_df['edge'] = agg_df[pre_col].astype(str) + ' -> ' + agg_df[post_col].astype(str)
             agg_df = agg_df.set_index('edge')
@@ -486,6 +525,37 @@ class ComparisonMetrics:
         
         # Merge all datasets
         aligned = pd.concat(dfs, axis=1, join='outer').fillna(0)
+        
+        # If type_mapper was used, create display names with cross-dataset mappings
+        if type_mapper is not None and edge_display_names:
+            display_index = []
+            for edge_key in aligned.index:
+                if ' -> ' in str(edge_key):
+                    parts = str(edge_key).split(' -> ')
+                    pre_canonical = parts[0]
+                    post_canonical = parts[1] if len(parts) > 1 else ''
+                    
+                    # Build display name for source
+                    pre_variants = edge_display_names.get(pre_canonical, {pre_canonical})
+                    if len(pre_variants) > 1:
+                        others = sorted([v for v in pre_variants if v != pre_canonical])
+                        pre_display = f"{pre_canonical}({'/'.join(others)})"
+                    else:
+                        pre_display = pre_canonical
+                    
+                    # Build display name for target
+                    post_variants = edge_display_names.get(post_canonical, {post_canonical})
+                    if len(post_variants) > 1:
+                        others = sorted([v for v in post_variants if v != post_canonical])
+                        post_display = f"{post_canonical}({'/'.join(others)})"
+                    else:
+                        post_display = post_canonical
+                    
+                    display_index.append(f"{pre_display} -> {post_display}")
+                else:
+                    display_index.append(str(edge_key))
+            
+            aligned.index = pd.Index(display_index)
         
         return aligned
     
@@ -691,7 +761,8 @@ class ComparisonMetrics:
         results: Dict[str, Dict[int, pd.DataFrame]],
         datasets: List[str],
         thresholds: List[int],
-        label_mapper: Optional[Any] = None
+        label_mapper: Optional[Any] = None,
+        type_mapper: Optional[Any] = None
     ) -> Dict[str, Any]:
         """
         Generate comprehensive comparison summary.
@@ -701,6 +772,7 @@ class ComparisonMetrics:
             datasets: List of dataset identifiers
             thresholds: List of thresholds
             label_mapper: Optional LabelMapper
+            type_mapper: Optional CrossDatasetTypeMapper for type unification
             
         Returns:
             Dictionary with all comparison metrics and findings
@@ -714,7 +786,7 @@ class ComparisonMetrics:
         
         # Calculate metrics at the middle threshold for backward compatibility
         mid_threshold = thresholds[len(thresholds) // 2]
-        aligned = self._align_results_at_threshold(results, datasets, mid_threshold, label_mapper)
+        aligned = self._align_results_at_threshold(results, datasets, mid_threshold, label_mapper, type_mapper)
         
         if aligned.empty:
             summary['key_findings'].append("No data available for comparison")
@@ -759,7 +831,7 @@ class ComparisonMetrics:
                 'conservation_rate': 0.0
             }
             
-            aligned_t = self._align_results_at_threshold(results, datasets, threshold, label_mapper)
+            aligned_t = self._align_results_at_threshold(results, datasets, threshold, label_mapper, type_mapper)
             
             if aligned_t.empty:
                 summary['key_findings_per_threshold'][threshold] = threshold_findings

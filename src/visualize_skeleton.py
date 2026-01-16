@@ -1677,6 +1677,18 @@ class VisualizeSkeleton:
     '''
 
     custom_layer_names: list = field(default_factory=list)
+    '''
+    Optional custom names for layers. If empty, auto-generates smart names from neuron types.
+    
+    Supports partial specification:
+    - If list is shorter than neuron_layers, remaining layers use auto-generated names
+    - Use empty string '' to skip a layer and use auto-naming for that position
+    
+    Examples:
+        custom_layer_names=['DN1', 'LN', 'Output']  # Full specification for 3 layers
+        custom_layer_names=['MyLayer1']             # Only name first layer, auto-name rest
+        custom_layer_names=['', '', 'Output']       # Skip first two, name only third layer
+    '''
 
     layer_map_csv: str = None
     '''
@@ -4519,7 +4531,24 @@ class VisualizeSkeleton:
         if not self.custom_layer_names:
             self.layer_names = self._generate_smart_layer_names()
         else:
-            self.layer_names = self.custom_layer_names
+            # Support partial custom_layer_names - merge with auto-generated names
+            auto_names = self._generate_smart_layer_names()
+            n_layers = len(self.neuron_layers)
+            n_custom = len(self.custom_layer_names)
+            
+            merged_names = []
+            for i in range(n_layers):
+                if i < n_custom and self.custom_layer_names[i]:
+                    # Use custom name if provided and non-empty
+                    merged_names.append(self.custom_layer_names[i])
+                elif i < len(auto_names):
+                    # Use auto-generated name
+                    merged_names.append(auto_names[i])
+                else:
+                    # Fallback
+                    merged_names.append(f"layer_{i}")
+            
+            self.layer_names = merged_names
             
         if self.saveas is None:
             # Generate saveas from layer names

@@ -46,6 +46,7 @@ except ImportError:
         return iterable
 
 from .connectivity_profiler import ConnectivityProfile, ConnectivityProfiler, ProfilerConfig
+from .cross_dataset_type_mapper import CrossDatasetTypeMapper, get_type_mapper
 
 if TYPE_CHECKING:
     from .connectivity_profiler import ConnectivityStatus
@@ -743,6 +744,47 @@ class ProfileComparator:
         return expanded_types
     
     @staticmethod
+    def _get_expanded_types_standardized(
+        profile: ConnectivityProfile,
+        direction: str,
+        type_mapper: Optional[CrossDatasetTypeMapper] = None,
+        prefix_2hop: bool = True,
+        top_n_for_2hop_check: int = 5
+    ) -> Dict[str, float]:
+        """
+        Get expanded type profile with standardized (canonical) type names.
+        
+        This wraps _get_expanded_types and optionally standardizes type names
+        to their male-cns canonical names for cross-dataset comparison.
+        
+        When comparing profiles from different datasets, partner types like
+        'MTe07' (FAFB) and 'MeVPLo2' (male-cns) should be recognized as the
+        same type. This method maps all types to their canonical names.
+        
+        Args:
+            profile: ConnectivityProfile
+            direction: 'upstream', 'downstream', or 'both'
+            type_mapper: Optional CrossDatasetTypeMapper for standardization.
+                        If None, returns un-standardized types.
+            prefix_2hop: If True, prefix 2-hop types with "2hop:" (default: True)
+            top_n_for_2hop_check: Only use 2-hop if top N connections are all untyped (default: 5)
+        
+        Returns:
+            Dict[canonical_type, weight] with standardized type names
+        """
+        # Get raw expanded types
+        expanded = ProfileComparator._get_expanded_types(
+            profile, direction, prefix_2hop, top_n_for_2hop_check
+        )
+        
+        # If no mapper, return as-is
+        if type_mapper is None:
+            return expanded
+        
+        # Standardize to canonical names
+        return type_mapper.standardize_partner_types(expanded, profile.dataset)
+    
+    @staticmethod
     def bodyid_jaccard(
         profile_a: ConnectivityProfile,
         profile_b: ConnectivityProfile,
@@ -1182,7 +1224,8 @@ class ProfileComparator:
         source_profile: ConnectivityProfile,
         target_profiles: Dict[int, ConnectivityProfile],
         candidate_map: Dict[int, int],
-        direction: str = 'both'
+        direction: str = 'both',
+        type_mapper: Optional[CrossDatasetTypeMapper] = None
     ) -> List[Dict[str, Any]]:
         """
         Batch compare one source profile against many targets efficiently.
@@ -1197,6 +1240,9 @@ class ProfileComparator:
             target_profiles: Dict mapping target_bid -> ConnectivityProfile
             candidate_map: Dict mapping target_bid -> shared_count (adjacency score)
             direction: 'upstream', 'downstream', or 'both'
+            type_mapper: Optional CrossDatasetTypeMapper for standardizing partner types.
+                        When comparing across datasets, this maps types like 'MTe07' (FAFB)
+                        to their canonical male-cns names like 'MeVPLo2'.
         
         Returns:
             List of score dicts for each valid comparison
@@ -1206,7 +1252,13 @@ class ProfileComparator:
         results = []
         
         # Pre-compute source expanded types ONCE
-        source_types = ProfileComparator._get_expanded_types(source_profile, direction)
+        # Use standardized types if type_mapper is provided
+        if type_mapper is not None:
+            source_types = ProfileComparator._get_expanded_types_standardized(
+                source_profile, direction, type_mapper
+            )
+        else:
+            source_types = ProfileComparator._get_expanded_types(source_profile, direction)
         source_type_set = set(source_types.keys())
         source_type_count = len(source_types)
         
@@ -1219,8 +1271,13 @@ class ProfileComparator:
             if target_profile is None:
                 continue
             
-            # Get target expanded types
-            target_types = ProfileComparator._get_expanded_types(target_profile, direction)
+            # Get target expanded types (standardized if mapper provided)
+            if type_mapper is not None:
+                target_types = ProfileComparator._get_expanded_types_standardized(
+                    target_profile, direction, type_mapper
+                )
+            else:
+                target_types = ProfileComparator._get_expanded_types(target_profile, direction)
             target_type_set = set(target_types.keys())
             target_type_count = len(target_types)
             
@@ -2231,6 +2288,7 @@ class HomologFinder:
         verbose: bool = True,
         token: str = '',
         vector_prefiltering: bool = False,
+        use_auto_type_mapping: bool = True,
     ):
         """
         Initialize HomologFinder with configuration and default parameters.
@@ -2276,6 +2334,12 @@ class HomologFinder:
                 Custom weights for combined score: {'jaccard': 0.5, 'rank': 0.5}
             verbose: Print progress messages
             token: API token for NeuPrint (if empty, FNC auto-handles from env vars)
+            use_auto_type_mapping: Enable automatic type mapping for cross-dataset
+                comparison (default: True). When enabled, partner types are
+                standardized to their canonical (male-cns) names before comparison.
+                This allows proper matching of types that have different names
+                in different datasets (e.g., 'MTe07' in FAFB → 'MeVPLo2' in male-cns).
+                For intra-dataset comparison, original types are always used.
         
         Example:
             >>> # Set up finder with visualization
@@ -2316,6 +2380,12 @@ class HomologFinder:
         self.visualize_skeleton = visualize_skeleton
         self.visualize_top_n = visualize_top_n
         self.vector_prefiltering = vector_prefiltering
+        
+        # Auto type mapping for cross-dataset comparison
+        # When enabled, partner types are standardized to canonical (male-cns) names
+        # This allows proper matching of types like 'MTe07' (FAFB) ↔ 'MeVPLo2' (male-cns)
+        self.use_auto_type_mapping = use_auto_type_mapping
+        self._type_mapper: Optional[CrossDatasetTypeMapper] = None
         
         # Similarity metric for sorting - can be str or dict
         # If dict: custom weights for computing combined score
@@ -2402,6 +2472,33 @@ class HomologFinder:
                 tqdm.write(f"[HomologFinder] {msg}")
             else:
                 print(f"[HomologFinder] {msg}")
+
+    def _get_type_mapper_for_comparison(self, is_cross_dataset: bool) -> Optional[CrossDatasetTypeMapper]:
+        """
+        Get the type mapper for cross-dataset comparison if enabled.
+        
+        Returns None if:
+        - use_auto_type_mapping is False
+        - is_cross_dataset is False (intra-dataset uses original types/bodyIds)
+        
+        Returns:
+            CrossDatasetTypeMapper if enabled for cross-dataset, None otherwise.
+        """
+        if not self.use_auto_type_mapping:
+            return None
+        
+        if not is_cross_dataset:
+            # Intra-dataset comparison: use original types and bodyIds
+            return None
+        
+        # Cross-dataset: get or create type mapper
+        if self._type_mapper is None:
+            self._type_mapper = get_type_mapper()
+            if self._type_mapper._loaded:
+                self._log(f"Using auto type mapping for cross-dataset comparison")
+                self._log(f"  Partner types will be standardized to canonical (male-cns) names")
+        
+        return self._type_mapper if self._type_mapper._loaded else None
 
     # ------------------------------------------------------------------
     # Shared bodyId-level type comparison core (for ComparisonAnalyzer)
@@ -3509,6 +3606,9 @@ class HomologFinder:
         # Build source_type_lookup
         source_type_lookup = {bid: (profile.neuron_type if profile.neuron_type else str(query)) for bid, profile in source_profiles.items()}
 
+        # Get type mapper for cross-dataset comparison
+        type_mapper = self._get_type_mapper_for_comparison(is_cross_dataset)
+
         # Run shared comparison core
         results_df, intra_type_df, skipped_sources, warned_sources, source_status_map, target_status_map, target_status_counts = self._compare_candidates_core(
             source_bodyids=list(source_profiles.keys()),
@@ -3525,7 +3625,8 @@ class HomologFinder:
             top_n=top_n,
             min_score=min_score,
             include_intra_type=not is_cross_dataset,
-            vector_prefiltering=self.vector_prefiltering
+            vector_prefiltering=self.vector_prefiltering,
+            type_mapper=type_mapper
         )
 
         if results_df.empty:
@@ -3741,7 +3842,25 @@ class HomologFinder:
             from coana import _FNC_CACHE
             if safe_name in _FNC_CACHE and 'conn_df' in _FNC_CACHE[safe_name]:
                 fnc_df = _FNC_CACHE[safe_name]['conn_df']
-                if fnc_df is not None and not fnc_df.empty:
+                
+                # Handle both Polars and pandas DataFrames from FNC cache
+                fnc_is_empty = False
+                if fnc_df is not None:
+                    try:
+                        import polars as pl
+                        if isinstance(fnc_df, pl.DataFrame):
+                            fnc_is_empty = fnc_df.is_empty()
+                            if not fnc_is_empty:
+                                # Convert Polars to pandas for compatibility
+                                fnc_df = fnc_df.to_pandas()
+                        else:
+                            fnc_is_empty = fnc_df.empty
+                    except ImportError:
+                        fnc_is_empty = fnc_df.empty if hasattr(fnc_df, 'empty') else len(fnc_df) == 0
+                else:
+                    fnc_is_empty = True
+                
+                if fnc_df is not None and not fnc_is_empty:
                     self._log(f"Using FNC cache for {dataset} ({len(fnc_df):,} connections)")
                     # FNC cache may not have type columns - add them IN-PLACE to avoid copying
                     if 'type_pre' not in fnc_df.columns or 'type_post' not in fnc_df.columns:
@@ -4330,9 +4449,17 @@ class HomologFinder:
         top_n: int,
         min_score: Optional[float] = None,
         include_intra_type: bool = True,
-        vector_prefiltering: bool = False
+        vector_prefiltering: bool = False,
+        type_mapper: Optional[CrossDatasetTypeMapper] = None
     ) -> Tuple[pd.DataFrame, pd.DataFrame, Dict[str, List[int]], Dict[str, List[int]], Dict[int, 'ConnectivityStatus'], Dict[int, 'ConnectivityStatus'], Dict[str, int]]: # 
-        """Shared bodyId comparison core used by find_homologs and find_homologs_fast."""
+        """
+        Shared bodyId comparison core used by find_homologs and find_homologs_fast.
+        
+        Args:
+            type_mapper: Optional CrossDatasetTypeMapper for standardizing partner types
+                        during cross-dataset comparison. When provided, partner types
+                        are mapped to their canonical (male-cns) names before comparison.
+        """
         from .connectivity_profiler import ConnectivityStatus
 
         target_status_counts: Dict[str, int] = {s.value: 0 for s in ConnectivityStatus}
@@ -4413,7 +4540,8 @@ class HomologFinder:
 
             if is_cross_dataset:
                 batch_scores = ProfileComparator.batch_compare_cross_dataset(
-                    source_profile, target_profiles_cache, source_candidates, 'both'
+                    source_profile, target_profiles_cache, source_candidates, 'both',
+                    type_mapper=type_mapper
                 )
 
                 for score_dict in batch_scores:
@@ -5430,6 +5558,9 @@ class HomologFinder:
                 status_summary = ", ".join([f"{k.upper()}: {v}" for k, v in target_status_counts.items() if v > 0])
                 self._log(f"Target connectivity status breakdown: {status_summary}")
             
+            # Get type mapper for cross-dataset comparison
+            type_mapper = self._get_type_mapper_for_comparison(is_cross_dataset)
+            
             # Shared comparison core
             results_df, intra_type_df, skipped_sources, warned_sources, source_status_map, target_status_map, target_status_counts = self._compare_candidates_core(
                 source_bodyids=source_bodyids,
@@ -5447,6 +5578,7 @@ class HomologFinder:
                 min_score=None,
                 include_intra_type=not is_cross_dataset,
                 vector_prefiltering=self.vector_prefiltering,
+                type_mapper=type_mapper,
             )
 
             # Log skipped and warned sources by status
@@ -5690,6 +5822,9 @@ class HomologFinder:
                 status_summary = ", ".join([f"{k.upper()}: {v}" for k, v in target_status_counts.items() if v > 0])
                 self._log(f"Target connectivity status breakdown: {status_summary}")
 
+            # Get type mapper for cross-dataset comparison
+            type_mapper = self._get_type_mapper_for_comparison(is_cross_dataset)
+            
             # Step 5: Compare via shared core
             results_df, intra_type_df, skipped_sources, warned_sources, source_status_map, target_status_map, target_status_counts = self._compare_candidates_core(
                 source_bodyids=source_bodyids,
@@ -5707,6 +5842,7 @@ class HomologFinder:
                 min_score=None,
                 include_intra_type=False,
                 vector_prefiltering=self.vector_prefiltering,
+                type_mapper=type_mapper,
             )
 
             # Log skipped and warned sources by status
@@ -7434,16 +7570,18 @@ class HomologFinder:
 
 class ConnectivityProfileComparer:
     """
-    Compare connectivity profiles within a single dataset.
+    Compare connectivity profiles within or across datasets.
     
-    This class provides functionality for intra-dataset connectivity profile
-    comparison, supporting bodyId-level or type-level comparisons with 
+    This class provides functionality for connectivity profile comparison,
+    supporting both intra-dataset and cross-dataset comparisons with
     interactive heatmap visualization.
     
     Key Features:
+        - Intra-dataset comparison: Compare neurons within a single dataset
+        - Cross-dataset comparison: Compare neurons across different datasets (N×M matrix)
         - Flexible query input: simple list, nested list with custom names, or CSV file
-        - Nested list format: [['GroupName', [id1, id2]], ['Group2', [id3, 'type']]]
-        - CSV file support: group_map_csv parameter (similar to VisualizeSkeleton's layer_map_csv)
+        - Dict query format for cross-dataset: {'datasetA': [types], 'datasetB': [types]}
+        - Auto type mapping: Standardizes partner types across datasets (can be disabled)
         - Mean-pooled aggregation for type-level profiles
         - Outputs ALL metrics: jaccard, cosine, rank_corr, rank_corr_union
         - Separate heatmap files for EACH metric (not just one with switching)
@@ -7453,15 +7591,26 @@ class ConnectivityProfileComparer:
         - Saves individual and aggregated connectivity profiles
     
     Query Input Formats:
-        1. Simple list: ['Mi1', 'Tm3', 720575940610453042]
-        2. Nested list with custom group names (like VisualizeSkeleton's neuron_layers):
-           [['DN1p', ['DN1pA', 'DN1pB']], ['DN2', ['DN2']], ['l-LNv', [12345]]]
-        3. CSV file via group_map_csv parameter (like VisualizeSkeleton's layer_map_csv):
-           CSV format: columns 'group' and 'id_type_instance'
+        1. Single dataset (intra-dataset comparison):
+           - Simple list: ['Mi1', 'Tm3', 720575940610453042]
+           - Nested list with custom names: [['DN1p', ['DN1pA', 'DN1pB']], ...]
+           - CSV file via group_map_csv
+           
+        2. Cross-dataset comparison (dict format):
+           - Dict with dataset keys: {'male-cns:v0.9': ['Mi1', 'aMe12'], 
+                                       'flywire_FAFB_v783': ['Mi1', 'aMe12']}
+           - Generates N×M similarity matrix between neurons from different datasets
+           - Auto type mapping enabled by default to standardize partner types
     
     Aggregation Strategies:
         - 'bodyid': Compare individual bodyId profiles directly
         - 'type': Aggregate profiles by neuron type using mean pooling
+    
+    Auto Type Mapping (Cross-Dataset):
+        When comparing across datasets, partner types may have different names
+        (e.g., 'MTe07' in FAFB vs 'MeVPLo2' in male-cns). Auto type mapping
+        standardizes partner types to their canonical (male-cns) names before
+        comparison. This can be disabled via use_auto_type_mapping=False.
     
     Output Structure:
         {output_dir}/connectivity_profiling_{query_name}_{timestamp}/
@@ -7483,7 +7632,7 @@ class ConnectivityProfileComparer:
             └── heatmap_{direction}_rank_corr_union.html
     
     Example:
-        >>> # Simple list format
+        >>> # Intra-dataset: Simple list format
         >>> comparer = ConnectivityProfileComparer(
         ...     query=['Mi1', 'Tm3', 'aMe12'],
         ...     dataset='male-cns:v0.9',
@@ -7491,6 +7640,17 @@ class ConnectivityProfileComparer:
         ...     output_dir='./results'
         ... )
         >>> results = comparer.run()
+        
+        >>> # Cross-dataset: Dict format (generates N×M matrix)
+        >>> comparer = ConnectivityProfileComparer(
+        ...     query={
+        ...         'male-cns:v0.9': ['Mi1', 'aMe12', 'MeVPLo2'],
+        ...         'flywire_FAFB_v783': ['Mi1', 'aMe12', 'MTe07'],
+        ...     },
+        ...     use_auto_type_mapping=True,  # Standardize partner types
+        ...     output_dir='./results'
+        ... )
+        >>> # Note: dataset=None when using dict query
         
         >>> # Nested list with custom group names
         >>> comparer = ConnectivityProfileComparer(
@@ -7509,8 +7669,8 @@ class ConnectivityProfileComparer:
     
     def __init__(
         self,
-        query: Union[str, int, List[Union[str, int, List]]],
-        dataset: str,
+        query: Union[str, int, List[Union[str, int, List]], Dict[str, List]],
+        dataset: Optional[str] = None,
         aggregation_level: str = 'type',
         top_k: int = 15,
         top_m: int = 5,
@@ -7523,6 +7683,7 @@ class ConnectivityProfileComparer:
         use_cache: bool = True,
         group_map_csv: Optional[str] = None,
         skip_bodyId_level: Union[bool, str] = 'auto',
+        use_auto_type_mapping: bool = True,
     ):
         """
         Initialize ConnectivityProfileComparer.
@@ -7535,7 +7696,13 @@ class ConnectivityProfileComparer:
                 - Nested list with custom group names (like VisualizeSkeleton):
                   [['Group1', [bodyId1, bodyId2]], ['Group2', [bodyId3, 'type1']]]
                   Each group is ['GroupName', [list_of_ids_or_types]]
-            dataset: Dataset identifier (e.g., 'male-cns:v0.9')
+                - Dict for cross-dataset comparison (generates N×M matrix):
+                  {'male-cns:v0.9': ['Mi1', 'aMe12'], 'flywire_FAFB_v783': ['Mi1']}
+                  When using dict format, the `dataset` parameter should be None.
+            dataset: Dataset identifier (e.g., 'male-cns:v0.9').
+                For intra-dataset comparison, this is required.
+                For cross-dataset comparison (dict query), this should be None.
+                If dict query is provided but dataset is not None, a warning is issued.
             aggregation_level: 'bodyid' or 'type'
             top_k: Top K partners per direction (default: 15)
             top_m: Minimum unique types to ensure (default: 5)
@@ -7552,22 +7719,82 @@ class ConnectivityProfileComparer:
                 - 'id_type_instance': neuron identifier (bodyId, type, or instance name)
                 When provided, this overrides `query` parameter.
             skip_bodyId_level: Whether to skip bodyId-level computations (Steps 3 & 4).
-                - False: Always compute bodyId-level matrices (bodyId-level metrics will be used to compute the average inter- and intra-type similarities)
+                - False: Always compute bodyId-level matrices
                 - True: Always skip bodyId-level matrices  
-                - 'auto': Skip if n_bodyId_profiles > 1000 (default, avoids O(n²) explosion)
-                    For 10,000 bodyIds with direction='both', this would require: 50 million pairs × 3 directions = 150M similarity computations.
-                    Estimated time: several hours
+                - 'auto': Skip if n_bodyId_profiles > 1000 (default)
+                Note: For cross-dataset comparison, bodyId-level is always skipped
+                since profiles are from different datasets.
+            use_auto_type_mapping: Enable automatic type name mapping for cross-dataset
+                comparison (default: True). When enabled, partner types are standardized
+                to their canonical (male-cns) names before comparison. This allows
+                proper matching of types that have different names in different datasets
+                (e.g., 'MTe07' in FAFB → 'MeVPLo2' in male-cns).
+                Has no effect for intra-dataset comparison.
         """
         self.group_map_csv = group_map_csv
+        self.use_auto_type_mapping = use_auto_type_mapping
+        self._type_mapper: Optional[CrossDatasetTypeMapper] = None
         
-        # Parse group_map_csv if provided (overrides query)
-        if group_map_csv is not None:
-            self.query, self._custom_group_names = self._parse_group_map_csv(group_map_csv)
+        # Detect cross-dataset mode (dict query format)
+        self.is_cross_dataset = isinstance(query, dict)
+        
+        if self.is_cross_dataset:
+            # Cross-dataset comparison mode
+            # Query format: {'datasetA': [types], 'datasetB': [types]}
+            if dataset is not None:
+                warnings.warn(
+                    f"Cross-dataset comparison detected (dict query). "
+                    f"The 'dataset' parameter ('{dataset}') is ignored. "
+                    f"Datasets are specified in the query dict.",
+                    UserWarning
+                )
+            
+            # Extract datasets and queries from dict
+            self._cross_dataset_query = query  # Store original dict
+            self.datasets = list(query.keys())
+            
+            if len(self.datasets) < 2:
+                raise ValueError(
+                    "Cross-dataset comparison requires at least 2 datasets in query dict. "
+                    f"Got: {self.datasets}"
+                )
+            
+            # For cross-dataset, we use the first dataset as "primary" for internal bookkeeping
+            self.dataset = self.datasets[0]
+            
+            # Flatten query for logging
+            self.query = []
+            self._custom_group_names = None
+            for ds, neurons in query.items():
+                for n in neurons:
+                    self.query.append(f"{ds}:{n}")
+            
+            # Cross-dataset always skips bodyId-level (profiles from different datasets)
+            if skip_bodyId_level != True:
+                self._log_pending = f"Cross-dataset comparison: bodyId-level matrices skipped (profiles from different datasets)"
+            self.skip_bodyId_level = True
+            
         else:
-            # Normalize query and detect nested list format
-            self.query, self._custom_group_names = self._normalize_query(query)
+            # Intra-dataset comparison mode
+            self._cross_dataset_query = None
+            self.datasets = [dataset] if dataset else []
+            self._log_pending = None
+            
+            # Parse group_map_csv if provided (overrides query)
+            if group_map_csv is not None:
+                self.query, self._custom_group_names = self._parse_group_map_csv(group_map_csv)
+            else:
+                # Normalize query and detect nested list format
+                self.query, self._custom_group_names = self._normalize_query(query)
+            
+            if dataset is None:
+                raise ValueError(
+                    "For intra-dataset comparison, 'dataset' parameter is required. "
+                    "For cross-dataset comparison, use dict query format: "
+                    "{'datasetA': [types], 'datasetB': [types]}"
+                )
         
-        self.dataset = dataset
+        self.dataset = dataset if not self.is_cross_dataset else self.datasets[0]
         self.aggregation_level = aggregation_level
         self.top_k = top_k
         self.top_m = top_m
@@ -7578,12 +7805,13 @@ class ConnectivityProfileComparer:
         self.show_figures = show_figures
         self.verbose = verbose
         self.use_cache = use_cache
-        self.skip_bodyId_level = skip_bodyId_level
+        if not self.is_cross_dataset:
+            self.skip_bodyId_level = skip_bodyId_level
         
         # Generate query name for output folder
         self.query_name = self._generate_query_name()
         
-        # Initialize profiler
+        # Initialize profiler with all datasets
         config = ProfilerConfig(
             top_k_bodyid=top_k,
             top_m_type=top_m,
@@ -7591,8 +7819,9 @@ class ConnectivityProfileComparer:
             use_cache=use_cache
         )
         
+        profiler_datasets = self.datasets if self.is_cross_dataset else [dataset]
         self.profiler = ConnectivityProfiler(
-            datasets=[dataset],
+            datasets=profiler_datasets,
             config=config,
             verbose=verbose
         )
@@ -8050,6 +8279,272 @@ class ConnectivityProfileComparer:
         self._log(f"Extracted {len(type_profiles)} type profiles, {len(bodyid_profiles)} bodyId profiles")
         return type_profiles, bodyid_profiles
     
+    def _extract_cross_dataset_profiles(
+        self
+    ) -> Tuple[Dict[str, Dict[str, ConnectivityProfile]], List[str], List[str]]:
+        """
+        Extract profiles for cross-dataset comparison.
+        
+        Returns:
+            Tuple of:
+            - profiles_by_dataset: Dict[dataset -> Dict[label -> ConnectivityProfile]]
+            - row_labels: Labels for the first dataset (rows in N×M matrix)
+            - col_labels: Labels for the second dataset (columns in N×M matrix)
+        """
+        if not self.is_cross_dataset or not self._cross_dataset_query:
+            raise RuntimeError("_extract_cross_dataset_profiles called but not in cross-dataset mode")
+        
+        profiles_by_dataset: Dict[str, Dict[str, ConnectivityProfile]] = {}
+        
+        for dataset, neurons in self._cross_dataset_query.items():
+            self._log(f"Extracting profiles from {dataset}...")
+            
+            # Ensure connection cache is complete for this dataset
+            if self.use_cache:
+                self._ensure_connection_cache_complete_for_dataset(dataset)
+            
+            dataset_profiles = {}
+            
+            for neuron_query in neurons:
+                # Resolve neuron query to bodyIds
+                if isinstance(neuron_query, int):
+                    # BodyId query
+                    body_ids = [neuron_query]
+                    label = str(neuron_query)
+                elif str(neuron_query).isdigit():
+                    body_ids = [int(neuron_query)]
+                    label = neuron_query
+                else:
+                    # Type name or pattern
+                    body_ids = self.profiler.get_bodyids_for_type(str(neuron_query), dataset)
+                    label = str(neuron_query)
+                
+                if not body_ids:
+                    self._log(f"  Warning: No bodyIds found for '{neuron_query}' in {dataset}")
+                    continue
+                
+                # Get profiles for these bodyIds
+                individual_profiles = []
+                for bid in body_ids:
+                    try:
+                        profile = self.profiler.get_profile(bid, dataset)
+                        if profile is not None:
+                            individual_profiles.append(profile)
+                    except Exception as e:
+                        self._log(f"  Warning: Failed to get profile for {bid}: {e}")
+                
+                if not individual_profiles:
+                    self._log(f"  Warning: No profiles extracted for '{neuron_query}'")
+                    continue
+                
+                # Aggregate profiles for this type
+                if len(individual_profiles) == 1:
+                    dataset_profiles[label] = individual_profiles[0]
+                else:
+                    dataset_profiles[label] = self._aggregate_profiles_from_list(
+                        individual_profiles, label
+                    )
+            
+            profiles_by_dataset[dataset] = dataset_profiles
+            self._log(f"  Extracted {len(dataset_profiles)} profiles from {dataset}")
+        
+        # Get labels for row (first dataset) and column (second dataset)
+        ds_list = list(self._cross_dataset_query.keys())
+        row_labels = list(profiles_by_dataset.get(ds_list[0], {}).keys())
+        col_labels = list(profiles_by_dataset.get(ds_list[1], {}).keys())
+        
+        return profiles_by_dataset, row_labels, col_labels
+    
+    def _ensure_connection_cache_complete_for_dataset(self, dataset: str) -> bool:
+        """Ensure connection cache is complete for a specific dataset."""
+        try:
+            try:
+                from ..coana import FindNeuronConnection
+            except ImportError:
+                try:
+                    from coana import FindNeuronConnection
+                except ImportError:
+                    import sys
+                    from pathlib import Path
+                    sys.path.insert(0, str(Path(__file__).parent.parent))
+                    from coana import FindNeuronConnection
+            
+            fnc = FindNeuronConnection(
+                dataset=dataset,
+                use_cache=True,
+                verbose_mode='simple',
+                simple_fetch=True
+            )
+            
+            result = fnc.build_connection_cache(batch_size=1000, quiet=not self.verbose)
+            
+            # Clear memory
+            fnc._conn_df_cache = None
+            del fnc
+            import gc
+            gc.collect()
+            
+            return True
+        except Exception as e:
+            self._log(f"WARNING: Could not ensure connection cache for {dataset}: {e}")
+            return False
+    
+    def _compute_cross_dataset_similarity_matrices(
+        self,
+        profiles_by_dataset: Dict[str, Dict[str, ConnectivityProfile]],
+        row_labels: List[str],
+        col_labels: List[str],
+    ) -> Dict[str, Dict[str, pd.DataFrame]]:
+        """
+        Compute N×M similarity matrices for cross-dataset comparison.
+        
+        Args:
+            profiles_by_dataset: Dict[dataset -> Dict[label -> ConnectivityProfile]]
+            row_labels: Labels for rows (first dataset)
+            col_labels: Labels for columns (second dataset)
+        
+        Returns:
+            Nested dictionary: {direction: {metric: DataFrame}}
+        """
+        ds_list = list(profiles_by_dataset.keys())
+        profiles_a = profiles_by_dataset[ds_list[0]]
+        profiles_b = profiles_by_dataset[ds_list[1]]
+        
+        n_rows = len(row_labels)
+        n_cols = len(col_labels)
+        
+        directions = ['both', 'upstream', 'downstream'] if self.direction == 'both' else [self.direction]
+        metrics = ['jaccard', 'cosine', 'rank_corr', 'rank_corr_union']
+        
+        all_matrices = {}
+        total_pairs = n_rows * n_cols
+        
+        # Get type mapper if enabled
+        type_mapper = None
+        if self.use_auto_type_mapping:
+            type_mapper = get_type_mapper()
+            if type_mapper._loaded:
+                self._log(f"Using auto type mapping for cross-dataset comparison")
+                self._log(f"  Partner types will be standardized to canonical (male-cns) names")
+            else:
+                self._log(f"Warning: Auto type mapping requested but mapper not loaded")
+                type_mapper = None
+        
+        for direction in directions:
+            dir_name = 'combined' if direction == 'both' else direction
+            
+            # Initialize matrices for all metrics
+            metric_matrices = {m: np.zeros((n_rows, n_cols)) for m in metrics}
+            
+            self._log(f"Computing cross-dataset {dir_name} similarity ({n_rows}×{n_cols}, {total_pairs} pairs)...")
+            
+            with tqdm(total=total_pairs, desc=f"  {dir_name}", disable=not self.verbose) as pbar:
+                for i, row_label in enumerate(row_labels):
+                    profile_a = profiles_a.get(row_label)
+                    if profile_a is None:
+                        pbar.update(n_cols)
+                        continue
+                    
+                    for j, col_label in enumerate(col_labels):
+                        profile_b = profiles_b.get(col_label)
+                        if profile_b is None:
+                            pbar.update(1)
+                            continue
+                        
+                        # Use cross-dataset comparison with type standardization
+                        if type_mapper is not None:
+                            # Get standardized expanded types
+                            types_a = ProfileComparator._get_expanded_types_standardized(
+                                profile_a, direction, type_mapper
+                            )
+                            types_b = ProfileComparator._get_expanded_types_standardized(
+                                profile_b, direction, type_mapper
+                            )
+                            
+                            # Compute metrics manually with standardized types
+                            scores = self._compute_similarity_from_types(types_a, types_b)
+                        else:
+                            # Standard cross-dataset comparison
+                            scores = ProfileComparator.combined_score(
+                                profile_a, profile_b, direction=direction
+                            )
+                        
+                        metric_matrices['jaccard'][i, j] = scores.get('jaccard', 0.0)
+                        metric_matrices['cosine'][i, j] = scores.get('cosine', 0.0)
+                        
+                        rank_val = scores.get('rank', np.nan)
+                        metric_matrices['rank_corr'][i, j] = rank_val if not np.isnan(rank_val) else 0.0
+                        
+                        rank_norm = scores.get('rank_norm', np.nan)
+                        metric_matrices['rank_corr_union'][i, j] = rank_norm if not np.isnan(rank_norm) else 0.5
+                        
+                        pbar.update(1)
+            
+            # Convert to DataFrames
+            all_matrices[dir_name] = {
+                m: pd.DataFrame(metric_matrices[m], index=row_labels, columns=col_labels)
+                for m in metrics
+            }
+        
+        return all_matrices
+    
+    def _compute_similarity_from_types(
+        self,
+        types_a: Dict[str, float],
+        types_b: Dict[str, float],
+    ) -> Dict[str, float]:
+        """
+        Compute similarity metrics from pre-computed type dictionaries.
+        
+        Used for cross-dataset comparison with type standardization.
+        """
+        from scipy.stats import spearmanr
+        
+        set_a = set(types_a.keys())
+        set_b = set(types_b.keys())
+        
+        # Jaccard
+        intersection = set_a & set_b
+        union = set_a | set_b
+        jaccard = len(intersection) / len(union) if union else 0.0
+        
+        # Cosine
+        if not union:
+            cosine = 0.0
+        else:
+            all_types = sorted(union)
+            vec_a = np.array([types_a.get(t, 0.0) for t in all_types])
+            vec_b = np.array([types_b.get(t, 0.0) for t in all_types])
+            norm_a, norm_b = np.linalg.norm(vec_a), np.linalg.norm(vec_b)
+            cosine = float(np.dot(vec_a, vec_b) / (norm_a * norm_b)) if norm_a > 0 and norm_b > 0 else 0.0
+        
+        # Rank correlation on shared types
+        shared_types = sorted(intersection)
+        if len(shared_types) >= 3:
+            weights_a = [types_a[t] for t in shared_types]
+            weights_b = [types_b[t] for t in shared_types]
+            if len(set(weights_a)) > 1 and len(set(weights_b)) > 1:
+                try:
+                    rank_corr, _ = spearmanr(weights_a, weights_b)
+                    rank_corr = float(rank_corr) if not np.isnan(rank_corr) else np.nan
+                except:
+                    rank_corr = np.nan
+            else:
+                rank_corr = np.nan
+        else:
+            rank_corr = np.nan
+        
+        # Normalized rank correlation
+        rank_norm = (rank_corr + 1) / 2 if not np.isnan(rank_corr) else 0.5
+        
+        return {
+            'jaccard': jaccard,
+            'cosine': cosine,
+            'rank': rank_corr,
+            'rank_norm': rank_norm,
+            'combined': 0.5 * jaccard + 0.5 * rank_norm if jaccard > 0 else 0.0,
+        }
+
     def _aggregate_profiles_from_list(
         self,
         profiles: List[ConnectivityProfile],
@@ -8744,6 +9239,10 @@ class ConnectivityProfileComparer:
                - Type-avg-bodyId: Type similarities averaged from bodyId pairs
                  (diagonal = intra-type avg, off-diagonal = inter-type avg)
         
+        For cross-dataset mode (query is dict), generates N×M similarity matrices
+        comparing types from the first dataset (rows) against the second dataset (columns).
+        BodyId-level comparison is skipped in cross-dataset mode.
+        
         Returns:
             Dictionary with results summary including:
             - n_type_profiles: Number of type profiles
@@ -8755,7 +9254,12 @@ class ConnectivityProfileComparer:
             - bodyid_matrices: BodyId-level similarity matrices (empty dict if skipped)
             - type_avg_matrices: Type-averaged-from-bodyId matrices (empty dict if skipped)
             - bodyid_level_skipped: Boolean indicating if bodyId computation was skipped
+            - is_cross_dataset: Boolean indicating if this was cross-dataset comparison
         """
+        # Branch for cross-dataset comparison
+        if self.is_cross_dataset:
+            return self._run_cross_dataset()
+        
         self._log(f"Starting connectivity profile comparison for {self.dataset}")
         self._log(f"Query: {self._format_query_for_log(self.query)}")
         
@@ -8838,6 +9342,201 @@ class ConnectivityProfileComparer:
             'bodyid_matrices': bodyid_matrices,
             'type_avg_matrices': type_avg_matrices,
             'bodyid_level_skipped': do_skip_bodyid,
+            'is_cross_dataset': False,
+        }
+    
+    def _run_cross_dataset(self) -> Dict[str, Any]:
+        """
+        Run cross-dataset connectivity profile comparison.
+        
+        Generates N×M similarity matrices comparing types from the first dataset (rows)
+        against types from the second dataset (columns).
+        
+        Returns:
+            Dictionary with results summary for cross-dataset comparison.
+        """
+        ds_list = list(self._cross_dataset_query.keys())
+        self._log("=" * 60)
+        self._log("CROSS-DATASET CONNECTIVITY PROFILE COMPARISON")
+        self._log("=" * 60)
+        self._log(f"Dataset A (rows): {ds_list[0]} with {len(self._cross_dataset_query[ds_list[0]])} types")
+        self._log(f"Dataset B (cols): {ds_list[1]} with {len(self._cross_dataset_query[ds_list[1]])} types")
+        if self.use_auto_type_mapping:
+            self._log("Auto type mapping: ENABLED (partner types standardized to canonical names)")
+        else:
+            self._log("Auto type mapping: DISABLED")
+        self._log("BodyId-level comparison: SKIPPED (not applicable for cross-dataset)")
+        self._log("")
+        
+        # Step 1: Extract profiles from both datasets
+        self._log("Step 1: Extracting profiles from both datasets...")
+        profiles_by_dataset, row_labels, col_labels = self._extract_cross_dataset_profiles()
+        
+        n_rows = len(row_labels)
+        n_cols = len(col_labels)
+        
+        if n_rows == 0 or n_cols == 0:
+            self._log("Error: No profiles extracted from one or both datasets")
+            return {
+                'is_cross_dataset': True,
+                'error': 'No profiles extracted',
+                'n_type_profiles': 0,
+            }
+        
+        # Step 2: Compute cross-dataset similarity matrices
+        self._log(f"Step 2: Computing {n_rows}×{n_cols} cross-dataset similarity matrices...")
+        cross_matrices = self._compute_cross_dataset_similarity_matrices(
+            profiles_by_dataset, row_labels, col_labels
+        )
+        
+        # Step 3: Save results
+        self._log("Step 3: Saving results...")
+        saved_files = self._save_cross_dataset_results(
+            profiles_by_dataset, cross_matrices, row_labels, col_labels
+        )
+        
+        output_path = saved_files.get('output_path', '')
+        
+        # Print summary
+        self._log("")
+        self._log("=" * 60)
+        self._log("CROSS-DATASET COMPARISON COMPLETE")
+        self._log("=" * 60)
+        self._log(f"Output: {output_path}")
+        self._log(f"Matrix dimensions: {n_rows} × {n_cols}")
+        self._log(f"  Rows ({ds_list[0]}): {row_labels}")
+        self._log(f"  Cols ({ds_list[1]}): {col_labels}")
+        self._log("")
+        self._log("Output includes:")
+        self._log("  - cross_dataset/: N×M similarity matrices & heatmaps")
+        self._log("  - profiles/: Extracted profiles from each dataset")
+        
+        return {
+            'is_cross_dataset': True,
+            'n_type_profiles': n_rows + n_cols,
+            'n_bodyid_profiles': 0,
+            'output_path': output_path,
+            'row_labels': row_labels,
+            'col_labels': col_labels,
+            'datasets': ds_list,
+            'matrices_saved': saved_files.get('matrices_saved', []),
+            'heatmaps_generated': saved_files.get('heatmaps_generated', []),
+            'cross_matrices': cross_matrices,
+            'bodyid_level_skipped': True,
+            'use_auto_type_mapping': self.use_auto_type_mapping,
+        }
+    
+    def _save_cross_dataset_results(
+        self,
+        profiles_by_dataset: Dict[str, Dict[str, ConnectivityProfile]],
+        cross_matrices: Dict[str, Dict[str, pd.DataFrame]],
+        row_labels: List[str],
+        col_labels: List[str],
+    ) -> Dict[str, Any]:
+        """
+        Save cross-dataset comparison results.
+        
+        Args:
+            profiles_by_dataset: Profiles organized by dataset
+            cross_matrices: N×M similarity matrices by direction and metric
+            row_labels: Labels for rows (first dataset)
+            col_labels: Labels for columns (second dataset)
+            
+        Returns:
+            Dictionary with paths to saved files
+        """
+        ds_list = list(self._cross_dataset_query.keys())
+        
+        # Create output directory
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        safe_ds_name = f"{ds_list[0]}_vs_{ds_list[1]}".replace(' ', '_').replace('/', '_')
+        base_dir = os.path.join(self.output_dir, f"{safe_ds_name}_{timestamp}_cross_dataset")
+        cross_dir = os.path.join(base_dir, "cross_dataset")
+        profiles_dir = os.path.join(base_dir, "profiles")
+        
+        os.makedirs(cross_dir, exist_ok=True)
+        os.makedirs(profiles_dir, exist_ok=True)
+        
+        matrices_saved = []
+        heatmaps_generated = []
+        
+        # Save matrices and heatmaps
+        for direction, metric_matrices in cross_matrices.items():
+            for metric, matrix_df in metric_matrices.items():
+                # Save CSV
+                csv_path = os.path.join(cross_dir, f"{direction}_{metric}.csv")
+                matrix_df.to_csv(csv_path)
+                matrices_saved.append(csv_path)
+                
+                # Generate heatmap
+                if not self.skip_heatmap:
+                    try:
+                        import matplotlib
+                        matplotlib.use('Agg')
+                        import matplotlib.pyplot as plt
+                        import seaborn as sns
+                        
+                        figsize = (max(8, len(col_labels) * 0.5), max(6, len(row_labels) * 0.4))
+                        fig, ax = plt.subplots(figsize=figsize)
+                        
+                        vmin = 0 if metric != 'rank_corr' else -1
+                        vmax = 1
+                        cmap = 'RdYlGn' if metric == 'rank_corr' else 'YlGnBu'
+                        
+                        sns.heatmap(
+                            matrix_df,
+                            annot=len(row_labels) <= 20 and len(col_labels) <= 20,
+                            fmt='.2f' if len(row_labels) <= 20 else '',
+                            cmap=cmap,
+                            vmin=vmin,
+                            vmax=vmax,
+                            ax=ax,
+                        )
+                        
+                        ax.set_title(f"Cross-Dataset {direction.title()} {metric.replace('_', ' ').title()}\n{ds_list[0]} vs {ds_list[1]}")
+                        ax.set_xlabel(ds_list[1])
+                        ax.set_ylabel(ds_list[0])
+                        
+                        plt.tight_layout()
+                        heatmap_path = os.path.join(cross_dir, f"{direction}_{metric}_heatmap.png")
+                        fig.savefig(heatmap_path, dpi=150, bbox_inches='tight')
+                        plt.close(fig)
+                        heatmaps_generated.append(heatmap_path)
+                        
+                    except Exception as e:
+                        self._log(f"Warning: Failed to generate heatmap for {direction}_{metric}: {e}")
+        
+        # Save profiles
+        for dataset, profiles in profiles_by_dataset.items():
+            ds_dir = os.path.join(profiles_dir, dataset.replace(' ', '_'))
+            os.makedirs(ds_dir, exist_ok=True)
+            for label, profile in profiles.items():
+                safe_label = label.replace('/', '_').replace(' ', '_')
+                profile_path = os.path.join(ds_dir, f"{safe_label}_profile.json")
+                with open(profile_path, 'w') as f:
+                    json.dump(profile.to_dict(), f, indent=2)
+        
+        # Save metadata
+        metadata = {
+            'timestamp': timestamp,
+            'datasets': ds_list,
+            'query': {ds: list(types) for ds, types in self._cross_dataset_query.items()},
+            'row_labels': row_labels,
+            'col_labels': col_labels,
+            'direction': self.direction,
+            'use_auto_type_mapping': self.use_auto_type_mapping,
+            'matrices_saved': [os.path.basename(p) for p in matrices_saved],
+            'heatmaps_generated': [os.path.basename(p) for p in heatmaps_generated],
+        }
+        
+        metadata_path = os.path.join(base_dir, "metadata.json")
+        with open(metadata_path, 'w') as f:
+            json.dump(metadata, f, indent=2)
+        
+        return {
+            'output_path': base_dir,
+            'matrices_saved': matrices_saved,
+            'heatmaps_generated': heatmaps_generated,
         }
     
     def compare_intra_inter_type(self) -> Dict[str, pd.DataFrame]:

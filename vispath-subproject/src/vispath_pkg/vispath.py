@@ -8550,6 +8550,15 @@ def VisConnMatInteractive(cmat, filename, title='', color_scale=[[0, 'rgb(255,25
     x_labels = cmat.columns.astype(str).tolist()
     y_labels = cmat.index.astype(str).tolist()
     
+    # Calculate dynamic left margin based on longest row label
+    # Approximate character width: ~7px per character at default font size
+    max_row_label_length = max(len(str(label)) for label in y_labels) if y_labels else 0
+    max_col_label_length = max(len(str(label)) for label in x_labels) if x_labels else 0
+    # Calculate left margin: min 120px, max 400px, ~7px per character + 40px padding
+    dynamic_left_margin = min(400, max(120, max_row_label_length * 7 + 40))
+    # Calculate bottom margin for rotated column labels: min 120px, ~5px per char (due to 45° rotation)
+    dynamic_bottom_margin = min(300, max(120, max_col_label_length * 5 + 40))
+    
     # Generate unique storage key for this heatmap
     from datetime import datetime
     output_name = os.path.splitext(os.path.basename(filename))[0]
@@ -9169,6 +9178,10 @@ def VisConnMatInteractive(cmat, filename, title='', color_scale=[[0, 'rgb(255,25
         let reverseContrast = false;  // Whether to reverse black/white contrast colors
         let useClusteredOrder = {json.dumps(init_clustered and clustering_successful)};  // Track current ordering mode (use init_clustered parameter)
         let currentClusteringMethod = 'ward';  // Current clustering method (ward, average, complete, single)
+        
+        // Dynamic margins based on label lengths
+        const dynamicLeftMargin = {dynamic_left_margin};
+        const dynamicBottomMargin = {dynamic_bottom_margin};
         let isTransposed = false;  // Track if matrix is transposed
         const metricType = '{metric_type}';
         const isLarge = {json.dumps(is_large)};
@@ -9596,7 +9609,7 @@ def VisConnMatInteractive(cmat, filename, title='', color_scale=[[0, 'rgb(255,25
                 }},
                 width: currentWidth,
                 height: currentHeight,
-                margin: {{l: 120, r: 40, b: 120, t: 100, pad: 4}}
+                margin: {{l: dynamicLeftMargin, r: 40, b: dynamicBottomMargin, t: 100, pad: 4}}
             }};
             
             const config = {{
@@ -10002,7 +10015,7 @@ def VisConnMatInteractive(cmat, filename, title='', color_scale=[[0, 'rgb(255,25
                 // Prevent autosize from expanding the plot
                 'autosize': false,
                 // Keep margins fixed to prevent rescaling
-                'margin.l': 120,
+                'margin.l': dynamicLeftMargin,
                 'margin.r': 40,
                 'margin.t': 100,
                 'margin.b': 120,
@@ -10699,7 +10712,7 @@ def VisConnMatInteractive(cmat, filename, title='', color_scale=[[0, 'rgb(255,25
             if (squareCellsLocked && gd.data && gd.data[0]) {{
                 const numRows = gd.data[0].y.length;
                 const numCols = gd.data[0].x.length;
-                const margins = gd.layout.margin || {{l: 120, r: 40, b: 120, t: 100}};
+                const margins = gd.layout.margin || {{l: dynamicLeftMargin, r: 40, b: dynamicBottomMargin, t: 100}};
                 const marginHorizontal = margins.l + margins.r;
                 const marginVertical = margins.t + margins.b;
                 const plotAreaWidth = currentWidth - marginHorizontal;
@@ -10734,7 +10747,7 @@ def VisConnMatInteractive(cmat, filename, title='', color_scale=[[0, 'rgb(255,25
             if (squareCellsLocked && gd.data && gd.data[0]) {{
                 const numRows = gd.data[0].y.length;
                 const numCols = gd.data[0].x.length;
-                const margins = gd.layout.margin || {{l: 120, r: 40, b: 120, t: 100}};
+                const margins = gd.layout.margin || {{l: dynamicLeftMargin, r: 40, b: dynamicBottomMargin, t: 100}};
                 const marginHorizontal = margins.l + margins.r;
                 const marginVertical = margins.t + margins.b;
                 const plotAreaWidth = currentWidth - marginHorizontal;
@@ -10771,10 +10784,10 @@ def VisConnMatInteractive(cmat, filename, title='', color_scale=[[0, 'rgb(255,25
                 const numRows = gd.data[0].y.length;
                 const numCols = gd.data[0].x.length;
                 
-                // Get margins (l=120, r=40, b=120, t=100)
-                const margins = gd.layout.margin || {{l: 120, r: 40, b: 120, t: 100}};
-                const marginHorizontal = margins.l + margins.r;  // 160px
-                const marginVertical = margins.t + margins.b;    // 220px
+                // Get margins (use dynamic margins calculated based on label lengths)
+                const margins = gd.layout.margin || {{l: dynamicLeftMargin, r: 40, b: dynamicBottomMargin, t: 100}};
+                const marginHorizontal = margins.l + margins.r;
+                const marginVertical = margins.t + margins.b;
                 
                 // Calculate height for square cells based on current width
                 const plotAreaWidth = currentWidth - marginHorizontal;

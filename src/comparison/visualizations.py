@@ -2454,8 +2454,12 @@ class ComparisonVisualizer:
                             valid_paths = df
                             
                         if not valid_paths.empty:
-                            pre_col = 'std_label_pre' if 'std_label_pre' in valid_paths.columns else 'type_pre'
-                            post_col = 'std_label_post' if 'std_label_post' in valid_paths.columns else 'type_post'
+                            # Use type_pre/type_post directly since results are already type-mapped
+                            # (get_mapped_results() applies canonical type mapping)
+                            # Don't use std_label_pre/std_label_post as those may contain display names
+                            # like 'MeVPLo2(MTe07)' which won't match across datasets
+                            pre_col = 'type_pre'
+                            post_col = 'type_post'
                             if pre_col in valid_paths.columns and post_col in valid_paths.columns:
                                 edges = set()
                                 for _, row in valid_paths.iterrows():
@@ -3196,9 +3200,12 @@ class ComparisonVisualizer:
                             valid_paths = df
                         
                         if not valid_paths.empty:
-                            # Determine columns to use (prefer standardized labels)
-                            pre_col = 'std_label_pre' if 'std_label_pre' in valid_paths.columns else 'type_pre'
-                            post_col = 'std_label_post' if 'std_label_post' in valid_paths.columns else 'type_post'
+                            # Use type_pre/type_post directly since results are already type-mapped
+                            # (get_mapped_results() applies canonical type mapping)
+                            # Don't use std_label_pre/std_label_post as those may contain display names
+                            # like 'MeVPLo2(MTe07)' which won't match across datasets
+                            pre_col = 'type_pre'
+                            post_col = 'type_post'
                             
                             if pre_col in valid_paths.columns and post_col in valid_paths.columns:
                                 # Create set of edges (ensure string and strip whitespace)

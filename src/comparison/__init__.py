@@ -80,6 +80,13 @@ from .cross_dataset_verifier import (
     VerificationResult,
 )
 from .profile_visualizations import ProfileVisualizer
+from .cross_dataset_type_mapper import (
+    CrossDatasetTypeMapper,
+    TypeMappingWarning,
+    TypeMappingConflict,
+    get_type_mapper,
+    DATASET_PRIORITY,
+)
 
 __all__ = [
     # Primary entry point
@@ -90,6 +97,13 @@ __all__ = [
     # Optional components
     'LabelMapper',
     'DatasetConfig',
+    
+    # Cross-dataset type mapping
+    'CrossDatasetTypeMapper',
+    'TypeMappingWarning',
+    'TypeMappingConflict',
+    'get_type_mapper',
+    'DATASET_PRIORITY',
     
     # Advanced usage
     'DataLoader',

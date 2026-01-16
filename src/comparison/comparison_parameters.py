@@ -247,6 +247,22 @@ class ComparisonParameters:
     This fetches connection data directly from the CAVE API for more up-to-date data.
     Note: Only applies to FAFB datasets. BANC does not support API fetching."""
 
+    auto_type_mapping: bool = True
+    """Enable automatic cross-dataset type mapping using male-cns neuron_df.
+    
+    When enabled, uses the type mapping columns from male-cns (flywireType, hemibrainType, mancType)
+    to automatically resolve equivalent neuron types across datasets. This allows comparing neurons
+    by their biological identity even when type names differ (e.g., MeVPLo2 in male-cns = MTe07 in flywire).
+    
+    Features:
+    - Auto-loads mappings from male-cns_v0_9_allneurons_neuron_df.csv
+    - Handles 1-to-1 type mappings automatically
+    - Warns about N-to-1 mappings that could cause incorrect aggregation
+    - Priority order: male-cns > flywire > manc > hemibrain > optic-lobe
+    - LabelMapper has higher priority (manual mappings override auto-mapping)
+    
+    Note: Requires male-cns dataset to be initialized first for mapping file to exist."""
+
     def __post_init__(self):
         """Validate and process parameters after initialization."""
         from .label_mapper import LabelMapper
@@ -360,6 +376,11 @@ class ComparisonParameters:
         if self.comparison_mode not in valid_modes:
             raise ValueError(f"comparison_mode must be one of {valid_modes}, got: {self.comparison_mode}")
         
+        # Initialize auto type mapper (stores CrossDatasetTypeMapper instance if enabled)
+        self._auto_type_mapper = None
+        if self.auto_type_mapping:
+            self._initialize_auto_type_mapping()
+        
         # Validate minimum requirements
         if len(self.datasets) < 1:
             raise ValueError("At least 1 dataset is required")
@@ -373,21 +394,36 @@ class ComparisonParameters:
         if self.verbose:
             print("\n=== ComparisonParameters Initialization Summary ===")
             print(f"Datasets Included ({len(self.datasets)}):")
+            dataset_names = self.get_dataset_names()
             for i, ds in enumerate(self.datasets):
                 nickname = self.datasets_nickname[i] if self.datasets_nickname and i < len(self.datasets_nickname) else "N/A"
                 print(f"  - {ds} (Nickname: {nickname})")
                 
             print(f"\nSource Neurons:")
             if self.overall_label_mapper:
-                 print(f"  Defined by LabelMapper (Labels: {self.source_labels})")
+                print(f"  Defined by LabelMapper (Labels: {self.source_labels})")
             else:
-                 print(f"  {self.source_neurons}")
+                print(f"  {self.source_neurons}")
+                # Show auto type mapping results for source neurons
+                if self.auto_type_mapping and self._auto_type_mapper:
+                    self._print_neuron_mapping_summary(
+                        self._ensure_flat_list(self.source_neurons),
+                        dataset_names,
+                        indent="  "
+                    )
                  
             print(f"\nTarget Neurons:")
             if self.overall_label_mapper:
-                 print(f"  Defined by LabelMapper (Labels: {self.target_labels})")
+                print(f"  Defined by LabelMapper (Labels: {self.target_labels})")
             else:
-                 print(f"  {self.target_neurons}")
+                print(f"  {self.target_neurons}")
+                # Show auto type mapping results for target neurons
+                if self.auto_type_mapping and self._auto_type_mapper:
+                    self._print_neuron_mapping_summary(
+                        self._ensure_flat_list(self.target_neurons),
+                        dataset_names,
+                        indent="  "
+                    )
             
             if self.intermediate_labels:
                 print(f"\nIntermediate Neurons:")
@@ -398,6 +434,9 @@ class ComparisonParameters:
                     print(f"  Labels: {self.intermediate_labels}")
                  
             print(f"\nLabel Mapper Provided: {'Yes' if self.overall_label_mapper else 'No'}")
+            print(f"Auto Type Mapping: {'Enabled' if self.auto_type_mapping else 'Disabled'}")
+            if self.auto_type_mapping and self._auto_type_mapper:
+                print(f"  └─ Type mapper loaded successfully")
             print(f"Comparison Mode: {self.comparison_mode}")
             print("===================================================\n")
         
@@ -537,8 +576,10 @@ class ComparisonParameters:
         """
         Get source neurons for a specific dataset.
         
-        If using LabelMapper, resolves neurons from mapper.
-        Otherwise returns the shared source_neurons list.
+        Resolution priority:
+        1. LabelMapper (explicit mappings)
+        2. Auto type mapping (from male-cns neuron_df)
+        3. Shared source_neurons list (same names across all datasets)
         
         Args:
             dataset: Dataset identifier
@@ -546,17 +587,29 @@ class ComparisonParameters:
         Returns:
             List of source neuron types/patterns/bodyIds
         """
+        # Priority 1: LabelMapper
         if self._source_mapper is not None:
             # Get neurons from LabelMapper for this dataset
             return self._source_mapper.get_all_neurons_for_dataset(dataset, 'source')
+        
+        # Priority 2: Auto type mapping
+        if self.auto_type_mapping and self._auto_type_mapper:
+            return self._resolve_neurons_with_auto_mapping(
+                self._ensure_flat_list(self.source_neurons), 
+                dataset
+            )
+        
+        # Priority 3: Shared list
         return self._ensure_flat_list(self.source_neurons)
     
     def get_target_neurons_for_dataset(self, dataset: str) -> List[Union[str, int]]:
         """
         Get target neurons for a specific dataset.
         
-        If using LabelMapper, resolves neurons from mapper.
-        Otherwise returns the shared target_neurons list.
+        Resolution priority:
+        1. LabelMapper (explicit mappings)
+        2. Auto type mapping (from male-cns neuron_df)
+        3. Shared target_neurons list (same names across all datasets)
         
         Args:
             dataset: Dataset identifier
@@ -564,8 +617,18 @@ class ComparisonParameters:
         Returns:
             List of target neuron types/patterns/bodyIds
         """
+        # Priority 1: LabelMapper
         if self._target_mapper is not None:
             return self._target_mapper.get_all_neurons_for_dataset(dataset, 'target')
+        
+        # Priority 2: Auto type mapping
+        if self.auto_type_mapping and self._auto_type_mapper:
+            return self._resolve_neurons_with_auto_mapping(
+                self._ensure_flat_list(self.target_neurons),
+                dataset
+            )
+        
+        # Priority 3: Shared list
         return self._ensure_flat_list(self.target_neurons)
     
     def get_source_groups(self) -> List[List[Union[str, int]]]:
@@ -788,6 +851,196 @@ class ComparisonParameters:
             saveas=data.get('saveas'),
             token=data.get('token', ''),
         )
+    
+    def _initialize_auto_type_mapping(self) -> None:
+        """
+        Initialize auto type mapping from male-cns neuron_df.
+        
+        Loads CrossDatasetTypeMapper. Mapping warnings will be shown during
+        the initialization summary print.
+        """
+        from .cross_dataset_type_mapper import CrossDatasetTypeMapper
+        import os
+        
+        # Determine workspace path
+        # Try to find from common paths
+        workspace_candidates = [
+            os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),  # From this file
+            os.getcwd(),
+            os.path.expanduser('~/Documents/GitHub/hemibrain-connectomes-analysis-v3.1'),
+        ]
+        
+        workspace_path = None
+        for candidate in workspace_candidates:
+            neuron_df_path = os.path.join(
+                candidate, 'datasets', 'male-cns_v0_9', 
+                'male-cns_v0_9_allneurons_neuron_df.csv'
+            )
+            if os.path.exists(neuron_df_path):
+                workspace_path = candidate
+                break
+        
+        if workspace_path is None:
+            if self.verbose:
+                print("\n⚠️ Auto type mapping: Could not find male-cns neuron_df file.")
+                print("   Initialize male-cns dataset first, or disable auto_type_mapping.")
+            self._auto_type_mapper = None
+            return
+        
+        # Initialize type mapper
+        self._auto_type_mapper = CrossDatasetTypeMapper(
+            workspace_path=workspace_path,
+            verbose=self.verbose,
+        )
+        
+        if not self._auto_type_mapper.load():
+            self._auto_type_mapper = None
+            return
+    
+    def _resolve_neurons_with_auto_mapping(
+        self, 
+        neurons: List[Union[str, int]], 
+        dataset: str
+    ) -> List[Union[str, int]]:
+        """
+        Resolve neuron type names using auto type mapping.
+        
+        Args:
+            neurons: List of neuron types/patterns/bodyIds
+            dataset: Target dataset to resolve for
+            
+        Returns:
+            List of resolved neuron types for the target dataset
+        """
+        if not self._auto_type_mapper:
+            return neurons
+        
+        resolved = []
+        for neuron in neurons:
+            # Skip non-string identifiers (bodyIds)
+            if not isinstance(neuron, str):
+                resolved.append(neuron)
+                continue
+            
+            # Skip regex patterns - pass through as-is
+            if '*' in neuron or ('.' in neuron and '.*' in neuron):
+                resolved.append(neuron)
+                continue
+            
+            # Try to find mapping
+            source_ds = self._auto_type_mapper._detect_type_source(neuron)
+            if source_ds:
+                mapped = self._auto_type_mapper.get_mapped_type(neuron, source_ds, dataset)
+                if mapped:
+                    resolved.append(mapped)
+                else:
+                    # No mapping found, use original (might be missing in target dataset)
+                    resolved.append(neuron)
+            else:
+                # Type not found in any known dataset, pass through
+                resolved.append(neuron)
+        
+        return resolved
+    
+    def _print_neuron_mapping_summary(
+        self,
+        neurons: List[Union[str, int]],
+        datasets: List[str],
+        indent: str = "  ",
+    ) -> None:
+        """
+        Print mapping summary for source/target neurons.
+        
+        Shows:
+        - Per-dataset resolved types (only if different from query)
+        - N-to-1 warnings with recommendation
+        - 1-to-N warnings with recommendation
+        """
+        if not self._auto_type_mapper:
+            return
+        
+        # Get mapping summary
+        summary = self._auto_type_mapper.get_source_target_mapping_summary(
+            [n for n in neurons if isinstance(n, str)],
+            datasets,
+        )
+        
+        # Print different mappings
+        if summary['different_mappings']:
+            print(f"{indent}Auto-mapped types:")
+            for type_name, mappings in summary['different_mappings']:
+                # Show: type_name → dataset1:mapped1, dataset2:mapped2
+                mapping_strs = []
+                for ds, mapped in mappings.items():
+                    if mapped != type_name:
+                        # Use nickname if available
+                        ds_idx = datasets.index(ds) if ds in datasets else -1
+                        ds_label = self.datasets_nickname[ds_idx] if (
+                            self.datasets_nickname and ds_idx >= 0 and ds_idx < len(self.datasets_nickname)
+                        ) else ds
+                        mapping_strs.append(f"{ds_label}:{mapped}")
+                if mapping_strs:
+                    print(f"{indent}  • {type_name} → {', '.join(mapping_strs)}")
+        
+        # Print N-to-1 warnings
+        if summary['n_to_1_warnings']:
+            print(f"\n{indent}⚠️  N-to-1 type mapping detected:")
+            for type_name, src_ds, tgt_ds, conflict_types in summary['n_to_1_warnings']:
+                # Determine which dataset is "A" (N types) and which is "B" (1 type)
+                # The source_type in the conflict is the "1" side
+                conflict_types_str = ", ".join(sorted(conflict_types))
+                if type_name in conflict_types:
+                    # User queried a type from the "N" side
+                    # Recommend using the "1" type from target dataset
+                    print(f"{indent}  • '{type_name}' is one of N types ({conflict_types_str}) in {tgt_ds}")
+                    print(f"{indent}    that all map to 1 type in {src_ds}.")
+                    print(f"{indent}    💡 Recommend: Query by the {src_ds} type name to compare aggregated results.")
+                else:
+                    # User queried the "1" type
+                    print(f"{indent}  • '{type_name}' in {src_ds} maps to multiple types in {tgt_ds}:")
+                    print(f"{indent}    ({conflict_types_str})")
+                    print(f"{indent}    💡 Results from {tgt_ds} will aggregate these {len(conflict_types)} types.")
+        
+        # Print 1-to-N warnings
+        if summary['one_to_n_warnings']:
+            print(f"\n{indent}⚠️  1-to-N type mapping detected:")
+            for type_name, src_ds, tgt_ds, split_types in summary['one_to_n_warnings']:
+                split_types_str = ", ".join(sorted(split_types))
+                print(f"{indent}  • '{type_name}' in {src_ds} splits into {len(split_types)} types in {tgt_ds}:")
+                print(f"{indent}    ({split_types_str})")
+                print(f"{indent}    💡 Results from {tgt_ds} will aggregate these {len(split_types)} types.")
+                print(f"{indent}    To avoid aggregation, use custom LabelMapper or set auto_type_mapping=False.")
+    
+    def get_auto_type_mapper(self) -> Optional[Any]:
+        """
+        Get the auto type mapper instance if enabled.
+        
+        Returns:
+            CrossDatasetTypeMapper instance or None
+        """
+        return self._auto_type_mapper
+    
+    def export_auto_mapping(self, output_path: Optional[str] = None) -> Optional[str]:
+        """
+        Export the auto type mapping used in this comparison.
+        
+        Args:
+            output_path: Path to save CSV file. If None, saves to output folder.
+            
+        Returns:
+            Path to saved file, or None if auto mapping not enabled.
+        """
+        if not self._auto_type_mapper:
+            return None
+        
+        if output_path is None:
+            output_path = os.path.join(
+                self.full_output_path, 
+                'auto_type_mapping.csv'
+            )
+        
+        self._auto_type_mapper.export_mapping(output_path)
+        return output_path
     
     def __repr__(self) -> str:
         datasets_str = self.get_dataset_names()

@@ -25,7 +25,7 @@ import os
 import json
 from datetime import datetime
 from itertools import combinations
-from typing import Dict, List, Optional, Any, Union, Tuple
+from typing import Dict, List, Optional, Any, Union, Tuple, Set
 import pandas as pd
 import numpy as np
 from tqdm import tqdm
@@ -262,6 +262,173 @@ class ComparisonAnalyzer:
         except Exception:
             # Fallback for polars issues (schema inference, etc.)
             return pd.read_csv(filepath, encoding='utf-8', **kwargs)
+    
+    def _collect_result_types(self) -> Set[str]:
+        """Collect all neuron types present in comparison results.
+        
+        This scans raw_results for type names in result DataFrames.
+        raw_results structure: {dataset: {threshold: DataFrame}}
+        
+        Returns:
+            Set of all unique type names (strings only).
+        """
+        all_types = set()
+        
+        for dataset, thresh_results in self.raw_results.items():
+            for threshold, result in thresh_results.items():
+                # Handle DataFrame directly (path/edge analysis results)
+                if isinstance(result, pd.DataFrame) and not result.empty:
+                    # Check common type columns
+                    for col in ['type_pre', 'type_post', 'from_type', 'to_type', 
+                                'std_label_pre', 'std_label_post']:
+                        if col in result.columns:
+                            all_types.update(result[col].dropna().unique())
+                
+                # Handle dict structure if present (legacy format)
+                elif isinstance(result, dict):
+                    for key in ['type_level', 'edge_level']:
+                        df = result.get(key)
+                        if df is not None and hasattr(df, 'empty') and not df.empty:
+                            for col in ['from', 'to', 'from_type', 'to_type',
+                                        'type_pre', 'type_post']:
+                                if col in df.columns:
+                                    all_types.update(df[col].dropna().unique())
+        
+        # Filter to only string types
+        return {t for t in all_types if isinstance(t, str)}
+    
+    def get_mapped_results(self) -> Dict[str, Dict[int, pd.DataFrame]]:
+        """Get raw_results with type mapping applied.
+        
+        Creates a copy of raw_results where type_pre and type_post columns
+        are replaced with canonical (mapped) type names. This is used for
+        visualizations and conservation analysis to properly compare types
+        across datasets that may use different naming conventions.
+        
+        Returns:
+            Dict mapping dataset -> threshold -> DataFrame with mapped types
+        """
+        if not self.parameters.auto_type_mapping or not self.parameters._auto_type_mapper:
+            return self.raw_results
+        
+        mapped_results = {}
+        
+        for dataset, thresh_results in self.raw_results.items():
+            mapped_results[dataset] = {}
+            
+            for threshold, df in thresh_results.items():
+                if isinstance(df, pd.DataFrame) and not df.empty:
+                    # Create a copy to avoid modifying original
+                    mapped_df = df.copy()
+                    
+                    # Map type columns to canonical names
+                    if 'type_pre' in mapped_df.columns:
+                        mapped_df['type_pre'] = mapped_df['type_pre'].apply(
+                            lambda t: self._get_canonical_type(t, dataset) if pd.notna(t) else t
+                        )
+                    if 'type_post' in mapped_df.columns:
+                        mapped_df['type_post'] = mapped_df['type_post'].apply(
+                            lambda t: self._get_canonical_type(t, dataset) if pd.notna(t) else t
+                        )
+                    
+                    mapped_results[dataset][threshold] = mapped_df
+                else:
+                    mapped_results[dataset][threshold] = df
+        
+        return mapped_results
+    
+    def _get_canonical_type(self, type_name: str, dataset: str) -> str:
+        """Get canonical (male-cns) type name for a given type.
+        
+        If auto_type_mapping is enabled and a mapping exists, returns the 
+        canonical (male-cns) name. Otherwise returns the original type name.
+        
+        Args:
+            type_name: Original type name
+            dataset: Dataset the type comes from
+            
+        Returns:
+            Canonical type name (male-cns name if mapped, else original)
+        """
+        if not self.parameters.auto_type_mapping or not self.parameters._auto_type_mapper:
+            return type_name
+        return self.parameters._auto_type_mapper.get_canonical_type(type_name, dataset)
+    
+    def _get_display_type(self, canonical_name: str) -> str:
+        """Get display name for a canonical type showing all dataset variants.
+        
+        If auto_type_mapping is enabled, returns format like 'MeVPaMe1(MTe46)'.
+        Otherwise returns the canonical name unchanged.
+        
+        Args:
+            canonical_name: Canonical (male-cns) type name
+            
+        Returns:
+            Display name with variants in parentheses
+        """
+        if not self.parameters.auto_type_mapping or not self.parameters._auto_type_mapper:
+            return canonical_name
+        # Pass all datasets being compared to get full mapping info
+        datasets = self.parameters.get_dataset_names()
+        return self.parameters._auto_type_mapper.get_display_name(canonical_name, datasets)
+    
+    def _build_path_key_with_mapping(self, path_nodes: list, dataset: str) -> Tuple[str, str]:
+        """Build canonical and display path keys from path nodes.
+        
+        Args:
+            path_nodes: List of type names in the path
+            dataset: Dataset the path comes from
+            
+        Returns:
+            Tuple of (canonical_key, display_key) where:
+            - canonical_key: Path with canonical names for merging
+            - display_key: Path with display names (variants in parentheses)
+        """
+        # Get canonical names for each node
+        canonical_nodes = [self._get_canonical_type(node, dataset) for node in path_nodes]
+        canonical_key = ' → '.join(canonical_nodes)
+        
+        # Get display names for each canonical node
+        display_nodes = [self._get_display_type(node) for node in canonical_nodes]
+        display_key = ' → '.join(display_nodes)
+        
+        return canonical_key, display_key
+
+    def _print_intermediate_mapping_summary(self):
+        """Print summary of intermediate neuron type mappings.
+        
+        Shows:
+        - Number of types with cross-dataset name differences
+        - Count of N-to-1 and 1-to-N mappings
+        - Reference to export file for details
+        """
+        if not self.parameters.auto_type_mapping or not self.parameters._auto_type_mapper:
+            return
+        
+        # Use the helper method to collect all types from results
+        str_types = self._collect_result_types()
+        
+        if not str_types:
+            return
+        
+        # Get mapping summary
+        mapper = self.parameters._auto_type_mapper
+        dataset_names = self.parameters.get_dataset_names()
+        summary = mapper.get_intermediate_mapping_summary(str_types, dataset_names)
+        
+        # Print summary
+        output_path = self.parameters.full_output_path
+        self._log("Auto type mapping summary for intermediate neurons:")
+        self._log(f"  • {summary['total_types']} neuron types in comparison results")
+        if summary['mapped_count'] > 0:
+            self._log(f"  • {summary['mapped_count']} types have cross-dataset name differences")
+        if summary['n_to_1_count'] > 0:
+            self._log(f"  ⚠️ {summary['n_to_1_count']} N-to-1 type mappings (check aggregation)")
+        if summary['one_to_n_count'] > 0:
+            self._log(f"  ⚠️ {summary['one_to_n_count']} 1-to-N type mappings (check aggregation)")
+        
+        if summary['mapped_count'] > 0 or summary['n_to_1_count'] > 0 or summary['one_to_n_count'] > 0:
+            self._log(f"  → Check auto_type_mapping.csv and auto_type_mapping_conflicts.csv in output folder")
 
     def _generate_mode_specific_note(self) -> str:
         """Generate HTML note specific to the comparison mode used."""
@@ -1593,6 +1760,9 @@ class ComparisonAnalyzer:
         self._log("  Step 1/2: Generating comparison summary...")
 
         dataset_names = self.parameters.get_dataset_names()
+        
+        # Get type mapper for auto type mapping (if enabled)
+        type_mapper = self.parameters._auto_type_mapper if self.parameters.auto_type_mapping else None
 
         # Generate comprehensive summary
         # Pass label_mapper=None because raw_results are already mapped
@@ -1600,7 +1770,8 @@ class ComparisonAnalyzer:
             results=self.raw_results,
             datasets=dataset_names,
             thresholds=self.parameters.thresholds,
-            label_mapper=None
+            label_mapper=None,
+            type_mapper=type_mapper
         )
 
         self._log("  Step 2/2: Calculating cross-threshold similarities...")
@@ -1613,7 +1784,8 @@ class ComparisonAnalyzer:
             datasets=dataset_names,
             thresholds=self.parameters.thresholds,
             label_mapper=None,
-            path_data_func=self._get_path_data_for_threshold
+            path_data_func=self._get_path_data_for_threshold,
+            type_mapper=type_mapper
         )
         summary['threshold_similarities'] = similarities
 
@@ -1626,6 +1798,10 @@ class ComparisonAnalyzer:
 
         # Store for later use
         self.comparison_report = summary
+        
+        # Print intermediate type mapping summary if auto_type_mapping is enabled
+        if self.parameters.auto_type_mapping and self.parameters._auto_type_mapper:
+            self._print_intermediate_mapping_summary()
         
         return summary
     
@@ -1675,12 +1851,16 @@ class ComparisonAnalyzer:
         
         dataset_names = self.parameters.get_dataset_names()
         
+        # Get type mapper for auto type mapping (if enabled)
+        type_mapper = self.parameters._auto_type_mapper if self.parameters.auto_type_mapping else None
+        
         # Pass label_mapper=None because raw_results are already mapped in run_path_analysis/run_edge_analysis
         aligned = self.metrics._align_results_at_threshold(
             self.raw_results,
             dataset_names,
             threshold,
-            label_mapper=None
+            label_mapper=None,
+            type_mapper=type_mapper
         )
         
         self.aligned_results[threshold] = aligned
@@ -1980,6 +2160,33 @@ class ComparisonAnalyzer:
         # Save label mapping (always generate a compatible JSON)
         label_map_path = os.path.join(out_dir, "label_map.json")
         self._export_label_map(label_map_path)
+        
+        # Export auto type mapping if enabled (filtered to result types and used datasets only)
+        if self.parameters.auto_type_mapping and self.parameters._auto_type_mapper:
+            try:
+                # Collect types from results for filtered export
+                result_types = self._collect_result_types()
+                dataset_names = self.parameters.get_dataset_names()
+                
+                auto_map_path = os.path.join(out_dir, "auto_type_mapping.csv")
+                self.parameters._auto_type_mapper.export_mapping(
+                    auto_map_path, 
+                    filter_types=result_types if result_types else None,
+                    datasets=dataset_names,
+                    only_different=True  # Only export mappings where types differ across datasets
+                )
+                self._log_file(auto_map_path, "Auto type mapping")
+                
+                # Also export conflicts if any (filtered to result types)
+                if self.parameters._auto_type_mapper._conflicts:
+                    conflicts_path = os.path.join(out_dir, "auto_type_mapping_conflicts.csv")
+                    self.parameters._auto_type_mapper.export_conflicts(
+                        conflicts_path,
+                        filter_types=result_types if result_types else None
+                    )
+                    self._log_file(conflicts_path, "Type mapping conflicts")
+            except Exception as e:
+                self._log(f"Warning: Failed to export auto type mapping: {e}", level='warn')
         
         # Save report (skip logging since we already logged "Saving parameters and report")
         report_path = os.path.join(out_dir, "comparison_report.txt")
@@ -2962,19 +3169,26 @@ class ComparisonAnalyzer:
                     if len(path_nodes) < 2:
                         continue
                     
-                    source = path_nodes[0]
-                    target = path_nodes[-1]
-                    intermediates = path_nodes[1:-1] if len(path_nodes) > 2 else []
-                    path_key = ' → '.join(path_nodes)
+                    # Build path key using canonical names for cross-dataset merging
+                    canonical_key, display_key = self._build_path_key_with_mapping(path_nodes, dataset)
                     
-                    # Initialize path data
+                    # Get canonical node names
+                    canonical_nodes = [self._get_canonical_type(node, dataset) for node in path_nodes]
+                    source = canonical_nodes[0]
+                    target = canonical_nodes[-1]
+                    intermediates = canonical_nodes[1:-1] if len(canonical_nodes) > 2 else []
+                    
+                    # Use canonical_key for merging
+                    path_key = canonical_key
+                    
+                    # Initialize path data (use display names for output)
                     if path_key not in all_paths:
                         all_paths[path_key] = {
-                            'path_key': path_key,
-                            'source': source,
-                            'target': target,
+                            'path_key': display_key,
+                            'source': self._get_display_type(source) if self.parameters.auto_type_mapping else source,
+                            'target': self._get_display_type(target) if self.parameters.auto_type_mapping else target,
                             'hops': len(path_nodes) - 1,
-                            'intermediates': ' → '.join(intermediates) if intermediates else '',
+                            'intermediates': ' → '.join([self._get_display_type(i) for i in intermediates]) if intermediates else '',
                         }
                     
                     # Add threshold-specific data
@@ -3456,16 +3670,22 @@ class ComparisonAnalyzer:
                 if len(path_nodes) < 2:
                     continue
                 
-                source = path_nodes[0]
-                target = path_nodes[-1]
-                intermediates = path_nodes[1:-1] if len(path_nodes) > 2 else []
+                # Build path key using canonical names for cross-dataset merging
+                # and display names for the output
+                canonical_key, display_key = self._build_path_key_with_mapping(path_nodes, dataset)
                 
-                # Build path key using arrow notation
-                path_key = ' → '.join(path_nodes)
+                # Get canonical node names for source/intermediates/target
+                canonical_nodes = [self._get_canonical_type(node, dataset) for node in path_nodes]
+                source = canonical_nodes[0]
+                target = canonical_nodes[-1]
+                intermediates = canonical_nodes[1:-1] if len(canonical_nodes) > 2 else []
+                
+                # Use canonical_key for data merging (consistent across datasets)
+                path_key = canonical_key
                 
                 # Initialize path data if not exists
                 if path_key not in path_data:
-                    path_data[path_key] = {}
+                    path_data[path_key] = {'_display_key': display_key}
                     path_details[path_key] = {
                         'source': source,
                         'target': target,
@@ -3520,12 +3740,15 @@ class ComparisonAnalyzer:
         for path_key, presence in path_data.items():
             details = path_details[path_key]
             
+            # Use display_key for human-readable output (shows type variants)
+            display_key = presence.get('_display_key', path_key)
+            
             row_data = {
-                'path_key': path_key,
-                'source': details['source'],
-                'target': details['target'],
+                'path_key': display_key,
+                'source': self._get_display_type(details['source']) if self.parameters.auto_type_mapping else details['source'],
+                'target': self._get_display_type(details['target']) if self.parameters.auto_type_mapping else details['target'],
                 'hops': len(details['intermediates']) + 1,
-                'intermediates': ' → '.join(details['intermediates']) if details['intermediates'] else '',
+                'intermediates': ' → '.join([self._get_display_type(i) for i in details['intermediates']]) if details['intermediates'] else '',
             }
             
             # Add presence markers, weights, and hop weights
@@ -3782,9 +4005,13 @@ class ComparisonAnalyzer:
             nicknames = self.parameters.get_dataset_nicknames()
             nickname_map = dict(zip(dataset_names, nicknames))
             
+            # Get type-mapped results for proper cross-dataset comparison
+            # This ensures types like MeVPaMe1 (male-cns) and MTe46 (FAFB) are recognized as the same
+            mapped_results = self.get_mapped_results()
+            
             # Generate all standard plots, passing cached similarity function
             visualizer.save_all_plots(
-                results=self.raw_results,
+                results=mapped_results,
                 aligned_data=aligned,
                 similarities=pairwise_sim,
                 output_dir=vis_dir,
@@ -3856,16 +4083,45 @@ class ComparisonAnalyzer:
             
             if df is not None and 'path' in df.columns and 'min_weight' in df.columns:
                 for _, row in df.iterrows():
-                    path_key = row['path']
+                    original_path_key = row['path']
                     min_weight = row['min_weight']
+                    
+                    # Apply type mapping to path key if auto_type_mapping is enabled
+                    if self.parameters.auto_type_mapping and self.parameters._auto_type_mapper:
+                        # Parse path nodes
+                        if '->' in str(original_path_key):
+                            path_nodes = [n.strip() for n in str(original_path_key).split('->')]
+                        elif ' → ' in str(original_path_key):
+                            path_nodes = [n.strip() for n in str(original_path_key).split(' → ')]
+                        else:
+                            path_nodes = [str(original_path_key)]
+                        
+                        # Build canonical and display keys
+                        canonical_key, display_key = self._build_path_key_with_mapping(path_nodes, dataset_name)
+                        path_key = canonical_key  # Use canonical key for merging
+                    else:
+                        path_key = original_path_key
+                        display_key = original_path_key
+                    
                     if path_key not in all_path_data:
-                        all_path_data[path_key] = {}
+                        all_path_data[path_key] = {'_display_key': display_key}
                     all_path_data[path_key][dataset_name] = min_weight
         
         if not all_path_data:
             return pd.DataFrame()
         
-        return pd.DataFrame(all_path_data).T.fillna(0)
+        # Build result DataFrame using display keys for index
+        result_rows = []
+        for canonical_key, data in all_path_data.items():
+            display_key = data.pop('_display_key', canonical_key)
+            row_data = {d: data.get(d, 0) for d in dataset_names}
+            result_rows.append((display_key, row_data))
+        
+        if not result_rows:
+            return pd.DataFrame()
+        
+        result_df = pd.DataFrame([r[1] for r in result_rows], index=[r[0] for r in result_rows])
+        return result_df.fillna(0)
     
     def _get_path_hop_weights_for_threshold(self, threshold: int) -> Dict[str, Dict[str, List[float]]]:
         """
@@ -3910,7 +4166,7 @@ class ComparisonAnalyzer:
             
             if df is not None and 'path' in df.columns and 'weights' in df.columns:
                 for _, row in df.iterrows():
-                    path_key = row['path']
+                    original_path_key = row['path']
                     weights_str = str(row.get('weights', ''))
                     
                     # Parse weights column
@@ -3928,6 +4184,22 @@ class ComparisonAnalyzer:
                                 pass
                     
                     if hop_weights:
+                        # Apply type mapping to path key if auto_type_mapping is enabled
+                        if self.parameters.auto_type_mapping and self.parameters._auto_type_mapper:
+                            # Parse path nodes
+                            if '->' in str(original_path_key):
+                                path_nodes = [n.strip() for n in str(original_path_key).split('->')]
+                            elif ' → ' in str(original_path_key):
+                                path_nodes = [n.strip() for n in str(original_path_key).split(' → ')]
+                            else:
+                                path_nodes = [str(original_path_key)]
+                            
+                            # Build canonical key for merging
+                            canonical_key, _ = self._build_path_key_with_mapping(path_nodes, dataset_name)
+                            path_key = canonical_key
+                        else:
+                            path_key = original_path_key
+                        
                         if path_key not in all_hop_weights:
                             all_hop_weights[path_key] = {}
                         all_hop_weights[path_key][safe_name] = hop_weights
@@ -3982,16 +4254,45 @@ class ComparisonAnalyzer:
             
             if df is not None and 'path' in df.columns and 'min_ratio' in df.columns:
                 for _, row in df.iterrows():
-                    path_key = row['path']
+                    original_path_key = row['path']
                     min_ratio = row['min_ratio']
+                    
+                    # Apply type mapping to path key if auto_type_mapping is enabled
+                    if self.parameters.auto_type_mapping and self.parameters._auto_type_mapper:
+                        # Parse path nodes
+                        if '->' in str(original_path_key):
+                            path_nodes = [n.strip() for n in str(original_path_key).split('->')]
+                        elif ' → ' in str(original_path_key):
+                            path_nodes = [n.strip() for n in str(original_path_key).split(' → ')]
+                        else:
+                            path_nodes = [str(original_path_key)]
+                        
+                        # Build canonical and display keys
+                        canonical_key, display_key = self._build_path_key_with_mapping(path_nodes, dataset_name)
+                        path_key = canonical_key  # Use canonical key for merging
+                    else:
+                        path_key = original_path_key
+                        display_key = original_path_key
+                    
                     if path_key not in all_ratio_data:
-                        all_ratio_data[path_key] = {}
+                        all_ratio_data[path_key] = {'_display_key': display_key}
                     all_ratio_data[path_key][dataset_name] = min_ratio
         
         if not all_ratio_data:
             return pd.DataFrame()
         
-        return pd.DataFrame(all_ratio_data).T.fillna(0)
+        # Build result DataFrame using display keys for index
+        result_rows = []
+        for canonical_key, data in all_ratio_data.items():
+            display_key = data.pop('_display_key', canonical_key)
+            row_data = {d: data.get(d, 0) for d in dataset_names}
+            result_rows.append((display_key, row_data))
+        
+        if not result_rows:
+            return pd.DataFrame()
+        
+        result_df = pd.DataFrame([r[1] for r in result_rows], index=[r[0] for r in result_rows])
+        return result_df.fillna(0)
     
     def _get_prob_data_for_threshold(self, threshold: int) -> pd.DataFrame:
         """
@@ -4041,16 +4342,45 @@ class ComparisonAnalyzer:
             
             if df is not None and 'path' in df.columns and 'path_prob' in df.columns:
                 for _, row in df.iterrows():
-                    path_key = row['path']
+                    original_path_key = row['path']
                     path_prob = row['path_prob']
+                    
+                    # Apply type mapping to path key if auto_type_mapping is enabled
+                    if self.parameters.auto_type_mapping and self.parameters._auto_type_mapper:
+                        # Parse path nodes
+                        if '->' in str(original_path_key):
+                            path_nodes = [n.strip() for n in str(original_path_key).split('->')]
+                        elif ' → ' in str(original_path_key):
+                            path_nodes = [n.strip() for n in str(original_path_key).split(' → ')]
+                        else:
+                            path_nodes = [str(original_path_key)]
+                        
+                        # Build canonical and display keys
+                        canonical_key, display_key = self._build_path_key_with_mapping(path_nodes, dataset_name)
+                        path_key = canonical_key  # Use canonical key for merging
+                    else:
+                        path_key = original_path_key
+                        display_key = original_path_key
+                    
                     if path_key not in all_prob_data:
-                        all_prob_data[path_key] = {}
+                        all_prob_data[path_key] = {'_display_key': display_key}
                     all_prob_data[path_key][dataset_name] = path_prob
         
         if not all_prob_data:
             return pd.DataFrame()
         
-        return pd.DataFrame(all_prob_data).T.fillna(0)
+        # Build result DataFrame using display keys for index
+        result_rows = []
+        for canonical_key, data in all_prob_data.items():
+            display_key = data.pop('_display_key', canonical_key)
+            row_data = {d: data.get(d, 0) for d in dataset_names}
+            result_rows.append((display_key, row_data))
+        
+        if not result_rows:
+            return pd.DataFrame()
+        
+        result_df = pd.DataFrame([r[1] for r in result_rows], index=[r[0] for r in result_rows])
+        return result_df.fillna(0)
 
     def _get_edge_ratio_data_for_threshold(self, threshold: int) -> pd.DataFrame:
         """
@@ -4119,11 +4449,25 @@ class ComparisonAnalyzer:
             
             # Aggregate by edge - use mean for connection_ratio
             for _, row in df.iterrows():
-                edge_key = f"{row[pre_col]} -> {row[post_col]}"
+                pre_type = str(row[pre_col])
+                post_type = str(row[post_col])
+                
+                # Apply type mapping if auto_type_mapping is enabled
+                if self.parameters.auto_type_mapping and self.parameters._auto_type_mapper:
+                    canonical_pre = self._get_canonical_type(pre_type, dataset_name)
+                    canonical_post = self._get_canonical_type(post_type, dataset_name)
+                    display_pre = self._get_display_type(pre_type, dataset_name)
+                    display_post = self._get_display_type(post_type, dataset_name)
+                    edge_key = f"{canonical_pre} -> {canonical_post}"
+                    display_edge_key = f"{display_pre} -> {display_post}"
+                else:
+                    edge_key = f"{pre_type} -> {post_type}"
+                    display_edge_key = edge_key
+                
                 ratio_val = row['connection_ratio']
                 if pd.notna(ratio_val):
                     if edge_key not in all_ratio_data:
-                        all_ratio_data[edge_key] = {}
+                        all_ratio_data[edge_key] = {'_display_key': display_edge_key}
                     # Store ratio, will be averaged later if multiple edges
                     if dataset_name not in all_ratio_data[edge_key]:
                         all_ratio_data[edge_key][dataset_name] = []
@@ -4132,13 +4476,25 @@ class ComparisonAnalyzer:
         if not all_ratio_data:
             return pd.DataFrame()
         
-        # Convert lists to averages
-        for edge_key in all_ratio_data:
-            for ds in all_ratio_data[edge_key]:
-                vals = all_ratio_data[edge_key][ds]
-                all_ratio_data[edge_key][ds] = sum(vals) / len(vals) if vals else 0.0
+        # Convert lists to averages and build result DataFrame
+        dataset_names = self.parameters.get_dataset_names()
+        result_rows = []
+        for edge_key, data in all_ratio_data.items():
+            display_key = data.pop('_display_key', edge_key)
+            row_data = {}
+            for ds in dataset_names:
+                vals = data.get(ds, [])
+                if isinstance(vals, list) and vals:
+                    row_data[ds] = sum(vals) / len(vals)
+                else:
+                    row_data[ds] = 0.0
+            result_rows.append((display_key, row_data))
         
-        return pd.DataFrame(all_ratio_data).T.fillna(0)
+        if not result_rows:
+            return pd.DataFrame()
+        
+        result_df = pd.DataFrame([r[1] for r in result_rows], index=[r[0] for r in result_rows])
+        return result_df.fillna(0)
 
     def _generate_vispath_visualizations(self, vis_dir: str):
         """
@@ -5414,19 +5770,31 @@ class ComparisonAnalyzer:
         # Get all unique nodes
         all_nodes = set(edges_df['source'].unique()) | set(edges_df['target'].unique())
         
+        # Helper to extract canonical name from display name like "MeVPaMe1(MTe46)" -> "MeVPaMe1"
+        def get_canonical_name(display_name: str) -> str:
+            if '(' in display_name:
+                return display_name.split('(')[0]
+            return display_name
+        
         # Classify nodes as source, target, or intermediate
         import re
         def matches_patterns(node: str, patterns: list) -> bool:
-            """Check if node matches any pattern."""
-            for pattern in patterns:
-                if isinstance(pattern, str):
-                    # Handle regex patterns
-                    if '.*' in pattern or '*' in pattern:
-                        regex = pattern.replace('.*', '.*').replace('*', '.*')
-                        if re.match(f'^{regex}$', node):
+            """Check if node matches any pattern. Handles merged display names."""
+            # Get canonical name for matching (handles merged display names)
+            canonical = get_canonical_name(node)
+            # Check both the full label and canonical name
+            names_to_check = [node, canonical] if canonical != node else [node]
+            
+            for name in names_to_check:
+                for pattern in patterns:
+                    if isinstance(pattern, str):
+                        # Handle regex patterns
+                        if '.*' in pattern or '*' in pattern:
+                            regex = pattern.replace('.*', '.*').replace('*', '.*')
+                            if re.match(f'^{regex}$', name):
+                                return True
+                        elif name == pattern:
                             return True
-                    elif node == pattern:
-                        return True
             return False
         
         source_nodes = {n for n in all_nodes if matches_patterns(n, source_patterns)}
