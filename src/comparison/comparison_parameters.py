@@ -731,21 +731,27 @@ class ComparisonParameters:
         
         Returns:
             Dictionary representation suitable for parameters.json
+            
+        Note: When auto_type_mapping=True, the source_groups and target_groups
+        will contain the resolved types per dataset with unmapped types removed.
         """
-        # Build source/target groups per dataset
+        # Build source/target groups per dataset (with unmapped types filtered out for export)
         source_groups = {}
         target_groups = {}
         
         for dataset in self.get_dataset_names():
-            source_groups[dataset] = self.get_source_neurons_for_dataset(dataset)
-            target_groups[dataset] = self.get_target_neurons_for_dataset(dataset)
+            # For export, use remove_unmapped=True to filter out types that don't exist
+            source_groups[dataset] = self.get_source_neurons_for_dataset_filtered(dataset)
+            target_groups[dataset] = self.get_target_neurons_for_dataset_filtered(dataset)
         
         return {
             'metadata': {
                 'created_at': datetime.now().isoformat(),
-                'version': '2.1',
-                'run_timestamp': self.run_timestamp
+                'version': '2.2',
+                'run_timestamp': self.run_timestamp,
+                'description': 'ComparisonParameters for cross-dataset analysis'
             },
+            
             # Dataset configuration
             'datasets': self.get_dataset_names(),
             'datasets_nickname': self.get_dataset_nicknames(),
@@ -757,12 +763,21 @@ class ComparisonParameters:
             'target_groups': target_groups,
             'source_labels': self.source_labels,
             'target_labels': self.target_labels,
+            'intermediate_labels': self.intermediate_labels,
             
             # Analysis parameters
             'thresholds': self.thresholds,
             'max_interlayer': self.max_interlayer,
             'top_edges': self.top_edges,
             'comparison_mode': self.comparison_mode,
+            'pathfinding': self.pathfinding,
+            
+            # Auto type mapping
+            'auto_type_mapping': self.auto_type_mapping,
+            
+            # Data fetching options
+            'skip_bodyId': self.skip_bodyId,
+            'force_API_fetching': self.force_API_fetching,
             
             # Verification settings
             'verification_settings': {
@@ -789,7 +804,9 @@ class ComparisonParameters:
             'analysis_settings': {
                 'min_ratio': self._min_ratio,
                 'min_prob': self._min_prob,
-                'output_format': self._output_format
+                'output_format': self._output_format,
+                'allow_single_dataset': self.allow_single_dataset,
+                'verbose': self.verbose
             },
             
             # Output configuration
@@ -797,6 +814,62 @@ class ComparisonParameters:
             'saveas': self.saveas,
             'full_output_path': self.full_output_path
         }
+    
+    def get_source_neurons_for_dataset_filtered(self, dataset: str) -> List[Union[str, int]]:
+        """
+        Get source neurons for export with unmapped types removed.
+        
+        Same as get_source_neurons_for_dataset but removes types that don't exist
+        in the target dataset when auto_type_mapping is enabled.
+        
+        Args:
+            dataset: Dataset identifier
+            
+        Returns:
+            List of source neuron types/patterns/bodyIds with unmapped types removed
+        """
+        # Priority 1: LabelMapper
+        if self._source_mapper is not None:
+            return self._source_mapper.get_all_neurons_for_dataset(dataset, 'source')
+        
+        # Priority 2: Auto type mapping (with unmapped filtering)
+        if self.auto_type_mapping and self._auto_type_mapper:
+            return self._resolve_neurons_with_auto_mapping(
+                self._ensure_flat_list(self.source_neurons), 
+                dataset,
+                remove_unmapped=True
+            )
+        
+        # Priority 3: Shared list
+        return self._ensure_flat_list(self.source_neurons)
+    
+    def get_target_neurons_for_dataset_filtered(self, dataset: str) -> List[Union[str, int]]:
+        """
+        Get target neurons for export with unmapped types removed.
+        
+        Same as get_target_neurons_for_dataset but removes types that don't exist
+        in the target dataset when auto_type_mapping is enabled.
+        
+        Args:
+            dataset: Dataset identifier
+            
+        Returns:
+            List of target neuron types/patterns/bodyIds with unmapped types removed
+        """
+        # Priority 1: LabelMapper
+        if self._target_mapper is not None:
+            return self._target_mapper.get_all_neurons_for_dataset(dataset, 'target')
+        
+        # Priority 2: Auto type mapping (with unmapped filtering)
+        if self.auto_type_mapping and self._auto_type_mapper:
+            return self._resolve_neurons_with_auto_mapping(
+                self._ensure_flat_list(self.target_neurons),
+                dataset,
+                remove_unmapped=True
+            )
+        
+        # Priority 3: Shared list
+        return self._ensure_flat_list(self.target_neurons)
     
     @classmethod
     def from_dict(cls, data: dict) -> 'ComparisonParameters':
@@ -900,7 +973,8 @@ class ComparisonParameters:
     def _resolve_neurons_with_auto_mapping(
         self, 
         neurons: List[Union[str, int]], 
-        dataset: str
+        dataset: str,
+        remove_unmapped: bool = False
     ) -> List[Union[str, int]]:
         """
         Resolve neuron type names using auto type mapping.
@@ -908,6 +982,9 @@ class ComparisonParameters:
         Args:
             neurons: List of neuron types/patterns/bodyIds
             dataset: Target dataset to resolve for
+            remove_unmapped: If True, remove types that don't have a mapping in the target
+                           dataset (instead of passing them through). Default False for 
+                           backward compatibility with querying.
             
         Returns:
             List of resolved neuron types for the target dataset
@@ -933,12 +1010,14 @@ class ComparisonParameters:
                 mapped = self._auto_type_mapper.get_mapped_type(neuron, source_ds, dataset)
                 if mapped:
                     resolved.append(mapped)
-                else:
+                elif not remove_unmapped:
                     # No mapping found, use original (might be missing in target dataset)
                     resolved.append(neuron)
-            else:
+                # If remove_unmapped=True and no mapping found, skip the type
+            elif not remove_unmapped:
                 # Type not found in any known dataset, pass through
                 resolved.append(neuron)
+            # If remove_unmapped=True and type not found, skip it
         
         return resolved
     

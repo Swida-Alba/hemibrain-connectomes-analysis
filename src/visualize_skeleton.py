@@ -3609,7 +3609,7 @@ class VisualizeSkeleton:
         If 'color' column exists, populates self._neuron_color_overrides.
         """
         import pandas as pd
-        from .utils.color_utils import standardize_color
+        # standardize_color already imported at module level from utils.color_utils
         
         csv_path = self.layer_map_csv
         if not os.path.exists(csv_path):
@@ -4187,7 +4187,7 @@ class VisualizeSkeleton:
                 if not use_existing_client:
                     # Use TokenManager to get token
                     try:
-                        from .utils.token_manager import token_manager
+                        from utils.token_manager import token_manager
                         self.token = token_manager.get_token('NEUPRINT_TOKEN', self.token)
                     except ImportError:
                         pass
@@ -8019,12 +8019,20 @@ class VisualizeSkeleton:
         return f'rgba({r}, {g}, {b}, {a})'
     
     def _interpolate_colors(self, base_colors, n_needed):
-        """Generate n_needed colors by interpolating through a colormap built from base_colors.
+        """Generate n_needed colors by keeping original colors first, then appending interpolated ones.
+        
+        Uses a round-based approach to generate new colors:
+        - Round 1: Generate midpoints between consecutive pairs (0-1, 1-2, ..., 8-9, 9-0)
+          e.g., 10 colors → 10 new midpoints → 20 total candidates
+        - Round 2: If more needed, generate midpoints between all consecutive pairs in expanded set
+        - Continue until enough candidates are generated
+        
+        Final result: [original colors] + [interpolated colors as needed]
         
         Parameters
         ----------
         base_colors : tuple or list
-            Base color palette to interpolate from. Accepts any format supported by
+            Base color palette to preserve. Accepts any format supported by
             standardize_color: hex strings, RGB tuples, RGBA tuples, named colors, rgba strings
         n_needed : int
             Number of colors needed
@@ -8032,10 +8040,9 @@ class VisualizeSkeleton:
         Returns
         -------
         list
-            List of n_needed rgba color strings
+            List of n_needed rgba color strings, with original colors first, then interpolated
         """
         import numpy as np
-        from matplotlib.colors import LinearSegmentedColormap, to_hex
         
         # Convert base colors to normalized RGB tuples using our standardize_color utility
         rgb_colors = []
@@ -8043,30 +8050,69 @@ class VisualizeSkeleton:
         for c in base_colors:
             try:
                 rgba = extract_rgba_tuple(c)
-                # Normalize to 0-1 for matplotlib
-                rgb_colors.append((rgba[0]/255, rgba[1]/255, rgba[2]/255))
+                # Normalize to 0-1 for interpolation
+                rgb_colors.append(np.array([rgba[0]/255, rgba[1]/255, rgba[2]/255]))
                 alphas.append(rgba[3])
             except ValueError:
-                rgb_colors.append((0.5, 0.5, 0.5))  # fallback gray
+                rgb_colors.append(np.array([0.5, 0.5, 0.5]))  # fallback gray
                 alphas.append(1.0)
         
         # Use average alpha from base colors
         avg_alpha = sum(alphas) / len(alphas) if alphas else 1.0
         
+        n_base = len(rgb_colors)
+        
         # Handle single color case - just repeat the color n_needed times
-        if len(rgb_colors) == 1:
+        if n_base == 1:
             r, g, b = int(rgb_colors[0][0]*255), int(rgb_colors[0][1]*255), int(rgb_colors[0][2]*255)
             return [f'rgba({r}, {g}, {b}, {avg_alpha})' for _ in range(n_needed)]
         
-        # Create a colormap from base colors (requires at least 2 colors)
-        cmap = LinearSegmentedColormap.from_list('custom', rgb_colors, N=256)
+        # If we need fewer or equal colors than base, just use the base colors
+        if n_needed <= n_base:
+            result = []
+            for i in range(n_needed):
+                r, g, b = int(rgb_colors[i][0]*255), int(rgb_colors[i][1]*255), int(rgb_colors[i][2]*255)
+                result.append(f'rgba({r}, {g}, {b}, {avg_alpha})')
+            return result
         
-        # Sample n_needed colors evenly from the colormap
-        positions = np.linspace(0, 1, n_needed)
+        # Start with original colors, then generate interpolated colors to append
+        # Generate interpolated colors using round-based midpoint approach
+        interpolated_pool = []  # Pool of interpolated colors to draw from
+        current_set = rgb_colors.copy()  # Colors to generate midpoints from
+        
+        while len(rgb_colors) + len(interpolated_pool) < n_needed:
+            # Generate midpoints between consecutive pairs (with wrap-around)
+            new_midpoints = []
+            n_current = len(current_set)
+            for i in range(n_current):
+                next_idx = (i + 1) % n_current
+                midpoint = (current_set[i] + current_set[next_idx]) / 2
+                new_midpoints.append(midpoint)
+            
+            # Add new midpoints to the pool
+            interpolated_pool.extend(new_midpoints)
+            
+            # For next round, use interleaved set (original + midpoints) as the new current_set
+            # This creates finer gradations in the next round
+            interleaved = []
+            for i in range(n_current):
+                interleaved.append(current_set[i])
+                interleaved.append(new_midpoints[i])
+            current_set = interleaved
+        
+        # Build final result: original colors first, then interpolated as needed
         result = []
-        for pos in positions:
-            rgba = cmap(pos)
-            r, g, b = int(rgba[0]*255), int(rgba[1]*255), int(rgba[2]*255)
+        
+        # Add all original colors first
+        for c in rgb_colors:
+            r, g, b = int(c[0]*255), int(c[1]*255), int(c[2]*255)
+            result.append(f'rgba({r}, {g}, {b}, {avg_alpha})')
+        
+        # Add interpolated colors until we reach n_needed
+        n_extra_needed = n_needed - n_base
+        for i in range(n_extra_needed):
+            c = interpolated_pool[i]
+            r, g, b = int(c[0]*255), int(c[1]*255), int(c[2]*255)
             result.append(f'rgba({r}, {g}, {b}, {avg_alpha})')
         
         return result

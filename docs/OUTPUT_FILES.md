@@ -142,8 +142,20 @@ Outputs are saved in a user-defined output folder: `comparison_results_{timestam
     *   Sankey diagrams comparing flows
     *   Edge/path presence heatmaps
 *   **`comparison_report.txt`**: Plain text summary of the comparison results.
-*   **`parameters.json`**: JSON dump of all parameters used.
-*   **`label_map.json`**: Manual label mappings if LabelMapper was used.
+*   **`parameters.json`**: JSON dump of all ComparisonParameters used, including:
+    *   `metadata`: Version, timestamp, description
+    *   `datasets` / `datasets_nickname`: Dataset identifiers and display names
+    *   `source_neurons` / `target_neurons`: Original query types
+    *   `source_groups` / `target_groups`: Resolved types per dataset (with unmapped types removed when `auto_type_mapping=True`)
+    *   `thresholds` / `max_interlayer` / `top_edges`: Analysis parameters
+    *   `comparison_mode` / `pathfinding`: Algorithm settings
+    *   `auto_type_mapping` / `skip_bodyId` / `force_API_fetching`: Feature flags
+    *   `verification_settings`: Profile verification parameters
+    *   `performance_settings` / `analysis_settings`: Internal settings
+*   **`label_map.json`**: Label mappings for source/target neurons across datasets:
+    *   When `auto_type_mapping=True`, shows the auto-mapped types per dataset (e.g., `MeVPLo2` → `MTe07` for FAFB)
+    *   Types that don't exist in specific datasets are removed from those dataset entries
+    *   Includes `metadata.auto_type_mapping` flag to indicate if auto-mapping was used
 
 #### Comparison Results Subfolder (`comparison_results/`)
 *   **`edge_presence_matrix.csv`**: Binary matrix showing edge presence across datasets.

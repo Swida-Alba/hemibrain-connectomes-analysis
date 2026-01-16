@@ -2233,9 +2233,14 @@ class ComparisonAnalyzer:
         
         Ensures that a valid LabelMapper JSON is always saved, merging data from
         an existing LabelMapper and any list-based parameters.
+        
+        When auto_type_mapping=True:
+        - Saves the auto-mapped types per dataset (e.g., MeVPLo2 → MTe07 for FAFB)
+        - Removes types that don't exist in specific datasets from those dataset entries
         """
         output = {}
         dataset_names = self.parameters.get_dataset_names()
+        auto_mapper = self.parameters._auto_type_mapper if self.parameters.auto_type_mapping else None
         
         # Helper for smart labels
         def generate_smart_labels(groups, user_labels, suffix=""):
@@ -2253,6 +2258,39 @@ class ComparisonAnalyzer:
                 else:
                     labels.append(f"Group_{i+1}{suffix}")
             return labels
+        
+        def resolve_types_for_dataset(neurons: list, dataset: str) -> list:
+            """Resolve neuron types for a specific dataset using auto mapping."""
+            if not auto_mapper:
+                return neurons
+            
+            resolved = []
+            for neuron in neurons:
+                if isinstance(neuron, list):
+                    # Handle grouped neurons
+                    resolved_group = resolve_types_for_dataset(neuron, dataset)
+                    if resolved_group:  # Only add if not empty
+                        resolved.append(resolved_group)
+                elif isinstance(neuron, str):
+                    # Skip regex patterns - pass through as-is
+                    if '*' in neuron or ('.' in neuron and '.*' in neuron):
+                        resolved.append(neuron)
+                        continue
+                    
+                    # Try to resolve type using auto mapper
+                    source_ds = auto_mapper._detect_type_source(neuron)
+                    if source_ds:
+                        mapped = auto_mapper.get_mapped_type(neuron, source_ds, dataset)
+                        if mapped:
+                            resolved.append(mapped)
+                        # If no mapping found, the type doesn't exist in this dataset - skip it
+                    else:
+                        # Type not found in any dataset, pass through (might be regex or new type)
+                        resolved.append(neuron)
+                else:
+                    # Non-string (bodyId), pass through
+                    resolved.append(neuron)
+            return resolved
 
         # --- Source Mapping ---
         # Priority 1: Analyzer's label_mapper (contains merged overall/source/target mappers)
@@ -2267,8 +2305,23 @@ class ComparisonAnalyzer:
             labels = generate_smart_labels(groups, self.parameters.source_labels, suffix="_source")
             
             source_data = {'custom_label': labels}
-            for ds in dataset_names:
-                source_data[ds] = groups
+            
+            # If auto_type_mapping is enabled, resolve types per dataset
+            if auto_mapper:
+                for ds in dataset_names:
+                    resolved_groups = []
+                    for group in groups:
+                        if isinstance(group, list):
+                            resolved_group = resolve_types_for_dataset(group, ds)
+                        else:
+                            resolved_group = resolve_types_for_dataset([group], ds)
+                        if resolved_group:  # Only add non-empty groups
+                            resolved_groups.append(resolved_group)
+                    source_data[ds] = resolved_groups if resolved_groups else groups
+            else:
+                for ds in dataset_names:
+                    source_data[ds] = groups
+                    
             output['source_mapping'] = source_data
 
         # --- Target Mapping ---
@@ -2284,8 +2337,23 @@ class ComparisonAnalyzer:
             labels = generate_smart_labels(groups, self.parameters.target_labels, suffix="_target")
             
             target_data = {'custom_label': labels}
-            for ds in dataset_names:
-                target_data[ds] = groups
+            
+            # If auto_type_mapping is enabled, resolve types per dataset
+            if auto_mapper:
+                for ds in dataset_names:
+                    resolved_groups = []
+                    for group in groups:
+                        if isinstance(group, list):
+                            resolved_group = resolve_types_for_dataset(group, ds)
+                        else:
+                            resolved_group = resolve_types_for_dataset([group], ds)
+                        if resolved_group:  # Only add non-empty groups
+                            resolved_groups.append(resolved_group)
+                    target_data[ds] = resolved_groups if resolved_groups else groups
+            else:
+                for ds in dataset_names:
+                    target_data[ds] = groups
+                    
             output['target_mapping'] = target_data
 
         # --- Intermediate Mapping ---
@@ -2293,6 +2361,12 @@ class ComparisonAnalyzer:
             d = self.label_mapper.to_dict()
             if 'intermediate_mapping' in d:
                 output['intermediate_mapping'] = d['intermediate_mapping']
+        
+        # Add auto_type_mapping metadata
+        output['metadata'] = {
+            'auto_type_mapping': self.parameters.auto_type_mapping,
+            'description': 'Type mappings per dataset. When auto_type_mapping=True, types are resolved to their dataset-specific equivalents.'
+        }
 
         if output:
             with open(filepath, 'w') as f:
@@ -4414,7 +4488,8 @@ class ComparisonAnalyzer:
             
             # Try to read connections_edge.csv first (edge mode output)
             conn_file = os.path.join(dataset_output_path, 'connections_edge.csv')
-            if os.path.exists(conn_file):
+            file_exists = os.path.exists(conn_file)
+            if file_exists:
                 try:
                     # Check file is not empty before reading
                     if os.path.getsize(conn_file) > 0:
@@ -4456,8 +4531,9 @@ class ComparisonAnalyzer:
                 if self.parameters.auto_type_mapping and self.parameters._auto_type_mapper:
                     canonical_pre = self._get_canonical_type(pre_type, dataset_name)
                     canonical_post = self._get_canonical_type(post_type, dataset_name)
-                    display_pre = self._get_display_type(pre_type, dataset_name)
-                    display_post = self._get_display_type(post_type, dataset_name)
+                    # _get_display_type takes canonical name, not (type, dataset)
+                    display_pre = self._get_display_type(canonical_pre)
+                    display_post = self._get_display_type(canonical_post)
                     edge_key = f"{canonical_pre} -> {canonical_post}"
                     display_edge_key = f"{display_pre} -> {display_post}"
                 else:
@@ -5720,9 +5796,13 @@ class ComparisonAnalyzer:
         
         self._log(f"  Found {len(conserved_edges)} conserved edges")
         
+        # Get ratio and probability data for enhanced hover labels
+        ratio_data = self._get_edge_ratio_data_for_threshold(threshold)
+        # Note: prob_data is path-level, not edge-level. We'll include it if edge matches
+        
         # Build edge list with weights from each dataset
         edge_list = []
-        edge_labels = {}  # {(source, target): {dataset: weight, ...}}
+        edge_labels = {}  # {(source, target): {dataset: {'weight': w, 'ratio': r}, ...}}
         
         for edge_key, row in conserved_edges.iterrows():
             # Parse source/target from edge key
@@ -5733,8 +5813,9 @@ class ComparisonAnalyzer:
             else:
                 continue
             
-            # Get weights from all datasets
-            weights = {}
+            # Get weights and ratios from all datasets
+            # Format for vispath edge_labels: {key: value} where key-value pairs are shown in tooltip
+            edge_info = {}  # Will contain: {'MCNS weight': 5, 'MCNS ratio': 0.01, ...}
             avg_weight = 0
             for dataset in available_ds:
                 weight = row[dataset]
@@ -5744,7 +5825,19 @@ class ComparisonAnalyzer:
                     nickname = (self.parameters.datasets_nickname[idx] 
                                if self.parameters.datasets_nickname and idx < len(self.parameters.datasets_nickname)
                                else self.parameters._sanitize_name(dataset))
-                    weights[nickname] = int(weight)
+                    
+                    # Add weight for this dataset
+                    edge_info[f'{nickname} wt'] = int(weight)
+                    
+                    # Try to get ratio data for this edge
+                    if not ratio_data.empty and dataset in ratio_data.columns:
+                        # Look for matching edge in ratio_data
+                        edge_key_for_ratio = str(edge_key)
+                        if edge_key_for_ratio in ratio_data.index:
+                            ratio_val = ratio_data.loc[edge_key_for_ratio, dataset]
+                            if ratio_val > 0:
+                                edge_info[f'{nickname} ratio'] = round(ratio_val, 4)
+                    
                     avg_weight += weight
             
             avg_weight = avg_weight / len(available_ds) if available_ds else 0
@@ -5754,7 +5847,7 @@ class ComparisonAnalyzer:
                 'target': target,
                 'weight': avg_weight  # Use average weight for visualization
             })
-            edge_labels[(source, target)] = weights
+            edge_labels[(source, target)] = edge_info
         
         if not edge_list:
             self._log("Warning: No valid edges to visualize.")

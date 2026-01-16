@@ -490,7 +490,7 @@ def _write_buffer_to_csv(buffer_list, output_path, append=False):
         # For initial write, use Polars native (faster)
         df_combined.write_csv(output_path)
 
-def EnrichConnectionTablePolars(conn_table, traversal_probability_threshold=0, dataset=None, script_path=None, target_neurons_df=None, aggregate_method='product', label_mapper=None):
+def EnrichConnectionTablePolars(conn_table, traversal_probability_threshold=0, dataset=None, script_path=None, target_neurons_df=None, aggregate_method='product', label_mapper=None, global_incoming_weights=None):
     '''Add traversal probability, connection ratio, and layer information to the connection table using Polars
     
     IMPLEMENTS USER's 6-STEP LABEL MAPPING APPROACH:
@@ -522,6 +522,11 @@ def EnrichConnectionTablePolars(conn_table, traversal_probability_threshold=0, d
     label_mapper : LabelMapper, optional
         LabelMapper object for cross-dataset comparison.
         When provided, aggregation uses std_label for mapped neurons and type for unmapped.
+    global_incoming_weights : DataFrame, optional
+        Pre-computed total incoming weights for each post-synaptic type.
+        Should have columns [type_post, total_incoming_weight].
+        If provided, used for calculating GLOBAL type-level ratios.
+        If None, local ratios (from provided connections only) are calculated.
     
     Returns
     -------
@@ -682,12 +687,36 @@ def EnrichConnectionTablePolars(conn_table, traversal_probability_threshold=0, d
     else:
         if 'post' not in conn_df.columns:
             conn_df = conn_df.with_columns(pl.lit(0).alias('post'))
+    
+    # Check if connection_ratio already exists and has valid values (from coana.py global calculation)
+    # If so, preserve it to maintain the correct global ratio calculation
+    has_valid_ratio = False
+    if 'connection_ratio' in conn_df.columns:
+        ratio_stats = conn_df.select([
+            pl.col('connection_ratio').is_not_null().any().alias('has_any'),
+            (pl.col('connection_ratio') > 0).any().alias('has_positive')
+        ]).to_dicts()[0]
+        has_valid_ratio = ratio_stats['has_any'] and ratio_stats['has_positive']
+    
+    if not has_valid_ratio:
+        # Only recalculate if ratio doesn't exist or has no valid values
+        # NOTE: This local calculation only considers connections in this table,
+        # NOT all incoming connections. For accurate global ratios, use coana.py
+        total_incoming = conn_df.group_by('bodyId_post').agg(
+            pl.col('weight').sum().alias('total_incoming_weight')
+        )
+        conn_df = conn_df.join(total_incoming, on='bodyId_post', how='left')
+            
+        # Calculate metrics using LOCAL ratio (not global)
+        conn_df = conn_df.with_columns(
+            pl.when(pl.col('total_incoming_weight') > 0)
+            .then(pl.col('weight') / pl.col('total_incoming_weight'))
+            .otherwise(None)
+            .alias('connection_ratio')
+        )
         
-    # Calculate metrics
-    # connection_ratio = weight / post
-    conn_df = conn_df.with_columns(
-        (pl.col('weight') / pl.col('post')).fill_null(0).alias('connection_ratio')
-    )
+        # Drop temporary column
+        conn_df = conn_df.drop('total_incoming_weight')
     
     # traversal_probability = connection_ratio / 0.3 (capped at 1.0)
     conn_df = conn_df.with_columns(
@@ -742,6 +771,14 @@ def EnrichConnectionTablePolars(conn_table, traversal_probability_threshold=0, d
     elif ref_df is not None:
         ref_df_with_labels = ref_df.with_columns(pl.col('type').alias('std_label'))
     
+    # Convert global_incoming_weights to Polars if provided
+    global_incoming_pl = None
+    if global_incoming_weights is not None:
+        if isinstance(global_incoming_weights, pd.DataFrame):
+            global_incoming_pl = pl.from_pandas(global_incoming_weights)
+        else:
+            global_incoming_pl = global_incoming_weights
+    
     # Check if nt_type exists
     has_nt_type = 'nt_type' in bodyid_pairs.columns
     
@@ -783,32 +820,87 @@ def EnrichConnectionTablePolars(conn_table, traversal_probability_threshold=0, d
             agg_df = agg_df.join(probs.select([group_pre_col, group_post_col, 'traversal_probability']), on=[group_pre_col, group_post_col], how='left')
 
         # Calculate Connection Ratio (Type Level)
-        # Need total_post for the group
-        total_post_df = None
-        
-        # Use appropriate reference dataframe
-        use_ref = ref_df_with_labels if (ref_group_col == 'std_label' and ref_df_with_labels is not None) else ref_df
-        
-        if use_ref is not None and ref_group_col and ref_group_col in use_ref.columns:
-            total_post_df = use_ref.group_by(ref_group_col).agg(
-                pl.col('post').sum().alias('total_post')
+        # Use GLOBAL incoming weights if provided, otherwise fall back to LOCAL calculation
+        if global_incoming_pl is not None and group_post_col in ['type_post', 'std_label_post']:
+            # Use global incoming weights from the full dataset
+            # global_incoming_weights has 'type_post' and 'total_incoming_weight' columns
+            
+            if group_post_col == 'std_label_post':
+                # For std_label aggregation, we need to join bodyid_pairs with global weights
+                # first, then aggregate. This handles the case where std_label differs from type.
+                # Create a mapping from type_post to total_incoming_weight
+                type_to_weight = dict(zip(
+                    global_incoming_pl['type_post'].to_list(),
+                    global_incoming_pl['total_incoming_weight'].to_list()
+                ))
+                
+                # Get unique std_label_post -> type_post mappings from bodyid_pairs
+                # Since bodyid_pairs still has both type_post and std_label_post
+                if 'type_post' in bodyid_pairs.columns:
+                    # Build std_label -> sum of global incoming weights
+                    # Each std_label_post may map to multiple type_post, so we sum their incoming weights
+                    std_label_type_map = bodyid_pairs.select(['std_label_post', 'type_post']).unique()
+                    
+                    # Add global incoming weight for each type_post
+                    std_label_type_map = std_label_type_map.with_columns(
+                        pl.col('type_post').map_elements(
+                            lambda t: type_to_weight.get(t, 0),
+                            return_dtype=pl.Float64
+                        ).alias('type_incoming')
+                    )
+                    
+                    # Sum by std_label_post (in case one std_label maps to multiple types)
+                    global_incoming_by_std_label = std_label_type_map.group_by('std_label_post').agg(
+                        pl.col('type_incoming').sum().alias('total_incoming_weight')
+                    )
+                    
+                    # Join with agg_df
+                    agg_df = agg_df.join(global_incoming_by_std_label, on='std_label_post', how='left')
+                else:
+                    # Fallback: rename type_post to std_label_post (they should be the same)
+                    global_incoming_renamed = global_incoming_pl.rename({'type_post': 'std_label_post'})
+                    agg_df = agg_df.join(global_incoming_renamed, on='std_label_post', how='left')
+            else:
+                # Direct join for type_post grouping
+                agg_df = agg_df.join(global_incoming_pl, on='type_post', how='left')
+            
+            # Calculate ratio using GLOBAL denominator
+            agg_df = agg_df.with_columns(
+                pl.when(pl.col('total_incoming_weight') > 0)
+                .then(pl.col('weight') / pl.col('total_incoming_weight'))
+                .otherwise(None)
+                .alias('connection_ratio')
             )
-            # Rename for join
-            total_post_df = total_post_df.rename({ref_group_col: group_post_col})
-        
-        if total_post_df is None:
-            # Fallback: sum post from connections (less accurate)
-            total_post_df = conn_df.unique(subset=['bodyId_post']).group_by(group_post_col).agg(
-                pl.col('post').sum().alias('total_post')
+            if 'total_incoming_weight' in agg_df.columns:
+                agg_df = agg_df.drop('total_incoming_weight')
+            
+            # Recalculate traversal_probability from GLOBAL connection_ratio
+            # This ensures type-level traversal_prob matches the global ratio
+            agg_df = agg_df.with_columns(
+                (pl.col('connection_ratio') / 0.3).clip(0.0, 1.0).alias('traversal_probability')
+            )
+        else:
+            # Fall back to LOCAL calculation (only connections in this table)
+            total_incoming_df = agg_df.group_by(group_post_col).agg(
+                pl.col('weight').sum().alias('total_incoming_weight')
             )
             
-        # Join total_post
-        agg_df = agg_df.join(total_post_df, on=group_post_col, how='left')
-        
-        # Calculate ratio
-        agg_df = agg_df.with_columns(
-            (pl.col('weight') / pl.col('total_post')).fill_null(0).alias('connection_ratio')
-        )
+            # Join total incoming weight
+            agg_df = agg_df.join(total_incoming_df, on=group_post_col, how='left')
+            
+            # Calculate ratio using LOCAL denominator
+            agg_df = agg_df.with_columns(
+                pl.when(pl.col('total_incoming_weight') > 0)
+                .then(pl.col('weight') / pl.col('total_incoming_weight'))
+                .otherwise(None)
+                .alias('connection_ratio')
+            )
+            agg_df = agg_df.drop('total_incoming_weight')
+            
+            # Recalculate traversal_probability from LOCAL connection_ratio
+            agg_df = agg_df.with_columns(
+                (pl.col('connection_ratio') / 0.3).clip(0.0, 1.0).alias('traversal_probability')
+            )
         
         return agg_df
 

@@ -386,8 +386,8 @@ def _generate_summary_section(analyzer, dataset_names: List[str], thresholds: Li
             if not ratio_data.empty:
                 ratio_data.to_csv(os.path.join(used_data_dir, f'ratio_data_t{t}.csv'))
                 ratio_data_cache[t] = ratio_data
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[HTML Report] Warning: Failed to get ratio data for threshold {t}: {e}")
     
     for d in dataset_names:
         nick = nickname_map[d]

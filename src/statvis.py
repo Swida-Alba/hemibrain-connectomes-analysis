@@ -20,6 +20,8 @@ import plotly.graph_objects as go
 import plotly
 import seaborn as sns
 from neuprint import *
+# Explicit imports for Pylance static analysis (already imported via *)
+from neuprint import Client, fetch_neurons
 from tqdm import tqdm
 
 # FlyWire client support removed
@@ -220,10 +222,11 @@ def _get_neuron_df(dataset: str = 'male-cns:v0.9', verbose: bool = False) -> pd.
 def get_types(
     query,
     dataset: str = 'male-cns:v0.9',
-    verbose: bool = True
-) -> tuple:
+    verbose: bool = True,
+    return_simple: bool = False
+):
     """
-    Get neuron types for a query (bodyIds/types/instances/regex patterns).
+    Get neuron types for a query (bodyIds/types/instances/regex patterns/dict filters).
     
     Similar to FindNeuronConnection query syntax, this function searches local
     data files and returns type information for matching neurons.
@@ -234,31 +237,72 @@ def get_types(
             - List of identifiers: ['Mi1', 'Tm3', 720575940610453042]
             - Regex pattern: 'aMe.*', 'Mi[1-9]'
             - Mixed: ['aMe.*', 'Mi1', 720575940610453042]
+            - Dict filter: {'contains': 'DN'}  # Auto-searches type, instance, etc.
+            - Dict filter: {'startswith': ['aMe', 'Mi']}  # OR for list values
+            - Dict filter: {'contains': 'DN', 'endswith': '_R'}  # AND across operators
         dataset: Dataset identifier (default: 'male-cns:v0.9')
         verbose: Print search progress messages
+        return_simple: If True, return just the type_list instead of tuple
     
     Returns:
-        tuple: (type_list, map_dict, dataset)
-            - type_list: List of unique types found
-            - map_dict: Dict mapping {type: [input_items_that_matched]}
-            - dataset: The dataset used (normalized)
+        If return_simple=True:
+            list: List of unique types found
+        Otherwise:
+            tuple: (type_list, map_dict, dataset)
+                - type_list: List of unique types found
+                - map_dict: Dict mapping {type: [input_items_that_matched]}
+                - dataset: The dataset used (normalized)
     
     Examples:
+        >>> # Simple return (recommended for most use cases)
+        >>> type_list = get_types('aMe.*', return_simple=True)
+        >>> print(type_list)  # ['aMe12', 'aMe17a', 'aMe17b', ...]
+        
+        >>> # Dict filter with simple return
+        >>> type_list = get_types({'contains': 'DN'}, return_simple=True)
+        
+        >>> # Full return (legacy)
         >>> type_list, map_dict, ds = get_types('aMe.*')
         >>> print(type_list)  # ['aMe12', 'aMe17a', 'aMe17b', ...]
         
         >>> type_list, map_dict, ds = get_types(['Mi1', 'Tm3'])
         >>> print(map_dict)  # {'Mi1': ['Mi1'], 'Tm3': ['Tm3']}
         
-        >>> type_list, map_dict, ds = get_types(720575940610453042)
-        >>> print(type_list)  # ['SomeType']
+        >>> # Dict filter examples
+        >>> types = get_types({'startswith': ['DN', 'AN']}, return_simple=True)
+        >>> types = get_types({'contains': 'DN', 'endswith': '_R'}, return_simple=True)
     """
+    # Load neuron DataFrame
+    ndf = _get_neuron_df(dataset, verbose=verbose)
+    dataset_normalized = dataset.replace(':', '_').replace('.', '_')
+    
+    # Check if query is dict-based filter
+    if isinstance(query, dict):
+        # Use NeuronFilter for dict-based queries
+        try:
+            from utils.neuron_filter import NeuronFilter
+        except ImportError:
+            from src.utils.neuron_filter import NeuronFilter
+        
+        nf = NeuronFilter(query)
+        matched_df = nf.apply(ndf)
+        type_list = sorted(matched_df['type'].dropna().unique().tolist()) if 'type' in matched_df.columns else []
+        
+        if verbose:
+            print(f"Found {len(type_list)} unique types matching filter")
+        
+        if return_simple:
+            return type_list
+        
+        # For dict queries, map_dict shows filter -> types
+        map_dict = {t: [str(query)] for t in type_list}
+        return type_list, map_dict, dataset_normalized
+    
+    # Legacy query handling
     # Normalize query to list
     if not isinstance(query, list):
         query = [query]
     
-    # Load neuron DataFrame
-    ndf = _get_neuron_df(dataset, verbose=verbose)
     bodyId_alltypes = ndf['bodyId'].tolist()
     
     # Process each query item
@@ -281,10 +325,12 @@ def get_types(
                 map_dict[t].append(item)
     
     type_list = sorted(list(type_set))
-    dataset_normalized = dataset.replace(':', '_').replace('.', '_')
     
     if verbose:
         print(f"Found {len(type_list)} unique types from {len(query)} query items")
+    
+    if return_simple:
+        return type_list
     
     return type_list, map_dict, dataset_normalized
 
@@ -292,10 +338,11 @@ def get_types(
 def get_bodyIds(
     query,
     dataset: str = 'male-cns:v0.9',
-    verbose: bool = True
-) -> tuple:
+    verbose: bool = True,
+    return_simple: bool = False
+):
     """
-    Get bodyIds for a query (bodyIds/types/instances/regex patterns).
+    Get bodyIds for a query (bodyIds/types/instances/regex patterns/dict filters).
     
     Similar to FindNeuronConnection query syntax, this function searches local
     data files and returns bodyId information for matching neurons.
@@ -306,28 +353,67 @@ def get_bodyIds(
             - List of identifiers: ['Mi1', 'Tm3', 720575940610453042]
             - Regex pattern: 'aMe.*', 'Mi[1-9]'
             - Mixed: ['aMe.*', 'Mi1', 720575940610453042]
+            - Dict filter: {'contains': 'DN'}  # Auto-searches type, instance, etc.
+            - Dict filter: {'startswith': ['aMe', 'Mi']}  # OR for list values
         dataset: Dataset identifier (default: 'male-cns:v0.9')
         verbose: Print search progress messages
+        return_simple: If True, return just the bodyId_list instead of tuple
     
     Returns:
-        tuple: (bodyId_list, map_dict, dataset)
-            - bodyId_list: List of all bodyIds found
-            - map_dict: Dict mapping {bodyId: input_item_that_matched}
-            - dataset: The dataset used (normalized)
+        If return_simple=True:
+            list: List of all bodyIds found
+        Otherwise:
+            tuple: (bodyId_list, map_dict, dataset)
+                - bodyId_list: List of all bodyIds found
+                - map_dict: Dict mapping {bodyId: input_item_that_matched}
+                - dataset: The dataset used (normalized)
     
     Examples:
+        >>> # Simple return (recommended for most use cases)
+        >>> bodyIds = get_bodyIds('aMe12', return_simple=True)
+        >>> print(len(bodyIds))  # Number of aMe12 neurons
+        
+        >>> # Dict filter with simple return
+        >>> bodyIds = get_bodyIds({'contains': 'DN'}, return_simple=True)
+        
+        >>> # Full return (legacy)
         >>> bodyIds, map_dict, ds = get_bodyIds('aMe12')
         >>> print(len(bodyIds))  # Number of aMe12 neurons
         
         >>> bodyIds, map_dict, ds = get_bodyIds(['Mi1', 'Tm3'])
         >>> print(len(bodyIds))  # Total Mi1 + Tm3 neurons
     """
+    # Load neuron DataFrame
+    ndf = _get_neuron_df(dataset, verbose=verbose)
+    dataset_normalized = dataset.replace(':', '_').replace('.', '_')
+    
+    # Check if query is dict-based filter
+    if isinstance(query, dict):
+        # Use NeuronFilter for dict-based queries
+        try:
+            from utils.neuron_filter import NeuronFilter
+        except ImportError:
+            from src.utils.neuron_filter import NeuronFilter
+        
+        nf = NeuronFilter(query)
+        matched_df = nf.apply(ndf)
+        bodyId_list = matched_df['bodyId'].tolist() if 'bodyId' in matched_df.columns else []
+        
+        if verbose:
+            print(f"Found {len(bodyId_list)} bodyIds matching filter")
+        
+        if return_simple:
+            return bodyId_list
+        
+        # For dict queries, map all bodyIds to the filter string
+        map_dict = {bid: str(query) for bid in bodyId_list}
+        return bodyId_list, map_dict, dataset_normalized
+    
+    # Legacy query handling
     # Normalize query to list
     if not isinstance(query, list):
         query = [query]
     
-    # Load neuron DataFrame
-    ndf = _get_neuron_df(dataset, verbose=verbose)
     bodyId_alltypes = ndf['bodyId'].tolist()
     
     # Process each query item
@@ -350,10 +436,11 @@ def get_bodyIds(
             seen.add(bid)
             bodyId_list.append(bid)
     
-    dataset_normalized = dataset.replace(':', '_').replace('.', '_')
-    
     if verbose:
         print(f"Found {len(bodyId_list)} unique bodyIds from {len(query)} query items")
+    
+    if return_simple:
+        return bodyId_list
     
     return bodyId_list, map_dict, dataset_normalized
 
@@ -361,10 +448,11 @@ def get_bodyIds(
 def get_instances(
     query,
     dataset: str = 'male-cns:v0.9',
-    verbose: bool = True
-) -> tuple:
+    verbose: bool = True,
+    return_simple: bool = False
+):
     """
-    Get neuron instances for a query (bodyIds/types/instances/regex patterns).
+    Get neuron instances for a query (bodyIds/types/instances/regex patterns/dict filters).
     
     Similar to FindNeuronConnection query syntax, this function searches local
     data files and returns instance information for matching neurons.
@@ -375,35 +463,75 @@ def get_instances(
             - List of identifiers: ['Mi1', 'Tm3', 720575940610453042]
             - Regex pattern: 'aMe.*', 'Mi[1-9]'
             - Mixed: ['aMe.*', 'Mi1', 720575940610453042]
+            - Dict filter: {'contains': 'DN'}  # Auto-searches type, instance, etc.
+            - Dict filter: {'endswith': '_R'}  # Suffix match
         dataset: Dataset identifier (default: 'male-cns:v0.9')
         verbose: Print search progress messages
+        return_simple: If True, return just the instance_list instead of tuple
     
     Returns:
-        tuple: (instance_list, map_dict, dataset)
-            - instance_list: List of unique instances found
-            - map_dict: Dict mapping {instance: [input_items_that_matched]}
-            - dataset: The dataset used (normalized)
+        If return_simple=True:
+            list: List of unique instances found
+        Otherwise:
+            tuple: (instance_list, map_dict, dataset)
+                - instance_list: List of unique instances found
+                - map_dict: Dict mapping {instance: [input_items_that_matched]}
+                - dataset: The dataset used (normalized)
     
     Examples:
+        >>> # Simple return (recommended for most use cases)
+        >>> instances = get_instances('aMe12', return_simple=True)
+        >>> print(instances)  # ['aMe12_L', 'aMe12_R', ...]
+        
+        >>> # Dict filter with simple return
+        >>> instances = get_instances({'endswith': '_R'}, return_simple=True)
+        
+        >>> # Full return (legacy)
         >>> instances, map_dict, ds = get_instances('aMe12')
         >>> print(instances)  # ['aMe12_L', 'aMe12_R', ...]
         
         >>> instances, map_dict, ds = get_instances(['Mi1', 'Tm3'])
     """
-    # Normalize query to list
-    if not isinstance(query, list):
-        query = [query]
-    
     # Load neuron DataFrame
     ndf = _get_neuron_df(dataset, verbose=verbose)
-    bodyId_alltypes = ndf['bodyId'].tolist()
+    dataset_normalized = dataset.replace(':', '_').replace('.', '_')
     
     # Check if instance column exists
     if 'instance' not in ndf.columns:
         if verbose:
             print(f"Warning: 'instance' column not found in dataset '{dataset}'")
-        dataset_normalized = dataset.replace(':', '_').replace('.', '_')
+        if return_simple:
+            return []
         return [], {}, dataset_normalized
+    
+    # Check if query is dict-based filter
+    if isinstance(query, dict):
+        # Use NeuronFilter for dict-based queries
+        try:
+            from utils.neuron_filter import NeuronFilter
+        except ImportError:
+            from src.utils.neuron_filter import NeuronFilter
+        
+        nf = NeuronFilter(query)
+        matched_df = nf.apply(ndf)
+        instance_list = sorted(matched_df['instance'].dropna().unique().tolist())
+        
+        if verbose:
+            print(f"Found {len(instance_list)} unique instances matching filter")
+        
+        if return_simple:
+            return instance_list
+        
+        # For dict queries, map_dict shows filter -> instances
+        map_dict = {inst: [str(query)] for inst in instance_list}
+        return instance_list, map_dict, dataset_normalized
+    
+    # Legacy query handling
+    # Normalize query to list
+    if not isinstance(query, list):
+        query = [query]
+    
+    bodyId_alltypes = ndf['bodyId'].tolist()
     
     # Process each query item
     instance_set = set()
@@ -425,10 +553,12 @@ def get_instances(
                 map_dict[inst].append(item)
     
     instance_list = sorted(list(instance_set))
-    dataset_normalized = dataset.replace(':', '_').replace('.', '_')
     
     if verbose:
         print(f"Found {len(instance_list)} unique instances from {len(query)} query items")
+    
+    if return_simple:
+        return instance_list
     
     return instance_list, map_dict, dataset_normalized
 
@@ -452,6 +582,8 @@ def get_info(
             - Regex pattern: 'aMe.*', 'Mi[1-9]'
             - Mixed: ['aMe.*', 'Mi1', 720575940610453042]
             - None: Return all neurons in dataset
+            - Dict filter: {'contains': 'DN'}  # Auto-searches type, instance, etc.
+            - Dict filter: {'startswith': ['aMe', 'Mi'], 'endswith': '_R'}  # AND logic
         dataset: Dataset identifier (default: 'male-cns:v0.9')
         columns: List of columns to return. If None, returns all columns.
         verbose: Print search progress messages
@@ -466,6 +598,10 @@ def get_info(
         >>> df = get_info(['Mi1', 'Tm3'], columns=['bodyId', 'type', 'instance', 'soma'])
         
         >>> df = get_info(None)  # Get all neurons in dataset
+        
+        >>> # Dict filter examples
+        >>> df = get_info({'contains': 'DN'})
+        >>> df = get_info({'startswith': 'aMe', 'endswith': '_R'})
     """
     # Load neuron DataFrame
     ndf = _get_neuron_df(dataset, verbose=verbose)
@@ -480,6 +616,31 @@ def get_info(
             print(f"Returning all {len(result)} neurons from dataset '{dataset}'")
         return result
     
+    # Check if query is dict-based filter
+    if isinstance(query, dict):
+        # Use NeuronFilter for dict-based queries
+        try:
+            from utils.neuron_filter import NeuronFilter
+        except ImportError:
+            from src.utils.neuron_filter import NeuronFilter
+        
+        nf = NeuronFilter(query)
+        result = nf.apply(ndf)
+        
+        # Select columns if specified
+        if columns:
+            available_cols = [c for c in columns if c in result.columns]
+            missing_cols = [c for c in columns if c not in result.columns]
+            if missing_cols and verbose:
+                print(f"Warning: Columns not found: {missing_cols}")
+            result = result[available_cols]
+        
+        if verbose:
+            print(f"Found {len(result)} neurons matching filter")
+        
+        return result
+    
+    # Legacy query handling
     # Normalize query to list
     if not isinstance(query, list):
         query = [query]
@@ -828,10 +989,24 @@ def getNeurons(requiredNeurons, dataset='hemibrain:v1.2.1', custom_group_names=N
     
     Parameters
     ----------
-    requiredNeurons : list or None
-        List of neuron identifiers (types, instances, bodyIds).
-        Supports nested lists for custom grouping: e.g., ['A', 'B', ['C', 'D']]
-        Nested lists will be merged into a single custom group.
+    requiredNeurons : list, dict, or None
+        Neuron query. Supports multiple formats:
+        
+        Legacy formats:
+        - None: Return all neurons
+        - list of types/instances: ['aMe12', 'Mi1']
+        - list of regex patterns: ['aMe.*', 'Mi.*']
+        - list of bodyIds: [12345, 67890]
+        - nested lists for grouping: ['A', 'B', ['C', 'D']]
+        
+        Dict filter format:
+        - {'type': {'contains': 'DN'}}  # Types containing 'DN'
+        - {'type': {'startswith': ['aMe', 'Mi']}}  # Types starting with 'aMe' or 'Mi'
+        - {'type': {'endswith': '_R'}}  # Types ending with '_R'
+        - {'type': {'regex': 'DN[a-z]\\d+'}}  # Types matching regex
+        - {'bodyId': [12345, 67890]}  # Specific bodyIds
+        - {'type': {'contains': 'DN'}, 'instance': {'endswith': '_R'}}  # Combined filters (AND)
+        
     dataset : str
         Dataset name
     custom_group_names : list, optional
@@ -851,7 +1026,56 @@ def getNeurons(requiredNeurons, dataset='hemibrain:v1.2.1', custom_group_names=N
         Auto-generated name for the neuron set
     criteria : NeuronCriteria
         Neuprint criteria object
+        
+    Examples
+    --------
+    >>> # Legacy format
+    >>> neuron_df, roi_df, name, criteria = getNeurons(['aMe.*'], dataset='hemibrain:v1.2.1')
+    
+    >>> # Dict filter format (recommended for complex queries)
+    >>> neuron_df, _, _, _ = getNeurons({'type': {'contains': 'DN'}}, dataset='hemibrain:v1.2.1')
+    >>> neuron_df, _, _, _ = getNeurons({'type': {'startswith': ['aMe', 'Mi']}}, dataset='hemibrain:v1.2.1')
     '''
+    from neuprint import NeuronCriteria as NC
+    
+    # Check if requiredNeurons is a dict-based filter
+    if isinstance(requiredNeurons, dict):
+        # Use NeuronFilter for dict-based queries
+        try:
+            from utils.neuron_filter import NeuronFilter
+        except ImportError:
+            from src.utils.neuron_filter import NeuronFilter
+        
+        nf = NeuronFilter(requiredNeurons)
+        
+        # Load the dataset first
+        if 'flywire' in dataset.lower() or 'fafb' in dataset.lower() or 'banc' in dataset.lower():
+            ndf = _get_neuron_df(dataset, verbose=verbose)
+        else:
+            # Standard neuprint datasets
+            dataset_normalized = dataset.replace(':','_').replace('.','_')
+            project_root = os.path.dirname(os.path.dirname(__file__))
+            dataset_dir = os.path.join(project_root, "datasets", dataset_normalized)
+            if os.path.exists(dataset_dir):
+                dataset_path_body = os.path.join(dataset_dir, f"{dataset_normalized}_allneurons")
+            else:
+                dataset_path_body = os.path.join(project_root, "datasets", f"{dataset_normalized}_allneurons")
+            ndf, roi_df = _get_cached_neuron_df(dataset_normalized, dataset_path_body)
+        
+        # Apply filter
+        matched_df = nf.apply(ndf)
+        
+        # Generate auto_name from filter description
+        auto_name = nf.describe().replace(' ', '_')[:30]  # Truncate for file names
+        if len(auto_name) > 20:
+            auto_name = 'filter_result'
+        
+        if verbose:
+            print(f"Found {len(matched_df)} neurons matching filter: {nf.describe()}")
+        
+        return matched_df, pd.DataFrame(), auto_name, None
+    
+    # Original getNeurons logic for legacy formats
     from neuprint import NeuronCriteria as NC
     
     # Special handling for FlyWire/FAFB/BANC
@@ -5050,14 +5274,31 @@ def EnrichConnectionTable(conn_table, traversal_probability_threshold=0, dataset
         # Prefer the new info (post_y) if available, otherwise keep old (post_x)
         conn_df['post'] = conn_df['post_y'].fillna(conn_df['post_x'])
         conn_df = conn_df.drop(columns=['post_x', 'post_y'])
+    
+    # Check if connection_ratio already exists and has valid values (from coana.py global calculation)
+    # If so, preserve it to maintain the correct global ratio calculation
+    has_valid_ratio = ('connection_ratio' in conn_df.columns and 
+                       conn_df['connection_ratio'].notna().any() and 
+                       (conn_df['connection_ratio'] > 0).any())
+    
+    if not has_valid_ratio:
+        # Only recalculate if ratio doesn't exist or has no valid values
+        # NOTE: This local calculation only considers connections in this table,
+        # NOT all incoming connections. For accurate global ratios, use coana.py
+        total_incoming = conn_df.groupby('bodyId_post')['weight'].sum().reset_index(name='total_incoming_weight')
+        conn_df = conn_df.merge(total_incoming, how='left', on='bodyId_post')
         
-    # Calculate connection_ratio (handle if already exists)
-    if 'connection_ratio' in conn_df.columns:
-        conn_df['connection_ratio'] = conn_df.weight / conn_df.post
-    else:
-        conn_df.insert(loc=len(conn_df.columns),column='connection_ratio',value=conn_df.weight/conn_df.post)
+        # Calculate connection_ratio using local method: weight / local_incoming_weight
+        conn_df['connection_ratio'] = conn_df.apply(
+            lambda row: row['weight'] / row['total_incoming_weight'] 
+            if pd.notnull(row['total_incoming_weight']) and row['total_incoming_weight'] > 0 
+            else float('nan'), axis=1
+        )
         
-    # Calculate traversal_probability (handle if already exists)
+        # Drop temporary column
+        conn_df = conn_df.drop(columns=['total_incoming_weight'], errors='ignore')
+        
+    # Calculate traversal_probability from connection_ratio
     if 'traversal_probability' in conn_df.columns:
         conn_df['traversal_probability'] = conn_df.connection_ratio / 0.3
     else:
@@ -5070,6 +5311,9 @@ def EnrichConnectionTable(conn_table, traversal_probability_threshold=0, dataset
         conn_df['block_probability'] = 1 - conn_df.traversal_probability
     else:
         conn_df.insert(loc=len(conn_df.columns),column='block_probability',value= 1 - conn_df.traversal_probability)
+    
+    # Drop temporary column
+    conn_df = conn_df.drop(columns=['total_incoming_weight'], errors='ignore')
     
     conn_df = conn_df.loc[conn_df.traversal_probability >= traversal_probability_threshold]
     
@@ -5212,14 +5456,18 @@ def EnrichConnectionTable(conn_table, traversal_probability_threshold=0, dataset
             all_post_neurons = conn_df[[group_post, 'bodyId_post', 'post']].drop_duplicates(subset=['bodyId_post'])
             type_post_totals = all_post_neurons.groupby(group_post)['post'].sum().reset_index(name='total_post')
     
-    if pbar: pbar.update(1) # Step 3: Post-synaptic totals calculated
+    if pbar: pbar.update(1) # Step 3: Post-synaptic totals calculated (not used for dynamic ratio)
 
-    # Calculate group-to-group connection_ratio
-    conn_type = weight_sum.merge(type_post_totals, on=group_post, how='left')
+    # Calculate group-to-group connection_ratio using DYNAMIC method
+    # Ratio = weight(A→B) / total_incoming_weight(→B)
+    # Where total_incoming_weight is calculated from the threshold-filtered connections
+    conn_type = weight_sum.merge(total_incoming_per_type, on=group_post, how='left')
     
-    # Calculate ratio using total post-synaptic sites as denominator
+    # Calculate ratio using dynamic denominator (total incoming weight at this threshold)
     conn_type['connection_ratio'] = conn_type.apply(
-        lambda row: row['weight'] / row['total_post'] if pd.notnull(row['total_post']) and row['total_post'] > 0 else 0.0,
+        lambda row: row['weight'] / row['total_incoming_weight'] 
+        if pd.notnull(row['total_incoming_weight']) and row['total_incoming_weight'] > 0 
+        else float('nan'),
         axis=1
     )
 
@@ -5247,8 +5495,9 @@ def EnrichConnectionTable(conn_table, traversal_probability_threshold=0, dataset
     
     # Fix FutureWarning: Downcasting object dtype arrays on .fillna, .ffill, .bfill is deprecated
     # Explicitly convert to numeric before filling NaNs to avoid object-dtype downcasting issues
+    # Note: connection_ratio NaN means no incoming connections (undefined), keep it as NaN
     conn_aggregated = conn_type.copy()
-    conn_aggregated['connection_ratio'] = pd.to_numeric(conn_aggregated['connection_ratio'], errors='coerce').fillna(0.0)
+    conn_aggregated['connection_ratio'] = pd.to_numeric(conn_aggregated['connection_ratio'], errors='coerce')
     conn_aggregated['traversal_probability'] = pd.to_numeric(conn_aggregated['traversal_probability'], errors='coerce').fillna(0.0)
     conn_aggregated['block_probability'] = pd.to_numeric(conn_aggregated['block_probability'], errors='coerce').fillna(1.0)
     # conn_aggregated = conn_aggregated.infer_objects() # No longer needed as we explicitly converted
@@ -5276,31 +5525,14 @@ def EnrichConnectionTable(conn_table, traversal_probability_threshold=0, dataset
         
         if pbar_type: pbar_type.update(1) # Step 1: Weight aggregation
 
-        # Calculate type-level denominators
-        if target_neurons_df is not None and 'type' in target_neurons_df.columns and 'post' in target_neurons_df.columns:
-            all_post_neurons_type = target_neurons_df[['type', 'post']].copy()
-            all_post_neurons_type = all_post_neurons_type.rename(columns={'type': 'type_post'})
-            all_post_neurons_type = all_post_neurons_type[all_post_neurons_type['type_post'].notnull()]
-            all_post_neurons_type = all_post_neurons_type[all_post_neurons_type['type_post'] != '']
-            all_post_neurons_type = all_post_neurons_type[all_post_neurons_type['type_post'] != 'None']
-            type_post_totals_orig = all_post_neurons_type.groupby('type_post')['post'].sum().reset_index(name='total_post')
-        elif use_local and 'type_post' in conn_df.columns:
-            types_in_conn = conn_df['type_post'].unique().tolist()
-            all_post_neurons_type = ndf_complete[ndf_complete['type'].isin(types_in_conn)][['type', 'post']].copy()
-            all_post_neurons_type = all_post_neurons_type.rename(columns={'type': 'type_post'})
-            all_post_neurons_type = all_post_neurons_type[all_post_neurons_type['type_post'].notnull()]
-            all_post_neurons_type = all_post_neurons_type[all_post_neurons_type['type_post'] != '']
-            all_post_neurons_type = all_post_neurons_type[all_post_neurons_type['type_post'] != 'None']
-            type_post_totals_orig = all_post_neurons_type.groupby('type_post')['post'].sum().reset_index(name='total_post')
-        else:
-            all_post_neurons_type = conn_df[['type_post', 'bodyId_post', 'post']].drop_duplicates(subset=['bodyId_post'])
-            type_post_totals_orig = all_post_neurons_type.groupby('type_post')['post'].sum().reset_index(name='total_post')
-        
-        if pbar_type: pbar_type.update(1) # Step 2: Post-synaptic totals
+        if pbar_type: pbar_type.update(1) # Step 2: (skipped - not using static post counts)
 
-        conn_type = weight_sum_type.merge(type_post_totals_orig, on='type_post', how='left')
+        # Calculate type-level ratio using DYNAMIC method
+        conn_type = weight_sum_type.merge(total_incoming_per_type_orig, on='type_post', how='left')
         conn_type['connection_ratio'] = conn_type.apply(
-            lambda row: row['weight'] / row['total_post'] if pd.notnull(row['total_post']) and row['total_post'] > 0 else 0.0,
+            lambda row: row['weight'] / row['total_incoming_weight'] 
+            if pd.notnull(row['total_incoming_weight']) and row['total_incoming_weight'] > 0 
+            else float('nan'),
             axis=1
         )
         
@@ -5324,7 +5556,7 @@ def EnrichConnectionTable(conn_table, traversal_probability_threshold=0, dataset
             pbar_type.update(1) # Step 4: Traversal probabilities
             pbar_type.close()
         
-        conn_type = conn_type.fillna({'connection_ratio': 0.0, 'traversal_probability': 0.0, 'block_probability': 1.0}).infer_objects()
+        conn_type = conn_type.fillna({'traversal_probability': 0.0, 'block_probability': 1.0}).infer_objects()
         conn_type = conn_type[['type_pre', 'type_post', 'weight', 'connection_ratio', 'traversal_probability', 'block_probability']]
         
         # if len(bodyid_pairs) > 50000:

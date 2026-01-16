@@ -59,33 +59,45 @@ These metrics are calculated for each individual synaptic connection (edge) in t
 
 ### Connection Ratio
 
-**Definition**: The fraction of a neuron's total inputs provided by a specific upstream neuron.
+**Definition**: The fraction of a neuron's **total input from ALL sources in the dataset** provided by a specific upstream connection.
 
-**Formula**:
+**Formula (Global Ratio)**:
 
-$$\mathit{ratio}_{ij} = \frac{w_{ij}}{W_j}$$
+$$\mathit{ratio}_{ij}^{(t)} = \frac{w_{ij}^{(t)}}{\sum_{\forall k \in \text{dataset}} w_{kj}^{(t)}}$$
 
 Where:
-- $w_{ij}$ = Number of synapses from neuron $i$ to neuron $j$ (weight)
-- $W_j$ = Total number of post-synaptic sites on neuron $j$ (post)
+- $w_{ij}^{(t)}$ = Number of synapses from neuron $i$ to neuron $j$ passing threshold $t$
+- $\sum_{\forall k \in \text{dataset}} w_{kj}^{(t)}$ = Total incoming synapses to neuron $j$ from **ALL neurons in the dataset** at threshold $t$
+
+**Why Global Ratio?**
+
+The ratio is calculated using the **entire connection cache**, not just the neurons in the current query:
+- Denominator includes ALL incoming connections to B, from ANY source neuron
+- This gives the true biological fraction "how much of B's total input comes from A"
+- Without global calculation, ratios would be inflated when only a subset of source neurons is queried
 
 **Interpretation**:
-- Value of `0.25` means 25% of neuron $j$'s inputs come from neuron $i$
-- Higher values indicate stronger input influence
-- Range: 0.0 to 1.0
+- Value of `0.01` means 1% of neuron $j$'s **total input** comes from neuron $i$
+- Higher values indicate stronger relative input influence
+- Range: 0.0 to 1.0 (NaN if no incoming connections)
 
 **Example**:
 ```
-Neuron A → Neuron B
-Synapses (weight): 50
-Total inputs to B (post): 200
+Query: aMe12 → KCg-d at threshold = 3 synapses
 
-connection_ratio = 50 / 200 = 0.25 (25%)
+aMe12 → KCg-d: 49 synapses (the connection we're analyzing)
+All other neurons → KCg-d: 4951 synapses (from connection cache)
+Total incoming to KCg-d: 49 + 4951 = 5000
+
+connection_ratio(aMe12→KCg-d) = 49 / 5000 = 0.0098 (0.98%)
+
+Note: If we only counted from provided source neurons, we'd get a misleading
+ratio like 0.98 (98%) which doesn't represent true biological significance.
 ```
 
 **Used in**:
-- [`src/coana.py`](../../src/coana.py#L2736) - `_fetch_connections_with_cache()`
-- [`src/statvis.py`](../../src/statvis.py#L4599) - `EnrichConnectionTable()`
+- [`src/coana.py`](../../src/coana.py) - `_fetch_total_incoming_weight()`, `_apply_bodyid_level_filters()`, `_apply_type_level_filters()`
+- [`src/statvis.py`](../../src/statvis.py) - `EnrichConnectionTable()` (preserves pre-calculated ratios)
 - Edge filtering via `min_ratio` parameter
 
 ---
@@ -96,7 +108,7 @@ connection_ratio = 50 / 200 = 0.25 (25%)
 
 **Formula**:
 
-$$p_{ij} = \min\left(1.0, \frac{w_{ij}}{W_j \times 0.3}\right) = \min\left(1.0, \frac{\mathit{ratio}_{ij}}{0.3}\right)$$
+$$p_{ij} = \min\left(1.0, \frac{\mathit{ratio}_{ij}^{(t)}}{0.3}\right)$$
 
 **The 0.3 Biological Threshold**:
 
@@ -141,32 +153,35 @@ When analyzing connections between neuron **types** (populations), individual co
 
 ### Type-to-Type Connection Ratio
 
-**Definition**: The aggregate connection strength between two neuron types.
+**Definition**: The aggregate connection strength between two neuron types, using total input from ALL sources in the dataset.
 
-**Formula**:
+**Formula (Global Ratio)**:
 
-$$\mathit{ratio}_{AB} = \frac{\sum_{i \in A, j \in B} w_{ij}}{\sum_{j \in B} W_j}$$
+$$\mathit{ratio}_{AB}^{(t)} = \frac{\sum_{i \in A, j \in B} w_{ij}^{(t)}}{\sum_{\forall k \in \text{dataset}, j \in B} w_{kj}^{(t)}}$$
 
 Where:
 - $A$ = Set of neurons of type A (presynaptic population)
 - $B$ = Set of neurons of type B (postsynaptic population)
-- Numerator = Total synapses from type A to type B
-- Denominator = Total post-synaptic sites across all neurons of type B
+- Numerator = Total synapses from type A to type B at threshold $t$
+- Denominator = Total incoming synapses to type B from **ALL neuron types in the dataset** at threshold $t$
 
-**Implementation** ([`src/statvis.py`](../../src/statvis.py#L4740-L4780)):
+**Key Point**: The denominator includes ALL incoming connections to type B from any neuron type in the entire dataset (not just the source types in your query), giving the true fraction of type B's total input that comes from type A.
+
+**Implementation** ([`src/coana.py`](../../src/coana.py)):
 
 ```python
 # Step 1: Sum weights for each type pair
 weight_sum = conn_df.groupby([type_pre, type_post])['weight'].sum()
 
-# Step 2: Get total post-synaptic sites for each target type
-type_post_totals = target_neurons_df.groupby('type')['post'].sum()
+# Step 2: Get total incoming weight for each target type from ENTIRE CACHE
+# This queries the connection database, not just the current connections
+total_incoming_per_type = self._fetch_total_incoming_weight_by_type(post_types, min_weight)
 
-# Step 3: Calculate ratio
-conn_type['connection_ratio'] = weight_sum / type_post_totals
+# Step 3: Calculate global ratio
+conn_type['connection_ratio'] = weight_sum / total_incoming_per_type
 ```
 
-**Aggregation via matrix operations** ([`src/coana.py`](../../src/coana.py#L384-L387)):
+**Aggregation via matrix operations** ([`src/coana.py`](../../src/coana.py)):
 
 ```python
 # For type-level pivot tables, use 'max' aggregation

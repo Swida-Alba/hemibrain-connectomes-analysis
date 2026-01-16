@@ -22,6 +22,8 @@ import flybrains
 import seaborn as sns
 from tqdm import tqdm
 from neuprint import *
+# Explicit imports for Pylance static analysis (already imported via *)
+from neuprint import Client, NeuronCriteria, fetch_neurons, fetch_roi_hierarchy
 from neuprint.utils import connection_table_to_matrix
 try:
     import src.statvis_polars as svp
@@ -727,23 +729,40 @@ class FindNeuronConnection:
     sourceNeurons: list = field(default_factory=list)
     '''
     Source neurons to find connection. All neurons in the list will be treated as a single source neuron group.\n
-    Can be a list of neuron types or a list of neuron bodyIds, but must be a list even if only one item is in the list.\n
-    All items in the list should be in the same category, that is, all types or all bodyIds.\n
-    To search for all neurons, use None as input.\n
-    To search for all neurons having a given type, use empty list [] as input.\n
-    e.g. ['MBON01', MBON02', 'MBON03'] # neuron types\n
-    e.g. ['MBON.*'] or ['MBON.*_R'] or ['.*_.*PN.*'] ... # all neurons whose type matches the regular expression\n
-    e.g. [12345, 23456, 34567] # neuron bodyIds\n
-    e.g. None # all neurons in the dataset\n
-    e.g. [ ] or list() # all neurons having a given type\n
-    All types of neurons can be found in the corresponding hemibrain dataset.\n
-    see https://neuprint.janelia.org for more information.\n
+    
+    Supports multiple input formats:
+    
+    Legacy formats (list-based):
+    - List of neuron types: ['MBON01', 'MBON02', 'MBON03']
+    - List of bodyIds: [12345, 23456, 34567]
+    - Regex patterns: ['MBON.*'], ['MBON.*_R'], ['.*_.*PN.*']
+    - None: All neurons in the dataset
+    - Empty list []: All neurons having a given type
+    
+    Dict filter format (same as type_filter, auto-searches columns):
+    - {'contains': 'DN'}  # Types/instances containing 'DN'
+    - {'startswith': ['aMe', 'Mi']}  # Starting with 'aMe' or 'Mi' (OR)
+    - {'endswith': '_R'}  # Ending with '_R'
+    - {'regex': 'DN[a-z]\\d+'}  # Regex pattern match
+    - {'contains': 'DN', 'endswith': '_R'}  # Combined (AND logic)
+    
+    Filter operators:
+    - contains: Substring match (e.g., 'DN' matches 'DNa01', 'DNb02')
+    - startswith: Prefix match (e.g., 'aMe' matches 'aMe12', 'aMe17')
+    - endswith: Suffix match (e.g., '_R' matches 'MBON01_R')
+    - regex: Full regex pattern match
+    - exact: Exact value match (default for simple lists)
+    
+    Examples:
+    - sourceNeurons=['aMe.*']  # Legacy regex
+    - sourceNeurons={'contains': 'DN'}  # Dict filter
+    - sourceNeurons={'startswith': ['DN', 'AN']}  # Multiple prefixes (OR)
     '''
     
     targetNeurons: list = field(default_factory=list)
     '''
-    target neurons to find connection\n
-    same as sourceNeurons
+    Target neurons to find connection.\n
+    Same formats as sourceNeurons (list-based or dict filter).
     '''
     
     largeTargetSet: bool = False
@@ -3239,17 +3258,148 @@ class FindNeuronConnection:
         
         return combined
     
-    def _apply_bodyid_level_filters(self, combined, min_conn_ratio, min_traversal_prob, total_before_filter, min_weight):
-        """Apply filters at individual bodyId level (default behavior)"""
-        # Get post-synaptic counts (use local dataset if available)
-        post_bodyIds = combined['bodyId_post'].unique().tolist()
-        post_df = self._fetch_neurons_local_or_api(post_bodyIds, columns=['bodyId', 'post'])
-        post_info = post_df[['bodyId', 'post']].copy()
-        post_info.columns = ['bodyId_post', 'post']
+    def _fetch_total_incoming_weight(self, post_bodyIds: list, min_weight: int = 1, auto_build_cache: bool = True) -> pd.DataFrame:
+        """
+        Fetch ALL incoming connections to the given post-synaptic bodyIds.
         
-        # Merge and calculate both ratios
-        combined = combined.merge(post_info, how='left', on='bodyId_post')
-        combined['connection_ratio'] = combined['weight'] / combined['post']
+        This is used for calculating the true connection ratio:
+        ratio = weight(A→B) / total_incoming_to_B_from_ALL_sources
+        
+        Parameters:
+        -----------
+        post_bodyIds : list
+            List of post-synaptic bodyIds to fetch incoming connections for
+        min_weight : int
+            Minimum weight threshold for filtering connections
+        auto_build_cache : bool
+            If True and cache doesn't exist, automatically build connection cache.
+            This may take significant time for large datasets. Default: True
+            
+        Returns:
+        --------
+        pd.DataFrame : DataFrame with columns [bodyId_post, total_incoming_weight]
+        """
+        if len(post_bodyIds) == 0:
+            return pd.DataFrame(columns=['bodyId_post', 'total_incoming_weight'])
+        
+        self._vprint(f'     📥 Fetching all incoming connections to {len(post_bodyIds)} post-synaptic neurons...', level='full')
+        
+        # Convert to strings for consistency
+        post_strs = [str(x) for x in post_bodyIds]
+        
+        # Check if we have a cached connection database
+        if self._conn_df_cache is not None:
+            # Query from cached database - much faster
+            import polars as pl
+            if isinstance(self._conn_df_cache, pl.DataFrame):
+                incoming = self._conn_df_cache.filter(
+                    pl.col('bodyId_post').is_in(post_strs) & 
+                    (pl.col('weight') >= min_weight)
+                )
+                total_incoming = incoming.group_by('bodyId_post').agg(
+                    pl.col('weight').sum().alias('total_incoming_weight')
+                ).to_pandas()
+                self._vprint(f'     ✓ Found {len(total_incoming)} post-synaptic neurons with incoming connections (from cache)', level='full')
+                return total_incoming
+        
+        # Fallback: query the database file directly
+        db_path = self._get_connection_db_path()
+        
+        # If cache doesn't exist and auto_build_cache is enabled, build it first
+        if not os.path.exists(db_path) and auto_build_cache:
+            self._vprint(f'\n     ⚠️  Connection cache not found for {self.dataset}', level='simple')
+            self._vprint(f'     ⏳ Building connection cache (this may take several minutes for large datasets)...', level='simple')
+            self._vprint(f'     💡 This is a one-time operation. The cache will be reused for future analyses.', level='simple')
+            
+            try:
+                # Build the cache with progress feedback
+                cache_result = self.build_connection_cache(
+                    batch_size=100,
+                    force_rebuild=False,
+                    quiet=False
+                )
+                self._vprint(f'     ✓ Cache built: {cache_result.get("total_connections", 0):,} connections', level='simple')
+            except Exception as e:
+                self._vprint(f'     ❌ Failed to build cache: {e}', level='simple')
+        
+        if os.path.exists(db_path):
+            try:
+                import polars as pl
+                all_conn = pl.scan_parquet(db_path).filter(
+                    pl.col('bodyId_post').is_in(post_strs) &
+                    (pl.col('weight') >= min_weight)
+                ).collect()
+                
+                total_incoming = all_conn.group_by('bodyId_post').agg(
+                    pl.col('weight').sum().alias('total_incoming_weight')
+                ).to_pandas()
+                self._vprint(f'     ✓ Found {len(total_incoming)} post-synaptic neurons with incoming connections (from DB)', level='full')
+                return total_incoming
+            except Exception as e:
+                self._vprint(f'     ⚠️ Error querying connection DB: {e}', level='full')
+        
+        # Last resort: use NeuPrint/CAVE API to fetch incoming connections
+        # This is slow but accurate
+        try:
+            self._ensure_neuprint_client()
+            from neuprint import fetch_adjacencies, NeuronCriteria
+            
+            post_ints = [int(x) for x in post_bodyIds]
+            
+            self._vprint(f'     🌐 Fetching incoming connections from API (this may take a while)...', level='full')
+            
+            # Fetch all connections TO the post-synaptic neurons
+            # Note: targets=post_ints, sources=None means ALL sources
+            neuron_df, roi_conn_df = fetch_adjacencies(
+                sources=None,  # All sources
+                targets=post_ints,  # To these targets
+                min_total_weight=min_weight,
+                **self.kwargs_fetch
+            )
+            
+            if roi_conn_df is not None and len(roi_conn_df) > 0:
+                roi_conn_df['bodyId_post'] = roi_conn_df['bodyId_post'].astype(str)
+                total_incoming = roi_conn_df.groupby('bodyId_post')['weight'].sum().reset_index(name='total_incoming_weight')
+                self._vprint(f'     ✓ Fetched incoming connections to {len(total_incoming)} neurons from API', level='full')
+                return total_incoming
+                
+        except Exception as e:
+            self._vprint(f'     ⚠️ Error fetching incoming connections: {e}', level='full')
+        
+        # If all else fails, return empty DataFrame
+        return pd.DataFrame(columns=['bodyId_post', 'total_incoming_weight'])
+    
+    def _apply_bodyid_level_filters(self, combined, min_conn_ratio, min_traversal_prob, total_before_filter, min_weight):
+        """Apply filters at individual bodyId level (default behavior).
+        
+        Uses dynamic ratio calculation:
+        connection_ratio = weight(A→B) / total_incoming_weight(→B)
+        
+        Where total_incoming_weight(→B) is the sum of ALL incoming weights to bodyId B
+        from ALL sources in the dataset (not just provided source neurons). This gives
+        the true fraction of B's total input that comes from A.
+        """
+        # Get unique post-synaptic bodyIds
+        post_bodyIds = combined['bodyId_post'].unique().tolist()
+        
+        # Fetch total incoming weight from ALL sources (not just provided sources)
+        total_incoming = self._fetch_total_incoming_weight(post_bodyIds, min_weight)
+        
+        # Ensure bodyId_post is string type for merge
+        combined['bodyId_post'] = combined['bodyId_post'].astype(str)
+        total_incoming['bodyId_post'] = total_incoming['bodyId_post'].astype(str)
+        
+        # Merge total incoming weight
+        combined = combined.merge(total_incoming, how='left', on='bodyId_post')
+        
+        # Calculate dynamic connection_ratio: weight / total_incoming_weight (from ALL sources)
+        # This represents "what fraction of B's TOTAL input comes from A"
+        combined['connection_ratio'] = combined.apply(
+            lambda row: row['weight'] / row['total_incoming_weight'] 
+            if pd.notnull(row['total_incoming_weight']) and row['total_incoming_weight'] > 0 
+            else float('nan'),
+            axis=1
+        )
         combined['traversal_probability'] = combined['connection_ratio'] / 0.3
         combined.loc[combined['traversal_probability'] > 1, 'traversal_probability'] = 1
         
@@ -3262,7 +3412,7 @@ class FindNeuronConnection:
             combined = combined[combined['traversal_probability'] >= min_traversal_prob].copy()
         
         # Drop temporary columns - KEEP ratio/prob for downstream use
-        combined = combined.drop(columns=['post'])
+        combined = combined.drop(columns=['total_incoming_weight'])
         
         # Print filter summary
         filter_msg = []
@@ -3274,27 +3424,180 @@ class FindNeuronConnection:
             filter_msg.append(f'prob ≥ {min_traversal_prob}')
         
         self._vprint(f'     Filtered (bodyId level): {total_before_filter} → {len(combined)} connections ({", ".join(filter_msg)})', level='full')
-        self._vprint(f'     Enriched with neuron info from complete local dataset', level='full')
+        self._vprint(f'     Note: Ratio = weight / total_incoming_from_ALL_sources', level='full')
         
         return combined
+    
+    def _fetch_total_incoming_weight_by_type(self, post_types: list, min_weight: int = 1, auto_build_cache: bool = True) -> pd.DataFrame:
+        """
+        Fetch ALL incoming connections to neurons of the given types, aggregated by type.
+        
+        This is used for calculating the true type-level connection ratio:
+        ratio = weight(typeA→typeB) / total_incoming_to_typeB_from_ALL_sources
+        
+        Memory-efficient approach:
+        1. Load neuron_index once to create bodyId->type mapping (small, ~2MB)
+        2. Build set of target bodyIds from the type mapping
+        3. Process connections.parquet in row-group chunks to avoid loading entire file
+        4. Aggregate weights by type in a Python dict (constant memory)
+        
+        Parameters:
+        -----------
+        post_types : list
+            List of post-synaptic neuron types
+        min_weight : int
+            Minimum weight threshold for filtering connections
+        auto_build_cache : bool
+            If True and cache doesn't exist, automatically build connection cache.
+            This may take significant time for large datasets. Default: True
+            
+        Returns:
+        --------
+        pd.DataFrame : DataFrame with columns [type_post, total_incoming_weight]
+        """
+        if len(post_types) == 0:
+            return pd.DataFrame(columns=['type_post', 'total_incoming_weight'])
+        
+        self._vprint(f'     📥 Fetching all incoming connections to {len(post_types)} post-synaptic types...', level='full')
+        
+        import polars as pl
+        
+        # Check if we have a cached connection database
+        db_path = self._get_connection_db_path()
+        neuron_index_path = os.path.join(os.path.dirname(db_path), 'neuron_index.parquet')
+        
+        # If cache doesn't exist and auto_build_cache is enabled, build it first
+        if (not os.path.exists(db_path) or not os.path.exists(neuron_index_path)) and auto_build_cache:
+            self._vprint(f'\n     ⚠️  Connection cache not found for {self.dataset}', level='simple')
+            self._vprint(f'     ⏳ Building connection cache (this may take several minutes for large datasets)...', level='simple')
+            self._vprint(f'     💡 This is a one-time operation. The cache will be reused for future analyses.', level='simple')
+            
+            try:
+                # Build the cache with progress feedback
+                cache_result = self.build_connection_cache(
+                    batch_size=100,
+                    force_rebuild=False,
+                    quiet=False
+                )
+                self._vprint(f'     ✓ Cache built: {cache_result.get("total_connections", 0):,} connections', level='simple')
+            except Exception as e:
+                self._vprint(f'     ❌ Failed to build cache: {e}', level='simple')
+                self._vprint(f'     ⚠️ Falling back to local ratio calculation (may give inflated ratios)', level='simple')
+                return pd.DataFrame(columns=['type_post', 'total_incoming_weight'])
+        
+        if os.path.exists(db_path) and os.path.exists(neuron_index_path):
+            try:
+                # Step 1: Load neuron index to create bodyId->type mapping (small, fits in memory)
+                # Only load bodyId and type columns to minimize memory
+                neuron_index = pl.read_parquet(neuron_index_path, columns=['bodyId', 'type'])
+                
+                # Create bodyId -> type lookup dictionary (memory efficient)
+                bodyid_to_type = dict(zip(
+                    neuron_index['bodyId'].to_list(),
+                    neuron_index['type'].to_list()
+                ))
+                
+                # Step 2: Build set of target bodyIds for the requested types
+                post_types_set = set(post_types)
+                target_bodyIds = {bid for bid, t in bodyid_to_type.items() if t in post_types_set}
+                
+                if not target_bodyIds:
+                    self._vprint(f'     ⚠️ No neurons found for target types', level='full')
+                    return pd.DataFrame(columns=['type_post', 'total_incoming_weight'])
+                
+                self._vprint(f'     Processing {len(target_bodyIds):,} target neurons...', level='full')
+                
+                # Step 3: Process connections in row-group chunks (memory efficient)
+                # This approach never loads the full parquet into memory
+                import pyarrow.parquet as pq
+                
+                parquet_file = pq.ParquetFile(db_path)
+                num_row_groups = parquet_file.metadata.num_row_groups
+                total_rows = parquet_file.metadata.num_rows
+                
+                self._vprint(f'     Scanning {total_rows:,} connections in {num_row_groups} chunks...', level='full')
+                
+                # Aggregate weights by type in a simple dict (constant memory)
+                type_weights = {}  # type_post -> total weight
+                rows_processed = 0
+                
+                for i in range(num_row_groups):
+                    # Read only bodyId_post and weight columns from this row group
+                    table = parquet_file.read_row_group(i, columns=['bodyId_post', 'weight'])
+                    chunk_df = pl.from_arrow(table)
+                    rows_processed += len(chunk_df)
+                    
+                    # Filter by min_weight first (reduces data size)
+                    if min_weight > 1:
+                        chunk_df = chunk_df.filter(pl.col('weight') >= min_weight)
+                    
+                    if len(chunk_df) == 0:
+                        continue
+                    
+                    # Vectorized: Add type_post column using map
+                    bodyIds = chunk_df['bodyId_post'].to_list()
+                    weights = chunk_df['weight'].to_list()
+                    
+                    # Aggregate into type_weights dict
+                    for bid, weight in zip(bodyIds, weights):
+                        if bid in target_bodyIds:
+                            type_post = bodyid_to_type.get(bid)
+                            if type_post:
+                                type_weights[type_post] = type_weights.get(type_post, 0) + weight
+                
+                if type_weights:
+                    total_incoming = pd.DataFrame([
+                        {'type_post': t, 'total_incoming_weight': w}
+                        for t, w in type_weights.items()
+                    ])
+                    self._vprint(f'     ✓ Found incoming connections to {len(total_incoming)} types (indexed chunked)', level='full')
+                    return total_incoming
+                
+                self._vprint(f'     ⚠️ No connections found to target types at threshold {min_weight}', level='full')
+                return pd.DataFrame(columns=['type_post', 'total_incoming_weight'])
+                    
+            except Exception as e:
+                self._vprint(f'     ⚠️ Error querying connection DB: {e}', level='full')
+                import traceback
+                self._vprint(f'     Debug: {traceback.format_exc()}', level='full')
+        
+        # Fallback: if we have in-memory cache with type info
+        if self._conn_df_cache is not None:
+            try:
+                if isinstance(self._conn_df_cache, pl.DataFrame):
+                    if 'type_post' in self._conn_df_cache.columns:
+                        incoming = self._conn_df_cache.filter(
+                            pl.col('type_post').is_in(post_types) &
+                            (pl.col('weight') >= min_weight)
+                        )
+                        total_incoming = incoming.group_by('type_post').agg(
+                            pl.col('weight').sum().alias('total_incoming_weight')
+                        ).to_pandas()
+                        self._vprint(f'     ✓ Found incoming connections to {len(total_incoming)} types (from cache)', level='full')
+                        return total_incoming
+            except Exception as e:
+                self._vprint(f'     ⚠️ Error querying in-memory cache: {e}', level='full')
+        
+        # If no cache available and we couldn't build it, return empty
+        self._vprint(f'     ⚠️ No cached data available for type-level incoming weight', level='full')
+        self._vprint(f'     ⚠️ Ratios will be calculated locally (may give inflated values)', level='simple')
+        return pd.DataFrame(columns=['type_post', 'total_incoming_weight'])
     
     def _apply_type_level_filters(self, combined, min_weight, min_conn_ratio, min_traversal_prob, total_before_filter):
         """
         Apply filters at aggregated type-to-type level.
-        For type-level filtering: aggregate first, then apply weight/ratio/prob filters to type pairs.
+        
+        Uses dynamic ratio calculation:
+        connection_ratio = weight(typeA→typeB) / total_incoming_weight(→typeB)
+        
+        Where total_incoming_weight(→typeB) is the sum of ALL incoming weights to type B
+        from ALL source types in the dataset (not just provided source types). This gives
+        the true fraction of typeB's total input that comes from typeA.
         """
         # Separate connections with null types (preserve them always)
         null_type_mask = combined['type_pre'].isna() | combined['type_post'].isna()
         connections_with_null_types = combined[null_type_mask].copy()
         connections_with_types = combined[~null_type_mask].copy()
-        
-        # Get post-synaptic counts (use local dataset if available) if not already present
-        if 'post' not in connections_with_types.columns and len(connections_with_types) > 0:
-            post_bodyIds = connections_with_types['bodyId_post'].unique().tolist()
-            post_df = self._fetch_neurons_local_or_api(post_bodyIds, columns=['bodyId', 'post'])
-            post_info = post_df[['bodyId', 'post']].copy()
-            post_info.columns = ['bodyId_post', 'post']
-            connections_with_types = connections_with_types.merge(post_info, how='left', on='bodyId_post')
         
         # Group by type pairs and aggregate (only for connections with valid types)
         if len(connections_with_types) > 0:
@@ -3309,21 +3612,25 @@ class FindNeuronConnection:
         if min_weight > 1:
             type_grouped = type_grouped[type_grouped['weight'] >= min_weight].copy()
         
-        # Calculate total post-synaptic sites for each type (ALL neurons of that type, not just those in connections)
-        # Get all unique types that appear in connections
-        all_types = combined['type_post'].unique().tolist()
-        # Fetch ALL neurons of these types from dataset
-        all_neurons_df = self._fetch_neurons_by_types(all_types, columns=['bodyId', 'type', 'post'])
-        # Calculate total post per type
-        type_post_totals = all_neurons_df.groupby('type')['post'].sum().reset_index()
-        type_post_totals.columns = ['type_post', 'total_post']
+        # Get unique post types
+        post_types = type_grouped['type_post'].unique().tolist()
         
-        # Merge with grouped data (each type pair gets the total_post for its target type)
-        type_grouped = type_grouped.merge(type_post_totals, on='type_post', how='left')
+        # Fetch total incoming weight from ALL sources (not just provided sources)
+        total_incoming_per_type = self._fetch_total_incoming_weight_by_type(post_types, min_weight)
         
-        # Calculate ratios at type level
+        # If we couldn't get global incoming weights, fall back to local calculation
+        if total_incoming_per_type.empty and len(type_grouped) > 0:
+            self._vprint(f'     ⚠️ Falling back to local ratio calculation (no global incoming data)', level='full')
+            total_incoming_per_type = type_grouped.groupby('type_post')['weight'].sum().reset_index(name='total_incoming_weight')
+        
+        # Merge with grouped data
+        type_grouped = type_grouped.merge(total_incoming_per_type, on='type_post', how='left')
+        
+        # Calculate ratios at type level using global denominator
         type_grouped['connection_ratio'] = type_grouped.apply(
-            lambda row: row['weight'] / row['total_post'] if pd.notnull(row['total_post']) and row['total_post'] > 0 else 0.0,
+            lambda row: row['weight'] / row['total_incoming_weight'] 
+            if pd.notnull(row['total_incoming_weight']) and row['total_incoming_weight'] > 0 
+            else float('nan'),
             axis=1
         )
         type_grouped['traversal_probability'] = type_grouped['connection_ratio'] / 0.3
@@ -3340,10 +3647,6 @@ class FindNeuronConnection:
             # Keep ALL bodyId connections that belong to passing type pairs
             passing_type_pairs = set(zip(filtered_type_pairs['type_pre'], filtered_type_pairs['type_post']))
             filtered_connections = connections_with_types[connections_with_types.apply(lambda row: (row['type_pre'], row['type_post']) in passing_type_pairs, axis=1)].copy()
-            
-            # Drop temporary 'post' column if it exists
-            if 'post' in filtered_connections.columns:
-                filtered_connections = filtered_connections.drop(columns=['post'])
         else:
             filtered_type_pairs = type_grouped
             filtered_connections = connections_with_types
@@ -3368,8 +3671,7 @@ class FindNeuronConnection:
         self._vprint(f'     Filtered (type level): {type_grouped_before_weight} → {type_pairs_after} type pairs, {total_before_filter} → {len(combined)} connections ({", ".join(filter_msg)})', level='full')
         if null_conn_count > 0:
             self._vprint(f'     Note: {null_conn_count} connections with null types preserved (not filtered)', level='full')
-        self._vprint(f'     Note: All 3 filters applied at type level (weight=sum, ratio=sum(weight)/sum(post))', level='full')
-        self._vprint(f'     Enriched with neuron info from complete local dataset', level='full')
+        self._vprint(f'     Note: Ratio = weight / total_incoming_from_ALL_sources', level='full')
         
         return combined
     
@@ -6393,13 +6695,18 @@ class FindNeuronConnection:
             neurons_in_layer_df_pd = self._fetch_neurons_local_or_api(bodyIds_in_layer.to_list(), columns=['bodyId', 'type', 'post'])
             neurons_in_layer_df = pl.from_pandas(neurons_in_layer_df_pd)
             
+            # Get unique post types for global incoming weight calculation
+            post_types = conn_filtered_no_layer['type_post'].unique().to_list() if 'type_post' in conn_filtered_no_layer.columns else []
+            global_incoming_weights = self._fetch_total_incoming_weight_by_type(post_types, min_weight=self.min_synapse_num) if post_types else None
+            
             # Enrich with traversal probability (use local dataset if available)
             conn_enriched, conn_type, conn_group = EnrichConnectionTablePolars(
                 conn_filtered_no_layer,
                 dataset=self.dataset, 
                 script_path=self.script_path,
                 target_neurons_df=neurons_in_layer_df,
-                label_mapper=self.label_mapper
+                label_mapper=self.label_mapper,
+                global_incoming_weights=global_incoming_weights
             )
             
             # Add conn_layer column AFTER enrichment
@@ -6747,13 +7054,18 @@ class FindNeuronConnection:
                 neurons_in_layer_df_pd = self._fetch_neurons_local_or_api(bodyIds_in_layer.to_list(), columns=['bodyId', 'type', 'post'])
                 neurons_in_layer_df = pl.from_pandas(neurons_in_layer_df_pd)
                 
+                # Get unique post types for global incoming weight calculation
+                post_types = layer_conn['type_post'].unique().to_list() if 'type_post' in layer_conn.columns else []
+                layer_global_incoming_weights = self._fetch_total_incoming_weight_by_type(post_types, min_weight=self.min_synapse_num) if post_types else None
+                
                 # Enrich
                 _, layer_conn_type, layer_conn_group = EnrichConnectionTablePolars(
                     layer_conn.drop('conn_layer'), 
                     dataset=self.dataset,
                     script_path=self.script_path,
                     target_neurons_df=neurons_in_layer_df,
-                    label_mapper=self.label_mapper
+                    label_mapper=self.label_mapper,
+                    global_incoming_weights=layer_global_incoming_weights
                 )
                 
                 # Add conn_layer back
@@ -6803,6 +7115,10 @@ class FindNeuronConnection:
             all_neurons_df_pd = self._fetch_neurons_local_or_api(all_bodyIds.to_list(), columns=['bodyId', 'type', 'post'])
             all_neurons_df = pl.from_pandas(all_neurons_df_pd)
         
+        # Get unique post types for global incoming weight calculation
+        global_post_types = conn_inpath_global['type_post'].unique().to_list() if 'type_post' in conn_inpath_global.columns else []
+        global_incoming_weights = self._fetch_total_incoming_weight_by_type(global_post_types, min_weight=self.min_synapse_num) if global_post_types else None
+        
         _, conn_types_global, _ = EnrichConnectionTablePolars(
             conn_inpath_global, 
             traversal_probability_threshold=self.min_traversal_probability,
@@ -6810,7 +7126,8 @@ class FindNeuronConnection:
             script_path=self.script_path,
             target_neurons_df=all_neurons_df,
             aggregate_method='product',
-            label_mapper=self.label_mapper
+            label_mapper=self.label_mapper,
+            global_incoming_weights=global_incoming_weights
         )
         
         # print("  Enrichment returned. Proceeding to save...", flush=True)
