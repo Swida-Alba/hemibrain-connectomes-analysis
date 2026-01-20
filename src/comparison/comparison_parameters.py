@@ -37,13 +37,18 @@ class ComparisonParameters:
             visualizations. If provided, must match length of datasets list.
             Example: ['Hemi', 'Male', 'FAFB'] for shorter labels in charts/networks.
             
-        source_neurons (List[str | int] | List[List] | LabelMapper): Source neuron 
+        source_neurons (List[str | int] | List[List] | Dict | LabelMapper): Source neuron 
             types, bodyIds, or patterns to analyze. Supports:
             - Simple list: ['MBON14.*_R', 'PPL101.*_R']
             - Nested list (groups): [['MBON14.*_R'], ['MBON06.*_R']]
+            - Dict filter: {'contains': 'DN'}  # Types containing 'DN'
+            - Dict filter: {'startswith': ['aMe', 'Mi']}  # Types starting with prefixes
+            - Dict filter: {'endswith': '_R'}  # Types ending with suffix
+            - Dict filter: {'regex': r'DN[a-z]\d+'}  # Regex pattern
+            - Dict filter: {'contains': 'DN', 'endswith': '_R'}  # Combined (AND)
             - LabelMapper: for dataset-specific neuron mapping
             
-        target_neurons (List[str | int] | List[List] | LabelMapper): Target neuron
+        target_neurons (List[str | int] | List[List] | Dict | LabelMapper): Target neuron
             types, bodyIds, or patterns. Same format options as source_neurons.
             
         max_interlayer (int): Maximum number of intermediate hops for path finding.
@@ -101,6 +106,22 @@ class ComparisonParameters:
         ...     source_labels=['MBON14_grp', 'MBON06_grp'],
         ...     target_labels=['KCg-d_grp', 'PPL101_grp'],
         ... )
+        >>>
+        >>> # With dict-based filters (flexible neuron selection)
+        >>> params = ComparisonParameters(
+        ...     datasets=['hemibrain:v1.2.1', 'male-cns:v0.9'],
+        ...     source_neurons={'contains': 'DN'},        # All descending neurons
+        ...     target_neurons={'startswith': ['LC', 'LPLC']},  # LC and LPLC types
+        ...     source_labels='DN_neurons',
+        ...     target_labels='LC_neurons',
+        ... )
+        >>>
+        >>> # Dict filter with AND logic
+        >>> params = ComparisonParameters(
+        ...     datasets=['hemibrain:v1.2.1', 'male-cns:v0.9'],
+        ...     source_neurons={'contains': 'DN', 'endswith': '_R'},  # DN types ending in _R
+        ...     target_neurons={'regex': r'MBON\\d+'},  # MBON followed by numbers
+        ... )
     """
     
     # Primary configuration (REQUIRED)
@@ -112,13 +133,15 @@ class ComparisonParameters:
     """Short display names for datasets in visualizations (e.g., ['Hemi', 'Male', 'FAFB']).
     If provided, must match length of datasets list. Falls back to sanitized dataset names if None."""
     
-    source_neurons: Union[List[Union[str, int]], List[List[Union[str, int]]], Any] = field(default_factory=list)
+    source_neurons: Union[List[Union[str, int]], List[List[Union[str, int]]], Dict, Any] = field(default_factory=list)
     """Source neuron types, bodyIds, or regex patterns. Supports:
     - Simple list: ['MBON14.*_R', 'PPL101.*_R']
     - Grouped list: [['MBON14.*_R'], ['MBON06.*_R']] for separate group analysis
+    - Dict filter: {'contains': 'DN'}, {'startswith': 'aMe'}, {'endswith': '_R'}, {'regex': 'pattern'}
+    - Dict combined: {'contains': 'DN', 'endswith': '_R'} (AND logic)
     - LabelMapper object for dataset-specific neuron mapping"""
     
-    target_neurons: Union[List[Union[str, int]], List[List[Union[str, int]]], Any] = field(default_factory=list)
+    target_neurons: Union[List[Union[str, int]], List[List[Union[str, int]]], Dict, Any] = field(default_factory=list)
     """Target neuron types, bodyIds, or regex patterns. Same format options as source_neurons."""
     
     max_interlayer: int = 2
@@ -530,19 +553,20 @@ class ComparisonParameters:
         'mushroombody': 'U',
     }
     
-    def _get_neuron_abbreviation(self, neurons: Union[List, Any], labels: List[str] = None) -> str:
+    def _get_neuron_abbreviation(self, neurons: Union[List, Dict, Any], labels: List[str] = None) -> str:
         """
         Generate a short abbreviation for neuron list, similar to FindNeuronConnection's naming.
         
         Logic:
         - If labels are provided, use the first label
         - If LabelMapper, use first source/target label from the mapper
+        - If dict filter: generate name from filter operators (e.g., 'DN_R' for contains+endswith)
         - If list with single item: use that item (remove .* patterns)
         - If list with multiple items: use first item + '_etc'
         - If empty: return 'ALL'
         
         Args:
-            neurons: Neuron list, nested list, or LabelMapper
+            neurons: Neuron list, nested list, dict filter, or LabelMapper
             labels: Optional custom labels
             
         Returns:
@@ -566,7 +590,31 @@ class ComparisonParameters:
                 else:
                     return str(std_labels[0]).replace('.*', '') + '_etc'
         
-        # Priority 3: Handle list
+        # Priority 3: Handle dict-based filter
+        if isinstance(neurons, dict):
+            # Build abbreviation from filter values
+            parts = []
+            for operator in ['contains', 'startswith', 'endswith', 'regex', 'exact']:
+                if operator in neurons:
+                    values = neurons[operator]
+                    if not isinstance(values, list):
+                        values = [values]
+                    # Use first value, clean it up
+                    if values:
+                        part = str(values[0]).replace('.*', '').replace(r'\d+', '').replace(r'\d', '')
+                        # Truncate long patterns
+                        if len(part) > 10:
+                            part = part[:10]
+                        parts.append(part)
+                        if len(values) > 1:
+                            parts.append('etc')
+                        break  # Use first operator found
+            
+            if parts:
+                return '_'.join(parts)
+            return 'filter'
+        
+        # Priority 4: Handle list
         if not neurons:
             return 'ALL'
         
