@@ -787,12 +787,12 @@ def _generate_similarity_section(analyzer, dataset_names: List[str], thresholds:
             <div class="section-content">
                 <p style="margin-bottom: 20px; color: var(--secondary-color);">
                     Pairwise similarity between datasets at each threshold.<br>
-                    <strong>UNION-BASED RANK METRICS</strong> [0, 1] (include all items, 0 for missing):<br>
-                    &nbsp;&nbsp;• <strong>Edge Rank</strong> = Spearman rank correlation on union of edges<br>
-                    &nbsp;&nbsp;• <strong>Path Rank</strong> = Spearman rank correlation on union of paths<br>
+                    <strong>ALL-EDGE METRICS</strong> (compare all edges, assign 0 to missing edges):<br>
+                    &nbsp;&nbsp;• <strong>Edge Rank</strong> [-1, 1]: Spearman correlation comparing how edges are <em>ranked by weight</em> across datasets<br>
+                    &nbsp;&nbsp;• <strong>Cosine</strong> [0, 1]: Measures <em>directional similarity</em> of weight vectors (scale-invariant, ignores magnitude)<br>
                     <strong>SET-BASED METRICS</strong>:<br>
-                    &nbsp;&nbsp;• <strong>Jaccard</strong> [0, 1] = edge set overlap |A∩B|/|A∪B|<br>
-                    &nbsp;&nbsp;• <strong>Spearman (shared)</strong> [-1, 1] = rank correlation of shared edge weights only (N/A if &lt;3 shared)
+                    &nbsp;&nbsp;• <strong>Jaccard</strong> [0, 1]: Binary edge <em>overlap ratio</em> |A∩B|/|A∪B| (ignores weights)<br>
+                    &nbsp;&nbsp;• <strong>Spearman (shared)</strong> [-1, 1]: Rank correlation on <em>shared edges only</em> (N/A if &lt;3 shared edges)
                 </p>
 """)
     
@@ -843,38 +843,39 @@ def _generate_similarity_section(analyzer, dataset_names: List[str], thresholds:
         
         n = len(available)
         # Initialize similarity matrices for 4 key metrics
-        jaccard = [[1.0 if i == j else 0.0 for j in range(n)] for i in range(n)]
-        spearman_sim = [[1.0 if i == j else 0.0 for j in range(n)] for i in range(n)]
-        edge_rank_sim = [[1.0 if i == j else 0.0 for j in range(n)] for i in range(n)]
-        path_rank_sim = [[1.0 if i == j else 0.0 for j in range(n)] for i in range(n)]
+        # Diagonal is always 1.0 for self-comparison
+        jaccard = [[1.0 if i == j else None for j in range(n)] for i in range(n)]
+        spearman_sim = [[1.0 if i == j else None for j in range(n)] for i in range(n)]
+        edge_rank_sim = [[1.0 if i == j else None for j in range(n)] for i in range(n)]
+        cosine_sim = [[1.0 if i == j else None for j in range(n)] for i in range(n)]
         
         for _, row in similarities.iterrows():
             d1, d2 = row['dataset_1'], row['dataset_2']
             if d1 in available and d2 in available:
                 i1, i2 = available.index(d1), available.index(d2)
-                jac = row.get('jaccard_similarity', 0)
+                jac = row.get('jaccard_similarity', None)
                 # Spearman returns raw correlation in [-1, 1], NaN for undefined
                 spearman_val = row.get('spearman_rank_correlation', None)
-                edge_rank_val = row.get('edge_rank_correlation', 0)
-                path_rank_val = row.get('path_rank_correlation', 0)
-                # Handle NaN values - use None for Spearman to show as "N/A"
-                if pd.isna(jac): jac = 0
-                if pd.isna(edge_rank_val): edge_rank_val = 0
-                if pd.isna(path_rank_val): path_rank_val = 0
-                # Keep spearman_val as None if NaN (will be displayed as "N/A")
+                # Edge rank now returns raw correlation in [-1, 1], NaN for undefined
+                edge_rank_val = row.get('edge_rank_correlation', None)
+                cosine_val = row.get('cosine_similarity', None)
+                # Handle NaN values - use None to show as "N/A"
+                if pd.isna(jac): jac = None
+                if pd.isna(edge_rank_val): edge_rank_val = None
+                if pd.isna(cosine_val): cosine_val = None
                 if pd.isna(spearman_val): spearman_val = None
                 # Fill symmetric matrices
                 jaccard[i1][i2] = jaccard[i2][i1] = jac
                 spearman_sim[i1][i2] = spearman_sim[i2][i1] = spearman_val
                 edge_rank_sim[i1][i2] = edge_rank_sim[i2][i1] = edge_rank_val
-                path_rank_sim[i1][i2] = path_rank_sim[i2][i1] = path_rank_val
+                cosine_sim[i1][i2] = cosine_sim[i2][i1] = cosine_val
         
         # Calculate cell size for square cells - smaller to fit 4 in a row
         cell_size = 50
         # Chart size scales with number of datasets but caps for 4-in-row layout
         chart_size = min(n * cell_size + 80, 200)
         
-        # Always display 4 metrics: Edge Rank, Path Rank, Jaccard, Spearman
+        # Always display 4 metrics: Edge Rank, Cosine, Jaccard, Spearman
         num_metrics = 4
         max_width_pct = f"{100 // num_metrics}%" if num_metrics <= 4 else "25%"
         
@@ -890,10 +891,10 @@ def _generate_similarity_section(analyzer, dataset_names: List[str], thresholds:
                             <h5 style="font-size: 10px; margin: 0 0 4px 0; color: #1e40af; text-align: center;">🔷 Edge Rank</h5>
                             <div id="edge_rank_{threshold}" style="width: 100%; height: {chart_size}px;"></div>
                         </div>
-                        <!-- Path Rank Correlation (union) -->
+                        <!-- Cosine Similarity (union) -->
                         <div style="flex: 1; min-width: {chart_size}px; max-width: {max_width_pct}; background: #eff6ff; border-radius: 6px; padding: 8px;">
-                            <h5 style="font-size: 10px; margin: 0 0 4px 0; color: #1e40af; text-align: center;">🔷 Path Rank</h5>
-                            <div id="path_rank_{threshold}" style="width: 100%; height: {chart_size}px;"></div>
+                            <h5 style="font-size: 10px; margin: 0 0 4px 0; color: #1e40af; text-align: center;">🔷 Cosine</h5>
+                            <div id="cosine_{threshold}" style="width: 100%; height: {chart_size}px;"></div>
                         </div>
                         <!-- Jaccard -->
                         <div style="flex: 1; min-width: {chart_size}px; max-width: {max_width_pct}; background: #fef3c7; border-radius: 6px; padding: 8px;">
@@ -907,7 +908,7 @@ def _generate_similarity_section(analyzer, dataset_names: List[str], thresholds:
                         </div>
                     </div>
                     <p style="font-size: 0.75em; color: #64748b; margin-top: 8px; text-align: center;">
-                        🔷 Union-based (all items, 0 for missing) | 🔶 Set-based (shared items only)
+                        🔷 All-edge (compare all edges, 0 for missing) | 🔶 Set-based (shared edges only)
                     </p>
                 </div>
                 <script>
@@ -915,13 +916,14 @@ def _generate_similarity_section(analyzer, dataset_names: List[str], thresholds:
                         const labels = {json.dumps(labels)};
                         const jaccard = {json.dumps(jaccard)};
                         const edgeRankSim = {json.dumps(edge_rank_sim)};
-                        const pathRankSim = {json.dumps(path_rank_sim)};
+                        const cosineSim = {json.dumps(cosine_sim)};
                         const spearmanSim = {json.dumps(spearman_sim)};
                         const layout = {{
                             margin: {{ l: 45, r: 10, t: 10, b: 45 }},
                             xaxis: {{ tickangle: -45, scaleanchor: 'y', constrain: 'domain', tickfont: {{size: 8}} }},
                             yaxis: {{ autorange: 'reversed', constrain: 'domain', tickfont: {{size: 8}} }}
                         }};
+                        // Annotation function for [0, 1] metrics
                         const makeAnnotations = (data, labels) => data.flatMap((row, i) => 
                             row.map((val, j) => ({{
                                 x: labels[j], y: labels[i], 
@@ -929,8 +931,8 @@ def _generate_similarity_section(analyzer, dataset_names: List[str], thresholds:
                                 showarrow: false,
                                 font: {{ color: (val === null || val > 0.5) ? 'white' : 'black', size: 10 }}
                             }})));
-                        // Annotation function for Spearman with [-1, 1] range
-                        const makeSpearmanAnnotations = (data, labels) => data.flatMap((row, i) => 
+                        // Annotation function for [-1, 1] range (Edge Rank, Spearman)
+                        const makeDivergingAnnotations = (data, labels) => data.flatMap((row, i) => 
                             row.map((val, j) => ({{
                                 x: labels[j], y: labels[i], 
                                 text: val === null ? 'N/A' : val.toFixed(2), 
@@ -939,27 +941,28 @@ def _generate_similarity_section(analyzer, dataset_names: List[str], thresholds:
                             }})));
                         // Use consistent green colorscale: higher value = darker green
                         const greenScale = [[0, '#ffffff'], [0.3, '#c6efce'], [0.6, '#22c55e'], [1, '#166534']];
-                        // Diverging colorscale for Spearman [-1, 1]: red (negative) -> white (0) -> green (positive)
+                        // Diverging colorscale for [-1, 1]: red (negative) -> white (0) -> green (positive)
                         const divergingScale = [[0, '#dc2626'], [0.5, '#ffffff'], [1, '#166534']];
-                        // Union-based rank metrics (blue background)
+                        // Edge Rank uses diverging scale [-1, 1] (all-edge, blue background)
                         Plotly.newPlot('edge_rank_{threshold}', [{{
                             z: edgeRankSim, x: labels, y: labels, type: 'heatmap',
+                            colorscale: divergingScale, zmin: -1, zmax: 1, showscale: false
+                        }}], {{...layout, annotations: makeDivergingAnnotations(edgeRankSim, labels)}}, {{responsive: true}});
+                        // Cosine uses [0, 1] scale (all-edge, blue background)
+                        Plotly.newPlot('cosine_{threshold}', [{{
+                            z: cosineSim, x: labels, y: labels, type: 'heatmap',
                             colorscale: greenScale, zmin: 0, zmax: 1, showscale: false
-                        }}], {{...layout, annotations: makeAnnotations(edgeRankSim, labels)}}, {{responsive: true}});
-                        Plotly.newPlot('path_rank_{threshold}', [{{
-                            z: pathRankSim, x: labels, y: labels, type: 'heatmap',
-                            colorscale: greenScale, zmin: 0, zmax: 1, showscale: false
-                        }}], {{...layout, annotations: makeAnnotations(pathRankSim, labels)}}, {{responsive: true}});
-                        // Set-based metrics (yellow background)
+                        }}], {{...layout, annotations: makeAnnotations(cosineSim, labels)}}, {{responsive: true}});
+                        // Jaccard uses [0, 1] scale (set-based, yellow background)
                         Plotly.newPlot('jaccard_{threshold}', [{{
                             z: jaccard, x: labels, y: labels, type: 'heatmap',
                             colorscale: greenScale, zmin: 0, zmax: 1, showscale: false
                         }}], {{...layout, annotations: makeAnnotations(jaccard, labels)}}, {{responsive: true}});
-                        // Spearman uses diverging scale [-1, 1]
+                        // Spearman uses diverging scale [-1, 1] (set-based, yellow background)
                         Plotly.newPlot('spearman_{threshold}', [{{
                             z: spearmanSim, x: labels, y: labels, type: 'heatmap',
                             colorscale: divergingScale, zmin: -1, zmax: 1, showscale: false
-                        }}], {{...layout, annotations: makeSpearmanAnnotations(spearmanSim, labels)}}, {{responsive: true}});
+                        }}], {{...layout, annotations: makeDivergingAnnotations(spearmanSim, labels)}}, {{responsive: true}});
                     }})();
                 </script>
 """)
@@ -3438,17 +3441,9 @@ def _generate_statistics_section(analyzer, dataset_names: List[str], thresholds:
                 </script>
 """)
     
-    # Generate Jaccard similarity line plot across thresholds
-    jaccard_plot_html = _generate_jaccard_similarity_plot(analyzer, dataset_names, thresholds, nickname_map)
-    html_parts.append(jaccard_plot_html)
-    
-    # Generate Edge Rank Correlation line plot across thresholds
-    edge_rank_plot_html = _generate_edge_rank_correlation_plot(analyzer, dataset_names, thresholds, nickname_map)
-    html_parts.append(edge_rank_plot_html)
-    
-    # Generate Path Rank Correlation line plot across thresholds
-    path_rank_plot_html = _generate_path_rank_correlation_plot(analyzer, dataset_names, thresholds, nickname_map)
-    html_parts.append(path_rank_plot_html)
+    # Generate unified 2x2 Similarity Trends plot across thresholds
+    similarity_trends_html = _generate_similarity_trends_2x2_plot(analyzer, dataset_names, thresholds, nickname_map)
+    html_parts.append(similarity_trends_html)
     
     html_parts.append("""
             </div>
@@ -3456,6 +3451,204 @@ def _generate_statistics_section(analyzer, dataset_names: List[str], thresholds:
 """)
     
     return ''.join(html_parts)
+
+
+def _generate_similarity_trends_2x2_plot(analyzer, dataset_names: List[str], thresholds: List[int],
+                                          nickname_map: Dict[str, str]) -> str:
+    """
+    Generate a 2x2 subplot showing all 4 similarity metrics across thresholds.
+    
+    Layout:
+        Row 1: Jaccard (set overlap) | Edge Rank (all-edge ranking)
+        Row 2: Cosine (all-edge directional) | Spearman (shared-edge ranking)
+    """
+    from itertools import combinations
+    from .metrics import ComparisonMetrics
+    import json
+    
+    metrics = ComparisonMetrics()
+    
+    # Collect data for all 4 metrics
+    # Structure: {metric_name: {(d1, d2): {threshold: value}}}
+    all_pair_data = {
+        'jaccard': {},
+        'edge_rank': {},
+        'cosine': {},
+        'spearman': {}
+    }
+    
+    available_pairs = []
+    for i, d1 in enumerate(dataset_names):
+        for d2 in dataset_names[i+1:]:
+            pair_key = (d1, d2)
+            available_pairs.append(pair_key)
+            for metric in all_pair_data:
+                all_pair_data[metric][pair_key] = {}
+    
+    for threshold in thresholds:
+        aligned = analyzer.get_aligned_data(threshold)
+        if aligned.empty:
+            continue
+        
+        available = [d for d in dataset_names if d in aligned.columns]
+        
+        for i, d1 in enumerate(available):
+            for d2 in available[i+1:]:
+                pair_key = (d1, d2)
+                if pair_key not in all_pair_data['jaccard']:
+                    pair_key = (d2, d1)
+                
+                # Jaccard (set overlap)
+                c1, c2 = aligned[d1], aligned[d2]
+                s1, s2 = set(aligned.index[c1 > 0]), set(aligned.index[c2 > 0])
+                inter, union = len(s1 & s2), len(s1 | s2)
+                jac = inter / union if union > 0 else 0
+                all_pair_data['jaccard'][pair_key][threshold] = jac
+                
+                # Get edge weights as Series
+                weights_a = aligned[d1].dropna()
+                weights_b = aligned[d2].dropna()
+                
+                # Edge Rank (all edges, 0 for missing)
+                edge_rank = metrics.calculate_edge_list_rank_correlation(weights_a, weights_b)
+                all_pair_data['edge_rank'][pair_key][threshold] = edge_rank
+                
+                # Cosine (all edges, 0 for missing)
+                cosine = metrics.calculate_cosine_similarity(weights_a, weights_b)
+                all_pair_data['cosine'][pair_key][threshold] = cosine
+                
+                # Spearman (shared edges only)
+                spearman = metrics.calculate_spearman_rank_correlation(weights_a, weights_b)
+                all_pair_data['spearman'][pair_key][threshold] = spearman
+    
+    # Build Plotly subplot data
+    colors = ['#3b82f6', '#f97316', '#22c55e', '#ef4444', '#8b5cf6', '#06b6d4', '#ec4899', '#eab308']
+    
+    # Helper function to create traces for a metric
+    # Plotly subplot indices: row1col1=1, row1col2=2, row2col1=3, row2col2=4
+    def make_traces(metric_data, subplot_idx, show_legend=False):
+        traces = []
+        axis_suffix = '' if subplot_idx == 1 else str(subplot_idx)
+        
+        for idx, pair_key in enumerate(available_pairs):
+            d1, d2 = pair_key
+            n1, n2 = nickname_map.get(d1, d1), nickname_map.get(d2, d2)
+            
+            x_vals = []
+            y_vals = []
+            for t in thresholds:
+                if t in metric_data[pair_key]:
+                    val = metric_data[pair_key][t]
+                    if val is not None and not (isinstance(val, float) and np.isnan(val)):
+                        x_vals.append(t)
+                        y_vals.append(val)
+            
+            if x_vals:
+                color = colors[idx % len(colors)]
+                traces.append({
+                    'x': x_vals,
+                    'y': y_vals,
+                    'type': 'scatter',
+                    'mode': 'lines+markers',
+                    'name': f'{n1} vs {n2}',
+                    'line': {'color': color, 'width': 2},
+                    'marker': {'size': 6},
+                    'legendgroup': f'{n1} vs {n2}',
+                    'showlegend': show_legend,
+                    'xaxis': f'x{axis_suffix}',
+                    'yaxis': f'y{axis_suffix}'
+                })
+        
+        # Add average trace
+        avg_x = []
+        avg_y = []
+        for t in thresholds:
+            vals = [metric_data[pk].get(t) for pk in available_pairs if t in metric_data[pk]]
+            vals = [v for v in vals if v is not None and not (isinstance(v, float) and np.isnan(v))]
+            if vals:
+                avg_x.append(t)
+                avg_y.append(sum(vals) / len(vals))
+        
+        if avg_x:
+            traces.append({
+                'x': avg_x,
+                'y': avg_y,
+                'type': 'scatter',
+                'mode': 'lines+markers',
+                'name': 'Average',
+                'line': {'color': '#64748b', 'width': 3, 'dash': 'dash'},
+                'marker': {'size': 8, 'symbol': 'star'},
+                'legendgroup': 'Average',
+                'showlegend': show_legend,
+                'xaxis': f'x{axis_suffix}',
+                'yaxis': f'y{axis_suffix}'
+            })
+        
+        return traces
+    
+    # Build all traces (subplot indices: 1=top-left, 2=top-right, 3=bottom-left, 4=bottom-right)
+    all_traces = []
+    all_traces.extend(make_traces(all_pair_data['jaccard'], 1, show_legend=True))   # Top-left: Jaccard
+    all_traces.extend(make_traces(all_pair_data['edge_rank'], 2, show_legend=False)) # Top-right: Edge Rank
+    all_traces.extend(make_traces(all_pair_data['cosine'], 3, show_legend=False))    # Bottom-left: Cosine
+    all_traces.extend(make_traces(all_pair_data['spearman'], 4, show_legend=False))  # Bottom-right: Spearman
+    
+    # Layout with 2x2 subplots
+    layout = {
+        'grid': {'rows': 2, 'columns': 2, 'pattern': 'independent'},
+        'annotations': [
+            {'text': '<b>Jaccard</b> (set overlap) [0,1]', 'x': 0.22, 'y': 1.08, 'xref': 'paper', 'yref': 'paper', 'showarrow': False, 'font': {'size': 13}},
+            {'text': '<b>Edge Rank</b> (all edges) [-1,1]', 'x': 0.78, 'y': 1.08, 'xref': 'paper', 'yref': 'paper', 'showarrow': False, 'font': {'size': 13}},
+            {'text': '<b>Cosine</b> (all edges) [0,1]', 'x': 0.22, 'y': 0.45, 'xref': 'paper', 'yref': 'paper', 'showarrow': False, 'font': {'size': 13}},
+            {'text': '<b>Spearman</b> (shared only) [-1,1]', 'x': 0.78, 'y': 0.45, 'xref': 'paper', 'yref': 'paper', 'showarrow': False, 'font': {'size': 13}}
+        ],
+        # Top-left: Jaccard [0, 1]
+        'xaxis': {'title': '', 'type': 'category', 'domain': [0, 0.45]},
+        'yaxis': {'title': 'Similarity', 'range': [0, 1], 'domain': [0.55, 1]},
+        # Top-right: Edge Rank [-1, 1]
+        'xaxis2': {'title': '', 'type': 'category', 'domain': [0.55, 1]},
+        'yaxis2': {'title': '', 'range': [-1, 1], 'domain': [0.55, 1]},
+        # Bottom-left: Cosine [0, 1]
+        'xaxis3': {'title': 'Threshold', 'type': 'category', 'domain': [0, 0.45]},
+        'yaxis3': {'title': 'Similarity', 'range': [0, 1], 'domain': [0, 0.42]},
+        # Bottom-right: Spearman [-1, 1]
+        'xaxis4': {'title': 'Threshold', 'type': 'category', 'domain': [0.55, 1]},
+        'yaxis4': {'title': '', 'range': [-1, 1], 'domain': [0, 0.42]},
+        # Legend and margins
+        'legend': {'orientation': 'h', 'y': -0.15, 'x': 0.5, 'xanchor': 'center'},
+        'margin': {'t': 60, 'b': 100, 'l': 60, 'r': 30},
+        'hovermode': 'x unified',
+        # Zero reference lines for [-1, 1] plots
+        'shapes': [
+            {'type': 'line', 'x0': 0, 'x1': 1, 'y0': 0, 'y1': 0, 'xref': 'x2 domain', 'yref': 'y2', 'line': {'color': 'gray', 'width': 1, 'dash': 'dot'}},
+            {'type': 'line', 'x0': 0, 'x1': 1, 'y0': 0, 'y1': 0, 'xref': 'x4 domain', 'yref': 'y4', 'line': {'color': 'gray', 'width': 1, 'dash': 'dot'}}
+        ]
+    }
+    
+    plotly_data = json.dumps({'data': all_traces, 'layout': layout})
+    
+    return f'''
+        <div class="card" style="margin-top: 30px;">
+            <h3>Similarity Trends Across Thresholds</h3>
+            <p style="color: var(--secondary-color); font-size: 0.85rem; margin-bottom: 15px;">
+                How similarity metrics change with increasing threshold. <strong>Edge Rank</strong> and <strong>Cosine</strong> compare 
+                all edges (assigning 0 to missing edges), while <strong>Spearman (shared)</strong> only compares edges present in both datasets.
+                The dashed line shows the average across all dataset pairs.
+            </p>
+            <div id="similarity_trends_2x2" style="width: 100%; height: 700px;"></div>
+            <script>
+                (function() {{
+                    try {{
+                        var plotData = {plotly_data};
+                        Plotly.newPlot('similarity_trends_2x2', plotData.data, plotData.layout, {{responsive: true}});
+                    }} catch(e) {{
+                        console.error("Failed to render similarity trends plot:", e);
+                        document.getElementById('similarity_trends_2x2').innerHTML = '<p style="text-align:center;color:#999;">Chart failed to load</p>';
+                    }}
+                }})();
+            </script>
+        </div>
+    '''
 
 
 def _generate_jaccard_similarity_plot(analyzer, dataset_names: List[str], thresholds: List[int],
@@ -3624,8 +3817,11 @@ def _generate_edge_rank_correlation_plot(analyzer, dataset_names: List[str], thr
         y_vals = []
         for t in thresholds:
             if t in pair_data[pair_key]:
-                x_vals.append(t)
-                y_vals.append(pair_data[pair_key][t])
+                val = pair_data[pair_key][t]
+                # Skip NaN values
+                if val is not None and not (isinstance(val, float) and np.isnan(val)):
+                    x_vals.append(t)
+                    y_vals.append(val)
         
         if x_vals:
             color = colors[idx % len(colors)]
@@ -3639,12 +3835,13 @@ def _generate_edge_rank_correlation_plot(analyzer, dataset_names: List[str], thr
                 'marker': {'size': 8}
             })
     
-    # Calculate average across all pairs
+    # Calculate average across all pairs, ignoring NaN values
     avg_x = []
     avg_y = []
     for t in thresholds:
         vals = [pair_data[pk].get(t) for pk in available_pairs if t in pair_data[pk]]
-        vals = [v for v in vals if v is not None]
+        # Filter out None and NaN values
+        vals = [v for v in vals if v is not None and not (isinstance(v, float) and np.isnan(v))]
         if vals:
             avg_x.append(t)
             avg_y.append(sum(vals) / len(vals))
@@ -3663,7 +3860,7 @@ def _generate_edge_rank_correlation_plot(analyzer, dataset_names: List[str], thr
     layout = {
         'title': {'text': 'Edge Rank Correlation Across Thresholds', 'font': {'size': 16}},
         'xaxis': {'title': 'Threshold', 'type': 'category'},
-        'yaxis': {'title': 'Edge Rank Correlation', 'range': [0, 1]},
+        'yaxis': {'title': 'Edge Rank Correlation', 'range': [-1, 1]},
         'legend': {'orientation': 'h', 'y': -0.2, 'x': 0.5, 'xanchor': 'center'},
         'margin': {'t': 50, 'b': 80, 'l': 60, 'r': 30},
         'hovermode': 'x unified'
@@ -3675,7 +3872,7 @@ def _generate_edge_rank_correlation_plot(analyzer, dataset_names: List[str], thr
         <div class="card" style="margin-top: 30px;">
             <h3>Edge Rank Correlation Trend Across Thresholds</h3>
             <p style="color: var(--secondary-color); font-size: 0.85rem; margin-bottom: 15px;">
-                Compares the ranking of edges by weight (using union of edges). Higher values indicate more similar edge importance rankings. The dashed line shows the average across all pairs.
+                Compares the ranking of edges by weight (using union of edges). Values range from -1 (inverse ranking) to +1 (identical ranking). The dashed line shows the average across all pairs.
             </p>
             <div id="edge_rank_trend_plot" style="width: 100%; height: 1050px;"></div>
             <script>
@@ -3686,6 +3883,134 @@ def _generate_edge_rank_correlation_plot(analyzer, dataset_names: List[str], thr
                     }} catch(e) {{
                         console.error("Failed to render Edge Rank Correlation trend plot:", e);
                         document.getElementById('edge_rank_trend_plot').innerHTML = '<p style="text-align:center;color:#999;">Chart failed to load</p>';
+                    }}
+                }})();
+            </script>
+        </div>
+    '''
+
+
+def _generate_cosine_similarity_trend_plot(analyzer, dataset_names: List[str], thresholds: List[int],
+                                          nickname_map: Dict[str, str]) -> str:
+    """Generate a line plot showing Cosine Similarity across thresholds for all dataset pairs."""
+    from itertools import combinations
+    from .metrics import ComparisonMetrics
+    
+    metrics = ComparisonMetrics()
+    
+    # Collect cosine similarities for each pair at each threshold
+    pair_data = {}  # {(d1, d2): {threshold: cosine_sim}}
+    available_pairs = []
+    
+    for i, d1 in enumerate(dataset_names):
+        for d2 in dataset_names[i+1:]:
+            pair_key = (d1, d2)
+            pair_data[pair_key] = {}
+            available_pairs.append(pair_key)
+    
+    for threshold in thresholds:
+        try:
+            aligned = analyzer.get_aligned_data(threshold)
+        except:
+            continue
+        
+        if aligned is None or aligned.empty:
+            continue
+        
+        available = [d for d in dataset_names if d in aligned.columns]
+        
+        for i, d1 in enumerate(available):
+            for d2 in available[i+1:]:
+                pair_key = (d1, d2)
+                if pair_key not in pair_data:
+                    pair_key = (d2, d1)  # Try reverse
+                
+                # Get edge weights as Series
+                weights_a = aligned[d1].dropna()
+                weights_b = aligned[d2].dropna()
+                
+                # Calculate cosine similarity
+                cosine = metrics.calculate_cosine_similarity(weights_a, weights_b)
+                pair_data[pair_key][threshold] = cosine
+    
+    # Build traces for Plotly
+    traces = []
+    colors = ['#3b82f6', '#f97316', '#22c55e', '#ef4444', '#8b5cf6', '#06b6d4', '#ec4899', '#eab308']
+    
+    for idx, pair_key in enumerate(available_pairs):
+        d1, d2 = pair_key
+        n1, n2 = nickname_map.get(d1, d1), nickname_map.get(d2, d2)
+        
+        x_vals = []
+        y_vals = []
+        for t in thresholds:
+            if t in pair_data[pair_key]:
+                val = pair_data[pair_key][t]
+                # Skip NaN values
+                if val is not None and not (isinstance(val, float) and np.isnan(val)):
+                    x_vals.append(t)
+                    y_vals.append(val)
+        
+        if x_vals:
+            color = colors[idx % len(colors)]
+            traces.append({
+                'x': x_vals,
+                'y': y_vals,
+                'type': 'scatter',
+                'mode': 'lines+markers',
+                'name': f'{n1} vs {n2}',
+                'line': {'color': color, 'width': 2},
+                'marker': {'size': 8}
+            })
+    
+    # Calculate average across all pairs, ignoring NaN values
+    avg_x = []
+    avg_y = []
+    for t in thresholds:
+        vals = [pair_data[pk].get(t) for pk in available_pairs if t in pair_data[pk]]
+        # Filter out None and NaN values
+        vals = [v for v in vals if v is not None and not (isinstance(v, float) and np.isnan(v))]
+        if vals:
+            avg_x.append(t)
+            avg_y.append(sum(vals) / len(vals))
+    
+    if avg_x:
+        traces.append({
+            'x': avg_x,
+            'y': avg_y,
+            'type': 'scatter',
+            'mode': 'lines+markers',
+            'name': 'Average',
+            'line': {'color': '#64748b', 'width': 3, 'dash': 'dash'},
+            'marker': {'size': 10, 'symbol': 'star'}
+        })
+    
+    layout = {
+        'title': {'text': 'Cosine Similarity Across Thresholds', 'font': {'size': 16}},
+        'xaxis': {'title': 'Threshold', 'type': 'category'},
+        'yaxis': {'title': 'Cosine Similarity', 'range': [0, 1]},
+        'legend': {'orientation': 'h', 'y': -0.2, 'x': 0.5, 'xanchor': 'center'},
+        'margin': {'t': 50, 'b': 80, 'l': 60, 'r': 30},
+        'hovermode': 'x unified'
+    }
+    
+    plotly_data = json.dumps({'data': traces, 'layout': layout})
+    
+    return f'''
+        <div class="card" style="margin-top: 30px;">
+            <h3>Cosine Similarity Trend Across Thresholds</h3>
+            <p style="color: var(--secondary-color); font-size: 0.85rem; margin-bottom: 15px;">
+                Compares edge weight distributions using cosine similarity (scale-invariant). Higher values indicate more similar connectivity patterns. The dashed line shows the average across all pairs (N/A values excluded).
+            </p>
+            <div id="cosine_trend_plot" style="width: 100%; height: 1050px;"></div>
+            <script>
+                (function() {{
+                    try {{
+                        var plotData = {plotly_data};
+                        Plotly.newPlot('cosine_trend_plot', plotData.data, plotData.layout, {{responsive: true}});
+                    }} catch(e) {{
+                        console.error("Failed to render Cosine Similarity trend plot:", e);
+                        document.getElementById('cosine_trend_plot').innerHTML = '<p style="text-align:center;color:#999;">Chart failed to load</p>';
                     }}
                 }})();
             </script>
@@ -3748,8 +4073,11 @@ def _generate_path_rank_correlation_plot(analyzer, dataset_names: List[str], thr
         y_vals = []
         for t in thresholds:
             if t in pair_data[pair_key]:
-                x_vals.append(t)
-                y_vals.append(pair_data[pair_key][t])
+                val = pair_data[pair_key][t]
+                # Skip NaN values in plotting
+                if val is not None and not (isinstance(val, float) and np.isnan(val)):
+                    x_vals.append(t)
+                    y_vals.append(val)
         
         if x_vals:
             color = colors[idx % len(colors)]
@@ -3763,12 +4091,13 @@ def _generate_path_rank_correlation_plot(analyzer, dataset_names: List[str], thr
                 'marker': {'size': 8}
             })
     
-    # Calculate average across all pairs
+    # Calculate average across all pairs (excluding NaN values)
     avg_x = []
     avg_y = []
     for t in thresholds:
         vals = [pair_data[pk].get(t) for pk in available_pairs if t in pair_data[pk]]
-        vals = [v for v in vals if v is not None]
+        # Filter out None and NaN values
+        vals = [v for v in vals if v is not None and not (isinstance(v, float) and np.isnan(v))]
         if vals:
             avg_x.append(t)
             avg_y.append(sum(vals) / len(vals))
@@ -3787,10 +4116,16 @@ def _generate_path_rank_correlation_plot(analyzer, dataset_names: List[str], thr
     layout = {
         'title': {'text': 'Path Rank Correlation Across Thresholds', 'font': {'size': 16}},
         'xaxis': {'title': 'Threshold', 'type': 'category'},
-        'yaxis': {'title': 'Path Rank Correlation', 'range': [0, 1]},
+        'yaxis': {'title': 'Path Rank Correlation', 'range': [-1, 1]},
         'legend': {'orientation': 'h', 'y': -0.2, 'x': 0.5, 'xanchor': 'center'},
         'margin': {'t': 50, 'b': 80, 'l': 60, 'r': 30},
-        'hovermode': 'x unified'
+        'hovermode': 'x unified',
+        'shapes': [{
+            'type': 'line',
+            'x0': 0, 'x1': 1, 'xref': 'paper',
+            'y0': 0, 'y1': 0,
+            'line': {'color': 'gray', 'width': 1, 'dash': 'dot'}
+        }]
     }
     
     plotly_data = json.dumps({'data': traces, 'layout': layout})

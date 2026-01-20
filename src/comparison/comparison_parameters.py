@@ -226,6 +226,16 @@ class ComparisonParameters:
     _use_cache: bool = field(default=True, repr=False)
     """Internal: caching enabled for performance"""
     
+    cache_only: bool = False
+    """If True, operate in offline mode using only local cache without connecting to NeuPrint server.
+    Useful when:
+    - The server is unavailable but local cache has all needed data
+    - The dataset is no longer available on the server (e.g., deprecated datasets)
+    - Working offline with previously cached data
+    If cache is insufficient for the query, an error will be raised.
+    If False (default), attempts server connection first, falls back to cache-only if connection fails
+    AND cache appears sufficient."""
+    
     _min_ratio: float = field(default=0.0, repr=False)
     """Internal: ratio filtering done post-hoc"""
     
@@ -503,17 +513,159 @@ class ComparisonParameters:
         """Get the cached timestamp string for this run."""
         return self._cached_timestamp
     
+    # Dataset single-character abbreviation mapping
+    # Keys are lowercased for case-insensitive matching
+    DATASET_SHORT_CODES = {
+        'male-cns': 'M',
+        'mcns': 'M',
+        'fafb': 'F',
+        'flywire_fafb': 'F',
+        'banc': 'B',
+        'flywire_banc': 'B',
+        'hemibrain': 'H',
+        'hemi': 'H',
+        'optic-lobe': 'O',
+        'optic_lobe': 'O',
+        'manc': 'C',
+        'mushroombody': 'U',
+    }
+    
+    def _get_neuron_abbreviation(self, neurons: Union[List, Any], labels: List[str] = None) -> str:
+        """
+        Generate a short abbreviation for neuron list, similar to FindNeuronConnection's naming.
+        
+        Logic:
+        - If labels are provided, use the first label
+        - If LabelMapper, use first source/target label from the mapper
+        - If list with single item: use that item (remove .* patterns)
+        - If list with multiple items: use first item + '_etc'
+        - If empty: return 'ALL'
+        
+        Args:
+            neurons: Neuron list, nested list, or LabelMapper
+            labels: Optional custom labels
+            
+        Returns:
+            Abbreviated name string
+        """
+        from .label_mapper import LabelMapper
+        
+        # Priority 1: Use provided labels
+        if labels and len(labels) > 0:
+            if len(labels) == 1:
+                return str(labels[0]).replace('.*', '')
+            else:
+                return str(labels[0]).replace('.*', '') + '_etc'
+        
+        # Priority 2: Handle LabelMapper
+        if isinstance(neurons, LabelMapper):
+            std_labels = neurons.get_all_std_labels('source') or neurons.get_all_std_labels('target')
+            if std_labels:
+                if len(std_labels) == 1:
+                    return str(std_labels[0]).replace('.*', '')
+                else:
+                    return str(std_labels[0]).replace('.*', '') + '_etc'
+        
+        # Priority 3: Handle list
+        if not neurons:
+            return 'ALL'
+        
+        # Flatten nested lists to get first element
+        flat_list = self._ensure_flat_list(neurons) if hasattr(self, '_ensure_flat_list') else neurons
+        if isinstance(flat_list, list) and len(flat_list) > 0:
+            first_item = flat_list[0]
+            # Handle nested lists - get the actual first neuron
+            while isinstance(first_item, list) and len(first_item) > 0:
+                first_item = first_item[0]
+            
+            # Convert to string and clean up
+            name = str(first_item).replace('.*', '')
+            
+            # Add '_etc' if multiple items
+            if len(flat_list) > 1:
+                name += '_etc'
+            return name
+        
+        return 'ALL'
+    
+    def _get_dataset_short_codes(self) -> str:
+        """
+        Generate combined single-character codes for all datasets.
+        
+        Uses DATASET_SHORT_CODES mapping. For example:
+        - ['male-cns:v0.9', 'flywire_FAFB_v783', 'flywire_BANC_v626'] -> 'MFB'
+        - ['hemibrain:v1.2.1', 'male-cns:v0.9'] -> 'HM'
+        
+        Returns:
+            Combined string of single-character dataset codes
+        """
+        codes = []
+        used_codes = set()
+        
+        for ds in self.datasets:
+            # Get dataset name string
+            ds_name = ds.dataset if hasattr(ds, 'dataset') else str(ds)
+            
+            # Normalize: lowercase, remove version info
+            ds_lower = ds_name.lower()
+            # Remove version suffixes like :v1.2.1, _v783, etc.
+            import re
+            ds_clean = re.sub(r'[:_]v?\d+[\d._]*$', '', ds_lower)
+            ds_clean = ds_clean.replace('_', '-')  # Normalize underscores
+            
+            # Look up in mapping
+            code = None
+            for key, val in self.DATASET_SHORT_CODES.items():
+                if key in ds_clean or ds_clean in key:
+                    code = val
+                    break
+            
+            # Fallback: use first character uppercase
+            if code is None:
+                code = ds_clean[0].upper() if ds_clean else 'X'
+                # Ensure uniqueness
+                while code in used_codes:
+                    # Try next character or append number
+                    code = chr(ord(code) + 1) if code < 'Z' else 'X'
+            
+            codes.append(code)
+            used_codes.add(code)
+        
+        return ''.join(codes)
+    
     @property
     def output_name(self) -> str:
         """
         Get the output folder name.
+        
+        Format: comp_{source_abbr}_to_{target_abbr}_{dataset_codes}_{timestamp}
+        
+        Examples:
+        - comp_aMe12_to_PPL101_MFB_20251120_143025
+        - comp_KC_etc_to_MBON_etc_HM_20251120_143025
         
         Returns:
             saveas value if provided, otherwise auto-generated name with timestamp
         """
         if self.saveas:
             return self.saveas
-        return f"comparison_results_{self.run_timestamp}"
+        
+        # Get source abbreviation
+        source_abbr = self._get_neuron_abbreviation(
+            self.source_neurons if self.source_neurons else self._source_mapper,
+            self.source_labels
+        )
+        
+        # Get target abbreviation
+        target_abbr = self._get_neuron_abbreviation(
+            self.target_neurons if self.target_neurons else self._target_mapper,
+            self.target_labels
+        )
+        
+        # Get dataset codes
+        dataset_codes = self._get_dataset_short_codes()
+        
+        return f"comp_{source_abbr}_to_{target_abbr}_{dataset_codes}_{self.run_timestamp}"
     
     @property
     def full_output_path(self) -> str:
@@ -797,7 +949,8 @@ class ComparisonParameters:
             'performance_settings': {
                 'parallel': self.parallel,
                 'max_workers': self.max_workers,
-                'use_cache': self._use_cache
+                'use_cache': self._use_cache,
+                'cache_only': self.cache_only
             },
             
             # Internal analysis settings

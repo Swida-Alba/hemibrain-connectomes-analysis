@@ -108,6 +108,7 @@ Essential functionality documentation:
 - **✨ Connectivity Profiler**: 1-hop/2-hop hybrid profile building
 - **✨ Homolog Finding**: Find homologous neurons across datasets
 - **✨ Cross-Dataset Comparison**: Compare connectivity across multiple datasets
+- **✨ [Graph Similarity Metrics](./core-features/GraphSimilarityMetrics_Documentation.md)**: Detailed metric explanations (Jaccard, Cosine, Edge Rank, etc.)
 - **✨ Connectivity Profile Verification**: Verify neuron types using connectivity fingerprints
 - **✨ [Connectivity Profiling](./CONNECTIVITY_PROFILING.md)**: Intra-dataset profile comparison with heatmap visualization (NEW)
 - **Path Finding**: Multi-hop connection discovery
@@ -138,6 +139,7 @@ Advanced technical documentation:
 - **[FlyLight Downloader](./core-features/FlyLight_Guide.md)** - Download LM imagery (NEW)
 - **[Homolog Finding](./core-features/HomologFinding_Guide.md)** - Find homologs across datasets
 - **[Cross-Dataset Comparison](./core-features/CrossDatasetComparison_Guide.md)** - Compare connectivity patterns
+- **[Graph Similarity Metrics](./core-features/GraphSimilarityMetrics_Documentation.md)** - Understanding similarity metrics
 - **[Connectivity Profile Verification](./core-features/ConnectivityProfileVerification_Guide.md)** - Verify neuron types
 - [Heatmap Guide](./visualizations/Heatmap_Guide.md) - Quantitative analysis
 - [Network Guide](./visualizations/Network_Guide.md) - Topology exploration

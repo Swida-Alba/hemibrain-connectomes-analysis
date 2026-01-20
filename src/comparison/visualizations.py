@@ -1125,13 +1125,14 @@ class ComparisonVisualizer:
         datasets = list(results.keys())
         
         # Metric definitions with progress info
-        # Edge Rank: uses union of edges
-        # Path Rank: uses union of paths (multi-hop)
-        # Spearman: uses shared edges only (intersection), returns raw [-1, 1] correlation
+        # Jaccard: [0, 1] overlap ratio
+        # Edge Rank: raw Spearman correlation [-1, 1] on union of edges (0 for missing)
+        # Cosine: [0, 1] scale-invariant similarity on union of edges
+        # Spearman: raw Spearman correlation [-1, 1] on shared edges only (intersection)
         metric_configs = [
             ('jaccard_similarity', 'Jaccard', 'Greens', 0, 1),
-            ('edge_rank_correlation', 'Edge Rank (union)', 'Greens', 0, 1),
-            ('path_rank_correlation', 'Path Rank (union)', 'Blues', 0, 1),
+            ('edge_rank_correlation', 'Edge Rank (union)', 'RdYlGn', -1, 1),  # Diverging colormap for [-1, 1]
+            ('cosine_similarity', 'Cosine (union)', 'Blues', 0, 1),
             ('spearman_rank_correlation', 'Spearman (shared)', 'RdYlGn', -1, 1),  # Diverging colormap for [-1, 1]
         ]
         
@@ -1168,8 +1169,8 @@ class ComparisonVisualizer:
                 
                 if similarity_func:
                     similarities = similarity_func(threshold)
-                    # Add advanced metrics if not present (including path_rank_correlation)
-                    if similarities.empty or 'edge_rank_correlation' not in similarities.columns or 'path_rank_correlation' not in similarities.columns:
+                    # Add advanced metrics if not present (including cosine_similarity)
+                    if similarities.empty or 'edge_rank_correlation' not in similarities.columns or 'cosine_similarity' not in similarities.columns:
                         similarities = metrics.calculate_all_pairwise_similarities(
                             aligned, datasets, threshold=1, include_advanced_metrics=True, path_data=path_data_t
                         )
@@ -1323,6 +1324,18 @@ class ComparisonVisualizer:
         if nickname_map is None:
             nickname_map = {d: d for d in datasets}
         
+        # Helper to safely extract scalar from potentially duplicate-indexed DataFrame
+        def safe_get_value(df, row_key, col_key):
+            """Extract scalar value, handling duplicate indices by summing."""
+            try:
+                val = df.loc[row_key, col_key]
+                # If duplicate indices exist, .loc returns a Series - sum them
+                if isinstance(val, pd.Series):
+                    return float(val.sum())
+                return float(val)
+            except (KeyError, TypeError, ValueError):
+                return 0.0
+        
         # Collect all paths across all thresholds
         all_data = {}
         all_paths = set()
@@ -1341,7 +1354,7 @@ class ComparisonVisualizer:
                             col_name = f"{nick}_t{threshold}"
                             if path_key not in all_data:
                                 all_data[path_key] = {}
-                            all_data[path_key][col_name] = path_df.loc[path_key, dataset]
+                            all_data[path_key][col_name] = safe_get_value(path_df, path_key, dataset)
             except Exception:
                 pass
         
@@ -1350,8 +1363,10 @@ class ComparisonVisualizer:
             ax.text(0.5, 0.5, "No path data available", ha='center', va='center')
             return fig
         
-        # Create DataFrame
+        # Create DataFrame and ensure numeric dtype
         df = pd.DataFrame(all_data).T.fillna(0)
+        # Convert all columns to float to avoid object dtype issues
+        df = df.apply(pd.to_numeric, errors='coerce').fillna(0)
         
         # Select top paths by mean
         df['mean'] = df.mean(axis=1)
@@ -1554,6 +1569,18 @@ class ComparisonVisualizer:
         if not HAS_SEABORN:
             raise ImportError("seaborn is required for heatmaps")
         
+        # Helper to safely extract scalar from potentially duplicate-indexed DataFrame
+        def safe_get_value(df, row_key, col_key):
+            """Extract scalar value, handling duplicate indices by summing."""
+            try:
+                val = df.loc[row_key, col_key]
+                # If duplicate indices exist, .loc returns a Series - sum them
+                if isinstance(val, pd.Series):
+                    return float(val.sum())
+                return float(val)
+            except (KeyError, TypeError, ValueError):
+                return 0.0
+        
         # Collect all edges across all thresholds
         all_data = {}
         all_edges = set()
@@ -1571,7 +1598,7 @@ class ComparisonVisualizer:
                             col_name = f"{dataset[:10]}_t{threshold}"
                             if edge_key not in all_data:
                                 all_data[edge_key] = {}
-                            all_data[edge_key][col_name] = ratio_df.loc[edge_key, dataset]
+                            all_data[edge_key][col_name] = safe_get_value(ratio_df, edge_key, dataset)
             except Exception:
                 pass
         
@@ -1580,8 +1607,10 @@ class ComparisonVisualizer:
             ax.text(0.5, 0.5, "No ratio data available", ha='center', va='center')
             return fig
         
-        # Create DataFrame
+        # Create DataFrame and ensure numeric dtype
         df = pd.DataFrame(all_data).T.fillna(0)
+        # Convert all columns to float to avoid object dtype issues
+        df = df.apply(pd.to_numeric, errors='coerce').fillna(0)
         
         # Select top edges by mean
         df['mean'] = df.mean(axis=1)
@@ -1644,6 +1673,18 @@ class ComparisonVisualizer:
         if not HAS_SEABORN:
             raise ImportError("seaborn is required for heatmaps")
         
+        # Helper to safely extract scalar from potentially duplicate-indexed DataFrame
+        def safe_get_value(df, row_key, col_key):
+            """Extract scalar value, handling duplicate indices by summing."""
+            try:
+                val = df.loc[row_key, col_key]
+                # If duplicate indices exist, .loc returns a Series - sum them
+                if isinstance(val, pd.Series):
+                    return float(val.sum())
+                return float(val)
+            except (KeyError, TypeError, ValueError):
+                return 0.0
+        
         # Collect all paths across all thresholds
         all_data = {}
         all_paths = set()
@@ -1661,7 +1702,7 @@ class ComparisonVisualizer:
                             col_name = f"{dataset[:10]}_t{threshold}"
                             if path_key not in all_data:
                                 all_data[path_key] = {}
-                            all_data[path_key][col_name] = prob_df.loc[path_key, dataset]
+                            all_data[path_key][col_name] = safe_get_value(prob_df, path_key, dataset)
             except Exception:
                 pass
         
@@ -1670,8 +1711,10 @@ class ComparisonVisualizer:
             ax.text(0.5, 0.5, "No probability data available", ha='center', va='center')
             return fig
         
-        # Create DataFrame
+        # Create DataFrame and ensure numeric dtype
         df = pd.DataFrame(all_data).T.fillna(0)
+        # Convert all columns to float to avoid object dtype issues
+        df = df.apply(pd.to_numeric, errors='coerce').fillna(0)
         
         # Select top paths by mean
         df['mean'] = df.mean(axis=1)
@@ -2208,6 +2251,22 @@ class ComparisonVisualizer:
                 path_rank_df.to_csv(os.path.join(vis_data_dir, "path_rank_correlation_trend.csv"), index=False)
             except Exception as e:
                 self._vprint(f"Warning: Could not create Path Rank Correlation plot: {e}")
+        
+        # Generate Cosine Similarity trend plot
+        if align_func and len(thresholds) > 1:
+            try:
+                fig, cosine_df = self.plot_cosine_similarity_trend(
+                    align_func, thresholds, datasets,
+                    title="Cosine Similarity Across Thresholds",
+                    nickname_map=nickname_map
+                )
+                self.save_figure(fig, os.path.join(output_dir, "cosine_similarity_trend.png"))
+                plt.close(fig)
+                
+                # Save data
+                cosine_df.to_csv(os.path.join(vis_data_dir, "cosine_similarity_trend.csv"), index=False)
+            except Exception as e:
+                self._vprint(f"Warning: Could not create Cosine Similarity plot: {e}")
         
         # Note: vis_summary.pdf generation removed - use HTML report instead
         
@@ -2754,8 +2813,11 @@ class ComparisonVisualizer:
             y_vals = []
             for t in sorted_thresholds:
                 if t in pair_data[pair_key]:
-                    x_vals.append(t)
-                    y_vals.append(pair_data[pair_key][t])
+                    val = pair_data[pair_key][t]
+                    # Skip NaN values in plotting
+                    if val is not None and not (isinstance(val, float) and np.isnan(val)):
+                        x_vals.append(t)
+                        y_vals.append(val)
             
             if x_vals:
                 color = colors[idx % len(colors)]
@@ -2763,12 +2825,13 @@ class ComparisonVisualizer:
                 ax.plot(x_vals, y_vals, marker=marker, color=color, linewidth=2,
                        markersize=8, label=f'{n1} vs {n2}')
         
-        # Calculate and plot average
+        # Calculate and plot average (excluding NaN values)
         avg_x = []
         avg_y = []
         for t in sorted_thresholds:
             vals = [pair_data[pk].get(t) for pk in pairs if t in pair_data.get(pk, {})]
-            vals = [v for v in vals if v is not None]
+            # Filter out None and NaN values
+            vals = [v for v in vals if v is not None and not (isinstance(v, float) and np.isnan(v))]
             if vals:
                 avg_x.append(t)
                 avg_y.append(sum(vals) / len(vals))
@@ -2786,7 +2849,8 @@ class ComparisonVisualizer:
         
         ax.set_xlabel('Threshold')
         ax.set_ylabel('Edge Rank Correlation')
-        ax.set_ylim(0, 1)
+        ax.set_ylim(-1, 1)  # Raw Spearman correlation range
+        ax.axhline(y=0, color='gray', linestyle=':', alpha=0.5)  # Zero reference line
         ax.set_title(title)
         # Only show legend if there are labeled artists
         if ax.get_legend_handles_labels()[0]:
@@ -2889,8 +2953,11 @@ class ComparisonVisualizer:
             y_vals = []
             for t in sorted_thresholds:
                 if t in pair_data[pair_key]:
-                    x_vals.append(t)
-                    y_vals.append(pair_data[pair_key][t])
+                    val = pair_data[pair_key][t]
+                    # Skip NaN values in plotting
+                    if val is not None and not (isinstance(val, float) and np.isnan(val)):
+                        x_vals.append(t)
+                        y_vals.append(val)
             
             if x_vals:
                 color = colors[idx % len(colors)]
@@ -2898,12 +2965,13 @@ class ComparisonVisualizer:
                 ax.plot(x_vals, y_vals, marker=marker, color=color, linewidth=2,
                        markersize=8, label=f'{n1} vs {n2}')
         
-        # Calculate and plot average
+        # Calculate and plot average (excluding NaN values)
         avg_x = []
         avg_y = []
         for t in sorted_thresholds:
             vals = [pair_data[pk].get(t) for pk in pairs if t in pair_data.get(pk, {})]
-            vals = [v for v in vals if v is not None]
+            # Filter out None and NaN values
+            vals = [v for v in vals if v is not None and not (isinstance(v, float) and np.isnan(v))]
             if vals:
                 avg_x.append(t)
                 avg_y.append(sum(vals) / len(vals))
@@ -2921,6 +2989,146 @@ class ComparisonVisualizer:
         
         ax.set_xlabel('Threshold')
         ax.set_ylabel('Path Rank Correlation')
+        ax.set_ylim(-1, 1)  # Raw Spearman correlation range
+        ax.axhline(y=0, color='gray', linestyle=':', alpha=0.5)  # Zero reference line
+        ax.set_title(title)
+        # Only show legend if there are labeled artists
+        if ax.get_legend_handles_labels()[0]:
+            ax.legend(loc='upper right', fontsize=9)
+        ax.grid(True, alpha=0.3)
+        ax.set_xticks(sorted_thresholds)
+        
+        plt.tight_layout()
+        
+        return fig, pd.DataFrame(all_data)
+
+    def plot_cosine_similarity_trend(
+        self,
+        align_func,
+        thresholds: List[int],
+        datasets: List[str],
+        title: str = "Cosine Similarity Across Thresholds",
+        nickname_map: Dict[str, str] = None,
+        figsize: Optional[Tuple[int, int]] = None
+    ) -> Tuple[plt.Figure, pd.DataFrame]:
+        """
+        Plot cosine similarity trend across thresholds for all dataset pairs.
+        
+        Uses the union of edges and compares weight distributions using cosine similarity.
+        
+        Args:
+            align_func: Function to get aligned data at a threshold
+            thresholds: List of thresholds
+            datasets: List of dataset names
+            title: Plot title
+            nickname_map: Dict mapping dataset names to display names
+            figsize: Figure size tuple
+            
+        Returns:
+            Tuple of (matplotlib Figure, DataFrame with similarity data)
+        """
+        if not HAS_MATPLOTLIB:
+            return None, pd.DataFrame()
+        
+        if nickname_map is None:
+            nickname_map = {d: d for d in datasets}
+        
+        sorted_thresholds = sorted(thresholds)
+        
+        from itertools import combinations
+        from .metrics import ComparisonMetrics
+        metrics = ComparisonMetrics()
+        
+        pair_data = {}  # {(d1, d2): {threshold: cosine_sim}}
+        all_data = []  # For DataFrame export
+        
+        pairs = list(combinations(datasets, 2))
+        for pair in pairs:
+            pair_data[pair] = {}
+        
+        for threshold in sorted_thresholds:
+            try:
+                aligned = align_func(threshold)
+            except:
+                continue
+            
+            if aligned is None or aligned.empty:
+                continue
+            
+            available = [d for d in datasets if d in aligned.columns]
+            
+            for d1, d2 in combinations(available, 2):
+                pair_key = (d1, d2) if (d1, d2) in pair_data else (d2, d1)
+                
+                # Get edge weights as Series
+                weights_a = aligned[d1].dropna()
+                weights_b = aligned[d2].dropna()
+                
+                # Calculate cosine similarity
+                cosine = metrics.calculate_cosine_similarity(weights_a, weights_b)
+                pair_data[pair_key][threshold] = cosine
+                
+                # For export
+                n1 = nickname_map.get(d1, d1)
+                n2 = nickname_map.get(d2, d2)
+                all_data.append({
+                    'threshold': threshold,
+                    'dataset1': n1,
+                    'dataset2': n2,
+                    'cosine_similarity': cosine
+                })
+        
+        # Create figure
+        figsize = figsize or (10, 6)
+        fig, ax = plt.subplots(figsize=figsize)
+        
+        colors = plt.cm.tab10.colors
+        markers = ['o', 's', '^', 'D', 'v', '<', '>']
+        
+        for idx, pair_key in enumerate(pairs):
+            d1, d2 = pair_key
+            n1, n2 = nickname_map.get(d1, d1), nickname_map.get(d2, d2)
+            
+            x_vals = []
+            y_vals = []
+            for t in sorted_thresholds:
+                if t in pair_data[pair_key]:
+                    val = pair_data[pair_key][t]
+                    # Skip NaN values in plotting
+                    if val is not None and not (isinstance(val, float) and np.isnan(val)):
+                        x_vals.append(t)
+                        y_vals.append(val)
+            
+            if x_vals:
+                color = colors[idx % len(colors)]
+                marker = markers[idx % len(markers)]
+                ax.plot(x_vals, y_vals, marker=marker, color=color, linewidth=2,
+                       markersize=8, label=f'{n1} vs {n2}')
+        
+        # Calculate and plot average (excluding NaN values)
+        avg_x = []
+        avg_y = []
+        for t in sorted_thresholds:
+            vals = [pair_data[pk].get(t) for pk in pairs if t in pair_data.get(pk, {})]
+            # Filter out None and NaN values
+            vals = [v for v in vals if v is not None and not (isinstance(v, float) and np.isnan(v))]
+            if vals:
+                avg_x.append(t)
+                avg_y.append(sum(vals) / len(vals))
+                
+                all_data.append({
+                    'threshold': t,
+                    'dataset1': 'Average',
+                    'dataset2': 'Average',
+                    'cosine_similarity': sum(vals) / len(vals)
+                })
+        
+        if avg_x:
+            ax.plot(avg_x, avg_y, marker='*', color='black', linewidth=3,
+                   markersize=12, linestyle='--', label='Average', alpha=0.7)
+        
+        ax.set_xlabel('Threshold')
+        ax.set_ylabel('Cosine Similarity')
         ax.set_ylim(0, 1)
         ax.set_title(title)
         # Only show legend if there are labeled artists

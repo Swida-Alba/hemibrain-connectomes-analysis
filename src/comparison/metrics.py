@@ -321,6 +321,7 @@ class ComparisonMetrics:
             #
             # WEIGHT-SENSITIVE METRICS (uses normalized weights):
             #   - ruzicka_similarity (already computed above, with normalized weights)
+            #   - cosine_similarity (vector cosine, scale-invariant)
             #   - spearman_rank_correlation (rank of shared edge weights)
             #   - rv_coefficient (multivariate matrix similarity)
             # ---------------------------------------------------------------
@@ -328,6 +329,10 @@ class ComparisonMetrics:
                 # TOPOLOGY: Edge list rank correlation (union of edges)
                 edge_rank_sim = self.calculate_edge_list_rank_correlation(weights_1, weights_2)
                 row['edge_rank_correlation'] = edge_rank_sim
+                
+                # WEIGHT-SENSITIVE: Cosine similarity (union of edges)
+                cosine_sim = self.calculate_cosine_similarity(weights_1, weights_2)
+                row['cosine_similarity'] = cosine_sim
                 
                 # PATH-LEVEL: Path list rank correlation (union of paths)
                 # Only compute if path_data is provided
@@ -1605,10 +1610,79 @@ class ComparisonMetrics:
         
         return adj_a, adj_b
     
-    def calculate_edge_list_rank_correlation(
+    def calculate_cosine_similarity(
         self,
         weights_a: pd.Series,
         weights_b: pd.Series
+    ) -> float:
+        """
+        Calculate cosine similarity between two edge weight vectors (uses UNION).
+        
+        Cosine similarity measures the angle between two vectors, making it
+        scale-invariant and useful for comparing edge weight distributions
+        regardless of total connectivity strength.
+        
+        cos(A, B) = (A · B) / (||A|| * ||B||)
+        
+        Args:
+            weights_a: Series of weights indexed by edge (e.g., "typeA -> typeB")
+            weights_b: Series of weights indexed by edge
+            
+        Returns:
+            Cosine similarity score in [0, 1], where 1 = identical direction.
+            Returns NaN if both vectors are zero (undefined).
+        """
+        # Get union of all edges
+        all_edges = sorted(set(weights_a.index) | set(weights_b.index))
+        
+        if len(all_edges) == 0:
+            return np.nan  # Both empty = undefined
+        
+        # Build weight vectors (0 for missing edges)
+        vec_a = np.array([weights_a.get(e, 0) for e in all_edges], dtype=float)
+        vec_b = np.array([weights_b.get(e, 0) for e in all_edges], dtype=float)
+        
+        # Compute norms
+        norm_a = np.linalg.norm(vec_a)
+        norm_b = np.linalg.norm(vec_b)
+        
+        # Handle edge cases
+        if norm_a == 0 and norm_b == 0:
+            return np.nan  # Both zero vectors = undefined
+        if norm_a == 0 or norm_b == 0:
+            return 0.0  # One zero vector = orthogonal
+        
+        # Compute cosine similarity
+        return float(np.dot(vec_a, vec_b) / (norm_a * norm_b))
+    
+    def _safe_series_get(self, series: pd.Series, key, default=0) -> float:
+        """
+        Safely get a value from a pandas Series, handling duplicate indices.
+        
+        When a Series has duplicate indices, .get() returns a Series instead of
+        a scalar. This helper aggregates duplicates by summing them.
+        
+        Args:
+            series: Pandas Series to retrieve value from
+            key: Index key to look up
+            default: Default value if key not found
+            
+        Returns:
+            Scalar float value
+        """
+        if key not in series.index:
+            return float(default)
+        val = series.get(key, default)
+        # If duplicate indices exist, .get() returns a Series - sum them
+        if isinstance(val, pd.Series):
+            return float(val.sum())
+        return float(val)
+    
+    def calculate_edge_list_rank_correlation(
+        self,
+        weights_a: pd.Series,
+        weights_b: pd.Series,
+        normalize: bool = False
     ) -> float:
         """
         Calculate rank correlation based on sorted edge lists (uses UNION).
@@ -1617,14 +1691,19 @@ class ComparisonMetrics:
         Edges are sorted by weight, and Spearman rank correlation is computed
         on the union of edges (with 0 for missing edges).
         
-        Inspired by the homolog finder's profile comparator approach.
+        Note: For cross-dataset comparison, this returns the original Spearman
+        correlation in [-1, 1]. For homolog finding and connectivity profile
+        comparisons, use normalize=True to get values in [0, 1].
         
         Args:
             weights_a: Series of weights indexed by edge (e.g., "typeA -> typeB")
             weights_b: Series of weights indexed by edge
+            normalize: If True, normalize from [-1, 1] to [0, 1] (for homolog finding).
+                       If False (default), return original correlation.
             
         Returns:
-            Normalized similarity score in [0, 1], where 1 = identical edge rankings
+            Spearman rank correlation in [-1, 1] (or [0, 1] if normalize=True).
+            Returns NaN if insufficient data or undefined.
         """
         from scipy.stats import spearmanr
         
@@ -1632,31 +1711,35 @@ class ComparisonMetrics:
         all_edges = sorted(set(weights_a.index) | set(weights_b.index))
         
         if len(all_edges) < 3:
-            return 0.5  # Insufficient data for correlation
+            return np.nan  # Insufficient data for correlation
         
         # Build weight vectors (0 for missing edges)
-        vec_a = np.array([weights_a.get(e, 0) for e in all_edges], dtype=float)
-        vec_b = np.array([weights_b.get(e, 0) for e in all_edges], dtype=float)
+        # Use _safe_series_get to handle duplicate indices
+        vec_a = np.array([self._safe_series_get(weights_a, e, 0) for e in all_edges], dtype=float)
+        vec_b = np.array([self._safe_series_get(weights_b, e, 0) for e in all_edges], dtype=float)
         
         # Handle edge cases
         if vec_a.std() == 0 and vec_b.std() == 0:
-            return 1.0  # Both constant = identical
+            return np.nan  # Both constant = undefined correlation
         if vec_a.std() == 0 or vec_b.std() == 0:
-            return 0.5  # One constant = undefined
+            return np.nan  # One constant = undefined correlation
         
         # Compute Spearman rank correlation
         corr, _ = spearmanr(vec_a, vec_b)
         
         if np.isnan(corr):
-            return 0.5
+            return np.nan
         
-        # Normalize from [-1, 1] to [0, 1]
-        return (corr + 1.0) / 2.0
+        # Return original or normalized
+        if normalize:
+            return (corr + 1.0) / 2.0
+        return corr
     
     def calculate_path_list_rank_correlation(
         self,
         paths_a: pd.Series,
-        paths_b: pd.Series
+        paths_b: pd.Series,
+        normalize: bool = False
     ) -> float:
         """
         Calculate rank correlation based on sorted path lists (uses UNION).
@@ -1668,12 +1751,19 @@ class ComparisonMetrics:
         Similar to edge_list_rank_correlation but operates on multi-hop paths
         like "aMe12->KCg-d->PPL103" instead of single edges.
         
+        Note: For cross-dataset comparison, this returns the original Spearman
+        correlation in [-1, 1]. For homolog finding and connectivity profile
+        comparisons, use normalize=True to get values in [0, 1].
+        
         Args:
             paths_a: Series of min_weights indexed by path string (e.g., "A->B->C")
             paths_b: Series of min_weights indexed by path string
+            normalize: If True, normalize from [-1, 1] to [0, 1] (for homolog finding).
+                       If False (default), return original correlation.
             
         Returns:
-            Normalized similarity score in [0, 1], where 1 = identical path rankings
+            Spearman rank correlation in [-1, 1] (or [0, 1] if normalize=True).
+            Returns NaN if insufficient data or undefined.
         """
         from scipy.stats import spearmanr
         
@@ -1681,26 +1771,29 @@ class ComparisonMetrics:
         all_paths = sorted(set(paths_a.index) | set(paths_b.index))
         
         if len(all_paths) < 3:
-            return 0.5  # Insufficient data for correlation
+            return np.nan  # Insufficient data for correlation
         
         # Build weight vectors (0 for missing paths)
-        vec_a = np.array([paths_a.get(p, 0) for p in all_paths], dtype=float)
-        vec_b = np.array([paths_b.get(p, 0) for p in all_paths], dtype=float)
+        # Use _safe_series_get to handle duplicate indices
+        vec_a = np.array([self._safe_series_get(paths_a, p, 0) for p in all_paths], dtype=float)
+        vec_b = np.array([self._safe_series_get(paths_b, p, 0) for p in all_paths], dtype=float)
         
         # Handle edge cases
         if vec_a.std() == 0 and vec_b.std() == 0:
-            return 1.0  # Both constant = identical
+            return np.nan  # Both constant = undefined correlation
         if vec_a.std() == 0 or vec_b.std() == 0:
-            return 0.5  # One constant = undefined
+            return np.nan  # One constant = undefined correlation
         
         # Compute Spearman rank correlation
         corr, _ = spearmanr(vec_a, vec_b)
         
         if np.isnan(corr):
-            return 0.5
+            return np.nan
         
-        # Normalize from [-1, 1] to [0, 1]
-        return (corr + 1.0) / 2.0
+        # Return original or normalized
+        if normalize:
+            return (corr + 1.0) / 2.0
+        return corr
     
     def calculate_graph_kernel_similarity(
         self,

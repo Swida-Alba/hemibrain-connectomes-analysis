@@ -65,13 +65,13 @@ Cross-dataset comparison analyzes the same neural circuit query across multiple 
 
 ### Key Terminology
 
-| Term | Definition |
-|------|------------|
-| **Edge** | A direct connection between two neuron types (e.g., `aMe12 → KCg-d`) |
-| **Path** | A multi-hop route from source to target (e.g., `aMe12 → KCg-d → PPL101`) |
-| **Threshold** | Minimum synapse count required for an edge to be included |
-| **Conservation** | Presence of an edge/path across multiple datasets |
-| **Dead-end** | An edge that doesn't contribute to any complete source→target path |
+| Term             | Definition                                                               |
+| ---------------- | ------------------------------------------------------------------------ |
+| **Edge**         | A direct connection between two neuron types (e.g., `aMe12 → KCg-d`)     |
+| **Path**         | A multi-hop route from source to target (e.g., `aMe12 → KCg-d → PPL101`) |
+| **Threshold**    | Minimum synapse count required for an edge to be included                |
+| **Conservation** | Presence of an edge/path across multiple datasets                        |
+| **Dead-end**     | An edge that doesn't contribute to any complete source→target path       |
 
 ### Datasets Supported
 
@@ -125,13 +125,13 @@ Cross-dataset comparison analyzes the same neural circuit query across multiple 
 
 ### Choosing a Mode
 
-| Use Case | Recommended Mode |
-|----------|------------------|
-| Functional circuit analysis | `path` |
-| Direct connectivity comparison | `edge` |
-| Identifying all possible connections | `edge` |
-| Studying specific pathways | `path` |
-| Large-scale conservation analysis | `edge` |
+| Use Case                             | Recommended Mode |
+| ------------------------------------ | ---------------- |
+| Functional circuit analysis          | `path`           |
+| Direct connectivity comparison       | `edge`           |
+| Identifying all possible connections | `edge`           |
+| Studying specific pathways           | `path`           |
+| Large-scale conservation analysis    | `edge`           |
 
 ---
 
@@ -486,58 +486,58 @@ comparison_results_20251127_155513/
 
 Shows total neuron counts per dataset for both source and target neurons.
 
-| Column | Description |
-|--------|-------------|
-| `dataset` | Dataset name |
-| `source_count` | Number of source neurons found |
-| `target_count` | Number of target neurons found |
-| `total_neurons` | Total unique neurons |
-| `source_types` | Number of unique source neuron types |
-| `target_types` | Number of unique target neuron types |
+| Column          | Description                          |
+| --------------- | ------------------------------------ |
+| `dataset`       | Dataset name                         |
+| `source_count`  | Number of source neurons found       |
+| `target_count`  | Number of target neurons found       |
+| `total_neurons` | Total unique neurons                 |
+| `source_types`  | Number of unique source neuron types |
+| `target_types`  | Number of unique target neuron types |
 
 #### `neuron_counts_by_type.csv`
 
 Shows neuron count per type in each dataset. Useful for understanding which neuron types exist in which datasets.
 
-| Column | Description |
-|--------|-------------|
-| `type` | Neuron type name |
-| `role` | Whether this type is used as source or target |
-| `{dataset}_source` | Count of this type as source in dataset |
-| `{dataset}_target` | Count of this type as target in dataset |
+| Column             | Description                                   |
+| ------------------ | --------------------------------------------- |
+| `type`             | Neuron type name                              |
+| `role`             | Whether this type is used as source or target |
+| `{dataset}_source` | Count of this type as source in dataset       |
+| `{dataset}_target` | Count of this type as target in dataset       |
 
 #### `edge_presence_matrix_minsyn_{threshold}.csv`
 
 Shows edge presence and weight across all datasets at a specific threshold.
 
-| Column | Description |
-|--------|-------------|
-| `edge_key` | Edge identifier (`source → target`) |
-| `source_type` | Source neuron type |
-| `target_type` | Target neuron type |
+| Column               | Description                              |
+| -------------------- | ---------------------------------------- |
+| `edge_key`           | Edge identifier (`source → target`)      |
+| `source_type`        | Source neuron type                       |
+| `target_type`        | Target neuron type                       |
 | `conservation_count` | Number of datasets where edge is present |
-| `{dataset}` | `True` if present, `0` if absent |
-| `weight_{dataset}` | Synapse count in that dataset |
-| `max_weight` | Maximum weight across datasets |
-| `avg_weight` | Average weight across present datasets |
-| `weight_cv` | Coefficient of variation (std/mean) |
+| `{dataset}`          | `True` if present, `0` if absent         |
+| `weight_{dataset}`   | Synapse count in that dataset            |
+| `max_weight`         | Maximum weight across datasets           |
+| `avg_weight`         | Average weight across present datasets   |
+| `weight_cv`          | Coefficient of variation (std/mean)      |
 
 #### `path_presence_matrix_minsyn_{threshold}.csv`
 
 Shows multi-hop path presence across all datasets.
 
-| Column | Description |
-|--------|-------------|
-| `path_key` | Full path (`source → inter → target`) |
-| `source` | Starting neuron type |
-| `target` | Ending neuron type |
-| `hops` | Number of edges in path |
-| `intermediates` | Intermediate neuron types |
-| `conservation_count` | Number of datasets where path exists |
-| `{dataset}` | `True` if present, `0` if absent |
-| `weight_{dataset}` | Minimum edge weight along path |
-| `hop_weights_{dataset}` | Individual hop weights (`-w1-w2-`) |
-| `max_weight`, `avg_weight`, `weight_cv` | Statistics |
+| Column                                  | Description                           |
+| --------------------------------------- | ------------------------------------- |
+| `path_key`                              | Full path (`source → inter → target`) |
+| `source`                                | Starting neuron type                  |
+| `target`                                | Ending neuron type                    |
+| `hops`                                  | Number of edges in path               |
+| `intermediates`                         | Intermediate neuron types             |
+| `conservation_count`                    | Number of datasets where path exists  |
+| `{dataset}`                             | `True` if present, `0` if absent      |
+| `weight_{dataset}`                      | Minimum edge weight along path        |
+| `hop_weights_{dataset}`                 | Individual hop weights (`-w1-w2-`)    |
+| `max_weight`, `avg_weight`, `weight_cv` | Statistics                            |
 
 #### `unified_edge_comparison.csv`
 
@@ -563,22 +563,33 @@ conservation_rate = (edges in ALL datasets) / (total unique edges) × 100%
 
 ### Similarity Metrics
 
+> **📖 Detailed Documentation**: See [Graph Similarity Metrics Documentation](GraphSimilarityMetrics_Documentation.md) for comprehensive explanations of all metrics including Edge Rank Correlation, Cosine Similarity, Spearman Rank, and NaN handling.
+
 #### Jaccard Similarity
 Measures overlap of edge sets between two datasets.
 ```
 Jaccard(A, B) = |A ∩ B| / |A ∪ B|
 ```
-- Range: 0 (no overlap) to 1 (identical)
+- Range: [0, 1]
 - Ignores edge weights, only considers presence
 
-#### Cosine Similarity
-Measures similarity of edge weight vectors.
+#### Cosine Similarity (NEW)
+Measures similarity of edge weight vectors using union of edges.
 ```
 Cosine(A, B) = (A · B) / (||A|| × ||B||)
 ```
-- Range: 0 to 1
-- Accounts for weight magnitudes
+- Range: [0, 1], NaN if both vectors are zero
+- Scale-invariant (only considers angle, not magnitude)
 - Higher values indicate similar weight distributions
+
+#### Edge Rank Correlation (NEW)
+Raw Spearman correlation on union of edges (missing edges = weight 0).
+```
+EdgeRank(A, B) = Spearman(ranks_A, ranks_B)
+```
+- Range: [-1, +1], NaN if fewer than 3 non-zero edges
+- Positive: similar ranking, Negative: inverse ranking
+- Captures both overlap and weight ranking agreement
 
 ### Weight Statistics
 

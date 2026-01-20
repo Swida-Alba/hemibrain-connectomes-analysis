@@ -145,6 +145,15 @@ def run_comprehensive_comparison():
         # Performance Settings (path finding algorithm)
         # -----------------------------------------------------------------
         pathfinding='Bidirectional', # 'MemoizedDFS', 'Bidirectional', 'DP', 'DFS'
+        
+        # Offline/Cache Mode
+        # -----------------------------------------------------------------
+        # cache_only=True: Use ONLY local cache, never connect to NeuPrint server.
+        #   Useful for deprecated datasets (e.g., male-cns:v0.9) or offline work.
+        #   Requires prior cache population. Raises error if cache is insufficient.
+        # cache_only=False (default): Try server first, auto-fallback to cache if
+        #   server is unavailable but cache exists.
+        cache_only=True,  # Enable for deprecated datasets like male-cns:v0.9
     )
     
     analyzer = ComparisonAnalyzer(params, verbose=True)

@@ -1355,7 +1355,13 @@ def getNeurons(requiredNeurons, dataset='hemibrain:v1.2.1', custom_group_names=N
             neuron_df = ndf_alltypes[ndf_alltypes['bodyId'].isin(bodyId_list)]
             roi_count_df = rdf_alltypes[rdf_alltypes['bodyId'].isin(bodyId_list)]
     
-    criteria = NC(bodyId=bodyId_list)
+    # Create NeuronCriteria only if client is available (skip in cache-only mode)
+    criteria = None
+    try:
+        criteria = NC(bodyId=bodyId_list)
+    except RuntimeError:
+        # No default client set (cache-only mode) - criteria not needed for local data
+        pass
     return neuron_df, roi_count_df, auto_name, criteria
 
 def _process_single_neuron(requiredNeuron, ndf_alltypes, bodyId_alltypes, verbose=True):

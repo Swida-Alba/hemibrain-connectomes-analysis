@@ -544,6 +544,7 @@ class ComparisonAnalyzer:
             label_mapper=self.label_mapper,  # Pass label mapper for standardization
             pathfinding=self.parameters.pathfinding,  # Pass pathfinding algorithm
             force_API_fetching=use_force_api,  # Use CAVE API for FAFB if enabled
+            cache_only=self.parameters.cache_only,  # Use cache-only mode if enabled
         )
         
         # Initialize and run analysis

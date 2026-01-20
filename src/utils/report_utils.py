@@ -180,14 +180,27 @@ def img2pptx(
     # Convert title_height from points to inches
     title_height_inches = title_height / 72 if title_height > 0 else 0
     
+    # Auto-detect font color from background if using default black font on dark background
+    def get_luminance(color_tuple):
+        """Calculate luminance from RGB tuple (0-255)."""
+        r, g, b = color_tuple[:3]
+        return (r * 0.299 + g * 0.587 + b * 0.114) / 255
+    
+    effective_font_color = font_color
+    if background_color is not None and font_color == (0, 0, 0):
+        # Auto-adjust font color for dark backgrounds
+        bg_rgb = parse_color(background_color)
+        if get_luminance(bg_rgb) < 0.5:
+            effective_font_color = (255, 255, 255)  # White text on dark background
+    
     # Handle font color (convert 0-1 float to 0-255 int if needed)
-    r, g, b = font_color
-    if all(isinstance(c, (int, float)) and c <= 1.0 for c in font_color) and not all(c == 0 for c in font_color):
+    r, g, b = effective_font_color
+    if all(isinstance(c, (int, float)) and c <= 1.0 for c in effective_font_color) and not all(c == 0 for c in effective_font_color):
         # Heuristic: if all values are <= 1.0 (and not all 0), assume float 0-1 and convert to 0-255
-        print(f"ℹ️  Converting font_color {font_color} from 0-1 range to 0-255 range.")
-        r, g, b = [int(c * 255) for c in font_color]
+        print(f"ℹ️  Converting font_color {effective_font_color} from 0-1 range to 0-255 range.")
+        r, g, b = [int(c * 255) for c in effective_font_color]
     else:
-        r, g, b = [int(c) for c in font_color]
+        r, g, b = [int(c) for c in effective_font_color]
     
     font_color_rgb = (r, g, b)
     
@@ -313,6 +326,7 @@ def img2pptx(
                 p.text = title_text
                 p.font.size = Pt(title_fontsize)
                 p.font.bold = True
+                p.font.color.rgb = RGBColor(*font_color_rgb)
                 p.alignment = PP_ALIGN.CENTER
                 content_top = margin + title_height_inches
             

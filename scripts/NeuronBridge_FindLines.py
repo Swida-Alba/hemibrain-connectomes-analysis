@@ -234,6 +234,11 @@ if __name__ == "__main__":
     #   - False or None: Disable generation
     summary_format = ['pdf', 'pptx']
     
+    # Background color for PDF/PPTX summary files
+    # Options: 'black', 'white', '#RRGGBB' hex color, or (R, G, B) tuple (0-255)
+    # Default: 'black' - uses dark background with white text for better contrast
+    summary_background_color = 'black'
+    
     # ==========================================================================
     # EXECUTION - No need to edit below this line
     # ==========================================================================
@@ -260,6 +265,7 @@ if __name__ == "__main__":
         flylight_category=flylight_category,
         simple_mode=simple_mode,
         summary_format=summary_format,
+        summary_background_color=summary_background_color,
     )
     
     # Display summary

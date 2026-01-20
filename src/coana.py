@@ -100,6 +100,13 @@ logging.getLogger('navis').setLevel(logging.WARNING)
 _FNC_CACHE = {}
 
 # ============================================================================
+# Module-level tracking for datasets operating in cache-only mode
+# Used to avoid repeated "fallback" warnings when the same dataset is used multiple times
+# Structure: {dataset: {'cache_only': bool, 'reason': str, 'warned': bool}}
+# ============================================================================
+_CACHE_ONLY_DATASETS = {}
+
+# ============================================================================
 # Module-level cache for FindAllPath graph data (bodyId-level)
 # Used by comparison module to skip heavy graph building when running same query at different thresholds
 # Structure: {cache_key: {'threshold': int, 'graph': FastGraph, 'all_connections': list[DataFrame], 
@@ -933,6 +940,18 @@ class FindNeuronConnection:
     Cache is stored in: cache/{dataset}/connections/ (in project root)\n
     '''
     
+    cache_only: bool = False
+    '''
+    When True, operates in offline mode using only local cache without connecting to the NeuPrint server.\n
+    Useful when:
+    - The server is unavailable but local cache has all needed data
+    - The dataset is no longer available on the server (e.g., deprecated datasets)
+    - Working offline with previously cached data\n
+    If cache is insufficient for the query, an error will be raised.\n
+    If False (default), attempts server connection first, falls back to cache-only if connection fails
+    AND cache appears sufficient.\n
+    '''
+    
     cache_folder: str = ''
     '''folder to store cached data, automatically set based on dataset'''
     
@@ -1003,50 +1022,106 @@ class FindNeuronConnection:
         if self.client_type == 'flywire':
             self._prepare_flywire_data()
         
+        # Initialize cache folder early (needed for cache check)
+        dataset_safe = self.dataset.replace(':', '_').replace('.', '_')
+        self._dataset_safe = dataset_safe
+        
         # Initialize NeuPrint client if needed
         if self.client_type == 'neuprint' and self.client_hemibrain is None:
             from neuprint import Client, set_default_client, default_client
-            # Check if existing default client is for the SAME dataset
-            # Different datasets require different clients (they connect to different neuprint servers)
-            try:
-                existing_client = default_client()
-            except RuntimeError:
-                existing_client = None
             
-            # Check if existing client matches our dataset
-            need_new_client = True
-            if existing_client is not None:
-                # Compare dataset names (NeuPrint client stores dataset in .dataset attribute)
+            # Check if this dataset is already known to be cache-only (from previous instances)
+            global _CACHE_ONLY_DATASETS
+            already_cache_only = self.dataset in _CACHE_ONLY_DATASETS and _CACHE_ONLY_DATASETS[self.dataset].get('cache_only', False)
+            
+            # Check cache status before attempting server connection
+            cache_status = self._check_cache_exists()
+            
+            if self.cache_only:
+                # User explicitly requested cache-only mode - no warning needed
+                if cache_status['is_usable']:
+                    # Only show message once per dataset
+                    if self.dataset not in _CACHE_ONLY_DATASETS or not _CACHE_ONLY_DATASETS[self.dataset].get('warned', False):
+                        self._vprint(f"🔌 Cache-only mode: Using local cache for {self.dataset}", level='always')
+                        self._vprint(f"   📊 Cache contains {cache_status['neuron_count']:,} neurons, {cache_status['connection_count']:,} connections", level='always')
+                        _CACHE_ONLY_DATASETS[self.dataset] = {'cache_only': True, 'reason': 'user_requested', 'warned': True}
+                    # Don't connect to server - will use cache only
+                else:
+                    raise RuntimeError(
+                        f"Cache-only mode requested but cache is insufficient for dataset '{self.dataset}'.\n"
+                        f"   Cache status: connections={cache_status['has_connections']}, "
+                        f"neuron_index={cache_status['has_neuron_index']}, dataset_csv={cache_status['has_dataset']}\n"
+                        f"   Please run with cache_only=False first to build the cache, "
+                        f"or ensure the cache files exist in: cache/{dataset_safe}/"
+                    )
+            elif already_cache_only:
+                # Dataset already known to be cache-only from previous instance - silently use cache
+                self.cache_only = True
+                # No warning - already shown before
+            else:
+                # Normal mode: try server first, fall back to cache if available
+                # Check if existing default client is for the SAME dataset
+                # Different datasets require different clients (they connect to different neuprint servers)
                 try:
-                    existing_dataset = existing_client.dataset
-                    if existing_dataset == self.dataset:
-                        # Same dataset - reuse existing client
-                        self.client_hemibrain = existing_client
-                        need_new_client = False
-                        self._vprint(f"Reusing existing NeuPrint client for dataset: {self.dataset}", level='full')
-                    else:
-                        self._vprint(f"Existing client is for '{existing_dataset}', need new client for '{self.dataset}'", level='full')
-                except AttributeError:
-                    # Client doesn't have dataset attribute, create new one
-                    pass
-            
-            if need_new_client:
-                self._vprint(f"Initializing NeuPrint client for dataset: {self.dataset}", level='full')
+                    existing_client = default_client()
+                except RuntimeError:
+                    existing_client = None
                 
-                # Use TokenManager
-                try:
-                    from .utils.token_manager import token_manager
-                    self.token = token_manager.get_token('NEUPRINT_TOKEN', self.token)
-                except ImportError:
-                    # Fallback if import fails (e.g. running script directly)
+                # Check if existing client matches our dataset
+                need_new_client = True
+                if existing_client is not None:
+                    # Compare dataset names (NeuPrint client stores dataset in .dataset attribute)
                     try:
-                        from src.utils.token_manager import token_manager
+                        existing_dataset = existing_client.dataset
+                        if existing_dataset == self.dataset:
+                            # Same dataset - reuse existing client
+                            self.client_hemibrain = existing_client
+                            need_new_client = False
+                            self._vprint(f"Reusing existing NeuPrint client for dataset: {self.dataset}", level='full')
+                        else:
+                            self._vprint(f"Existing client is for '{existing_dataset}', need new client for '{self.dataset}'", level='full')
+                    except AttributeError:
+                        # Client doesn't have dataset attribute, create new one
+                        pass
+                
+                if need_new_client:
+                    self._vprint(f"Initializing NeuPrint client for dataset: {self.dataset}", level='full')
+                    
+                    # Use TokenManager
+                    try:
+                        from .utils.token_manager import token_manager
                         self.token = token_manager.get_token('NEUPRINT_TOKEN', self.token)
                     except ImportError:
-                        pass
+                        # Fallback if import fails (e.g. running script directly)
+                        try:
+                            from src.utils.token_manager import token_manager
+                            self.token = token_manager.get_token('NEUPRINT_TOKEN', self.token)
+                        except ImportError:
+                            pass
 
-                self.client_hemibrain = Client(self.server, self.dataset, self.token)
-                set_default_client(self.client_hemibrain)
+                    try:
+                        self.client_hemibrain = Client(self.server, self.dataset, self.token)
+                        set_default_client(self.client_hemibrain)
+                    except (RuntimeError, Exception) as e:
+                        # Server connection failed - check if we can use cache instead
+                        error_msg = str(e)
+                        if cache_status['is_usable']:
+                            # Show warning only once per dataset
+                            self._vprint(f"⚠️  Server connection failed: {error_msg}", level='always')
+                            self._vprint(f"🔌 Falling back to cache-only mode for {self.dataset}", level='always')
+                            self._vprint(f"   📊 Cache contains {cache_status['neuron_count']:,} neurons, {cache_status['connection_count']:,} connections", level='always')
+                            # Enable cache-only mode automatically and track it
+                            self.cache_only = True
+                            _CACHE_ONLY_DATASETS[self.dataset] = {'cache_only': True, 'reason': 'server_unavailable', 'warned': True}
+                        else:
+                            # No usable cache - must raise the original error
+                            raise RuntimeError(
+                                f"Server connection failed and local cache is insufficient.\n"
+                                f"   Server error: {error_msg}\n"
+                                f"   Cache status: connections={cache_status['has_connections']}, "
+                                f"neuron_index={cache_status['has_neuron_index']}, dataset_csv={cache_status['has_dataset']}\n"
+                                f"   Please check your network connection or ensure you have cached data for '{self.dataset}'."
+                            ) from e
 
         # Validate filter_by parameter
         if self.filter_by not in ['bodyId', 'type']:
@@ -1054,8 +1129,6 @@ class FindNeuronConnection:
         
         # Initialize cache folder and in-memory cache structures
         # Try to use module-level shared cache first (avoids repeated disk reads)
-        dataset_safe = self.dataset.replace(':', '_').replace('.', '_')
-        self._dataset_safe = dataset_safe
         
         # Check module-level cache first
         global _FNC_CACHE
@@ -1094,9 +1167,15 @@ class FindNeuronConnection:
         (e.g., when processing multiple datasets in comparison mode).
         This method checks if the existing client matches our dataset and 
         creates a new one if needed.
+        
+        In cache_only mode, this method does nothing (no server connection needed).
         '''
         if self.client_type != 'neuprint':
             return  # Not using NeuPrint
+        
+        # In cache-only mode, we don't need a server connection
+        if self.cache_only:
+            return
         
         if self.client_hemibrain is not None:
             # Already have a client - verify it's for the right dataset
@@ -1124,8 +1203,18 @@ class FindNeuronConnection:
         
         # Need a new client for this dataset
         self._vprint(f"Creating NeuPrint client for dataset: {self.dataset}", level='full')
-        self.client_hemibrain = Client(self.server, self.dataset, self.token)
-        set_default_client(self.client_hemibrain)
+        try:
+            self.client_hemibrain = Client(self.server, self.dataset, self.token)
+            set_default_client(self.client_hemibrain)
+        except (RuntimeError, Exception) as e:
+            # Server connection failed - check if we can fall back to cache
+            cache_status = self._check_cache_exists()
+            if cache_status['is_usable']:
+                self._vprint(f"⚠️  Server connection failed: {e}", level='always')
+                self._vprint(f"🔌 Falling back to cache-only mode for {self.dataset}", level='always')
+                self.cache_only = True
+            else:
+                raise
     
     def _ensure_complete_dataset(self):
         '''
@@ -1135,6 +1224,11 @@ class FindNeuronConnection:
         '''
         if self.client_type == 'flywire':
             # No need to print anything - FlyWire uses local files or CAVE API, not downloaded dataset
+            return
+        
+        # In cache-only mode, skip download attempts
+        if self.cache_only:
+            self._vprint(f'   [Cache-only mode] Skipping dataset download check', level='full')
             return
 
         # Create datasets folder if it doesn't exist
@@ -1170,6 +1264,63 @@ class FindNeuronConnection:
                 self._vprint(f'⚠️ Warning: Failed to download complete dataset: {e}', level='always')
                 self._vprint(f'   Cache enrichment may fail for neurons without types.', level='always')
     
+    def _check_cache_exists(self):
+        '''
+        Check if local cache data exists for this dataset.
+        
+        Returns:
+        --------
+        dict : Cache status with keys:
+            - 'has_connections': bool - True if connections.parquet exists
+            - 'has_neuron_index': bool - True if neuron_index.parquet exists
+            - 'has_dataset': bool - True if dataset CSV files exist
+            - 'is_usable': bool - True if cache appears sufficient for basic operations
+            - 'connection_count': int - Number of connections in cache (0 if not loaded)
+            - 'neuron_count': int - Number of neurons indexed (0 if not loaded)
+        '''
+        dataset_safe = self.dataset.replace(':', '_').replace('.', '_')
+        cache_folder = os.path.join(self.script_path, 'cache', dataset_safe)
+        datasets_folder = os.path.join(self.script_path, 'datasets', dataset_safe)
+        
+        conn_path = os.path.join(cache_folder, 'connections.parquet')
+        index_path = os.path.join(cache_folder, 'neuron_index.parquet')
+        neuron_csv = os.path.join(datasets_folder, f"{dataset_safe}_allneurons_neuron_df.csv")
+        
+        has_connections = os.path.exists(conn_path)
+        has_neuron_index = os.path.exists(index_path)
+        has_dataset = os.path.exists(neuron_csv)
+        
+        # Cache is usable if we have connection data and neuron index
+        is_usable = has_connections and has_neuron_index
+        
+        # Get counts if files exist
+        connection_count = 0
+        neuron_count = 0
+        
+        if has_connections:
+            try:
+                import polars as pl
+                # Use lazy scan to just get row count without loading all data
+                connection_count = pl.scan_parquet(conn_path).select(pl.len()).collect().item()
+            except Exception:
+                pass
+        
+        if has_neuron_index:
+            try:
+                import polars as pl
+                neuron_count = pl.scan_parquet(index_path).select(pl.len()).collect().item()
+            except Exception:
+                pass
+        
+        return {
+            'has_connections': has_connections,
+            'has_neuron_index': has_neuron_index,
+            'has_dataset': has_dataset,
+            'is_usable': is_usable,
+            'connection_count': connection_count,
+            'neuron_count': neuron_count,
+        }
+
     # ============================================================================
     # Core Database Access
     # ============================================================================
@@ -2986,193 +3137,202 @@ class FindNeuronConnection:
         # Step 2: Fetch uncached neurons from API if needed
         api_conn = pd.DataFrame()
         if len(uncached_upstream) > 0:
-            self._vprint(f'  🌐 Fetching {len(uncached_upstream)} uncached neurons from API (weight ≥ 1)...', level='full')
-            
-            fetched_locally = False
-            # Special handling for FAFB/FlyWire local data
-            if 'fafb' in self.dataset.lower() or 'flywire' in self.dataset.lower():
-                try:
-                    import fafb_utils
-                    project_root = os.path.dirname(os.path.dirname(__file__))
-                    
-                    # Try to find dataset directory by name
-                    data_dir = os.path.join(project_root, "datasets", self.dataset)
-                    if not os.path.exists(data_dir):
-                        # Fallback to default FAFB directory
-                        data_dir = os.path.join(project_root, "datasets", "flywire_FAFB_v783")
-                    
-                    if os.path.exists(data_dir):
-                        # Only try local if the directory exists
-                        _, conn_file = fafb_utils.prepare_fafb_data(data_dir)
-                        
-                        # Load connections
-                        # Optimization: Load once if possible, but here we load on demand
-                        # Use string for IDs
-                        full_conn = self._read_csv(conn_file, dtype={'pre_root_id': str, 'post_root_id': str})
-                        full_conn = full_conn.rename(columns={
-                            'pre_root_id': 'bodyId_pre',
-                            'post_root_id': 'bodyId_post',
-                            'syn_count': 'weight'
-                        })
-                        
-                        # Filter by upstream
-                        upstream_strs = [str(x) for x in uncached_upstream]
-                        api_conn = full_conn[full_conn['bodyId_pre'].isin(upstream_strs)].copy()
-                        
-                        # Filter by downstream if provided
-                        if downstream_bodyIds is not None:
-                            downstream_strs = [str(x) for x in downstream_bodyIds]
-                            api_conn = api_conn[api_conn['bodyId_post'].isin(downstream_strs)].copy()
-                            
-                        # Add dummy ROI column if missing
-                        if 'roi' not in api_conn.columns:
-                            api_conn['roi'] = 'WholeBrain'
-                            
-                        fetched_locally = True
-                        self._vprint(f"  ✓ Loaded {len(api_conn)} connections from local FAFB data", level='full')
-                except ImportError:
-                    pass
-                except Exception as e:
-                    self._vprint(f"  ⚠️ Error loading local FAFB data: {e}", level='full')
-
-            if not fetched_locally:
-                # Check if we should enforce local-only for FAFB/FlyWire
+            # In cache-only mode, we cannot fetch from API - use only cached data
+            if self.cache_only:
+                self._vprint(f'  ⚠️  {len(uncached_upstream)} neurons not in cache (cache-only mode - skipping API fetch)', level='full')
+                self._vprint(f'     Using only cached data. Results may be incomplete.', level='full')
+                # Return only cached connections
+                if cached_conn.empty:
+                    self._vprint(f'     No cached connections found for these neurons.', level='full')
+                # Continue without API fetch - api_conn stays empty
+            else:
+                self._vprint(f'  🌐 Fetching {len(uncached_upstream)} uncached neurons from API (weight ≥ 1)...', level='full')
+                
+                fetched_locally = False
+                # Special handling for FAFB/FlyWire local data
                 if 'fafb' in self.dataset.lower() or 'flywire' in self.dataset.lower():
-                     self._vprint(f"\n  ⚠️  Local connection data not found for dataset '{self.dataset}'.", level='full')
-                     self._vprint("  Please download the synapse table from: https://codex.flywire.ai/api/download?dataset=fafb", level='full')
-                     self._vprint(f"  Save the file to: datasets/{self.dataset.replace(':', '_')}", level='full') 
-                     self._vprint("  Skipping API fetch to avoid timeouts/limits.", level='full')
-                     return pd.DataFrame()
-
-                if self.client_type == 'flywire':
-                    if self.client_flywire:
-                        # Use FlyWire adapter
-                        # Note: FlyWire adapter mimics fetch_adjacencies behavior
-                        neuron_df, api_conn = self.client_flywire.fetch_adjacencies(
-                            sources=uncached_upstream,
-                            targets=downstream_bodyIds
-                        )
-                        # api_conn should have bodyId_pre, bodyId_post, weight, roi
-                    else:
-                        self._vprint("Error: FlyWire client not initialized", level='full')
-                else:
-                    # Login to neuprint only if needed
-                    from neuprint import Client, set_default_client, default_client, NeuronCriteria
                     try:
-                        from tqdm import tqdm
-                    except ImportError:
-                        # Fallback if tqdm not installed
-                        def tqdm(iterable, **kwargs): return iterable
-                    
-                    # Ensure bodyIds are integers for NeuPrint
-                    # NeuPrint client requires bodyIds to be integers, not strings or floats
-                    # This fixes AssertionError: bodyId should be an integer or list of integers
-                    if uncached_upstream:
-                        try:
-                            uncached_upstream = [int(x) for x in uncached_upstream]
-                        except (ValueError, TypeError):
-                            # If conversion fails (e.g. non-numeric IDs), keep as is and let NeuPrint handle/fail
-                            pass
-                            
-                    if downstream_bodyIds:
-                        try:
-                            downstream_bodyIds = [int(x) for x in downstream_bodyIds]
-                        except (ValueError, TypeError):
-                            pass
-
-                    # Ensure we have a valid client for THIS dataset (not a different one from global default)
-                    self._ensure_neuprint_client()
-                    
-                    # Batch processing with timeout and retry
-                    batch_size = 1000
-                    all_api_conn = []
-                    
-                    # Import API utilities for timeout/retry
-                    try:
-                        from src.utils.api_utils import api_call_with_retry, APITimeoutError, APIRetryExhaustedError
-                    except ImportError:
-                        # Fallback: define inline if utils not available
-                        from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
-                        class APITimeoutError(Exception): pass
-                        class APIRetryExhaustedError(Exception): pass
-                        def api_call_with_retry(func, timeout=60, max_retries=3, retry_delay=2.0, description="API call", on_retry=None, verbose=True):
-                            import time
-                            last_exc = None
-                            for attempt in range(1, max_retries + 1):
-                                try:
-                                    with ThreadPoolExecutor(max_workers=1) as executor:
-                                        future = executor.submit(func)
-                                        return future.result(timeout=timeout)
-                                except FuturesTimeoutError:
-                                    last_exc = APITimeoutError(f"{description} timed out after {timeout}s (attempt {attempt}/{max_retries})")
-                                    if attempt < max_retries:
-                                        time.sleep(retry_delay * (2 ** (attempt - 1)))
-                                except Exception as e:
-                                    last_exc = e
-                                    if attempt < max_retries:
-                                        time.sleep(retry_delay * (2 ** (attempt - 1)))
-                            raise last_exc or Exception("Unknown error")
-                    
-                    # Create batches
-                    batches = [uncached_upstream[i:i + batch_size] for i in range(0, len(uncached_upstream), batch_size)]
-                    
-                    if len(batches) > 1:
-                        self._vprint(f'     Processing {len(batches)} batches (size={batch_size})...', level='full')
-                    
-                    # Use tqdm only if multiple batches or large single batch
-                    iterator = tqdm(batches, desc="Fetching batches", unit="batch") if len(batches) > 1 else batches
-                    
-                    failed_batches = []
-                    for batch_idx, batch in enumerate(iterator):
-                        def fetch_batch(b=batch):
-                            """Inner function for timeout wrapping."""
-                            if self.simple_fetch:
-                                from neuprint import fetch_simple_connections
-                                upstream_criteria = NeuronCriteria(bodyId=b)
-                                downstream_criteria = NeuronCriteria(bodyId=downstream_bodyIds) if downstream_bodyIds is not None else None
-                                return fetch_simple_connections(
-                                    upstream_criteria=upstream_criteria,
-                                    downstream_criteria=downstream_criteria,
-                                    min_weight=1,
-                                    **self.kwargs_fetch
-                                )
-                            else:
-                                from neuprint import fetch_adjacencies
-                                neuron_df, roi_conn_df = fetch_adjacencies(
-                                    sources=b,
-                                    targets=downstream_bodyIds,
-                                    min_total_weight=1,
-                                    **self.kwargs_fetch
-                                )
-                                # roi_conn_df already has bodyId_pre, bodyId_post, roi, weight
-                                return roi_conn_df
+                        import fafb_utils
+                        project_root = os.path.dirname(os.path.dirname(__file__))
                         
-                        try:
-                            # Use timeout and retry for each batch
-                            batch_conn = api_call_with_retry(
-                                fetch_batch,
-                                timeout=120.0,  # 2 minutes per batch
-                                max_retries=3,
-                                retry_delay=5.0,
-                                description=f"Batch {batch_idx+1}/{len(batches)}",
-                                verbose=True
-                            )
-                            if batch_conn is not None and not batch_conn.empty:
-                                all_api_conn.append(batch_conn)
-                        except (APITimeoutError, APIRetryExhaustedError) as e:
-                            self._vprint(f"     ⚠️ Batch {batch_idx+1} failed after retries: {e}", level='full')
-                            failed_batches.append(batch_idx + 1)
-                        except Exception as e:
-                            self._vprint(f"     ⚠️ Error fetching batch {batch_idx+1}: {e}", level='full')
-                            failed_batches.append(batch_idx + 1)
-                    
-                    if failed_batches:
-                        self._vprint(f"     ⚠️ {len(failed_batches)} batches failed: {failed_batches}", level='full')
+                        # Try to find dataset directory by name
+                        data_dir = os.path.join(project_root, "datasets", self.dataset)
+                        if not os.path.exists(data_dir):
+                            # Fallback to default FAFB directory
+                            data_dir = os.path.join(project_root, "datasets", "flywire_FAFB_v783")
+                        
+                        if os.path.exists(data_dir):
+                            # Only try local if the directory exists
+                            _, conn_file = fafb_utils.prepare_fafb_data(data_dir)
                             
-                    if all_api_conn:
-                        api_conn = pd.concat(all_api_conn, ignore_index=True)
+                            # Load connections
+                            # Optimization: Load once if possible, but here we load on demand
+                            # Use string for IDs
+                            full_conn = self._read_csv(conn_file, dtype={'pre_root_id': str, 'post_root_id': str})
+                            full_conn = full_conn.rename(columns={
+                                'pre_root_id': 'bodyId_pre',
+                                'post_root_id': 'bodyId_post',
+                                'syn_count': 'weight'
+                            })
+                            
+                            # Filter by upstream
+                            upstream_strs = [str(x) for x in uncached_upstream]
+                            api_conn = full_conn[full_conn['bodyId_pre'].isin(upstream_strs)].copy()
+                            
+                            # Filter by downstream if provided
+                            if downstream_bodyIds is not None:
+                                downstream_strs = [str(x) for x in downstream_bodyIds]
+                                api_conn = api_conn[api_conn['bodyId_post'].isin(downstream_strs)].copy()
+                                
+                            # Add dummy ROI column if missing
+                            if 'roi' not in api_conn.columns:
+                                api_conn['roi'] = 'WholeBrain'
+                                
+                            fetched_locally = True
+                            self._vprint(f"  ✓ Loaded {len(api_conn)} connections from local FAFB data", level='full')
+                    except ImportError:
+                        pass
+                    except Exception as e:
+                        self._vprint(f"  ⚠️ Error loading local FAFB data: {e}", level='full')
+
+                if not fetched_locally:
+                    # Check if we should enforce local-only for FAFB/FlyWire
+                    if 'fafb' in self.dataset.lower() or 'flywire' in self.dataset.lower():
+                        self._vprint(f"\n  ⚠️  Local connection data not found for dataset '{self.dataset}'.", level='full')
+                        self._vprint("  Please download the synapse table from: https://codex.flywire.ai/api/download?dataset=fafb", level='full')
+                        self._vprint(f"  Save the file to: datasets/{self.dataset.replace(':', '_')}", level='full') 
+                        self._vprint("  Skipping API fetch to avoid timeouts/limits.", level='full')
+                        return pd.DataFrame()
+
+                    if self.client_type == 'flywire':
+                        if self.client_flywire:
+                            # Use FlyWire adapter
+                            # Note: FlyWire adapter mimics fetch_adjacencies behavior
+                            neuron_df, api_conn = self.client_flywire.fetch_adjacencies(
+                                sources=uncached_upstream,
+                                targets=downstream_bodyIds
+                            )
+                            # api_conn should have bodyId_pre, bodyId_post, weight, roi
+                        else:
+                            self._vprint("Error: FlyWire client not initialized", level='full')
                     else:
-                        api_conn = pd.DataFrame()
+                        # Login to neuprint only if needed
+                        from neuprint import Client, set_default_client, default_client, NeuronCriteria
+                        try:
+                            from tqdm import tqdm
+                        except ImportError:
+                            # Fallback if tqdm not installed
+                            def tqdm(iterable, **kwargs): return iterable
+                        
+                        # Ensure bodyIds are integers for NeuPrint
+                        # NeuPrint client requires bodyIds to be integers, not strings or floats
+                        # This fixes AssertionError: bodyId should be an integer or list of integers
+                        if uncached_upstream:
+                            try:
+                                uncached_upstream = [int(x) for x in uncached_upstream]
+                            except (ValueError, TypeError):
+                                # If conversion fails (e.g. non-numeric IDs), keep as is and let NeuPrint handle/fail
+                                pass
+                                
+                        if downstream_bodyIds:
+                            try:
+                                downstream_bodyIds = [int(x) for x in downstream_bodyIds]
+                            except (ValueError, TypeError):
+                                pass
+
+                        # Ensure we have a valid client for THIS dataset (not a different one from global default)
+                        self._ensure_neuprint_client()
+                        
+                        # Batch processing with timeout and retry
+                        batch_size = 1000
+                        all_api_conn = []
+                        
+                        # Import API utilities for timeout/retry
+                        try:
+                            from src.utils.api_utils import api_call_with_retry, APITimeoutError, APIRetryExhaustedError
+                        except ImportError:
+                            # Fallback: define inline if utils not available
+                            from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
+                            class APITimeoutError(Exception): pass
+                            class APIRetryExhaustedError(Exception): pass
+                            def api_call_with_retry(func, timeout=60, max_retries=3, retry_delay=2.0, description="API call", on_retry=None, verbose=True):
+                                import time
+                                last_exc = None
+                                for attempt in range(1, max_retries + 1):
+                                    try:
+                                        with ThreadPoolExecutor(max_workers=1) as executor:
+                                            future = executor.submit(func)
+                                            return future.result(timeout=timeout)
+                                    except FuturesTimeoutError:
+                                        last_exc = APITimeoutError(f"{description} timed out after {timeout}s (attempt {attempt}/{max_retries})")
+                                        if attempt < max_retries:
+                                            time.sleep(retry_delay * (2 ** (attempt - 1)))
+                                    except Exception as e:
+                                        last_exc = e
+                                        if attempt < max_retries:
+                                            time.sleep(retry_delay * (2 ** (attempt - 1)))
+                                raise last_exc or Exception("Unknown error")
+                        
+                        # Create batches
+                        batches = [uncached_upstream[i:i + batch_size] for i in range(0, len(uncached_upstream), batch_size)]
+                        
+                        if len(batches) > 1:
+                            self._vprint(f'     Processing {len(batches)} batches (size={batch_size})...', level='full')
+                        
+                        # Use tqdm only if multiple batches or large single batch
+                        iterator = tqdm(batches, desc="Fetching batches", unit="batch") if len(batches) > 1 else batches
+                        
+                        failed_batches = []
+                        for batch_idx, batch in enumerate(iterator):
+                            def fetch_batch(b=batch):
+                                """Inner function for timeout wrapping."""
+                                if self.simple_fetch:
+                                    from neuprint import fetch_simple_connections
+                                    upstream_criteria = NeuronCriteria(bodyId=b)
+                                    downstream_criteria = NeuronCriteria(bodyId=downstream_bodyIds) if downstream_bodyIds is not None else None
+                                    return fetch_simple_connections(
+                                        upstream_criteria=upstream_criteria,
+                                        downstream_criteria=downstream_criteria,
+                                        min_weight=1,
+                                        **self.kwargs_fetch
+                                    )
+                                else:
+                                    from neuprint import fetch_adjacencies
+                                    neuron_df, roi_conn_df = fetch_adjacencies(
+                                        sources=b,
+                                        targets=downstream_bodyIds,
+                                        min_total_weight=1,
+                                        **self.kwargs_fetch
+                                    )
+                                    # roi_conn_df already has bodyId_pre, bodyId_post, roi, weight
+                                    return roi_conn_df
+                            
+                            try:
+                                # Use timeout and retry for each batch
+                                batch_conn = api_call_with_retry(
+                                    fetch_batch,
+                                    timeout=120.0,  # 2 minutes per batch
+                                    max_retries=3,
+                                    retry_delay=5.0,
+                                    description=f"Batch {batch_idx+1}/{len(batches)}",
+                                    verbose=True
+                                )
+                                if batch_conn is not None and not batch_conn.empty:
+                                    all_api_conn.append(batch_conn)
+                            except (APITimeoutError, APIRetryExhaustedError) as e:
+                                self._vprint(f"     ⚠️ Batch {batch_idx+1} failed after retries: {e}", level='full')
+                                failed_batches.append(batch_idx + 1)
+                            except Exception as e:
+                                self._vprint(f"     ⚠️ Error fetching batch {batch_idx+1}: {e}", level='full')
+                                failed_batches.append(batch_idx + 1)
+                        
+                        if failed_batches:
+                            self._vprint(f"     ⚠️ {len(failed_batches)} batches failed: {failed_batches}", level='full')
+                                
+                        if all_api_conn:
+                            api_conn = pd.concat(all_api_conn, ignore_index=True)
+                        else:
+                            api_conn = pd.DataFrame()
             
             # Save connections to database (but don't mark neurons as cached yet)
             self._save_connections_only(api_conn, uncached_upstream)

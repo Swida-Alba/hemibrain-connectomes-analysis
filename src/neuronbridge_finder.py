@@ -84,6 +84,18 @@ except ImportError:
         CrossDatasetTypeMapper = None  # type: ignore
         get_type_mapper = None  # type: ignore
 
+# Try to import img2pptx for PPTX generation
+try:
+    from utils.report_utils import img2pptx
+    HAS_IMG2PPTX = True
+except ImportError:
+    try:
+        from src.utils.report_utils import img2pptx
+        HAS_IMG2PPTX = True
+    except ImportError:
+        HAS_IMG2PPTX = False
+        img2pptx = None  # type: ignore
+
 # Try to import neuronbridge
 # Apply patch to fix API compatibility issue with pydantic validation
 # (NeuronBridge API added new fields 'defaultSearchLibrary' that the Python client doesn't recognize)
@@ -7507,6 +7519,7 @@ class NeuronBridgeFinder:
         pdf_images_per_page: Tuple[int, int] = (3, 2),
         pdf_landscape: bool = True,
         summary_format: Union[str, List[str]] = 'pdf',
+        summary_background_color: Union[str, Tuple[int, int, int]] = 'black',
     ) -> pd.DataFrame:
         """
         Find driver lines for multiple EM neurons with automatic saving.
@@ -7580,6 +7593,10 @@ class NeuronBridgeFinder:
             Format(s) for summary file generation.
             Options: 'pdf', 'pptx', or list like ['pdf', 'pptx']
             Default: 'pdf'
+        summary_background_color : str or tuple of (int, int, int)
+            Background color for PDF/PPTX summary files. Can be named color 
+            ('black', 'white'), hex string ('#000000'), or RGB tuple (0-255).
+            Default: 'black' (dark background with white text)
         
         Notes
         -----
@@ -8358,20 +8375,32 @@ class NeuronBridgeFinder:
                                         output_pdf=os.path.join(output_path, 'images_summary.pdf'),
                                         images_per_page=pdf_images_per_page,
                                         landscape=pdf_landscape,
-                                        line_order=download_lines,  # Preserve ranking order
-                                        verbose=self.verbose
+                                        line_order=download_lines,
+                                        verbose=self.verbose,
+                                        background_color=summary_background_color
                                     )
                                     if pdf_path:
                                         self._vprint(f"   ✅ PDF saved: {pdf_path}")
                                 
                                 if 'pptx' in formats:
                                     self._vprint(f"\n📊 Generating PPTX summary...")
-                                    pptx_path = create_image_pptx(
+                                    # img2pptx auto-detects font color from background
+                                    pptx_path = img2pptx(
+                                        input_path=images_dir,
+                                        output_pptx=os.path.join(output_path, 'images_summary.pptx'),
+                                        images_per_slide=pdf_images_per_page,
+                                        slide_title='{subfolder}',
+                                        include_subfolders=True,
+                                        group_by_subfolder=True,
+                                        label_position='below',
+                                        background_color=summary_background_color
+                                    ) if HAS_IMG2PPTX else create_image_pptx(
                                         images_dir=images_dir,
                                         output_pptx=os.path.join(output_path, 'images_summary.pptx'),
                                         images_per_slide=pdf_images_per_page,
-                                        line_order=download_lines,  # Preserve ranking order
-                                        verbose=self.verbose
+                                        line_order=download_lines,
+                                        verbose=self.verbose,
+                                        background_color=summary_background_color
                                     )
                                     if pptx_path:
                                         self._vprint(f"   ✅ PPTX saved: {pptx_path}")
@@ -8577,42 +8606,64 @@ class NeuronBridgeFinder:
         if verbose:
             print(f"  📦 Found {total_file_count} files across {lines_with_files} lines")
         
-        # Phase 2: Download with progress bar
-        pbar = None
-        if HAS_TQDM and verbose:
-            pbar = tqdm(total=total_file_count, desc="  Downloading", unit="file")
+        # Phase 2: Download with parallel processing
+        import threading
+        from concurrent.futures import ThreadPoolExecutor, as_completed
         
-        files_downloaded = 0
+        downloaded = []
+        downloaded_lock = threading.Lock()
+        
+        # Build flat list of download tasks
+        download_tasks = []
         for line_name in lines:
             if line_name not in line_files_map or not line_files_map[line_name]:
                 continue
-            
+            line_dir = os.path.join(output_dir, line_name)
+            for file_type, file_path in line_files_map[line_name]:
+                url = cdm_base_url + file_path
+                filename = os.path.basename(file_path)
+                local_path = os.path.join(line_dir, filename)
+                download_tasks.append((line_name, url, local_path, line_dir))
+        
+        def download_single_file(task):
+            """Download a single file and return (success, local_path, line_name)."""
+            line_name, url, local_path, line_dir = task
             try:
-                line_dir = os.path.join(output_dir, line_name)
                 os.makedirs(line_dir, exist_ok=True)
-                
-                for file_type, file_path in line_files_map[line_name]:
-                    url = cdm_base_url + file_path
-                    filename = os.path.basename(file_path)
-                    local_path = os.path.join(line_dir, filename)
-                    
-                    try:
-                        if pbar:
-                            pbar.set_postfix(line=line_name[:15], refresh=False)
-                        urllib.request.urlretrieve(url, local_path)
-                        downloaded.append(local_path)
-                        files_downloaded += 1
-                        if pbar:
-                            pbar.update(1)
-                        elif verbose:
-                            print(f"  [{files_downloaded}/{total_file_count}] {line_name}: {filename}")
-                    except Exception as e:
-                        if verbose and not pbar:
-                            print(f"  ⚠️ Failed to download {filename}: {e}")
-                        
+                urllib.request.urlretrieve(url, local_path)
+                return (True, local_path, line_name)
             except Exception as e:
-                if verbose and not pbar:
-                    print(f"  ❌ Error processing '{line_name}': {e}")
+                return (False, str(e), line_name)
+        
+        pbar = None
+        if HAS_TQDM and verbose:
+            pbar = tqdm(total=len(download_tasks), desc="  Downloading", unit="file")
+        
+        # Use ThreadPoolExecutor for parallel downloads
+        # Use all available CPU cores for maximum throughput
+        max_workers = min(os.cpu_count() or 8, len(download_tasks))
+        files_downloaded = 0
+        
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_to_task = {executor.submit(download_single_file, task): task for task in download_tasks}
+            
+            for future in as_completed(future_to_task):
+                success, result, line_name = future.result()
+                
+                if success:
+                    with downloaded_lock:
+                        downloaded.append(result)
+                    files_downloaded += 1
+                    if pbar:
+                        pbar.set_postfix(line=line_name[:15], refresh=False)
+                        pbar.update(1)
+                    elif verbose:
+                        print(f"  [{files_downloaded}/{total_file_count}] {line_name}: {os.path.basename(result)}")
+                else:
+                    if pbar:
+                        pbar.update(1)
+                    elif verbose:
+                        print(f"  ⚠️ Failed to download for {line_name}: {result}")
         
         if pbar:
             pbar.close()
@@ -9048,99 +9099,90 @@ class NeuronBridgeFinder:
                 print(f"📊 Scanning {len(lines)} lines (categories: {cat_str})...")
         
         line_files_map = {}  # line_name -> list of FlyLightFile
-        total_file_count = 0
         max_files_limit = max_files if max_files else 999999
+        
+        # Determine VT format settings
+        vt_formats = formats
+        if isinstance(vt_formats, str):
+            vt_formats = [vt_formats]
+        if 'png' in vt_formats and 'jpg' not in vt_formats:
+            vt_formats = list(vt_formats) + ['jpg']
+        
+        # Thread-safe counters and containers
+        import threading
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        
+        total_file_count = [0]  # Use list for thread-safe mutation
+        count_lock = threading.Lock()
+        result_lock = threading.Lock()
+        warning_lock = threading.Lock()
+        
+        def scan_single_line(line_name: str) -> tuple:
+            """Scan a single line and return (line_name, files)."""
+            is_vt = line_name.upper().startswith('VT')
+            line_formats = vt_formats if is_vt else formats
+            line_image_types = 'all' if is_vt else image_types
+            
+            try:
+                # Sequential category search
+                files = get_files_for_line_sequential(
+                    line_name, 
+                    categories,
+                    {'formats': line_formats, 'image_types': line_image_types},
+                    max_files_limit
+                )
+                
+                # MCFO fallback if no files found and fallback is enabled
+                if not files and needs_mcfo_fallback:
+                    with warning_lock:
+                        warning_msg = f"ℹ️  No files from {', '.join(categories)} for {line_name}, trying MCFO fallback..."
+                        self._warning_collector.append(warning_msg)
+                    
+                    files = get_files_for_line_sequential(
+                        line_name,
+                        ['MCFO'],
+                        {'formats': line_formats, 'image_types': line_image_types},
+                        max_files_limit
+                    )
+                    if not files:
+                        with warning_lock:
+                            warning_msg = f"⚠️  No images found for {line_name} in any collection (including MCFO)"
+                            self._warning_collector.append(warning_msg)
+                
+                return (line_name, files)
+            except Exception:
+                return (line_name, [])
         
         # Create a scanning progress bar
         scan_pbar = None
         if HAS_TQDM and verbose:
             scan_pbar = tqdm(total=len(lines), desc="  Scanning", unit="line", leave=False)
         
-        # Scan other lines (non-VT)
-        for line_name in other_lines:
-            try:
-                # Sequential category search
-                files = get_files_for_line_sequential(
-                    line_name, 
-                    categories,
-                    {'formats': formats, 'image_types': image_types},
-                    max_files_limit
-                )
-                
-                # MCFO fallback if no files found and fallback is enabled
-                if not files and needs_mcfo_fallback:
-                    warning_msg = f"ℹ️  No files from {', '.join(categories)} for {line_name}, trying MCFO fallback..."
-                    self._warning_collector.append(warning_msg)
-                    
-                    files = get_files_for_line_sequential(
-                        line_name,
-                        ['MCFO'],
-                        {'formats': formats, 'image_types': image_types},
-                        max_files_limit
-                    )
-                    # Only print success message if no progress bar (otherwise it interrupts the bar)
-                    if files and verbose and not scan_pbar:
-                        print(f"  ✓ Found {len(files)} MCFO images for {line_name}")
-                    elif not files:
-                        warning_msg = f"⚠️  No images found for {line_name} in any collection (including MCFO)"
-                        self._warning_collector.append(warning_msg)
-                
-                line_files_map[line_name] = files
-                total_file_count += len(files)
-            except Exception:
-                line_files_map[line_name] = []
-            
-            if scan_pbar:
-                scan_pbar.set_postfix(files=total_file_count, refresh=False)
-                scan_pbar.update(1)
+        # Use ThreadPoolExecutor for parallel scanning
+        # Use all available CPU cores for maximum throughput
+        max_workers = min(os.cpu_count() or 8, len(lines))
         
-        # Scan VT lines (need different format settings)
-        if vt_lines:
-            vt_formats = formats
-            if isinstance(vt_formats, str):
-                vt_formats = [vt_formats]
-            if 'png' in vt_formats and 'jpg' not in vt_formats:
-                vt_formats = list(vt_formats) + ['jpg']
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            # Submit all lines for scanning
+            future_to_line = {executor.submit(scan_single_line, line): line for line in lines}
             
-            for line_name in vt_lines:
-                try:
-                    # Sequential category search for VT lines
-                    files = get_files_for_line_sequential(
-                        line_name,
-                        categories,
-                        {'formats': vt_formats, 'image_types': 'all'},
-                        max_files_limit
-                    )
-                    
-                    # MCFO fallback if no files found
-                    if not files and needs_mcfo_fallback:
-                        warning_msg = f"ℹ️  No files from {', '.join(categories)} for {line_name}, trying MCFO fallback..."
-                        self._warning_collector.append(warning_msg)
-                        
-                        files = get_files_for_line_sequential(
-                            line_name,
-                            ['MCFO'],
-                            {'formats': vt_formats, 'image_types': 'all'},
-                            max_files_limit
-                        )
-                        # Only print success message if no progress bar (otherwise it interrupts the bar)
-                        if files and verbose and not scan_pbar:
-                            print(f"  ✓ Found {len(files)} MCFO images for {line_name}")
-                        elif not files:
-                            warning_msg = f"⚠️  No images found for {line_name} in any collection (including MCFO)"
-                            self._warning_collector.append(warning_msg)
-                    
+            for future in as_completed(future_to_line):
+                line_name, files = future.result()
+                
+                with result_lock:
                     line_files_map[line_name] = files
-                    total_file_count += len(files)
-                except Exception:
-                    line_files_map[line_name] = []
+                
+                with count_lock:
+                    total_file_count[0] += len(files)
                 
                 if scan_pbar:
-                    scan_pbar.set_postfix(files=total_file_count, refresh=False)
+                    scan_pbar.set_postfix(files=total_file_count[0], refresh=False)
                     scan_pbar.update(1)
         
         if scan_pbar:
             scan_pbar.close()
+        
+        total_file_count = total_file_count[0]  # Convert back to int
         
         # Track lines without any FlyLight files
         lines_without_files = [l for l, f in line_files_map.items() if not f]
@@ -9156,63 +9198,92 @@ class NeuronBridgeFinder:
             if lines_without_files:
                 print(f"  ⚠️ No files for: {', '.join(lines_without_files[:5])}{'...' if len(lines_without_files) > 5 else ''}")
         
-        # Phase 2: Download with combined progress bar
+        # Phase 2: Download files
+        # Download all lines using pre-scanned files with parallel processing
+        import threading
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        
         downloaded = []
-        files_downloaded = [0]  # Use list to allow modification in callback
-        current_line = ['']  # Track current line for progress display
+        downloaded_lock = threading.Lock()
+        files_downloaded = [0]
         
         # Create a single progress bar for all files
         pbar = None
         if HAS_TQDM and verbose:
             pbar = tqdm(total=total_file_count, desc="  Downloading", unit="file")
         
-        def on_file_downloaded(file_path, line_name):
-            """Callback to update progress after each file download."""
-            files_downloaded[0] += 1
-            if pbar:
-                # Update postfix to show current line
-                if line_name != current_line[0]:
-                    current_line[0] = line_name
-                pbar.set_postfix(line=line_name[:15], refresh=False)
-                pbar.update(1)
-            elif verbose:
-                # Fallback without tqdm
-                print(f"  [{files_downloaded[0]}/{total_file_count}] {line_name}: {file_path.name if hasattr(file_path, 'name') else file_path}")
+        def download_line_files(line_info):
+            """Download files for a single line."""
+            line_name, line_files = line_info
+            try:
+                # Determine the correct formats for this line
+                line_formats = formats
+                line_image_types = image_types
+                if line_name.upper().startswith('VT'):
+                    if isinstance(line_formats, str):
+                        line_formats = [line_formats]
+                    if 'png' in line_formats and 'jpg' not in line_formats:
+                        line_formats = list(line_formats) + ['jpg']
+                    line_image_types = 'all'
+                
+                # Create downloader with parallel support (no verbose to avoid nested progress bars)
+                downloader = FlyLightDownloader(
+                    output_dir=output_dir,
+                    formats=line_formats,
+                    image_types=line_image_types,
+                    verbose=False,
+                    max_workers=min(4, os.cpu_count() or 4)  # Limit per-line workers
+                )
+                
+                dl_files = downloader.download(
+                    line_name=line_name,
+                    max_files=max_files,
+                    flat_structure=True,
+                    add_timestamp=False,
+                    files=line_files
+                )
+                return (line_name, [str(f) for f in dl_files], len(line_files))
+            except Exception as e:
+                return (line_name, [], len(line_files), str(e))
         
-        # Download all lines using pre-scanned files
-        for line_name in lines:
-            if line_name in line_files_map and line_files_map[line_name]:
-                try:
-                    # Determine the correct formats for this line
-                    line_formats = formats
-                    line_image_types = image_types
-                    if line_name.upper().startswith('VT'):
-                        if isinstance(line_formats, str):
-                            line_formats = [line_formats]
-                        if 'png' in line_formats and 'jpg' not in line_formats:
-                            line_formats = list(line_formats) + ['jpg']
-                        line_image_types = 'all'
+        # Prepare download tasks (only lines with files)
+        download_tasks = [(ln, line_files_map[ln]) for ln in lines 
+                         if ln in line_files_map and line_files_map[ln]]
+        
+        # Use ThreadPoolExecutor for parallel line downloads
+        # Limit workers to avoid too many concurrent connections
+        max_line_workers = min(4, len(download_tasks))
+        
+        if max_line_workers > 1 and len(download_tasks) > 1:
+            with ThreadPoolExecutor(max_workers=max_line_workers) as executor:
+                future_to_line = {executor.submit(download_line_files, task): task[0] 
+                                  for task in download_tasks}
+                
+                for future in as_completed(future_to_line):
+                    result = future.result()
+                    line_name = result[0]
+                    dl_files = result[1]
+                    expected_count = result[2] if len(result) > 2 else len(dl_files)
                     
-                    # Create downloader (category doesn't matter since we're using pre-scanned files)
-                    downloader = FlyLightDownloader(
-                        output_dir=output_dir,
-                        formats=line_formats,
-                        image_types=line_image_types,
-                        verbose=False
-                    )
+                    with downloaded_lock:
+                        downloaded.extend(dl_files)
                     
-                    dl_files = downloader.download(
-                        line_name=line_name,
-                        max_files=max_files,
-                        on_file_downloaded=on_file_downloaded,
-                        flat_structure=True,
-                        add_timestamp=False,  # Don't add timestamp - organize by line name only for summary generation
-                        files=line_files_map[line_name]  # Use pre-filtered files
-                    )
-                    downloaded.extend([str(f) for f in dl_files])
-                except Exception as e:
-                    if verbose and not pbar:
-                        print(f"  ❌ {line_name}: {e}")
+                    # Update progress bar
+                    if pbar:
+                        pbar.set_postfix(line=line_name[:15], refresh=False)
+                        pbar.update(expected_count)
+        else:
+            # Sequential fallback for small number of tasks
+            for task in download_tasks:
+                result = download_line_files(task)
+                line_name = result[0]
+                dl_files = result[1]
+                expected_count = result[2] if len(result) > 2 else len(dl_files)
+                downloaded.extend(dl_files)
+                
+                if pbar:
+                    pbar.set_postfix(line=line_name[:15], refresh=False)
+                    pbar.update(expected_count)
         
         if pbar:
             pbar.close()
@@ -9615,6 +9686,7 @@ def create_image_pptx(
     margin: float = 0.3,
     line_order: Optional[List[str]] = None,
     font_color: Tuple[int, int, int] = (0, 0, 0),
+    background_color: Union[str, Tuple[int, int, int]] = None,
     verbose: bool = True
 ) -> Optional[str]:
     """
@@ -9648,6 +9720,10 @@ def create_image_pptx(
         If None, lines are sorted alphabetically.
     font_color : tuple of (int, int, int), default (0, 0, 0)
         RGB color tuple for label text (r, g, b), each value 0-255. Default is black.
+    background_color : str or tuple of (int, int, int), optional
+        Background color for slides. Can be named color ('black', 'white'),
+        hex string ('#000000'), or RGB tuple (0-255). Default: None (white).
+        When set to 'black' or dark color, font_color auto-adjusts to white if not specified.
     verbose : bool
         Print progress messages. Default: True
         
@@ -9748,6 +9824,40 @@ def create_image_pptx(
     prs.slide_height = Inches(slide_height)
     blank_layout = prs.slide_layouts[6]
     
+    # Parse background color and determine text color
+    from pptx.dml.color import RGBColor
+    bg_rgb = None
+    text_color = font_color
+    if background_color:
+        try:
+            if isinstance(background_color, str):
+                if background_color.lower() == 'black':
+                    bg_rgb = RGBColor(0, 0, 0)
+                elif background_color.lower() == 'white':
+                    bg_rgb = RGBColor(255, 255, 255)
+                elif background_color.startswith('#'):
+                    hex_str = background_color.lstrip('#')
+                    r, g, b = int(hex_str[0:2], 16), int(hex_str[2:4], 16), int(hex_str[4:6], 16)
+                    bg_rgb = RGBColor(r, g, b)
+                else:
+                    # Try named colors
+                    color_map = {'gray': (128, 128, 128), 'grey': (128, 128, 128), 
+                                 'darkgray': (64, 64, 64), 'darkgrey': (64, 64, 64)}
+                    if background_color.lower() in color_map:
+                        r, g, b = color_map[background_color.lower()]
+                        bg_rgb = RGBColor(r, g, b)
+            elif isinstance(background_color, (tuple, list)) and len(background_color) >= 3:
+                bg_rgb = RGBColor(*background_color[:3])
+            
+            # Auto-adjust text color for dark backgrounds if font_color wasn't explicitly set to non-default
+            if bg_rgb and font_color == (0, 0, 0):
+                # Calculate luminance
+                luminance = (bg_rgb[0]*0.299 + bg_rgb[1]*0.587 + bg_rgb[2]*0.114) / 255
+                if luminance < 0.5:
+                    text_color = (255, 255, 255)  # White text on dark background
+        except Exception:
+            pass
+    
     total_slides = 0
     total_images = 0
     
@@ -9764,6 +9874,16 @@ def create_image_pptx(
         
         for slide_idx in range(num_slides):
             slide = prs.slides.add_slide(blank_layout)
+            
+            # Apply background color
+            if bg_rgb:
+                from pptx.oxml.ns import nsmap
+                from pptx.oxml import parse_xml
+                # Set slide background
+                background = slide.background
+                fill = background.fill
+                fill.solid()
+                fill.fore_color.rgb = bg_rgb
             
             # Build title
             slide_title = line_name
@@ -9782,6 +9902,7 @@ def create_image_pptx(
             p.text = slide_title
             p.font.size = Pt(title_font_size)
             p.font.bold = True
+            p.font.color.rgb = RGBColor(*text_color)
             p.alignment = PP_ALIGN.CENTER
             
             # Get images for this slide
@@ -9839,8 +9960,7 @@ def create_image_pptx(
                         p = tf.paragraphs[0]
                         p.text = label
                         p.font.size = Pt(label_font_size)
-                        from pptx.dml.color import RGBColor
-                        p.font.color.rgb = RGBColor(*font_color)
+                        p.font.color.rgb = RGBColor(*text_color)
                         p.alignment = PP_ALIGN.CENTER
                         
                         total_images += 1
