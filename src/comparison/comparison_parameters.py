@@ -275,6 +275,16 @@ class ComparisonParameters:
     """If True, skip bodyId-level data saving, visualization, and calculations.
     Useful for large-scale analyses where only type-level data is needed."""
 
+    max_edges_for_metrics: Optional[int] = 50000
+    """Maximum number of edges to compute similarity metrics for.
+    If the aligned data has more edges than this threshold, expensive metrics
+    computation (Jaccard, Ruzicka, correlation, etc.) will be skipped for that threshold.
+    
+    Default: 50000 (handles most comparisons in reasonable time)
+    Set to None to compute for all edges regardless of count.
+    For very fast runs, use 5000-10000.
+    For complete analysis on smaller datasets, use None."""
+
     force_API_fetching: bool = False
     """If True, use CAVE API to fetch FlyWire (FAFB) data instead of local files.
     This fetches connection data directly from the CAVE API for more up-to-date data.
@@ -553,6 +563,35 @@ class ComparisonParameters:
         'mushroombody': 'U',
     }
     
+    # Dataset display nickname mapping for plot axes/legends
+    # Keys are lowercased for case-insensitive matching
+    # These are the default short names used in visualizations when no nickname is provided
+    DEFAULT_DISPLAY_NICKNAMES = {
+        'male-cns': 'MCNS',
+        'mcns': 'MCNS',
+        'male_cns': 'MCNS',
+        'fafb': 'FAFB',
+        'flywire_fafb': 'FAFB',
+        'flywire-fafb': 'FAFB',
+        'banc': 'BANC',
+        'flywire_banc': 'BANC',
+        'flywire-banc': 'BANC',
+        'hemibrain': 'HEMI',
+        'hemi': 'HEMI',
+        'optic-lobe': 'OL',
+        'optic_lobe': 'OL',
+        'opticlobe': 'OL',
+        'manc': 'MANC',
+        'mushroombody': 'MB',
+        'mushroom_body': 'MB',
+        'mushroom-body': 'MB',
+        'larva': 'LARVA',
+        'l1em': 'L1EM',
+        'central-brain': 'CB',
+        'central_brain': 'CB',
+        'vnc': 'VNC',
+    }
+    
     def _get_neuron_abbreviation(self, neurons: Union[List, Dict, Any], labels: List[str] = None) -> str:
         """
         Generate a short abbreviation for neuron list, similar to FindNeuronConnection's naming.
@@ -681,6 +720,63 @@ class ComparisonParameters:
         
         return ''.join(codes)
     
+    def get_display_nickname(self, dataset_name: str) -> str:
+        """
+        Get a short display nickname for a dataset for use in plot labels/axes.
+        
+        Uses DEFAULT_DISPLAY_NICKNAMES mapping. For example:
+        - 'male-cns:v0.9' -> 'MCNS'
+        - 'flywire_FAFB_v783' -> 'FAFB'
+        - 'hemibrain:v1.2.1' -> 'HEMI'
+        
+        If no mapping found, returns a sanitized short name.
+        
+        Args:
+            dataset_name: Full dataset name or identifier
+            
+        Returns:
+            Short display nickname (typically 2-5 characters)
+        """
+        import re
+        
+        # Normalize: lowercase, remove version info
+        ds_lower = dataset_name.lower()
+        # Remove version suffixes like :v1.2.1, _v783, etc.
+        ds_clean = re.sub(r'[:_]v?\d+[\d._]*$', '', ds_lower)
+        ds_clean = ds_clean.replace('_', '-')  # Normalize underscores
+        
+        # Look up in mapping - try various forms
+        for key, nickname in self.DEFAULT_DISPLAY_NICKNAMES.items():
+            if key in ds_clean or ds_clean in key:
+                return nickname
+        
+        # Fallback: create short name from first word, uppercase, max 6 chars
+        # e.g., 'unknown-dataset' -> 'UNKNOW'
+        short = ds_clean.split('-')[0].upper()[:6]
+        return short if short else dataset_name[:6].upper()
+    
+    def get_nickname_map(self) -> Dict[str, str]:
+        """
+        Build a nickname map for all datasets using DEFAULT_DISPLAY_NICKNAMES.
+        
+        This is a convenience method for visualization functions that need
+        a mapping from full dataset names to short display names.
+        
+        If datasets_nickname is provided, those are used. Otherwise,
+        nicknames are auto-generated using DEFAULT_DISPLAY_NICKNAMES.
+        
+        Returns:
+            Dict mapping dataset names to display nicknames
+        """
+        dataset_names = self.get_dataset_names()
+        
+        if self.datasets_nickname and len(self.datasets_nickname) == len(dataset_names):
+            # User provided nicknames
+            return {name: nick for name, nick in zip(dataset_names, self.datasets_nickname)}
+        
+        # Auto-generate using DEFAULT_DISPLAY_NICKNAMES
+        return {name: self.get_display_nickname(name) for name in dataset_names}
+    
     @property
     def output_name(self) -> str:
         """
@@ -762,15 +858,16 @@ class ComparisonParameters:
         """
         Get short nicknames for datasets for visualization labels.
         
-        Returns datasets_nickname if provided, otherwise returns sanitized dataset names.
+        Returns datasets_nickname if provided, otherwise returns auto-generated
+        display nicknames from DEFAULT_DISPLAY_NICKNAMES mapping.
         
         Returns:
             List of short dataset labels for visualizations
         """
         if self.datasets_nickname and len(self.datasets_nickname) == len(self.datasets):
             return self.datasets_nickname
-        # Fallback to sanitized names
-        return [self._sanitize_name(n) for n in self.get_dataset_names()]
+        # Fallback to DEFAULT_DISPLAY_NICKNAMES
+        return [self.get_display_nickname(n) for n in self.get_dataset_names()]
     
     def get_source_neurons_for_dataset(self, dataset: str) -> List[Union[str, int]]:
         """
@@ -977,6 +1074,7 @@ class ComparisonParameters:
             
             # Data fetching options
             'skip_bodyId': self.skip_bodyId,
+            'max_edges_for_metrics': self.max_edges_for_metrics,
             'force_API_fetching': self.force_API_fetching,
             
             # Verification settings

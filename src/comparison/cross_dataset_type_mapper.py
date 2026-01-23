@@ -534,6 +534,85 @@ class CrossDatasetTypeMapper:
         
         return None
     
+    # Dataset short codes for display names
+    DATASET_SHORT_CODES = {
+        'male-cns:v0.9': 'M',
+        'male-cns_v0_9': 'M',
+        'flywire_FAFB_v783': 'F',
+        'flywire_FAFB': 'F',
+        'flywire_BANC_v626': 'B',
+        'flywire_BANC': 'B',
+        'hemibrain:v1.2.1': 'H',
+        'hemibrain_v1_2_1': 'H',
+        'manc:v1.0': 'N',  # N for MANC
+        'manc:v1.2.1': 'N',
+        'manc_v1_0': 'N',
+        'manc_v1_2_1': 'N',
+        'optic-lobe:v1.1': 'O',
+        'optic-lobe_v1_1': 'O',
+    }
+    
+    # Full dataset names for hover info
+    DATASET_FULL_NAMES = {
+        'male-cns:v0.9': 'male-cns v0.9',
+        'male-cns_v0_9': 'male-cns v0.9',
+        'flywire_FAFB_v783': 'FlyWire FAFB v783',
+        'flywire_FAFB': 'FlyWire FAFB',
+        'flywire_BANC_v626': 'FlyWire BANC v626',
+        'flywire_BANC': 'FlyWire BANC',
+        'hemibrain:v1.2.1': 'hemibrain v1.2.1',
+        'hemibrain_v1_2_1': 'hemibrain v1.2.1',
+        'manc:v1.0': 'MANC v1.0',
+        'manc:v1.2.1': 'MANC v1.2.1',
+        'manc_v1_0': 'MANC v1.0',
+        'manc_v1_2_1': 'MANC v1.2.1',
+        'optic-lobe:v1.1': 'optic-lobe v1.1',
+        'optic-lobe_v1_1': 'optic-lobe v1.1',
+    }
+    
+    def get_dataset_short_code(self, dataset: str) -> str:
+        """
+        Get the one-character short code for a dataset.
+        
+        Args:
+            dataset: Dataset name.
+            
+        Returns:
+            One-character short code (e.g., 'M' for male-cns, 'F' for FAFB).
+        """
+        norm_ds = self._normalize_dataset_name(dataset)
+        return self.DATASET_SHORT_CODES.get(norm_ds, dataset[0].upper())
+    
+    def get_dataset_full_name(self, dataset: str) -> str:
+        """
+        Get the full display name for a dataset.
+        
+        Args:
+            dataset: Dataset name.
+            
+        Returns:
+            Full dataset name for display.
+        """
+        norm_ds = self._normalize_dataset_name(dataset)
+        return self.DATASET_FULL_NAMES.get(norm_ds, dataset)
+    
+    def get_all_dataset_short_codes(self, datasets: List[str]) -> Dict[str, str]:
+        """
+        Get short codes for all datasets being compared.
+        
+        Args:
+            datasets: List of dataset names.
+            
+        Returns:
+            Dict mapping short code to full dataset name.
+        """
+        result = {}
+        for ds in datasets:
+            code = self.get_dataset_short_code(ds)
+            full_name = self.get_dataset_full_name(ds)
+            result[code] = full_name
+        return result
+    
     def get_display_name(
         self,
         type_name: str,
@@ -543,7 +622,8 @@ class CrossDatasetTypeMapper:
         """
         Get a display name for a type showing mappings across datasets.
         
-        Format: {mcns_name}({flywire_name}/{hemibrain_name}) if different.
+        Format: {mcns_name} (F:{fafb_name}/H:{hemi_name}) if names differ.
+        Uses one-character dataset codes: M=male-cns, F=FAFB, H=hemibrain, etc.
         
         Args:
             type_name: Type name to display.
@@ -551,27 +631,31 @@ class CrossDatasetTypeMapper:
             source_dataset: Source dataset for the type.
             
         Returns:
-            Display name with mapping info.
+            Display name with mapping info and dataset codes.
         """
         mappings = self.resolve_type_across_datasets(type_name, datasets, source_dataset)
         
-        # Get male-cns name as canonical
+        # Get male-cns name as canonical (primary display name)
         mcns_name = mappings.get('male-cns:v0.9') or mappings.get('male-cns_v0_9')
         
         if not mcns_name:
-            # Use the original type name
+            # Use the original type name as canonical
             mcns_name = type_name
         
-        # Collect different names from other datasets
-        other_names = set()
+        # Collect different names from other datasets with their short codes
+        # Format: {short_code}:{mapped_name} for names that differ from canonical
+        other_parts = []
         for ds, mapped_name in mappings.items():
             if mapped_name and mapped_name != mcns_name:
-                other_names.add(mapped_name)
+                code = self.get_dataset_short_code(ds)
+                other_parts.append((code, mapped_name))
         
-        if other_names:
-            # Format: mcns_name(other1/other2)
-            others_str = '/'.join(sorted(other_names))
-            return f"{mcns_name}({others_str})"
+        if other_parts:
+            # Sort by dataset code for consistent ordering
+            other_parts.sort(key=lambda x: x[0])
+            # Format: mcns_name (F:fafb_name/H:hemi_name)
+            others_str = '/'.join([f"{code}:{name}" for code, name in other_parts])
+            return f"{mcns_name} ({others_str})"
         
         return mcns_name
     

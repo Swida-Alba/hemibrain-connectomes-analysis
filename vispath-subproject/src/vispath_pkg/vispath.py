@@ -243,6 +243,7 @@ class VisualizePath:
         verbose=True,           # NEW: Control print output (True=show prints, False=silent)
         edge_labels=None,       # NEW: Custom edge labels dict {(source, target): {'label_name': value, ...}}
         color_edges_by_nt=False, # NEW: Color edges by neurotransmitter type
+        dataset_legend=None,    # NEW: Dataset short code legend {code: full_name} for display names
     ):
         """
         Initialize VisualizePath with pathway data and visualization settings.
@@ -425,6 +426,10 @@ class VisualizePath:
         
         # Custom edge labels for multi-dataset synapse info
         self.edge_labels = edge_labels  # Dict: {(source, target): {label_name: value, ...}}
+        
+        # Dataset legend for cross-dataset type name display
+        # Format: {short_code: full_dataset_name} e.g., {'M': 'male-cns v0.9', 'F': 'FlyWire FAFB v783'}
+        self.dataset_legend = dataset_legend or {}
         
         # Neurotransmitter-based edge coloring
         self.color_edges_by_nt = color_edges_by_nt  # If True, color edges by NT type
@@ -2168,6 +2173,29 @@ class VisualizePath:
         
         self._vprint("\nCreating layered Sankey diagram...")
         
+        # Determine how many edges we expect and check if simplification is needed
+        MAX_EDGES = self.edgeN_limit
+        
+        # First, compute min_weight for each path to enable path-based filtering
+        # This is more coherent than filtering top edges, as it preserves complete paths
+        path_df_with_score = self.path_df.copy()
+        
+        def compute_path_min_weight(weights_value):
+            """Compute min weight for a path from its weights list."""
+            weights_list = self._safe_eval_list(weights_value)
+            if not weights_list:
+                return 0
+            return min(weights_list)
+        
+        path_df_with_score['_min_weight'] = path_df_with_score['weights'].apply(compute_path_min_weight)
+        
+        # Estimate edges per path (on average, each path has n-1 edges where n is path length)
+        # Some edges may be shared across paths, so we may need more paths than max_edges
+        estimated_paths_needed = MAX_EDGES * 2  # Start with 2x multiplier
+        
+        # Sort paths by min_weight descending and potentially limit
+        path_df_sorted = path_df_with_score.sort_values('_min_weight', ascending=False)
+        
         # Extract layer information from paths
         # edge_data: {(layer_idx, source, target): {'weight': ..., 'ratio': ..., 'prob': ..., 'count': ...}}
         edge_data = {}
@@ -2178,7 +2206,51 @@ class VisualizePath:
         has_probs = 'traversal_probabilities' in self.path_df.columns
         has_nt = 'nt_types' in self.path_df.columns
         
-        for idx, row in self.path_df.iterrows():
+        # First pass: check total unique edges to see if simplification is needed
+        total_paths = len(path_df_sorted)
+        needs_simplification = False
+        
+        # Quick edge count estimate by processing a sample of paths
+        if total_paths > estimated_paths_needed:
+            sample_edges = set()
+            for idx, row in path_df_sorted.head(estimated_paths_needed).iterrows():
+                path_block = row['path_block']
+                nodes = self._parse_path_block(path_block)
+                for i in range(len(nodes) - 1):
+                    sample_edges.add((i, nodes[i], nodes[i + 1]))
+            if len(sample_edges) > MAX_EDGES:
+                needs_simplification = True
+        
+        # If simplification is needed, limit to top paths that give us ~max_edges unique edges
+        if needs_simplification:
+            self._vprint(f'\033[33m⚠️ Large dataset ({total_paths} paths) - selecting top paths for {MAX_EDGES} edges\033[0m')
+            
+            # Iteratively add paths until we reach max_edges unique edges
+            paths_to_use = []
+            unique_edges = set()
+            
+            for idx, row in path_df_sorted.iterrows():
+                path_block = row['path_block']
+                nodes = self._parse_path_block(path_block)
+                
+                # Count new edges this path would add
+                for i in range(len(nodes) - 1):
+                    unique_edges.add((i, nodes[i], nodes[i + 1]))
+                
+                paths_to_use.append(idx)
+                
+                # Stop when we have enough edges
+                if len(unique_edges) >= MAX_EDGES:
+                    break
+            
+            # Use only the selected paths
+            path_df_to_process = path_df_sorted.loc[paths_to_use]
+            self._vprint(f'  Selected top {len(paths_to_use)} paths → {len(unique_edges)} unique edges')
+        else:
+            path_df_to_process = path_df_sorted
+        
+        # Process paths to extract edge data
+        for idx, row in path_df_to_process.iterrows():
             path_block = row['path_block']
             weights = self._safe_eval_list(row['weights'])
             ratios = self._safe_eval_list(row.get('connection_ratios', [])) if has_ratios else []
@@ -2223,18 +2295,11 @@ class VisualizePath:
             # include orphan nodes) if no non-zero links are present.
             self._vprint('\033[33mWarning: No non-zero connections found for Sankey diagram. Building node-only Sankey (no links).\033[0m')
         
-        # Simplify Sankey if too many edges (> edgeN_limit)
-        MAX_EDGES = self.edgeN_limit
-        simplification_applied = False
+        # Track if path-based simplification was already applied
+        # Note: We keep all edges from selected paths even if slightly over MAX_EDGES
+        # This preserves complete path connectivity
+        simplification_applied = needs_simplification
         original_edge_count = len(edge_data)
-        
-        if len(edge_data) > MAX_EDGES:
-            self._vprint(f'\033[33m⚠️ Too many edges ({original_edge_count}) - simplifying to top {MAX_EDGES} by weight\033[0m')
-            # Sort edges by absolute weight (descending) and keep top MAX_EDGES
-            sorted_edges = sorted(edge_data.items(), key=lambda x: abs(x[1]['weight']), reverse=True)
-            edge_data = dict(sorted_edges[:MAX_EDGES])
-            simplification_applied = True
-            self._vprint(f'  Kept {len(edge_data)} edges (top {MAX_EDGES} by weight)')
         
         # Build node list ordered by layers (key to proper layering)
         nodes_by_layer = {}
@@ -3530,27 +3595,100 @@ class VisualizePath:
         self._vprint("\nCreating interactive network visualization...")
         
         # Simplify network if too many edges (> edgeN_limit)
+        # Use path-based filtering to preserve complete paths
         G_to_plot = self.G_network
         if self.edgeN_limit > 0 and self.G_network.number_of_edges() > self.edgeN_limit:
-             self._vprint(f'\033[33m⚠️ Too many edges ({self.G_network.number_of_edges()}) - simplifying to top {self.edgeN_limit} by weight\033[0m')
-             # Sort edges by weight
-             edges = sorted(self.G_network.edges(data=True), key=lambda x: abs(x[2].get('weight', 0)), reverse=True)
-             top_edges = edges[:self.edgeN_limit]
+             self._vprint(f'\033[33m⚠️ Too many edges ({self.G_network.number_of_edges()}) - simplifying to top {self.edgeN_limit} edges from top paths\033[0m')
              
-             # Create new graph with top edges
-             G_sub = FastGraph()
-             
-             # Add edges and their nodes
-             for u, v, data in top_edges:
-                 G_sub.add_edge(u, v, **data)
-                 # Copy node attributes
-                 if u in self.G_network._node:
-                     G_sub._node[u].update(self.G_network._node[u])
-                 if v in self.G_network._node:
-                     G_sub._node[v].update(self.G_network._node[v])
-             
-             G_to_plot = G_sub
-             self._vprint(f'  Kept {G_to_plot.number_of_edges()} edges')
+             # Use path-based filtering if path_df is available
+             if self.path_df is not None and 'path_block' in self.path_df.columns and 'weights' in self.path_df.columns:
+                 # Compute min_weight for each path
+                 path_df_with_score = self.path_df.copy()
+                 
+                 def compute_path_min_weight(weights_value):
+                     weights_list = self._safe_eval_list(weights_value)
+                     if not weights_list:
+                         return 0
+                     return min(weights_list)
+                 
+                 path_df_with_score['_min_weight'] = path_df_with_score['weights'].apply(compute_path_min_weight)
+                 path_df_sorted = path_df_with_score.sort_values('_min_weight', ascending=False)
+                 
+                 # Collect edges with their weights from paths
+                 # Use dict to track edge data: {(source, target): {'weight': max_weight, ...}}
+                 edge_data_dict = {}
+                 selected_paths = []
+                 
+                 # Check which optional columns are available
+                 has_ratios = 'connection_ratios' in self.path_df.columns
+                 has_probs = 'traversal_probabilities' in self.path_df.columns
+                 
+                 for idx, row in path_df_sorted.iterrows():
+                     path_block = row['path_block']
+                     nodes = self._parse_path_block(path_block)
+                     weights = self._safe_eval_list(row['weights'])
+                     ratios = self._safe_eval_list(row.get('connection_ratios', [])) if has_ratios else []
+                     probs = self._safe_eval_list(row.get('traversal_probabilities', [])) if has_probs else []
+                     
+                     # Add edges from this path with their weights
+                     for i in range(len(nodes) - 1):
+                         edge_key = (nodes[i], nodes[i + 1])
+                         weight = weights[i] if i < len(weights) else 0
+                         ratio = ratios[i] if i < len(ratios) else 0
+                         prob = probs[i] if i < len(probs) else 0
+                         
+                         # Skip zero-weight edges
+                         if weight == 0:
+                             continue
+                         
+                         if edge_key not in edge_data_dict:
+                             edge_data_dict[edge_key] = {
+                                 'weight': weight,
+                                 'ratio': ratio,
+                                 'probability': prob
+                             }
+                         else:
+                             # Use max weight for same edge
+                             edge_data_dict[edge_key]['weight'] = max(edge_data_dict[edge_key]['weight'], weight)
+                     
+                     selected_paths.append(idx)
+                     
+                     # Stop when we have enough edges
+                     if len(edge_data_dict) >= self.edgeN_limit:
+                         break
+                 
+                 # Create subgraph with edges from selected paths
+                 G_sub = FastGraph()
+                 
+                 for (u, v), data in edge_data_dict.items():
+                     G_sub.add_edge(u, v, **data)
+                     # Copy node attributes from original graph if available
+                     if u in self.G_network.node_attrs:
+                         G_sub.node_attrs[u].update(self.G_network.node_attrs[u])
+                     if v in self.G_network.node_attrs:
+                         G_sub.node_attrs[v].update(self.G_network.node_attrs[v])
+                 
+                 G_to_plot = G_sub
+                 self._vprint(f'  Selected {len(selected_paths)} paths → kept {G_to_plot.number_of_edges()} edges')
+             else:
+                 # Fallback to weight-based filtering if no path data
+                 edges = sorted(self.G_network.edges(data=True), key=lambda x: abs(x[2].get('weight', 0)), reverse=True)
+                 top_edges = edges[:self.edgeN_limit]
+                 
+                 # Create new graph with top edges
+                 G_sub = FastGraph()
+                 
+                 # Add edges and their nodes
+                 for u, v, data in top_edges:
+                     G_sub.add_edge(u, v, **data)
+                     # Copy node attributes
+                     if u in self.G_network.node_attrs:
+                         G_sub.node_attrs[u].update(self.G_network.node_attrs[u])
+                     if v in self.G_network.node_attrs:
+                         G_sub.node_attrs[v].update(self.G_network.node_attrs[v])
+                 
+                 G_to_plot = G_sub
+                 self._vprint(f'  Kept {G_to_plot.number_of_edges()} edges (by weight)')
         
         output_path = os.path.join(self.output_folder, self.base_filename + '_network.html')
         
@@ -3844,6 +3982,25 @@ class VisualizePath:
                 nt_option_parts.append(f'<option value="nt_{nt}">{nt} Edges</option>')
             nt_edge_styles = "\n                ".join(nt_style_parts)
             nt_edge_group_options = "\n                                    ".join(nt_option_parts)
+        
+        # Generate dataset legend HTML for cross-dataset type name display
+        # Shows one-character codes and their corresponding dataset names
+        dataset_legend_html = ""
+        if self.dataset_legend:
+            legend_items = []
+            for code, full_name in sorted(self.dataset_legend.items()):
+                legend_items.append(
+                    f'<div class="legend-item" title="{full_name}">'
+                    f'<span style="font-weight: bold; color: #666;">{code}:</span> '
+                    f'<span style="font-size: 11px;">{full_name}</span>'
+                    f'</div>'
+                )
+            if legend_items:
+                dataset_legend_html = (
+                    '<div style="margin-top: 8px; padding-top: 8px; border-top: 1px solid #ddd;">'
+                    '<span style="font-size: 10px; color: #888;">Dataset codes in node names:</span>'
+                    '</div>' + ''.join(legend_items)
+                )
         
         # Create HTML content
         html_content = f"""<!DOCTYPE html>
@@ -4286,6 +4443,7 @@ class VisualizePath:
                 <div class="legend-color" style="background: {self.target_color};"></div>
                 <span>Target</span>
             </div>
+            {dataset_legend_html}
         </div>
         
         <div class="info">

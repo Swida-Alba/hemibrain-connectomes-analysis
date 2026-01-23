@@ -230,8 +230,14 @@ class ComparisonAnalyzer:
         
         try:
             import polars as pl
+            # Reset index if needed to avoid conversion issues
+            if index:
+                df_to_save = df.reset_index()
+            else:
+                df_to_save = df.reset_index(drop=True) if df.index.name or not df.index.equals(pd.RangeIndex(len(df))) else df
+            
             # Convert pandas to polars and write - faster for large files
-            pl_df = pl.from_pandas(df)
+            pl_df = pl.from_pandas(df_to_save)
             pl_df.write_csv(filepath)
         except ImportError:
             # Fallback to pandas with explicit UTF-8 encoding
@@ -1772,7 +1778,8 @@ class ComparisonAnalyzer:
             datasets=dataset_names,
             thresholds=self.parameters.thresholds,
             label_mapper=None,
-            type_mapper=type_mapper
+            type_mapper=type_mapper,
+            max_edges_for_metrics=self.parameters.max_edges_for_metrics
         )
 
         self._log("  Step 2/2: Calculating cross-threshold similarities...")
@@ -1786,7 +1793,8 @@ class ComparisonAnalyzer:
             thresholds=self.parameters.thresholds,
             label_mapper=None,
             path_data_func=self._get_path_data_for_threshold,
-            type_mapper=type_mapper
+            type_mapper=type_mapper,
+            max_edges_for_metrics=self.parameters.max_edges_for_metrics
         )
         summary['threshold_similarities'] = similarities
 
@@ -3660,7 +3668,7 @@ class ComparisonAnalyzer:
         dataset_names = self.parameters.get_dataset_names()
         
         # Limit paths to prevent hanging on large datasets
-        max_paths_per_dataset = 10000  # Safety limit
+        max_paths_per_dataset = 5000  # Safety limit (reduced from 10000)
         
         # Collect paths from path CSV files (not connection data)
         path_data = {}  # path_key -> {dataset: True/False}
@@ -3951,56 +3959,64 @@ class ComparisonAnalyzer:
             if df.empty:
                 continue
             
-            # Extract edges
-            edges = {}  # (source, target) -> weight
-            nodes = set()
+            # Extract edges using vectorized operations
+            source_col = 'type_pre' if 'type_pre' in df.columns else 'source'
+            target_col = 'type_post' if 'type_post' in df.columns else 'target'
             
-            for _, row in df.iterrows():
-                source = str(row.get('type_pre', row.get('source', '')))
-                target = str(row.get('type_post', row.get('target', '')))
-                weight = row.get('weight', 1)
-                
-                if source and target and source != 'nan' and target != 'nan':
-                    edges[(source, target)] = weight
-                    nodes.add(source)
-                    nodes.add(target)
+            # Filter valid rows
+            valid_mask = (
+                df[source_col].notna() & 
+                df[target_col].notna() & 
+                (df[source_col].astype(str) != 'nan') & 
+                (df[target_col].astype(str) != 'nan')
+            )
+            valid_df = df[valid_mask]
+            
+            # Build edge set and adjacency structures
+            sources = valid_df[source_col].astype(str).values
+            targets = valid_df[target_col].astype(str).values
+            
+            edge_set = set(zip(sources, targets))
+            nodes = set(sources) | set(targets)
+            
+            # Build adjacency dict for fast neighbor lookup
+            out_neighbors = {}  # node -> set of outgoing neighbors
+            for s, t in edge_set:
+                if s not in out_neighbors:
+                    out_neighbors[s] = set()
+                out_neighbors[s].add(t)
             
             # Calculate motif counts
             feedforward_loops = 0
             feedback_loops = 0
             reciprocal_connections = 0
             
-            # Fan-in/fan-out analysis
-            in_degree = {}
-            out_degree = {}
+            # Fan-in/fan-out analysis using vectorized counting
+            from collections import Counter
+            out_degree = dict(Counter(sources))
+            in_degree = dict(Counter(targets))
             
-            for (s, t) in edges:
-                out_degree[s] = out_degree.get(s, 0) + 1
-                in_degree[t] = in_degree.get(t, 0) + 1
-            
-            # Find reciprocal connections
-            for (s, t) in edges:
-                if (t, s) in edges:
+            # Find reciprocal connections - only count each pair once
+            for (s, t) in edge_set:
+                if s < t and (t, s) in edge_set:  # Only count when s < t to avoid double counting
                     reciprocal_connections += 1
-            reciprocal_connections //= 2  # Count each pair once
+                elif s == t:  # Self-loop (edge to itself)
+                    pass  # Don't count self-loops as reciprocal
+                elif s > t and (t, s) in edge_set:
+                    pass  # Skip - already counted
             
             # Find feedforward loops (A→B→C where A→C also exists)
-            for a in nodes:
-                # Get B nodes that A connects to
-                b_nodes = [t for (s, t) in edges if s == a]
-                for b in b_nodes:
-                    # Get C nodes that B connects to
-                    c_nodes = [t for (s, t) in edges if s == b]
-                    for c in c_nodes:
-                        # Check if A→C exists (feedforward)
-                        if (a, c) in edges and c != a:
-                            feedforward_loops += 1
+            # Use adjacency dict for O(E) instead of O(E*N)
+            for a in out_neighbors:
+                a_neighbors = out_neighbors.get(a, set())
+                for b in a_neighbors:
+                    b_neighbors = out_neighbors.get(b, set())
+                    # Check which C nodes (neighbors of B) are also neighbors of A
+                    common = a_neighbors & b_neighbors
+                    feedforward_loops += len(common - {a})  # Exclude A itself
             
-            # Find feedback loops (A→B→A cycles)
-            for (a, b) in edges:
-                if (b, a) in edges:
-                    feedback_loops += 1
-            feedback_loops //= 2  # Count each pair once
+            # Find feedback loops (A→B→A cycles) - same as reciprocal
+            feedback_loops = reciprocal_connections
             
             # Calculate hub metrics
             max_out_degree = max(out_degree.values()) if out_degree else 0
@@ -4016,7 +4032,7 @@ class ComparisonAnalyzer:
                 'dataset': safe_name,
                 'threshold': threshold,  # To-Do List 5 Item 6: Add threshold column
                 'total_nodes': len(nodes),
-                'total_edges': len(edges),
+                'total_edges': len(edge_set),
                 'feedforward_loops': feedforward_loops,
                 'feedback_loops': feedback_loops,
                 'reciprocal_connections': reciprocal_connections,
@@ -4026,7 +4042,7 @@ class ComparisonAnalyzer:
                 'max_in_degree': max_in_degree,
                 'avg_out_degree': round(avg_out_degree, 2),
                 'avg_in_degree': round(avg_in_degree, 2),
-                'density': round(len(edges) / (len(nodes) * (len(nodes) - 1)) if len(nodes) > 1 else 0, 4),
+                'density': round(len(edge_set) / (len(nodes) * (len(nodes) - 1)) if len(nodes) > 1 else 0, 4),
             })
         
         if not motif_data:
@@ -5836,6 +5852,9 @@ class ComparisonAnalyzer:
                         edge_key_for_ratio = str(edge_key)
                         if edge_key_for_ratio in ratio_data.index:
                             ratio_val = ratio_data.loc[edge_key_for_ratio, dataset]
+                            # Handle case where loc returns a Series (duplicate indices)
+                            if isinstance(ratio_val, pd.Series):
+                                ratio_val = ratio_val.iloc[0]
                             if ratio_val > 0:
                                 edge_info[f'{nickname} ratio'] = round(ratio_val, 4)
                     
@@ -5857,17 +5876,67 @@ class ComparisonAnalyzer:
         # Convert to DataFrame
         edges_df = pd.DataFrame(edge_list)
         
+        # Transform node labels to display format with dataset-specific names
+        # Format: {mcns_name} (F:{fafb_name}/H:{hemi_name}) for types that differ across datasets
+        type_mapper = self.parameters._auto_type_mapper if self.parameters.auto_type_mapping else None
+        display_name_map = {}  # {canonical_name: display_name}
+        dataset_legend = {}  # {short_code: full_dataset_name} for legend
+        
+        if type_mapper:
+            # Get all unique nodes and compute display names
+            all_unique_nodes = set(edges_df['source'].unique()) | set(edges_df['target'].unique())
+            for node in all_unique_nodes:
+                display_name = type_mapper.get_display_name(node, dataset_names)
+                if display_name != node:
+                    display_name_map[node] = display_name
+            
+            # Get dataset legend info
+            dataset_legend = type_mapper.get_all_dataset_short_codes(dataset_names)
+            
+            # Apply display name transformation to edges_df
+            if display_name_map:
+                edges_df['source'] = edges_df['source'].apply(lambda x: display_name_map.get(x, x))
+                edges_df['target'] = edges_df['target'].apply(lambda x: display_name_map.get(x, x))
+                
+                # Update edge_labels keys to use display names
+                new_edge_labels = {}
+                for (src, tgt), info in edge_labels.items():
+                    new_src = display_name_map.get(src, src)
+                    new_tgt = display_name_map.get(tgt, tgt)
+                    new_edge_labels[(new_src, new_tgt)] = info
+                edge_labels = new_edge_labels
+                
+                self._log(f"  Applied display names to {len(display_name_map)} nodes with cross-dataset name differences")
+        
         # Identify source and target nodes from parameters
-        source_patterns = self.parameters.source_neurons
-        target_patterns = self.parameters.target_neurons
+        # CRITICAL: Include ALL mapped type names across all datasets, not just original query types
+        source_patterns = set(self.parameters._ensure_flat_list(self.parameters.source_neurons))
+        target_patterns = set(self.parameters._ensure_flat_list(self.parameters.target_neurons))
+        
+        # If auto_type_mapping is enabled, also include resolved type names for each dataset
+        if self.parameters.auto_type_mapping:
+            for dataset in dataset_names:
+                src_resolved = self.parameters.get_source_neurons_for_dataset(dataset)
+                source_patterns.update(src_resolved)
+                tgt_resolved = self.parameters.get_target_neurons_for_dataset(dataset)
+                target_patterns.update(tgt_resolved)
+        
+        # Convert back to list for matching function
+        source_patterns = list(source_patterns)
+        target_patterns = list(target_patterns)
         
         # Get all unique nodes
         all_nodes = set(edges_df['source'].unique()) | set(edges_df['target'].unique())
         
-        # Helper to extract canonical name from display name like "MeVPaMe1(MTe46)" -> "MeVPaMe1"
+        # Helper to extract canonical name from display name
+        # Handles formats like:
+        # - "MeVPLo2 (F:MTe07)" -> "MeVPLo2"
+        # - "MeVPaMe1(MTe46)" -> "MeVPaMe1" (legacy format)
         def get_canonical_name(display_name: str) -> str:
-            if '(' in display_name:
-                return display_name.split('(')[0]
+            if ' (' in display_name:
+                return display_name.split(' (')[0].strip()
+            elif '(' in display_name:
+                return display_name.split('(')[0].strip()
             return display_name
         
         # Classify nodes as source, target, or intermediate
@@ -5976,6 +6045,7 @@ class ComparisonAnalyzer:
             network_layout=network_layout,
             edge_width_scale=edge_width_scale,
             edge_labels=edge_labels,  # Multi-dataset synapse strengths
+            dataset_legend=dataset_legend,  # Dataset short code legend for display names
             verbose=self.verbose,
             **vispath_kwargs
         )

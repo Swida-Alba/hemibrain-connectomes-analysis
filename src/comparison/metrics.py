@@ -3,10 +3,14 @@ ComparisonMetrics - Metrics and statistics for cross-dataset comparison.
 
 This module provides functions for calculating comparison metrics including
 similarity scores, connection classification, and graph structure analysis.
+
+Optimized with polars for high-performance operations on large datasets.
 """
 
 import numpy as np
 import pandas as pd
+import polars as pl
+import time
 from typing import Dict, List, Tuple, Optional, Any, Set
 from itertools import combinations
 from collections import defaultdict
@@ -189,9 +193,9 @@ class ComparisonMetrics:
             Ruzicka similarity coefficient (0-1)
         """
         # Get union of all edges
-        all_edges = set(weights_a.index) | set(weights_b.index)
+        all_edges = weights_a.index.union(weights_b.index)
         
-        if not all_edges:
+        if len(all_edges) == 0:
             return 1.0  # Both empty = identical
         
         # Optionally normalize weights to proportions
@@ -203,15 +207,13 @@ class ComparisonMetrics:
         else:
             norm_a, norm_b = weights_a, weights_b
         
-        # Calculate numerator (sum of min) and denominator (sum of max)
-        numerator = 0.0
-        denominator = 0.0
+        # Vectorized: reindex both to union and fill missing with 0
+        vec_a = norm_a.reindex(all_edges, fill_value=0.0)
+        vec_b = norm_b.reindex(all_edges, fill_value=0.0)
         
-        for edge in all_edges:
-            w_a = norm_a.get(edge, 0)
-            w_b = norm_b.get(edge, 0)
-            numerator += min(w_a, w_b)
-            denominator += max(w_a, w_b)
+        # Vectorized min/max calculations
+        numerator = np.minimum(vec_a.values, vec_b.values).sum()
+        denominator = np.maximum(vec_a.values, vec_b.values).sum()
         
         return numerator / denominator if denominator > 0 else 0.0
     
@@ -277,6 +279,7 @@ class ComparisonMetrics:
         rows = []
         
         for d1, d2 in combinations(available, 2):
+            
             # Get edge sets
             edges_1 = set(aligned_data[aligned_data[d1] >= threshold].index)
             edges_2 = set(aligned_data[aligned_data[d2] >= threshold].index)
@@ -367,7 +370,8 @@ class ComparisonMetrics:
         label_mapper: Optional[Any] = None,
         show_progress: bool = True,
         path_data_func: Optional[callable] = None,
-        type_mapper: Optional[Any] = None
+        type_mapper: Optional[Any] = None,
+        max_edges_for_metrics: Optional[int] = None
     ) -> pd.DataFrame:
         """
         Calculate similarity metrics across all thresholds.
@@ -381,6 +385,8 @@ class ComparisonMetrics:
             path_data_func: Optional callable(threshold) -> DataFrame that returns
                            aligned path data for computing path rank correlation
             type_mapper: Optional CrossDatasetTypeMapper for type unification
+            max_edges_for_metrics: Optional max edges threshold - if exceeded, skip
+                                   expensive metrics computation at that threshold
             
         Returns:
             DataFrame with similarity metrics per threshold per dataset pair
@@ -417,6 +423,10 @@ class ComparisonMetrics:
                     path_data = path_data_func(threshold)
                 except Exception:
                     pass  # Path data not available
+            
+            # Check if we should skip expensive metrics due to large edge count
+            if max_edges_for_metrics and len(aligned) > max_edges_for_metrics:
+                continue
             
             # Calculate pairwise similarities (include advanced metrics for visualization)
             similarities = self.calculate_all_pairwise_similarities(
@@ -489,30 +499,31 @@ class ComparisonMetrics:
                 weight_col = 'count'
             
             # Apply type mapping if provided - standardize edge names to canonical form
+            # Using vectorized operations instead of slow iterrows
             if type_mapper is not None and pre_col in ['type_pre', 'std_label_pre']:
-                canonical_pre_list = []
-                canonical_post_list = []
+                # Vectorized: convert columns to strings
+                original_pre_series = agg_df[pre_col].astype(str)
+                original_post_series = agg_df[post_col].astype(str)
                 
-                for _, row in agg_df.iterrows():
-                    original_pre = str(row[pre_col])
-                    original_post = str(row[post_col])
-                    
-                    # Get canonical names (male-cns names)
-                    canonical_pre = type_mapper.get_canonical_type(original_pre, dataset)
-                    canonical_post = type_mapper.get_canonical_type(original_post, dataset)
-                    
-                    canonical_pre_list.append(canonical_pre)
-                    canonical_post_list.append(canonical_post)
-                    
-                    # Track display names for later (collect all dataset-specific names)
-                    for canonical, original in [(canonical_pre, original_pre), (canonical_post, original_post)]:
-                        if canonical not in edge_display_names:
-                            edge_display_names[canonical] = {canonical}  # Include canonical itself
-                        if original != canonical:
-                            edge_display_names[canonical].add(original)
+                # Vectorized: apply type mapping using map()
+                # Build lookup dicts for this dataset's type mappings
+                unique_pre = original_pre_series.unique()
+                unique_post = original_post_series.unique()
+                all_unique_types = set(unique_pre) | set(unique_post)
                 
-                agg_df['canonical_pre'] = canonical_pre_list
-                agg_df['canonical_post'] = canonical_post_list
+                # Create mapping dict for this dataset
+                canonical_map = {t: type_mapper.get_canonical_type(t, dataset) for t in all_unique_types}
+                
+                # Apply mapping vectorized
+                agg_df['canonical_pre'] = original_pre_series.map(canonical_map)
+                agg_df['canonical_post'] = original_post_series.map(canonical_map)
+                
+                # Track display names for later (collect all dataset-specific names)
+                for original, canonical in canonical_map.items():
+                    if canonical not in edge_display_names:
+                        edge_display_names[canonical] = {canonical}  # Include canonical itself
+                    if original != canonical:
+                        edge_display_names[canonical].add(original)
                 
                 # Re-aggregate by canonical edge (in case multiple original edges map to same canonical)
                 agg_df = agg_df.groupby(['canonical_pre', 'canonical_post'])[weight_col].sum().reset_index()
@@ -531,35 +542,29 @@ class ComparisonMetrics:
         # Merge all datasets
         aligned = pd.concat(dfs, axis=1, join='outer').fillna(0)
         
-        # If type_mapper was used, create display names with cross-dataset mappings
-        if type_mapper is not None and edge_display_names:
-            display_index = []
-            for edge_key in aligned.index:
-                if ' -> ' in str(edge_key):
-                    parts = str(edge_key).split(' -> ')
-                    pre_canonical = parts[0]
-                    post_canonical = parts[1] if len(parts) > 1 else ''
-                    
-                    # Build display name for source
-                    pre_variants = edge_display_names.get(pre_canonical, {pre_canonical})
-                    if len(pre_variants) > 1:
-                        others = sorted([v for v in pre_variants if v != pre_canonical])
-                        pre_display = f"{pre_canonical}({'/'.join(others)})"
-                    else:
-                        pre_display = pre_canonical
-                    
-                    # Build display name for target
-                    post_variants = edge_display_names.get(post_canonical, {post_canonical})
-                    if len(post_variants) > 1:
-                        others = sorted([v for v in post_variants if v != post_canonical])
-                        post_display = f"{post_canonical}({'/'.join(others)})"
-                    else:
-                        post_display = post_canonical
-                    
-                    display_index.append(f"{pre_display} -> {post_display}")
-                else:
-                    display_index.append(str(edge_key))
+        # Skip expensive display name building for large datasets (>10k edges)
+        # The canonical names are sufficient for computation; display names are cosmetic
+        if type_mapper is not None and edge_display_names and len(aligned) <= 10000:
+            # Pre-compute display name mappings for all unique types (vectorized)
+            # Use type_mapper.get_display_name() for consistent format: "MeVPLo2 (F:MTe07)"
+            type_display_map = {}
+            for canonical in edge_display_names.keys():
+                type_display_map[canonical] = type_mapper.get_display_name(canonical, datasets)
             
+            # Vectorized: split index, map, and rebuild
+            def build_display_name(edge_key):
+                if ' -> ' not in str(edge_key):
+                    return str(edge_key)
+                parts = str(edge_key).split(' -> ')
+                pre_canonical = parts[0]
+                post_canonical = parts[1] if len(parts) > 1 else ''
+                pre_display = type_display_map.get(pre_canonical, pre_canonical)
+                post_display = type_display_map.get(post_canonical, post_canonical)
+                return f"{pre_display} -> {post_display}"
+            
+            # Use polars for fast string operations
+            edge_list = aligned.index.tolist()
+            display_index = [build_display_name(e) for e in edge_list]
             aligned.index = pd.Index(display_index)
         
         return aligned
@@ -767,7 +772,9 @@ class ComparisonMetrics:
         datasets: List[str],
         thresholds: List[int],
         label_mapper: Optional[Any] = None,
-        type_mapper: Optional[Any] = None
+        type_mapper: Optional[Any] = None,
+        show_progress: bool = True,
+        max_edges_for_metrics: Optional[int] = None
     ) -> Dict[str, Any]:
         """
         Generate comprehensive comparison summary.
@@ -778,6 +785,8 @@ class ComparisonMetrics:
             thresholds: List of thresholds
             label_mapper: Optional LabelMapper
             type_mapper: Optional CrossDatasetTypeMapper for type unification
+            show_progress: Whether to show progress messages
+            max_edges_for_metrics: Skip expensive metrics if edges exceed this
             
         Returns:
             Dictionary with all comparison metrics and findings
@@ -800,8 +809,11 @@ class ComparisonMetrics:
         # Summary statistics (at mid threshold)
         summary['summary_stats'] = self.calculate_summary_statistics(aligned, datasets, mid_threshold)
         
-        # Pairwise similarities (at mid threshold)
-        similarities = self.calculate_all_pairwise_similarities(aligned, datasets, mid_threshold)
+        # Pairwise similarities (at mid threshold) - skip if too many edges
+        if max_edges_for_metrics and len(aligned) > max_edges_for_metrics:
+            similarities = pd.DataFrame()
+        else:
+            similarities = self.calculate_all_pairwise_similarities(aligned, datasets, mid_threshold)
         summary['pairwise_similarities'] = similarities
         
         if not similarities.empty:
@@ -823,7 +835,7 @@ class ComparisonMetrics:
             summary['key_findings'].append(f"Unique to {dataset}: {len(unique_df)} connections")
         
         # =====================================================================
-        # NEW: Generate per-threshold key findings
+        # Generate per-threshold key findings
         # =====================================================================
         for threshold in thresholds:
             threshold_findings = {
@@ -865,8 +877,11 @@ class ComparisonMetrics:
                 else:
                     threshold_findings['unique_edges'][ds] = int((aligned_t[ds] > 0).sum())
             
-            # Pairwise similarities at this threshold
-            sims = self.calculate_all_pairwise_similarities(aligned_t, datasets, threshold)
+            # Pairwise similarities at this threshold - skip if too many edges
+            if max_edges_for_metrics and len(aligned_t) > max_edges_for_metrics:
+                sims = pd.DataFrame()
+            else:
+                sims = self.calculate_all_pairwise_similarities(aligned_t, datasets, threshold)
             if not sims.empty:
                 threshold_findings['avg_jaccard'] = float(sims['jaccard_similarity'].mean())
                 if 'rv_coefficient' in sims.columns:
@@ -1695,6 +1710,8 @@ class ComparisonMetrics:
         correlation in [-1, 1]. For homolog finding and connectivity profile
         comparisons, use normalize=True to get values in [0, 1].
         
+        Optimized with polars for high performance on large datasets.
+        
         Args:
             weights_a: Series of weights indexed by edge (e.g., "typeA -> typeB")
             weights_b: Series of weights indexed by edge
@@ -1707,22 +1724,30 @@ class ComparisonMetrics:
         """
         from scipy.stats import spearmanr
         
-        # Get union of all edges
-        all_edges = sorted(set(weights_a.index) | set(weights_b.index))
+        # Fast path: use polars for vectorized join
+        # Convert pandas Series to polars DataFrames
+        df_a = pl.DataFrame({
+            'edge': weights_a.index.tolist(),
+            'weight_a': weights_a.values.tolist()
+        }).group_by('edge').agg(pl.col('weight_a').sum())  # Handle duplicates
         
-        if len(all_edges) < 3:
+        df_b = pl.DataFrame({
+            'edge': weights_b.index.tolist(),
+            'weight_b': weights_b.values.tolist()
+        }).group_by('edge').agg(pl.col('weight_b').sum())  # Handle duplicates
+        
+        # Full outer join to get union
+        merged = df_a.join(df_b, on='edge', how='full', coalesce=True).fill_null(0)
+        
+        if len(merged) < 3:
             return np.nan  # Insufficient data for correlation
         
-        # Build weight vectors (0 for missing edges)
-        # Use _safe_series_get to handle duplicate indices
-        vec_a = np.array([self._safe_series_get(weights_a, e, 0) for e in all_edges], dtype=float)
-        vec_b = np.array([self._safe_series_get(weights_b, e, 0) for e in all_edges], dtype=float)
+        vec_a = merged['weight_a'].to_numpy()
+        vec_b = merged['weight_b'].to_numpy()
         
         # Handle edge cases
-        if vec_a.std() == 0 and vec_b.std() == 0:
-            return np.nan  # Both constant = undefined correlation
         if vec_a.std() == 0 or vec_b.std() == 0:
-            return np.nan  # One constant = undefined correlation
+            return np.nan  # Constant = undefined correlation
         
         # Compute Spearman rank correlation
         corr, _ = spearmanr(vec_a, vec_b)
@@ -1751,6 +1776,8 @@ class ComparisonMetrics:
         Similar to edge_list_rank_correlation but operates on multi-hop paths
         like "aMe12->KCg-d->PPL103" instead of single edges.
         
+        Optimized with polars for high performance on large datasets.
+        
         Note: For cross-dataset comparison, this returns the original Spearman
         correlation in [-1, 1]. For homolog finding and connectivity profile
         comparisons, use normalize=True to get values in [0, 1].
@@ -1767,22 +1794,30 @@ class ComparisonMetrics:
         """
         from scipy.stats import spearmanr
         
-        # Get union of all paths
-        all_paths = sorted(set(paths_a.index) | set(paths_b.index))
+        # Fast path: use polars for vectorized join
+        # Convert pandas Series to polars DataFrames
+        df_a = pl.DataFrame({
+            'path': paths_a.index.tolist(),
+            'weight_a': paths_a.values.tolist()
+        }).group_by('path').agg(pl.col('weight_a').sum())  # Handle duplicates
         
-        if len(all_paths) < 3:
+        df_b = pl.DataFrame({
+            'path': paths_b.index.tolist(),
+            'weight_b': paths_b.values.tolist()
+        }).group_by('path').agg(pl.col('weight_b').sum())  # Handle duplicates
+        
+        # Full outer join to get union
+        merged = df_a.join(df_b, on='path', how='full', coalesce=True).fill_null(0)
+        
+        if len(merged) < 3:
             return np.nan  # Insufficient data for correlation
         
-        # Build weight vectors (0 for missing paths)
-        # Use _safe_series_get to handle duplicate indices
-        vec_a = np.array([self._safe_series_get(paths_a, p, 0) for p in all_paths], dtype=float)
-        vec_b = np.array([self._safe_series_get(paths_b, p, 0) for p in all_paths], dtype=float)
+        vec_a = merged['weight_a'].to_numpy()
+        vec_b = merged['weight_b'].to_numpy()
         
         # Handle edge cases
-        if vec_a.std() == 0 and vec_b.std() == 0:
-            return np.nan  # Both constant = undefined correlation
         if vec_a.std() == 0 or vec_b.std() == 0:
-            return np.nan  # One constant = undefined correlation
+            return np.nan  # Constant = undefined correlation
         
         # Compute Spearman rank correlation
         corr, _ = spearmanr(vec_a, vec_b)

@@ -1466,10 +1466,123 @@ def _generate_networks_section(analyzer, dataset_names: List[str], thresholds: L
     return ''.join(html_parts)
 
 
+def _extract_edges_from_paths(path_data: pd.DataFrame, dataset_names: List[str], max_paths: int = 100) -> set:
+    """
+    Extract edges from top-M paths ranked by total min_weight across datasets.
+    
+    This builds a set of edges from the top paths, which ensures complete path
+    connectivity rather than selecting disconnected top edges.
+    
+    Args:
+        path_data: DataFrame with path strings as index and dataset columns containing min_weight
+        dataset_names: List of dataset names
+        max_paths: Maximum number of top paths to include
+        
+    Returns:
+        Set of edge keys (e.g., "A -> B")
+    """
+    if path_data is None or path_data.empty:
+        return set()
+    
+    # Calculate total weight across datasets for each path
+    available_cols = [d for d in dataset_names if d in path_data.columns]
+    if not available_cols:
+        return set()
+    
+    path_data = path_data.copy()
+    path_data['_total'] = path_data[available_cols].sum(axis=1)
+    
+    # Get top paths by total weight
+    top_paths_df = path_data.nlargest(max_paths, '_total')
+    
+    # Extract edges from each path
+    edges = set()
+    for path_str in top_paths_df.index:
+        path_str = str(path_str)
+        # Parse path nodes: "A -> B -> C" or "A → B → C"
+        if ' -> ' in path_str:
+            nodes = [n.strip() for n in path_str.split(' -> ')]
+        elif ' → ' in path_str:
+            nodes = [n.strip() for n in path_str.split(' → ')]
+        else:
+            continue
+        
+        # Create edge keys for consecutive node pairs
+        for i in range(len(nodes) - 1):
+            edge_key = f"{nodes[i]} -> {nodes[i+1]}"
+            edges.add(edge_key)
+    
+    return edges
+
+
+def _filter_aligned_by_paths(aligned: pd.DataFrame, path_data: pd.DataFrame, 
+                              dataset_names: List[str], max_edges: int = 500,
+                              max_paths_multiplier: float = 2.0) -> pd.DataFrame:
+    """
+    Filter aligned edge data to include edges from top paths.
+    
+    Strategy: Start with max_paths = max_edges * multiplier, extract edges from those paths.
+    If not enough edges, expand the number of paths considered.
+    
+    Args:
+        aligned: DataFrame with edge keys as index and dataset columns
+        path_data: DataFrame with path keys as index and dataset columns containing min_weight
+        dataset_names: List of dataset names
+        max_edges: Target number of edges to include
+        max_paths_multiplier: Initial multiplier for number of paths to consider
+        
+    Returns:
+        Filtered aligned DataFrame
+    """
+    if path_data is None or path_data.empty or aligned.empty:
+        # Fallback to original top-edges approach if no path data
+        if len(aligned) > max_edges:
+            available_cols = [d for d in dataset_names if d in aligned.columns]
+            if available_cols:
+                aligned = aligned.copy()
+                aligned['_total'] = aligned[available_cols].sum(axis=1)
+                aligned = aligned.nlargest(max_edges, '_total').drop(columns=['_total'])
+        return aligned
+    
+    # Start with initial number of paths
+    max_paths = int(max_edges * max_paths_multiplier)
+    edges_from_paths = _extract_edges_from_paths(path_data, dataset_names, max_paths)
+    
+    # Expand if needed (paths share edges, so may need more paths for enough edges)
+    attempts = 0
+    while len(edges_from_paths) < max_edges and max_paths < len(path_data) and attempts < 5:
+        max_paths = min(int(max_paths * 1.5), len(path_data))
+        edges_from_paths = _extract_edges_from_paths(path_data, dataset_names, max_paths)
+        attempts += 1
+    
+    # Filter aligned to only include edges from paths
+    # Note: We keep all edges from selected paths even if slightly over max_edges
+    # This preserves complete path connectivity
+    if edges_from_paths:
+        aligned = aligned[aligned.index.isin(edges_from_paths)]
+    
+    return aligned
+
+
 def _generate_conservation_network(analyzer, dataset_names: List[str], threshold: int,
-                                    nickname_map: Dict[str, str]) -> str:
-    """Generate network with conservation-based edge coloring and role-based node coloring."""
+                                    nickname_map: Dict[str, str], max_edges: int = 500) -> str:
+    """Generate network with conservation-based edge coloring and role-based node coloring.
+    
+    Args:
+        max_edges: Maximum number of edges to show in the network (default 500).
+                   Edges are selected from top paths to preserve path connectivity.
+    """
     aligned = analyzer.get_aligned_data(threshold)
+    
+    # Get path data for this threshold to filter by top paths
+    path_data = None
+    try:
+        path_data = analyzer._get_path_data_for_threshold(threshold)
+    except Exception:
+        pass
+    
+    # Filter aligned data using path-based approach
+    aligned = _filter_aligned_by_paths(aligned, path_data, dataset_names, max_edges)
     
     # Always include ALL datasets, even if they have no connections at this threshold
     # This ensures consistent behavior and proper conservation coloring
@@ -1483,7 +1596,7 @@ def _generate_conservation_network(analyzer, dataset_names: List[str], threshold
     num_datasets = len(available)
     nicknames = [nickname_map[d] for d in available]
     
-    # Get source and target neurons
+    # Get source and target neurons (including all mapped type names across datasets)
     source_neurons = set()
     target_neurons = set()
     
@@ -1500,6 +1613,28 @@ def _generate_conservation_network(analyzer, dataset_names: List[str], threshold
     if hasattr(analyzer, 'label_mapper') and analyzer.label_mapper:
         source_neurons.update(analyzer.label_mapper.get_all_std_labels('source'))
         target_neurons.update(analyzer.label_mapper.get_all_std_labels('target'))
+    
+    # CRITICAL: If auto_type_mapping is enabled, ALSO include the resolved type names
+    # for EACH dataset. This is necessary because edge data uses mapped/canonical names
+    # (e.g., 'GNG588') not the original query types (e.g., 'CB0038').
+    if hasattr(analyzer, 'parameters') and analyzer.parameters.auto_type_mapping:
+        for dataset in dataset_names:
+            # Get resolved source neurons for this dataset
+            src_resolved = analyzer.parameters.get_source_neurons_for_dataset(dataset)
+            source_neurons.update(src_resolved)
+            # Get resolved target neurons for this dataset
+            tgt_resolved = analyzer.parameters.get_target_neurons_for_dataset(dataset)
+            target_neurons.update(tgt_resolved)
+    
+    # Build display name map for cross-dataset type names
+    # Format: {canonical_name: "mcns_name (F:fafb_name/H:hemi_name)"}
+    display_name_map = {}
+    dataset_legend = {}  # {short_code: full_dataset_name}
+    type_mapper = None
+    if hasattr(analyzer, 'parameters') and analyzer.parameters.auto_type_mapping:
+        type_mapper = analyzer.parameters._auto_type_mapper
+        if type_mapper:
+            dataset_legend = type_mapper.get_all_dataset_short_codes(dataset_names)
     
     # Build nodes and edges with conservation coloring
     nodes = []
@@ -1545,10 +1680,78 @@ def _generate_conservation_network(analyzer, dataset_names: List[str], threshold
     if not edge_data:
         return '<div class="card"><p>No connections at this threshold.</p></div>'
     
-    # Helper to extract canonical name from display name like "MeVPaMe1(MTe46)" -> "MeVPaMe1"
+    # Detect nodes with display names (format: "Name (F:X/H:Y)") to enable legend
+    # Note: aligned data from metrics.py already has display names applied
+    import re
+    display_name_pattern = re.compile(r'^.+ \([A-Z]:')  # Matches "Name (F:X" pattern
+    
+    # Collect all unique node names
+    all_nodes_raw = set()
+    for (src, tgt) in edge_data.keys():
+        all_nodes_raw.add(src)
+        all_nodes_raw.add(tgt)
+    
+    # Detect nodes that have display names (to enable legend display)
+    for node in all_nodes_raw:
+        if display_name_pattern.match(node):
+            # Node already has display name format - mark it for legend
+            canonical = node.split(' (')[0]  # Extract canonical name
+            display_name_map[canonical] = node  # Store mapping for legend trigger
+    
+    # Apply additional display name transformation if type_mapper available
+    # This handles any nodes that might not have been transformed by metrics.py
+    if type_mapper:
+        for node in all_nodes_raw:
+            # Skip nodes that already have display names
+            if display_name_pattern.match(node):
+                continue
+            display_name = type_mapper.get_display_name(node, dataset_names)
+            if display_name != node:
+                display_name_map[node] = display_name
+        
+        # Transform edge_data keys to use display names (only for non-display nodes)
+        if display_name_map:
+            new_edge_data = {}
+            new_outgoing_map = {}
+            new_incoming_map = {}
+            new_has_outgoing = set()
+            new_has_incoming = set()
+            
+            for (src, tgt), weights in edge_data.items():
+                new_src = display_name_map.get(src, src)
+                new_tgt = display_name_map.get(tgt, tgt)
+                new_edge_data[(new_src, new_tgt)] = weights
+                
+                # Update adjacency maps with display names
+                if new_src not in new_outgoing_map:
+                    new_outgoing_map[new_src] = []
+                new_outgoing_map[new_src].append(new_tgt)
+                
+                if new_tgt not in new_incoming_map:
+                    new_incoming_map[new_tgt] = []
+                new_incoming_map[new_tgt].append(new_src)
+                
+                # Update has_outgoing/has_incoming
+                if src in has_outgoing:
+                    new_has_outgoing.add(new_src)
+                if tgt in has_incoming:
+                    new_has_incoming.add(new_tgt)
+            
+            edge_data = new_edge_data
+            outgoing_map = new_outgoing_map
+            incoming_map = new_incoming_map
+            has_outgoing = new_has_outgoing
+            has_incoming = new_has_incoming
+    
+    # Helper to extract canonical name from display name
+    # Handles formats like:
+    # - "MeVPLo2 (F:MTe07)" -> "MeVPLo2"
+    # - "MeVPaMe1(MTe46)" -> "MeVPaMe1" (legacy format)
     def get_canonical_name(display_name: str) -> str:
-        if '(' in display_name:
-            return display_name.split('(')[0]
+        if ' (' in display_name:
+            return display_name.split(' (')[0].strip()
+        elif '(' in display_name:
+            return display_name.split('(')[0].strip()
         return display_name
     
     # Helper function to check if a node label matches any pattern
@@ -1726,25 +1929,36 @@ def _generate_conservation_network(analyzer, dataset_names: List[str], threshold
         
         Returns True if:
         - label is directly in node_ids
-        - label appears at the start of a merged node name like 'MeVPLo2(MTe07)'
-        - label appears inside parentheses of a merged node
+        - label appears at the start of a display name like 'MeVPLo2 (F:MTe07)'
+        - label appears inside parentheses of a display name (dataset-prefixed like F:MTe07)
         """
         if label in node_ids:
             return True
-        # Check for merged names like 'MeVPLo2(MTe07)' where label could be MeVPLo2 or MTe07
+        # Check for display names like 'MeVPLo2 (F:MTe07)' where label could be MeVPLo2 or MTe07
         for existing_label in node_ids.keys():
-            # Check if label is the base name (before parentheses)
+            # Check if label is the base name (before space and parentheses)
+            # New format: "MeVPLo2 (F:MTe07)"
+            if existing_label.startswith(label + ' ('):
+                return True
+            # Legacy format: "MeVPLo2(MTe07)"
             if existing_label.startswith(label + '('):
                 return True
-            # Check if label is inside parentheses
+            # Check if label is inside parentheses (with or without dataset code)
             if '(' in existing_label and ')' in existing_label:
                 paren_start = existing_label.index('(')
                 paren_end = existing_label.index(')')
                 inner = existing_label[paren_start + 1:paren_end]
-                # Handle multiple names separated by /
+                # Handle multiple dataset-prefixed names separated by /
+                # Format: "F:MTe07/H:MTe07_variant"
                 inner_names = [n.strip() for n in inner.split('/')]
-                if label in inner_names:
-                    return True
+                for name in inner_names:
+                    # Remove dataset prefix if present (e.g., "F:MTe07" -> "MTe07")
+                    if ':' in name:
+                        unprefixed = name.split(':', 1)[1]
+                        if label == unprefixed:
+                            return True
+                    elif label == name:
+                        return True
         return False
     
     for label in source_neurons:
@@ -1795,6 +2009,18 @@ def _generate_conservation_network(analyzer, dataset_names: List[str], threshold
     conserved_info = f' | <span style="color: #22c55e;"><strong>{conserved_count}</strong> conserved</span>'
     unique_info = f' | <span style="color: #94a3b8;"><strong>{unique_count}</strong> unique</span>' if unique_count > 0 else ''
     
+    # Generate dataset legend HTML for cross-dataset type name display
+    dataset_legend_html = ""
+    if dataset_legend and display_name_map:
+        legend_parts = [f'<span title="{full_name}" style="cursor: help;"><b>{code}</b>={full_name}</span>' 
+                        for code, full_name in sorted(dataset_legend.items())]
+        if legend_parts:
+            dataset_legend_html = f'''
+            <div style="margin-top: 8px; padding: 8px; background: #f8f9fa; border-radius: 6px; font-size: 11px;">
+                <span style="color: #666;">📝 Dataset codes in node names:</span> {" | ".join(legend_parts)}
+            </div>
+            '''
+    
     return f'''
         <div class="card">
             <h3>Network at Threshold = {threshold}</h3>
@@ -1820,6 +2046,7 @@ def _generate_conservation_network(analyzer, dataset_names: List[str], threshold
                     </button>
                 </div>
             </div>
+            {dataset_legend_html}
             <div id="{div_id}" style="height: 900px; border: 1px solid var(--border-color); border-radius: 8px;"></div>
         </div>
         <script>
@@ -1898,37 +2125,78 @@ def _generate_conservation_network(analyzer, dataset_names: List[str], threshold
 
 
 def _generate_dataset_network(analyzer, dataset: str, thresholds: List[int],
-                               nickname_map: Dict[str, str]) -> str:
+                               nickname_map: Dict[str, str], max_edges: int = 500) -> str:
     """Generate network visualization for a single dataset across all thresholds.
     
     Shows unique edges with conservation-style coloring based on how many thresholds
     the edge appears at. Hover shows weights at all threshold levels.
+    
+    Args:
+        max_edges: Maximum number of edges to show (default 500).
+                   Edges are selected from top paths to preserve path connectivity.
     """
     nick = nickname_map[dataset]
     num_thresholds = len(thresholds)
     
+    # Get path data for filtering (use first threshold with data)
+    all_path_edges = set()
+    for threshold in thresholds:
+        try:
+            path_data = analyzer._get_path_data_for_threshold(threshold)
+            if path_data is not None and not path_data.empty:
+                # Get edges from top paths for this threshold
+                edges_from_paths = _extract_edges_from_paths(path_data, [dataset], max_paths=int(max_edges * 2))
+                all_path_edges.update(edges_from_paths)
+        except Exception:
+            pass
+    
     # Collect edges: {(source, target): {threshold: weight}}
     edge_weights = {}  # {(source, target): {t: weight}}
     all_nodes = set()
+    
+    # First pass: get total weights per edge for prioritization
+    edge_total_weights = {}
     
     for threshold in thresholds:
         aligned = analyzer.get_aligned_data(threshold)
         if dataset not in aligned.columns:
             continue
         
-        for edge_key, row in aligned.iterrows():
+        # Vectorized extraction of edges
+        valid_mask = aligned[dataset] > 0
+        for edge_key in aligned.loc[valid_mask].index:
             if ' -> ' not in str(edge_key):
                 continue
+            
+            # If we have path edges, filter to only those
+            if all_path_edges and edge_key not in all_path_edges:
+                continue
+                
             parts = str(edge_key).split(' -> ')
             source, target = parts[0], parts[1] if len(parts) > 1 else ''
-            weight = row.get(dataset, 0)
+            weight = aligned.loc[edge_key, dataset]
+            # Handle Series (duplicate indices)
+            if hasattr(weight, 'iloc'):
+                weight = weight.iloc[0]
+            weight = int(weight)
             if weight > 0:
                 edge_tuple = (source, target)
                 if edge_tuple not in edge_weights:
                     edge_weights[edge_tuple] = {}
-                edge_weights[edge_tuple][threshold] = int(weight)
-                all_nodes.add(source)
-                all_nodes.add(target)
+                    edge_total_weights[edge_tuple] = 0
+                edge_weights[edge_tuple][threshold] = weight
+                edge_total_weights[edge_tuple] += weight
+    
+    # Limit to top edges if still too many
+    if len(edge_weights) > max_edges:
+        top_edges = sorted(edge_total_weights.items(), key=lambda x: -x[1])[:max_edges]
+        top_edge_set = set(e[0] for e in top_edges)
+        edge_weights = {k: v for k, v in edge_weights.items() if k in top_edge_set}
+    
+    # Build node set
+    for (source, target) in edge_weights:
+        all_nodes.add(source)
+        all_nodes.add(target)
     
     if not all_nodes:
         return f'<div class="card"><p>No connections for {nick} at any threshold.</p></div>'
@@ -2547,18 +2815,36 @@ def _generate_edge_dataset_table(analyzer, dataset: str, thresholds: List[int],
                                   nickname_map: Dict[str, str]) -> str:
     """Generate edge presence table for a single dataset across all thresholds."""
     nick = nickname_map[dataset]
+    max_edges_to_show = 50
     
-    # Collect all edges and their presence/weight across thresholds
-    all_edges = set()
+    # First, identify top edges from the first threshold to limit iteration
+    top_edges_set = set()
+    first_threshold = thresholds[0] if thresholds else None
+    if first_threshold is not None:
+        aligned_first = analyzer.get_aligned_data(first_threshold)
+        if not aligned_first.empty and dataset in aligned_first.columns:
+            top_indices = aligned_first.nlargest(max_edges_to_show * 2, dataset).index
+            top_edges_set = set(top_indices)
+    
+    # Collect data only for top edges across thresholds
     edge_data = {}  # edge_key -> {threshold: weight}
     
     for threshold in thresholds:
         aligned = analyzer.get_aligned_data(threshold)
         if aligned.empty or dataset not in aligned.columns:
             continue
-        for edge_key, row in aligned.iterrows():
-            weight = row.get(dataset, 0)
-            all_edges.add(edge_key)
+        
+        # Only iterate over top edges
+        if top_edges_set:
+            edges_to_process = [e for e in top_edges_set if e in aligned.index]
+        else:
+            edges_to_process = list(aligned.index[:max_edges_to_show * 2])
+        
+        for edge_key in edges_to_process:
+            weight = aligned.loc[edge_key, dataset]
+            # Handle Series (duplicate indices)
+            if hasattr(weight, 'iloc'):
+                weight = weight.iloc[0]
             if edge_key not in edge_data:
                 edge_data[edge_key] = {}
             edge_data[edge_key][threshold] = weight
@@ -2756,8 +3042,19 @@ def _generate_path_dataset_table(analyzer, dataset: str, thresholds: List[int],
     nick = nickname_map[dataset]
     safe_name = analyzer.parameters._sanitize_name(dataset)
     
-    # Collect all paths and their presence/weight across thresholds
-    all_paths = set()
+    # First, identify top paths from the first threshold to limit iteration
+    max_paths_to_show = 50
+    top_paths_set = set()
+    
+    first_threshold = thresholds[0] if thresholds else None
+    if first_threshold is not None:
+        pdata_first = analyzer._get_path_data_for_threshold(first_threshold)
+        if pdata_first is not None and not pdata_first.empty and dataset in pdata_first.columns:
+            # Get top paths by weight
+            top_indices = pdata_first.nlargest(max_paths_to_show * 2, dataset).index
+            top_paths_set = set(top_indices)
+    
+    # Collect data only for top paths across thresholds
     path_data = {}  # path_key -> {threshold: (weight, hop_weights)}
     
     for threshold in thresholds:
@@ -2768,9 +3065,17 @@ def _generate_path_dataset_table(analyzer, dataset: str, thresholds: List[int],
         # Get hop weights for this threshold
         hop_weights_dict = analyzer._get_path_hop_weights_for_threshold(threshold) if hasattr(analyzer, '_get_path_hop_weights_for_threshold') else {}
         
-        for path_key, row in pdata.iterrows():
-            weight = row.get(dataset, 0)
-            all_paths.add(path_key)
+        # Only iterate over top paths (using vectorized access)
+        if top_paths_set:
+            paths_to_process = [p for p in top_paths_set if p in pdata.index]
+        else:
+            paths_to_process = list(pdata.index[:max_paths_to_show * 2])
+        
+        for path_key in paths_to_process:
+            weight = pdata.loc[path_key, dataset]
+            # Handle Series (duplicate indices)
+            if hasattr(weight, 'iloc'):
+                weight = weight.iloc[0]
             if path_key not in path_data:
                 path_data[path_key] = {}
             
@@ -2948,12 +3253,12 @@ def _generate_conservation_section(analyzer, dataset_names: List[str], threshold
         if aligned.empty or n == 0:
             continue
         
-        # Compute edge distribution: count how many datasets each edge appears in
+        # Compute edge distribution using vectorized operations
         edge_counts = {}  # {count: number_of_edges}
-        for edge_key, row in aligned.iterrows():
-            count = sum(1 for d in available if row.get(d, 0) > 0)
-            if count > 0:
-                edge_counts[count] = edge_counts.get(count, 0) + 1
+        # Count non-zero columns per row
+        presence_matrix = (aligned[available] > 0).astype(int)
+        counts_per_row = presence_matrix.sum(axis=1)
+        edge_counts = counts_per_row[counts_per_row > 0].value_counts().to_dict()
         
         # Get path data from path_presence_matrix
         path_counts = {}  # {count: number_of_paths}
@@ -2973,16 +3278,12 @@ def _generate_conservation_section(analyzer, dataset_names: List[str], threshold
                         cols_for_threshold.append(col_name)
                 
                 if cols_for_threshold:
-                    # Count how many datasets each path appears in at this threshold
-                    for _, row in path_presence_matrix.iterrows():
-                        count = 0
-                        for col in cols_for_threshold:
-                            val = row.get(col, 0)
-                            # Handle both string 'True' and boolean True
-                            if val == 'True' or val == True or (isinstance(val, (int, float)) and val > 0):
-                                count += 1
-                        if count > 0:
-                            path_counts[count] = path_counts.get(count, 0) + 1
+                    # Vectorized: count how many datasets each path appears in at this threshold
+                    sub_df = path_presence_matrix[cols_for_threshold]
+                    # Convert to boolean - handle 'True', True, and numeric > 0
+                    presence_bool = sub_df.apply(lambda col: col.map(lambda v: v == 'True' or v == True or (isinstance(v, (int, float)) and v > 0)))
+                    counts_per_path = presence_bool.sum(axis=1)
+                    path_counts = counts_per_path[counts_per_path > 0].value_counts().to_dict()
         except Exception as e:
             pass
         

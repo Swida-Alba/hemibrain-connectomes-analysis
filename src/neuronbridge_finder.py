@@ -41,10 +41,12 @@ import os
 import re
 import time
 import warnings
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple, Union, TYPE_CHECKING
 
+import bokeh.palettes
 import numpy as np
 import pandas as pd
 
@@ -336,6 +338,9 @@ class NeuronBridgeFinder:
     max_api_images_per_line : int
         Maximum LM images to process per driver line for API calls. Use -1 for unlimited. Default: -1
         Images are pre-filtered by match_type availability before limiting.
+    max_workers : int
+        Maximum number of parallel threads for processing images. Set to 1 for sequential
+        processing. Higher values speed up API calls but may hit rate limits. Default: 8
     
     Attributes
     ----------
@@ -356,6 +361,9 @@ class NeuronBridgeFinder:
     
     # With NeuPrint token for pulling missing datasets
     >>> nbf = NeuronBridgeFinder(neuprint_token='your_token_here')
+    
+    # With parallel processing for faster image searches
+    >>> nbf = NeuronBridgeFinder(max_workers=12)  # Use 12 parallel threads
     """
     
     datasets_path: Optional[str] = None
@@ -368,6 +376,7 @@ class NeuronBridgeFinder:
     match_type: str = 'cds'
     region: str = 'All'
     max_api_images_per_line: int = -1
+    max_workers: int = 8
     
     # Private fields
     _client: Any = field(init=False, repr=False, default=None)
@@ -4789,42 +4798,93 @@ class NeuronBridgeFinder:
             # Create progress bar for image processing if we have multiple images and tqdm is available
             show_image_progress = HAS_TQDM and self.verbose and n_images > 1
             
-            if show_image_progress:
-                from tqdm import tqdm as tqdm_progress
-                # Suppress loading messages while progress bar is active
+            # Use parallel processing for multiple images when max_workers > 1
+            use_parallel = self.max_workers > 1 and n_images > 1
+            
+            if use_parallel:
+                # Parallel processing with ThreadPoolExecutor
                 self._suppress_loading_msgs = True
-                image_iterator = tqdm_progress(
-                    lm_images,
-                    desc=f"  🖼️  Processing images",
-                    unit="img",
-                    leave=False,
-                    bar_format='  {desc}: {percentage:3.0f}%|{bar:20}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]',
-                    ncols=90
-                )
-            else:
-                image_iterator = lm_images
-            
-            for img_idx, lm_image in enumerate(image_iterator, 1):
-                # Use the unified _get_image_matches_cached which handles 'both' internally
-                matches, from_cache, partial_cache = self._get_image_matches_cached(
-                    lm_image, match_type, line_name
-                )
                 
-                if from_cache:
-                    cache_hits += 1
-                elif partial_cache:
-                    partial_cache_hits += 1
-                else:
-                    api_fetches += 1
+                def process_single_image(lm_image):
+                    """Worker function to process a single image."""
+                    return self._get_image_matches_cached(lm_image, match_type, line_name)
                 
-                if matches:
-                    all_matches.extend(matches)
-                elif not from_cache and not partial_cache:
-                    errors += 1
-            
-            # Restore loading messages flag after processing images
-            if show_image_progress:
+                with ThreadPoolExecutor(max_workers=min(self.max_workers, n_images)) as executor:
+                    # Submit all tasks
+                    futures = {executor.submit(process_single_image, img): img for img in lm_images}
+                    
+                    # Process results as they complete
+                    if show_image_progress:
+                        from tqdm import tqdm as tqdm_progress
+                        iterator = tqdm_progress(
+                            as_completed(futures),
+                            total=n_images,
+                            desc=f"  🖼️  Processing images",
+                            unit="img",
+                            leave=False,
+                            bar_format='  {desc}: {percentage:3.0f}%|{bar:20}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]',
+                            ncols=90
+                        )
+                    else:
+                        iterator = as_completed(futures)
+                    
+                    for future in iterator:
+                        try:
+                            matches, from_cache, partial_cache = future.result()
+                            
+                            if from_cache:
+                                cache_hits += 1
+                            elif partial_cache:
+                                partial_cache_hits += 1
+                            else:
+                                api_fetches += 1
+                            
+                            if matches:
+                                all_matches.extend(matches)
+                            elif not from_cache and not partial_cache:
+                                errors += 1
+                        except Exception as e:
+                            errors += 1
+                
                 self._suppress_loading_msgs = False
+            else:
+                # Sequential processing (original behavior)
+                if show_image_progress:
+                    from tqdm import tqdm as tqdm_progress
+                    # Suppress loading messages while progress bar is active
+                    self._suppress_loading_msgs = True
+                    image_iterator = tqdm_progress(
+                        lm_images,
+                        desc=f"  🖼️  Processing images",
+                        unit="img",
+                        leave=False,
+                        bar_format='  {desc}: {percentage:3.0f}%|{bar:20}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]',
+                        ncols=90
+                    )
+                else:
+                    image_iterator = lm_images
+                
+                for img_idx, lm_image in enumerate(image_iterator, 1):
+                    # Use the unified _get_image_matches_cached which handles 'both' internally
+                    matches, from_cache, partial_cache = self._get_image_matches_cached(
+                        lm_image, match_type, line_name
+                    )
+                    
+                    if from_cache:
+                        cache_hits += 1
+                    elif partial_cache:
+                        partial_cache_hits += 1
+                    else:
+                        api_fetches += 1
+                    
+                    if matches:
+                        all_matches.extend(matches)
+                    elif not from_cache and not partial_cache:
+                        errors += 1
+                
+                # Restore loading messages flag after processing images
+                if show_image_progress:
+                    self._suppress_loading_msgs = False
             
             # Report cache/API statistics explicitly
             total_lookups = cache_hits + partial_cache_hits + api_fetches
@@ -5935,6 +5995,141 @@ class NeuronBridgeFinder:
                 type_counts = type_counts.head(top_n)
             return type_counts.index.tolist()
     
+    def _get_type_scores(
+        self,
+        ds_df: pd.DataFrame,
+        sort_by: str = 'max_score'
+    ) -> Dict[str, float]:
+        """
+        Compute score for each type based on the sort_by metric.
+        
+        Parameters
+        ----------
+        ds_df : pd.DataFrame
+            Dataset-filtered DataFrame with 'type_label' and 'score' columns
+        sort_by : str, default 'max_score'
+            Score metric: 'max_score', 'avg_score', 'median_score', 'Q3_score', 'Q1_score'
+            
+        Returns
+        -------
+        dict
+            Dictionary mapping type_label to score value
+        """
+        score_col = 'score' if 'score' in ds_df.columns else None
+        
+        if score_col:
+            # Calculate the score metric based on sort_by
+            if sort_by == 'max_score':
+                type_scores = ds_df.groupby('type_label')[score_col].max()
+            elif sort_by == 'median_score':
+                type_scores = ds_df.groupby('type_label')[score_col].median()
+            elif sort_by == 'Q3_score':
+                type_scores = ds_df.groupby('type_label')[score_col].quantile(0.75)
+            elif sort_by == 'Q1_score':
+                type_scores = ds_df.groupby('type_label')[score_col].quantile(0.25)
+            elif sort_by == 'avg_score':
+                type_scores = ds_df.groupby('type_label')[score_col].mean()
+            else:
+                # Default to max_score if invalid sort_by
+                type_scores = ds_df.groupby('type_label')[score_col].max()
+            
+            return type_scores.to_dict()
+        else:
+            # No scores available - return empty dict (will use default alpha)
+            return {}
+    
+    def _compute_layer_alphas(
+        self,
+        layer_scores: List[float],
+        base_alpha: float = 0.2
+    ) -> List[float]:
+        """
+        Compute alpha values for each layer based on relative scores.
+        
+        Alpha = base_alpha * (score_i / max_score)
+        
+        Parameters
+        ----------
+        layer_scores : list
+            Score for each layer
+        base_alpha : float, default 0.2
+            Maximum alpha value for the highest-scoring layer
+            
+        Returns
+        -------
+        list
+            Alpha value for each layer
+        """
+        if not layer_scores:
+            return []
+        
+        max_score = max(layer_scores) if layer_scores else 1.0
+        if max_score == 0:
+            max_score = 1.0  # Avoid division by zero
+        
+        alphas = [base_alpha * (score / max_score) for score in layer_scores]
+        return alphas
+    
+    def _hex_to_rgba(self, hex_color: str, alpha: float = 1.0) -> Tuple[int, int, int, float]:
+        """
+        Convert a hex color string to RGBA tuple.
+        
+        Parameters
+        ----------
+        hex_color : str
+            Hex color string like '#ff0000' or 'ff0000'
+        alpha : float, default 1.0
+            Alpha value (0.0 to 1.0)
+            
+        Returns
+        -------
+        tuple
+            RGBA tuple (r, g, b, alpha) with r,g,b as 0-255 integers
+        """
+        hex_color = hex_color.lstrip('#')
+        r = int(hex_color[0:2], 16)
+        g = int(hex_color[2:4], 16)
+        b = int(hex_color[4:6], 16)
+        return (r, g, b, alpha)
+    
+    def _create_neuron_colors_with_alpha(
+        self,
+        n_layers: int,
+        layer_alphas: List[float]
+    ) -> List[Tuple[int, int, int, float]]:
+        """
+        Create neuron colors with explicit alpha values for each layer.
+        
+        Uses Bokeh's Category10 or Category20 palette depending on layer count.
+        
+        Parameters
+        ----------
+        n_layers : int
+            Number of layers
+        layer_alphas : list
+            Alpha value for each layer
+            
+        Returns
+        -------
+        list
+            List of RGBA tuples, one per layer
+        """
+        # Choose palette based on number of layers
+        if n_layers <= 10:
+            base_palette = bokeh.palettes.Category10[10]
+        else:
+            base_palette = bokeh.palettes.Category20[20]
+        
+        # Create RGBA colors with per-layer alpha
+        colors = []
+        for i in range(n_layers):
+            hex_color = base_palette[i % len(base_palette)]
+            alpha = layer_alphas[i] if i < len(layer_alphas) else 0.2
+            rgba = self._hex_to_rgba(hex_color, alpha)
+            colors.append(rgba)
+        
+        return colors
+    
     def _visualize_top_types(
         self,
         combined_df: pd.DataFrame,
@@ -6100,6 +6295,9 @@ class NeuronBridgeFinder:
                 if not all_types:
                     continue
                 
+                # Compute type scores for alpha calculation
+                type_scores = self._get_type_scores(ds_df, sort_by=sort_by)
+                
                 # Create list of (original_rank, type_name) tuples
                 ranked_types = [(i, name) for i, name in enumerate(all_types, start=1)]
                 
@@ -6117,8 +6315,10 @@ class NeuronBridgeFinder:
                 
                 # Build neuron_layers as nested list (one sublist per type)
                 # Use r{rank}_{type}_x{N} format for legend names (rank is ORIGINAL rank before filtering)
+                # Also track layer_scores for alpha calculation
                 neuron_layers = []
                 layer_names = []
+                layer_scores = []  # Track score for each layer
                 
                 for original_rank, type_name in top_ranked_types:
                     # Case-sensitive type matching
@@ -6131,6 +6331,8 @@ class NeuronBridgeFinder:
                         # Create legend name: r{rank}_{type}_x{N} - using ORIGINAL rank
                         n_neurons = len(type_neurons)
                         layer_names.append(f"r{original_rank}_{type_name}_x{n_neurons}")
+                        # Track score for this type (default to 1.0 if not available)
+                        layer_scores.append(type_scores.get(type_name, 1.0))
                 
                 if not neuron_layers:
                     continue
@@ -6163,6 +6365,9 @@ class NeuronBridgeFinder:
                     ds_df_sorted = ds_df.sort_values(score_col, ascending=False)
                 else:
                     ds_df_sorted = ds_df
+                
+                # Compute type scores for alpha calculation
+                type_scores = self._get_type_scores(ds_df, sort_by=sort_by)
                 
                 # Group ALL bodyIds by type for layer organization
                 # Track the minimum rank (best score position) for each type for sorting
@@ -6199,8 +6404,10 @@ class NeuronBridgeFinder:
                 
                 # Build neuron_layers: one layer per type, containing all bodyIds of that type
                 # Use r{rank}_{type}_x{N} format for legend names (rank is ORIGINAL rank before filtering)
+                # Also track layer_scores for alpha calculation
                 neuron_layers = []
                 layer_names = []
+                layer_scores = []  # Track score for each layer
                 
                 for type_label in sorted_types:
                     bodyids = type_to_bodyids[type_label]
@@ -6210,6 +6417,8 @@ class NeuronBridgeFinder:
                     rank = type_min_rank[type_label]
                     n_neurons = len(bodyids)
                     layer_names.append(f"r{rank}_{type_label}_x{n_neurons}")
+                    # Track score for this type (default to 1.0 if not available)
+                    layer_scores.append(type_scores.get(type_label, 1.0))
                 
                 if not neuron_layers:
                     continue
@@ -6283,6 +6492,11 @@ class NeuronBridgeFinder:
                 # Custom folder name: plot3d_{dataset_folder} (VisualizeSkeleton prepends 'plot3d_')
                 custom_saveas = dataset_folder
                 
+                # Compute per-layer alpha based on relative scores
+                # Alpha = 0.2 * (score_i / max_score) so higher-scoring types are more visible
+                layer_alphas = self._compute_layer_alphas(layer_scores, base_alpha=0.2)
+                neuron_colors = self._create_neuron_colors_with_alpha(len(neuron_layers), layer_alphas)
+                
                 vs = VisualizeSkeleton(
                     dataset=dataset,
                     output_dir=output_path,
@@ -6291,7 +6505,7 @@ class NeuronBridgeFinder:
                     saveas=custom_saveas,
                     include_timestamp=False,  # No timestamp for cleaner folder names
                     skip_synapse=True,
-                    neuron_alpha=0.3,
+                    neuron_colors=neuron_colors,  # RGBA colors with per-layer alpha
                     skeleton_mode='tube',
                     legend_mode=legend_mode,  # 'layer' for type, 'single' for bodyId
                     brain_mesh=brain_mesh,
@@ -6545,35 +6759,64 @@ class NeuronBridgeFinder:
             # Restore loading message setting
             self._suppress_loading_msgs = old_suppress
             
-            # Phase 2: Fetch uncached data with progress bar
+            # Phase 2: Fetch uncached data with parallel processing
             if uncached_lines:
                 self._vprint("\n🌐 Fetching new data...")
-                fetch_pbar = tqdm_progress(
-                    uncached_lines,
-                    desc="   🔄 Fetching",
-                    unit="line",
-                    bar_format='{desc}: {percentage:3.0f}%|{bar:30}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]',
-                    ncols=110,
-                    position=0,
-                    leave=False
-                )
                 
-                for line_name in fetch_pbar:
-                    fetch_pbar.set_postfix_str(line_name[:20])
+                # Use parallel processing for multiple uncached lines
+                use_parallel_lines = self.max_workers > 1 and len(uncached_lines) > 1
+                
+                if use_parallel_lines:
+                    # Parallel fetching with ThreadPoolExecutor
+                    self._suppress_loading_msgs = True
+                    fetch_results = []
+                    fetch_errors = []
                     
-                    try:
-                        neurons_df = self.line_to_neuron(
-                            line_name,
-                            top_n=top_n,
-                            match_type=match_type
-                        )
+                    def fetch_single_line(ln):
+                        """Worker function to fetch data for a single line."""
+                        try:
+                            neurons_df = self.line_to_neuron(
+                                ln,
+                                top_n=top_n,
+                                match_type=match_type
+                            )
+                            if neurons_df.empty:
+                                return (ln, None, None)
+                            
+                            neurons_df = neurons_df.copy()
+                            neurons_df['source_line'] = ln
+                            return (ln, neurons_df, None)
+                        except Exception as e:
+                            return (ln, None, str(e))
+                    
+                    with ThreadPoolExecutor(max_workers=min(self.max_workers, len(uncached_lines))) as executor:
+                        futures = {executor.submit(fetch_single_line, ln): ln for ln in uncached_lines}
                         
-                        if neurons_df.empty:
-                            continue
+                        if HAS_TQDM:
+                            iterator = tqdm_progress(
+                                as_completed(futures),
+                                total=len(uncached_lines),
+                                desc="   🔄 Fetching (parallel)",
+                                unit="line",
+                                bar_format='{desc}: {percentage:3.0f}%|{bar:30}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]',
+                                ncols=110,
+                                position=0,
+                                leave=False
+                            )
+                        else:
+                            iterator = as_completed(futures)
                         
-                        # Add source line info
-                        neurons_df = neurons_df.copy()
-                        neurons_df['source_line'] = line_name
+                        for future in iterator:
+                            line_name, neurons_df, error = future.result()
+                            if error:
+                                fetch_errors.append((line_name, error))
+                            elif neurons_df is not None:
+                                fetch_results.append((line_name, neurons_df))
+                    
+                    self._suppress_loading_msgs = False
+                    
+                    # Process results
+                    for line_name, neurons_df in fetch_results:
                         all_results.append(neurons_df)
                         
                         # Save individual results
@@ -6586,12 +6829,56 @@ class NeuronBridgeFinder:
                                 self._save_dataset_categorized_files(
                                     neurons_df, line_name, output_path, verbose=False, sort_by=sort_by
                                 )
+                    
+                    self._vprint(f"   ✓ Fetched {len(fetch_results)}/{len(uncached_lines)} from API (parallel)")
+                    if fetch_errors:
+                        self._vprint(f"   ⚠️ {len(fetch_errors)} line(s) had errors")
+                else:
+                    # Sequential fetching (single line or max_workers=1)
+                    fetch_pbar = tqdm_progress(
+                        uncached_lines,
+                        desc="   🔄 Fetching",
+                        unit="line",
+                        bar_format='{desc}: {percentage:3.0f}%|{bar:30}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]',
+                        ncols=110,
+                        position=0,
+                        leave=False
+                    )
+                    
+                    for line_name in fetch_pbar:
+                        fetch_pbar.set_postfix_str(line_name[:20])
                         
-                    except Exception as e:
-                        pass  # Silent in progress mode
-                
-                fetch_pbar.close()
-                self._vprint(f"   ✓ Fetched {len(uncached_lines)} from API")
+                        try:
+                            neurons_df = self.line_to_neuron(
+                                line_name,
+                                top_n=top_n,
+                                match_type=match_type
+                            )
+                            
+                            if neurons_df.empty:
+                                continue
+                            
+                            # Add source line info
+                            neurons_df = neurons_df.copy()
+                            neurons_df['source_line'] = line_name
+                            all_results.append(neurons_df)
+                            
+                            # Save individual results
+                            if output_path:
+                                output_file = os.path.join(output_path, f'{line_name}_neurons.csv')
+                                neurons_df.to_csv(output_file, index=False)
+                                
+                                # Save dataset-categorized files
+                                if 'dataset' in neurons_df.columns:
+                                    self._save_dataset_categorized_files(
+                                        neurons_df, line_name, output_path, verbose=False, sort_by=sort_by
+                                    )
+                            
+                        except Exception as e:
+                            pass  # Silent in progress mode
+                    
+                    fetch_pbar.close()
+                    self._vprint(f"   ✓ Fetched {len(uncached_lines)} from API")
         
         else:
             # Single line or no progress bar - original behavior

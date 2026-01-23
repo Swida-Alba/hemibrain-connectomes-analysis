@@ -292,9 +292,28 @@ class ComparisonVisualizer:
         if nickname_map is None:
             nickname_map = {d: d for d in datasets}
         
-        # Collect all edges across all thresholds
+        # First pass: identify top edges from first threshold to limit iteration
+        top_edges = []
+        sample_threshold = thresholds[0] if thresholds else None
+        
+        if sample_threshold is not None:
+            try:
+                aligned = align_func(sample_threshold)
+                if not aligned.empty:
+                    # Sum across all dataset columns for each edge
+                    dataset_cols = [d for d in datasets if d in aligned.columns]
+                    if dataset_cols:
+                        aligned['_total'] = aligned[dataset_cols].sum(axis=1)
+                        top_edges = aligned.nlargest(max_edges * 2, '_total').index.tolist()
+                    else:
+                        top_edges = list(aligned.index[:max_edges * 2])
+            except Exception:
+                pass
+        
+        top_edges_set = set(top_edges)
+        
+        # Collect data only for top edges across all thresholds
         all_data = {}
-        all_edges = set()
         
         for threshold in thresholds:
             try:
@@ -302,8 +321,10 @@ class ComparisonVisualizer:
                 if aligned.empty:
                     continue
                 
-                for edge_key in aligned.index:
-                    all_edges.add(edge_key)
+                # Only process top edges
+                edges_to_process = [e for e in aligned.index if e in top_edges_set] if top_edges_set else list(aligned.index[:max_edges * 2])
+                
+                for edge_key in edges_to_process:
                     for dataset in datasets:
                         if dataset in aligned.columns:
                             nick = nickname_map.get(dataset, dataset)[:12]
@@ -1336,9 +1357,34 @@ class ComparisonVisualizer:
             except (KeyError, TypeError, ValueError):
                 return 0.0
         
-        # Collect all paths across all thresholds
+        # First pass: collect path means across all thresholds to find top paths
+        # This avoids building full data for millions of paths
+        path_totals = {}
+        sample_threshold = thresholds[0] if thresholds else None
+        
+        if sample_threshold is not None:
+            try:
+                path_df = path_data_func(sample_threshold)
+                if not path_df.empty and len(datasets) > 0:
+                    # Sum across all dataset columns for each path
+                    dataset_cols = [d for d in datasets if d in path_df.columns]
+                    if dataset_cols:
+                        path_df['_total'] = path_df[dataset_cols].sum(axis=1)
+                        # Get top N paths
+                        top_paths = path_df.nlargest(max_paths * 2, '_total').index.tolist()
+                    else:
+                        top_paths = list(path_df.index[:max_paths * 2])
+                else:
+                    top_paths = []
+            except Exception:
+                top_paths = []
+        else:
+            top_paths = []
+        
+        top_paths_set = set(top_paths)
+        
+        # Collect data only for top paths across all thresholds
         all_data = {}
-        all_paths = set()
         
         for threshold in thresholds:
             try:
@@ -1346,8 +1392,10 @@ class ComparisonVisualizer:
                 if path_df.empty:
                     continue
                 
-                for path_key in path_df.index:
-                    all_paths.add(path_key)
+                # Only process top paths (or all if fewer than limit)
+                paths_to_process = [p for p in path_df.index if p in top_paths_set] if top_paths_set else list(path_df.index[:max_paths * 2])
+                
+                for path_key in paths_to_process:
                     for dataset in datasets:
                         if dataset in path_df.columns:
                             nick = nickname_map.get(dataset, dataset)[:10]
@@ -1419,7 +1467,8 @@ class ComparisonVisualizer:
         datasets: List[str],
         figsize: Optional[Tuple[int, int]] = None,
         title: str = "Path Ratio Across Datasets",
-        max_edges: int = 50
+        max_edges: int = 50,
+        nickname_map: Dict[str, str] = None
     ) -> plt.Figure:
         """
         Plot heatmap of min_ratio values (path-level statistics).
@@ -1430,6 +1479,7 @@ class ComparisonVisualizer:
             figsize: Figure size tuple
             title: Plot title
             max_edges: Maximum number of edges to show
+            nickname_map: Dict mapping dataset names to display names
             
         Returns:
             matplotlib Figure
@@ -1448,6 +1498,10 @@ class ComparisonVisualizer:
         plot_data = ratio_data[available].copy()
         plot_data['mean'] = plot_data.mean(axis=1)
         plot_data = plot_data.nlargest(max_edges, 'mean').drop(columns=['mean'])
+        
+        # Rename columns to nicknames if provided
+        if nickname_map:
+            plot_data = plot_data.rename(columns={d: nickname_map.get(d, d) for d in available})
         
         # Create heatmap
         fig_height = max(6, len(plot_data) * 0.3)
@@ -1481,7 +1535,8 @@ class ComparisonVisualizer:
         datasets: List[str],
         figsize: Optional[Tuple[int, int]] = None,
         title: str = "Traversal Probability Across Datasets",
-        max_paths: int = 50
+        max_paths: int = 50,
+        nickname_map: Dict[str, str] = None
     ) -> plt.Figure:
         """
         Plot heatmap of traversal probability values (path-level statistics).
@@ -1492,6 +1547,7 @@ class ComparisonVisualizer:
             figsize: Figure size tuple
             title: Plot title
             max_paths: Maximum number of paths to show
+            nickname_map: Dict mapping dataset names to display names
             
         Returns:
             matplotlib Figure
@@ -1510,6 +1566,10 @@ class ComparisonVisualizer:
         plot_data = prob_data[available].copy()
         plot_data['mean'] = plot_data.mean(axis=1)
         plot_data = plot_data.nlargest(max_paths, 'mean').drop(columns=['mean'])
+        
+        # Rename columns to nicknames if provided
+        if nickname_map:
+            plot_data = plot_data.rename(columns={d: nickname_map.get(d, d) for d in available})
         
         # Create heatmap with log scale annotation for small values
         fig_height = max(6, len(plot_data) * 0.3)
@@ -1550,7 +1610,8 @@ class ComparisonVisualizer:
         datasets: List[str],
         figsize: Optional[Tuple[int, int]] = None,
         title: str = "Min-Ratio Across All Thresholds",
-        max_edges: int = 30
+        max_edges: int = 30,
+        nickname_map: Dict[str, str] = None
     ) -> plt.Figure:
         """
         Plot heatmap of min_ratio across all thresholds.
@@ -1562,12 +1623,17 @@ class ComparisonVisualizer:
             figsize: Figure size tuple
             title: Plot title
             max_edges: Maximum number of edges to show
+            nickname_map: Dict mapping dataset names to display names
             
         Returns:
             matplotlib Figure
         """
         if not HAS_SEABORN:
             raise ImportError("seaborn is required for heatmaps")
+        
+        # Create default nickname map if not provided
+        if nickname_map is None:
+            nickname_map = {d: d for d in datasets}
         
         # Helper to safely extract scalar from potentially duplicate-indexed DataFrame
         def safe_get_value(df, row_key, col_key):
@@ -1581,9 +1647,28 @@ class ComparisonVisualizer:
             except (KeyError, TypeError, ValueError):
                 return 0.0
         
-        # Collect all edges across all thresholds
+        # First pass: identify top edges from first threshold to limit iteration
+        top_edges = []
+        sample_threshold = thresholds[0] if thresholds else None
+        
+        if sample_threshold is not None:
+            try:
+                ratio_df = ratio_data_func(sample_threshold)
+                if ratio_df is not None and not ratio_df.empty and len(datasets) > 0:
+                    # Sum across all dataset columns for each edge
+                    dataset_cols = [d for d in datasets if d in ratio_df.columns]
+                    if dataset_cols:
+                        ratio_df['_total'] = ratio_df[dataset_cols].sum(axis=1)
+                        top_edges = ratio_df.nlargest(max_edges * 2, '_total').index.tolist()
+                    else:
+                        top_edges = list(ratio_df.index[:max_edges * 2])
+            except Exception:
+                pass
+        
+        top_edges_set = set(top_edges)
+        
+        # Collect data only for top edges across all thresholds
         all_data = {}
-        all_edges = set()
         
         for threshold in thresholds:
             try:
@@ -1591,11 +1676,15 @@ class ComparisonVisualizer:
                 if ratio_df is None or ratio_df.empty:
                     continue
                 
-                for edge_key in ratio_df.index:
-                    all_edges.add(edge_key)
+                # Only process top edges
+                edges_to_process = [e for e in ratio_df.index if e in top_edges_set] if top_edges_set else list(ratio_df.index[:max_edges * 2])
+                
+                for edge_key in edges_to_process:
                     for dataset in datasets:
                         if dataset in ratio_df.columns:
-                            col_name = f"{dataset[:10]}_t{threshold}"
+                            # Use nickname if available, otherwise truncate dataset name
+                            nick = nickname_map.get(dataset, dataset)[:12]
+                            col_name = f"{nick}_t{threshold}"
                             if edge_key not in all_data:
                                 all_data[edge_key] = {}
                             all_data[edge_key][col_name] = safe_get_value(ratio_df, edge_key, dataset)
@@ -1654,7 +1743,8 @@ class ComparisonVisualizer:
         datasets: List[str],
         figsize: Optional[Tuple[int, int]] = None,
         title: str = "Traversal Probability Across All Thresholds",
-        max_paths: int = 30
+        max_paths: int = 30,
+        nickname_map: Dict[str, str] = None
     ) -> plt.Figure:
         """
         Plot heatmap of traversal probability across all thresholds.
@@ -1666,12 +1756,17 @@ class ComparisonVisualizer:
             figsize: Figure size tuple
             title: Plot title
             max_paths: Maximum number of paths to show
+            nickname_map: Dict mapping dataset names to display names
             
         Returns:
             matplotlib Figure
         """
         if not HAS_SEABORN:
             raise ImportError("seaborn is required for heatmaps")
+        
+        # Create default nickname map if not provided
+        if nickname_map is None:
+            nickname_map = {d: d for d in datasets}
         
         # Helper to safely extract scalar from potentially duplicate-indexed DataFrame
         def safe_get_value(df, row_key, col_key):
@@ -1685,9 +1780,28 @@ class ComparisonVisualizer:
             except (KeyError, TypeError, ValueError):
                 return 0.0
         
-        # Collect all paths across all thresholds
+        # First pass: identify top paths from first threshold to limit iteration
+        top_paths = []
+        sample_threshold = thresholds[0] if thresholds else None
+        
+        if sample_threshold is not None:
+            try:
+                prob_df = prob_data_func(sample_threshold)
+                if prob_df is not None and not prob_df.empty and len(datasets) > 0:
+                    # Sum across all dataset columns for each path
+                    dataset_cols = [d for d in datasets if d in prob_df.columns]
+                    if dataset_cols:
+                        prob_df['_total'] = prob_df[dataset_cols].sum(axis=1)
+                        top_paths = prob_df.nlargest(max_paths * 2, '_total').index.tolist()
+                    else:
+                        top_paths = list(prob_df.index[:max_paths * 2])
+            except Exception:
+                pass
+        
+        top_paths_set = set(top_paths)
+        
+        # Collect data only for top paths across all thresholds
         all_data = {}
-        all_paths = set()
         
         for threshold in thresholds:
             try:
@@ -1695,11 +1809,15 @@ class ComparisonVisualizer:
                 if prob_df is None or prob_df.empty:
                     continue
                 
-                for path_key in prob_df.index:
-                    all_paths.add(path_key)
+                # Only process top paths
+                paths_to_process = [p for p in prob_df.index if p in top_paths_set] if top_paths_set else list(prob_df.index[:max_paths * 2])
+                
+                for path_key in paths_to_process:
                     for dataset in datasets:
                         if dataset in prob_df.columns:
-                            col_name = f"{dataset[:10]}_t{threshold}"
+                            # Use nickname if available, otherwise truncate dataset name
+                            nick = nickname_map.get(dataset, dataset)[:12]
+                            col_name = f"{nick}_t{threshold}"
                             if path_key not in all_data:
                                 all_data[path_key] = {}
                             all_data[path_key][col_name] = safe_get_value(prob_df, path_key, dataset)
@@ -2153,7 +2271,8 @@ class ComparisonVisualizer:
                     if ratio_df is not None and not ratio_df.empty:
                         fig = self.plot_ratio_heatmap(
                             ratio_df, datasets,
-                            title=f"Path Min-Ratio at Threshold={threshold}"
+                            title=f"Path Min-Ratio at Threshold={threshold}",
+                            nickname_map=nickname_map
                         )
                         self.save_figure(fig, os.path.join(ratio_dir, f"ratio_heatmap_{threshold}.png"))
                         plt.close(fig)
@@ -2165,7 +2284,8 @@ class ComparisonVisualizer:
                 if len(thresholds) > 1:
                     fig = self.plot_ratio_heatmap_all_thresholds(
                         ratio_data_func, thresholds, datasets,
-                        title="Path Min-Ratio Across All Thresholds"
+                        title="Path Min-Ratio Across All Thresholds",
+                        nickname_map=nickname_map
                     )
                     self.save_figure(fig, os.path.join(ratio_dir, "ratio_heatmap_all_thresholds.png"))
                     plt.close(fig)
@@ -2185,7 +2305,8 @@ class ComparisonVisualizer:
                     if prob_df is not None and not prob_df.empty:
                         fig = self.plot_traversal_probability_heatmap(
                             prob_df, datasets,
-                            title=f"Traversal Probability at Threshold={threshold}"
+                            title=f"Traversal Probability at Threshold={threshold}",
+                            nickname_map=nickname_map
                         )
                         self.save_figure(fig, os.path.join(prob_dir, f"traversal_prob_heatmap_{threshold}.png"))
                         plt.close(fig)
@@ -2197,7 +2318,8 @@ class ComparisonVisualizer:
                 if len(thresholds) > 1:
                     fig = self.plot_traversal_probability_heatmap_all_thresholds(
                         prob_data_func, thresholds, datasets,
-                        title="Traversal Probability Across All Thresholds"
+                        title="Traversal Probability Across All Thresholds",
+                        nickname_map=nickname_map
                     )
                     self.save_figure(fig, os.path.join(prob_dir, "traversal_prob_heatmap_all_thresholds.png"))
                     plt.close(fig)
