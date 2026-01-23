@@ -244,6 +244,7 @@ class VisualizePath:
         edge_labels=None,       # NEW: Custom edge labels dict {(source, target): {'label_name': value, ...}}
         color_edges_by_nt=False, # NEW: Color edges by neurotransmitter type
         dataset_legend=None,    # NEW: Dataset short code legend {code: full_name} for display names
+        node_dataset_info=None, # NEW: Node-level dataset info {node_label: {code: name_in_dataset}}
     ):
         """
         Initialize VisualizePath with pathway data and visualization settings.
@@ -430,6 +431,10 @@ class VisualizePath:
         # Dataset legend for cross-dataset type name display
         # Format: {short_code: full_dataset_name} e.g., {'M': 'male-cns v0.9', 'F': 'FlyWire FAFB v783'}
         self.dataset_legend = dataset_legend or {}
+        
+        # Node-level dataset info for hover labels
+        # Format: {node_label: {code: name_in_that_dataset}} e.g., {'MeVP(MTe07)': {'M': 'MeVP', 'F': 'MTe07'}}
+        self.node_dataset_info = node_dataset_info or {}
         
         # Neurotransmitter-based edge coloring
         self.color_edges_by_nt = color_edges_by_nt  # If True, color edges by NT type
@@ -3034,6 +3039,11 @@ class VisualizePath:
                 </div>
                 
                 <div class="btn-group">
+                    <button id="bgToggleBtn" class="btn-secondary" onclick="toggleBackground()" title="Toggle background color">🎨 BG: White</button>
+                    <input type="color" id="customBgColor" value="#f5f5f5" style="width: 30px; height: 28px; border: 1px solid #ddd; border-radius: 3px; cursor: pointer; display: none;" onchange="applyCustomBackground()">
+                </div>
+                
+                <div class="btn-group">
                     <label style="font-size: 12px; margin-right: 5px;">Scale:</label>
                     <input type="number" id="exportScale" min="1" max="10" value="2" step="0.5" style="width: 50px; padding: 3px; border: 1px solid #ddd; border-radius: 3px;">
                     <button class="btn-secondary" onclick="exportPNG()" title="Export PNG">📸 PNG</button>
@@ -3502,6 +3512,65 @@ class VisualizePath:
             updateDiagram();
         }}
         
+        // Background color toggle
+        let bgMode = 0; // 0: white, 1: black, 2: custom
+        const bgColors = ['#ffffff', '#000000', 'custom'];
+        const bgLabels = ['White', 'Dark', 'Custom'];
+        
+        function toggleBackground() {{
+            bgMode = (bgMode + 1) % 3;
+            const btn = document.getElementById('bgToggleBtn');
+            const colorPicker = document.getElementById('customBgColor');
+            
+            if (bgMode === 2) {{
+                // Custom mode - show color picker
+                colorPicker.style.display = 'inline-block';
+                btn.textContent = '🎨 BG: Custom';
+                applyCustomBackground();
+            }} else {{
+                colorPicker.style.display = 'none';
+                btn.textContent = '🎨 BG: ' + bgLabels[bgMode];
+                applyBackground(bgColors[bgMode]);
+            }}
+        }}
+        
+        function applyBackground(color) {{
+            document.body.style.background = color;
+            document.getElementById('sankey-container').style.background = color;
+            const gd = document.querySelector('.plotly-graph-div');
+            if (gd) {{
+                Plotly.relayout(gd, {{
+                    'paper_bgcolor': color,
+                    'plot_bgcolor': color
+                }});
+            }}
+            // Adjust text color for dark backgrounds
+            const isDark = isColorDark(color);
+            document.querySelectorAll('.control-label, .slider-value').forEach(el => {{
+                el.style.color = isDark ? '#e0e0e0' : '#555';
+            }});
+        }}
+        
+        function applyCustomBackground() {{
+            const color = document.getElementById('customBgColor').value;
+            applyBackground(color);
+        }}
+        
+        function isColorDark(color) {{
+            // Convert hex to RGB and calculate luminance
+            let r, g, b;
+            if (color.startsWith('#')) {{
+                const hex = color.slice(1);
+                r = parseInt(hex.substr(0, 2), 16);
+                g = parseInt(hex.substr(2, 2), 16);
+                b = parseInt(hex.substr(4, 2), 16);
+            }} else {{
+                return false;
+            }}
+            const luminance = (0.299 * r + 0.587 * g + 0.114 * b) / 255;
+            return luminance < 0.5;
+        }}
+        
         // Export functions
         function exportPNG() {{
             const MAX_SAFE_SCALE = 4;
@@ -3829,12 +3898,16 @@ class VisualizePath:
             else:  # intermediate
                 color = self.node_color[1]
             
+            # Get dataset info for this node (for hover labels)
+            ds_info = self.node_dataset_info.get(node, {})
+            
             nodes_data.append({
                 'data': {
                     'id': node,
                     'label': node,
                     'node_type': node_type,
-                    'color': color
+                    'color': color,
+                    'dataset_info': ds_info  # {code: name_in_that_dataset}
                 },
                 'position': {},  # Will be set by layout
                 'classes': ''  # For CSS classes
@@ -4371,9 +4444,9 @@ class VisualizePath:
                 
                 <div style="margin-top: 15px;">
                     <label style="display: block; margin-bottom: 5px; font-weight: bold; font-size: 13px;">Hide Edges (weight):</label>
-                    <input type="text" id="ignoreEdgesInput" placeholder="e.g., 0, <5, >100" style="width: 100%; padding: 5px; font-size: 11px; border: 1px solid #ddd; border-radius: 3px; box-sizing: border-box;" oninput="updateIgnoredEdges()">
+                    <input type="text" id="ignoreEdgesInput" placeholder="OR: <5, >100 | AND: (>=5, <=10)" style="width: 100%; padding: 5px; font-size: 11px; border: 1px solid #ddd; border-radius: 3px; box-sizing: border-box;" oninput="updateIgnoredEdges()">
                     <div style="font-size: 9px; color: #666; margin-top: 3px; line-height: 1.2;">
-                        Comma-separated: 1, &lt;5, &gt;=10, &lt;=20
+                        Comma = OR, Parentheses = AND. E.g., &lt;5, (&gt;=10, &lt;=20), &gt;100
                     </div>
                 </div>
             </div>
@@ -4420,9 +4493,18 @@ class VisualizePath:
                     <button class="btn" onclick="importGraph()" style="flex: 1; padding: 6px; font-size: 12px; background: #9c27b0;">📂 Import</button>
                 </div>
                 
-                <div style="display: flex; gap: 6px;">
+                <div style="display: flex; gap: 6px; margin-bottom: 6px;">
                     <button class="btn" onclick="exportLayout()" style="flex: 1; padding: 6px; font-size: 11px; background: #607d8b;">📍 Layout</button>
                     <button class="btn" onclick="importLayout()" style="flex: 1; padding: 6px; font-size: 11px; background: #607d8b;">📌 Apply</button>
+                </div>
+                
+                <!-- Background Color Toggle -->
+                <div style="margin-top: 10px; padding-top: 10px; border-top: 1px solid #ddd;">
+                    <label style="display: block; margin-bottom: 5px; font-weight: bold; font-size: 13px;">🎨 Background:</label>
+                    <div style="display: flex; gap: 6px; align-items: center;">
+                        <button id="bgToggleBtn" class="btn" onclick="toggleBackground()" style="flex: 1; padding: 6px; font-size: 11px; background: #795548;">White</button>
+                        <input type="color" id="customBgColor" value="#f5f5f5" style="width: 35px; height: 28px; border: 1px solid #ddd; border-radius: 3px; cursor: pointer; display: none;">
+                    </div>
                 </div>
                 
                 <input type="file" id="graphFileInput" accept=".json" style="display: none;" onchange="loadGraphFile(event)">
@@ -4913,11 +4995,19 @@ class VisualizePath:
             const node = evt.target;
             const data = node.data();
             const info = document.getElementById('hoverInfo');
-            info.innerHTML = `
+            let html = `
                 <b>Node:</b> ${{data.label}}<br>
                 <b>Type:</b> ${{data.node_type}}<br>
                 <b>Color:</b> ${{data.color}}
             `;
+            // Add dataset info if available
+            if (data.dataset_info && Object.keys(data.dataset_info).length > 0) {{
+                html += `<br><span style="color: #888; font-size: 0.9em;">─────────────</span><br><b>Names by dataset:</b>`;
+                for (const [code, name] of Object.entries(data.dataset_info).sort()) {{
+                    html += `<br>&nbsp;&nbsp;${{code}}: ${{name}}`;
+                }}
+            }}
+            info.innerHTML = html;
         }});
 
         cy.on('mouseover', 'edge', function(evt) {{
@@ -5530,6 +5620,70 @@ class VisualizePath:
                 btn.textContent = 'Hide Labels';
                 labelsVisible = true;
             }}
+        }}
+        
+        // Background color toggle for network
+        let bgMode = 0; // 0: white, 1: black, 2: custom
+        const bgColors = ['#ffffff', '#000000', 'custom'];
+        const bgLabels = ['White', 'Dark', 'Custom'];
+        
+        function toggleBackground() {{
+            bgMode = (bgMode + 1) % 3;
+            const btn = document.getElementById('bgToggleBtn');
+            const colorPicker = document.getElementById('customBgColor');
+            
+            if (bgMode === 2) {{
+                // Custom mode - show color picker
+                colorPicker.style.display = 'inline-block';
+                btn.textContent = 'Custom';
+                applyCustomBackground();
+            }} else {{
+                colorPicker.style.display = 'none';
+                btn.textContent = bgLabels[bgMode];
+                applyBackground(bgColors[bgMode]);
+            }}
+        }}
+        
+        function applyBackground(color) {{
+            document.body.style.background = color;
+            document.getElementById('cy').style.background = color;
+            
+            // Adjust text colors based on background luminance
+            const isDark = isColorDark(color);
+            
+            // Update info text, legend, and label colors
+            document.querySelectorAll('.info, .legend span, .controls label').forEach(el => {{
+                el.style.color = isDark ? '#e0e0e0' : '#333';
+            }});
+            
+            // Update node label text background for readability
+            cy.style()
+                .selector('node')
+                .style({{
+                    'text-background-color': isDark ? '#333' : '#fff',
+                    'text-background-opacity': 0.8
+                }})
+                .update();
+        }}
+        
+        function applyCustomBackground() {{
+            const color = document.getElementById('customBgColor').value;
+            applyBackground(color);
+        }}
+        
+        function isColorDark(color) {{
+            // Convert hex to RGB and calculate luminance
+            let r, g, b;
+            if (color.startsWith('#')) {{
+                const hex = color.slice(1);
+                r = parseInt(hex.substr(0, 2), 16);
+                g = parseInt(hex.substr(2, 2), 16);
+                b = parseInt(hex.substr(4, 2), 16);
+            }} else {{
+                return false;
+            }}
+            const luminance = (0.299 * r + 0.587 * g + 0.114 * b) / 255;
+            return luminance < 0.5;
         }}
 
         function updateFontSize(size) {{
@@ -6796,72 +6950,140 @@ class VisualizePath:
         }}
         
         // ===== EDGE FILTERING =====
+        // Supports same AND/OR logic as heatmap filter:
+        //   - OR logic: <5, >100  (comma-separated, any condition matches)
+        //   - AND logic: (>=5, <=10)  (parentheses, all conditions must match)
+        
+        let edgeFilterGroups = [];  // Parsed filter groups for edge filtering
         
         // Update ignored edges based on input
         function updateIgnoredEdges() {{
             const input = document.getElementById('ignoreEdgesInput');
-            const expressions = input.value.split(',').map(v => v.trim()).filter(v => v !== '');
+            const filterValue = input.value.trim();
             
             // Clear previous filters
             ignoredEdges.clear();
             ignoredEdgeExpressions = [];
+            edgeFilterGroups = [];
             
-            expressions.forEach(expr => {{
-                // Check if it's a comparison expression (>, <, >=, <=, ==, !=)
-                const compMatch = expr.match(/^([><]=?|==|!=)\\s*(-?\\d+\\.?\\d*)$/);
-                if (compMatch) {{
-                    // It's a comparison expression
-                    const operator = compMatch[1];
-                    const threshold = parseFloat(compMatch[2]);
-                    ignoredEdgeExpressions.push({{ operator, threshold }});
-                }} else {{
-                    // Try to parse as exact number
-                    const num = parseFloat(expr);
-                    if (!isNaN(num)) {{
-                        ignoredEdges.add(num);
-                    }}
-                }}
-            }});
+            if (!filterValue) {{
+                // No filter - show all edges
+                applyEdgeFilter();
+                return;
+            }}
             
-            console.log('Ignored edge exact values:', Array.from(ignoredEdges));
-            console.log('Ignored edge expressions:', ignoredEdgeExpressions);
+            // Parse using same logic as heatmap filter
+            edgeFilterGroups = parseEdgeFilterExpressions(filterValue);
+            
+            console.log('Edge filter groups:', edgeFilterGroups);
             
             // Apply filter to all edges
             applyEdgeFilter();
         }}
         
-        // Check if an edge weight should be ignored
-        function shouldIgnoreEdge(weight) {{
-            // Check exact values
-            if (ignoredEdges.has(weight)) {{
-                return true;
+        function parseEdgeSingleExpression(expr) {{
+            // Parse a single comparison expression like ">5" or "<=10"
+            const compMatch = expr.match(/^([><]=?|==|!=)\\s*(-?\\d+\\.?\\d*)$/);
+            if (compMatch) {{
+                return {{ operator: compMatch[1], threshold: parseFloat(compMatch[2]) }};
+            }}
+            // Try to parse as exact number
+            const num = parseFloat(expr);
+            if (!isNaN(num)) {{
+                return {{ operator: '==', threshold: num }};
+            }}
+            return null;
+        }}
+        
+        function parseEdgeFilterExpressions(inputString) {{
+            // Returns an array of filter groups (same logic as heatmap)
+            const result = [];
+            let remaining = inputString.trim();
+            
+            while (remaining.length > 0) {{
+                // Skip leading commas and whitespace
+                remaining = remaining.replace(/^[,\\s]+/, '');
+                if (remaining.length === 0) break;
+                
+                if (remaining.startsWith('(')) {{
+                    // AND group: find matching closing parenthesis
+                    const closeIdx = remaining.indexOf(')');
+                    if (closeIdx === -1) {{
+                        const inner = remaining.substring(1);
+                        const andExprs = inner.split(',').map(e => e.trim()).filter(e => e !== '');
+                        const parsed = andExprs.map(e => parseEdgeSingleExpression(e)).filter(e => e !== null);
+                        if (parsed.length > 0) {{
+                            result.push({{ type: 'AND', expressions: parsed }});
+                        }}
+                        break;
+                    }} else {{
+                        const inner = remaining.substring(1, closeIdx);
+                        const andExprs = inner.split(',').map(e => e.trim()).filter(e => e !== '');
+                        const parsed = andExprs.map(e => parseEdgeSingleExpression(e)).filter(e => e !== null);
+                        if (parsed.length > 0) {{
+                            result.push({{ type: 'AND', expressions: parsed }});
+                        }}
+                        remaining = remaining.substring(closeIdx + 1);
+                    }}
+                }} else {{
+                    // Single expression (OR)
+                    const nextComma = remaining.indexOf(',');
+                    const nextParen = remaining.indexOf('(');
+                    let endIdx = remaining.length;
+                    
+                    if (nextComma !== -1 && (nextParen === -1 || nextComma < nextParen)) {{
+                        endIdx = nextComma;
+                    }} else if (nextParen !== -1 && (nextComma === -1 || nextParen < nextComma)) {{
+                        endIdx = nextParen;
+                    }}
+                    
+                    const expr = remaining.substring(0, endIdx).trim();
+                    if (expr.length > 0) {{
+                        const parsed = parseEdgeSingleExpression(expr);
+                        if (parsed !== null) {{
+                            result.push({{ type: 'OR', expression: parsed }});
+                        }}
+                    }}
+                    remaining = remaining.substring(endIdx);
+                }}
             }}
             
-            // Check comparison expressions
-            for (const expr of ignoredEdgeExpressions) {{
-                let matches = false;
-                switch (expr.operator) {{
-                    case '>':
-                        matches = weight > expr.threshold;
-                        break;
-                    case '<':
-                        matches = weight < expr.threshold;
-                        break;
-                    case '>=':
-                        matches = weight >= expr.threshold;
-                        break;
-                    case '<=':
-                        matches = weight <= expr.threshold;
-                        break;
-                    case '==':
-                        matches = weight === expr.threshold;
-                        break;
-                    case '!=':
-                        matches = weight !== expr.threshold;
-                        break;
-                }}
-                if (matches) {{
-                    return true;
+            return result;
+        }}
+        
+        function evaluateEdgeCondition(value, expr) {{
+            switch (expr.operator) {{
+                case '>': return value > expr.threshold;
+                case '<': return value < expr.threshold;
+                case '>=': return value >= expr.threshold;
+                case '<=': return value <= expr.threshold;
+                case '==': return value === expr.threshold;
+                case '!=': return value !== expr.threshold;
+                default: return false;
+            }}
+        }}
+        
+        // Check if an edge weight should be ignored
+        function shouldIgnoreEdge(weight) {{
+            if (edgeFilterGroups.length === 0) return false;
+            
+            // OR logic between groups: return true if ANY group matches
+            for (const group of edgeFilterGroups) {{
+                if (group.type === 'AND') {{
+                    // AND logic within group: ALL expressions must match
+                    let allMatch = true;
+                    for (const expr of group.expressions) {{
+                        if (!evaluateEdgeCondition(weight, expr)) {{
+                            allMatch = false;
+                            break;
+                        }}
+                    }}
+                    if (allMatch) return true;
+                }} else {{
+                    // Single OR expression
+                    if (evaluateEdgeCondition(weight, group.expression)) {{
+                        return true;
+                    }}
                 }}
             }}
             
@@ -9042,10 +9264,21 @@ def VisConnMatInteractive(cmat, filename, title='', color_scale=[[0, 'rgb(255,25
                     <!-- Data Filter -->
                     <div style="margin-top: 8px;">
                         <label style="font-size: 10px; display: block; margin-bottom: 2px;">
-                            🔍 Data Filter (hide rows/cols):
+                            🔍 Data Filter:
                             <button onclick="resetDataFilter()" style="padding: 2px 6px; font-size: 9px; background: #6c757d; color: white; border: none; border-radius: 3px; cursor: pointer; margin-left: 4px;" title="Reset filter">🔄</button>
                         </label>
-                        <input type="text" id="dataFilterInput" placeholder="e.g., <5, <=10, >100" style="width: 100%; padding: 4px; font-size: 10px; border: 1px solid #dee2e6; border-radius: 3px; box-sizing: border-box;" oninput="applyDataFilter()">
+                        <input type="text" id="dataFilterInput" placeholder="OR: <5, >100 | AND: (>=5, <=10)" style="width: 100%; padding: 4px; font-size: 10px; border: 1px solid #dee2e6; border-radius: 3px; box-sizing: border-box;" oninput="applyDataFilter()">
+                        <div style="font-size: 8px; color: #888; margin-top: 1px;">Comma = OR, Parentheses = AND. E.g., <5, (>=10, <=20), >100</div>
+                        <div style="margin-top: 4px; display: flex; gap: 4px; flex-wrap: wrap;">
+                            <div class="button-group" style="flex: 1; min-width: 120px;">
+                                <button id="btn-filter-hide" class="active" onclick="setFilterMode('hide')" title="Hide filtered rows/columns">Hide</button>
+                                <button id="btn-filter-zero" onclick="setFilterMode('zero')" title="Show filtered values as 0">Zero</button>
+                            </div>
+                            <label style="font-size: 9px; display: flex; align-items: center; gap: 2px; cursor: pointer;" title="Show or hide filtered rows and columns">
+                                <input type="checkbox" id="showFilteredRowsCols" onchange="toggleFilteredVisibility()" checked>
+                                <span>Show rows/cols</span>
+                            </label>
+                        </div>
                         <div id="filterStatus" style="font-size: 9px; color: #666; margin-top: 2px; min-height: 14px;"></div>
                     </div>
                 </div>
@@ -9224,6 +9457,15 @@ def VisConnMatInteractive(cmat, filename, title='', color_scale=[[0, 'rgb(255,25
                     </div>
                     <div id="settingsStatus"></div>
                 </div>
+                
+                <!-- Background Color Toggle -->
+                <div class="control-section">
+                    <h3>🎨 Background</h3>
+                    <div style="display: flex; gap: 6px; align-items: center;">
+                        <button id="bgToggleBtn" onclick="toggleBackground()" style="flex: 1; padding: 6px; font-size: 11px;">White</button>
+                        <input type="color" id="customBgColor" value="#f5f5f5" style="width: 35px; height: 28px; border: 1px solid #ddd; border-radius: 3px; cursor: pointer; display: none;" onchange="applyCustomBackground()">
+                    </div>
+                </div>
             </div>
             
             <div class="info-box">
@@ -9350,6 +9592,9 @@ def VisConnMatInteractive(cmat, filename, title='', color_scale=[[0, 'rgb(255,25
         let dataFilterExpressions = [];
         let filteredRowIndices = [];  // Indices of rows to show after filtering
         let filteredColIndices = [];  // Indices of columns to show after filtering
+        let dataFilterMode = 'hide';  // 'hide' = hide rows/cols, 'zero' = show values as 0
+        let showFilteredRowsCols = true;  // Whether to show filtered rows/cols (when in 'zero' mode)
+        let zeroMaskMatrix = null;  // Boolean matrix for cells to show as 0
         
         // Function to generate hover text dynamically when needed
         // Hover text is pre-generated in Python with proper labels
@@ -9504,7 +9749,8 @@ def VisConnMatInteractive(cmat, filename, title='', color_scale=[[0, 'rgb(255,25
                 return;
             }}
             
-            let data = getDataForScale(currentScale);
+            // IMPORTANT: Create deep copies of data to avoid mutating the cached originals
+            let data = getDataForScale(currentScale).map(row => row.slice());
             let dataOriginal = dataLinear.map(row => row.slice()); // Keep original for cell values
             const scaleLabel = getScaleLabel(currentScale);
             
@@ -9609,30 +9855,105 @@ def VisConnMatInteractive(cmat, filename, title='', color_scale=[[0, 'rgb(255,25
                 if (currentHoverText !== null) {{
                     currentHoverText = reorderHoverText(currentHoverText, effectiveRowOrder, effectiveColOrder);
                 }}
+                // Reorder zero mask if active (create a copy to avoid mutating the original)
+                if (zeroMaskMatrix !== null) {{
+                    const maskCopy = zeroMaskMatrix.map(row => row.slice());
+                    zeroMaskMatrix = reorderData(maskCopy, effectiveRowOrder, effectiveColOrder);
+                }}
             }}
             
-            // Apply data filter if active (hide rows/columns based on their max values)
-            if (dataFilterActive && filteredRowIndices.length > 0 && filteredColIndices.length > 0) {{
-                // Filter data matrix
-                data = filteredRowIndices.map(rowIdx => 
-                    filteredColIndices.map(colIdx => data[rowIdx][colIdx])
-                );
-                dataOriginal = filteredRowIndices.map(rowIdx => 
-                    filteredColIndices.map(colIdx => dataOriginal[rowIdx][colIdx])
-                );
-                
-                // Filter labels
-                displayXLabels = filteredColIndices.map(idx => displayXLabels[idx]);
-                displayYLabels = filteredRowIndices.map(idx => displayYLabels[idx]);
-                
-                // Filter hover text if available
-                if (currentHoverText !== null) {{
-                    currentHoverText = filteredRowIndices.map(rowIdx => 
-                        filteredColIndices.map(colIdx => currentHoverText[rowIdx][colIdx])
+            // Apply data filter based on filter mode
+            // Create a local copy of zeroMaskMatrix to avoid mutating the original
+            let localZeroMask = zeroMaskMatrix ? zeroMaskMatrix.map(row => row.slice()) : null;
+            
+            if (dataFilterActive) {{
+                if (dataFilterMode === 'hide' && filteredRowIndices.length > 0 && filteredColIndices.length > 0) {{
+                    // HIDE MODE: Filter out rows/columns entirely
+                    data = filteredRowIndices.map(rowIdx => 
+                        filteredColIndices.map(colIdx => data[rowIdx][colIdx])
                     );
+                    dataOriginal = filteredRowIndices.map(rowIdx => 
+                        filteredColIndices.map(colIdx => dataOriginal[rowIdx][colIdx])
+                    );
+                    
+                    // Filter labels
+                    displayXLabels = filteredColIndices.map(idx => displayXLabels[idx]);
+                    displayYLabels = filteredRowIndices.map(idx => displayYLabels[idx]);
+                    
+                    // Filter hover text if available
+                    if (currentHoverText !== null) {{
+                        currentHoverText = filteredRowIndices.map(rowIdx => 
+                            filteredColIndices.map(colIdx => currentHoverText[rowIdx][colIdx])
+                        );
+                    }}
+                    
+                    console.log(`Data filter (hide): showing ${{filteredRowIndices.length}} rows × ${{filteredColIndices.length}} cols`);
+                }} else if (dataFilterMode === 'zero' && localZeroMask !== null) {{
+                    // ZERO MODE: Show filtered values as 0
+                    const nRows = data.length;
+                    const nCols = data[0].length;
+                    
+                    // Apply zero mask to data (using local copy to preserve original)
+                    for (let i = 0; i < nRows; i++) {{
+                        for (let j = 0; j < nCols; j++) {{
+                            if (localZeroMask[i][j]) {{
+                                data[i][j] = 0;
+                                dataOriginal[i][j] = 0;
+                            }}
+                        }}
+                    }}
+                    
+                    // Optionally hide rows/cols where ALL values are now zero
+                    if (!showFilteredRowsCols) {{
+                        // Find rows where ALL values are masked (fully filtered rows)
+                        const rowsToShow = [];
+                        const colsToShow = [];
+                        
+                        // Check which rows have at least one unmasked value
+                        for (let i = 0; i < nRows; i++) {{
+                            let hasUnmasked = false;
+                            for (let j = 0; j < nCols; j++) {{
+                                if (!localZeroMask[i][j]) {{
+                                    hasUnmasked = true;
+                                    break;
+                                }}
+                            }}
+                            if (hasUnmasked) rowsToShow.push(i);
+                        }}
+                        
+                        // Check which cols have at least one unmasked value
+                        for (let j = 0; j < nCols; j++) {{
+                            let hasUnmasked = false;
+                            for (let i = 0; i < nRows; i++) {{
+                                if (!localZeroMask[i][j]) {{
+                                    hasUnmasked = true;
+                                    break;
+                                }}
+                            }}
+                            if (hasUnmasked) colsToShow.push(j);
+                        }}
+                        
+                        // Apply row/col filtering if some are fully masked
+                        if (rowsToShow.length < nRows || colsToShow.length < nCols) {{
+                            data = rowsToShow.map(rowIdx => 
+                                colsToShow.map(colIdx => data[rowIdx][colIdx])
+                            );
+                            dataOriginal = rowsToShow.map(rowIdx => 
+                                colsToShow.map(colIdx => dataOriginal[rowIdx][colIdx])
+                            );
+                            displayXLabels = colsToShow.map(idx => displayXLabels[idx]);
+                            displayYLabels = rowsToShow.map(idx => displayYLabels[idx]);
+                            if (currentHoverText !== null) {{
+                                currentHoverText = rowsToShow.map(rowIdx => 
+                                    colsToShow.map(colIdx => currentHoverText[rowIdx][colIdx])
+                                );
+                            }}
+                            console.log(`Data filter (zero, hidden): ${{rowsToShow.length}}/${{nRows}} rows × ${{colsToShow.length}}/${{nCols}} cols`);
+                        }}
+                    }}
+                    
+                    console.log(`Data filter (zero): masked cells showing as 0`);
                 }}
-                
-                console.log(`Data filter: showing ${{filteredRowIndices.length}} rows × ${{filteredColIndices.length}} cols`);
             }}
             
             const range = getDataRange(data);
@@ -10306,60 +10627,131 @@ def VisConnMatInteractive(cmat, filename, title='', color_scale=[[0, 'rgb(255,25
         // ===== DATA FILTER FUNCTIONS =====
         // Filter entire rows/columns based on their maximum values
         
-        function parseFilterExpressions(inputString) {{
-            const expressions = inputString.split(',').map(v => v.trim()).filter(v => v !== '');
-            const parsedExpressions = [];
-            
-            expressions.forEach(expr => {{
-                // Check if it's a comparison expression (>, <, >=, <=, ==, !=)
-                const compMatch = expr.match(/^([><]=?|==|!=)\\s*(-?\\d+\\.?\\d*)$/);
-                if (compMatch) {{
-                    const operator = compMatch[1];
-                    const threshold = parseFloat(compMatch[2]);
-                    parsedExpressions.push({{ operator, threshold }});
-                }} else {{
-                    // Try to parse as exact number (will hide if max == this value)
-                    const num = parseFloat(expr);
-                    if (!isNaN(num)) {{
-                        parsedExpressions.push({{ operator: '==', threshold: num }});
-                    }}
-                }}
-            }});
-            
-            return parsedExpressions;
+        // ===== FILTER EXPRESSION PARSING =====
+        // Supports:
+        //   - OR logic: <5, >100  (comma-separated, any condition matches)
+        //   - AND logic: (>=5, <=10)  (parentheses, all conditions must match)
+        //   - Mixed: <5, (>=10, <=20), >100  (filter if <5 OR (>=10 AND <=20) OR >100)
+        
+        function parseSingleExpression(expr) {{
+            // Parse a single comparison expression like ">5" or "<=10"
+            const compMatch = expr.match(/^([><]=?|==|!=)\\s*(-?\\d+\\.?\\d*)$/);
+            if (compMatch) {{
+                return {{ operator: compMatch[1], threshold: parseFloat(compMatch[2]) }};
+            }}
+            // Try to parse as exact number
+            const num = parseFloat(expr);
+            if (!isNaN(num)) {{
+                return {{ operator: '==', threshold: num }};
+            }}
+            return null;
         }}
         
-        function shouldHideRowOrColumn(maxValue, expressions) {{
-            if (expressions.length === 0) return false;
+        function parseFilterExpressions(inputString) {{
+            // Returns an array of filter groups
+            // Each group is either:
+            //   - A single expression (OR with other groups)
+            //   - An array of expressions (AND within group, OR with other groups)
             
-            for (const expr of expressions) {{
-                let matches = false;
-                switch (expr.operator) {{
-                    case '>':
-                        matches = maxValue > expr.threshold;
+            const result = [];
+            let remaining = inputString.trim();
+            
+            while (remaining.length > 0) {{
+                // Skip leading commas and whitespace
+                remaining = remaining.replace(/^[,\\s]+/, '');
+                if (remaining.length === 0) break;
+                
+                if (remaining.startsWith('(')) {{
+                    // AND group: find matching closing parenthesis
+                    const closeIdx = remaining.indexOf(')');
+                    if (closeIdx === -1) {{
+                        // No closing paren, treat rest as single group
+                        const inner = remaining.substring(1);
+                        const andExprs = inner.split(',').map(e => e.trim()).filter(e => e !== '');
+                        const parsed = andExprs.map(e => parseSingleExpression(e)).filter(e => e !== null);
+                        if (parsed.length > 0) {{
+                            result.push({{ type: 'AND', expressions: parsed }});
+                        }}
                         break;
-                    case '<':
-                        matches = maxValue < expr.threshold;
-                        break;
-                    case '>=':
-                        matches = maxValue >= expr.threshold;
-                        break;
-                    case '<=':
-                        matches = maxValue <= expr.threshold;
-                        break;
-                    case '==':
-                        matches = maxValue === expr.threshold;
-                        break;
-                    case '!=':
-                        matches = maxValue !== expr.threshold;
-                        break;
-                }}
-                if (matches) {{
-                    return true;  // Hide if any expression matches
+                    }} else {{
+                        const inner = remaining.substring(1, closeIdx);
+                        const andExprs = inner.split(',').map(e => e.trim()).filter(e => e !== '');
+                        const parsed = andExprs.map(e => parseSingleExpression(e)).filter(e => e !== null);
+                        if (parsed.length > 0) {{
+                            result.push({{ type: 'AND', expressions: parsed }});
+                        }}
+                        remaining = remaining.substring(closeIdx + 1);
+                    }}
+                }} else {{
+                    // Single expression (OR): read until comma or opening paren
+                    const nextComma = remaining.indexOf(',');
+                    const nextParen = remaining.indexOf('(');
+                    let endIdx = remaining.length;
+                    
+                    if (nextComma !== -1 && (nextParen === -1 || nextComma < nextParen)) {{
+                        endIdx = nextComma;
+                    }} else if (nextParen !== -1 && (nextComma === -1 || nextParen < nextComma)) {{
+                        endIdx = nextParen;
+                    }}
+                    
+                    const expr = remaining.substring(0, endIdx).trim();
+                    if (expr.length > 0) {{
+                        const parsed = parseSingleExpression(expr);
+                        if (parsed !== null) {{
+                            result.push({{ type: 'OR', expression: parsed }});
+                        }}
+                    }}
+                    remaining = remaining.substring(endIdx);
                 }}
             }}
             
-            return false;
+            return result;
+        }}
+        
+        function evaluateSingleCondition(value, expr) {{
+            // Evaluate a single condition against a value
+            switch (expr.operator) {{
+                case '>': return value > expr.threshold;
+                case '<': return value < expr.threshold;
+                case '>=': return value >= expr.threshold;
+                case '<=': return value <= expr.threshold;
+                case '==': return value === expr.threshold;
+                case '!=': return value !== expr.threshold;
+                default: return false;
+            }}
+        }}
+        
+        function shouldFilterValue(value, filterGroups) {{
+            // Check if a value should be filtered based on parsed filter groups
+            // Returns true if value matches the filter (should be filtered/hidden/zeroed)
+            if (filterGroups.length === 0) return false;
+            
+            // OR logic between groups: return true if ANY group matches
+            for (const group of filterGroups) {{
+                if (group.type === 'AND') {{
+                    // AND logic within group: ALL expressions must match
+                    let allMatch = true;
+                    for (const expr of group.expressions) {{
+                        if (!evaluateSingleCondition(value, expr)) {{
+                            allMatch = false;
+                            break;
+                        }}
+                    }}
+                    if (allMatch) return true;  // This AND group matched
+                }} else {{
+                    // Single OR expression
+                    if (evaluateSingleCondition(value, group.expression)) {{
+                        return true;
+                    }}
+                }}
+            }}
+            
+            return false;  // No group matched
+        }}
+        
+        function shouldHideRowOrColumn(maxValue, filterGroups) {{
+            // Legacy wrapper for row/column filtering (hide mode)
+            return shouldFilterValue(maxValue, filterGroups);
         }}
         
         function applyDataFilter() {{
@@ -10376,6 +10768,7 @@ def VisConnMatInteractive(cmat, filename, title='', color_scale=[[0, 'rgb(255,25
                 dataFilterExpressions = [];
                 filteredRowIndices = [];
                 filteredColIndices = [];
+                zeroMaskMatrix = null;
                 return;
             }} else {{
                 input.disabled = false;
@@ -10387,6 +10780,7 @@ def VisConnMatInteractive(cmat, filename, title='', color_scale=[[0, 'rgb(255,25
                 dataFilterExpressions = [];
                 filteredRowIndices = [];
                 filteredColIndices = [];
+                zeroMaskMatrix = null;
                 statusDiv.textContent = '';
                 createHeatmap();
                 return;
@@ -10399,16 +10793,6 @@ def VisConnMatInteractive(cmat, filename, title='', color_scale=[[0, 'rgb(255,25
                 statusDiv.textContent = '⚠️ Invalid filter format';
                 statusDiv.style.color = '#d32f2f';
                 return;
-            }}
-            
-            // Get current data based on scale
-            let currentData = dataLinear;
-            if (currentScale === 'log2' && (useLazyTransforms ? cachedDataLog2 : dataLog2)) {{
-                currentData = useLazyTransforms ? cachedDataLog2 : dataLog2;
-            }} else if (currentScale === 'log10' && (useLazyTransforms ? cachedDataLog10 : dataLog10)) {{
-                currentData = useLazyTransforms ? cachedDataLog10 : dataLog10;
-            }} else if (currentScale === 'sqrt' && (useLazyTransforms ? cachedDataSqrt : dataSqrt)) {{
-                currentData = useLazyTransforms ? cachedDataSqrt : dataSqrt;
             }}
             
             // Use original unscaled data for filtering
@@ -10429,7 +10813,8 @@ def VisConnMatInteractive(cmat, filename, title='', color_scale=[[0, 'rgb(255,25
                 }}
             }}
             
-            // Determine which rows and columns to keep
+            // Determine which rows and columns to keep (for 'hide' mode)
+            // Hide mode: filter based on row/column MAX values
             filteredRowIndices = [];
             filteredColIndices = [];
             
@@ -10445,24 +10830,72 @@ def VisConnMatInteractive(cmat, filename, title='', color_scale=[[0, 'rgb(255,25
                 }}
             }}
             
+            // Create zero mask matrix (for 'zero' mode)
+            // Zero mode: filter based on INDIVIDUAL CELL values
+            zeroMaskMatrix = new Array(nRows);
+            let maskedCellCount = 0;
+            for (let i = 0; i < nRows; i++) {{
+                zeroMaskMatrix[i] = new Array(nCols);
+                for (let j = 0; j < nCols; j++) {{
+                    // Apply filter to individual cell value
+                    const cellValue = filterData[i][j];
+                    zeroMaskMatrix[i][j] = shouldFilterValue(cellValue, dataFilterExpressions);
+                    if (zeroMaskMatrix[i][j]) maskedCellCount++;
+                }}
+            }}
+            
             dataFilterActive = true;
             
             const hiddenRows = nRows - filteredRowIndices.length;
             const hiddenCols = nCols - filteredColIndices.length;
             
-            if (filteredRowIndices.length === 0 || filteredColIndices.length === 0) {{
-                statusDiv.textContent = '⚠️ Filter hides all data!';
-                statusDiv.style.color = '#d32f2f';
-                dataFilterActive = false;
-                return;
+            // Update status based on mode
+            if (dataFilterMode === 'hide') {{
+                if (filteredRowIndices.length === 0 || filteredColIndices.length === 0) {{
+                    statusDiv.textContent = '⚠️ Filter hides all data!';
+                    statusDiv.style.color = '#d32f2f';
+                    dataFilterActive = false;
+                    return;
+                }}
+                statusDiv.textContent = `✓ Showing ${{filteredRowIndices.length}}/${{nRows}} rows, ${{filteredColIndices.length}}/${{nCols}} cols`;
+                statusDiv.style.color = '#2e7d32';
+                console.log(`Data filter (hide): hiding ${{hiddenRows}} rows and ${{hiddenCols}} cols`);
+            }} else {{
+                // 'zero' mode
+                const totalCells = nRows * nCols;
+                const pctMasked = ((maskedCellCount / totalCells) * 100).toFixed(1);
+                statusDiv.textContent = `✓ ${{maskedCellCount}}/${{totalCells}} cells (${{pctMasked}}%) shown as 0`;
+                statusDiv.style.color = '#2e7d32';
+                console.log(`Data filter (zero): masking ${{maskedCellCount}}/${{totalCells}} cells as 0`);
             }}
             
-            statusDiv.textContent = `✓ Showing ${{filteredRowIndices.length}}/${{nRows}} rows, ${{filteredColIndices.length}}/${{nCols}} cols`;
-            statusDiv.style.color = '#2e7d32';
-            
-            console.log(`Data filter applied: hiding ${{hiddenRows}} rows and ${{hiddenCols}} cols`);
-            
             createHeatmap();
+        }}
+        
+        function setFilterMode(mode) {{
+            dataFilterMode = mode;
+            
+            // Update button states
+            document.getElementById('btn-filter-hide').classList.toggle('active', mode === 'hide');
+            document.getElementById('btn-filter-zero').classList.toggle('active', mode === 'zero');
+            
+            // Update checkbox visibility (only relevant for 'zero' mode)
+            const checkbox = document.getElementById('showFilteredRowsCols');
+            checkbox.disabled = mode !== 'zero';
+            
+            // Re-apply filter with new mode
+            if (dataFilterActive) {{
+                applyDataFilter();
+            }}
+        }}
+        
+        function toggleFilteredVisibility() {{
+            showFilteredRowsCols = document.getElementById('showFilteredRowsCols').checked;
+            
+            // Re-apply filter with new visibility setting
+            if (dataFilterActive && dataFilterMode === 'zero') {{
+                createHeatmap();
+            }}
         }}
         
         function resetDataFilter() {{
@@ -10472,6 +10905,7 @@ def VisConnMatInteractive(cmat, filename, title='', color_scale=[[0, 'rgb(255,25
             dataFilterExpressions = [];
             filteredRowIndices = [];
             filteredColIndices = [];
+            zeroMaskMatrix = null;
             createHeatmap();
         }}
         
@@ -11492,6 +11926,77 @@ def VisConnMatInteractive(cmat, filename, title='', color_scale=[[0, 'rgb(255,25
             
             createHeatmap();
             showStatus('✅ Reset to defaults', 'success');
+        }}
+        
+        // Background color toggle for heatmap
+        let bgMode = 0; // 0: white, 1: dark, 2: custom
+        const bgColors = ['#f5f5f5', '#000000', 'custom'];
+        const bgLabels = ['White', 'Dark', 'Custom'];
+        
+        function toggleBackground() {{
+            bgMode = (bgMode + 1) % 3;
+            const btn = document.getElementById('bgToggleBtn');
+            const colorPicker = document.getElementById('customBgColor');
+            
+            if (bgMode === 2) {{
+                // Custom mode - show color picker
+                colorPicker.style.display = 'inline-block';
+                btn.textContent = 'Custom';
+                applyCustomBackground();
+            }} else {{
+                colorPicker.style.display = 'none';
+                btn.textContent = bgLabels[bgMode];
+                applyBackground(bgColors[bgMode]);
+            }}
+        }}
+        
+        function applyBackground(color) {{
+            document.body.style.background = color;
+            document.querySelector('.main-container').style.background = color;
+            document.getElementById('heatmap-container').style.background = color;
+            
+            // Update Plotly layout background
+            const gd = document.getElementById('heatmap');
+            if (gd) {{
+                Plotly.relayout(gd, {{
+                    'paper_bgcolor': color,
+                    'plot_bgcolor': color
+                }});
+            }}
+            
+            // Adjust text colors based on background luminance
+            const isDark = isColorDark(color);
+            
+            // Update control panel text colors
+            document.querySelectorAll('.control-section h3, .control-section label, .slider-value, .info-box').forEach(el => {{
+                el.style.color = isDark ? '#e0e0e0' : (el.classList.contains('slider-value') ? '#4CAF50' : '#495057');
+            }});
+            
+            // Update controls background for dark mode
+            document.querySelectorAll('.controls, .control-section').forEach(el => {{
+                el.style.background = isDark ? '#2d2d44' : (el.classList.contains('controls') ? 'white' : '#f8f9fa');
+                el.style.borderColor = isDark ? '#444' : '#e9ecef';
+            }});
+        }}
+        
+        function applyCustomBackground() {{
+            const color = document.getElementById('customBgColor').value;
+            applyBackground(color);
+        }}
+        
+        function isColorDark(color) {{
+            // Convert hex to RGB and calculate luminance
+            let r, g, b;
+            if (color.startsWith('#')) {{
+                const hex = color.slice(1);
+                r = parseInt(hex.substr(0, 2), 16);
+                g = parseInt(hex.substr(2, 2), 16);
+                b = parseInt(hex.substr(4, 2), 16);
+            }} else {{
+                return false;
+            }}
+            const luminance = (0.299 * r + 0.587 * g + 0.114 * b) / 255;
+            return luminance < 0.5;
         }}
         
         function showStatus(message, type) {{

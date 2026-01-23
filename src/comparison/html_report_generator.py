@@ -1479,7 +1479,8 @@ def _extract_edges_from_paths(path_data: pd.DataFrame, dataset_names: List[str],
         max_paths: Maximum number of top paths to include
         
     Returns:
-        Set of edge keys (e.g., "A -> B")
+        Set of edge keys (e.g., "A -> B") including BOTH canonical names AND display names
+        to ensure matching works regardless of which format the aligned data uses.
     """
     if path_data is None or path_data.empty:
         return set()
@@ -1488,6 +1489,13 @@ def _extract_edges_from_paths(path_data: pd.DataFrame, dataset_names: List[str],
     available_cols = [d for d in dataset_names if d in path_data.columns]
     if not available_cols:
         return set()
+    
+    # Helper to extract canonical name from display name
+    # Handles format: "GNG588(CB0038)" -> "GNG588"
+    def get_canonical_name(display_name: str) -> str:
+        if '(' in display_name:
+            return display_name.split('(')[0].strip()
+        return display_name
     
     path_data = path_data.copy()
     path_data['_total'] = path_data[available_cols].sum(axis=1)
@@ -1508,9 +1516,21 @@ def _extract_edges_from_paths(path_data: pd.DataFrame, dataset_names: List[str],
             continue
         
         # Create edge keys for consecutive node pairs
+        # Add BOTH display format AND canonical format to ensure matching
+        # regardless of which format aligned data uses
         for i in range(len(nodes) - 1):
-            edge_key = f"{nodes[i]} -> {nodes[i+1]}"
-            edges.add(edge_key)
+            src_display = nodes[i]
+            dst_display = nodes[i+1]
+            src_canonical = get_canonical_name(src_display)
+            dst_canonical = get_canonical_name(dst_display)
+            
+            # Add display name format (e.g., "GNG588(CB0038) -> GNG458(CB0890)")
+            display_edge_key = f"{src_display} -> {dst_display}"
+            edges.add(display_edge_key)
+            
+            # Add canonical name format (e.g., "GNG588 -> GNG458")
+            canonical_edge_key = f"{src_canonical} -> {dst_canonical}"
+            edges.add(canonical_edge_key)
     
     return edges
 
@@ -1680,10 +1700,14 @@ def _generate_conservation_network(analyzer, dataset_names: List[str], threshold
     if not edge_data:
         return '<div class="card"><p>No connections at this threshold.</p></div>'
     
-    # Detect nodes with display names (format: "Name (F:X/H:Y)") to enable legend
+    # Detect nodes with display names (format: "Name(alt1/alt2)") to enable legend
     # Note: aligned data from metrics.py already has display names applied
     import re
-    display_name_pattern = re.compile(r'^.+ \([A-Z]:')  # Matches "Name (F:X" pattern
+    # New format: "MeVPLo2(MTe07)" - canonical name followed by (alternatives) without space
+    display_name_pattern = re.compile(r'^[^\(]+\([^\)]+\)$')  # Matches "Name(X)" or "Name(X/Y)" pattern
+    
+    # Store dataset mappings for hover labels: node -> {dataset_code: name_in_that_dataset}
+    node_dataset_mappings = {}
     
     # Collect all unique node names
     all_nodes_raw = set()
@@ -1695,7 +1719,7 @@ def _generate_conservation_network(analyzer, dataset_names: List[str], threshold
     for node in all_nodes_raw:
         if display_name_pattern.match(node):
             # Node already has display name format - mark it for legend
-            canonical = node.split(' (')[0]  # Extract canonical name
+            canonical = node.split('(')[0]  # Extract canonical name (no space before paren)
             display_name_map[canonical] = node  # Store mapping for legend trigger
     
     # Apply additional display name transformation if type_mapper available
@@ -1704,10 +1728,15 @@ def _generate_conservation_network(analyzer, dataset_names: List[str], threshold
         for node in all_nodes_raw:
             # Skip nodes that already have display names
             if display_name_pattern.match(node):
+                # Already has display name, but get dataset mappings for hover
+                display_name, dataset_info = type_mapper.get_display_name_with_dataset_info(node.split('(')[0], dataset_names)
+                node_dataset_mappings[node] = dataset_info
                 continue
-            display_name = type_mapper.get_display_name(node, dataset_names)
+            display_name, dataset_info = type_mapper.get_display_name_with_dataset_info(node, dataset_names)
             if display_name != node:
                 display_name_map[node] = display_name
+            if dataset_info:
+                node_dataset_mappings[display_name] = dataset_info
         
         # Transform edge_data keys to use display names (only for non-display nodes)
         if display_name_map:
@@ -1744,13 +1773,9 @@ def _generate_conservation_network(analyzer, dataset_names: List[str], threshold
             has_incoming = new_has_incoming
     
     # Helper to extract canonical name from display name
-    # Handles formats like:
-    # - "MeVPLo2 (F:MTe07)" -> "MeVPLo2"
-    # - "MeVPaMe1(MTe46)" -> "MeVPaMe1" (legacy format)
+    # Handles format: "MeVPaMe1(MTe46)" -> "MeVPaMe1"
     def get_canonical_name(display_name: str) -> str:
-        if ' (' in display_name:
-            return display_name.split(' (')[0].strip()
-        elif '(' in display_name:
+        if '(' in display_name:
             return display_name.split('(')[0].strip()
         return display_name
     
@@ -1847,6 +1872,17 @@ def _generate_conservation_network(analyzer, dataset_names: List[str], threshold
     conserved_node_ids = set()  # Track node IDs that are part of conserved edges
     
     for (source, target), weights in edge_data.items():
+        # Helper to build node hover title with dataset mapping info
+        def build_node_title(node_label: str, role: str) -> str:
+            lines = [f"{node_label}", f"Role: {role}"]
+            if node_label in node_dataset_mappings:
+                ds_info = node_dataset_mappings[node_label]
+                if ds_info:
+                    lines.append("Names by dataset:")
+                    for code, name in sorted(ds_info.items()):
+                        lines.append(f"  {code}: {name}")
+            return '\n'.join(lines)
+        
         # Add nodes with role-based coloring
         if source not in node_ids:
             node_ids[source] = node_counter
@@ -1861,7 +1897,7 @@ def _generate_conservation_network(analyzer, dataset_names: List[str], threshold
             nodes.append({
                 'id': node_counter, 
                 'label': source, 
-                'title': f"{source} ({display_role})",
+                'title': build_node_title(source, display_role),
                 'color': colors
             })
             node_counter += 1
@@ -1878,7 +1914,7 @@ def _generate_conservation_network(analyzer, dataset_names: List[str], threshold
             nodes.append({
                 'id': node_counter, 
                 'label': target, 
-                'title': f"{target} ({display_role})",
+                'title': build_node_title(target, display_role),
                 'color': colors
             })
             node_counter += 1
@@ -1961,16 +1997,47 @@ def _generate_conservation_network(analyzer, dataset_names: List[str], threshold
                         return True
         return False
     
+    # Track which canonical names have been added as isolated nodes to avoid duplicates
+    # This handles the case where CB0038 (FAFB/BANC) and GNG588 (MCNS) are the same type
+    added_canonical_sources = set()
+    added_canonical_targets = set()
+    
     for label in source_neurons:
         # Skip patterns - they're not actual neuron names
         if '*' in label or '.*' in label:
             continue
         if not is_represented_in_nodes(label, node_ids):
-            node_ids[label] = node_counter
+            # Get the merged display name if type_mapper is available
+            # This ensures CB0038 and GNG588 become one node: GNG588(CB0038)
+            display_label = label
+            dataset_info = {}
+            if type_mapper:
+                display_label, dataset_info = type_mapper.get_display_name_with_dataset_info(label, dataset_names)
+            
+            # Extract canonical name to avoid adding duplicates
+            canonical = display_label.split('(')[0] if '(' in display_label else display_label
+            if canonical in added_canonical_sources:
+                continue  # Already added this type with merged display name
+            added_canonical_sources.add(canonical)
+            
+            # Also check if display_label is already in node_ids (may have been added by another name)
+            if display_label in node_ids:
+                continue
+            
+            # Build hover title with dataset info
+            title_lines = [f"{display_label}", "Role: source (isolated)"]
+            if dataset_info:
+                title_lines.append("Names by dataset:")
+                for code, name in sorted(dataset_info.items()):
+                    title_lines.append(f"  {code}: {name}")
+                node_dataset_mappings[display_label] = dataset_info
+            
+            node_ids[display_label] = node_counter
+            node_roles[display_label] = 'source'
             nodes.append({
                 'id': node_counter,
-                'label': label,
-                'title': f"{label} (source - isolated)",
+                'label': display_label,
+                'title': '\n'.join(title_lines),
                 'color': role_colors['source']
             })
             node_counter += 1
@@ -1980,11 +2047,36 @@ def _generate_conservation_network(analyzer, dataset_names: List[str], threshold
         if '*' in label or '.*' in label:
             continue
         if not is_represented_in_nodes(label, node_ids):
-            node_ids[label] = node_counter
+            # Get the merged display name if type_mapper is available
+            display_label = label
+            dataset_info = {}
+            if type_mapper:
+                display_label, dataset_info = type_mapper.get_display_name_with_dataset_info(label, dataset_names)
+            
+            # Extract canonical name to avoid adding duplicates
+            canonical = display_label.split('(')[0] if '(' in display_label else display_label
+            if canonical in added_canonical_targets:
+                continue  # Already added this type with merged display name
+            added_canonical_targets.add(canonical)
+            
+            # Also check if display_label is already in node_ids
+            if display_label in node_ids:
+                continue
+            
+            # Build hover title with dataset info
+            title_lines = [f"{display_label}", "Role: target (isolated)"]
+            if dataset_info:
+                title_lines.append("Names by dataset:")
+                for code, name in sorted(dataset_info.items()):
+                    title_lines.append(f"  {code}: {name}")
+                node_dataset_mappings[display_label] = dataset_info
+            
+            node_ids[display_label] = node_counter
+            node_roles[display_label] = 'target'
             nodes.append({
                 'id': node_counter,
-                'label': label,
-                'title': f"{label} (target - isolated)",
+                'label': display_label,
+                'title': '\n'.join(title_lines),
                 'color': role_colors['target']
             })
             node_counter += 1

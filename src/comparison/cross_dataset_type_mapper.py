@@ -622,8 +622,8 @@ class CrossDatasetTypeMapper:
         """
         Get a display name for a type showing mappings across datasets.
         
-        Format: {mcns_name} (F:{fafb_name}/H:{hemi_name}) if names differ.
-        Uses one-character dataset codes: M=male-cns, F=FAFB, H=hemibrain, etc.
+        Format: {canonical}({alt1}/{alt2}) if names differ, skipping identical names.
+        Example: "MeVPLo2(MTe07)" if FAFB uses MTe07 but BANC uses MeVPLo2.
         
         Args:
             type_name: Type name to display.
@@ -631,7 +631,7 @@ class CrossDatasetTypeMapper:
             source_dataset: Source dataset for the type.
             
         Returns:
-            Display name with mapping info and dataset codes.
+            Display name with alternative names in parentheses.
         """
         mappings = self.resolve_type_across_datasets(type_name, datasets, source_dataset)
         
@@ -642,22 +642,47 @@ class CrossDatasetTypeMapper:
             # Use the original type name as canonical
             mcns_name = type_name
         
-        # Collect different names from other datasets with their short codes
-        # Format: {short_code}:{mapped_name} for names that differ from canonical
-        other_parts = []
+        # Collect unique alternative names (different from canonical)
+        alt_names = set()
         for ds, mapped_name in mappings.items():
             if mapped_name and mapped_name != mcns_name:
-                code = self.get_dataset_short_code(ds)
-                other_parts.append((code, mapped_name))
+                alt_names.add(mapped_name)
         
-        if other_parts:
-            # Sort by dataset code for consistent ordering
-            other_parts.sort(key=lambda x: x[0])
-            # Format: mcns_name (F:fafb_name/H:hemi_name)
-            others_str = '/'.join([f"{code}:{name}" for code, name in other_parts])
-            return f"{mcns_name} ({others_str})"
+        if alt_names:
+            # Sort for consistent ordering, join with /
+            alt_str = '/'.join(sorted(alt_names))
+            return f"{mcns_name}({alt_str})"
         
         return mcns_name
+    
+    def get_display_name_with_dataset_info(
+        self,
+        type_name: str,
+        datasets: List[str],
+        source_dataset: Optional[str] = None,
+    ) -> Tuple[str, Dict[str, str]]:
+        """
+        Get display name and dataset->name mapping for hover labels.
+        
+        Args:
+            type_name: Type name to display.
+            datasets: Datasets being compared.
+            source_dataset: Source dataset for the type.
+            
+        Returns:
+            Tuple of (display_name, {dataset_code: name_in_that_dataset}).
+        """
+        mappings = self.resolve_type_across_datasets(type_name, datasets, source_dataset)
+        display_name = self.get_display_name(type_name, datasets, source_dataset)
+        
+        # Build dataset code -> name mapping for hover info
+        dataset_names = {}
+        for ds, mapped_name in mappings.items():
+            if mapped_name:
+                code = self.get_dataset_short_code(ds)
+                dataset_names[code] = mapped_name
+        
+        return display_name, dataset_names
     
     def is_n_to_1_type(self, type_name: str, dataset: str) -> bool:
         """

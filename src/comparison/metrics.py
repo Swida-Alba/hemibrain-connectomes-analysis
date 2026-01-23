@@ -546,7 +546,7 @@ class ComparisonMetrics:
         # The canonical names are sufficient for computation; display names are cosmetic
         if type_mapper is not None and edge_display_names and len(aligned) <= 10000:
             # Pre-compute display name mappings for all unique types (vectorized)
-            # Use type_mapper.get_display_name() for consistent format: "MeVPLo2 (F:MTe07)"
+            # Use type_mapper.get_display_name() for consistent format: "MeVPLo2(MTe07)"
             type_display_map = {}
             for canonical in edge_display_names.keys():
                 type_display_map[canonical] = type_mapper.get_display_name(canonical, datasets)
@@ -566,6 +566,11 @@ class ComparisonMetrics:
             edge_list = aligned.index.tolist()
             display_index = [build_display_name(e) for e in edge_list]
             aligned.index = pd.Index(display_index)
+            
+            # Aggregate duplicate indices (sum weights) that may result from display name merging
+            # This handles cases where different canonical names map to the same display name
+            if aligned.index.duplicated().any():
+                aligned = aligned.groupby(aligned.index).sum()
         
         return aligned
     
@@ -1654,8 +1659,9 @@ class ComparisonMetrics:
             return np.nan  # Both empty = undefined
         
         # Build weight vectors (0 for missing edges)
-        vec_a = np.array([weights_a.get(e, 0) for e in all_edges], dtype=float)
-        vec_b = np.array([weights_b.get(e, 0) for e in all_edges], dtype=float)
+        # Use _safe_series_get to handle duplicate indices gracefully
+        vec_a = np.array([self._safe_series_get(weights_a, e, 0) for e in all_edges], dtype=float)
+        vec_b = np.array([self._safe_series_get(weights_b, e, 0) for e in all_edges], dtype=float)
         
         # Compute norms
         norm_a = np.linalg.norm(vec_a)

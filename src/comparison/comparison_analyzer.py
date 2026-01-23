@@ -5877,18 +5877,21 @@ class ComparisonAnalyzer:
         edges_df = pd.DataFrame(edge_list)
         
         # Transform node labels to display format with dataset-specific names
-        # Format: {mcns_name} (F:{fafb_name}/H:{hemi_name}) for types that differ across datasets
+        # Format: {canonical}({alt1}/{alt2}) for types that differ across datasets
         type_mapper = self.parameters._auto_type_mapper if self.parameters.auto_type_mapping else None
         display_name_map = {}  # {canonical_name: display_name}
+        node_dataset_info = {}  # {display_name: {code: name_in_that_dataset}} for hover labels
         dataset_legend = {}  # {short_code: full_dataset_name} for legend
         
         if type_mapper:
-            # Get all unique nodes and compute display names
+            # Get all unique nodes and compute display names + dataset info for hover
             all_unique_nodes = set(edges_df['source'].unique()) | set(edges_df['target'].unique())
             for node in all_unique_nodes:
-                display_name = type_mapper.get_display_name(node, dataset_names)
+                display_name, ds_info = type_mapper.get_display_name_with_dataset_info(node, dataset_names)
                 if display_name != node:
                     display_name_map[node] = display_name
+                if ds_info:
+                    node_dataset_info[display_name] = ds_info
             
             # Get dataset legend info
             dataset_legend = type_mapper.get_all_dataset_short_codes(dataset_names)
@@ -5929,13 +5932,9 @@ class ComparisonAnalyzer:
         all_nodes = set(edges_df['source'].unique()) | set(edges_df['target'].unique())
         
         # Helper to extract canonical name from display name
-        # Handles formats like:
-        # - "MeVPLo2 (F:MTe07)" -> "MeVPLo2"
-        # - "MeVPaMe1(MTe46)" -> "MeVPaMe1" (legacy format)
+        # Handles format: "MeVPaMe1(MTe46)" -> "MeVPaMe1"
         def get_canonical_name(display_name: str) -> str:
-            if ' (' in display_name:
-                return display_name.split(' (')[0].strip()
-            elif '(' in display_name:
+            if '(' in display_name:
                 return display_name.split('(')[0].strip()
             return display_name
         
@@ -6046,6 +6045,7 @@ class ComparisonAnalyzer:
             edge_width_scale=edge_width_scale,
             edge_labels=edge_labels,  # Multi-dataset synapse strengths
             dataset_legend=dataset_legend,  # Dataset short code legend for display names
+            node_dataset_info=node_dataset_info,  # Node-level dataset info for hover labels
             verbose=self.verbose,
             **vispath_kwargs
         )
