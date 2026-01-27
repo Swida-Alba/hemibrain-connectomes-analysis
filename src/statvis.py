@@ -1119,8 +1119,20 @@ def getNeurons(requiredNeurons, dataset='hemibrain:v1.2.1', custom_group_names=N
                     if verbose:
                         print(f"  ✓ Loaded {len(full_neuron_df):,} neurons (cached for reuse)")
                 
+                # Handle special cases: None = all neurons, [] = all typed neurons
                 if requiredNeurons is None:
                     return full_neuron_df, pd.DataFrame(), 'ALL_FAFB', None
+                
+                if len(requiredNeurons) == 0:
+                    # Empty list = all typed neurons (neurons with non-null type)
+                    if 'type' in full_neuron_df.columns:
+                        typed_df = full_neuron_df[full_neuron_df['type'].notna() & (full_neuron_df['type'] != '')].copy()
+                        if verbose:
+                            print(f"Returning all typed neurons: {len(typed_df):,} neurons")
+                        return typed_df, pd.DataFrame(), 'allneurons', None
+                    else:
+                        # No type column, return all
+                        return full_neuron_df, pd.DataFrame(), 'allneurons', None
                 
                 # Filter based on requiredNeurons
                 selected_dfs = []
@@ -1235,8 +1247,16 @@ def getNeurons(requiredNeurons, dataset='hemibrain:v1.2.1', custom_group_names=N
     bodyId_alltypes = ndf_alltypes['bodyId'].tolist()
     
     if len(requiredNeurons) == 0:
-        neuron_df = ndf_alltypes
-        roi_count_df = rdf_alltypes
+        # Empty list = all typed neurons (neurons with non-null type)
+        if 'type' in ndf_alltypes.columns:
+            neuron_df = ndf_alltypes[ndf_alltypes['type'].notna() & (ndf_alltypes['type'] != '')].copy()
+            # Also filter roi_count_df to match
+            roi_count_df = rdf_alltypes[rdf_alltypes.index.isin(neuron_df['bodyId'])].copy() if not rdf_alltypes.empty else rdf_alltypes
+            if verbose:
+                print(f"Returning all typed neurons: {len(neuron_df):,} neurons")
+        else:
+            neuron_df = ndf_alltypes
+            roi_count_df = rdf_alltypes
         auto_name = 'allneurons'
         bodyId_list = neuron_df['bodyId'].tolist()
     else:

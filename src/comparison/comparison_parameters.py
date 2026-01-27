@@ -37,7 +37,7 @@ class ComparisonParameters:
             visualizations. If provided, must match length of datasets list.
             Example: ['Hemi', 'Male', 'FAFB'] for shorter labels in charts/networks.
             
-        source_neurons (List[str | int] | List[List] | Dict | LabelMapper): Source neuron 
+        source_neurons (List[str | int] | List[List] | Dict | LabelMapper | None): Source neuron 
             types, bodyIds, or patterns to analyze. Supports:
             - Simple list: ['MBON14.*_R', 'PPL101.*_R']
             - Nested list (groups): [['MBON14.*_R'], ['MBON06.*_R']]
@@ -47,8 +47,10 @@ class ComparisonParameters:
             - Dict filter: {'regex': r'DN[a-z]\d+'}  # Regex pattern
             - Dict filter: {'contains': 'DN', 'endswith': '_R'}  # Combined (AND)
             - LabelMapper: for dataset-specific neuron mapping
+            - None: All neurons in the dataset (including untyped, not recommended)
+            - Empty list []: All neurons having a given type (excludes untyped neurons)
             
-        target_neurons (List[str | int] | List[List] | Dict | LabelMapper): Target neuron
+        target_neurons (List[str | int] | List[List] | Dict | LabelMapper | None): Target neuron
             types, bodyIds, or patterns. Same format options as source_neurons.
             
         max_interlayer (int): Maximum number of intermediate hops for path finding.
@@ -133,16 +135,20 @@ class ComparisonParameters:
     """Short display names for datasets in visualizations (e.g., ['Hemi', 'Male', 'FAFB']).
     If provided, must match length of datasets list. Falls back to sanitized dataset names if None."""
     
-    source_neurons: Union[List[Union[str, int]], List[List[Union[str, int]]], Dict, Any] = field(default_factory=list)
+    source_neurons: Union[List[Union[str, int]], List[List[Union[str, int]]], Dict, Any, None] = field(default_factory=list)
     """Source neuron types, bodyIds, or regex patterns. Supports:
     - Simple list: ['MBON14.*_R', 'PPL101.*_R']
     - Grouped list: [['MBON14.*_R'], ['MBON06.*_R']] for separate group analysis
     - Dict filter: {'contains': 'DN'}, {'startswith': 'aMe'}, {'endswith': '_R'}, {'regex': 'pattern'}
     - Dict combined: {'contains': 'DN', 'endswith': '_R'} (AND logic)
-    - LabelMapper object for dataset-specific neuron mapping"""
+    - LabelMapper object for dataset-specific neuron mapping
+    - None: All neurons in the dataset (not recommended for large datasets)
+    - Empty list []: All neurons having a given type (excludes untyped neurons)"""
     
-    target_neurons: Union[List[Union[str, int]], List[List[Union[str, int]]], Dict, Any] = field(default_factory=list)
-    """Target neuron types, bodyIds, or regex patterns. Same format options as source_neurons."""
+    target_neurons: Union[List[Union[str, int]], List[List[Union[str, int]]], Dict, Any, None] = field(default_factory=list)
+    """Target neuron types, bodyIds, or regex patterns. Same format options as source_neurons.
+    - None: All neurons in the dataset (not recommended for large datasets)
+    - Empty list []: All neurons having a given type (excludes untyped neurons)"""
     
     max_interlayer: int = 2
     """Maximum interlayer hops for path finding (shared across ALL datasets)"""
@@ -445,6 +451,10 @@ class ComparisonParameters:
             print(f"\nSource Neurons:")
             if self.overall_label_mapper:
                 print(f"  Defined by LabelMapper (Labels: {self.source_labels})")
+            elif self.source_neurons is None:
+                print(f"  None (All neurons in each dataset, including untyped)")
+            elif isinstance(self.source_neurons, list) and len(self.source_neurons) == 0:
+                print(f"  [] (All typed neurons in each dataset)")
             else:
                 print(f"  {self.source_neurons}")
                 # Show auto type mapping results for source neurons
@@ -458,6 +468,10 @@ class ComparisonParameters:
             print(f"\nTarget Neurons:")
             if self.overall_label_mapper:
                 print(f"  Defined by LabelMapper (Labels: {self.target_labels})")
+            elif self.target_neurons is None:
+                print(f"  None (All neurons in each dataset, including untyped)")
+            elif isinstance(self.target_neurons, list) and len(self.target_neurons) == 0:
+                print(f"  [] (All typed neurons in each dataset)")
             else:
                 print(f"  {self.target_neurons}")
                 # Show auto type mapping results for target neurons
@@ -486,22 +500,29 @@ class ComparisonParameters:
         if not self.thresholds:
             raise ValueError("At least one threshold is required")
         
-        # Validate neurons: Must have either explicit list OR a mapper
-        if not self._source_mapper and not self.source_neurons:
-             # If we have an overall mapper but it has no source mappings, that might be an issue,
-             # but technically _source_mapper should be set if overall_label_mapper is present.
-             # Double check if overall_label_mapper is set but empty?
-             if self.overall_label_mapper:
-                 # If overall mapper exists, we assume it handles source neurons unless it's empty
-                 pass 
-             else:
-                raise ValueError("source_neurons cannot be empty (provide list, nested list, or LabelMapper)")
-                
-        if not self._target_mapper and not self.target_neurons:
-             if self.overall_label_mapper:
-                 pass
-             else:
-                raise ValueError("target_neurons cannot be empty (provide list, nested list, or LabelMapper)")
+        # Handle None and empty list for source/target neurons (similar to coana.py FindNeuronConnection)
+        # None = all neurons in dataset (not recommended)
+        # [] = all typed neurons (neurons with non-null type)
+        self._source_is_all_neurons = self.source_neurons is None
+        self._source_is_all_typed = (isinstance(self.source_neurons, list) and 
+                                     len(self.source_neurons) == 0 and 
+                                     not self._source_mapper and 
+                                     not self.overall_label_mapper)
+        self._target_is_all_neurons = self.target_neurons is None
+        self._target_is_all_typed = (isinstance(self.target_neurons, list) and 
+                                     len(self.target_neurons) == 0 and 
+                                     not self._target_mapper and 
+                                     not self.overall_label_mapper)
+        
+        # Print warnings for large dataset queries
+        if self._source_is_all_neurons or self._target_is_all_neurons:
+            print('\033[33m⚠️  Warning: Using None for neurons will query ALL neurons in dataset (including untyped).\n'
+                  '   This is not recommended for large datasets. Consider using [] for all typed neurons instead.\033[0m')
+        
+        if self._source_is_all_typed:
+            print('\033[36mℹ️  Source neurons: [] (all typed neurons in each dataset)\033[0m')
+        if self._target_is_all_typed:
+            print('\033[36mℹ️  Target neurons: [] (all typed neurons in each dataset)\033[0m')
         
         # Cache the timestamp for consistent output_name
         self._cached_timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
@@ -946,21 +967,38 @@ class ComparisonParameters:
         """
         return self._ensure_grouped(self.target_neurons)
     
-    def _ensure_flat_list(self, neurons: List) -> List[Union[str, int]]:
-        """Flatten nested list of neurons to single list."""
+    def _ensure_flat_list(self, neurons) -> List[Union[str, int]]:
+        """Flatten nested list of neurons to single list.
+        
+        Handles special cases:
+        - None: Returns None (signals all neurons in dataset)
+        - Empty list []: Returns empty list (signals all typed neurons)
+        """
+        # None = all neurons, preserve this signal
+        if neurons is None:
+            return None
+        # Empty list = all typed neurons, preserve this signal  
+        if isinstance(neurons, list) and len(neurons) == 0:
+            return []
+        
         flat = []
         for item in neurons:
             if isinstance(item, list):
-                flat.extend(self._ensure_flat_list(item))
+                flat.extend(self._ensure_flat_list(item) or [])
             else:
                 flat.append(item)
         return flat
     
-    def _ensure_grouped(self, neurons: List) -> List[List[Union[str, int]]]:
+    def _ensure_grouped(self, neurons) -> List[List[Union[str, int]]]:
         """
         Ensure neurons are in grouped format (list of lists).
+        
+        Handles special cases:
+        - None: Returns [[]] (signals all neurons for single group)
+        - Empty list []: Returns [[]] (signals all typed neurons for single group)
         """
-        if not neurons:
+        # None or empty list = single group with all neurons
+        if neurons is None or (isinstance(neurons, list) and len(neurons) == 0):
             return [[]]
         
         # Check if first element is a list (already grouped)
@@ -1279,15 +1317,20 @@ class ComparisonParameters:
         Resolve neuron type names using auto type mapping.
         
         Args:
-            neurons: List of neuron types/patterns/bodyIds
+            neurons: List of neuron types/patterns/bodyIds (or None/empty list for all neurons)
             dataset: Target dataset to resolve for
             remove_unmapped: If True, remove types that don't have a mapping in the target
                            dataset (instead of passing them through). Default False for 
                            backward compatibility with querying.
             
         Returns:
-            List of resolved neuron types for the target dataset
+            List of resolved neuron types for the target dataset,
+            or None/empty list for special "all neurons" cases
         """
+        # Handle special cases for all neurons/all typed neurons
+        if neurons is None or (isinstance(neurons, list) and len(neurons) == 0):
+            return neurons  # Pass through None or [] as-is for downstream handling
+            
         if not self._auto_type_mapper:
             return neurons
         
