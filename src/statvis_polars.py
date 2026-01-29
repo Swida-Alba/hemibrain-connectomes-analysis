@@ -490,8 +490,13 @@ def _write_buffer_to_csv(buffer_list, output_path, append=False):
         # For initial write, use Polars native (faster)
         df_combined.write_csv(output_path)
 
-def EnrichConnectionTablePolars(conn_table, traversal_probability_threshold=0, dataset=None, script_path=None, target_neurons_df=None, aggregate_method='product', label_mapper=None, global_incoming_weights=None):
+def EnrichConnectionTablePolars(conn_table, traversal_probability_threshold=0, dataset=None, script_path=None, target_neurons_df=None, aggregate_method='product', label_mapper=None, global_incoming_weights=None, separate_hemispheres=False):
     '''Add traversal probability, connection ratio, and layer information to the connection table using Polars
+    
+    NOTE: When separate_hemispheres=True, the caller is expected to have already applied
+    hemisphere suffixes (_L/_R/_U) to type_pre/type_post columns. This function will
+    aggregate by those already-suffixed types. The parameter is accepted for API
+    compatibility but does not change the aggregation behavior.
     
     IMPLEMENTS USER's 6-STEP LABEL MAPPING APPROACH:
     Step 1: Fetch neurons using original type/bodyId/instance (done by caller)
@@ -604,6 +609,11 @@ def EnrichConnectionTablePolars(conn_table, traversal_probability_threshold=0, d
     # For mapped bodyIds: use std_label
     # For unmapped bodyIds: use original type (Step 5)
     # For untyped neurons (empty/null type): use bodyId as fallback
+    #
+    # IMPORTANT: When separate_hemispheres=True, the type_pre/type_post columns already 
+    # have hemisphere suffixes (e.g., "PPL101_L"). The std_label from label_mapper is the
+    # base type (e.g., "PPL101"). We need to preserve the hemisphere suffix by extracting
+    # it from the type column and appending it to the std_label.
     if bodyid_label_map:
         # Create a Polars-friendly mapping for vectorized lookup
         map_df = pl.DataFrame({
@@ -613,32 +623,84 @@ def EnrichConnectionTablePolars(conn_table, traversal_probability_threshold=0, d
         
         # Map pre neurons
         conn_df = conn_df.join(
-            map_df.rename({'bodyId': 'bodyId_pre', 'std_label': 'std_label_pre'}),
+            map_df.rename({'bodyId': 'bodyId_pre', 'std_label': '_mapped_std_label_pre'}),
             on='bodyId_pre',
             how='left'
         )
-        # Use std_label if mapped, else fall back to type, else fall back to bodyId
-        conn_df = conn_df.with_columns(
-            pl.coalesce([
-                pl.col('std_label_pre'),
-                pl.when(pl.col('type_pre').is_not_null() & (pl.col('type_pre') != '')).then(pl.col('type_pre')).otherwise(None),
-                pl.col('bodyId_pre')
-            ]).alias('std_label_pre')
-        )
+        
+        if separate_hemispheres:
+            # When hemisphere separation is enabled, append the hemisphere suffix from type_pre to std_label
+            # Extract suffix: if type_pre ends with _L, _R, or _U, extract that suffix
+            conn_df = conn_df.with_columns(
+                pl.when(pl.col('type_pre').str.ends_with('_L'))
+                    .then(pl.lit('_L'))
+                    .when(pl.col('type_pre').str.ends_with('_R'))
+                    .then(pl.lit('_R'))
+                    .when(pl.col('type_pre').str.ends_with('_U'))
+                    .then(pl.lit('_U'))
+                    .otherwise(pl.lit(''))
+                    .alias('_hemi_suffix_pre')
+            )
+            # Build std_label_pre: mapped_std_label + hemisphere_suffix, else fall back to type_pre, else bodyId
+            conn_df = conn_df.with_columns(
+                pl.coalesce([
+                    pl.when(pl.col('_mapped_std_label_pre').is_not_null())
+                        .then(pl.col('_mapped_std_label_pre') + pl.col('_hemi_suffix_pre'))
+                        .otherwise(None),
+                    pl.when(pl.col('type_pre').is_not_null() & (pl.col('type_pre') != '')).then(pl.col('type_pre')).otherwise(None),
+                    pl.col('bodyId_pre')
+                ]).alias('std_label_pre')
+            )
+            conn_df = conn_df.drop('_mapped_std_label_pre', '_hemi_suffix_pre')
+        else:
+            # No hemisphere separation: use std_label directly
+            conn_df = conn_df.with_columns(
+                pl.coalesce([
+                    pl.col('_mapped_std_label_pre'),
+                    pl.when(pl.col('type_pre').is_not_null() & (pl.col('type_pre') != '')).then(pl.col('type_pre')).otherwise(None),
+                    pl.col('bodyId_pre')
+                ]).alias('std_label_pre')
+            )
+            conn_df = conn_df.drop('_mapped_std_label_pre')
         
         # Map post neurons
         conn_df = conn_df.join(
-            map_df.rename({'bodyId': 'bodyId_post', 'std_label': 'std_label_post'}),
+            map_df.rename({'bodyId': 'bodyId_post', 'std_label': '_mapped_std_label_post'}),
             on='bodyId_post',
             how='left'
         )
-        conn_df = conn_df.with_columns(
-            pl.coalesce([
-                pl.col('std_label_post'),
-                pl.when(pl.col('type_post').is_not_null() & (pl.col('type_post') != '')).then(pl.col('type_post')).otherwise(None),
-                pl.col('bodyId_post')
-            ]).alias('std_label_post')
-        )
+        
+        if separate_hemispheres:
+            # Extract hemisphere suffix from type_post
+            conn_df = conn_df.with_columns(
+                pl.when(pl.col('type_post').str.ends_with('_L'))
+                    .then(pl.lit('_L'))
+                    .when(pl.col('type_post').str.ends_with('_R'))
+                    .then(pl.lit('_R'))
+                    .when(pl.col('type_post').str.ends_with('_U'))
+                    .then(pl.lit('_U'))
+                    .otherwise(pl.lit(''))
+                    .alias('_hemi_suffix_post')
+            )
+            conn_df = conn_df.with_columns(
+                pl.coalesce([
+                    pl.when(pl.col('_mapped_std_label_post').is_not_null())
+                        .then(pl.col('_mapped_std_label_post') + pl.col('_hemi_suffix_post'))
+                        .otherwise(None),
+                    pl.when(pl.col('type_post').is_not_null() & (pl.col('type_post') != '')).then(pl.col('type_post')).otherwise(None),
+                    pl.col('bodyId_post')
+                ]).alias('std_label_post')
+            )
+            conn_df = conn_df.drop('_mapped_std_label_post', '_hemi_suffix_post')
+        else:
+            conn_df = conn_df.with_columns(
+                pl.coalesce([
+                    pl.col('_mapped_std_label_post'),
+                    pl.when(pl.col('type_post').is_not_null() & (pl.col('type_post') != '')).then(pl.col('type_post')).otherwise(None),
+                    pl.col('bodyId_post')
+                ]).alias('std_label_post')
+            )
+            conn_df = conn_df.drop('_mapped_std_label_post')
     else:
         # No label_mapper: std_label = type, or bodyId if type is empty/null
         conn_df = conn_df.with_columns([

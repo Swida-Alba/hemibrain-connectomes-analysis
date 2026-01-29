@@ -466,6 +466,18 @@ The system searches for neurons using the following priority order:
 - The search returns all neurons matching the **first column that produces results**
 - All comparisons are string-based internally for consistency
 
+### Hemisphere Handling (FindNeuronConnection)
+
+| Parameter              | Default | Description                                                                                                                                                  |
+| ---------------------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `separate_hemispheres` | False   | When True, type and custom-group labels are suffixed with `_L/_R/_U` based on hemisphere annotations. All aggregation is split by hemisphere.                |
+| `symmetry_analysis`    | True    | When True, generates hemisphere symmetry outputs (ipsilateral vs contralateral) under `hemisphere_symmetry/`. Auto-enabled when `separate_hemispheres=True`. |
+
+**Behavior notes:**
+- `_L`/`_R` suffixes in query patterns are treated as hemisphere filters.
+- When hemisphere info is missing, `_U` is used.
+- Hemisphere symmetry outputs are saved per-threshold in `hemisphere_symmetry/` under the run folder.
+
 ### Connection Filters
 
 | Parameter                   | Description                            | Default    | Typical Values |

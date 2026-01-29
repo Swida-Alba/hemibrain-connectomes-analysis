@@ -54,12 +54,18 @@ def generate_html_report(
     
     # 1.5. Neuron Counts Section
     html_parts.append(_generate_neuron_counts_section(analyzer, dataset_names, nickname_map))
+
+    # 1.75. Hemisphere Symmetry Section
+    html_parts.append(_generate_hemisphere_symmetry_section(analyzer, dataset_names, thresholds, nickname_map))
     
     # 2. Similarity Matrices Section
     html_parts.append(_generate_similarity_section(analyzer, dataset_names, thresholds, nickname_map))
     
     # 3. Networks Section
     html_parts.append(_generate_networks_section(analyzer, dataset_names, thresholds, nickname_map))
+
+    # 3.5. Reciprocal Visualizations Section (REMOVED - per-dataset reciprocal links are now in Networks section)
+    # html_parts.append(_generate_reciprocal_visualizations_section(analyzer, dataset_names, thresholds, nickname_map))
     
     # 4. Edge Presence Matrices Section
     html_parts.append(_generate_edge_matrices_section(analyzer, dataset_names, thresholds, nickname_map))
@@ -100,7 +106,6 @@ def _generate_html_header() -> str:
             --success-color: #22c55e;
             --warning-color: #f59e0b;
             --danger-color: #ef4444;
-            --bg-color: #f8fafc;
             --card-bg: #ffffff;
             --border-color: #e2e8f0;
             --conserved-color: #22c55e;
@@ -316,6 +321,7 @@ def _generate_toc(thresholds: List[int]) -> str:
             <ul>
                 <li><a href="#summary">📋 Summary & Key Findings</a></li>
                 <li><a href="#neuron-counts">🧬 Neuron Counts Comparison</a></li>
+                <li><a href="#hemisphere-symmetry">🪞 Hemisphere Symmetry</a></li>
                 <li><a href="#similarity">🔢 Similarity Matrices</a></li>
                 <li><a href="#networks">🕸️ Network Visualizations</a></li>
                 <li><a href="#edge-matrices">🔗 Edge Presence Matrices</a></li>
@@ -337,12 +343,7 @@ def _generate_summary_section(analyzer, dataset_names: List[str], thresholds: Li
         <div id="summary" class="section">
             <div class="section-header">📋 Summary & Key Findings</div>
             <div class="section-content">
-""")
-    
-    # Key findings table
-    html_parts.append('<div class="card"><h3>Key Metrics by Threshold</h3>')
-    html_parts.append('<table><thead><tr><th>Threshold</th><th>Total Edges</th><th>Conserved Edges</th><th>Edge Rate</th><th>Total Paths</th><th>Conserved Paths</th><th>Path Rate</th></tr></thead><tbody>')
-    
+    """)
     for t in thresholds:
         kf = key_findings.get(t, {})
         total_edges = kf.get('total_edges', 0)
@@ -971,6 +972,111 @@ def _generate_similarity_section(analyzer, dataset_names: List[str], thresholds:
     return ''.join(html_parts)
 
 
+def _generate_hemisphere_symmetry_section(analyzer, dataset_names: List[str], thresholds: List[int],
+                                          nickname_map: Dict[str, str]) -> str:
+    """Generate hemisphere symmetry summary section."""
+    html_parts = []
+    
+    # Check if separate_hemispheres is enabled
+    separate_hemispheres = bool(getattr(getattr(analyzer, 'parameters', None), 'separate_hemispheres', False))
+    
+    summaries = analyzer.get_hemisphere_symmetry_summaries()
+
+    html_parts.append("""
+        <div id="hemisphere-symmetry" class="section">
+            <div class="section-header">🪞 Hemisphere Symmetry</div>
+            <div class="section-content">
+                <p style="margin-bottom: 20px; color: var(--secondary-color);">
+                    Hemisphere symmetry summaries per dataset and threshold (ipsilateral vs contralateral).
+                </p>
+    """)
+
+    # Show notice if separate_hemispheres=False
+    if not separate_hemispheres:
+        html_parts.append('''
+            <div class="card" style="background: #fef3c7; border: 1px solid #f59e0b;">
+                <p style="color: #92400e; margin: 0;">
+                    <strong>⚠️ Hemisphere analysis unavailable:</strong> 
+                    <code>separate_hemispheres=False</code> in this comparison. 
+                    To enable hemisphere symmetry analysis, set <code>separate_hemispheres=True</code> 
+                    in ComparisonParameters. This adds _L/_R/_U suffixes to neuron type labels, 
+                    allowing comparison of left vs right hemisphere connectivity.
+                </p>
+            </div>
+        ''')
+        html_parts.append("</div></div>")
+        return ''.join(html_parts)
+
+    if not summaries:
+        html_parts.append('<div class="card"><p style="color:#999; text-align:center;">No hemisphere symmetry summaries found.</p></div>')
+        html_parts.append("</div></div>")
+        return ''.join(html_parts)
+
+    html_parts.append('<div class="tabs"><div class="tab-buttons">')
+    for i, t in enumerate(thresholds):
+        active = 'active' if i == 0 else ''
+        html_parts.append(f'<button class="tab-btn {active}" onclick="showSymTab({t})">t = {t}</button>')
+    html_parts.append('</div>')
+
+    for i, threshold in enumerate(thresholds):
+        active = 'active' if i == 0 else ''
+        html_parts.append(f'<div id="sym_tab_{threshold}" class="tab-content {active}">')
+        html_parts.append('<div class="card">')
+        html_parts.append(f'<h3>Hemisphere Symmetry at Threshold = {threshold}</h3>')
+        html_parts.append('<table><thead><tr>'
+                          '<th>Dataset</th>'
+                          '<th>Ipsi Jaccard</th>'
+                          '<th>Contra Jaccard</th>'
+                          '<th>Ipsi Conserved/Union</th>'
+                          '<th>Contra Conserved/Union</th>'
+                          '<th>Types Conserved/Union</th>'
+                          '<th>Counts L/R</th>'
+                          '</tr></thead><tbody>')
+
+        for dataset in dataset_names:
+            summary = summaries.get(threshold, {}).get(dataset)
+            if not summary:
+                continue
+            ipsi = summary.get('ipsi', {})
+            contra = summary.get('contra', {})
+            types = summary.get('neuron_types', {})
+            counts = summary.get('hemisphere_counts', {}).get('total', {})
+            ipsi_j = ipsi.get('jaccard', 0)
+            contra_j = contra.get('jaccard', 0)
+            ipsi_cons = f"{ipsi.get('conserved', 0)}/{ipsi.get('union', 0)}"
+            contra_cons = f"{contra.get('conserved', 0)}/{contra.get('union', 0)}"
+            types_cons = f"{types.get('types_conserved', 0)}/{types.get('types_union', 0)}"
+            lr_counts = f"{counts.get('L', 0)}/{counts.get('R', 0)}"
+            ds_label = nickname_map.get(dataset, dataset)
+            html_parts.append(
+                f'<tr><td><strong>{ds_label}</strong></td>'
+                f'<td>{ipsi_j:.3f}</td>'
+                f'<td>{contra_j:.3f}</td>'
+                f'<td>{ipsi_cons}</td>'
+                f'<td>{contra_cons}</td>'
+                f'<td>{types_cons}</td>'
+                f'<td>{lr_counts}</td></tr>'
+            )
+
+        html_parts.append('</tbody></table></div></div>')
+
+    html_parts.append("""
+                </div>
+                <script>
+                    function showSymTab(threshold) {
+                        document.querySelectorAll('#hemisphere-symmetry .tab-content').forEach(el => el.classList.remove('active'));
+                        document.querySelectorAll('#hemisphere-symmetry .tab-btn').forEach(el => el.classList.remove('active'));
+                        document.getElementById('sym_tab_' + threshold).classList.add('active');
+                        event.target.classList.add('active');
+                    }
+                </script>
+            </div>
+        </div>
+    """)
+
+    return ''.join(html_parts)
+
+
 def _generate_networks_section(analyzer, dataset_names: List[str], thresholds: List[int],
                                 nickname_map: Dict[str, str]) -> str:
     """Generate networks section with conservation-colored edges and role-colored nodes."""
@@ -997,7 +1103,7 @@ def _generate_networks_section(analyzer, dataset_names: List[str], thresholds: L
             # Count self-edges across all thresholds
             self_edge_count = 0
             for threshold in thresholds:
-                aligned = analyzer.get_aligned_data(threshold)
+                aligned = analyzer.get_aligned_data_for_network(threshold)
                 if not aligned.empty:
                     for edge_key in aligned.index:
                         if ' -> ' in str(edge_key):
@@ -1095,6 +1201,153 @@ def _generate_networks_section(analyzer, dataset_names: List[str], thresholds: L
                         }}
                         
                         applyNetworkPhysics(threshold);
+                    }}
+                    
+                    // Hemisphere mirroring toggle
+                    window.hemisphereMirrorEnabled = {{}};  // Per-threshold mirror state
+                    window.allThresholds.forEach(t => {{
+                        window.hemisphereMirrorEnabled[t] = false;
+                    }});
+                    
+                    function toggleHemisphereMirror(threshold) {{
+                        window.hemisphereMirrorEnabled[threshold] = !window.hemisphereMirrorEnabled[threshold];
+                        const btn = document.getElementById('mirror_btn_' + threshold);
+                        
+                        if (window.hemisphereMirrorEnabled[threshold]) {{
+                            btn.innerHTML = '🪞 Mirrored';
+                            btn.style.background = '#0ea5e9';
+                            applyHemisphereMirror(threshold);
+                        }} else {{
+                            btn.innerHTML = '🪞 Mirror Hemispheres';
+                            btn.style.background = '#64748b';
+                            resetHemisphereMirror(threshold);
+                        }}
+                    }}
+                    
+                    function getBaseName(label) {{
+                        // Extract base name without hemisphere suffix
+                        if (label.endsWith('_L') || label.endsWith('_R') || label.endsWith('_U')) {{
+                            return label.slice(0, -2);
+                        }}
+                        return label;
+                    }}
+                    
+                    function getHemisphere(label) {{
+                        // Get hemisphere from label suffix
+                        if (label.endsWith('_L')) return 'L';
+                        if (label.endsWith('_R')) return 'R';
+                        if (label.endsWith('_U')) return 'U';
+                        return 'U';  // Unknown
+                    }}
+                    
+                    function applyHemisphereMirror(threshold) {{
+                        if (!window.allNetworks[threshold]) return;
+                        const netData = window.allNetworks[threshold];
+                        const net = netData.network;
+                        const nodes = netData.nodes;
+                        
+                        // Store original positions if not already stored
+                        if (!netData.originalPositions) {{
+                            netData.originalPositions = {{}};
+                            const positions = net.getPositions();
+                            for (const [id, pos] of Object.entries(positions)) {{
+                                netData.originalPositions[id] = {{ x: pos.x, y: pos.y }};
+                            }}
+                        }}
+                        
+                        // Get current positions
+                        const positions = net.getPositions();
+                        const nodeIds = Object.keys(positions);
+                        if (nodeIds.length === 0) return;
+                        
+                        // Calculate bounds of current layout
+                        let minX = Infinity, maxX = -Infinity;
+                        for (const id of nodeIds) {{
+                            minX = Math.min(minX, positions[id].x);
+                            maxX = Math.max(maxX, positions[id].x);
+                        }}
+                        const layoutWidth = maxX - minX || 200;
+                        const centerX = (minX + maxX) / 2;
+                        const gap = Math.max(100, layoutWidth * 0.3);  // Gap between hemispheres
+                        
+                        // Build base name -> [nodes] mapping for Y position averaging
+                        const baseNodeMap = {{}};
+                        const allNodes = netData.allNodes;
+                        allNodes.forEach(node => {{
+                            const baseName = getBaseName(node.label);
+                            if (!baseNodeMap[baseName]) baseNodeMap[baseName] = [];
+                            baseNodeMap[baseName].push(node);
+                        }});
+                        
+                        // Calculate average Y positions for base names (to align L/R pairs vertically)
+                        const baseYPositions = {{}};
+                        for (const [baseName, nodeList] of Object.entries(baseNodeMap)) {{
+                            let sumY = 0;
+                            let count = 0;
+                            nodeList.forEach(node => {{
+                                if (positions[node.id]) {{
+                                    sumY += positions[node.id].y;
+                                    count++;
+                                }}
+                            }});
+                            baseYPositions[baseName] = count > 0 ? sumY / count : 0;
+                        }}
+                        
+                        // Apply mirrored layout: _L nodes on RIGHT, _R nodes on LEFT
+                        // (brain convention: right hemisphere on left screen)
+                        // PRESERVE relative X positions within each hemisphere panel
+                        const updates = [];
+                        allNodes.forEach(node => {{
+                            const hemi = getHemisphere(node.label);
+                            const baseName = getBaseName(node.label);
+                            const baseY = baseYPositions[baseName] || (positions[node.id] ? positions[node.id].y : 0);
+                            const origPos = positions[node.id];
+                            if (!origPos) return;
+                            
+                            // Compute relative X position from center (normalized to -1 to 1)
+                            const relX = layoutWidth > 0 ? (origPos.x - centerX) / (layoutWidth / 2) : 0;
+                            
+                            let newX;
+                            if (hemi === 'R') {{
+                                // Right hemisphere -> LEFT panel (mirrored: flip X)
+                                newX = centerX - gap - (layoutWidth / 2) - (relX * layoutWidth / 2);
+                            }} else if (hemi === 'L') {{
+                                // Left hemisphere -> RIGHT panel (preserve X direction)
+                                newX = centerX + gap + (layoutWidth / 2) + (relX * layoutWidth / 2);
+                            }} else {{
+                                // Unknown/center -> keep near center
+                                newX = centerX + (relX * layoutWidth / 4);
+                            }}
+                            
+                            updates.push({{ id: node.id, x: newX, y: baseY }});
+                        }});
+                        
+                        // Apply updates
+                        updates.forEach(u => {{
+                            nodes.update({{ id: u.id, x: u.x, y: u.y }});
+                        }});
+                        
+                        // Fit the view
+                        net.fit({{ animation: true }});
+                    }}
+                    
+                    function resetHemisphereMirror(threshold) {{
+                        if (!window.allNetworks[threshold]) return;
+                        const netData = window.allNetworks[threshold];
+                        const net = netData.network;
+                        const nodes = netData.nodes;
+                        
+                        // Restore original positions if available
+                        if (netData.originalPositions) {{
+                            const updates = [];
+                            for (const [id, pos] of Object.entries(netData.originalPositions)) {{
+                                updates.push({{ id: parseInt(id), x: pos.x, y: pos.y }});
+                            }}
+                            updates.forEach(u => {{
+                                nodes.update(u);
+                            }});
+                            net.fit({{ animation: true }});
+                        }}
                     }}
                     
                     function updateNetworkDisplay(threshold) {{
@@ -1466,6 +1719,91 @@ def _generate_networks_section(analyzer, dataset_names: List[str], thresholds: L
     return ''.join(html_parts)
 
 
+def _generate_reciprocal_visualizations_section(analyzer, dataset_names: List[str], thresholds: List[int],
+                                                nickname_map: Dict[str, str]) -> str:
+    """Generate reciprocal visualizations section with links to VisPath outputs."""
+    html_parts = []
+
+    find_reciprocal = bool(getattr(getattr(analyzer, 'parameters', None), 'find_reciprocal', False))
+
+    html_parts.append("""
+        <div id="reciprocal-visualizations" class="section">
+            <div class="section-header">🔁 Reciprocal Visualizations</div>
+            <div class="section-content">
+    """)
+
+    if not find_reciprocal:
+        html_parts.append("""
+            <div class="card">
+                <h3>Reciprocal analysis not enabled</h3>
+                <p>This report was generated without <strong>find_reciprocal</strong>. Enable it to generate reciprocal network and heatmap visualizations.</p>
+            </div>
+        """)
+        html_parts.append("</div></div>")
+        return ''.join(html_parts)
+
+    def _make_link(path: str) -> str:
+        if not path or not os.path.exists(path):
+            return '-'
+        rel_path = os.path.relpath(path, analyzer.parameters.full_output_path).replace(os.sep, '/')
+        return f'<a href="{rel_path}" target="_blank">Open</a>'
+
+    for t in thresholds:
+        html_parts.append(f'<div class="card"><h3>Threshold t = {t}</h3>')
+        html_parts.append('<table><thead><tr>'
+                  '<th>Dataset</th>'
+                  '<th>Type Network</th>'
+                  '<th>Type Heatmap</th>'
+                  '<th>Group Network</th>'
+                  '<th>Group Heatmap</th>'
+                  '<th>BodyId Network</th>'
+                  '<th>BodyId Heatmap</th>'
+                  '<th>Type CSV</th>'
+                  '<th>Group CSV</th>'
+                  '<th>BodyId CSV</th>'
+                  '</tr></thead><tbody>')
+
+        for d in dataset_names:
+            nick = nickname_map.get(d, d)
+            base_dir = os.path.join(
+                analyzer.parameters.full_output_path,
+                'dataset_data',
+                d,
+                f'minsyn_{t}',
+                'find_reciprocal',
+                'visualizations'
+            )
+
+            type_network = _make_link(os.path.join(base_dir, 'reciprocal_type_network.html'))
+            type_heatmap = _make_link(os.path.join(base_dir, 'reciprocal_type_heatmap.html'))
+            group_network = _make_link(os.path.join(base_dir, 'reciprocal_groups_network.html'))
+            group_heatmap = _make_link(os.path.join(base_dir, 'reciprocal_groups_heatmap.html'))
+            body_network = _make_link(os.path.join(base_dir, 'reciprocal_bodyId_network.html'))
+            body_heatmap = _make_link(os.path.join(base_dir, 'reciprocal_bodyId_heatmap.html'))
+
+            type_csv = _make_link(os.path.join(base_dir, 'reciprocal_connection_type.csv'))
+            group_csv = _make_link(os.path.join(base_dir, 'reciprocal_connection_custom_groups.csv'))
+            body_csv = _make_link(os.path.join(base_dir, 'reciprocal_connection_bodyId.csv'))
+
+            html_parts.append('<tr>'
+                              f'<td><strong>{nick}</strong></td>'
+                              f'<td>{type_network}</td>'
+                              f'<td>{type_heatmap}</td>'
+                              f'<td>{group_network}</td>'
+                              f'<td>{group_heatmap}</td>'
+                              f'<td>{body_network}</td>'
+                              f'<td>{body_heatmap}</td>'
+                              f'<td>{type_csv}</td>'
+                              f'<td>{group_csv}</td>'
+                              f'<td>{body_csv}</td>'
+                              '</tr>')
+
+        html_parts.append('</tbody></table></div>')
+
+    html_parts.append('</div></div>')
+    return ''.join(html_parts)
+
+
 def _extract_edges_from_paths(path_data: pd.DataFrame, dataset_names: List[str], max_paths: int = 100) -> set:
     """
     Extract edges from top-M paths ranked by total min_weight across datasets.
@@ -1592,7 +1930,7 @@ def _generate_conservation_network(analyzer, dataset_names: List[str], threshold
         max_edges: Maximum number of edges to show in the network (default 500).
                    Edges are selected from top paths to preserve path connectivity.
     """
-    aligned = analyzer.get_aligned_data(threshold)
+    aligned = analyzer.get_aligned_data_for_network(threshold)
     
     # Get path data for this threshold to filter by top paths
     path_data = None
@@ -1781,12 +2119,22 @@ def _generate_conservation_network(analyzer, dataset_names: List[str], threshold
     
     # Helper function to check if a node label matches any pattern
     # For merged display names like "MeVPaMe1(MTe46)", also check the canonical part
+    # Also handles hemisphere suffixes (_L/_R/_U) for separate_hemispheres mode
     def matches_patterns(label: str, patterns: set) -> bool:
         import re
         # Get canonical name for matching (handles merged display names)
         canonical = get_canonical_name(label)
-        # Check both the full label and canonical name
-        names_to_check = [label, canonical] if canonical != label else [label]
+        
+        # Get base name without hemisphere suffix (for separate_hemispheres mode)
+        def get_base_name(name: str) -> str:
+            if name.endswith('_L') or name.endswith('_R') or name.endswith('_U'):
+                return name[:-2]
+            return name
+        
+        base_name = get_base_name(canonical)
+        
+        # Check label, canonical name, and base name (without suffix)
+        names_to_check = list(set([label, canonical, base_name]))
         
         for name in names_to_check:
             for pattern in patterns:
@@ -1965,11 +2313,16 @@ def _generate_conservation_network(analyzer, dataset_names: List[str], threshold
         
         Returns True if:
         - label is directly in node_ids
+        - label with hemisphere suffix (_L/_R/_U) is in node_ids (e.g., aMe12 represented by aMe12_L)
         - label appears at the start of a display name like 'MeVPLo2 (F:MTe07)'
         - label appears inside parentheses of a display name (dataset-prefixed like F:MTe07)
         """
         if label in node_ids:
             return True
+        # Check for hemisphere-suffixed versions (e.g., aMe12 is represented by aMe12_L or aMe12_R)
+        for suffix in ['_L', '_R', '_U']:
+            if (label + suffix) in node_ids:
+                return True
         # Check for display names like 'MeVPLo2 (F:MTe07)' where label could be MeVPLo2 or MTe07
         for existing_label in node_ids.keys():
             # Check if label is the base name (before space and parentheses)
@@ -1979,6 +2332,10 @@ def _generate_conservation_network(analyzer, dataset_names: List[str], threshold
             # Legacy format: "MeVPLo2(MTe07)"
             if existing_label.startswith(label + '('):
                 return True
+            # Check for hemisphere suffix before parentheses (e.g., 'aMe12_L (F:aMe12)')
+            for suffix in ['_L', '_R', '_U']:
+                if existing_label.startswith(label + suffix + ' (') or existing_label.startswith(label + suffix + '('):
+                    return True
             # Check if label is inside parentheses (with or without dataset code)
             if '(' in existing_label and ')' in existing_label:
                 paren_start = existing_label.index('(')
@@ -1997,6 +2354,13 @@ def _generate_conservation_network(analyzer, dataset_names: List[str], threshold
                         return True
         return False
     
+    # Check if separate_hemispheres is enabled
+    separate_hemispheres = getattr(getattr(analyzer, 'parameters', None), 'separate_hemispheres', False)
+    
+    def has_hemisphere_suffix(name: str) -> bool:
+        """Check if a name already has a hemisphere suffix (_L/_R/_U)."""
+        return name.endswith('_L') or name.endswith('_R') or name.endswith('_U')
+    
     # Track which canonical names have been added as isolated nodes to avoid duplicates
     # This handles the case where CB0038 (FAFB/BANC) and GNG588 (MCNS) are the same type
     added_canonical_sources = set()
@@ -2005,6 +2369,11 @@ def _generate_conservation_network(analyzer, dataset_names: List[str], threshold
     for label in source_neurons:
         # Skip patterns - they're not actual neuron names
         if '*' in label or '.*' in label:
+            continue
+        # When separate_hemispheres is True, skip adding isolated nodes for base names
+        # (without _L/_R/_U suffix). The actual hemisphere-suffixed nodes will be added
+        # from edge data if they have connections.
+        if separate_hemispheres and not has_hemisphere_suffix(label):
             continue
         if not is_represented_in_nodes(label, node_ids):
             # Get the merged display name if type_mapper is available
@@ -2045,6 +2414,11 @@ def _generate_conservation_network(analyzer, dataset_names: List[str], threshold
     for label in target_neurons:
         # Skip patterns - they're not actual neuron names
         if '*' in label or '.*' in label:
+            continue
+        # When separate_hemispheres is True, skip adding isolated nodes for base names
+        # (without _L/_R/_U suffix). The actual hemisphere-suffixed nodes will be added
+        # from edge data if they have connections.
+        if separate_hemispheres and not has_hemisphere_suffix(label):
             continue
         if not is_represented_in_nodes(label, node_ids):
             # Get the merged display name if type_mapper is available
@@ -2135,6 +2509,11 @@ def _generate_conservation_network(analyzer, dataset_names: List[str], threshold
                         style="padding: 6px 12px; border-radius: 6px; border: 1px solid var(--border-color); 
                                background: var(--secondary-color); color: white; cursor: pointer; font-size: 12px; white-space: nowrap;">
                         📌 Static Mode
+                    </button>
+                    <button id="mirror_btn_{threshold}" onclick="toggleHemisphereMirror({threshold})" 
+                        style="padding: 6px 12px; border-radius: 6px; border: 1px solid var(--border-color); 
+                               background: #64748b; color: white; cursor: pointer; font-size: 12px; white-space: nowrap;">
+                        🪞 Mirror Hemispheres
                     </button>
                 </div>
             </div>
@@ -2321,8 +2700,17 @@ def _generate_dataset_network(analyzer, dataset: str, thresholds: List[int],
         import re
         # Get canonical name for matching (handles merged display names)
         canonical = get_canonical_name(label)
-        # Check both the full label and canonical name
-        names_to_check = [label, canonical] if canonical != label else [label]
+        
+        # Get base name without hemisphere suffix (for separate_hemispheres mode)
+        def get_base_name(name: str) -> str:
+            if name.endswith('_L') or name.endswith('_R') or name.endswith('_U'):
+                return name[:-2]
+            return name
+        
+        base_name = get_base_name(canonical)
+        
+        # Check label, canonical name, and base name (without suffix)
+        names_to_check = list(set([label, canonical, base_name]))
         
         for name in names_to_check:
             for pattern in patterns:
@@ -3491,8 +3879,53 @@ def _generate_conservation_section(analyzer, dataset_names: List[str], threshold
             </script>
 ''')
     
-    # Close: grid-2, wrapper div (Conservation Distribution section), section-content, section
-    html_parts.append('</div></div></div></div></div>')
+    # Links to conserved graph visualizations
+    def _make_link(path: str) -> str:
+        if not path or not os.path.exists(path):
+            return '-'
+        rel_path = os.path.relpath(path, analyzer.parameters.full_output_path).replace(os.sep, '/')
+        return f'<a href="{rel_path}" target="_blank">Open</a>'
+
+    html_parts.append('''
+                    </div>
+                    <div class="card" style="margin-top: 30px;">
+                        <h3>Conserved Graph Visualizations</h3>
+                        <table>
+                            <thead>
+                                <tr>
+                                    <th>Threshold</th>
+                                    <th>Conserved Paths</th>
+                                    <th>Conserved Reciprocal Graph</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+    ''')
+
+    for threshold in thresholds:
+        conserved_path_file = os.path.join(
+            analyzer.parameters.full_output_path,
+            'conserved_paths',
+            f'conserved_network_t{threshold}_network.html'
+        )
+        conserved_recip_file = os.path.join(
+            analyzer.parameters.full_output_path,
+            'conserved_reciprocal_graph',
+            f'conserved_reciprocal_t{threshold}_network.html'
+        )
+        html_parts.append(
+            f'<tr><td><strong>t={threshold}</strong></td>'
+            f'<td>{_make_link(conserved_path_file)}</td>'
+            f'<td>{_make_link(conserved_recip_file)}</td></tr>'
+        )
+
+    html_parts.append('''
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        </div>
+    ''')
     return ''.join(html_parts)
 
 

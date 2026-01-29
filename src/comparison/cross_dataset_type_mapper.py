@@ -161,6 +161,19 @@ class CrossDatasetTypeMapper:
             )
         
         self._workspace_path = workspace_path
+
+    @staticmethod
+    def _split_hemi_suffix(type_name: str) -> Tuple[str, str]:
+        """Split hemisphere suffix (_L/_R/_U) from a type name.
+
+        Returns (base, suffix) where suffix includes leading underscore.
+        """
+        if not isinstance(type_name, str):
+            return type_name, ''
+        for suffix in ('_L', '_R', '_U'):
+            if type_name.endswith(suffix):
+                return type_name[:-2], suffix
+        return type_name, ''
     
     def _log(self, message: str, level: str = 'info'):
         """Print message if verbose mode enabled."""
@@ -436,10 +449,15 @@ class CrossDatasetTypeMapper:
         
         if src_ds == tgt_ds:
             return type_name
+
+        base_name, hemi_suffix = self._split_hemi_suffix(type_name)
         
         if src_ds in self._type_mappings:
-            if type_name in self._type_mappings[src_ds]:
-                return self._type_mappings[src_ds][type_name].get(tgt_ds)
+            if base_name in self._type_mappings[src_ds]:
+                mapped = self._type_mappings[src_ds][base_name].get(tgt_ds)
+                if mapped and hemi_suffix:
+                    return f"{mapped}{hemi_suffix}"
+                return mapped
         
         return None
     
@@ -520,16 +538,18 @@ class CrossDatasetTypeMapper:
         if not self._loaded:
             return None
         
+        base_name, _ = self._split_hemi_suffix(type_name)
+
         # Check in priority order
         for dataset in DATASET_PRIORITY:
             norm_ds = self._normalize_dataset_name(dataset)
             if norm_ds in self._type_mappings:
-                if type_name in self._type_mappings[norm_ds]:
+                if type_name in self._type_mappings[norm_ds] or base_name in self._type_mappings[norm_ds]:
                     return norm_ds
             
             # Also check the dataset_types index
             if norm_ds in self._dataset_types:
-                if type_name in self._dataset_types[norm_ds]:
+                if type_name in self._dataset_types[norm_ds] or base_name in self._dataset_types[norm_ds]:
                     return norm_ds
         
         return None
@@ -633,20 +653,24 @@ class CrossDatasetTypeMapper:
         Returns:
             Display name with alternative names in parentheses.
         """
-        mappings = self.resolve_type_across_datasets(type_name, datasets, source_dataset)
+        base_name, hemi_suffix = self._split_hemi_suffix(type_name)
+        mappings = self.resolve_type_across_datasets(base_name, datasets, source_dataset)
         
         # Get male-cns name as canonical (primary display name)
         mcns_name = mappings.get('male-cns:v0.9') or mappings.get('male-cns_v0_9')
         
         if not mcns_name:
             # Use the original type name as canonical
-            mcns_name = type_name
+            mcns_name = base_name
+        canonical_base = mcns_name
+        if hemi_suffix:
+            mcns_name = f"{mcns_name}{hemi_suffix}"
         
         # Collect unique alternative names (different from canonical)
         alt_names = set()
         for ds, mapped_name in mappings.items():
-            if mapped_name and mapped_name != mcns_name:
-                alt_names.add(mapped_name)
+            if mapped_name and mapped_name != canonical_base:
+                alt_names.add(f"{mapped_name}{hemi_suffix}" if hemi_suffix else mapped_name)
         
         if alt_names:
             # Sort for consistent ordering, join with /
@@ -672,7 +696,8 @@ class CrossDatasetTypeMapper:
         Returns:
             Tuple of (display_name, {dataset_code: name_in_that_dataset}).
         """
-        mappings = self.resolve_type_across_datasets(type_name, datasets, source_dataset)
+        base_name, hemi_suffix = self._split_hemi_suffix(type_name)
+        mappings = self.resolve_type_across_datasets(base_name, datasets, source_dataset)
         display_name = self.get_display_name(type_name, datasets, source_dataset)
         
         # Build dataset code -> name mapping for hover info
@@ -680,7 +705,7 @@ class CrossDatasetTypeMapper:
         for ds, mapped_name in mappings.items():
             if mapped_name:
                 code = self.get_dataset_short_code(ds)
-                dataset_names[code] = mapped_name
+                dataset_names[code] = f"{mapped_name}{hemi_suffix}" if hemi_suffix else mapped_name
         
         return display_name, dataset_names
     
@@ -820,6 +845,15 @@ class CrossDatasetTypeMapper:
                 raise RuntimeError("Cannot export: mappings not loaded")
         
         rows = []
+
+        # Normalize filter types (strip hemisphere suffixes)
+        normalized_filter_types = None
+        if filter_types:
+            normalized_filter_types = set()
+            for t in filter_types:
+                base, _ = self._split_hemi_suffix(t)
+                if base:
+                    normalized_filter_types.add(base)
         
         # Determine which columns/datasets to include
         all_datasets = ['male-cns:v0.9', 'flywire_FAFB_v783', 'flywire_BANC_v626', 
@@ -846,10 +880,10 @@ class CrossDatasetTypeMapper:
                     row[ds] = target_maps.get(ds, '')
             
             # Filter if filter_types is provided
-            if filter_types is not None:
+            if normalized_filter_types is not None:
                 # Check if any type in this row is in filter_types
                 row_types = {v for v in row.values() if v}
-                if not row_types.intersection(filter_types):
+                if not row_types.intersection(normalized_filter_types):
                     continue  # Skip this row
             
             # Filter out identical mappings if only_different is True
@@ -872,8 +906,8 @@ class CrossDatasetTypeMapper:
         df.to_csv(output_path, index=False)
         
         filter_parts = []
-        if filter_types:
-            filter_parts.append(f"filtered to {len(filter_types)} result types")
+        if normalized_filter_types:
+            filter_parts.append(f"filtered to {len(normalized_filter_types)} result types")
         if only_different:
             filter_parts.append("only different mappings")
         if datasets:

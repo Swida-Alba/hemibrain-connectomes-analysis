@@ -52,6 +52,14 @@ The output folder name includes parameters used:
 *   **`{folder_name}_Sankey.html`**: Sankey flow diagram of pathways
 *   **`bodyId_visualization/`**: Per-bodyId network visualizations (if generated)
 
+#### Hemisphere Symmetry (`hemisphere_symmetry/`)
+When `symmetry_analysis=True`, per-threshold hemisphere symmetry outputs are saved:
+*   **`symmetry_summary.json`**: Ipsilateral/contralateral Jaccard and conserved/union counts
+*   **`symmetry_ipsi.csv`**: L-L vs R-R edge comparisons
+*   **`symmetry_contra.csv`**: L-R vs R-L edge comparisons
+*   **`conserved_edges.csv`** / **`unconserved_edges.csv`**: Hemisphere-conserved edge lists
+*   **`pairwise_strength.csv`**: Weight comparisons for matched hemisphere edge pairs
+
 #### Data Details Subfolder
 Detailed neuron and parameter data saved in the `data_details/` subfolder:
 *   **`{query_name}_info_snp{n}_source_info.csv`**: Source neurons with full metadata
@@ -184,6 +192,20 @@ Outputs are saved in a user-defined output folder: `comparison_results_{timestam
 
 #### Dataset Data Subfolder (`dataset_data/`)
 *   Raw `FindNeuronConnection` outputs for each dataset (see Section 1).
+
+##### Hemisphere Symmetry Outputs (`hemisphere_symmetry/`)
+When `symmetry_analysis=True`, each dataset/threshold includes:
+*   **`symmetry_summary.json`**: Jaccard and conserved/union counts for ipsilateral and contralateral edges
+*   **`symmetry_ipsi.csv`** / **`symmetry_contra.csv`**: Per-edge hemisphere comparison tables
+*   **`conserved_edges.csv`** / **`unconserved_edges.csv`**: Hemisphere-conserved vs unconserved edges
+*   **`pairwise_strength.csv`**: Weight comparisons for matched hemisphere edge pairs
+
+##### Reciprocal Outputs (`find_reciprocal/`)
+When `find_reciprocal=True`, each dataset/threshold includes:
+*   **`reciprocal_connection_type.csv`**: Type-level reciprocal connections
+*   **`reciprocal_connection_custom_groups.csv`**: Custom-group reciprocal connections (if groups provided)
+*   **`reciprocal_connection_bodyId.csv`**: BodyId-level reciprocal connections (if enabled)
+*   **`visualizations/`**: Reciprocal network and heatmap HTML outputs
 
 #### Used Data Subfolder (`comparison_report_used_data/`)
 *   Processed data files used to generate the HTML report.

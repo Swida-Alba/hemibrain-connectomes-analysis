@@ -8,7 +8,7 @@ across different datasets with varying naming conventions.
 import os
 import json
 import pandas as pd
-from typing import Dict, List, Union, Optional, Any
+from typing import Dict, List, Union, Optional, Any, Tuple
 from collections import defaultdict
 
 
@@ -697,6 +697,19 @@ class LabelMapper:
             return column  # FlyWire names typically don't have colons
         else:
             return column
+
+    @staticmethod
+    def _split_hemi_suffix(label: str) -> Tuple[str, str]:
+        """Split hemisphere suffix (_L/_R/_U) from a label.
+
+        Returns (base, suffix) where suffix includes leading underscore.
+        """
+        if not isinstance(label, str):
+            return label, ''
+        for suffix in ('_L', '_R', '_U'):
+            if label.endswith(suffix):
+                return label[:-2], suffix
+        return label, ''
     
     def get_std_label(self, dataset: str, original_id: Union[str, int], role: str) -> str:
         """
@@ -727,6 +740,14 @@ class LabelMapper:
         sanitized = self._sanitize_dataset_name(dataset)
         if sanitized in reverse and str_id in reverse[sanitized]:
             return reverse[sanitized][str_id]
+
+        # Try base label without hemisphere suffix and re-apply suffix
+        base_id, hemi_suffix = self._split_hemi_suffix(str_id)
+        if hemi_suffix:
+            if dataset in reverse and base_id in reverse[dataset]:
+                return f"{reverse[dataset][base_id]}{hemi_suffix}"
+            if sanitized in reverse and base_id in reverse[sanitized]:
+                return f"{reverse[sanitized][base_id]}{hemi_suffix}"
         
         # Auto-generate label
         return self.auto_generate_label(original_id)
@@ -757,6 +778,15 @@ class LabelMapper:
             sanitized = self._sanitize_dataset_name(dataset)
             if sanitized in mapping[std_label]:
                 return mapping[std_label][sanitized]
+
+        # Fallback: strip hemisphere suffix and try base label
+        base_label, _ = self._split_hemi_suffix(std_label)
+        if base_label in mapping:
+            if dataset in mapping[base_label]:
+                return mapping[base_label][dataset]
+            sanitized = self._sanitize_dataset_name(dataset)
+            if sanitized in mapping[base_label]:
+                return mapping[base_label][sanitized]
         
         return []
     

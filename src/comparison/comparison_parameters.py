@@ -281,6 +281,28 @@ class ComparisonParameters:
     """If True, skip bodyId-level data saving, visualization, and calculations.
     Useful for large-scale analyses where only type-level data is needed."""
 
+    find_reciprocal: bool = False
+    """If True, FindAllPath enriches the path graph by finding all direct connections
+    among nodes in the path graph and saves results in a find_reciprocal subfolder."""
+
+    separate_hemispheres: bool = False
+    """Whether to separate left/right hemisphere neurons in type/custom-group aggregation.
+    When True, type/custom_group labels are suffixed with _L/_R/_U based on hemisphere info.
+    Note: Even when False, hemisphere analysis (symmetry_analysis, keep_only_hemisphere_conserved_connections)
+    still works by extracting hemisphere info from type labels that have _L/_R/_U suffixes."""
+
+    symmetry_analysis: bool = True
+    """If True, compute hemisphere symmetry analysis per dataset/threshold (symmetric datasets only).
+    Analysis extracts hemisphere info from type labels (_L/_R/_U suffixes) and compares
+    L vs R connections. Works regardless of separate_hemispheres setting."""
+
+    keep_only_hemisphere_conserved_connections: bool = False
+    """If True, keep only edges that are conserved between hemispheres in cross-dataset
+    comparison. An edge is conserved if both it and its mirror counterpart exist
+    (e.g., A_L->B_L paired with A_R->B_R). This filtering is applied to edges that have
+    hemisphere suffixes (_L/_R/_U) in their type labels - edges without hemisphere info
+    are kept as-is. Works regardless of separate_hemispheres setting."""
+
     max_edges_for_metrics: Optional[int] = 50000
     """Maximum number of edges to compute similarity metrics for.
     If the aligned data has more edges than this threshold, expensive metrics
@@ -420,6 +442,25 @@ class ComparisonParameters:
         # Sort thresholds
         self.thresholds = sorted(self.thresholds)
         
+        # Hemisphere analysis validation and enforcement
+        # When separate_hemispheres=True, always enable symmetry_analysis
+        if self.separate_hemispheres:
+            if not self.symmetry_analysis:
+                self.symmetry_analysis = True
+                if self.verbose:
+                    print("\033[36mℹ️  symmetry_analysis automatically enabled (separate_hemispheres=True)\033[0m")
+        else:
+            # When separate_hemispheres=False, warn and disable keep_only_hemisphere_conserved_connections
+            if self.keep_only_hemisphere_conserved_connections:
+                print("\033[33m⚠️  Warning: keep_only_hemisphere_conserved_connections=True requires separate_hemispheres=True.\n"
+                      "   Setting keep_only_hemisphere_conserved_connections=False.\033[0m")
+                self.keep_only_hemisphere_conserved_connections = False
+            # Symmetry analysis also requires separate_hemispheres
+            if self.symmetry_analysis:
+                if self.verbose:
+                    print("\033[33m⚠️  Note: symmetry_analysis requires separate_hemispheres=True to produce meaningful results.\n"
+                          "   Symmetry section will show a notice in the HTML report.\033[0m")
+        
         # Validate comparison_mode
         valid_modes = ['path', 'edge']
         if self.comparison_mode not in valid_modes:
@@ -439,11 +480,18 @@ class ComparisonParameters:
                 "Set allow_single_dataset=True for single-dataset threshold sensitivity analysis."
             )
 
+        # Warn about FAFB hemisphere annotation when mixed datasets are used
+        dataset_names = self.get_dataset_names()
+        has_fafb = any('fafb' in str(ds).lower() or 'flywire' in str(ds).lower() for ds in dataset_names)
+        has_neuprint = any('fafb' not in str(ds).lower() and 'flywire' not in str(ds).lower() for ds in dataset_names)
+        if has_fafb and has_neuprint and len(dataset_names) > 1:
+            print("\033[33m⚠️  FAFB hemisphere labels are reversed relative to NeuPrint datasets.\n"
+                  "   Interpret L/R comparisons across FAFB vs NeuPrint with caution.\033[0m")
+
         # Print initialization summary
         if self.verbose:
             print("\n=== ComparisonParameters Initialization Summary ===")
             print(f"Datasets Included ({len(self.datasets)}):")
-            dataset_names = self.get_dataset_names()
             for i, ds in enumerate(self.datasets):
                 nickname = self.datasets_nickname[i] if self.datasets_nickname and i < len(self.datasets_nickname) else "N/A"
                 print(f"  - {ds} (Nickname: {nickname})")
@@ -495,6 +543,10 @@ class ComparisonParameters:
             if self.auto_type_mapping and self._auto_type_mapper:
                 print(f"  └─ Type mapper loaded successfully")
             print(f"Comparison Mode: {self.comparison_mode}")
+            print(f"Separate Hemispheres: {self.separate_hemispheres}")
+            print(f"Hemisphere Symmetry Analysis: {self.symmetry_analysis}")
+            print(f"Keep Only Hemisphere-Conserved: {self.keep_only_hemisphere_conserved_connections}")
+            print(f"Find Reciprocal: {self.find_reciprocal}")
             print("===================================================\n")
         
         if not self.thresholds:
@@ -1112,6 +1164,10 @@ class ComparisonParameters:
             
             # Data fetching options
             'skip_bodyId': self.skip_bodyId,
+            'find_reciprocal': self.find_reciprocal,
+            'separate_hemispheres': self.separate_hemispheres,
+            'symmetry_analysis': self.symmetry_analysis,
+            'keep_only_hemisphere_conserved_connections': self.keep_only_hemisphere_conserved_connections,
             'max_edges_for_metrics': self.max_edges_for_metrics,
             'force_API_fetching': self.force_API_fetching,
             

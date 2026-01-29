@@ -5058,8 +5058,13 @@ def process_paths_streaming(path_gen, conn_data, targets, output_path,
             
     return total_saved
 
-def EnrichConnectionTable(conn_table, traversal_probability_threshold=0, dataset=None, script_path=None, target_neurons_df=None, aggregate_method='product', label_mapper=None):
+def EnrichConnectionTable(conn_table, traversal_probability_threshold=0, dataset=None, script_path=None, target_neurons_df=None, aggregate_method='product', label_mapper=None, separate_hemispheres=False):
     '''Add traversal probability, connection ratio, and layer information to the connection table
+    
+    NOTE: When separate_hemispheres=True, the caller is expected to have already applied
+    hemisphere suffixes (_L/_R/_U) to type_pre/type_post columns. This function will
+    aggregate by those already-suffixed types. The parameter is accepted for API
+    compatibility but does not change the aggregation behavior.
     
     Parameters
     ----------
@@ -5081,6 +5086,9 @@ def EnrichConnectionTable(conn_table, traversal_probability_threshold=0, dataset
         - 'average': weighted average for direct parallel connections
     label_mapper : LabelMapper, optional
         LabelMapper object to standardize types in the local dataset for accurate ratio calculation.
+    separate_hemispheres : bool, optional
+        Whether hemisphere separation is enabled. The actual suffix application
+        should be done by the caller before passing the connection table.
     
     Returns
     -------
@@ -5259,9 +5267,38 @@ def EnrichConnectionTable(conn_table, traversal_probability_threshold=0, dataset
         
         if label_mapper:
             # 1. Apply explicit mappings (overwrite types for mapped neurons)
+            # IMPORTANT: When separate_hemispheres=True, type_pre/type_post may already have
+            # hemisphere suffixes (e.g., "PPL101_L"). mapped_dict contains base types (e.g., "PPL101").
+            # We need to preserve the hemisphere suffix when applying the mapping.
             if mapped_dict:
-                conn_df['type_pre'] = conn_df['bodyId_pre'].map(mapped_dict).fillna(conn_df['type_pre'])
-                conn_df['type_post'] = conn_df['bodyId_post'].map(mapped_dict).fillna(conn_df['type_post'])
+                if separate_hemispheres:
+                    # Helper to extract hemisphere suffix from type name
+                    def extract_hemi_suffix(type_name):
+                        if pd.notna(type_name) and isinstance(type_name, str):
+                            if type_name.endswith('_L'):
+                                return '_L'
+                            elif type_name.endswith('_R'):
+                                return '_R'
+                            elif type_name.endswith('_U'):
+                                return '_U'
+                        return ''
+                    
+                    # Apply mapping to pre neurons, preserving hemisphere suffix
+                    mapped_pre = conn_df['bodyId_pre'].map(mapped_dict)
+                    hemi_suffix_pre = conn_df['type_pre'].apply(extract_hemi_suffix)
+                    mapped_pre_with_suffix = mapped_pre.astype(str) + hemi_suffix_pre
+                    # Only apply where mapping exists (mapped_pre is not NaN)
+                    conn_df['type_pre'] = mapped_pre_with_suffix.where(mapped_pre.notna(), conn_df['type_pre'])
+                    
+                    # Apply mapping to post neurons, preserving hemisphere suffix
+                    mapped_post = conn_df['bodyId_post'].map(mapped_dict)
+                    hemi_suffix_post = conn_df['type_post'].apply(extract_hemi_suffix)
+                    mapped_post_with_suffix = mapped_post.astype(str) + hemi_suffix_post
+                    conn_df['type_post'] = mapped_post_with_suffix.where(mapped_post.notna(), conn_df['type_post'])
+                else:
+                    # No hemisphere separation: apply mapping directly
+                    conn_df['type_pre'] = conn_df['bodyId_pre'].map(mapped_dict).fillna(conn_df['type_pre'])
+                    conn_df['type_post'] = conn_df['bodyId_post'].map(mapped_dict).fillna(conn_df['type_post'])
             
             # 2. Fill unknowns with type_map (original types + mapped types)
             # This preserves existing valid types in conn_df that were NOT mapped, preventing fallback to bodyIds

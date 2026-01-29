@@ -15,6 +15,7 @@ The **Custom Groups** feature allows you to define arbitrary neuron groupings be
 ✅ **Optimized Performance**: Dedicated group-level DFS ensures fast pathfinding (10-100x faster than bodyId→group conversion)  
 ✅ **Hierarchical Analysis**: Analyze at bodyId, type, AND custom group levels simultaneously  
 ✅ **Automatic Aggregation**: Connection metrics properly aggregated from bodyId to group level  
+✅ **Hemisphere-Aware Grouping**: When `separate_hemispheres=True`, group labels are split into `_L/_R/_U` subgroups based on neuron hemisphere
 
 ---
 
@@ -68,6 +69,15 @@ When `custom_group` column exists, you get additional output:
 
 #### Visualizations
 - `custom_groups/` folder: Network and Sankey diagrams for group-level paths
+
+### Hemisphere-Aware Group Splitting
+
+When `separate_hemispheres=True`, each custom group is split into hemisphere-specific subgroups:
+
+- `Sensory_A` → `Sensory_A_L`, `Sensory_A_R`, `Sensory_A_U`
+- `KC_Gamma` → `KC_Gamma_L`, `KC_Gamma_R`, `KC_Gamma_U`
+
+This ensures group-level aggregation preserves left/right separation in both pathfinding and outputs.
 
 ---
 

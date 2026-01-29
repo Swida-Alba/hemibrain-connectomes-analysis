@@ -8,13 +8,13 @@ A comprehensive Python toolkit for analyzing and visualizing connectome data fro
 
 ## ✨ Key Features
 
-| Category              | Features                                                           |
-| --------------------- | ------------------------------------------------------------------ |
-| **🗄️ Dataset Support** | Inter-dataset analysis and comprehensive dataset support           |
-| **🔬 EM↔LM Mapping**   | NeuronBridge integration for GAL4/Split-GAL4 driver line discovery |
-| **🎨 Visualization**   | 3D skeletons, interactive networks, Sankey diagrams, heatmaps      |
-| **📊 Analysis**        | Multi-hop pathfinding, cross-dataset comparison, homolog finding   |
-| **⚡ Performance**     | 10-100x speedup with local caching, Polars acceleration            |
+| Category              | Features                                                                   |
+| --------------------- | -------------------------------------------------------------------------- |
+| **🗄️ Dataset Support** | Inter-dataset analysis and comprehensive dataset support                   |
+| **🔬 EM↔LM Mapping**   | NeuronBridge integration for GAL4/Split-GAL4 driver line discovery         |
+| **🎨 Visualization**   | 3D skeletons, interactive networks, Sankey diagrams, heatmaps              |
+| **📊 Analysis**        | Multi-hop pathfinding, cross-dataset comparison, hemisphere-aware analysis |
+| **⚡ Performance**     | 10-100x speedup with local caching, Polars acceleration                    |
 
 ---
 
@@ -105,6 +105,30 @@ fc.InitializeNeuronInfo()
 fc.FindDirectConnection()  # Direct connections
 # or
 fc.FindAllPath()           # Multi-hop pathways
+```
+
+### Hemisphere-Aware Cross-Dataset Comparison
+
+Enable hemisphere-aware aggregation and symmetry analysis in cross-dataset comparisons:
+
+```python
+from comparison import ComparisonParameters, ComparisonAnalyzer
+
+params = ComparisonParameters(
+    datasets=['male-cns:v0.9', 'flywire_FAFB_v783'],
+    source_neurons=['aMe12'],
+    target_neurons=['PPL101'],
+    thresholds=[1, 3, 5],
+    output_folder='/path/to/output',
+    separate_hemispheres=True,  # Adds _L/_R/_U suffixes at type/group level
+    keep_only_hemisphere_conserved_connections=True,  # Keep only L/R-conserved edges
+    symmetry_analysis=True,     # Auto-enabled when separate_hemispheres=True
+    find_reciprocal=True,       # Build reciprocal graphs and reports
+)
+
+analyzer = ComparisonAnalyzer(params, verbose=True)
+analyzer.run_comparison()
+analyzer.generate_report()
 ```
 
 ### Available Methods

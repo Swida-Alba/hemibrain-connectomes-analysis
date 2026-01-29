@@ -135,6 +135,53 @@ Cross-dataset comparison analyzes the same neural circuit query across multiple 
 
 ---
 
+## Hemisphere-Aware Comparison
+
+Use these settings to split types by hemisphere, compute symmetry statistics, and optionally filter to hemisphere-conserved edges.
+
+### Key Parameters
+
+| Parameter                                    | Type | Default | Description                                                                                                                                                                       |
+| -------------------------------------------- | ---- | ------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `separate_hemispheres`                       | bool | False   | When True, type/group labels are suffixed with `_L/_R/_U` using dataset hemisphere annotations. All type-level and custom-group aggregations are split by hemisphere.             |
+| `symmetry_analysis`                          | bool | True    | Generates per-dataset, per-threshold hemisphere symmetry summaries (ipsilateral vs contralateral). Auto-enabled when `separate_hemispheres=True`.                                 |
+| `keep_only_hemisphere_conserved_connections` | bool | False   | When True, keep only edges that are conserved between hemispheres (e.g., `A_L→B_L` and `A_R→B_R`). Requires `separate_hemispheres=True` and is disabled with a warning otherwise. |
+
+### Notes and Behavior
+
+- When `separate_hemispheres=True`, the comparison report includes a Hemisphere Symmetry section with Jaccard and conserved/union metrics.
+- When `separate_hemispheres=False`, the HTML report shows a notice that hemisphere symmetry is unavailable.
+- FlyWire FAFB uses reversed hemisphere annotation relative to NeuPrint datasets. The comparison prints a warning when mixing FAFB with NeuPrint.
+
+### Example
+
+```python
+params = ComparisonParameters(
+    datasets=['male-cns:v0.9', 'flywire_FAFB_v783'],
+    source_neurons=['aMe12'],
+    target_neurons=['PPL101'],
+    thresholds=[1, 3, 5],
+    output_folder='/path/to/output',
+    separate_hemispheres=True,
+    symmetry_analysis=True,  # Auto-enabled when separate_hemispheres=True
+    keep_only_hemisphere_conserved_connections=True,
+)
+```
+
+---
+
+## Reciprocal Analysis (`find_reciprocal`)
+
+When enabled, the path graph is enriched with direct reciprocal connections and additional visualizations are generated.
+
+### Behavior
+
+- `find_reciprocal=True` triggers reciprocal edge discovery in `FindAllPath`.
+- Reciprocal graphs and CSVs are saved under each dataset’s `find_reciprocal/` folder.
+- The comparison report includes reciprocal visualizations when available.
+
+---
+
 ## Usage Examples
 
 ### Example 1: Basic Two-Dataset Comparison

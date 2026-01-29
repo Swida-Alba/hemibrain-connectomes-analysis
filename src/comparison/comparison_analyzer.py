@@ -81,6 +81,7 @@ class ComparisonAnalyzer:
         self.parameters = parameters
         self.label_mapper = label_mapper
         self.verbose = verbose
+        self.separate_hemispheres = parameters.separate_hemispheres
         
         # Track if a mapper was explicitly provided
         has_user_mapper = self.label_mapper is not None or self.parameters.overall_label_mapper is not None
@@ -106,6 +107,8 @@ class ComparisonAnalyzer:
         
         # Cache for expensive calculations (reused across export/visualizations)
         self._similarity_cache: Dict[int, pd.DataFrame] = {}  # threshold -> similarities
+        self._hemisphere_symmetry_cache: Dict[int, Dict[str, Dict]] = {}
+        self._network_aligned_cache: Dict[int, pd.DataFrame] = {}
         self._output_base_printed: bool = False  # Track if base dir was printed
         
         # Resolve dataset configurations from strings
@@ -302,6 +305,47 @@ class ComparisonAnalyzer:
         
         # Filter to only string types
         return {t for t in all_types if isinstance(t, str)}
+
+    def get_hemisphere_symmetry_summaries(self) -> Dict[int, Dict[str, Dict]]:
+        """Load hemisphere symmetry summaries for all datasets and thresholds.
+
+        Returns:
+            Dict mapping threshold -> {dataset_name: summary_dict}
+        """
+        if not self.parameters.symmetry_analysis:
+            return {}
+
+        dataset_names = self.parameters.get_dataset_names()
+        thresholds = self.parameters.thresholds
+        summaries: Dict[int, Dict[str, Dict]] = {}
+
+        for threshold in thresholds:
+            if threshold in self._hemisphere_symmetry_cache:
+                summaries[threshold] = self._hemisphere_symmetry_cache[threshold]
+                continue
+
+            threshold_summaries: Dict[str, Dict] = {}
+            for dataset in dataset_names:
+                safe_name = self.parameters._sanitize_name(dataset)
+                summary_path = os.path.join(
+                    self.parameters.full_output_path,
+                    'dataset_data',
+                    safe_name,
+                    f'minsyn_{threshold}',
+                    'hemisphere_symmetry',
+                    'symmetry_summary.json'
+                )
+                if os.path.exists(summary_path):
+                    try:
+                        with open(summary_path, 'r', encoding='utf-8') as f:
+                            threshold_summaries[dataset] = json.load(f)
+                    except Exception as e:
+                        self._log(f"Warning: Failed to load symmetry summary for {dataset} t={threshold}: {e}", level='warn')
+
+            self._hemisphere_symmetry_cache[threshold] = threshold_summaries
+            summaries[threshold] = threshold_summaries
+
+        return summaries
     
     def get_mapped_results(self) -> Dict[str, Dict[int, pd.DataFrame]]:
         """Get raw_results with type mapping applied.
@@ -551,6 +595,9 @@ class ComparisonAnalyzer:
             pathfinding=self.parameters.pathfinding,  # Pass pathfinding algorithm
             force_API_fetching=use_force_api,  # Use CAVE API for FAFB if enabled
             cache_only=self.parameters.cache_only,  # Use cache-only mode if enabled
+            separate_hemispheres=self.parameters.separate_hemispheres,
+            symmetry_analysis=self.parameters.symmetry_analysis,
+            keep_only_hemisphere_conserved_connections=self.parameters.keep_only_hemisphere_conserved_connections,
         )
         
         # Initialize and run analysis
@@ -558,7 +605,7 @@ class ComparisonAnalyzer:
         # "DO NOT use the FindDirectConnection() function, because the FindAllPath() 
         # function can already include direct connections as 1-hop paths"
         fnc.InitializeNeuronInfo()
-        fnc.FindAllPath()
+        fnc.FindAllPath(find_reciprocal=self.parameters.find_reciprocal)
         
         # Get results - FindAllPath saves both path data and connection data
         # For comparison metrics, we need the connection data (edge-level) format:
@@ -1871,8 +1918,164 @@ class ComparisonAnalyzer:
             label_mapper=None,
             type_mapper=type_mapper
         )
+
+        # Optionally filter edges to only hemisphere-conserved pairs
+        # Works for edges with _L/_R/_U suffixes; edges without hemisphere info are kept as-is
+        if self.parameters.keep_only_hemisphere_conserved_connections:
+            aligned = self._filter_hemisphere_unconserved(aligned, dataset_names, threshold)
         
         self.aligned_results[threshold] = aligned
+        return aligned
+
+    def get_aligned_data_for_network(self, threshold: int) -> pd.DataFrame:
+        """Get aligned edge data for network visualizations.
+
+        When find_reciprocal=True, this uses reciprocal_connection_type.csv
+        outputs (if available) to build the network graph.
+        """
+        if not self.parameters.find_reciprocal:
+            return self.get_aligned_data(threshold)
+
+        if threshold in self._network_aligned_cache:
+            return self._network_aligned_cache[threshold]
+
+        dataset_names = self.parameters.get_dataset_names()
+        type_mapper = self.parameters._auto_type_mapper if self.parameters.auto_type_mapping else None
+
+        # Build temporary raw_results from reciprocal files when available
+        reciprocal_results: Dict[str, Dict[int, pd.DataFrame]] = {}
+        for dataset in dataset_names:
+            reciprocal_results[dataset] = {}
+            safe_name = self.parameters._sanitize_name(dataset)
+            reciprocal_path = os.path.join(
+                self.parameters.full_output_path,
+                'dataset_data',
+                safe_name,
+                f'minsyn_{threshold}',
+                'find_reciprocal',
+                'reciprocal_connection_type.csv'
+            )
+            if os.path.exists(reciprocal_path):
+                try:
+                    df = self._read_csv(reciprocal_path)
+                    reciprocal_results[dataset][threshold] = df
+                except Exception as e:
+                    self._log(f"Warning: Failed to read reciprocal network data for {dataset} t={threshold}: {e}", level='warn')
+
+        # If no reciprocal data found, fall back to standard aligned data
+        has_any = any(threshold in reciprocal_results.get(ds, {}) for ds in dataset_names)
+        if not has_any:
+            return self.get_aligned_data(threshold)
+
+        aligned = self.metrics._align_results_at_threshold(
+            reciprocal_results,
+            dataset_names,
+            threshold,
+            label_mapper=None,
+            type_mapper=type_mapper
+        )
+
+        if self.parameters.keep_only_hemisphere_conserved_connections:
+            aligned = self._filter_hemisphere_unconserved(aligned, dataset_names, threshold)
+
+        self._network_aligned_cache[threshold] = aligned
+        return aligned
+
+    def _filter_hemisphere_unconserved(self, aligned: pd.DataFrame, dataset_names: List[str], 
+                                        threshold: int = None) -> pd.DataFrame:
+        """
+        Filter out hemisphere-unconserved edges and save them to a separate file.
+        
+        An edge is considered "conserved" if both it and its mirror counterpart
+        (L->L paired with R->R, or L->R paired with R->L) are present.
+        
+        Edges without hemisphere suffixes (_L/_R/_U) in their labels are kept as-is
+        since they cannot be evaluated for hemisphere conservation.
+        
+        Args:
+            aligned: Aligned edge data
+            dataset_names: List of dataset names
+            threshold: Optional threshold value for file naming
+            
+        Returns:
+            Filtered DataFrame with only conserved edges
+        """
+        if aligned is None or aligned.empty:
+            return aligned
+
+        def extract_hemi(label: str):
+            base = label.split('(')[0].strip() if '(' in label else label
+            hemi = None
+            if base.endswith(('_L', '_R', '_U')):
+                hemi = base[-1]
+                base = base[:-2]
+            return base, hemi
+
+        def opposite(hemi: str) -> str:
+            return 'R' if hemi == 'L' else 'L'
+
+        aligned = aligned.copy()
+        aligned.index = aligned.index.astype(str)
+        index_set = set(aligned.index)
+        
+        # Track unconserved edges for saving
+        unconserved_edges = []
+        unconserved_reasons = []
+
+        for edge_key in aligned.index:
+            if ' -> ' not in edge_key:
+                continue
+            pre, post = edge_key.split(' -> ', 1)
+            base_pre, hemi_pre = extract_hemi(pre)
+            base_post, hemi_post = extract_hemi(post)
+
+            if hemi_pre not in ('L', 'R') or hemi_post not in ('L', 'R'):
+                # Edge doesn't have proper L/R hemisphere info - keep it as-is
+                # (Cannot evaluate hemisphere conservation without hemisphere suffixes)
+                continue
+
+            if hemi_pre == hemi_post:
+                counterpart = f"{base_pre}_{opposite(hemi_pre)} -> {base_post}_{opposite(hemi_post)}"
+            else:
+                counterpart = f"{base_pre}_{opposite(hemi_pre)} -> {base_post}_{opposite(hemi_post)}"
+
+            if counterpart not in index_set:
+                original_weights = {ds: aligned.at[edge_key, ds] for ds in dataset_names if ds in aligned.columns and aligned.at[edge_key, ds] > 0}
+                if original_weights:
+                    unconserved_edges.append(edge_key)
+                    unconserved_reasons.append(f"Missing counterpart: {counterpart}")
+                aligned.loc[edge_key, dataset_names] = 0
+                continue
+
+            for ds in dataset_names:
+                if ds not in aligned.columns:
+                    continue
+                w = aligned.at[edge_key, ds]
+                w2 = aligned.at[counterpart, ds]
+                if not (w > 0 and w2 > 0):
+                    if w > 0:
+                        unconserved_edges.append(edge_key)
+                        unconserved_reasons.append(f"Counterpart {counterpart} has weight=0 in {ds}")
+                    aligned.at[edge_key, ds] = 0
+        
+        # Save unconserved edges to file
+        if unconserved_edges and hasattr(self, 'parameters') and self.parameters.full_output_path:
+            try:
+                results_dir = os.path.join(self.parameters.full_output_path, 'comparison_results')
+                os.makedirs(results_dir, exist_ok=True)
+                
+                threshold_suffix = f"_t{threshold}" if threshold else ""
+                unconserved_file = os.path.join(results_dir, f"hemisphere_unconserved_edges{threshold_suffix}.csv")
+                
+                unconserved_df = pd.DataFrame({
+                    'edge': unconserved_edges,
+                    'reason': unconserved_reasons
+                })
+                unconserved_df.to_csv(unconserved_file, index=False)
+                self._log(f"Saved {len(unconserved_edges)} unconserved edges to hemisphere_unconserved_edges{threshold_suffix}.csv")
+            except Exception as e:
+                self._log(f"Warning: Could not save unconserved edges: {e}")
+
         return aligned
     
     def get_common_connections(self, threshold: int) -> pd.DataFrame:
@@ -2013,6 +2216,42 @@ class ComparisonAnalyzer:
             lines.append(f"{threshold:>10} | {total_edges:>12} | {common_edges:>10} | {edge_rate:>9.1f}% | {total_paths:>12} | {path_rate:>9.1f}%")
         
         lines.append("")
+
+        # Hemisphere symmetry summary (per dataset & threshold)
+        symmetry_summaries = self.get_hemisphere_symmetry_summaries()
+        if symmetry_summaries:
+            lines.append("HEMISPHERE SYMMETRY SUMMARY:")
+            lines.append("-" * 70)
+            for threshold in self.parameters.thresholds:
+                summaries = symmetry_summaries.get(threshold, {})
+                if not summaries:
+                    continue
+                lines.append(f"Threshold t={threshold}:")
+                lines.append("  Dataset | Ipsi Jaccard | Contra Jaccard | Ipsi Conserved/Union | Contra Conserved/Union | Types Conserved/Union | Counts L/R")
+                lines.append("  " + "-" * 64)
+                for dataset in dataset_names:
+                    summary = summaries.get(dataset)
+                    if not summary:
+                        continue
+                    ipsi = summary.get('ipsi', {})
+                    contra = summary.get('contra', {})
+                    types = summary.get('neuron_types', {})
+                    counts = summary.get('hemisphere_counts', {}).get('total', {})
+                    ipsi_j = ipsi.get('jaccard', 0)
+                    contra_j = contra.get('jaccard', 0)
+                    ipsi_cons = f"{ipsi.get('conserved', 0)}/{ipsi.get('union', 0)}"
+                    contra_cons = f"{contra.get('conserved', 0)}/{contra.get('union', 0)}"
+                    types_cons = f"{types.get('types_conserved', 0)}/{types.get('types_union', 0)}"
+                    lr_counts = f"{counts.get('L', 0)}/{counts.get('R', 0)}"
+                    lines.append(
+                        f"  {dataset:<7} | {ipsi_j:>11.3f} | {contra_j:>13.3f} | {ipsi_cons:>19} | {contra_cons:>20} | {types_cons:>20} | {lr_counts:>9}"
+                    )
+                lines.append("")
+        else:
+            lines.append("HEMISPHERE SYMMETRY SUMMARY:")
+            lines.append("-" * 70)
+            lines.append("  (No hemisphere symmetry summaries found)")
+            lines.append("")
         
         # Edge counts per dataset per threshold
         lines.append("EDGE COUNTS PER DATASET:")
@@ -3069,6 +3308,28 @@ class ComparisonAnalyzer:
         summary_data = []
         type_counts = {}  # type -> {dataset: count}
         group_counts = {}  # group -> {dataset: count}
+
+        def _count_hemisphere(df: pd.DataFrame) -> Dict[str, int]:
+            if df is None or df.empty:
+                return {'L': 0, 'R': 0, 'U': 0}
+            hemi_col = None
+            for col in ['hemisphere', 'hemisphere_code', 'hemisphere_label', 'Soma side', 'soma_side']:
+                if col in df.columns:
+                    hemi_col = col
+                    break
+            counts = {'L': 0, 'R': 0, 'U': 0}
+            if hemi_col:
+                vals = df[hemi_col].astype(str).str.strip().str.upper()
+                counts['L'] = int((vals == 'L').sum())
+                counts['R'] = int((vals == 'R').sum())
+                counts['U'] = int((~vals.isin(['L', 'R'])).sum())
+                return counts
+            if 'type' in df.columns:
+                types = df['type'].astype(str)
+                counts['L'] = int(types.str.endswith('_L').sum())
+                counts['R'] = int(types.str.endswith('_R').sum())
+                counts['U'] = int(types.str.endswith('_U').sum())
+            return counts
         
         for dataset in dataset_names:
             safe_name = self.parameters._sanitize_name(dataset)
@@ -3082,12 +3343,15 @@ class ComparisonAnalyzer:
             target_count = 0
             source_df = None
             target_df = None
+            source_hemi = {'L': 0, 'R': 0, 'U': 0}
+            target_hemi = {'L': 0, 'R': 0, 'U': 0}
             
             # Load source neurons
             if os.path.exists(source_file):
                 try:
                     source_df = self._read_csv(source_file, dtype={'bodyId': str})
                     source_count = len(source_df)
+                    source_hemi = _count_hemisphere(source_df)
                     
                     # Count by type
                     if 'type' in source_df.columns:
@@ -3113,6 +3377,7 @@ class ComparisonAnalyzer:
                 try:
                     target_df = self._read_csv(target_file, dtype={'bodyId': str})
                     target_count = len(target_df)
+                    target_hemi = _count_hemisphere(target_df)
                     
                     # Count by type
                     if 'type' in target_df.columns:
@@ -3139,6 +3404,15 @@ class ComparisonAnalyzer:
                 'source_count': source_count,
                 'target_count': target_count,
                 'total_neurons': source_count + target_count,
+                'source_L': source_hemi['L'],
+                'source_R': source_hemi['R'],
+                'source_U': source_hemi['U'],
+                'target_L': target_hemi['L'],
+                'target_R': target_hemi['R'],
+                'target_U': target_hemi['U'],
+                'total_L': source_hemi['L'] + target_hemi['L'],
+                'total_R': source_hemi['R'] + target_hemi['R'],
+                'total_U': source_hemi['U'] + target_hemi['U'],
                 'source_types': source_df['type'].nunique() if source_df is not None and 'type' in source_df.columns else 0,
                 'target_types': target_df['type'].nunique() if target_df is not None and 'type' in target_df.columns else 0,
             })
@@ -3232,22 +3506,38 @@ class ComparisonAnalyzer:
                 if path_df is None or path_df.empty:
                     continue
                 
+                # Determine format: path column vs source/target columns
+                path_col = 'path' if 'path' in path_df.columns else 'path_str' if 'path_str' in path_df.columns else None
+                has_source_target_format = 'source' in path_df.columns and 'target' in path_df.columns
+                
+                if path_col is None and not has_source_target_format:
+                    continue
+                
                 # Extract path information
                 for _, row in path_df.iterrows():
-                    path_str = str(row.get('path', row.get('path_str', '')))
-                    if not path_str or path_str == 'nan':
-                        continue
-                    
-                    # Parse path string
-                    if '->' in path_str:
-                        path_nodes = [n.strip() for n in path_str.split('->')]
-                    elif path_str.startswith('['):
-                        try:
-                            path_nodes = ast.literal_eval(path_str)
-                        except:
+                    # Handle source/target format (e.g., from data_original_paths.csv)
+                    if path_col is None and has_source_target_format:
+                        source_node = str(row.get('source', ''))
+                        target_node = str(row.get('target', ''))
+                        if not source_node or source_node == 'nan' or not target_node or target_node == 'nan':
                             continue
+                        path_nodes = [source_node, target_node]
                     else:
-                        continue
+                        # Handle path/path_str format
+                        path_str = str(row.get('path', row.get('path_str', '')))
+                        if not path_str or path_str == 'nan':
+                            continue
+                        
+                        # Parse path string
+                        if '->' in path_str:
+                            path_nodes = [n.strip() for n in path_str.split('->')]
+                        elif path_str.startswith('['):
+                            try:
+                                path_nodes = ast.literal_eval(path_str)
+                            except:
+                                continue
+                        else:
+                            continue
                     
                     if len(path_nodes) < 2:
                         continue
@@ -3709,13 +3999,94 @@ class ComparisonAnalyzer:
                 continue
             
             # Extract path information from DataFrame using vectorized operations where possible
-            # Expected columns: path_str, path, weights, min_weight, length, etc.
+            # Expected columns: 
+            # Format 1 (allpaths_type.csv): path/path_str, weights, min_weight, length
+            # Format 2 (data_original_paths.csv): source, target, weight, weights, layer
             
-            # Get path column (try 'path' first, then 'path_str')
+            # Determine format: check for 'path' or 'path_str' column vs 'source'+'target' columns
             path_col = 'path' if 'path' in path_df.columns else 'path_str' if 'path_str' in path_df.columns else None
-            if path_col is None:
+            has_source_target_format = 'source' in path_df.columns and 'target' in path_df.columns
+            
+            if path_col is None and not has_source_target_format:
+                if not silent:
+                    self._log(f"Path file for {dataset} has no 'path' or 'source/target' columns")
                 continue
             
+            # Handle source/target format (e.g., from data_original_paths.csv)
+            if path_col is None and has_source_target_format:
+                # Create path strings from source/target columns
+                valid_mask = path_df['source'].notna() & path_df['target'].notna()
+                valid_paths = path_df[valid_mask].copy()
+                
+                if valid_paths.empty:
+                    continue
+                    
+                # Limit paths to prevent hanging on large datasets
+                if len(valid_paths) > max_paths_per_dataset:
+                    if 'weight' in valid_paths.columns:
+                        valid_paths = valid_paths.nlargest(max_paths_per_dataset, 'weight')
+                    else:
+                        valid_paths = valid_paths.head(max_paths_per_dataset)
+                    if not silent:
+                        self._log(f"  Limiting to top {max_paths_per_dataset} paths for {dataset}")
+                
+                # Process source-target format directly
+                for idx, row in valid_paths.iterrows():
+                    source_node = str(row['source'])
+                    target_node = str(row['target'])
+                    path_nodes = [source_node, target_node]
+                    
+                    # Build path key using canonical names for cross-dataset merging
+                    canonical_key, display_key = self._build_path_key_with_mapping(path_nodes, dataset)
+                    canonical_nodes = [self._get_canonical_type(node, dataset) for node in path_nodes]
+                    source = canonical_nodes[0]
+                    target = canonical_nodes[-1]
+                    path_key = canonical_key
+                    
+                    # Initialize path data if not exists
+                    if path_key not in path_data:
+                        path_data[path_key] = {'_display_key': display_key}
+                        path_details[path_key] = {
+                            'source': source,
+                            'target': target,
+                            'intermediates': [],
+                            'weights': {},
+                            'hop_weights': {}
+                        }
+                    
+                    # Mark as present
+                    path_data[path_key][safe_name] = True
+                    
+                    # Parse hop weights from weights column
+                    hop_weights_list = []
+                    weights_str = str(row.get('weights', ''))
+                    if weights_str and weights_str != 'nan':
+                        if weights_str.startswith('['):
+                            try:
+                                hop_weights_list = ast.literal_eval(weights_str)
+                            except:
+                                pass
+                        elif ',' in weights_str:
+                            try:
+                                hop_weights_list = [float(w.strip()) for w in weights_str.split(',')]
+                            except:
+                                pass
+                    
+                    if hop_weights_list:
+                        path_details[path_key]['hop_weights'][safe_name] = hop_weights_list
+                    
+                    # Get weight value
+                    weight = row.get('weight', 1)
+                    if pd.isna(weight):
+                        weight = hop_weights_list[0] if hop_weights_list else 1
+                    
+                    if safe_name not in path_details[path_key]['weights']:
+                        path_details[path_key]['weights'][safe_name] = []
+                    path_details[path_key]['weights'][safe_name].append(float(weight))
+                
+                continue  # Done with this dataset, skip the path_col logic below
+            
+            # Original path_col format handling (allpaths_type.csv with 'path' or 'path_str' column)
             # Vectorized: filter out null/empty paths
             valid_mask = path_df[path_col].notna() & (path_df[path_col].astype(str) != 'nan') & (path_df[path_col].astype(str) != '')
             valid_paths = path_df[valid_mask].copy()
@@ -4125,6 +4496,13 @@ class ComparisonAnalyzer:
         
         # Generate VisualizePath interactive heatmaps (no separate network files)
         self._generate_vispath_visualizations(vis_dir)
+
+        # Generate conserved reciprocal graphs when enabled
+        if getattr(self.parameters, 'find_reciprocal', False):
+            try:
+                self.visualize_conserved_reciprocal_graph_all_thresholds()
+            except Exception as e:
+                self._log(f"Warning: Failed to generate conserved reciprocal graphs: {e}")
     
     def _get_path_data_for_threshold(self, threshold: int) -> pd.DataFrame:
         """
@@ -4172,31 +4550,62 @@ class ComparisonAnalyzer:
                     except Exception as e:
                         self._log(f"Warning: Could not read {path_file}: {e}")
             
-            if df is not None and 'path' in df.columns and 'min_weight' in df.columns:
-                for _, row in df.iterrows():
-                    original_path_key = row['path']
-                    min_weight = row['min_weight']
-                    
-                    # Apply type mapping to path key if auto_type_mapping is enabled
-                    if self.parameters.auto_type_mapping and self.parameters._auto_type_mapper:
-                        # Parse path nodes
-                        if '->' in str(original_path_key):
-                            path_nodes = [n.strip() for n in str(original_path_key).split('->')]
-                        elif ' → ' in str(original_path_key):
-                            path_nodes = [n.strip() for n in str(original_path_key).split(' → ')]
-                        else:
-                            path_nodes = [str(original_path_key)]
+            if df is not None:
+                # Handle two formats:
+                # Format 1 (allpaths_type.csv): 'path' and 'min_weight' columns
+                # Format 2 (data_original_paths.csv): 'source', 'target', and 'weight' columns
+                has_path_format = 'path' in df.columns and 'min_weight' in df.columns
+                has_source_target_format = 'source' in df.columns and 'target' in df.columns and 'weight' in df.columns
+                
+                if has_path_format:
+                    for _, row in df.iterrows():
+                        original_path_key = row['path']
+                        min_weight = row['min_weight']
                         
-                        # Build canonical and display keys
-                        canonical_key, display_key = self._build_path_key_with_mapping(path_nodes, dataset_name)
-                        path_key = canonical_key  # Use canonical key for merging
-                    else:
-                        path_key = original_path_key
-                        display_key = original_path_key
-                    
-                    if path_key not in all_path_data:
-                        all_path_data[path_key] = {'_display_key': display_key}
-                    all_path_data[path_key][dataset_name] = min_weight
+                        # Apply type mapping to path key if auto_type_mapping is enabled
+                        if self.parameters.auto_type_mapping and self.parameters._auto_type_mapper:
+                            # Parse path nodes
+                            if '->' in str(original_path_key):
+                                path_nodes = [n.strip() for n in str(original_path_key).split('->')]
+                            elif ' → ' in str(original_path_key):
+                                path_nodes = [n.strip() for n in str(original_path_key).split(' → ')]
+                            else:
+                                path_nodes = [str(original_path_key)]
+                            
+                            # Build canonical and display keys
+                            canonical_key, display_key = self._build_path_key_with_mapping(path_nodes, dataset_name)
+                            path_key = canonical_key  # Use canonical key for merging
+                        else:
+                            path_key = original_path_key
+                            display_key = original_path_key
+                        
+                        if path_key not in all_path_data:
+                            all_path_data[path_key] = {'_display_key': display_key}
+                        all_path_data[path_key][dataset_name] = min_weight
+                
+                elif has_source_target_format:
+                    # Handle source/target format from data_original_paths.csv
+                    for _, row in df.iterrows():
+                        source = str(row['source'])
+                        target = str(row['target'])
+                        weight = row['weight']
+                        
+                        if pd.isna(source) or pd.isna(target) or source == 'nan' or target == 'nan':
+                            continue
+                        
+                        path_nodes = [source, target]
+                        
+                        # Apply type mapping if enabled
+                        if self.parameters.auto_type_mapping and self.parameters._auto_type_mapper:
+                            canonical_key, display_key = self._build_path_key_with_mapping(path_nodes, dataset_name)
+                            path_key = canonical_key
+                        else:
+                            path_key = f"{source} → {target}"
+                            display_key = path_key
+                        
+                        if path_key not in all_path_data:
+                            all_path_data[path_key] = {'_display_key': display_key}
+                        all_path_data[path_key][dataset_name] = weight
         
         if not all_path_data:
             return pd.DataFrame()
@@ -4588,6 +4997,158 @@ class ComparisonAnalyzer:
         
         result_df = pd.DataFrame([r[1] for r in result_rows], index=[r[0] for r in result_rows])
         return result_df.fillna(0)
+
+    def _get_edge_nt_consensus_for_threshold(self, threshold: int, reciprocal: bool = False) -> Dict[str, Optional[str]]:
+        """
+        Get consensus NT type per edge across datasets at a threshold.
+
+        - Ignores NaN/empty NT entries.
+        - If exactly one NT type is observed across datasets, returns that type.
+        - If multiple NT types are observed, returns None (inconsistent).
+
+        Args:
+            threshold: The threshold level
+            reciprocal: If True, use reciprocal_connection_type.csv files
+
+        Returns:
+            Dict mapping canonical edge_key ("pre -> post") to consensus NT type or None.
+        """
+        dataset_names = self.parameters.get_dataset_names()
+        nt_by_edge: Dict[str, set] = {}
+
+        for dataset_name in dataset_names:
+            safe_name = self.parameters._sanitize_name(dataset_name)
+            if reciprocal:
+                dataset_output_path = os.path.join(
+                    self.parameters.full_output_path,
+                    'dataset_data',
+                    safe_name,
+                    f'minsyn_{threshold}',
+                    'find_reciprocal'
+                )
+                conn_file = os.path.join(dataset_output_path, 'reciprocal_connection_type.csv')
+            else:
+                dataset_output_path = os.path.join(
+                    self.parameters.full_output_path,
+                    'dataset_data',
+                    safe_name,
+                    f'minsyn_{threshold}'
+                )
+                conn_file = os.path.join(dataset_output_path, 'connections_edge.csv')
+
+            df = None
+            if os.path.exists(conn_file) and os.path.getsize(conn_file) > 0:
+                try:
+                    df = self._read_csv(conn_file)
+                except Exception:
+                    df = None
+
+            if (df is None or df.empty) and not reciprocal:
+                fallback = os.path.join(dataset_output_path, 'data_details', 'connection_type.csv')
+                if os.path.exists(fallback) and os.path.getsize(fallback) > 0:
+                    try:
+                        df = self._read_csv(fallback)
+                    except Exception:
+                        df = None
+
+            if df is None or df.empty:
+                continue
+
+            if 'std_label_pre' in df.columns and 'std_label_post' in df.columns:
+                pre_col, post_col = 'std_label_pre', 'std_label_post'
+            elif 'type_pre' in df.columns and 'type_post' in df.columns:
+                pre_col, post_col = 'type_pre', 'type_post'
+            elif 'bodyId_pre' in df.columns and 'bodyId_post' in df.columns:
+                pre_col, post_col = 'bodyId_pre', 'bodyId_post'
+            else:
+                continue
+
+            if 'nt_type_pre' in df.columns:
+                nt_col = 'nt_type_pre'
+            elif 'nt_type' in df.columns:
+                nt_col = 'nt_type'
+            else:
+                continue
+
+            for _, row in df.iterrows():
+                pre_type = str(row[pre_col])
+                post_type = str(row[post_col])
+                nt_val = row.get(nt_col, None)
+                if pd.isna(nt_val):
+                    continue
+                nt_str = str(nt_val).strip()
+                if not nt_str:
+                    continue
+
+                if self.parameters.auto_type_mapping and self.parameters._auto_type_mapper:
+                    canonical_pre = self._get_canonical_type(pre_type, dataset_name)
+                    canonical_post = self._get_canonical_type(post_type, dataset_name)
+                else:
+                    canonical_pre = pre_type
+                    canonical_post = post_type
+
+                edge_key = f"{canonical_pre} -> {canonical_post}"
+                if edge_key not in nt_by_edge:
+                    nt_by_edge[edge_key] = set()
+                nt_by_edge[edge_key].add(nt_str)
+
+        if not nt_by_edge:
+            return {}
+
+        consensus: Dict[str, Optional[str]] = {}
+        for edge_key, nt_vals in nt_by_edge.items():
+            cleaned = {nt for nt in nt_vals if nt}
+            if len(cleaned) == 1:
+                consensus[edge_key] = next(iter(cleaned))
+            else:
+                consensus[edge_key] = None
+
+        return consensus
+
+    def _get_reciprocal_edge_ratio_data_for_threshold(self, threshold: int) -> pd.DataFrame:
+        """
+        Get edge-level connection_ratio data from reciprocal outputs for a threshold.
+
+        Reads from:
+        dataset_data/{dataset}/minsyn_{threshold}/find_reciprocal/reciprocal_connection_type.csv
+        """
+        dataset_names = self.parameters.get_dataset_names()
+        all_ratio_data = {}
+
+        for dataset_name in dataset_names:
+            safe_name = self.parameters._sanitize_name(dataset_name)
+            dataset_output_path = os.path.join(
+                self.parameters.full_output_path,
+                'dataset_data',
+                safe_name,
+                f'minsyn_{threshold}',
+                'find_reciprocal'
+            )
+
+            df = None
+            conn_file = os.path.join(dataset_output_path, 'reciprocal_connection_type.csv')
+            if os.path.exists(conn_file) and os.path.getsize(conn_file) > 0:
+                try:
+                    df = self._read_csv(conn_file)
+                except Exception:
+                    df = None
+
+            if df is None or df.empty or 'connection_ratio' not in df.columns:
+                continue
+
+            if 'type_pre' in df.columns and 'type_post' in df.columns:
+                df['edge_key'] = df['type_pre'].astype(str) + ' -> ' + df['type_post'].astype(str)
+            else:
+                continue
+
+            ratio_series = df.groupby('edge_key')['connection_ratio'].mean()
+            all_ratio_data[dataset_name] = ratio_series
+
+        if not all_ratio_data:
+            return pd.DataFrame()
+
+        result_df = pd.DataFrame(all_ratio_data).fillna(0)
+        return result_df
 
     def _generate_vispath_visualizations(self, vis_dir: str):
         """
@@ -5875,6 +6436,25 @@ class ComparisonAnalyzer:
         
         # Convert to DataFrame
         edges_df = pd.DataFrame(edge_list)
+
+        # Helper to extract canonical name from display name
+        def get_canonical_name(display_name: str) -> str:
+            if '(' in display_name:
+                return display_name.split('(')[0].strip()
+            return display_name
+
+        # Apply NT consensus coloring (gray if inconsistent)
+        nt_consensus = self._get_edge_nt_consensus_for_threshold(threshold, reciprocal=True)
+        if nt_consensus:
+            nt_types = []
+            for _, row in edges_df.iterrows():
+                src_canonical = get_canonical_name(row['source'])
+                tgt_canonical = get_canonical_name(row['target'])
+                edge_key = f"{src_canonical} -> {tgt_canonical}"
+                nt_types.append(nt_consensus.get(edge_key))
+            edges_df['nt_type'] = nt_types
+            if 'color_edges_by_nt' not in vispath_kwargs:
+                vispath_kwargs['color_edges_by_nt'] = True
         
         # Transform node labels to display format with dataset-specific names
         # Format: {canonical}({alt1}/{alt2}) for types that differ across datasets
@@ -5910,6 +6490,26 @@ class ComparisonAnalyzer:
                 edge_labels = new_edge_labels
                 
                 self._log(f"  Applied display names to {len(display_name_map)} nodes with cross-dataset name differences")
+
+        # Helper to extract canonical name from display name
+        # Handles format: "MeVPaMe1(MTe46)" -> "MeVPaMe1"
+        def get_canonical_name(display_name: str) -> str:
+            if '(' in display_name:
+                return display_name.split('(')[0].strip()
+            return display_name
+
+        # Apply NT consensus coloring (gray if inconsistent)
+        nt_consensus = self._get_edge_nt_consensus_for_threshold(threshold, reciprocal=False)
+        if nt_consensus:
+            nt_types = []
+            for _, row in edges_df.iterrows():
+                src_canonical = get_canonical_name(row['source'])
+                tgt_canonical = get_canonical_name(row['target'])
+                edge_key = f"{src_canonical} -> {tgt_canonical}"
+                nt_types.append(nt_consensus.get(edge_key))
+            edges_df['nt_type'] = nt_types
+            if 'color_edges_by_nt' not in vispath_kwargs:
+                vispath_kwargs['color_edges_by_nt'] = True
         
         # Identify source and target nodes from parameters
         # CRITICAL: Include ALL mapped type names across all datasets, not just original query types
@@ -5931,21 +6531,25 @@ class ComparisonAnalyzer:
         # Get all unique nodes
         all_nodes = set(edges_df['source'].unique()) | set(edges_df['target'].unique())
         
-        # Helper to extract canonical name from display name
-        # Handles format: "MeVPaMe1(MTe46)" -> "MeVPaMe1"
-        def get_canonical_name(display_name: str) -> str:
-            if '(' in display_name:
-                return display_name.split('(')[0].strip()
-            return display_name
+        # Helper to extract base name without hemisphere suffix
+        def get_base_name(label: str) -> str:
+            """Extract base name from label, removing hemisphere suffix like _L, _R, _U."""
+            base = get_canonical_name(label)
+            if base.endswith(('_L', '_R', '_U')):
+                return base[:-2]
+            return base
         
         # Classify nodes as source, target, or intermediate
         import re
+        separate_hemispheres = bool(getattr(self.parameters, 'separate_hemispheres', False))
+        
         def matches_patterns(node: str, patterns: list) -> bool:
-            """Check if node matches any pattern. Handles merged display names."""
+            """Check if node matches any pattern. Handles merged display names and hemisphere suffixes."""
             # Get canonical name for matching (handles merged display names)
             canonical = get_canonical_name(node)
-            # Check both the full label and canonical name
-            names_to_check = [node, canonical] if canonical != node else [node]
+            base = get_base_name(node)
+            # Check the full label, canonical name, and base name
+            names_to_check = list(set([node, canonical, base]))
             
             for name in names_to_check:
                 for pattern in patterns:
@@ -5953,10 +6557,16 @@ class ComparisonAnalyzer:
                         # Handle regex patterns
                         if '.*' in pattern or '*' in pattern:
                             regex = pattern.replace('.*', '.*').replace('*', '.*')
-                            if re.match(f'^{regex}$', name):
+                            if re.match(f'^{regex}$', name, re.IGNORECASE):
                                 return True
-                        elif name == pattern:
+                        elif name.lower() == pattern.lower():
                             return True
+                        # If separating hemispheres, allow exact base name to match suffixed labels
+                        elif separate_hemispheres and '.*' not in pattern and '*' not in pattern:
+                            if name.lower().startswith(pattern.lower() + '_'):
+                                suffix = name[len(pattern) + 1:]
+                                if suffix.upper() in ('L', 'R', 'U'):
+                                    return True
             return False
         
         source_nodes = {n for n in all_nodes if matches_patterns(n, source_patterns)}
@@ -6023,11 +6633,10 @@ class ComparisonAnalyzer:
             self._log("Warning: No edges remaining after trimming dead-ends.")
             return None
         
-        # Setup output path
+        # Setup output path (at root level, parallel to comparison_report.html)
         if output_folder is None:
             output_folder = os.path.join(
                 self.parameters.full_output_path,
-                "comparison_visualizations",
                 "conserved_paths"
             )
         os.makedirs(output_folder, exist_ok=True)
@@ -6047,6 +6656,7 @@ class ComparisonAnalyzer:
             dataset_legend=dataset_legend,  # Dataset short code legend for display names
             node_dataset_info=node_dataset_info,  # Node-level dataset info for hover labels
             verbose=self.verbose,
+            separate_hemispheres=self.parameters.separate_hemispheres,
             **vispath_kwargs
         )
         
@@ -6096,11 +6706,10 @@ class ComparisonAnalyzer:
         Returns:
             List of paths to generated HTML files.
         """
-        # Set up output folder for all thresholds
+        # Set up output folder for all thresholds (at root level, parallel to comparison_report.html)
         if output_folder is None:
             output_folder = os.path.join(
                 self.parameters.full_output_path,
-                "comparison_visualizations",
                 "conserved_paths"
             )
         os.makedirs(output_folder, exist_ok=True)
@@ -6123,6 +6732,267 @@ class ComparisonAnalyzer:
         if output_paths:
             self._log(f"  Generated {len(output_paths)} conserved path visualizations in: conserved_paths/")
         
+        return output_paths
+
+    # =========================================================================
+    # Conserved Reciprocal Graph Visualization
+    # =========================================================================
+
+    def visualize_conserved_reciprocal_graph(
+        self,
+        threshold: Optional[int] = None,
+        trim_dead_ends: bool = True,
+        output_folder: Optional[str] = None,
+        showfig: bool = False,
+        network_layout: str = 'hierarchical',
+        edge_width_scale: str = 'log',
+        **vispath_kwargs
+    ) -> Optional[str]:
+        """Visualize conserved edges from reciprocal graphs across datasets."""
+        try:
+            from vispath_pkg import VisualizePath
+        except ImportError:
+            self._log("Warning: vispath_pkg not available. Cannot generate conserved reciprocal visualization.")
+            return None
+
+        if not self.raw_results:
+            self._log("Warning: No comparison results. Run run_comparison() first.")
+            return None
+
+        dataset_names = self.parameters.get_dataset_names()
+
+        if threshold is None:
+            threshold = self.parameters.thresholds[len(self.parameters.thresholds) // 2]
+
+        self._log(f"Generating conserved reciprocal graph @ threshold={threshold}...")
+
+        aligned = self.get_aligned_data_for_network(threshold)
+        if aligned.empty:
+            self._log("Warning: No aligned reciprocal data at this threshold.")
+            return None
+
+        available_ds = [d for d in dataset_names if d in aligned.columns]
+        if not available_ds:
+            self._log("Warning: No datasets with aligned reciprocal data.")
+            return None
+
+        mask_all = (aligned[available_ds] > 0).all(axis=1)
+        conserved_edges = aligned[mask_all].copy()
+        if conserved_edges.empty:
+            self._log("Warning: No conserved reciprocal edges found at this threshold.")
+            return None
+
+        self._log(f"  Found {len(conserved_edges)} conserved reciprocal edges")
+
+        ratio_data = self._get_reciprocal_edge_ratio_data_for_threshold(threshold)
+
+        edge_list = []
+        edge_labels = {}
+
+        for edge_key, row in conserved_edges.iterrows():
+            if ' -> ' in str(edge_key):
+                parts = str(edge_key).split(' -> ')
+                source = parts[0].strip()
+                target = parts[1].strip() if len(parts) > 1 else ''
+            else:
+                continue
+
+            edge_info = {}
+            avg_weight = 0
+            for dataset in available_ds:
+                weight = row[dataset]
+                if weight > 0:
+                    idx = dataset_names.index(dataset)
+                    nickname = (self.parameters.datasets_nickname[idx]
+                               if self.parameters.datasets_nickname and idx < len(self.parameters.datasets_nickname)
+                               else self.parameters._sanitize_name(dataset))
+                    edge_info[f'{nickname} wt'] = int(weight)
+
+                    if not ratio_data.empty and dataset in ratio_data.columns:
+                        edge_key_for_ratio = str(edge_key)
+                        if edge_key_for_ratio in ratio_data.index:
+                            ratio_val = ratio_data.loc[edge_key_for_ratio, dataset]
+                            if isinstance(ratio_val, pd.Series):
+                                ratio_val = ratio_val.iloc[0]
+                            if ratio_val > 0:
+                                edge_info[f'{nickname} ratio'] = round(ratio_val, 4)
+
+                    avg_weight += weight
+
+            avg_weight = avg_weight / len(available_ds) if available_ds else 0
+
+            edge_list.append({'source': source, 'target': target, 'weight': avg_weight})
+            edge_labels[(source, target)] = edge_info
+
+        if not edge_list:
+            self._log("Warning: No valid edges to visualize.")
+            return None
+
+        edges_df = pd.DataFrame(edge_list)
+
+        source_patterns = set(self.parameters._ensure_flat_list(self.parameters.source_neurons))
+        target_patterns = set(self.parameters._ensure_flat_list(self.parameters.target_neurons))
+        if self.parameters.auto_type_mapping:
+            for dataset in dataset_names:
+                source_patterns.update(self.parameters.get_source_neurons_for_dataset(dataset))
+                target_patterns.update(self.parameters.get_target_neurons_for_dataset(dataset))
+        source_patterns = list(source_patterns)
+        target_patterns = list(target_patterns)
+
+        all_nodes = set(edges_df['source'].unique()) | set(edges_df['target'].unique())
+
+        import re
+        separate_hemispheres = bool(getattr(self.parameters, 'separate_hemispheres', False))
+
+        def get_canonical_name(display_name: str) -> str:
+            """Extract canonical name from display name with potential annotations."""
+            if '(' in display_name:
+                return display_name.split('(')[0].strip()
+            return display_name.strip()
+
+        def get_base_name(label: str) -> str:
+            base = get_canonical_name(label)
+            if base.endswith(('_L', '_R', '_U')):
+                return base[:-2]
+            return base
+
+        def matches_patterns(node: str, patterns: list) -> bool:
+            canonical = get_canonical_name(node)
+            base = get_base_name(node)
+            names_to_check = list(set([node, canonical, base]))
+            for name in names_to_check:
+                for pattern in patterns:
+                    if isinstance(pattern, str):
+                        if '.*' in pattern or '*' in pattern:
+                            regex = pattern.replace('.*', '.*').replace('*', '.*')
+                            if re.match(f'^{regex}$', name, re.IGNORECASE):
+                                return True
+                        elif name.lower() == pattern.lower():
+                            return True
+                        elif separate_hemispheres and '.*' not in pattern and '*' not in pattern:
+                            if name.lower().startswith(pattern.lower() + '_'):
+                                suffix = name[len(pattern) + 1:]
+                                if suffix.upper() in ('L', 'R', 'U'):
+                                    return True
+            return False
+
+        source_nodes = {n for n in all_nodes if matches_patterns(n, source_patterns)}
+        target_nodes = {n for n in all_nodes if matches_patterns(n, target_patterns)}
+        intermediate_nodes = all_nodes - source_nodes - target_nodes
+
+        if trim_dead_ends and source_nodes and target_nodes:
+            from collections import defaultdict
+            forward_adj = defaultdict(set)
+            backward_adj = defaultdict(set)
+            for _, row in edges_df.iterrows():
+                forward_adj[row['source']].add(row['target'])
+                backward_adj[row['target']].add(row['source'])
+
+            reachable_from_source = set()
+            queue = list(source_nodes)
+            while queue:
+                node = queue.pop(0)
+                if node in reachable_from_source:
+                    continue
+                reachable_from_source.add(node)
+                for next_node in forward_adj[node]:
+                    if next_node not in reachable_from_source:
+                        queue.append(next_node)
+
+            can_reach_target = set()
+            queue = list(target_nodes)
+            while queue:
+                node = queue.pop(0)
+                if node in can_reach_target:
+                    continue
+                can_reach_target.add(node)
+                for prev_node in backward_adj[node]:
+                    if prev_node not in can_reach_target:
+                        queue.append(prev_node)
+
+            valid_nodes = reachable_from_source & can_reach_target
+            edges_df = edges_df[
+                edges_df['source'].isin(valid_nodes) &
+                edges_df['target'].isin(valid_nodes)
+            ].copy()
+            edge_labels = {
+                k: v for k, v in edge_labels.items()
+                if k[0] in valid_nodes and k[1] in valid_nodes
+            }
+
+        if edges_df.empty:
+            self._log("Warning: No edges remaining after trimming dead-ends.")
+            return None
+
+        if output_folder is None:
+            output_folder = os.path.join(
+                self.parameters.full_output_path,
+                "conserved_reciprocal_graph"
+            )
+        os.makedirs(output_folder, exist_ok=True)
+
+        base_filename = f"conserved_reciprocal_t{threshold}"
+
+        vp = VisualizePath(
+            path_file=edges_df,
+            output_folder=output_folder,
+            showfig=showfig,
+            network_layout=network_layout,
+            edge_width_scale=edge_width_scale,
+            edge_labels=edge_labels,
+            verbose=self.verbose,
+            separate_hemispheres=self.parameters.separate_hemispheres,
+            **vispath_kwargs
+        )
+
+        vp.base_filename = base_filename
+        vp.build_network()
+
+        for node in vp.G_network.nodes():
+            if node in source_nodes:
+                vp.G_network.nodes[node]['node_type'] = 'source'
+            elif node in target_nodes:
+                vp.G_network.nodes[node]['node_type'] = 'target'
+            else:
+                vp.G_network.nodes[node]['node_type'] = 'intermediate'
+
+        output_path = vp.create_network()
+        self._log_file(output_path, "Saved conserved reciprocal graph")
+
+        return output_path
+
+    def visualize_conserved_reciprocal_graph_all_thresholds(
+        self,
+        trim_dead_ends: bool = True,
+        output_folder: Optional[str] = None,
+        showfig: bool = False,
+        **vispath_kwargs
+    ) -> List[str]:
+        """Generate conserved reciprocal graph visualizations for all thresholds."""
+        if output_folder is None:
+            output_folder = os.path.join(
+                self.parameters.full_output_path,
+                "conserved_reciprocal_graph"
+            )
+        os.makedirs(output_folder, exist_ok=True)
+
+        self._log(f"Generating conserved reciprocal graphs for {len(self.parameters.thresholds)} thresholds...")
+
+        output_paths = []
+        for threshold in self.parameters.thresholds:
+            result = self.visualize_conserved_reciprocal_graph(
+                threshold=threshold,
+                trim_dead_ends=trim_dead_ends,
+                output_folder=output_folder,
+                showfig=showfig,
+                **vispath_kwargs
+            )
+            if result:
+                output_paths.append(result)
+
+        if output_paths:
+            self._log(f"  Generated {len(output_paths)} conserved reciprocal graphs in: conserved_reciprocal_graph/")
+
         return output_paths
     
     # =========================================================================

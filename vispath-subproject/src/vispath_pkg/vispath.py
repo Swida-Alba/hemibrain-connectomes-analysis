@@ -84,6 +84,31 @@ def parse_color_to_hex_opacity(color_str):
     return (color_str, 1.0)
 
 
+def blend_with_gray(hex_color, factor=0.4):
+    """
+    Desaturate a hex color by blending with mid-gray.
+    factor=0 returns original color, factor=1 returns gray.
+    """
+    if not hex_color:
+        return '#808080'
+    hex_color = hex_color.strip()
+    if not hex_color.startswith('#'):
+        hex_color, _ = parse_color_to_hex_opacity(hex_color)
+    if len(hex_color) == 4:
+        hex_color = '#' + ''.join([c * 2 for c in hex_color[1:]])
+    try:
+        r = int(hex_color[1:3], 16)
+        g = int(hex_color[3:5], 16)
+        b = int(hex_color[5:7], 16)
+    except Exception:
+        return '#808080'
+    gray = 128
+    r = int(r * (1 - factor) + gray * factor)
+    g = int(g * (1 - factor) + gray * factor)
+    b = int(b * (1 - factor) + gray * factor)
+    return f'#{r:02x}{g:02x}{b:02x}'
+
+
 # Neurotransmitter color palette
 # Colors chosen for visual distinction and biological relevance
 # Grouped by excitatory/inhibitory/modulatory for interactive color adjustment
@@ -236,7 +261,7 @@ class VisualizePath:
         max_node_size=80,        # NEW: Maximum node size in pixels
         heatmap_row_order=None,  # NEW: Custom row order for heatmap
         heatmap_col_order=None,  # NEW: Custom column order for heatmap
-        straight_reciprocal_edges=False,  # NEW: Use straight lines for reciprocal edges
+        straight_reciprocal_edges=True,  # NEW: Use straight lines for reciprocal edges
         generate_empty_network=False,  # NEW: Generate empty network HTML template
         edgeN_limit=500,        # NEW: Limit number of edges to show (default 1000)
         output_format='xlsx',   # NEW: Output format for data files ('xlsx' or 'csv')
@@ -245,12 +270,23 @@ class VisualizePath:
         color_edges_by_nt=False, # NEW: Color edges by neurotransmitter type
         dataset_legend=None,    # NEW: Dataset short code legend {code: full_name} for display names
         node_dataset_info=None, # NEW: Node-level dataset info {node_label: {code: name_in_dataset}}
+        separate_hemispheres=False,  # NEW: Enable hemisphere-aware coloring/layout
+        hemisphere_desaturate_side='R',  # NEW: Hemisphere to desaturate ('L' or 'R')
+        hemisphere_desaturate_factor=0.4,  # NEW: Desaturation blend factor (0-1)
+        hemisphere_mirror_default=False,  # NEW: Default to mirrored hemisphere layout
     ):
         """
         Initialize VisualizePath with pathway data and visualization settings.
         
         Parameters
         ----------
+                {
+                    selector: 'node.placeholder',
+                    style: {
+                        'opacity': 0.0,
+                        'label': ''
+                    }
+                },
         path_file : str or pd.DataFrame
             Path to CSV/Excel file or DataFrame containing pathway data.
             Required columns: 'path_block', 'weights'
@@ -409,6 +445,23 @@ class VisualizePath:
             Useful for showing synapse strengths from multiple datasets.
             Example: {('PPL101', 'aMe12'): {'HEMI': 45, 'MCNS': 32, 'FAFB': 28}}
             Default: None
+        
+        separate_hemispheres : bool, optional
+            If True, enables hemisphere-aware coloring and layout controls.
+            Nodes with suffix _L/_R/_U will be handled specially.
+            Default: False
+        
+        hemisphere_desaturate_side : str, optional
+            Hemisphere side to desaturate. Use 'L' or 'R'.
+            Default: 'R'
+        
+        hemisphere_desaturate_factor : float, optional
+            Blend factor (0-1) for desaturation (higher = more gray).
+            Default: 0.4
+        
+        hemisphere_mirror_default : bool, optional
+            If True, mirror hemispheres by default in the network layout.
+            Default: False
             
         Raises
         ------
@@ -435,6 +488,12 @@ class VisualizePath:
         # Node-level dataset info for hover labels
         # Format: {node_label: {code: name_in_that_dataset}} e.g., {'MeVP(MTe07)': {'M': 'MeVP', 'F': 'MTe07'}}
         self.node_dataset_info = node_dataset_info or {}
+
+        # Hemisphere visualization options
+        self.separate_hemispheres = separate_hemispheres
+        self.hemisphere_desaturate_side = (hemisphere_desaturate_side or 'R').upper()
+        self.hemisphere_desaturate_factor = max(0.0, min(1.0, hemisphere_desaturate_factor))
+        self.hemisphere_mirror_default = bool(hemisphere_mirror_default)
         
         # Neurotransmitter-based edge coloring
         self.color_edges_by_nt = color_edges_by_nt  # If True, color edges by NT type
@@ -2128,10 +2187,36 @@ class VisualizePath:
             for n in missing_nodes:
                 G.add_node(n)
         
+        # Helper to extract base name without hemisphere suffix
+        def _get_base_name(label: str) -> str:
+            base = label
+            if '(' in base:
+                base = base.split('(')[0].strip()
+            if base.endswith(('_L', '_R', '_U')):
+                base = base[:-2]
+            return base
+        
+        # If separate_hemispheres, also collect base names for matching
+        # e.g., if aMe12 is in path_sources, aMe12_L and aMe12_R should also be sources
+        source_base_names = set(_get_base_name(s) for s in path_sources) if self.separate_hemispheres else set()
+        target_base_names = set(_get_base_name(t) for t in path_targets) if self.separate_hemispheres else set()
+        
         # Classify nodes: prioritize source/target identity
+        # When separate_hemispheres=True, match by base name as well
         all_nodes = set(G.nodes())
-        source_nodes = path_sources
-        target_nodes = path_targets
+        source_nodes = set()
+        target_nodes = set()
+        
+        for node in all_nodes:
+            if node in path_sources:
+                source_nodes.add(node)
+            elif self.separate_hemispheres and _get_base_name(str(node)) in source_base_names:
+                source_nodes.add(node)
+            elif node in path_targets:
+                target_nodes.add(node)
+            elif self.separate_hemispheres and _get_base_name(str(node)) in target_base_names:
+                target_nodes.add(node)
+        
         intermediate_nodes = all_nodes - source_nodes - target_nodes
         
         # Set node attributes
@@ -3887,25 +3972,50 @@ class VisualizePath:
         """
         # Prepare node data
         nodes_data = []
+        has_hemisphere_nodes = False
+
+        def _extract_hemisphere(label: str):
+            base_label = label
+            if '(' in label:
+                base_label = label.split('(')[0].strip()
+            hemi = None
+            if base_label.endswith(('_L', '_R', '_U')):
+                hemi = base_label[-1]
+                base_label = base_label[:-2]
+            return base_label, hemi
+
         for node in G.nodes():
             node_type = G.nodes[node].get('node_type', 'intermediate')
-            
+
             # Assign color based on node type
             if node_type == 'source':
-                color = self.node_color[0]
+                base_color = self.node_color[0]
             elif node_type == 'target':
-                color = self.target_color
+                base_color = self.target_color
             else:  # intermediate
-                color = self.node_color[1]
-            
+                base_color = self.node_color[1]
+
+            base_name, hemisphere = _extract_hemisphere(str(node))
+            if hemisphere:
+                has_hemisphere_nodes = True
+
+            # Normalize color to hex and apply hemisphere desaturation if needed
+            base_hex, _ = parse_color_to_hex_opacity(base_color)
+            color = base_hex
+            if self.separate_hemispheres and hemisphere:
+                if hemisphere == self.hemisphere_desaturate_side:
+                    color = blend_with_gray(base_hex, self.hemisphere_desaturate_factor)
+
             # Get dataset info for this node (for hover labels)
             ds_info = self.node_dataset_info.get(node, {})
-            
+
             nodes_data.append({
                 'data': {
                     'id': node,
                     'label': node,
                     'node_type': node_type,
+                    'hemisphere': hemisphere if hemisphere else '',
+                    'base_name': base_name,
                     'color': color,
                     'dataset_info': ds_info  # {code: name_in_that_dataset}
                 },
@@ -4056,6 +4166,24 @@ class VisualizePath:
             nt_edge_styles = "\n                ".join(nt_style_parts)
             nt_edge_group_options = "\n                                    ".join(nt_option_parts)
         
+        # Hemisphere group options and controls
+        has_hemi_controls = self.separate_hemispheres and has_hemisphere_nodes
+        hemisphere_group_options = ""
+        hemisphere_controls_html = ""
+        if has_hemi_controls:
+            hemisphere_group_options = """
+                                <optgroup label="Hemispheres">
+                                    <option value="hemi_left">Left Hemisphere (_L)</option>
+                                    <option value="hemi_right">Right Hemisphere (_R)</option>
+                                    <option value="hemi_unknown">Unknown Hemisphere (_U)</option>
+                                </optgroup>
+            """
+            hemisphere_controls_html = """
+                        <button class="btn" id="mirrorHemiBtn" onclick="toggleHemisphereMirror()" style="font-size: 11px; padding: 6px; background: #64748b;">
+                            🪞 Mirror Hemispheres
+                        </button>
+            """
+
         # Generate dataset legend HTML for cross-dataset type name display
         # Shows one-character codes and their corresponding dataset names
         dataset_legend_html = ""
@@ -4407,6 +4535,10 @@ class VisualizePath:
                     <option value="cose-bilkent" {{'selected' if cytoscape_layout == 'cose-bilkent' else ''}}>CoSE-Bilkent ⭐⭐⭐⭐</option>
                     <option value="cose" {{'selected' if cytoscape_layout == 'cose' else ''}}>CoSE ⭐⭐⭐</option>
                 </optgroup>
+                <optgroup label="🧠 Hemisphere-Aware">
+                    <option value="hemi-dagre" {{'selected' if cytoscape_layout == 'hemi-dagre' else ''}}>Hemisphere Dagre 🪞</option>
+                    <option value="hemi-fcose" {{'selected' if cytoscape_layout == 'hemi-fcose' else ''}}>Hemisphere fCoSE 🪞</option>
+                </optgroup>
                 <optgroup label="📐 Other">
                     <option value="circle" {{'selected' if cytoscape_layout == 'circle' else ''}}>Circular ⭐⭐</option>
                     <option value="grid" {{'selected' if cytoscape_layout == 'grid' else ''}}>Grid ⭐⭐</option>
@@ -4489,13 +4621,13 @@ class VisualizePath:
                 </div>
                 
                 <div style="display: flex; gap: 6px; margin-bottom: 6px;">
-                    <button class="btn" onclick="exportGraph()" style="flex: 1; padding: 6px; font-size: 12px; background: #9c27b0;">📊 Graph</button>
-                    <button class="btn" onclick="importGraph()" style="flex: 1; padding: 6px; font-size: 12px; background: #9c27b0;">📂 Import</button>
+                    <button class="btn" onclick="exportGraph()" style="flex: 1; padding: 6px; font-size: 11px; background: #9c27b0;">📤 Export Graph</button>
+                    <button class="btn" onclick="importGraph()" style="flex: 1; padding: 6px; font-size: 11px; background: #9c27b0;">📥 Import Graph</button>
                 </div>
                 
                 <div style="display: flex; gap: 6px; margin-bottom: 6px;">
-                    <button class="btn" onclick="exportLayout()" style="flex: 1; padding: 6px; font-size: 11px; background: #607d8b;">📍 Layout</button>
-                    <button class="btn" onclick="importLayout()" style="flex: 1; padding: 6px; font-size: 11px; background: #607d8b;">📌 Apply</button>
+                    <button class="btn" onclick="exportLayout()" style="flex: 1; padding: 6px; font-size: 11px; background: #607d8b;">📤 Export Layout</button>
+                    <button class="btn" onclick="importLayout()" style="flex: 1; padding: 6px; font-size: 11px; background: #607d8b;">📥 Import Layout</button>
                 </div>
                 
                 <!-- Background Color Toggle -->
@@ -4568,12 +4700,19 @@ class VisualizePath:
                         <button class="btn" id="hideOrphansBtn" onclick="toggleOrphanNodes()" style="font-size: 11px; padding: 6px; background: #9c27b0;">
                             👻 Hide Orphans
                         </button>
+                        <button class="btn" id="hideSelfLoopsBtn" onclick="toggleSelfLoops()" style="font-size: 11px; padding: 6px; background: #ff5722;">
+                            🔁 Hide Self-Loops
+                        </button>
+                    </div>
+                    <div style="display: grid; grid-template-columns: 1fr; gap: 6px; margin-bottom: 6px;">
                         <button class="btn" onclick="refreshLayout()" style="font-size: 11px; padding: 6px; background: #00bcd4;">
                             🔄 Refresh Layout
                         </button>
                     </div>
+                    {hemisphere_controls_html}
                     <div style="font-size: 10px; color: #666; line-height: 1.3;">
                         • Orphans: nodes with no connections<br>
+                        • Self-Loops: edges from a node to itself<br>
                         • Refresh: re-apply layout after hiding/filtering
                     </div>
                 </div>
@@ -4625,6 +4764,7 @@ class VisualizePath:
                                     <option value="negative_edges">Negative Edges</option>
                                     <option value="all_edges">All Edges</option>
                                 </optgroup>
+                                {hemisphere_group_options}
                                 <optgroup label="NT Edges" id="ntEdgeGroup">
                                     {nt_edge_group_options}
                                 </optgroup>
@@ -4774,6 +4914,12 @@ class VisualizePath:
                     }}
                 }},
                 {{
+                    selector: 'edge.selfloop-hidden',
+                    style: {{
+                        'display': 'none'
+                    }}
+                }},
+                {{
                     selector: 'edge',
                     style: {{
                         'width': 'mapData(scaled_width, {min_scaled_width}, {max_scaled_width}, 1, 10)',
@@ -4837,6 +4983,22 @@ class VisualizePath:
                         'width': 'mapData(scaled_width, {min_scaled_width}, {max_scaled_width}, 3, 20)',
                         'z-index': 999
                     }}
+                }},
+                {{
+                    selector: 'node.placeholder',
+                    style: {{
+                        'display': 'none',
+                        'opacity': 0,
+                        'width': 0,
+                        'height': 0
+                    }}
+                }},
+                {{
+                    selector: 'edge.placeholder',
+                    style: {{
+                        'display': 'none',
+                        'opacity': 0
+                    }}
                 }}
             ],
             layout: {{
@@ -4863,6 +5025,10 @@ class VisualizePath:
         let currentLayoutAlgorithm = '{cytoscape_layout}';
         let labelPosition = 'center';  // 'center' or 'outside'
         let labelsVisible = true;
+        const hasHemisphereNodes = {'true' if has_hemi_controls else 'false'};
+        let hemisphereMirrorEnabled = {'true' if self.hemisphere_mirror_default and has_hemi_controls else 'false'};
+        let originalHemispherePositions = null;
+        let hemisphereTemplateSide = null;
         
         function getLayoutConfig(layoutName) {{
             // Configure layouts with optimal settings for crossing minimization
@@ -4964,9 +5130,264 @@ class VisualizePath:
             layoutSelector.value = currentLayoutAlgorithm;
         }}
         
+        function cacheHemispherePositions() {{
+            if (!hasHemisphereNodes) return;
+            originalHemispherePositions = {{}};
+            cy.nodes().forEach(n => {{
+                originalHemispherePositions[n.id()] = n.position();
+            }});
+        }}
+
+        function getHemisphereTemplateSide() {{
+            if (!hasHemisphereNodes) return null;
+            const hasL = cy.nodes().some(n => n.data('hemisphere') === 'L');
+            const hasR = cy.nodes().some(n => n.data('hemisphere') === 'R');
+            if (hasL) return 'L';
+            if (hasR) return 'R';
+            return null;
+        }}
+
+        let hemispherePlaceholderIds = [];
+        let hemispherePlaceholderEdgeIds = [];
+
+        // Build unique placeholder set as union of all base names (without _L/_R suffix)
+        function buildPlaceholderSet() {{
+            const nodes = cy.nodes();
+            const baseNames = new Set();
+            nodes.forEach(n => {{
+                const base = n.data('base_name');
+                if (base) baseNames.add(base);
+            }});
+            return baseNames;
+        }}
+
+        // Create placeholder nodes for layout, one per unique base name
+        function createPlaceholderNodes() {{
+            hemispherePlaceholderIds = [];
+            hemispherePlaceholderEdgeIds = [];
+            const baseNames = buildPlaceholderSet();
+            const nodes = cy.nodes();
+            
+            // Map base -> node info for copying type/color
+            const baseInfo = {{}};
+            nodes.forEach(n => {{
+                const base = n.data('base_name');
+                if (base && !baseInfo[base]) {{
+                    baseInfo[base] = {{
+                        node_type: n.data('node_type') || 'intermediate',
+                        color: n.data('color') || '#888'
+                    }};
+                }}
+            }});
+            
+            baseNames.forEach(base => {{
+                const placeholderId = `__hemi_ph__${{base}}`;
+                if (cy.getElementById(placeholderId).length > 0) return;
+                const info = baseInfo[base] || {{ node_type: 'intermediate', color: '#888' }};
+                cy.add({{
+                    group: 'nodes',
+                    data: {{
+                        id: placeholderId,
+                        label: base,
+                        node_type: info.node_type,
+                        color: info.color,
+                        base_name: base,
+                        is_placeholder: 1
+                    }},
+                    classes: 'placeholder'
+                }});
+                hemispherePlaceholderIds.push(placeholderId);
+            }});
+            
+            // Create placeholder edges mirroring real edges (by base name)
+            const edgeSet = new Set();
+            cy.edges().forEach(e => {{
+                const srcBase = e.source().data('base_name');
+                const tgtBase = e.target().data('base_name');
+                if (srcBase && tgtBase) {{
+                    const key = `${{srcBase}}->${{tgtBase}}`;
+                    if (!edgeSet.has(key)) {{
+                        edgeSet.add(key);
+                        const phEdgeId = `__hemi_ph_edge__${{srcBase}}__${{tgtBase}}`;
+                        const srcPh = `__hemi_ph__${{srcBase}}`;
+                        const tgtPh = `__hemi_ph__${{tgtBase}}`;
+                        if (cy.getElementById(srcPh).length && cy.getElementById(tgtPh).length) {{
+                            cy.add({{
+                                group: 'edges',
+                                data: {{
+                                    id: phEdgeId,
+                                    source: srcPh,
+                                    target: tgtPh,
+                                    is_placeholder: 1
+                                }},
+                                classes: 'placeholder'
+                            }});
+                            hemispherePlaceholderEdgeIds.push(phEdgeId);
+                        }}
+                    }}
+                }}
+            }});
+        }}
+
+        // Remove all placeholder nodes and edges
+        function removePlaceholders() {{
+            // First remove by ID arrays
+            hemispherePlaceholderEdgeIds.forEach(id => {{
+                const el = cy.getElementById(id);
+                if (el.length) el.remove();
+            }});
+            hemispherePlaceholderIds.forEach(id => {{
+                const el = cy.getElementById(id);
+                if (el.length) el.remove();
+            }});
+            hemispherePlaceholderIds = [];
+            hemispherePlaceholderEdgeIds = [];
+            
+            // Also remove any remaining elements with placeholder class (safety net)
+            cy.elements('.placeholder').remove();
+        }}
+
+        // Run hemisphere-aware layout with mirroring
+        // 1. Create placeholder set (unique base names)
+        // 2. Layout placeholder set using current algorithm
+        // 3. Move placeholder layout to RIGHT panel
+        // 4. Position _L nodes (and _U, no-suffix) using placeholder positions
+        // 5. Mirror _R nodes to LEFT panel
+        // 6. Remove placeholders
+        function runHemisphereMirrorLayout() {{
+            if (!hasHemisphereNodes) return;
+            
+            // Create placeholder nodes/edges
+            createPlaceholderNodes();
+            
+            // Layout only placeholder elements using class selector
+            const phNodes = cy.nodes('.placeholder');
+            const phEdges = cy.edges('.placeholder');
+            const phElements = phNodes.union(phEdges);
+            
+            if (phElements.length === 0) {{
+                removePlaceholders();
+                return;
+            }}
+            
+            // Temporarily make placeholders visible for layout computation
+            phElements.style('display', 'element');
+            phElements.style('opacity', 1);
+            
+            const layoutConfig = getLayoutConfig(currentLayoutAlgorithm);
+            layoutConfig.animate = false;
+            layoutConfig.fit = false;
+            
+            const layout = phElements.layout(layoutConfig);
+            
+            // Define the callback function for positioning nodes after layout
+            const positionNodesAfterLayout = () => {{
+                // Get placeholder positions and compute bounds
+                const phPositions = {{}};
+                let minX = Infinity, maxX = -Infinity;
+                let minY = Infinity, maxY = -Infinity;
+                
+                phNodes.forEach(n => {{
+                    const base = n.data('base_name');
+                    const pos = n.position();
+                    phPositions[base] = {{ x: pos.x, y: pos.y }};
+                    minX = Math.min(minX, pos.x);
+                    maxX = Math.max(maxX, pos.x);
+                    minY = Math.min(minY, pos.y);
+                    maxY = Math.max(maxY, pos.y);
+                }});
+                
+                const layoutWidth = maxX - minX || 200;
+                const layoutCenterX = (minX + maxX) / 2;
+                // Gap between L and R panels: use minimum of 50px or 10% of layout width
+                const gap = Math.max(50, layoutWidth * 0.1);
+                
+                // Calculate panel positions: R on LEFT, L on RIGHT
+                // Right panel center (for L nodes): layoutCenterX + gap/2 + layoutWidth/2
+                // Left panel center (for R nodes): layoutCenterX - gap/2 - layoutWidth/2
+                const rightPanelOffset = gap / 2 + layoutWidth / 2;
+                const leftPanelOffset = -(gap / 2 + layoutWidth / 2);
+                
+                // Remove placeholders before positioning real nodes
+                removePlaceholders();
+                
+                // Position real nodes based on placeholder layout
+                cy.batch(() => {{
+                    cy.nodes().forEach(n => {{
+                        const base = n.data('base_name');
+                        const hemi = n.data('hemisphere');
+                        if (!base || !phPositions[base]) return;
+                        
+                        const refPos = phPositions[base];
+                        const relX = refPos.x - layoutCenterX;  // Position relative to center
+                        
+                        if (hemi === 'L' || !hemi || hemi === 'U') {{
+                            // L, U, and unsuffixed nodes go to RIGHT panel
+                            n.position({{
+                                x: layoutCenterX + rightPanelOffset + relX,
+                                y: refPos.y
+                            }});
+                        }} else if (hemi === 'R') {{
+                            // R nodes go to LEFT panel, mirrored
+                            n.position({{
+                                x: layoutCenterX + leftPanelOffset - relX,  // Mirror X
+                                y: refPos.y
+                            }});
+                        }}
+                    }});
+                }});
+                
+                cy.fit();
+            }};
+            
+            // Bind the event BEFORE running the layout to ensure we catch layoutstop
+            layout.one('layoutstop', positionNodesAfterLayout);
+            layout.run();
+            
+            // Fallback: if layout is synchronous and layoutstop already fired, 
+            // use setTimeout as a safety net
+            setTimeout(() => {{
+                if (cy.nodes('.placeholder').length > 0) {{
+                    // Layout didn't trigger our callback, call it manually
+                    positionNodesAfterLayout();
+                }}
+            }}, 100);
+        }}
+
+        function restoreHemispherePositions() {{
+            if (!hasHemisphereNodes || !originalHemispherePositions) return;
+            cy.batch(() => {{
+                Object.keys(originalHemispherePositions).forEach(id => {{
+                    const node = cy.getElementById(id);
+                    if (node.length) node.position(originalHemispherePositions[id]);
+                }});
+            }});
+            cy.fit();
+        }}
+
+        function toggleHemisphereMirror() {{
+            if (!hasHemisphereNodes) return;
+            hemisphereMirrorEnabled = !hemisphereMirrorEnabled;
+            const btn = document.getElementById('mirrorHemiBtn');
+            if (btn) {{
+                btn.style.background = hemisphereMirrorEnabled ? '#0ea5e9' : '#64748b';
+                btn.textContent = hemisphereMirrorEnabled ? '🪞 Mirrored' : '🪞 Mirror Hemispheres';
+            }}
+            if (hemisphereMirrorEnabled) {{
+                if (!originalHemispherePositions) cacheHemispherePositions();
+                runHemisphereMirrorLayout();
+            }} else {{
+                restoreHemispherePositions();
+            }}
+        }}
+
         // Apply the initial layout using proper configuration
         const initialLayout = getLayoutConfig(currentLayoutAlgorithm);
         cy.layout(initialLayout).run();
+        setTimeout(() => {{
+            cacheHemispherePositions();
+            if (hemisphereMirrorEnabled) runHemisphereMirrorLayout();
+        }}, 200);
         
         // Fix for click position drift - ensure Cytoscape canvas is properly sized
         cy.resize();
@@ -5000,6 +5421,9 @@ class VisualizePath:
                 <b>Type:</b> ${{data.node_type}}<br>
                 <b>Color:</b> ${{data.color}}
             `;
+            if (data.hemisphere) {{
+                html += `<br><b>Hemisphere:</b> ${{data.hemisphere}}`;
+            }}
             // Add dataset info if available
             if (data.dataset_info && Object.keys(data.dataset_info).length > 0) {{
                 html += `<br><span style="color: #888; font-size: 0.9em;">─────────────</span><br><b>Names by dataset:</b>`;
@@ -5191,12 +5615,34 @@ class VisualizePath:
                 'cose': '💡 CoSE (Compound Spring Embedder) is a standard force-directed layout algorithm',
                 'circle': '💡 Circular layout arranges all nodes in a circle - simple but many crossings',
                 'grid': '💡 Grid layout arranges nodes in a matrix - useful for small networks',
-                'concentric': '💡 Concentric layout arranges nodes in nested circles based on hierarchy'
+                'concentric': '💡 Concentric layout arranges nodes in nested circles based on hierarchy',
+                'hemi-dagre': '🪞 Hemisphere-aware Dagre: layouts L/R neurons in mirrored panels',
+                'hemi-fcose': '🪞 Hemisphere-aware fCoSE: layouts L/R neurons in mirrored panels'
             }};
             infoDiv.textContent = layoutInfos[newLayout] || '';
             
+            // Check if this is a hemisphere-aware layout
+            const isHemiLayout = newLayout.startsWith('hemi-');
+            
+            if (isHemiLayout && hasHemisphereNodes) {{
+                // Extract the base layout algorithm
+                const baseLayout = newLayout.replace('hemi-', '');
+                currentLayoutAlgorithm = baseLayout;
+                // Enable mirroring and run hemisphere layout
+                hemisphereMirrorEnabled = true;
+                const btn = document.getElementById('mirrorHemiBtn');
+                if (btn) {{
+                    btn.style.background = '#0ea5e9';
+                    btn.textContent = '🪞 Mirrored';
+                }}
+                if (!originalHemispherePositions) cacheHemispherePositions();
+                runHemisphereMirrorLayout();
+                updateHoverInfo(`🪞 Hemisphere-mirrored ${{baseLayout}} layout applied`);
+                return;
+            }}
+            
             // Get visible (non-hidden) nodes and edges
-            const visibleElements = cy.elements().not('.hidden, .filtered, .orphan-hidden');
+            const visibleElements = cy.elements().not('.hidden, .filtered, .orphan-hidden, .selfloop-hidden');
             
             if (visibleElements.length === 0) {{
                 updateHoverInfo('⚠️ No visible elements to layout');
@@ -6027,6 +6473,9 @@ class VisualizePath:
             source: {{ color: '{self.node_color[0]}', opacity: {int(self.source_opacity * 100)} }},
             intermediate: {{ color: '{self.node_color[1]}', opacity: {int(self.intermediate_opacity * 100)} }},
             target: {{ color: '{self.target_color}', opacity: {int(self.target_opacity * 100)} }},
+            hemisphere_left: {{ color: '{self.node_color[0]}', opacity: 100 }},
+            hemisphere_right: {{ color: '{blend_with_gray(self.node_color[0], self.hemisphere_desaturate_factor)}', opacity: 100 }},
+            hemisphere_unknown: {{ color: '#9ca3af', opacity: 100 }},
             positive_edges: {{ color: '{self.edge_color}', opacity: {int(self.edge_opacity * 100)} }},
             negative_edges: {{ color: '#4A90E2', opacity: 100 }}
         }};
@@ -6070,6 +6519,16 @@ class VisualizePath:
                 const ntColor = getNTColor(ntType);
                 // Use saved color if exists, otherwise default NT color
                 defaults = groupDefaults[group] || {{ color: ntColor, opacity: 100 }};
+            }}
+
+            // Handle hemisphere groups
+            if (group === 'hemi_left' || group === 'hemi_right' || group === 'hemi_unknown') {{
+                const keyMap = {{
+                    'hemi_left': 'hemisphere_left',
+                    'hemi_right': 'hemisphere_right',
+                    'hemi_unknown': 'hemisphere_unknown'
+                }};
+                defaults = groupDefaults[keyMap[group]] || {{ color: '#888888', opacity: 100 }};
             }}
             
             // Handle custom groups (prefixed with 'custom_')
@@ -6128,6 +6587,30 @@ class VisualizePath:
                     }}
                 }});
                 groupDefaults.target = {{ color: color, opacity: opacity * 100 }};
+            }}
+            if (group === 'hemi_left') {{
+                cy.nodes().filter('[hemisphere = "L"]').forEach(node => {{
+                    if (!node.selected()) {{
+                        node.style({{ 'background-color': color, 'opacity': opacity }});
+                    }}
+                }});
+                groupDefaults.hemisphere_left = {{ color: color, opacity: opacity * 100 }};
+            }}
+            if (group === 'hemi_right') {{
+                cy.nodes().filter('[hemisphere = "R"]').forEach(node => {{
+                    if (!node.selected()) {{
+                        node.style({{ 'background-color': color, 'opacity': opacity }});
+                    }}
+                }});
+                groupDefaults.hemisphere_right = {{ color: color, opacity: opacity * 100 }};
+            }}
+            if (group === 'hemi_unknown') {{
+                cy.nodes().filter('[hemisphere = "U"]').forEach(node => {{
+                    if (!node.selected()) {{
+                        node.style({{ 'background-color': color, 'opacity': opacity }});
+                    }}
+                }});
+                groupDefaults.hemisphere_unknown = {{ color: color, opacity: opacity * 100 }};
             }}
             if (group === 'positive_edges' || group === 'all_edges') {{
                 cy.edges().filter('[is_negative = 0]').forEach(edge => {{
@@ -6213,6 +6696,12 @@ class VisualizePath:
                 cy.nodes().filter('[node_type = "intermediate"]').select();
             }} else if (group === 'target') {{
                 cy.nodes().filter('[node_type = "target"]').select();
+            }} else if (group === 'hemi_left') {{
+                cy.nodes().filter('[hemisphere = "L"]').select();
+            }} else if (group === 'hemi_right') {{
+                cy.nodes().filter('[hemisphere = "R"]').select();
+            }} else if (group === 'hemi_unknown') {{
+                cy.nodes().filter('[hemisphere = "U"]').select();
             }} else if (group === 'positive_edges') {{
                 cy.edges().filter('[is_negative = 0]').select();
             }} else if (group === 'negative_edges') {{
@@ -7136,6 +7625,30 @@ class VisualizePath:
         // ===== ORPHAN NODE CONTROLS =====
         
         let orphansHidden = false;
+        let selfLoopsHidden = false;
+        
+        // Toggle self-loop edges visibility (edges where source === target)
+        function toggleSelfLoops() {{
+            const btn = document.getElementById('hideSelfLoopsBtn');
+            selfLoopsHidden = !selfLoopsHidden;
+            
+            // Find all self-loop edges
+            const selfLoopEdges = cy.edges().filter(edge => {{
+                return edge.source().id() === edge.target().id();
+            }});
+            
+            if (selfLoopsHidden) {{
+                selfLoopEdges.addClass('selfloop-hidden');
+                btn.textContent = '👁️ Show Self-Loops';
+                btn.style.background = '#e91e63';
+                updateHoverInfo(`🔁 Hidden ${{selfLoopEdges.length}} self-loop edge(s)`);
+            }} else {{
+                selfLoopEdges.removeClass('selfloop-hidden');
+                btn.textContent = '🔁 Hide Self-Loops';
+                btn.style.background = '#ff5722';
+                updateHoverInfo(`👁️ ${{selfLoopEdges.length}} self-loop edge(s) visible`);
+            }}
+        }}
         
         // Toggle orphan nodes visibility (dynamically detect based on current visible edges)
         function toggleOrphanNodes() {{
@@ -7144,11 +7657,11 @@ class VisualizePath:
             
             if (orphansHidden) {{
                 // Hide orphan nodes (nodes with no VISIBLE connections)
-                // Check degree excluding hidden/filtered edges
+                // Check degree excluding hidden/filtered/selfloop-hidden edges
                 let hiddenCount = 0;
                 cy.nodes().forEach(node => {{
-                    // Count only visible edges (not hidden, not filtered)
-                    const visibleEdges = node.connectedEdges().not('.hidden, .filtered');
+                    // Count only visible edges (not hidden, not filtered, not selfloop-hidden)
+                    const visibleEdges = node.connectedEdges().not('.hidden, .filtered, .selfloop-hidden');
                     const visibleDegree = visibleEdges.length;
                     
                     if (visibleDegree === 0) {{
@@ -7175,7 +7688,7 @@ class VisualizePath:
         // Refresh layout after hiding orphans or filtering edges
         function refreshLayout() {{
             // Get visible (non-hidden) nodes and edges
-            const visibleElements = cy.elements().not('.hidden, .filtered, .orphan-hidden');
+            const visibleElements = cy.elements().not('.hidden, .filtered, .orphan-hidden, .selfloop-hidden');
             
             if (visibleElements.length === 0) {{
                 updateHoverInfo('⚠️ No visible elements to layout');
@@ -7191,6 +7704,8 @@ class VisualizePath:
             visibleElements.layout(layoutConfig).run();
             
             setTimeout(() => {{
+                cacheHemispherePositions();
+                if (hemisphereMirrorEnabled) runHemisphereLayout();
                 updateHoverInfo('✓ Layout refreshed for visible elements');
             }}, 600);
         }}

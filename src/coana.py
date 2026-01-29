@@ -1,5 +1,6 @@
 # connectome analysis module -- coana
 import os
+from typing import List
 import sys
 import json
 import shutil
@@ -173,6 +174,51 @@ class FindNeuronConnection:
             if cols_to_drop:
                 self.source_df = self.source_df.drop(columns=cols_to_drop)
 
+    def _extract_nodes_from_path_graph(self, conn_inpath: pd.DataFrame) -> List[str]:
+        """Extract unique bodyIds from path graph edges."""
+        if conn_inpath is None:
+            return []
+        try:
+            import polars as pl
+            if isinstance(conn_inpath, pl.DataFrame):
+                if conn_inpath.is_empty():
+                    return []
+                pre_ids = conn_inpath['bodyId_pre'].cast(pl.Utf8).unique().to_list()
+                post_ids = conn_inpath['bodyId_post'].cast(pl.Utf8).unique().to_list()
+                return list(set(pre_ids + post_ids))
+        except Exception:
+            pass
+
+        if hasattr(conn_inpath, 'empty') and conn_inpath.empty:
+            return []
+        pre_ids = conn_inpath['bodyId_pre'].astype(str).unique().tolist()
+        post_ids = conn_inpath['bodyId_post'].astype(str).unique().tolist()
+        return list(set(pre_ids + post_ids))
+
+    def _fetch_direct_connections_for_nodes(self, node_ids: List[str]) -> pd.DataFrame:
+        """Fetch direct connections among nodes in the given list."""
+        if not node_ids:
+            return pd.DataFrame()
+
+        # Fetch all downstream connections for robustness, then filter to node set
+        conn_df = self._fetch_connections_with_cache(
+            upstream_bodyIds=node_ids,
+            downstream_bodyIds=None,
+            min_weight=self.min_synapse_num,
+            min_conn_ratio=self.min_ratio,
+            min_traversal_prob=self.min_traversal_probability
+        )
+
+        if conn_df.empty:
+            return conn_df
+
+        conn_df = conn_df.copy()
+        conn_df['bodyId_pre'] = conn_df['bodyId_pre'].astype(str)
+        conn_df['bodyId_post'] = conn_df['bodyId_post'].astype(str)
+        node_set = set(str(n) for n in node_ids)
+        conn_df = conn_df[conn_df['bodyId_post'].isin(node_set)]
+        return conn_df
+
     def _vprint(self, message: str, level: str = 'full', end: str = '\n', flush: bool = False):
         '''Print message based on verbose_mode setting.
         
@@ -227,6 +273,178 @@ class FindNeuronConnection:
         elif level == 'progress' and self.verbose_mode == 'progress':
             # For progress mode, print with carriage return to overwrite
             print(f'\r{message}', end='', flush=True)
+
+    def _normalize_hemisphere_value(self, value) -> str:
+        if value is None or (isinstance(value, float) and np.isnan(value)):
+            return 'U'
+        v = str(value).strip().lower()
+        if v in ('r', 'right', 'rhs', 'right hemisphere'):
+            return 'R'
+        if v in ('l', 'left', 'lhs', 'left hemisphere'):
+            return 'L'
+        return 'U'
+
+    def _ensure_hemisphere_columns(self, df: pd.DataFrame) -> pd.DataFrame:
+        if df is None or df.empty:
+            return df
+        df = df.copy()
+        if 'hemisphere' not in df.columns and 'Soma side' in df.columns:
+            df['hemisphere'] = df['Soma side']
+        if 'hemisphere' not in df.columns:
+            # Derive from instance if available
+            if 'instance' in df.columns:
+                df['hemisphere'] = df['instance'].apply(
+                    lambda x: 'right' if isinstance(x, str) and x.endswith('_R') else ('left' if isinstance(x, str) and x.endswith('_L') else '')
+                )
+            else:
+                df['hemisphere'] = ''
+        if 'hemisphere_code' not in df.columns:
+            df['hemisphere_code'] = df['hemisphere'].apply(self._normalize_hemisphere_value)
+        return df
+
+    def _append_hemi_suffix(self, label: str, hemi_code: str) -> str:
+        if label is None:
+            label = 'Unknown'
+        label_str = str(label)
+        if label_str.endswith(('_L', '_R', '_U')):
+            return label_str
+        return f"{label_str}_{hemi_code}"
+
+    def _apply_hemisphere_suffix_to_neuron_df(self, df: pd.DataFrame) -> pd.DataFrame:
+        if df is None or df.empty:
+            return df
+        df = self._ensure_hemisphere_columns(df)
+        if self.separate_hemispheres:
+            if 'type' in df.columns:
+                df['type'] = df.apply(lambda row: self._append_hemi_suffix(row['type'], row.get('hemisphere_code', 'U')), axis=1)
+            if 'custom_group' in df.columns:
+                df['custom_group'] = df.apply(lambda row: self._append_hemi_suffix(row['custom_group'], row.get('hemisphere_code', 'U')), axis=1)
+        return df
+
+    def _ensure_ratio_prob_columns(self, df, pre_col: str, post_col: str):
+        """Ensure connection_ratio and traversal_probability exist and are numeric."""
+        if df is None:
+            return df
+
+        try:
+            import polars as pl
+            if isinstance(df, pl.DataFrame):
+                if df.is_empty() or 'weight' not in df.columns:
+                    return df
+
+                def _all_null_or_empty(col_name: str) -> bool:
+                    if col_name not in df.columns:
+                        return True
+                    try:
+                        if df.select(pl.col(col_name).is_null().all()).item():
+                            return True
+                    except Exception:
+                        pass
+                    try:
+                        return df.select(pl.col(col_name).cast(pl.Utf8).str.strip().eq('').all()).item()
+                    except Exception:
+                        return False
+
+                ratio_missing = _all_null_or_empty('connection_ratio')
+                prob_missing = _all_null_or_empty('traversal_probability')
+
+                if ratio_missing or prob_missing:
+                    totals = df.group_by(post_col).agg(pl.col('weight').sum().alias('_total_weight'))
+                    df = df.join(totals, on=post_col, how='left')
+                    df = df.with_columns((pl.col('weight') / pl.col('_total_weight')).alias('connection_ratio'))
+                    df = df.with_columns((pl.col('connection_ratio') / 0.3).clip_max(1.0).alias('traversal_probability'))
+                    df = df.drop('_total_weight')
+                return df
+        except Exception:
+            pass
+
+        # Pandas fallback
+        if not isinstance(df, pd.DataFrame) and hasattr(df, 'to_pandas'):
+            try:
+                df = df.to_pandas()
+            except Exception:
+                return df
+        if hasattr(df, 'empty') and df.empty:
+            return df
+        if 'weight' not in df.columns:
+            return df
+
+        def _pd_all_null_or_empty(series) -> bool:
+            if series is None:
+                return True
+            if series.isna().all():
+                return True
+            try:
+                return series.astype(str).str.strip().eq('').all()
+            except Exception:
+                return False
+
+        ratio_missing = ('connection_ratio' not in df.columns) or _pd_all_null_or_empty(df['connection_ratio'])
+        prob_missing = ('traversal_probability' not in df.columns) or _pd_all_null_or_empty(df['traversal_probability'])
+
+        if ratio_missing or prob_missing:
+            total_incoming = df.groupby(post_col)['weight'].transform('sum').replace(0, np.nan)
+            df['connection_ratio'] = df['weight'] / total_incoming
+            df['traversal_probability'] = (df['connection_ratio'] / 0.3).clip(upper=1.0)
+        return df
+
+    def _apply_hemisphere_suffix_to_conn_df(self, conn_df: pd.DataFrame) -> pd.DataFrame:
+        if conn_df is None or conn_df.empty or not self.separate_hemispheres:
+            return conn_df
+        def _get_hemi_code(row, side: str) -> str:
+            code_col = f"hemisphere_code_{side}"
+            if code_col in row and pd.notna(row[code_col]):
+                return str(row[code_col])
+            hemi_col = f"hemisphere_{side}"
+            if hemi_col in row and pd.notna(row[hemi_col]):
+                return self._normalize_hemisphere_value(row[hemi_col])
+            inst_col = f"instance_{side}"
+            if inst_col in row and isinstance(row[inst_col], str):
+                if row[inst_col].endswith('_R'):
+                    return 'R'
+                if row[inst_col].endswith('_L'):
+                    return 'L'
+            return 'U'
+
+        conn_df = conn_df.copy()
+        if 'type_pre' in conn_df.columns:
+            conn_df['type_pre'] = conn_df.apply(lambda row: self._append_hemi_suffix(row['type_pre'], _get_hemi_code(row, 'pre')), axis=1)
+        if 'type_post' in conn_df.columns:
+            conn_df['type_post'] = conn_df.apply(lambda row: self._append_hemi_suffix(row['type_post'], _get_hemi_code(row, 'post')), axis=1)
+        if 'custom_group_pre' in conn_df.columns:
+            conn_df['custom_group_pre'] = conn_df.apply(lambda row: self._append_hemi_suffix(row['custom_group_pre'], _get_hemi_code(row, 'pre')), axis=1)
+        if 'custom_group_post' in conn_df.columns:
+            conn_df['custom_group_post'] = conn_df.apply(lambda row: self._append_hemi_suffix(row['custom_group_post'], _get_hemi_code(row, 'post')), axis=1)
+        return conn_df
+
+    def _query_has_hemisphere_suffix(self, query) -> bool:
+        if query is None:
+            return False
+        if isinstance(query, dict):
+            for key in ['endswith', 'regex']:
+                if key in query:
+                    vals = query[key]
+                    if not isinstance(vals, list):
+                        vals = [vals]
+                    for v in vals:
+                        if isinstance(v, str) and (v.endswith('_L') or v.endswith('_R') or v in ('_L', '_R')):
+                            return True
+            for _, col_spec in query.items():
+                if isinstance(col_spec, dict):
+                    for v in col_spec.values():
+                        vals = v if isinstance(v, list) else [v]
+                        if any(isinstance(x, str) and (x.endswith('_L') or x.endswith('_R') or x in ('_L', '_R')) for x in vals):
+                            return True
+            return False
+        if isinstance(query, list):
+            for item in query:
+                if isinstance(item, list):
+                    if self._query_has_hemisphere_suffix(item):
+                        return True
+                elif isinstance(item, str) and (item.endswith('_L') or item.endswith('_R')):
+                    return True
+            return False
+        return isinstance(query, str) and (query.endswith('_L') or query.endswith('_R'))
 
     def _save_matrices_to_excel(self, df, writer, level='bodyId'):
         """Generate and save connection matrices to Excel"""
@@ -821,6 +1039,26 @@ class FindNeuronConnection:
     This significantly reduces processing time and disk usage when only type-level analysis is needed.
     '''
 
+    find_reciprocal: bool = False
+    '''
+    If True, FindAllPath will enrich the path graph by finding all direct
+    connections among nodes in the path graph and saving them in a
+    find_reciprocal subfolder.
+    '''
+
+    separate_hemispheres: bool = False
+    symmetry_analysis: bool = False
+    keep_only_hemisphere_conserved_connections: bool = False
+    '''
+    Whether to separate left/right hemisphere neurons in type-level and custom-group aggregation.
+    When True, type/custom_group labels are suffixed with _L/_R/_U based on hemisphere info.
+    When False, hemisphere-specific queries are allowed but merged at type/group level.
+    
+    keep_only_hemisphere_conserved_connections: If True, keep only edges that are conserved between
+    hemispheres (e.g., A_L->B_L paired with A_R->B_R). Works by extracting hemisphere info from
+    type labels with _L/_R/_U suffixes - edges without hemisphere info are kept as-is.
+    '''
+
     max_interlayer: int = 1
     '''
     Maximum number of interlayers to be considered in connection.
@@ -994,8 +1232,16 @@ class FindNeuronConnection:
     If provided, it will be used to overwrite 'type' columns in source/target DataFrames
     and connection DataFrames with standardized labels.
     '''
+
+    verbose: bool | None = None
+    '''
+    Backward-compatible verbose flag. If provided, it overrides verbose_mode:
+    True -> 'full', False -> 'silent'.
+    '''
     
     def __post_init__(self):
+        if self.verbose is not None:
+            self.verbose_mode = 'full' if self.verbose else 'silent'
         # Flag to use tqdm.write instead of print when inside progress bar
         self._in_progress_bar = False
         
@@ -1984,15 +2230,22 @@ class FindNeuronConnection:
             
             if row_indices:
                 # Polars slicing
-                cached_conn = conn_db[row_indices]
+                if isinstance(conn_db, pl.DataFrame):
+                    cached_conn = conn_db[row_indices]
+                else:
+                    cached_conn = conn_db.iloc[row_indices].copy()
             else:
-                cached_conn = pl.DataFrame()
+                cached_conn = pl.DataFrame() if isinstance(conn_db, pl.DataFrame) else pd.DataFrame()
             
             # Filter by downstream if specified
-            if downstream_bodyIds is not None and not cached_conn.is_empty():
+            if downstream_bodyIds is not None:
                 downstream_set = set(str(b) for b in downstream_bodyIds)
-                # Polars filter
-                cached_conn = cached_conn.filter(pl.col('bodyId_post').cast(pl.Utf8).is_in(downstream_set))
+                if isinstance(cached_conn, pl.DataFrame):
+                    if not cached_conn.is_empty():
+                        cached_conn = cached_conn.filter(pl.col('bodyId_post').cast(pl.Utf8).is_in(downstream_set))
+                else:
+                    if not cached_conn.empty:
+                        cached_conn = cached_conn[cached_conn['bodyId_post'].astype(str).isin(downstream_set)].copy()
             
             # Return both cached connections and list of partially cached neurons for later marking
             return cached_conn, uncached_upstream, partially_cached
@@ -2089,8 +2342,10 @@ class FindNeuronConnection:
             self._update_neuron_index_after_fetch(new_connections, upstream_bodyIds, downstream_bodyIds)
             return
         
-        # Load existing database (returns Polars DataFrame)
+        # Load existing database
         conn_db = self._load_connection_db()
+        if not isinstance(conn_db, pl.DataFrame):
+            conn_db = pl.from_pandas(conn_db)
         
         # Prepare new connections
         new_conn = new_connections[['bodyId_pre', 'bodyId_post', 'weight']].copy()
@@ -2110,8 +2365,8 @@ class FindNeuronConnection:
         new_conn_pl = pl.from_pandas(new_conn)
         
         # Merge with existing, removing duplicates (keep existing entries)
-        # conn_db is a Polars DataFrame, use .is_empty() not .empty
-        if not conn_db.is_empty():
+        conn_db_empty = conn_db.is_empty() if hasattr(conn_db, 'is_empty') else conn_db.empty
+        if not conn_db_empty:
             self._vprint(f'  ⏳ Merging {len(new_conn_pl):,} connections with existing database...', level='full')
             # Remove any new connections that already exist (based on bodyId_pre, bodyId_post, roi)
             merge_cols = ['bodyId_pre', 'bodyId_post', 'roi']
@@ -2145,12 +2400,15 @@ class FindNeuronConnection:
         upstream_bodyIds : list
             List of upstream neurons that were queried (not marked as cached yet)
         '''
-        if new_connections.empty:
+        is_new_empty = new_connections.is_empty() if hasattr(new_connections, 'is_empty') else new_connections.empty
+        if is_new_empty:
             self._vprint(f'  📂 No connections found for {len(upstream_bodyIds)} neurons', level='full')
             return
         
-        # Load existing database (returns Polars DataFrame)
+        # Load existing database
         conn_db = self._load_connection_db()
+        if not isinstance(conn_db, pl.DataFrame):
+            conn_db = pl.from_pandas(conn_db)
         
         # Prepare new connections as Polars DataFrame
         new_conn = new_connections[['bodyId_pre', 'bodyId_post', 'weight']].copy()
@@ -2170,8 +2428,8 @@ class FindNeuronConnection:
         new_conn_pl = pl.from_pandas(new_conn)
         
         # Merge with existing, removing duplicates (keep existing entries)
-        # conn_db is a Polars DataFrame, use .is_empty() not .empty
-        if not conn_db.is_empty():
+        conn_db_empty = conn_db.is_empty() if hasattr(conn_db, 'is_empty') else conn_db.empty
+        if not conn_db_empty:
             self._vprint(f'  ⏳ Merging {len(new_conn_pl):,} connections with existing database...', level='full')
             merge_cols = ['bodyId_pre', 'bodyId_post', 'roi']
             combined = pl.concat([conn_db, new_conn_pl], how='diagonal_relaxed')
@@ -2500,9 +2758,12 @@ class FindNeuronConnection:
                 )
                 if not missing_neuron_df.empty:
                     neuron_df = pd.concat([neuron_df, missing_neuron_df], ignore_index=True)
+
+            # Ensure hemisphere columns exist
+            neuron_df = self._ensure_hemisphere_columns(neuron_df)
         
-        # Extract base columns: bodyId, type, instance
-        base_cols = ['bodyId', 'type', 'instance']
+        # Extract base columns: bodyId, type, instance, hemisphere
+        base_cols = ['bodyId', 'type', 'instance', 'hemisphere', 'hemisphere_code']
         
         # Check for neurotransmitter columns and include them
         # FAFB uses: nt_type
@@ -2549,15 +2810,16 @@ class FindNeuronConnection:
         # Drop existing type/instance/custom_group/nt columns if they exist (to avoid _x, _y suffixes after merge)
         columns_to_drop = []
         for col in ['type_pre', 'instance_pre', 'type_post', 'instance_post', 
-                    'custom_group_pre', 'custom_group_post', 'nt_type_pre', 'nt_type_post']:
+                'custom_group_pre', 'custom_group_post', 'nt_type_pre', 'nt_type_post',
+                'hemisphere_pre', 'hemisphere_post', 'hemisphere_code_pre', 'hemisphere_code_post']:
             if col in conn_df.columns:
                 columns_to_drop.append(col)
         if columns_to_drop:
             conn_df = conn_df.drop(columns=columns_to_drop)
         
         # Prepare columns to merge - add NT column if available
-        rename_dict_pre = {'type': 'type_pre', 'instance': 'instance_pre'}
-        rename_dict_post = {'type': 'type_post', 'instance': 'instance_post'}
+        rename_dict_pre = {'type': 'type_pre', 'instance': 'instance_pre', 'hemisphere': 'hemisphere_pre', 'hemisphere_code': 'hemisphere_code_pre'}
+        rename_dict_post = {'type': 'type_post', 'instance': 'instance_post', 'hemisphere': 'hemisphere_post', 'hemisphere_code': 'hemisphere_code_post'}
         
         # Add NT column renaming if available
         if nt_col_to_use and nt_col_to_use in neuron_info.columns:
@@ -2568,7 +2830,7 @@ class FindNeuronConnection:
         merge_info_pre = neuron_info.rename(columns=rename_dict_pre)
         
         # Build list of columns to keep for pre
-        pre_cols = ['bodyId', 'type_pre', 'instance_pre']
+        pre_cols = ['bodyId', 'type_pre', 'instance_pre', 'hemisphere_pre', 'hemisphere_code_pre']
         if 'nt_type_pre' in merge_info_pre.columns:
             pre_cols.append('nt_type_pre')
         if 'custom_group_pre' in merge_info_pre.columns:
@@ -2590,7 +2852,7 @@ class FindNeuronConnection:
         merge_info_post = neuron_info.rename(columns=rename_dict_post)
         
         # Build list of columns to keep for post
-        post_cols = ['bodyId', 'type_post', 'instance_post']
+        post_cols = ['bodyId', 'type_post', 'instance_post', 'hemisphere_post', 'hemisphere_code_post']
         if 'nt_type_post' in merge_info_post.columns:
             post_cols.append('nt_type_post')
         if 'custom_group_post' in merge_info_post.columns:
@@ -2628,6 +2890,13 @@ class FindNeuronConnection:
         '''
         if not bodyIds:
             return pd.DataFrame()
+
+        # Ensure hemisphere info available when separating hemispheres
+        if columns and self.separate_hemispheres:
+            extra_cols = ['instance', 'hemisphere', 'hemisphere_code']
+            for col in extra_cols:
+                if col not in columns:
+                    columns.append(col)
         
         # 1. Try to load from neuron index cache first (fastest)
         neuron_index = self._load_neuron_index()
@@ -2711,6 +2980,9 @@ class FindNeuronConnection:
             if is_fafb:
                 ndf_complete['bodyId'] = ndf_complete['bodyId'].astype(str)
                 bodyIds = [str(b) for b in bodyIds]
+
+            # Ensure hemisphere columns exist
+            ndf_complete = self._ensure_hemisphere_columns(ndf_complete)
             
             neuron_df = ndf_complete[ndf_complete['bodyId'].isin(bodyIds)].copy()
             if columns:
@@ -2774,6 +3046,13 @@ class FindNeuronConnection:
         --------
         pd.DataFrame : Neuron information dataframe
         '''
+        # Ensure hemisphere info available when separating hemispheres
+        if columns and self.separate_hemispheres:
+            extra_cols = ['instance', 'hemisphere', 'hemisphere_code']
+            for col in extra_cols:
+                if col not in columns:
+                    columns.append(col)
+
         # Try local dataset first
         dataset_safe = self.dataset.replace(':', '_').replace('.', '_')
         dataset_path = os.path.join(
@@ -2802,6 +3081,9 @@ class FindNeuronConnection:
             # Ensure bodyId is string for FAFB
             if is_fafb:
                 ndf_complete['bodyId'] = ndf_complete['bodyId'].astype(str)
+
+            # Ensure hemisphere columns exist
+            ndf_complete = self._ensure_hemisphere_columns(ndf_complete)
             
             neuron_df = ndf_complete[ndf_complete['type'].isin(types)].copy()
             if columns:
@@ -3024,6 +3306,9 @@ class FindNeuronConnection:
                 mask = combined['std_label_post'] != ''
                 combined.loc[mask, 'type_post'] = combined.loc[mask, 'std_label_post']
                 combined = combined.drop(columns=['std_label_post'])
+
+        # Apply hemisphere suffixes if requested
+        combined = self._apply_hemisphere_suffix_to_conn_df(combined)
         
         # Exclude intra-type connections if requested
         if self.exclude_intra_type_connections and len(combined) > 0:
@@ -3386,6 +3671,9 @@ class FindNeuronConnection:
                 mask = combined['std_label_post'] != ''
                 combined.loc[mask, 'type_post'] = combined.loc[mask, 'std_label_post']
                 combined = combined.drop(columns=['std_label_post'])
+
+        # Apply hemisphere suffixes if requested
+        combined = self._apply_hemisphere_suffix_to_conn_df(combined)
         
         # Exclude intra-type connections if requested (before applying other filters)
         if self.exclude_intra_type_connections and len(combined) > 0:
@@ -4860,6 +5148,11 @@ class FindNeuronConnection:
             self._ensure_neuprint_client()
         ''' initialize neuron info '''
         self._vprint('Fetching source and target neurons...', level='simple')
+
+        if not self.separate_hemispheres:
+            if self._query_has_hemisphere_suffix(self.sourceNeurons) or self._query_has_hemisphere_suffix(self.targetNeurons):
+                self._vprint('\033[33m⚠️  Hemisphere-specific query detected while separate_hemispheres=False.\n'
+                            '   Results will be merged at type/group level. Set separate_hemispheres=True to keep L/R separate.\033[0m', level='always')
         
         # Determine client to pass
         active_client = self.client_flywire if self.client_type == 'flywire' else self.client_hemibrain
@@ -4935,6 +5228,12 @@ class FindNeuronConnection:
                 mask = self.target_df['std_label'] != ''
                 self.target_df.loc[mask, 'type'] = self.target_df.loc[mask, 'std_label']
                 self.target_df = self.target_df.drop(columns=['std_label'])
+
+        # Ensure hemisphere columns and apply suffixes if requested
+        # (This must be OUTSIDE the label_mapper block to apply even when no mapper is used)
+        if self.separate_hemispheres:
+            self.source_df = self._apply_hemisphere_suffix_to_neuron_df(self.source_df)
+            self.target_df = self._apply_hemisphere_suffix_to_neuron_df(self.target_df)
         
         if self.max_interlayer > 2 or len(self.source_df) > 200:
             self.simple_fetch = False
@@ -4985,6 +5284,8 @@ class FindNeuronConnection:
             'filter by': self.filter_by,
             'exclude intra-type connections': str(self.exclude_intra_type_connections),
             'max interlayer': str(self.max_interlayer),
+            'separate hemispheres': str(self.separate_hemispheres),
+            'find reciprocal': str(self.find_reciprocal),
             'keyword in path to remove': self.keyword_in_path_to_remove,
             'server': self.server,
             'dataset': self.dataset,
@@ -5001,6 +5302,24 @@ class FindNeuronConnection:
         if self.max_interlayer == -1:
             self._vprint('\033[36mmax_interlayer=-1: Neurons fetched (no connections will be queried)\033[0m', level='simple')
             self._vprint('Use FetchNeuronsOnly() for connectivity profile analysis.', level='simple')
+
+    def SetSource(self, type_name: str = None, neuron_list: list = None):
+        '''
+        Backward-compatible helper to set source neurons and initialize neuron info.
+
+        Args:
+            type_name: Single neuron type string
+            neuron_list: List of neuron types or IDs
+        '''
+        if type_name is not None:
+            self.sourceNeurons = [type_name]
+        elif neuron_list is not None:
+            self.sourceNeurons = neuron_list
+
+        if not self.targetNeurons:
+            self.targetNeurons = list(self.sourceNeurons)
+
+        self.InitializeNeuronInfo()
     
     def FetchNeuronsOnly(self) -> tuple:
         '''
@@ -5232,7 +5551,8 @@ class FindNeuronConnection:
             dataset=self.dataset,
             script_path=self.script_path,
             aggregate_method='product',  # Type-level prob = 1 - product(bodyId-level block_prob)
-            label_mapper=self.label_mapper
+            label_mapper=self.label_mapper,
+            separate_hemispheres=self.separate_hemispheres
         )
         # fill empty values
         self.conn_df = self.conn_df.fillna("")
@@ -5495,12 +5815,29 @@ class FindNeuronConnection:
             if len(self.conn_df) > 0:
                 self._vprint('\nCreating VisualizePath visualization for bodyId-level connections...')
                 bodyId_path_data = []
+                def _format_bodyid_label(body_id, row, side: str):
+                    type_col = f"type_{side}"
+                    inst_col = f"instance_{side}"
+                    hemi_col = f"hemisphere_{side}"
+                    hemi_code_col = f"hemisphere_code_{side}"
+                    ntype = row[type_col] if type_col in row else ''
+                    hemi_code = None
+                    if hemi_code_col in row and pd.notna(row[hemi_code_col]):
+                        hemi_code = str(row[hemi_code_col])
+                    elif hemi_col in row and pd.notna(row[hemi_col]):
+                        hemi_code = self._normalize_hemisphere_value(row[hemi_col])
+                    elif inst_col in row and isinstance(row[inst_col], str):
+                        hemi_code = 'R' if row[inst_col].endswith('_R') else ('L' if row[inst_col].endswith('_L') else 'U')
+                    else:
+                        hemi_code = 'U'
+                    ntype_with_hemi = self._append_hemi_suffix(ntype, hemi_code)
+                    return f"{body_id}_{ntype_with_hemi}"
+
                 for idx in self.conn_df.index:
                     # Add type suffix to bodyIds
-                    source_type = str(self.conn_df.at[idx, 'type_pre'])
-                    target_type = str(self.conn_df.at[idx, 'type_post'])
-                    source = f"{self.conn_df.at[idx, 'bodyId_pre']}_{source_type}"
-                    target = f"{self.conn_df.at[idx, 'bodyId_post']}_{target_type}"
+                    row = self.conn_df.loc[idx]
+                    source = _format_bodyid_label(self.conn_df.at[idx, 'bodyId_pre'], row, 'pre')
+                    target = _format_bodyid_label(self.conn_df.at[idx, 'bodyId_post'], row, 'post')
                     
                     weight = self.conn_df.at[idx, 'weight']
                     ratio = self.conn_df.at[idx, 'connection_ratio'] if 'connection_ratio' in self.conn_df.columns else 0.0
@@ -5746,7 +6083,8 @@ class FindNeuronConnection:
                 dataset=self.dataset,
                 script_path=self.script_path,
                 target_neurons_df=neurons_in_layer_df,
-                label_mapper=self.label_mapper
+                label_mapper=self.label_mapper,
+                separate_hemispheres=self.separate_hemispheres
             )
             conn_df.insert(loc=0,column='conn_layer',value=str(i)+'->'+str(i+1))
             conn_type.insert(loc=0,column='conn_layer',value=str(i)+'->'+str(i+1))
@@ -5778,6 +6116,7 @@ class FindNeuronConnection:
             conn_inpath = conn_inpath.reset_index(drop=True)
             conn_types = conn_types.sort_values(by=['conn_layer','traversal_probability','weight'],ascending=[True,False,False])
             conn_types = conn_types.reset_index(drop=True)
+            conn_types = self._ensure_ratio_prob_columns(conn_types, 'type_pre', 'type_post')
         else:
             print("Warning: No paths found connecting source to target.")
 
@@ -6307,7 +6646,7 @@ class FindNeuronConnection:
         self._vprint('Done\n')
     
     def FindAllPath(self, find_bodyId_path=True, forward_only=True, exclude_searched_neurons=None, 
-                    use_graph_cache=True):
+                    use_graph_cache=True, find_reciprocal: bool = False):
         '''
         Find all paths between source and target neurons within max_interlayer.
         
@@ -6336,6 +6675,9 @@ class FindNeuronConnection:
         exclude_searched_neurons : bool, deprecated
             Deprecated parameter name. Use forward_only instead.
             If provided, it will override forward_only for backward compatibility.
+        find_reciprocal : bool, default=False
+            If True, enrich the path graph by finding all direct connections among
+            nodes in the path graph and saving them in a find_reciprocal subfolder.
         
         Logic:
         1. Fetch connections layer by layer, discovering network structure
@@ -6360,6 +6702,10 @@ class FindNeuronConnection:
             forward_only = exclude_searched_neurons
             self._vprint('⚠️  Warning: exclude_searched_neurons is deprecated. Use forward_only instead.', level='always')
             self._vprint(f'   Setting forward_only={forward_only}', level='always')
+
+        # If flag not provided, use instance attribute
+        if find_reciprocal is None:
+            find_reciprocal = self.find_reciprocal
         
         # Helper function to format decimal numbers for folder names
         def format_decimal(val):
@@ -6420,9 +6766,11 @@ class FindNeuronConnection:
         
         # Generate cache key based on query parameters (not threshold)
         # Threshold is handled separately - we can filter a lower-threshold graph
+        # Include separate_hemispheres to differentiate cached data with/without hemisphere suffixes
         source_hash = hash(tuple(sorted(str(s) for s in source_ID)))
         target_hash = hash(tuple(sorted(str(t) for t in target_ID)))
-        cache_key = f"{self._dataset_safe}_{source_hash}_{target_hash}_{self.max_interlayer}"
+        hemi_flag = 'hemi' if self.separate_hemispheres else 'nohemi'
+        cache_key = f"{self._dataset_safe}_{source_hash}_{target_hash}_{self.max_interlayer}_{hemi_flag}"
         
         cached_data = _FINDALLPATH_GRAPH_CACHE.get(cache_key) if use_graph_cache else None
         use_cached_graph = False
@@ -6866,7 +7214,8 @@ class FindNeuronConnection:
                 script_path=self.script_path,
                 target_neurons_df=neurons_in_layer_df,
                 label_mapper=self.label_mapper,
-                global_incoming_weights=global_incoming_weights
+                global_incoming_weights=global_incoming_weights,
+                separate_hemispheres=self.separate_hemispheres
             )
             
             # Add conn_layer column AFTER enrichment
@@ -7139,6 +7488,70 @@ class FindNeuronConnection:
         if not os.path.exists(self.allpath_folder):
             os.makedirs(self.allpath_folder, exist_ok=True)
             self._vprint(f'  📁 Recreated output folder: {self.allpath_folder}', level='full')
+
+        # Optional: find reciprocal/direct connections among nodes in the graph
+        if find_reciprocal:
+            if self.min_synapse_num <= 1:
+                self._vprint('⚠️  find_reciprocal=True with min_synapse_num=1 may be very large.', level='always')
+
+            node_ids = self._extract_nodes_from_path_graph(conn_inpath)
+
+            # Fallback: use all nodes from searched layers if no paths found
+            if not node_ids and 'conn_layers' in locals():
+                layer_nodes = []
+                for layer_conn in conn_layers:
+                    try:
+                        if isinstance(layer_conn, pl.DataFrame):
+                            if layer_conn.is_empty():
+                                continue
+                            layer_nodes.extend(layer_conn['bodyId_pre'].cast(pl.Utf8).unique().to_list())
+                            layer_nodes.extend(layer_conn['bodyId_post'].cast(pl.Utf8).unique().to_list())
+                        else:
+                            if layer_conn.empty:
+                                continue
+                            layer_nodes.extend(layer_conn['bodyId_pre'].astype(str).unique().tolist())
+                            layer_nodes.extend(layer_conn['bodyId_post'].astype(str).unique().tolist())
+                    except Exception:
+                        continue
+                node_ids = list(set(layer_nodes))
+
+            if not node_ids:
+                self._vprint('⚠️  find_reciprocal=True but no nodes found in graph.', level='always')
+            else:
+                reciprocal_df = self._fetch_direct_connections_for_nodes(node_ids)
+                if reciprocal_df.empty:
+                    self._vprint('⚠️  find_reciprocal=True but no reciprocal connections found.', level='always')
+                else:
+                    reciprocal_neurons_df_pd = self._fetch_neurons_local_or_api(node_ids, columns=['bodyId', 'type', 'post'])
+                    reciprocal_neurons_df = pl.from_pandas(reciprocal_neurons_df_pd)
+
+                    reciprocal_df_enriched, reciprocal_types, reciprocal_groups = EnrichConnectionTablePolars(
+                        reciprocal_df,
+                        traversal_probability_threshold=self.min_traversal_probability,
+                        dataset=self.dataset,
+                        script_path=self.script_path,
+                        target_neurons_df=reciprocal_neurons_df,
+                        label_mapper=self.label_mapper,
+                        separate_hemispheres=self.separate_hemispheres
+                    )
+
+                    # Cache reciprocal outputs for visualization override
+                    self._reciprocal_types = reciprocal_types
+                    self._reciprocal_groups = reciprocal_groups
+                    self._reciprocal_bodyId = reciprocal_df_enriched
+
+                    reciprocal_folder = os.path.join(self.allpath_folder, 'find_reciprocal')
+                    os.makedirs(reciprocal_folder, exist_ok=True)
+                    self._save_df_to_csv_polars(self.parameter_df, os.path.join(reciprocal_folder, 'parameters.csv'))
+                    self._save_df_to_csv_polars(reciprocal_types, os.path.join(reciprocal_folder, 'reciprocal_connection_type.csv'))
+
+                    if reciprocal_groups is not None:
+                        is_groups_empty = reciprocal_groups.is_empty() if hasattr(reciprocal_groups, 'is_empty') else reciprocal_groups.empty
+                        if not is_groups_empty:
+                            self._save_df_to_csv_polars(reciprocal_groups, os.path.join(reciprocal_folder, 'reciprocal_connection_custom_groups.csv'))
+
+                    if not self.skip_bodyId:
+                        self._save_df_to_csv_polars(reciprocal_df_enriched, os.path.join(reciprocal_folder, 'reciprocal_connection_bodyId.csv'))
         
         # Handle the case where no paths were found
         if conn_inpath.is_empty():
@@ -7159,6 +7572,7 @@ class FindNeuronConnection:
             # Save discovered type-level edges even without valid paths
             # conn_types contains type-level aggregated edges (correctly aggregated at this threshold)
             if not conn_types.is_empty():
+                conn_types = self._ensure_ratio_prob_columns(conn_types, 'type_pre', 'type_post')
                 self._save_df_to_csv_polars(conn_types, os.path.join(csv_folder, 'connection_type.csv'))
                 self._vprint(f'  ✓ Saved {len(conn_types)} type-level edges to connection_type.csv (no valid paths)', level='full')
             else:
@@ -7225,7 +7639,8 @@ class FindNeuronConnection:
                     script_path=self.script_path,
                     target_neurons_df=neurons_in_layer_df,
                     label_mapper=self.label_mapper,
-                    global_incoming_weights=layer_global_incoming_weights
+                    global_incoming_weights=layer_global_incoming_weights,
+                    separate_hemispheres=self.separate_hemispheres
                 )
                 
                 # Add conn_layer back
@@ -7287,9 +7702,10 @@ class FindNeuronConnection:
             target_neurons_df=all_neurons_df,
             aggregate_method='product',
             label_mapper=self.label_mapper,
-            global_incoming_weights=global_incoming_weights
+            global_incoming_weights=global_incoming_weights,
+            separate_hemispheres=self.separate_hemispheres
         )
-        
+
         # print("  Enrichment returned. Proceeding to save...", flush=True)
 
         # Save main data (type-level aggregations)
@@ -7330,6 +7746,7 @@ class FindNeuronConnection:
             self._save_df_to_csv_polars(totalweight_df, os.path.join(csv_folder, 'total_weight_layer.csv'), index=True)
             
             # print("    - connection_type.csv", flush=True)
+            conn_types = self._ensure_ratio_prob_columns(conn_types, 'type_pre', 'type_post')
             self._save_df_to_csv_polars(conn_types, os.path.join(csv_folder, 'connection_type.csv'), index=True)
             
             if conn_groups is not None and not conn_groups.is_empty():
@@ -7467,6 +7884,19 @@ class FindNeuronConnection:
         # Get source and target labels (mapped or original types)
         # When label_mapper is provided, conn_types uses std_labels, so we need to match
         # For untyped neurons, use bodyId as fallback to handle data quality gracefully
+        
+        # Helper to extract hemisphere suffix from a type string
+        def _extract_hemi_suffix(type_str: str) -> str:
+            """Extract hemisphere suffix (_L, _R, _U) from type string."""
+            if type_str and isinstance(type_str, str):
+                if type_str.endswith('_L'):
+                    return '_L'
+                if type_str.endswith('_R'):
+                    return '_R'
+                if type_str.endswith('_U'):
+                    return '_U'
+            return ''
+        
         source_labels = set()
         for idx, row in self.source_df.iterrows():
             b = str(row['bodyId']) if 'bodyId' in row else ''
@@ -7475,6 +7905,11 @@ class FindNeuronConnection:
             # Use std_label if available, else fall back to type, else fall back to bodyId
             if b and b in bodyid_to_label:
                 label = bodyid_to_label[b]
+                # When separate_hemispheres is True, append hemisphere suffix from row['type']
+                if self.separate_hemispheres and t is not None:
+                    hemi_suffix = _extract_hemi_suffix(str(t))
+                    if hemi_suffix and not label.endswith(hemi_suffix):
+                        label = label + hemi_suffix
             elif t is not None and (not isinstance(t, float) or not pd.isna(t)) and str(t).strip() != '':
                 label = str(t)
             elif b:
@@ -7495,6 +7930,11 @@ class FindNeuronConnection:
             # Use std_label if available, else fall back to type, else fall back to bodyId
             if b and b in bodyid_to_label:
                 label = bodyid_to_label[b]
+                # When separate_hemispheres is True, append hemisphere suffix from row['type']
+                if self.separate_hemispheres and t is not None:
+                    hemi_suffix = _extract_hemi_suffix(str(t))
+                    if hemi_suffix and not label.endswith(hemi_suffix):
+                        label = label + hemi_suffix
             elif t is not None and (not isinstance(t, float) or not pd.isna(t)) and str(t).strip() != '':
                 label = str(t)
             elif b:
@@ -8022,6 +8462,18 @@ class FindNeuronConnection:
         # ============================================================================
         # VISUALIZATION: Using VisualizePath only (PHASE 4)
         # ============================================================================
+
+        # Hemisphere symmetry analysis (type-level)
+        try:
+            if self.symmetry_analysis and self._is_symmetric_dataset():
+                sym_conn_types = conn_types
+                if isinstance(sym_conn_types, pl.DataFrame):
+                    sym_conn_types = sym_conn_types.to_pandas()
+                # Pass path_df_type if available for path conservation analysis
+                sym_paths = path_df_type if len(path_df_type) > 0 else None
+                self._run_hemisphere_symmetry_analysis(sym_conn_types, sym_paths)
+        except Exception as e:
+            self._vprint(f'  Warning: Hemisphere symmetry analysis failed: {e}', level='full')
         
         # VisualizePath network visualization
         if self.verbose_mode == 'simple':
@@ -8064,6 +8516,24 @@ class FindNeuronConnection:
                 if 'probabilities' in paths_to_visualize.columns and 'traversal_probabilities' not in paths_to_visualize.columns:
                     paths_to_visualize['traversal_probabilities'] = paths_to_visualize['probabilities']
 
+                # If find_reciprocal is enabled, override visualization with reciprocal edges
+                if find_reciprocal and hasattr(self, '_reciprocal_types'):
+                    edge_df = self._reciprocal_types
+                else:
+                    edge_df = conn_types
+
+                # Fallback: if path_df_type is empty or missing weights, use edge-list
+                if paths_to_visualize.empty or 'weights' not in paths_to_visualize.columns:
+                    if isinstance(edge_df, pl.DataFrame):
+                        edge_df = edge_df.to_pandas()
+                    if edge_df is not None and not edge_df.empty:
+                        edge_df = edge_df[['type_pre', 'type_post', 'weight']].copy()
+                        edge_df.columns = ['source', 'target', 'weight']
+                        paths_to_visualize = edge_df
+
+                if isinstance(paths_to_visualize, pl.DataFrame):
+                    paths_to_visualize = paths_to_visualize.to_pandas()
+
                 vp = VisualizePath(
                     path_file=paths_to_visualize,
                     output_folder=self.allpath_folder,
@@ -8076,7 +8546,8 @@ class FindNeuronConnection:
                     edgeN_limit=self.edgeN_limit,
                     output_format=self.output_format,
                     verbose=(self.verbose_mode == 'full'),
-                    color_edges_by_nt=True  # Enable NT-based edge coloring
+                    color_edges_by_nt=True,  # Enable NT-based edge coloring
+                    separate_hemispheres=self.separate_hemispheres
                 )
                 vp.visualize()
                 if self.verbose_mode == 'simple':
@@ -8084,8 +8555,198 @@ class FindNeuronConnection:
                 else:
                     self._vprint('  Created network_selected_paths.html and sankey_selected_paths.html', level='full')
             else:
-                if self.verbose_mode == 'full':
-                    self._vprint('  No paths found to visualize', level='full')
+                # Fallback to edge-list visualization if no path data
+                if find_reciprocal and hasattr(self, '_reciprocal_types'):
+                    edge_df = self._reciprocal_types
+                else:
+                    edge_df = conn_types
+                if isinstance(edge_df, pl.DataFrame):
+                    edge_df = edge_df.to_pandas()
+                if edge_df is not None and not edge_df.empty:
+                    edge_df = edge_df[['type_pre', 'type_post', 'weight']].copy()
+                    edge_df.columns = ['source', 'target', 'weight']
+                    vp = VisualizePath(
+                        path_file=edge_df,
+                        output_folder=self.allpath_folder,
+                        source_color=self.source_color if hasattr(self, 'source_color') else '#1f77b4',
+                        intermediate_color=self.intermediate_color if hasattr(self, 'intermediate_color') else '#2ca02c',
+                        target_color=self.target_color if hasattr(self, 'target_color') else '#d62728',
+                        link_color=self.link_color if hasattr(self, 'link_color') else 'rgba(100,100,100,0.3)',
+                        network_layout=self.network_layout if hasattr(self, 'network_layout') else 'hierarchical',
+                        showfig=self.showfig,
+                        edgeN_limit=self.edgeN_limit,
+                        output_format=self.output_format,
+                        verbose=(self.verbose_mode == 'full'),
+                        color_edges_by_nt=True,
+                        separate_hemispheres=self.separate_hemispheres
+                    )
+                    vp.visualize()
+                    if self.verbose_mode == 'full':
+                        self._vprint('  Created network and Sankey from edge list', level='full')
+                else:
+                    if self.verbose_mode == 'full':
+                        self._vprint('  No paths found to visualize', level='full')
+
+            # Independent reciprocal visualizations (type/group/bodyId) if available
+            if find_reciprocal and hasattr(self, '_reciprocal_types'):
+                try:
+                    reciprocal_vis_base = os.path.join(self.allpath_folder, 'find_reciprocal')
+                    os.makedirs(reciprocal_vis_base, exist_ok=True)
+
+                    def _to_pandas(df):
+                        if isinstance(df, pl.DataFrame):
+                            return df.to_pandas()
+                        return df
+
+                    def _build_edge_df(df, pre_col, post_col):
+                        if df is None or df.empty:
+                            return None
+                        if pre_col not in df.columns or post_col not in df.columns or 'weight' not in df.columns:
+                            return None
+                        edge_df = df[[pre_col, post_col, 'weight']].copy()
+                        edge_df.columns = ['source', 'target', 'weight']
+                        if 'connection_ratio' in df.columns:
+                            edge_df['ratio'] = df['connection_ratio']
+                        elif 'ratio' in df.columns:
+                            edge_df['ratio'] = df['ratio']
+                        if 'traversal_probability' in df.columns:
+                            edge_df['probability'] = df['traversal_probability']
+                        elif 'probability' in df.columns:
+                            edge_df['probability'] = df['probability']
+                        if 'nt_type' in df.columns:
+                            edge_df['nt_type'] = df['nt_type']
+                        elif 'nt_type_pre' in df.columns:
+                            edge_df['nt_type'] = df['nt_type_pre']
+                        return edge_df
+
+                    def _get_source_target_sets(level: str):
+                        if level == 'type':
+                            source = set(self.source_df['type'].dropna().astype(str).tolist())
+                            if 'Checked' in self.target_df.columns:
+                                target_df = self.target_df[self.target_df['Checked']]
+                            else:
+                                target_df = self.target_df
+                            target = set(target_df['type'].dropna().astype(str).tolist())
+                        elif level == 'group':
+                            source = set(self.source_df['custom_group'].dropna().astype(str).tolist()) if 'custom_group' in self.source_df.columns else set()
+                            if 'Checked' in self.target_df.columns:
+                                target_df = self.target_df[self.target_df['Checked']]
+                            else:
+                                target_df = self.target_df
+                            target = set(target_df['custom_group'].dropna().astype(str).tolist()) if 'custom_group' in target_df.columns else set()
+                        else:
+                            source = set(self.source_df['bodyId'].dropna().astype(str).tolist())
+                            if 'Checked' in self.target_df.columns:
+                                target_df = self.target_df[self.target_df['Checked']]
+                            else:
+                                target_df = self.target_df
+                            target = set(target_df['bodyId'].dropna().astype(str).tolist())
+                        return source, target
+
+                    def _assign_node_roles(vp, source_nodes, target_nodes):
+                        if vp.G_network is None:
+                            return
+                        for node in vp.G_network.nodes():
+                            if node in source_nodes:
+                                vp.G_network.nodes[node]['node_type'] = 'source'
+                            elif node in target_nodes:
+                                vp.G_network.nodes[node]['node_type'] = 'target'
+                            else:
+                                vp.G_network.nodes[node]['node_type'] = 'intermediate'
+
+                    if self.verbose_mode == 'full':
+                        self._vprint('\nCreating reciprocal visualizations...', level='full')
+
+                    # Type-level reciprocal visualization
+                    reciprocal_types_pd = _to_pandas(self._reciprocal_types)
+                    if reciprocal_types_pd is not None and not reciprocal_types_pd.empty:
+                        type_edge_df = _build_edge_df(reciprocal_types_pd, 'type_pre', 'type_post')
+                        if type_edge_df is not None and not type_edge_df.empty:
+                            vp_recip_type = VisualizePath(
+                                path_file=type_edge_df,
+                                output_folder=reciprocal_vis_base,
+                                source_color=self.source_color if hasattr(self, 'source_color') else '#1f77b4',
+                                intermediate_color=self.intermediate_color if hasattr(self, 'intermediate_color') else '#2ca02c',
+                                target_color=self.target_color if hasattr(self, 'target_color') else '#d62728',
+                                link_color=self.link_color if hasattr(self, 'link_color') else 'rgba(100,100,100,0.3)',
+                                network_layout=self.network_layout if hasattr(self, 'network_layout') else 'hierarchical',
+                                showfig=self.showfig,
+                                edgeN_limit=self.edgeN_limit,
+                                output_format=self.output_format,
+                                verbose=(self.verbose_mode == 'full'),
+                                color_edges_by_nt=True,
+                                separate_hemispheres=self.separate_hemispheres
+                            )
+                            vp_recip_type.base_filename = 'reciprocal_type'
+                            vp_recip_type.build_network()
+                            source_nodes, target_nodes = _get_source_target_sets('type')
+                            _assign_node_roles(vp_recip_type, source_nodes, target_nodes)
+                            vp_recip_type.create_heatmap()
+                            vp_recip_type.create_network()
+
+                    # Custom group reciprocal visualization
+                    if hasattr(self, '_reciprocal_groups') and self._reciprocal_groups is not None:
+                        reciprocal_groups_pd = _to_pandas(self._reciprocal_groups)
+                        if reciprocal_groups_pd is not None and not reciprocal_groups_pd.empty:
+                            group_pre_col = 'group_pre' if 'group_pre' in reciprocal_groups_pd.columns else None
+                            group_post_col = 'group_post' if 'group_post' in reciprocal_groups_pd.columns else None
+                            if group_pre_col is None and 'custom_group_pre' in reciprocal_groups_pd.columns:
+                                group_pre_col = 'custom_group_pre'
+                            if group_post_col is None and 'custom_group_post' in reciprocal_groups_pd.columns:
+                                group_post_col = 'custom_group_post'
+                            if group_pre_col and group_post_col:
+                                group_edge_df = _build_edge_df(reciprocal_groups_pd, group_pre_col, group_post_col)
+                                if group_edge_df is not None and not group_edge_df.empty:
+                                    vp_recip_group = VisualizePath(
+                                        path_file=group_edge_df,
+                                        output_folder=reciprocal_vis_base,
+                                        source_color=self.source_color if hasattr(self, 'source_color') else '#1f77b4',
+                                        intermediate_color=self.intermediate_color if hasattr(self, 'intermediate_color') else '#2ca02c',
+                                        target_color=self.target_color if hasattr(self, 'target_color') else '#d62728',
+                                        link_color=self.link_color if hasattr(self, 'link_color') else 'rgba(100,100,100,0.3)',
+                                        network_layout=self.network_layout if hasattr(self, 'network_layout') else 'hierarchical',
+                                        showfig=self.showfig,
+                                        edgeN_limit=self.edgeN_limit,
+                                        output_format=self.output_format,
+                                        verbose=(self.verbose_mode == 'full'),
+                                        color_edges_by_nt=True,
+                                        separate_hemispheres=self.separate_hemispheres
+                                    )
+                                    vp_recip_group.base_filename = 'reciprocal_groups'
+                                    vp_recip_group.build_network()
+                                    source_nodes, target_nodes = _get_source_target_sets('group')
+                                    _assign_node_roles(vp_recip_group, source_nodes, target_nodes)
+                                    vp_recip_group.create_heatmap()
+                                    vp_recip_group.create_network()
+
+                    # BodyId reciprocal visualization (if available and not skipped)
+                    if not self.skip_bodyId and hasattr(self, '_reciprocal_bodyId') and self._reciprocal_bodyId is not None:
+                        reciprocal_body_pd = _to_pandas(self._reciprocal_bodyId)
+                        if reciprocal_body_pd is not None and not reciprocal_body_pd.empty:
+                            body_edge_df = _build_edge_df(reciprocal_body_pd, 'bodyId_pre', 'bodyId_post')
+                            if body_edge_df is not None and not body_edge_df.empty:
+                                vp_recip_body = VisualizePath(
+                                    path_file=body_edge_df,
+                                    output_folder=reciprocal_vis_base,
+                                    source_color=self.source_color if hasattr(self, 'source_color') else '#1f77b4',
+                                    intermediate_color=self.intermediate_color if hasattr(self, 'intermediate_color') else '#2ca02c',
+                                    target_color=self.target_color if hasattr(self, 'target_color') else '#d62728',
+                                    link_color=self.link_color if hasattr(self, 'link_color') else 'rgba(100,100,100,0.3)',
+                                    network_layout=self.network_layout if hasattr(self, 'network_layout') else 'hierarchical',
+                                    showfig=self.showfig,
+                                    edgeN_limit=self.edgeN_limit,
+                                    output_format=self.output_format,
+                                    verbose=(self.verbose_mode == 'full'),
+                                    color_edges_by_nt=True
+                                )
+                                vp_recip_body.base_filename = 'reciprocal_bodyId'
+                                vp_recip_body.build_network()
+                                source_nodes, target_nodes = _get_source_target_sets('bodyId')
+                                _assign_node_roles(vp_recip_body, source_nodes, target_nodes)
+                                vp_recip_body.create_heatmap()
+                                vp_recip_body.create_network()
+                except Exception as e:
+                    self._vprint(f'  Warning: Reciprocal visualizations failed: {e}', level='full')
             
             # Create network from path_bodyId if it exists and requested
             if find_bodyId_path and len(path_df_bodyId) > 0:
@@ -8193,6 +8854,481 @@ class FindNeuronConnection:
             self._vprint('===========\n', level='simple')
         else:
             self._vprint('Done\n', level='full')
+
+    def _is_symmetric_dataset(self) -> bool:
+        dataset = str(self.dataset).lower()
+        return any(key in dataset for key in ['male-cns', 'manc', 'flywire_fafb', 'flywire_banc', 'fafb', 'banc'])
+
+    def _extract_hemi_from_label(self, label: str):
+        base = label.split('(')[0].strip() if '(' in label else label
+        hemi = None
+        if base.endswith(('_L', '_R', '_U')):
+            hemi = base[-1]
+            base = base[:-2]
+        return base, hemi
+
+    def _count_hemisphere_from_df(self, df: pd.DataFrame) -> dict:
+        """Count neurons by hemisphere from a DataFrame."""
+        if df is None or df.empty:
+            return {'L': 0, 'R': 0, 'U': 0}
+        
+        counts = {'L': 0, 'R': 0, 'U': 0}
+        
+        # Prefer hemisphere_code (already normalized to L/R/U)
+        if 'hemisphere_code' in df.columns:
+            vals = df['hemisphere_code'].astype(str).str.strip().str.upper()
+            counts['L'] = int((vals == 'L').sum())
+            counts['R'] = int((vals == 'R').sum())
+            counts['U'] = int((~vals.isin(['L', 'R'])).sum())
+            return counts
+        
+        # Try to get hemisphere from other columns and normalize
+        hemi_col = None
+        for col in ['hemisphere', 'hemisphere_label', 'Soma side', 'soma_side']:
+            if col in df.columns:
+                hemi_col = col
+                break
+        
+        if hemi_col:
+            # Normalize values (handle 'right', 'left', 'R', 'L', etc.)
+            def normalize_hemi(v):
+                if v is None or (isinstance(v, float) and np.isnan(v)):
+                    return 'U'
+                s = str(v).strip().lower()
+                if s in ('r', 'right', 'rhs', 'right hemisphere'):
+                    return 'R'
+                if s in ('l', 'left', 'lhs', 'left hemisphere'):
+                    return 'L'
+                return 'U'
+            
+            normalized = df[hemi_col].apply(normalize_hemi)
+            counts['L'] = int((normalized == 'L').sum())
+            counts['R'] = int((normalized == 'R').sum())
+            counts['U'] = int((normalized == 'U').sum())
+            return counts
+
+        # Fall back to checking type column suffixes
+        if 'type' in df.columns:
+            types = df['type'].astype(str)
+            counts['L'] = int(types.str.endswith('_L').sum())
+            counts['R'] = int(types.str.endswith('_R').sum())
+            # For U, count those that don't end with _L or _R (could be _U or no suffix)
+            counts['U'] = int((~types.str.endswith('_L') & ~types.str.endswith('_R')).sum())
+        
+        return counts
+
+    def _run_hemisphere_symmetry_analysis(self, conn_types_df: pd.DataFrame, paths_df: pd.DataFrame = None) -> None:
+        """Run hemisphere symmetry analysis comparing L vs R connections.
+        
+        Outputs:
+        - symmetry_summary.json: Overall statistics
+        - symmetry_ipsi.csv: Ipsilateral edge comparison (L vs R)
+        - symmetry_contra.csv: Contralateral edge comparison (L->R vs R->L)
+        - conserved_edges.csv: Edges present on both sides
+        - unconserved_edges.csv: Edges present only on one side
+        - conserved_paths.csv: Paths with mirror counterparts (if paths_df provided)
+        - unconserved_paths.csv: Paths without mirror counterparts (if paths_df provided)
+        - pairwise_strength.csv: Weight comparison for all edge pairs
+        - type_counts_by_role.csv: Per-type neuron counts by source/target/intermediate role
+        """
+        if not self.symmetry_analysis:
+            return
+        if not self._is_symmetric_dataset():
+            return
+        # Note: Hemisphere analysis works even with separate_hemispheres=False
+        # because hemisphere info is extracted from type labels (e.g., _L, _R suffixes)
+        if conn_types_df is None or conn_types_df.empty:
+            self._vprint('⚠️  Hemisphere symmetry analysis skipped (no connection data).', level='full')
+            return
+
+        required_cols = {'type_pre', 'type_post', 'weight'}
+        if not required_cols.issubset(conn_types_df.columns):
+            self._vprint(f'⚠️  Hemisphere symmetry analysis skipped (missing columns: {required_cols - set(conn_types_df.columns)}).', level='full')
+            return
+
+        self._vprint('Running hemisphere symmetry analysis...', level='full')
+        sym_dir = os.path.join(self.allpath_folder, 'hemisphere_symmetry')
+        os.makedirs(sym_dir, exist_ok=True)
+
+        ipsi_map = {}
+        contra_map = {}
+        
+        # Track original edges for conservation lists
+        all_edges_L = []  # List of (pre_L, post_L, weight)
+        all_edges_R = []  # List of (pre_R, post_R, weight)
+
+        for _, row in conn_types_df.iterrows():
+            pre = str(row['type_pre'])
+            post = str(row['type_post'])
+            weight = float(row['weight']) if not pd.isna(row['weight']) else 0.0
+            base_pre, hemi_pre = self._extract_hemi_from_label(pre)
+            base_post, hemi_post = self._extract_hemi_from_label(post)
+            if hemi_pre not in ('L', 'R') or hemi_post not in ('L', 'R'):
+                continue
+            
+            # Track all edges for conservation lists
+            if hemi_pre == 'L' and hemi_post == 'L':
+                all_edges_L.append({'pre': pre, 'post': post, 'base_pre': base_pre, 'base_post': base_post, 'weight': weight})
+            elif hemi_pre == 'R' and hemi_post == 'R':
+                all_edges_R.append({'pre': pre, 'post': post, 'base_pre': base_pre, 'base_post': base_post, 'weight': weight})
+
+            if hemi_pre == hemi_post:
+                key = (base_pre, base_post)
+                if key not in ipsi_map:
+                    ipsi_map[key] = {'weight_L': 0.0, 'weight_R': 0.0}
+                if hemi_pre == 'L':
+                    ipsi_map[key]['weight_L'] += weight
+                else:
+                    ipsi_map[key]['weight_R'] += weight
+            else:
+                key = (base_pre, base_post)
+                if key not in contra_map:
+                    contra_map[key] = {'weight_LR': 0.0, 'weight_RL': 0.0}
+                if hemi_pre == 'L' and hemi_post == 'R':
+                    contra_map[key]['weight_LR'] += weight
+                elif hemi_pre == 'R' and hemi_post == 'L':
+                    contra_map[key]['weight_RL'] += weight
+
+        ipsi_rows = []
+        for (base_pre, base_post), vals in ipsi_map.items():
+            wL = vals['weight_L']
+            wR = vals['weight_R']
+            present_L = wL > 0
+            present_R = wR > 0
+            conserved = present_L and present_R
+            ratio = (min(wL, wR) / max(wL, wR)) if conserved and max(wL, wR) > 0 else 0
+            ipsi_rows.append({
+                'base_pre': base_pre,
+                'base_post': base_post,
+                'weight_L': wL,
+                'weight_R': wR,
+                'present_L': present_L,
+                'present_R': present_R,
+                'conserved': conserved,
+                'ratio': ratio
+            })
+
+        contra_rows = []
+        for (base_pre, base_post), vals in contra_map.items():
+            wLR = vals['weight_LR']
+            wRL = vals['weight_RL']
+            present_LR = wLR > 0
+            present_RL = wRL > 0
+            conserved = present_LR and present_RL
+            ratio = (min(wLR, wRL) / max(wLR, wRL)) if conserved and max(wLR, wRL) > 0 else 0
+            contra_rows.append({
+                'base_pre': base_pre,
+                'base_post': base_post,
+                'weight_LR': wLR,
+                'weight_RL': wRL,
+                'present_LR': present_LR,
+                'present_RL': present_RL,
+                'conserved': conserved,
+                'ratio': ratio
+            })
+
+        ipsi_df = pd.DataFrame(ipsi_rows)
+        contra_df = pd.DataFrame(contra_rows)
+
+        ipsi_edges_L = set(ipsi_df.loc[ipsi_df['present_L'], ['base_pre', 'base_post']].itertuples(index=False, name=None)) if not ipsi_df.empty else set()
+        ipsi_edges_R = set(ipsi_df.loc[ipsi_df['present_R'], ['base_pre', 'base_post']].itertuples(index=False, name=None)) if not ipsi_df.empty else set()
+        ipsi_union = len(ipsi_edges_L | ipsi_edges_R)
+        ipsi_inter = len(ipsi_edges_L & ipsi_edges_R)
+        ipsi_jaccard = (ipsi_inter / ipsi_union) if ipsi_union > 0 else 0
+
+        contra_edges_LR = set(contra_df.loc[contra_df['present_LR'], ['base_pre', 'base_post']].itertuples(index=False, name=None)) if not contra_df.empty else set()
+        contra_edges_RL = set(contra_df.loc[contra_df['present_RL'], ['base_pre', 'base_post']].itertuples(index=False, name=None)) if not contra_df.empty else set()
+        contra_union = len(contra_edges_LR | contra_edges_RL)
+        contra_inter = len(contra_edges_LR & contra_edges_RL)
+        contra_jaccard = (contra_inter / contra_union) if contra_union > 0 else 0
+
+        # Compute additional similarity metrics for conserved edges
+        # Weight correlation (Pearson/Spearman) and cosine similarity
+        def compute_weight_similarity(df, weight_col_a, weight_col_b, conserved_mask):
+            """Compute weight-based similarity metrics for conserved edges."""
+            if conserved_mask.sum() < 2:
+                return {'pearson': 0.0, 'spearman': 0.0, 'cosine': 0.0}
+            
+            w_a = df.loc[conserved_mask, weight_col_a].values
+            w_b = df.loc[conserved_mask, weight_col_b].values
+            
+            # Pearson correlation
+            pearson = 0.0
+            if np.std(w_a) > 0 and np.std(w_b) > 0:
+                pearson = float(np.corrcoef(w_a, w_b)[0, 1])
+            
+            # Spearman rank correlation
+            spearman = 0.0
+            if len(w_a) >= 2:
+                from scipy.stats import spearmanr
+                spearman, _ = spearmanr(w_a, w_b)
+                spearman = float(spearman) if not np.isnan(spearman) else 0.0
+            
+            # Cosine similarity
+            cosine = 0.0
+            norm_a = np.linalg.norm(w_a)
+            norm_b = np.linalg.norm(w_b)
+            if norm_a > 0 and norm_b > 0:
+                cosine = float(np.dot(w_a, w_b) / (norm_a * norm_b))
+            
+            return {'pearson': pearson, 'spearman': spearman, 'cosine': cosine}
+        
+        ipsi_weight_sim = {'pearson': 0.0, 'spearman': 0.0, 'cosine': 0.0}
+        contra_weight_sim = {'pearson': 0.0, 'spearman': 0.0, 'cosine': 0.0}
+        
+        if not ipsi_df.empty and 'conserved' in ipsi_df.columns:
+            ipsi_weight_sim = compute_weight_similarity(ipsi_df, 'weight_L', 'weight_R', ipsi_df['conserved'])
+        
+        if not contra_df.empty and 'conserved' in contra_df.columns:
+            contra_weight_sim = compute_weight_similarity(contra_df, 'weight_LR', 'weight_RL', contra_df['conserved'])
+
+        hemi_counts_source = self._count_hemisphere_from_df(self.source_df)
+        hemi_counts_target = self._count_hemisphere_from_df(self.target_df)
+        hemi_counts_total = {
+            'L': hemi_counts_source['L'] + hemi_counts_target['L'],
+            'R': hemi_counts_source['R'] + hemi_counts_target['R'],
+            'U': hemi_counts_source['U'] + hemi_counts_target['U'],
+        }
+
+        # Count unique neuron types involved (by base name, excluding hemisphere suffix)
+        all_types_in_conns = set()
+        for _, row in conn_types_df.iterrows():
+            all_types_in_conns.add(str(row['type_pre']))
+            all_types_in_conns.add(str(row['type_post']))
+        
+        neuron_bases_L = set()
+        neuron_bases_R = set()
+        neuron_bases_U = set()
+        for t in all_types_in_conns:
+            base, hemi = self._extract_hemi_from_label(t)
+            if hemi == 'L':
+                neuron_bases_L.add(base)
+            elif hemi == 'R':
+                neuron_bases_R.add(base)
+            else:
+                neuron_bases_U.add(base)
+        
+        neuron_type_counts = {
+            'types_L': len(neuron_bases_L),
+            'types_R': len(neuron_bases_R),
+            'types_U': len(neuron_bases_U),
+            'types_union': len(neuron_bases_L | neuron_bases_R),
+            'types_conserved': len(neuron_bases_L & neuron_bases_R),
+        }
+
+        summary = {
+            'dataset': self.dataset,
+            'threshold': self.min_synapse_num,
+            'ipsi': {
+                'edges_L': len(ipsi_edges_L),
+                'edges_R': len(ipsi_edges_R),
+                'union': ipsi_union,
+                'conserved': ipsi_inter,
+                'jaccard': ipsi_jaccard,
+                'mean_ratio': float(ipsi_df['ratio'].mean()) if not ipsi_df.empty else 0,
+                'weight_pearson': ipsi_weight_sim['pearson'],
+                'weight_spearman': ipsi_weight_sim['spearman'],
+                'weight_cosine': ipsi_weight_sim['cosine']
+            },
+            'contra': {
+                'edges_LR': len(contra_edges_LR),
+                'edges_RL': len(contra_edges_RL),
+                'union': contra_union,
+                'conserved': contra_inter,
+                'jaccard': contra_jaccard,
+                'mean_ratio': float(contra_df['ratio'].mean()) if not contra_df.empty else 0,
+                'weight_pearson': contra_weight_sim['pearson'],
+                'weight_spearman': contra_weight_sim['spearman'],
+                'weight_cosine': contra_weight_sim['cosine']
+            },
+            'neuron_types': neuron_type_counts,
+            'hemisphere_counts': {
+                'source': hemi_counts_source,
+                'target': hemi_counts_target,
+                'total': hemi_counts_total
+            }
+        }
+
+        self._vprint(f"  Ipsi: {ipsi_inter}/{ipsi_union} conserved edges (Jaccard={ipsi_jaccard:.3f}, Pearson={ipsi_weight_sim['pearson']:.3f})", level='full')
+        self._vprint(f"  Contra: {contra_inter}/{contra_union} conserved edges (Jaccard={contra_jaccard:.3f}, Pearson={contra_weight_sim['pearson']:.3f})", level='full')
+        self._vprint(f"  Types: {neuron_type_counts['types_conserved']}/{neuron_type_counts['types_union']} conserved", level='full')
+
+        # ===== ENHANCED OUTPUTS =====
+        
+        # 1. Conserved/Unconserved Edge Lists
+        ipsi_conserved_edges = set(ipsi_df.loc[ipsi_df['conserved'], ['base_pre', 'base_post']].itertuples(index=False, name=None)) if not ipsi_df.empty else set()
+        ipsi_unconserved_L = set(ipsi_df.loc[ipsi_df['present_L'] & ~ipsi_df['present_R'], ['base_pre', 'base_post']].itertuples(index=False, name=None)) if not ipsi_df.empty else set()
+        ipsi_unconserved_R = set(ipsi_df.loc[ipsi_df['present_R'] & ~ipsi_df['present_L'], ['base_pre', 'base_post']].itertuples(index=False, name=None)) if not ipsi_df.empty else set()
+        
+        conserved_edges_rows = []
+        unconserved_edges_rows = []
+        
+        # Process ipsilateral edges
+        for e in ipsi_conserved_edges:
+            conserved_edges_rows.append({'base_pre': e[0], 'base_post': e[1], 'type': 'ipsi', 'note': 'L&R'})
+        for e in ipsi_unconserved_L:
+            unconserved_edges_rows.append({'base_pre': e[0], 'base_post': e[1], 'type': 'ipsi', 'present_in': 'L_only'})
+        for e in ipsi_unconserved_R:
+            unconserved_edges_rows.append({'base_pre': e[0], 'base_post': e[1], 'type': 'ipsi', 'present_in': 'R_only'})
+        
+        # Process contralateral edges
+        contra_conserved_edges = set(contra_df.loc[contra_df['conserved'], ['base_pre', 'base_post']].itertuples(index=False, name=None)) if not contra_df.empty else set()
+        contra_unconserved_LR = set(contra_df.loc[contra_df['present_LR'] & ~contra_df['present_RL'], ['base_pre', 'base_post']].itertuples(index=False, name=None)) if not contra_df.empty else set()
+        contra_unconserved_RL = set(contra_df.loc[contra_df['present_RL'] & ~contra_df['present_LR'], ['base_pre', 'base_post']].itertuples(index=False, name=None)) if not contra_df.empty else set()
+        
+        for e in contra_conserved_edges:
+            conserved_edges_rows.append({'base_pre': e[0], 'base_post': e[1], 'type': 'contra', 'note': 'LR&RL'})
+        for e in contra_unconserved_LR:
+            unconserved_edges_rows.append({'base_pre': e[0], 'base_post': e[1], 'type': 'contra', 'present_in': 'LR_only'})
+        for e in contra_unconserved_RL:
+            unconserved_edges_rows.append({'base_pre': e[0], 'base_post': e[1], 'type': 'contra', 'present_in': 'RL_only'})
+        
+        if conserved_edges_rows:
+            pd.DataFrame(conserved_edges_rows).to_csv(os.path.join(sym_dir, 'conserved_edges.csv'), index=False)
+        if unconserved_edges_rows:
+            pd.DataFrame(unconserved_edges_rows).to_csv(os.path.join(sym_dir, 'unconserved_edges.csv'), index=False)
+        
+        # 2. Pairwise Strength Comparison for all types
+        pairwise_rows = []
+        for (base_pre, base_post), vals in ipsi_map.items():
+            pairwise_rows.append({
+                'base_pre': base_pre,
+                'base_post': base_post,
+                'type': 'ipsi',
+                'weight_L': vals['weight_L'],
+                'weight_R': vals['weight_R'],
+                'diff': vals['weight_L'] - vals['weight_R'],
+                'ratio': vals['weight_L'] / vals['weight_R'] if vals['weight_R'] > 0 else float('inf') if vals['weight_L'] > 0 else 0
+            })
+        for (base_pre, base_post), vals in contra_map.items():
+            pairwise_rows.append({
+                'base_pre': base_pre,
+                'base_post': base_post,
+                'type': 'contra',
+                'weight_LR': vals['weight_LR'],
+                'weight_RL': vals['weight_RL'],
+                'diff': vals['weight_LR'] - vals['weight_RL'],
+                'ratio': vals['weight_LR'] / vals['weight_RL'] if vals['weight_RL'] > 0 else float('inf') if vals['weight_LR'] > 0 else 0
+            })
+        if pairwise_rows:
+            pd.DataFrame(pairwise_rows).to_csv(os.path.join(sym_dir, 'pairwise_strength.csv'), index=False)
+        
+        # 3. Per-Type Neuron Counts by Role (source/target/intermediate)
+        source_types_set = set()
+        target_types_set = set()
+        if hasattr(self, 'source_df') and self.source_df is not None and not self.source_df.empty:
+            if 'type' in self.source_df.columns:
+                source_types_set = set(self.source_df['type'].dropna().astype(str).unique())
+        if hasattr(self, 'target_df') and self.target_df is not None and not self.target_df.empty:
+            if 'type' in self.target_df.columns:
+                target_types_set = set(self.target_df['type'].dropna().astype(str).unique())
+        
+        type_role_counts = {}  # {base_name: {role: {'L': count, 'R': count, 'U': count}}}
+        
+        for t in all_types_in_conns:
+            base, hemi = self._extract_hemi_from_label(t)
+            # Determine role
+            if t in source_types_set:
+                role = 'source'
+            elif t in target_types_set:
+                role = 'target'
+            else:
+                role = 'intermediate'
+            
+            if base not in type_role_counts:
+                type_role_counts[base] = {'source': {'L': 0, 'R': 0, 'U': 0}, 'target': {'L': 0, 'R': 0, 'U': 0}, 'intermediate': {'L': 0, 'R': 0, 'U': 0}}
+            
+            h_key = hemi if hemi in ('L', 'R') else 'U'
+            type_role_counts[base][role][h_key] += 1
+        
+        type_counts_rows = []
+        for base, roles in type_role_counts.items():
+            row = {'base_type': base}
+            for role in ['source', 'target', 'intermediate']:
+                for h in ['L', 'R', 'U']:
+                    row[f'{role}_{h}'] = roles[role][h]
+            type_counts_rows.append(row)
+        
+        if type_counts_rows:
+            pd.DataFrame(type_counts_rows).to_csv(os.path.join(sym_dir, 'type_counts_by_role.csv'), index=False)
+        
+        # 4. Path Conservation Analysis (if paths_df provided)
+        if paths_df is not None and not paths_df.empty and 'path_block' in paths_df.columns:
+            def extract_path_signature(path_block: str):
+                """Extract base name sequence from path_block, removing hemisphere suffixes."""
+                nodes = [n.strip() for n in str(path_block).split('->')]
+                bases = []
+                for n in nodes:
+                    base, _ = self._extract_hemi_from_label(n)
+                    bases.append(base)
+                return ' -> '.join(bases)
+            
+            def get_path_hemisphere(path_block: str):
+                """Determine if path is all-L, all-R, or mixed."""
+                nodes = [n.strip() for n in str(path_block).split('->')]
+                hemis = []
+                for n in nodes:
+                    _, h = self._extract_hemi_from_label(n)
+                    hemis.append(h)
+                if all(h == 'L' for h in hemis):
+                    return 'L'
+                elif all(h == 'R' for h in hemis):
+                    return 'R'
+                else:
+                    return 'mixed'
+            
+            paths_df = paths_df.copy()
+            paths_df['_signature'] = paths_df['path_block'].apply(extract_path_signature)
+            paths_df['_hemisphere'] = paths_df['path_block'].apply(get_path_hemisphere)
+            
+            # Group by signature
+            paths_L = set(paths_df.loc[paths_df['_hemisphere'] == 'L', '_signature'].unique())
+            paths_R = set(paths_df.loc[paths_df['_hemisphere'] == 'R', '_signature'].unique())
+            
+            conserved_path_sigs = paths_L & paths_R
+            unconserved_L = paths_L - paths_R
+            unconserved_R = paths_R - paths_L
+            
+            # Save conserved paths
+            conserved_paths_df = paths_df[paths_df['_signature'].isin(conserved_path_sigs)].copy()
+            if not conserved_paths_df.empty:
+                conserved_paths_df.drop(columns=['_signature', '_hemisphere'], inplace=True, errors='ignore')
+                conserved_paths_df.to_csv(os.path.join(sym_dir, 'conserved_paths.csv'), index=False)
+            
+            # Save unconserved paths
+            unconserved_paths_df = paths_df[
+                (paths_df['_signature'].isin(unconserved_L)) | 
+                (paths_df['_signature'].isin(unconserved_R))
+            ].copy()
+            if not unconserved_paths_df.empty:
+                unconserved_paths_df['_conserved'] = False
+                unconserved_paths_df['_only_in'] = unconserved_paths_df.apply(
+                    lambda r: 'L' if r['_signature'] in unconserved_L else 'R', axis=1
+                )
+                unconserved_paths_df.drop(columns=['_signature', '_hemisphere'], inplace=True, errors='ignore')
+                unconserved_paths_df.to_csv(os.path.join(sym_dir, 'unconserved_paths.csv'), index=False)
+            
+            # Update summary with path stats
+            summary['paths'] = {
+                'total_L': len(paths_L),
+                'total_R': len(paths_R),
+                'conserved': len(conserved_path_sigs),
+                'unconserved_L_only': len(unconserved_L),
+                'unconserved_R_only': len(unconserved_R),
+                'jaccard': len(conserved_path_sigs) / len(paths_L | paths_R) if (paths_L | paths_R) else 0
+            }
+            self._vprint(f"  Paths: {len(conserved_path_sigs)}/{len(paths_L | paths_R)} conserved (Jaccard={summary['paths']['jaccard']:.3f})", level='full')
+        
+        # ===== END ENHANCED OUTPUTS =====
+
+        if not ipsi_df.empty:
+            ipsi_df.to_csv(os.path.join(sym_dir, 'symmetry_ipsi.csv'), index=False)
+        if not contra_df.empty:
+            contra_df.to_csv(os.path.join(sym_dir, 'symmetry_contra.csv'), index=False)
+        with open(os.path.join(sym_dir, 'symmetry_summary.json'), 'w') as f:
+            json.dump(summary, f, indent=2)
+        
+        self._vprint(f"  Saved to: {sym_dir}", level='full')
     
     def VisualizeSelectedPaths(
         self, 
