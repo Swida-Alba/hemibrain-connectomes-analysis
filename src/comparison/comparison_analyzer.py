@@ -64,6 +64,27 @@ class ComparisonAnalyzer:
         >>> report = analyzer.generate_report()
     """
     
+    # Normalization map for neurotransmitter names
+    # Key: uppercase variation, Value: canonical name (lowercase)
+    _NT_NORMALIZATION_MAP = {
+        'ACH': 'acetylcholine',
+        'ACETYLCHOLINE': 'acetylcholine',
+        'GABA': 'gaba',
+        'GLUT': 'glutamate',
+        'GLUTAMATE': 'glutamate',
+        'DA': 'dopamine',
+        'DOPAMINE': 'dopamine', 
+        'SER': 'serotonin',
+        'SEROTONIN': 'serotonin',
+        'OCT': 'octopamine',
+        'OCTOPAMINE': 'octopamine',
+        'HIS': 'histamine',
+        'HISTAMINE': 'histamine',
+        'UNKNOWN': 'unknown',
+        'NONE': 'unknown',
+        'NO_CONS': 'unknown'
+    }
+
     def __init__(
         self,
         parameters: ComparisonParameters,
@@ -4998,6 +5019,117 @@ class ComparisonAnalyzer:
         result_df = pd.DataFrame([r[1] for r in result_rows], index=[r[0] for r in result_rows])
         return result_df.fillna(0)
 
+    def _get_edge_nt_details(self, threshold: int) -> Dict[str, Dict[str, str]]:
+        """
+        Get NT type per edge per dataset at a threshold.
+        
+        Returns:
+            Dict[canonical_edge_key, Dict[dataset_name, nt_type]]
+        """
+        dataset_names = self.parameters.get_dataset_names()
+        nt_by_edge: Dict[str, Dict[str, str]] = {} # canonical_key -> {dataset: nt}
+
+        for dataset_name in dataset_names:
+            safe_name = self.parameters._sanitize_name(dataset_name)
+            
+            # Try reciprocal first, then standard
+            # We want the most specific NT info available
+            dataset_output_path = os.path.join(
+                self.parameters.full_output_path,
+                'dataset_data',
+                safe_name,
+                f'minsyn_{threshold}',
+                'find_reciprocal'
+            )
+            conn_file = os.path.join(dataset_output_path, 'reciprocal_connection_type.csv')
+            
+            df = None
+            if os.path.exists(conn_file) and os.path.getsize(conn_file) > 0:
+                try:
+                    df = self._read_csv(conn_file)
+                except Exception:
+                    df = None
+
+            # Fallback to standard connections
+            if df is None or df.empty:
+                dataset_output_path = os.path.join(
+                    self.parameters.full_output_path,
+                    'dataset_data',
+                    safe_name,
+                    f'minsyn_{threshold}'
+                )
+                conn_file = os.path.join(dataset_output_path, 'connections_edge.csv')
+                if os.path.exists(conn_file) and os.path.getsize(conn_file) > 0:
+                    try:
+                        df = self._read_csv(conn_file)
+                    except Exception:
+                        df = None
+
+            if (df is None or df.empty):
+                # Fallback to data_details
+                dataset_output_path = os.path.join(
+                    self.parameters.full_output_path,
+                    'dataset_data',
+                    safe_name,
+                    f'minsyn_{threshold}'
+                )
+                fallback = os.path.join(dataset_output_path, 'data_details', 'connection_type.csv')
+                if os.path.exists(fallback) and os.path.getsize(fallback) > 0:
+                    try:
+                        df = self._read_csv(fallback)
+                    except Exception:
+                        df = None
+
+            if df is None or df.empty:
+                continue
+
+            if 'std_label_pre' in df.columns and 'std_label_post' in df.columns:
+                pre_col, post_col = 'std_label_pre', 'std_label_post'
+            elif 'type_pre' in df.columns and 'type_post' in df.columns:
+                pre_col, post_col = 'type_pre', 'type_post'
+            elif 'bodyId_pre' in df.columns and 'bodyId_post' in df.columns:
+                pre_col, post_col = 'bodyId_pre', 'bodyId_post'
+            else:
+                continue
+
+            if 'nt_type_pre' in df.columns:
+                nt_col = 'nt_type_pre'
+            elif 'nt_type' in df.columns:
+                nt_col = 'nt_type'
+            else:
+                continue
+
+            for _, row in df.iterrows():
+                pre_type = str(row[pre_col])
+                post_type = str(row[post_col])
+                nt_val = row.get(nt_col, None)
+                if pd.isna(nt_val):
+                    continue
+                nt_str = str(nt_val).strip()
+                if not nt_str:
+                    continue
+                
+                # Normalize NT string
+                nt_upper = nt_str.upper()
+                nt_str = self._NT_NORMALIZATION_MAP.get(nt_upper, nt_str.lower())
+
+                if self.parameters.auto_type_mapping and self.parameters._auto_type_mapper:
+                    canonical_pre = self._get_canonical_type(pre_type, dataset_name)
+                    canonical_post = self._get_canonical_type(post_type, dataset_name)
+                else:
+                    canonical_pre = pre_type
+                    canonical_post = post_type
+
+                edge_key = f"{canonical_pre} -> {canonical_post}"
+                if edge_key not in nt_by_edge:
+                    nt_by_edge[edge_key] = {}
+                
+                # Check if we already have a value for this dataset (avoid overwrite if duplicates, or just take first)
+                if dataset_name not in nt_by_edge[edge_key]:
+                    nt_by_edge[edge_key][dataset_name] = nt_str
+        
+        return nt_by_edge
+
     def _get_edge_nt_consensus_for_threshold(self, threshold: int, reciprocal: bool = False) -> Dict[str, Optional[str]]:
         """
         Get consensus NT type per edge across datasets at a threshold.
@@ -5079,6 +5211,10 @@ class ComparisonAnalyzer:
                 nt_str = str(nt_val).strip()
                 if not nt_str:
                     continue
+                
+                # Normalize NT string
+                nt_upper = nt_str.upper()
+                nt_str = self._NT_NORMALIZATION_MAP.get(nt_upper, nt_str.lower())
 
                 if self.parameters.auto_type_mapping and self.parameters._auto_type_mapper:
                     canonical_pre = self._get_canonical_type(pre_type, dataset_name)
@@ -6378,6 +6514,9 @@ class ComparisonAnalyzer:
         ratio_data = self._get_edge_ratio_data_for_threshold(threshold)
         # Note: prob_data is path-level, not edge-level. We'll include it if edge matches
         
+        # Get NT details for all edges
+        nt_details = self._get_edge_nt_details(threshold)
+        
         # Build edge list with weights from each dataset
         edge_list = []
         edge_labels = {}  # {(source, target): {dataset: {'weight': w, 'ratio': r}, ...}}
@@ -6395,6 +6534,12 @@ class ComparisonAnalyzer:
             # Format for vispath edge_labels: {key: value} where key-value pairs are shown in tooltip
             edge_info = {}  # Will contain: {'MCNS weight': 5, 'MCNS ratio': 0.01, ...}
             avg_weight = 0
+            
+            # Get NT info for this edge if available
+            edge_nts = nt_details.get(str(edge_key), {})
+            unique_nts = set(v for v in edge_nts.values() if v)
+            nt_consensus = next(iter(unique_nts)) if len(unique_nts) == 1 else None
+            
             for dataset in available_ds:
                 weight = row[dataset]
                 if weight > 0:
@@ -6419,15 +6564,23 @@ class ComparisonAnalyzer:
                             if ratio_val > 0:
                                 edge_info[f'{nickname} ratio'] = round(ratio_val, 4)
                     
+                    # Add NT info for this dataset if available
+                    if dataset in edge_nts:
+                        edge_info[f'{nickname} nt'] = edge_nts[dataset]
+                    
                     avg_weight += weight
             
             avg_weight = avg_weight / len(available_ds) if available_ds else 0
             
-            edge_list.append({
+            edge_data = {
                 'source': source,
                 'target': target,
-                'weight': avg_weight  # Use average weight for visualization
-            })
+                'weight': avg_weight,  # Use average weight for visualization
+            }
+            if nt_consensus:
+                edge_data['nt_type'] = nt_consensus
+                
+            edge_list.append(edge_data)
             edge_labels[(source, target)] = edge_info
         
         if not edge_list:
@@ -6436,25 +6589,17 @@ class ComparisonAnalyzer:
         
         # Convert to DataFrame
         edges_df = pd.DataFrame(edge_list)
+        
+        # Enable NT coloring if we have NT types
+        if 'nt_type' in edges_df.columns and not edges_df['nt_type'].isna().all():
+            if 'color_edges_by_nt' not in vispath_kwargs:
+                vispath_kwargs['color_edges_by_nt'] = True
 
         # Helper to extract canonical name from display name
         def get_canonical_name(display_name: str) -> str:
             if '(' in display_name:
                 return display_name.split('(')[0].strip()
             return display_name
-
-        # Apply NT consensus coloring (gray if inconsistent)
-        nt_consensus = self._get_edge_nt_consensus_for_threshold(threshold, reciprocal=True)
-        if nt_consensus:
-            nt_types = []
-            for _, row in edges_df.iterrows():
-                src_canonical = get_canonical_name(row['source'])
-                tgt_canonical = get_canonical_name(row['target'])
-                edge_key = f"{src_canonical} -> {tgt_canonical}"
-                nt_types.append(nt_consensus.get(edge_key))
-            edges_df['nt_type'] = nt_types
-            if 'color_edges_by_nt' not in vispath_kwargs:
-                vispath_kwargs['color_edges_by_nt'] = True
         
         # Transform node labels to display format with dataset-specific names
         # Format: {canonical}({alt1}/{alt2}) for types that differ across datasets
@@ -6491,26 +6636,6 @@ class ComparisonAnalyzer:
                 
                 self._log(f"  Applied display names to {len(display_name_map)} nodes with cross-dataset name differences")
 
-        # Helper to extract canonical name from display name
-        # Handles format: "MeVPaMe1(MTe46)" -> "MeVPaMe1"
-        def get_canonical_name(display_name: str) -> str:
-            if '(' in display_name:
-                return display_name.split('(')[0].strip()
-            return display_name
-
-        # Apply NT consensus coloring (gray if inconsistent)
-        nt_consensus = self._get_edge_nt_consensus_for_threshold(threshold, reciprocal=False)
-        if nt_consensus:
-            nt_types = []
-            for _, row in edges_df.iterrows():
-                src_canonical = get_canonical_name(row['source'])
-                tgt_canonical = get_canonical_name(row['target'])
-                edge_key = f"{src_canonical} -> {tgt_canonical}"
-                nt_types.append(nt_consensus.get(edge_key))
-            edges_df['nt_type'] = nt_types
-            if 'color_edges_by_nt' not in vispath_kwargs:
-                vispath_kwargs['color_edges_by_nt'] = True
-        
         # Identify source and target nodes from parameters
         # CRITICAL: Include ALL mapped type names across all datasets, not just original query types
         source_patterns = set(self.parameters._ensure_flat_list(self.parameters.source_neurons))

@@ -110,33 +110,43 @@ def blend_with_gray(hex_color, factor=0.4):
 
 
 # Neurotransmitter color palette
-# Colors chosen for visual distinction and biological relevance
-# Grouped by excitatory/inhibitory/modulatory for interactive color adjustment
+# Colors chosen based on user requirements
 NT_COLORS = {
-    # Excitatory neurotransmitters - warm colors (orange/yellow tones)
-    'acetylcholine': '#F39C12',  # Orange - major excitatory NT in insects
-    'ACH': '#F39C12',
-    'ach': '#F39C12',
-    'glutamate': '#E67E22',      # Darker orange - excitatory
-    'GLUT': '#E67E22',
-    'glut': '#E67E22',
+    # Acetylcholine - Orange
+    'acetylcholine': '#FFA500',
+    'ACH': '#FFA500',
+    'ach': '#FFA500',
     
-    # Inhibitory neurotransmitters - green-based colors
-    'gaba': '#27AE60',           # Green - major inhibitory NT
-    'GABA': '#27AE60',
+    # GABA - Blue
+    'gaba': '#0000FF',
+    'GABA': '#0000FF',
     
-    # Modulatory neurotransmitters - varied colors
-    'dopamine': '#9B59B6',       # Purple - neuromodulator
-    'DA': '#9B59B6',
-    'da': '#9B59B6',
-    'serotonin': '#3498DB',      # Blue - neuromodulator
-    'SER': '#3498DB',
-    'ser': '#3498DB',
-    '5-HT': '#3498DB',
-    '5-ht': '#3498DB',
-    'octopamine': '#1ABC9C',     # Teal - insect-specific neuromodulator
-    'OCT': '#1ABC9C',
-    'oct': '#1ABC9C',
+    # Glutamate - Green
+    'glutamate': '#008000',
+    'GLUT': '#008000',
+    'glut': '#008000',
+    
+    # Dopamine - Red
+    'dopamine': '#FF0000',
+    'DA': '#FF0000',
+    'da': '#FF0000',
+    
+    # Serotonin - Yellow
+    'serotonin': '#FFD700',
+    'SER': '#FFD700',
+    'ser': '#FFD700',
+    '5-HT': '#FFD700',
+    '5-ht': '#FFD700',
+    
+    # Octopamine - Purple
+    'octopamine': '#800080',
+    'OCT': '#800080',
+    'oct': '#800080',
+
+    # Histamine - Cyan
+    'histamine': '#00FFFF',
+    'HISTAMINE': '#00FFFF',
+    'his': '#00FFFF',
     
     # Unknown/other
     'unknown': '#95A5A6',        # Gray

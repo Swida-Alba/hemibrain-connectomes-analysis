@@ -344,6 +344,23 @@ def _generate_summary_section(analyzer, dataset_names: List[str], thresholds: Li
             <div class="section-header">📋 Summary & Key Findings</div>
             <div class="section-content">
     """)
+    html_parts.append("""
+                <div class="card">
+                    <h3>Key Findings by Threshold</h3>
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Threshold</th>
+                                <th>Total Edges</th>
+                                <th>Common Edges</th>
+                                <th>Edge Conservation</th>
+                                <th>Total Paths</th>
+                                <th>Common Paths</th>
+                                <th>Path Conservation</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+    """)
     for t in thresholds:
         kf = key_findings.get(t, {})
         total_edges = kf.get('total_edges', 0)
@@ -591,7 +608,17 @@ def _generate_summary_section(analyzer, dataset_names: List[str], thresholds: Li
 
 def _generate_neuron_counts_section(analyzer, dataset_names: List[str], 
                                      nickname_map: Dict[str, str]) -> str:
-    """Generate neuron counts comparison section."""
+    """Generate neuron counts comparison section with type mapping aggregation."""
+    # Try to import type mapper for cross-dataset type name merging
+    try:
+        from .cross_dataset_type_mapper import get_type_mapper
+        type_mapper = get_type_mapper()
+        type_mapper.load()
+        has_type_mapper = True
+    except Exception:
+        has_type_mapper = False
+        type_mapper = None
+    
     html_parts = []
     
     html_parts.append("""
@@ -624,7 +651,7 @@ def _generate_neuron_counts_section(analyzer, dataset_names: List[str],
         
         html_parts.append('</tbody></table>')
         
-        # Add bar chart for neuron counts
+        # Add bar chart for neuron counts - Grouped by Source/Target
         chart_data = []
         for _, row in summary_df.iterrows():
             chart_data.append({
@@ -639,104 +666,213 @@ def _generate_neuron_counts_section(analyzer, dataset_names: List[str],
             <script>
                 (function() {{
                     const data = {chart_json};
-                    const datasets = data.map(d => d.dataset);
-                    Plotly.newPlot('neuronCountChart', [
-                        {{
-                            name: 'Source Neurons',
-                            x: datasets,
-                            y: data.map(d => d.source),
-                            type: 'bar',
-                            marker: {{ color: '#3b82f6' }}
-                        }},
-                        {{
-                            name: 'Target Neurons', 
-                            x: datasets,
-                            y: data.map(d => d.target),
-                            type: 'bar',
-                            marker: {{ color: '#22c55e' }}
-                        }}
-                    ], {{
+                    
+                    // Group by Source/Target
+                    // Traces are datasets
+                    const traces = [];
+                    data.forEach(d => {{
+                        traces.push({{
+                            name: d.dataset,
+                            x: ['Source Neurons', 'Target Neurons'],
+                            y: [d.source, d.target],
+                            type: 'bar'
+                        }});
+                    }});
+                    
+                    Plotly.newPlot('neuronCountChart', traces, {{
                         barmode: 'group',
-                        xaxis: {{ title: 'Dataset' }},
+                        xaxis: {{ title: 'Role' }},
                         yaxis: {{ title: 'Neuron Count' }},
-                        legend: {{ orientation: 'h', y: -0.15 }}
+                        legend: {{ orientation: 'v' }}
                     }}, {{responsive: true}});
                 }})();
             </script>
         ''')
         html_parts.append('</div>')
     
-    # Type counts table - split into source and target tables horizontally
+    # Combined Type counts table and chart
     if type_df is not None and not type_df.empty:
-        html_parts.append('<div class="card"><h3>Neuron Counts by Type</h3>')
-        html_parts.append('<p style="color: var(--secondary-color); font-size: 0.9em; margin-bottom: 10px;">Shows neuron count per type in each dataset, split by source and target roles.</p>')
-        
-        # Separate source and target columns
+        # Get all relevant columns
         source_cols = [c for c in type_df.columns if c not in ['type', 'role'] and 'source' in c.lower()]
         target_cols = [c for c in type_df.columns if c not in ['type', 'role'] and 'target' in c.lower()]
+        all_cols = source_cols + target_cols
         
-        # Create two tables side by side
-        html_parts.append('<div style="display: flex; gap: 30px; flex-wrap: wrap;">')
+        # Helper function to get canonical type name using type mapper
+        def get_canonical_type(type_name: str) -> str:
+            if not has_type_mapper or type_mapper is None:
+                return type_name
+            try:
+                # Get display name with all equivalent names
+                display_name = type_mapper.get_display_name(type_name, dataset_names)
+                # Extract just the canonical base (before parentheses)
+                if '(' in display_name:
+                    return display_name.split('(')[0].strip()
+                return display_name
+            except Exception:
+                return type_name
         
-        # Source table
-        if source_cols:
-            html_parts.append('<div style="flex: 1; min-width: 300px;"><h4 style="color: #ef4444; margin-bottom: 10px;">🔴 Source Neurons</h4>')
-            html_parts.append('<div class="sticky-table-container" style="overflow-x: auto;"><table class="presence-table"><thead><tr><th>Type</th>')
+        # Helper function to get grouped display name with alternatives
+        def get_display_type_name(type_name: str) -> str:
+            if not has_type_mapper or type_mapper is None:
+                return type_name
+            try:
+                return type_mapper.get_display_name(type_name, dataset_names)
+            except Exception:
+                return type_name
+        
+        # Aggregate type counts by canonical name
+        canonical_counts = {}  # {canonical_type: {col: total_count}}
+        dataset_specific_types = {}  # {canonical_type: {col: set(original_types)}}
+        canonical_to_display = {}  # {canonical_type: display_name_with_alternatives}
+        
+        for _, row in type_df.iterrows():
+            orig_type = row.get('type', '')
+            if not orig_type:
+                continue
+            
+            # Get canonical type (for grouping)
+            canonical = get_canonical_type(orig_type)
+            dataset_display = get_display_type_name(orig_type)
+            # Use the display name that contains the most info (alternatives)
+            if canonical not in canonical_to_display or len(dataset_display) > len(canonical_to_display[canonical]):
+                canonical_to_display[canonical] = dataset_display
+            
+            # Initialize canonical entry if needed
+            if canonical not in canonical_counts:
+                canonical_counts[canonical] = {col: 0 for col in all_cols}
+                dataset_specific_types[canonical] = {col: set() for col in all_cols}
+            
+            # Aggregate counts
+            for col in all_cols:
+                val = row.get(col, 0)
+                if pd.notna(val) and val > 0:
+                    canonical_counts[canonical][col] += int(val)
+                    dataset_specific_types[canonical][col].add(orig_type)
+        
+        # Filter out entries with zero total count
+        canonical_counts = {
+            k: v for k, v in canonical_counts.items() 
+            if sum(v.values()) > 0
+        }
+        
+        if canonical_counts:
+            html_parts.append('<div class="card"><h3>Neuron Counts by Type (Source & Target)</h3>')
+            html_parts.append('<p style="color: var(--secondary-color); font-size: 0.9em; margin-bottom: 10px;">Neuron counts grouped by canonical type name. Dataset-specific type names shown in parentheses if they differ.</p>')
+            
+            # Sort by total count
+            sorted_types = sorted(
+                canonical_counts.keys(),
+                key=lambda t: sum(canonical_counts[t].values()),
+                reverse=True
+            )
+            # Take top 50 for chart, but show all in table
+            top_types = sorted_types[:50]
+            
+            # Build combined chart data
+            chart_traces = []
+            
+            # Color palette
+            colors = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#14b8a6', '#3b82f6', '#8b5cf6', '#ec4899']
+            
+            # Make sure we have traces for Source and Target for each dataset
+            # Columns are like 'male-cns:v0.9_source', 'flywire_FAFB_v783_target'
+            # We want to group them nicely.
+            
+            # Sort columns to alternate datasets or group source/target?
+            # Let's just iterate through source_cols then target_cols for the chart
+            
+            trace_idx = 0
             for col in source_cols:
-                # Clean column name - remove "_source" suffix
-                display_col = col.replace('_source', '').replace('_v', ':v').replace('_', ' ')
-                html_parts.append(f'<th>{display_col}</th>')
-            html_parts.append('</tr></thead><tbody>')
+                display_col = col.replace('_source', ' (Source)').replace('_v', ':v').replace('_', ' ')
+                chart_traces.append({
+                    'name': display_col,
+                    'x': [canonical_to_display.get(t, t) for t in top_types],
+                    'y': [canonical_counts[t].get(col, 0) for t in top_types],
+                    'type': 'bar',
+                    'marker': {'color': colors[trace_idx % len(colors)]}
+                })
+                trace_idx += 1
             
-            for i, (_, row) in enumerate(type_df.iterrows()):
-                if i >= 50:
-                    html_parts.append(f'<tr><td colspan="{len(source_cols)+1}"><em>... and {len(type_df)-50} more types</em></td></tr>')
-                    break
-                # Check if this row has any source values
-                has_values = any(row.get(col, 0) > 0 for col in source_cols if not pd.isna(row.get(col, 0)))
-                if not has_values:
-                    continue
-                html_parts.append(f'<tr><td><strong>{row.get("type", "")}</strong></td>')
-                for col in source_cols:
-                    val = row.get(col, 0)
-                    if pd.isna(val) or val == 0:
-                        html_parts.append('<td class="absent">-</td>')
-                    else:
-                        html_parts.append(f'<td class="present">{int(val)}</td>')
-                html_parts.append('</tr>')
-            
-            html_parts.append('</tbody></table></div></div>')
-        
-        # Target table
-        if target_cols:
-            html_parts.append('<div style="flex: 1; min-width: 300px;"><h4 style="color: #8b5cf6; margin-bottom: 10px;">🟣 Target Neurons</h4>')
-            html_parts.append('<div class="sticky-table-container" style="overflow-x: auto;"><table class="presence-table"><thead><tr><th>Type</th>')
             for col in target_cols:
-                # Clean column name - remove "_target" suffix
-                display_col = col.replace('_target', '').replace('_v', ':v').replace('_', ' ')
-                html_parts.append(f'<th>{display_col}</th>')
+                display_col = col.replace('_target', ' (Target)').replace('_v', ':v').replace('_', ' ')
+                chart_traces.append({
+                    'name': display_col,
+                    'x': [canonical_to_display.get(t, t) for t in top_types],
+                    'y': [canonical_counts[t].get(col, 0) for t in top_types],
+                    'type': 'bar',
+                    'marker': {'color': colors[trace_idx % len(colors)]}
+                })
+                trace_idx += 1
+            
+            chart_json = json.dumps(chart_traces)
+            html_parts.append(f'''
+                <div id="combinedTypeChart" class="chart-container" style="height: 500px;"></div>
+                <script>
+                    (function() {{
+                        const traces = {chart_json};
+                        Plotly.newPlot('combinedTypeChart', traces, {{
+                            barmode: 'group',
+                            xaxis: {{ 
+                                title: 'Neuron Type',
+                                tickangle: -45,
+                                automargin: true
+                            }},
+                            yaxis: {{ title: 'Count' }},
+                            legend: {{ orientation: 'h', y: 1.1 }},
+                            margin: {{ b: 150 }}
+                        }}, {{responsive: true}});
+                    }})();
+                </script>
+            ''')
+            
+            # Combined Table (Fully Expanded)
+            html_parts.append('<div class="sticky-table-container" style="overflow-x: auto; max-height: none;"><table class="presence-table"><thead><tr><th>Type</th>')
+            
+            # Table Headers
+            table_cols = []
+            for col in source_cols:
+                display = col.replace('_source', '<br>(Source)').replace('_v', ':v').replace('_', ' ')
+                table_cols.append((col, display))
+            for col in target_cols:
+                display = col.replace('_target', '<br>(Target)').replace('_v', ':v').replace('_', ' ')
+                table_cols.append((col, display))
+                
+            for _, display in table_cols:
+                html_parts.append(f'<th>{display}</th>')
             html_parts.append('</tr></thead><tbody>')
             
-            for i, (_, row) in enumerate(type_df.iterrows()):
-                if i >= 50:
-                    html_parts.append(f'<tr><td colspan="{len(target_cols)+1}"><em>... and {len(type_df)-50} more types</em></td></tr>')
-                    break
-                # Check if this row has any target values
-                has_values = any(row.get(col, 0) > 0 for col in target_cols if not pd.isna(row.get(col, 0)))
-                if not has_values:
-                    continue
-                html_parts.append(f'<tr><td><strong>{row.get("type", "")}</strong></td>')
-                for col in target_cols:
-                    val = row.get(col, 0)
-                    if pd.isna(val) or val == 0:
+            for canonical in sorted_types:
+                display_name = canonical_to_display.get(canonical, canonical)
+                html_parts.append(f'<tr><td><strong>{display_name}</strong></td>')
+                
+                for col, _ in table_cols:
+                    val = canonical_counts[canonical].get(col, 0)
+                    if val == 0:
                         html_parts.append('<td class="absent">-</td>')
                     else:
-                        html_parts.append(f'<td class="present">{int(val)}</td>')
+                        # Check for dataset-specific name
+                        orig_types = dataset_specific_types[canonical].get(col, set())
+                        cell_content = f"{int(val)}"
+                        
+                        # Logic to append specific type name
+                        # If the specific type used is different from the canonical name's base part
+                        if len(orig_types) == 1:
+                            specific_type = list(orig_types)[0]
+                            # Remove hemisphere suffix from check
+                            specific_base = specific_type.replace('_L','').replace('_R','')
+                            canonical_base = canonical.replace('_L','').replace('_R','')
+                            
+                            # Simple check: if specific type is NOT contained in the display name (which has parens), OR
+                            # if it IS different from the canonical base and we want to be explicit.
+                            # User example: MeVPLo2 (canonical) vs MTe07 (specific)
+                            if specific_base != canonical_base:
+                                cell_content += f" <span style='font-size:0.8em; color:gray'>({specific_type})</span>"
+                        
+                        html_parts.append(f'<td class="present">{cell_content}</td>')
                 html_parts.append('</tr>')
             
-            html_parts.append('</tbody></table></div></div>')
-        
-        html_parts.append('</div></div>')  # Close flex container and card
+            html_parts.append('</tbody></table></div>')
+            html_parts.append('</div>')
     
     # Group counts table (if custom groups exist)
     if group_df is not None and not group_df.empty:
@@ -1084,6 +1220,14 @@ def _generate_networks_section(analyzer, dataset_names: List[str], thresholds: L
     num_networks = len(thresholds)
     # Responsive grid: 1 col on small, 2 cols if 2+ networks
     grid_cols = min(num_networks, 2)
+    separate_hemispheres = bool(getattr(getattr(analyzer, 'parameters', None), 'separate_hemispheres', False))
+    mirror_disabled_attr = '' if separate_hemispheres else 'disabled'
+    mirror_btn_style = (
+        'padding: 6px 12px; border-radius: 6px; border: 1px solid var(--border-color); '
+        'background: #64748b; color: white; font-size: 12px; white-space: nowrap; '
+        + ('cursor: pointer;' if separate_hemispheres else 'cursor: not-allowed; opacity: 0.5;')
+    )
+    mirror_btn_title = '' if separate_hemispheres else 'Hemisphere mirroring requires separate_hemispheres=True'
     
     # Check if source == target (self-edge scenario)
     is_source_equals_target = False
@@ -1225,18 +1369,20 @@ def _generate_networks_section(analyzer, dataset_names: List[str], thresholds: L
                     }}
                     
                     function getBaseName(label) {{
-                        // Extract base name without hemisphere suffix
-                        if (label.endsWith('_L') || label.endsWith('_R') || label.endsWith('_U')) {{
-                            return label.slice(0, -2);
+                        // Extract base name without hemisphere suffix (handles parentheses)
+                        const base = label.split('(')[0].trim();
+                        if (base.endsWith('_L') || base.endsWith('_R') || base.endsWith('_U')) {{
+                            return base.slice(0, -2);
                         }}
-                        return label;
+                        return base;
                     }}
                     
                     function getHemisphere(label) {{
-                        // Get hemisphere from label suffix
-                        if (label.endsWith('_L')) return 'L';
-                        if (label.endsWith('_R')) return 'R';
-                        if (label.endsWith('_U')) return 'U';
+                        // Get hemisphere from label suffix (handles parentheses)
+                        const base = label.split('(')[0].trim();
+                        if (base.endsWith('_L')) return 'L';
+                        if (base.endsWith('_R')) return 'R';
+                        if (base.endsWith('_U')) return 'U';
                         return 'U';  // Unknown
                     }}
                     
@@ -1245,6 +1391,9 @@ def _generate_networks_section(analyzer, dataset_names: List[str], thresholds: L
                         const netData = window.allNetworks[threshold];
                         const net = netData.network;
                         const nodes = netData.nodes;
+                        
+                        // Get current visible node IDs from the DataSet
+                        const visibleNodeIds = new Set(nodes.getIds());
                         
                         // Store original positions if not already stored
                         if (!netData.originalPositions) {{
@@ -1255,74 +1404,82 @@ def _generate_networks_section(analyzer, dataset_names: List[str], thresholds: L
                             }}
                         }}
                         
-                        // Get current positions
-                        const positions = net.getPositions();
+                        // Update original positions with current visible positions
+                        // (hierarchical layout may have changed since last mirror toggle)
+                        const currentPositions = net.getPositions();
+                        for (const [id, pos] of Object.entries(currentPositions)) {{
+                            netData.originalPositions[id] = {{ x: pos.x, y: pos.y }};
+                        }}
+                        
+                        // Use current positions as the layout baseline
+                        const positions = currentPositions;
                         const nodeIds = Object.keys(positions);
                         if (nodeIds.length === 0) return;
                         
-                        // Calculate bounds of current layout
+                        // Calculate bounds of current visible layout
                         let minX = Infinity, maxX = -Infinity;
                         for (const id of nodeIds) {{
                             minX = Math.min(minX, positions[id].x);
                             maxX = Math.max(maxX, positions[id].x);
                         }}
-                        const layoutWidth = maxX - minX || 200;
                         const centerX = (minX + maxX) / 2;
-                        const gap = Math.max(100, layoutWidth * 0.3);  // Gap between hemispheres
                         
-                        // Build base name -> [nodes] mapping for Y position averaging
+                        // Build base name -> hemisphere node mapping (only for visible nodes)
                         const baseNodeMap = {{}};
                         const allNodes = netData.allNodes;
                         allNodes.forEach(node => {{
+                            // Only include nodes that are currently visible
+                            if (!visibleNodeIds.has(node.id)) return;
+                            
                             const baseName = getBaseName(node.label);
-                            if (!baseNodeMap[baseName]) baseNodeMap[baseName] = [];
-                            baseNodeMap[baseName].push(node);
+                            const hemi = getHemisphere(node.label);
+                            if (!baseNodeMap[baseName]) baseNodeMap[baseName] = {{}};
+                            baseNodeMap[baseName][hemi] = node;
                         }});
                         
-                        // Calculate average Y positions for base names (to align L/R pairs vertically)
-                        const baseYPositions = {{}};
-                        for (const [baseName, nodeList] of Object.entries(baseNodeMap)) {{
+                        // Apply mirrored layout: enforce symmetric X for L/R pairs
+                        const updates = [];
+                        const minOffset = 60;
+                        for (const [baseName, hemiNodes] of Object.entries(baseNodeMap)) {{
+                            const nodeL = hemiNodes['L'];
+                            const nodeR = hemiNodes['R'];
+                            const nodeU = hemiNodes['U'];
+                            const candidates = [nodeL, nodeR, nodeU].filter(Boolean);
+                            if (candidates.length === 0) continue;
+                            
                             let sumY = 0;
-                            let count = 0;
-                            nodeList.forEach(node => {{
-                                if (positions[node.id]) {{
-                                    sumY += positions[node.id].y;
-                                    count++;
+                            let countY = 0;
+                            candidates.forEach(n => {{
+                                if (positions[n.id]) {{
+                                    sumY += positions[n.id].y;
+                                    countY++;
                                 }}
                             }});
-                            baseYPositions[baseName] = count > 0 ? sumY / count : 0;
-                        }}
-                        
-                        // Apply mirrored layout: _L nodes on RIGHT, _R nodes on LEFT
-                        // (brain convention: right hemisphere on left screen)
-                        // PRESERVE relative X positions within each hemisphere panel
-                        const updates = [];
-                        allNodes.forEach(node => {{
-                            const hemi = getHemisphere(node.label);
-                            const baseName = getBaseName(node.label);
-                            const baseY = baseYPositions[baseName] || (positions[node.id] ? positions[node.id].y : 0);
-                            const origPos = positions[node.id];
-                            if (!origPos) return;
+                            const baseY = countY > 0 ? sumY / countY : 0;
                             
-                            // Compute relative X position from center (normalized to -1 to 1)
-                            const relX = layoutWidth > 0 ? (origPos.x - centerX) / (layoutWidth / 2) : 0;
-                            
-                            let newX;
-                            if (hemi === 'R') {{
-                                // Right hemisphere -> LEFT panel (mirrored: flip X)
-                                newX = centerX - gap - (layoutWidth / 2) - (relX * layoutWidth / 2);
-                            }} else if (hemi === 'L') {{
-                                // Left hemisphere -> RIGHT panel (preserve X direction)
-                                newX = centerX + gap + (layoutWidth / 2) + (relX * layoutWidth / 2);
-                            }} else {{
-                                // Unknown/center -> keep near center
-                                newX = centerX + (relX * layoutWidth / 4);
+                            if (nodeL && nodeR && positions[nodeL.id] && positions[nodeR.id]) {{
+                                const leftPos = positions[nodeL.id];
+                                const rightPos = positions[nodeR.id];
+                                let offset = (Math.abs(leftPos.x - centerX) + Math.abs(rightPos.x - centerX)) / 2;
+                                if (!isFinite(offset) || offset < minOffset) offset = minOffset;
+                                updates.push({{ id: nodeL.id, x: centerX + offset, y: baseY }});
+                                updates.push({{ id: nodeR.id, x: centerX - offset, y: baseY }});
+                            }} else if (nodeL && positions[nodeL.id]) {{
+                                let offset = Math.abs(positions[nodeL.id].x - centerX);
+                                if (!isFinite(offset) || offset < minOffset) offset = minOffset;
+                                updates.push({{ id: nodeL.id, x: centerX + offset, y: baseY }});
+                            }} else if (nodeR && positions[nodeR.id]) {{
+                                let offset = Math.abs(positions[nodeR.id].x - centerX);
+                                if (!isFinite(offset) || offset < minOffset) offset = minOffset;
+                                updates.push({{ id: nodeR.id, x: centerX - offset, y: baseY }});
                             }}
                             
-                            updates.push({{ id: node.id, x: newX, y: baseY }});
-                        }});
+                            if (nodeU && positions[nodeU.id]) {{
+                                updates.push({{ id: nodeU.id, x: centerX, y: baseY }});
+                            }}
+                        }}
                         
-                        // Apply updates
+                        // Apply updates (only to visible nodes)
                         updates.forEach(u => {{
                             nodes.update({{ id: u.id, x: u.x, y: u.y }});
                         }});
@@ -1509,6 +1666,10 @@ def _generate_networks_section(analyzer, dataset_names: List[str], thresholds: L
                         }});
                         setTimeout(() => {{
                             net.setOptions({{ layout: {{ hierarchical: false }} }});
+                            // Re-apply mirror positions if mirror mode is enabled
+                            if (window.hemisphereMirrorEnabled[threshold]) {{
+                                applyHemisphereMirror(threshold);
+                            }}
                             net.fit({{ animation: true }});
                         }}, 200);
                     }}
@@ -2486,6 +2647,14 @@ def _generate_conservation_network(analyzer, dataset_names: List[str], threshold
                 <span style="color: #666;">📝 Dataset codes in node names:</span> {" | ".join(legend_parts)}
             </div>
             '''
+
+    mirror_disabled_attr = '' if separate_hemispheres else 'disabled'
+    mirror_btn_style = (
+        'padding: 6px 12px; border-radius: 6px; border: 1px solid var(--border-color); '
+        'background: #64748b; color: white; font-size: 12px; white-space: nowrap; '
+        + ('cursor: pointer;' if separate_hemispheres else 'cursor: not-allowed; opacity: 0.5;')
+    )
+    mirror_btn_title = '' if separate_hemispheres else 'Hemisphere mirroring requires separate_hemispheres=True'
     
     return f'''
         <div class="card">
@@ -2510,9 +2679,9 @@ def _generate_conservation_network(analyzer, dataset_names: List[str], threshold
                                background: var(--secondary-color); color: white; cursor: pointer; font-size: 12px; white-space: nowrap;">
                         📌 Static Mode
                     </button>
-                    <button id="mirror_btn_{threshold}" onclick="toggleHemisphereMirror({threshold})" 
-                        style="padding: 6px 12px; border-radius: 6px; border: 1px solid var(--border-color); 
-                               background: #64748b; color: white; cursor: pointer; font-size: 12px; white-space: nowrap;">
+                    <button id="mirror_btn_{threshold}" onclick="toggleHemisphereMirror({threshold})" {mirror_disabled_attr}
+                        title="{mirror_btn_title}"
+                        style="{mirror_btn_style}">
                         🪞 Mirror Hemispheres
                     </button>
                 </div>

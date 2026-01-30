@@ -5,8 +5,6 @@ import os
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent / 'src'))
 
-os.environ['COMPARISON_OUTPUT_DIR'] = '/tmp/test_ratio_comp'
-
 from comparison.comparison_analyzer import ComparisonAnalyzer, ComparisonParameters
 import polars as pl
 
@@ -21,11 +19,13 @@ params = ComparisonParameters(
 analyzer = ComparisonAnalyzer(params)
 results = analyzer.run_comparison()
 
-# Check the output
-edge_file = '/tmp/test_ratio_comp/dataset_data/male-cns_v0_9/minsyn_3/connections_edge.csv'
+# Get the actual output path from params
+output_base = params.full_output_path
+edge_file = os.path.join(output_base, 'dataset_data/male-cns_v0_9/minsyn_3/data_details/connection_type.csv')
+print(f'\nLooking for edge file at: {edge_file}')
 try:
     df = pl.read_csv(edge_file)
-    print('=== connections_edge.csv ===')
+    print('=== connection_type.csv ===')
     print(df.select(['type_pre', 'type_post', 'weight', 'connection_ratio', 'traversal_probability']).head(10))
     
     # Find aMe12->KCg-d connection

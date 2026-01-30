@@ -5554,6 +5554,27 @@ class FindNeuronConnection:
             label_mapper=self.label_mapper,
             separate_hemispheres=self.separate_hemispheres
         )
+        
+        # Filter hemisphere-unconserved edges if requested
+        if self.keep_only_hemisphere_conserved_connections and self.separate_hemispheres:
+            print('Filtering hemisphere-unconserved edges...')
+            if self.conn_type is not None and not self.conn_type.empty:
+                self.conn_type, unconserved_types = self._filter_hemisphere_unconserved_edges(
+                    self.conn_type, pre_col='type_pre', post_col='type_post', weight_col='weight'
+                )
+                # Save unconserved edges
+                if unconserved_types is not None and not unconserved_types.empty:
+                    unconserved_path = os.path.join(self.direct_folder, 'data_details')
+                    os.makedirs(unconserved_path, exist_ok=True)
+                    self._save_df_to_csv_polars(unconserved_types, os.path.join(unconserved_path, 'hemisphere_unconserved_edges.csv'))
+            
+            if self.conn_group is not None and not self.conn_group.empty:
+                group_pre_col = 'group_pre' if 'group_pre' in self.conn_group.columns else 'type_pre'
+                group_post_col = 'group_post' if 'group_post' in self.conn_group.columns else 'type_post'
+                self.conn_group, _ = self._filter_hemisphere_unconserved_edges(
+                    self.conn_group, pre_col=group_pre_col, post_col=group_post_col, weight_col='weight'
+                )
+        
         # fill empty values
         self.conn_df = self.conn_df.fillna("")
         self.source_df = self.source_df.fillna("")
@@ -7708,6 +7729,58 @@ class FindNeuronConnection:
 
         # print("  Enrichment returned. Proceeding to save...", flush=True)
 
+        # ========================================================================
+        # HEMISPHERE SYMMETRY ANALYSIS (run BEFORE filtering)
+        # ========================================================================
+        # IMPORTANT: Run symmetry analysis on UNFILTERED data to get meaningful
+        # statistics about the original connectivity structure.
+        # If we run it after filtering, we'd be analyzing an already-symmetric structure.
+        try:
+            if self.symmetry_analysis and self._is_symmetric_dataset():
+                self._vprint('Running hemisphere symmetry analysis on unfiltered data...', level='full')
+                sym_conn_types = conn_types
+                if isinstance(sym_conn_types, pl.DataFrame):
+                    sym_conn_types = sym_conn_types.to_pandas()
+                # Note: path_df_type not available yet at this point (built later)
+                # We'll pass paths=None here; path conservation is computed during the analysis
+                self._run_hemisphere_symmetry_analysis(sym_conn_types, paths_df=None)
+        except Exception as e:
+            self._vprint(f'  Warning: Hemisphere symmetry analysis failed: {e}', level='full')
+
+        # ========================================================================
+        # HEMISPHERE CONSERVATION FILTERING (applied before save/visualization)
+        # ========================================================================
+        # Filter out hemisphere-unconserved edges if requested
+        # This ensures both saved data and visualizations only show conserved edges
+        unconserved_types = None
+        unconserved_groups = None
+        if self.keep_only_hemisphere_conserved_connections and self.separate_hemispheres:
+            self._vprint('Filtering hemisphere-unconserved edges...', level='full')
+            
+            # Filter conn_types (type-level edges)
+            if conn_types is not None and not (hasattr(conn_types, 'is_empty') and conn_types.is_empty()) and \
+               not (hasattr(conn_types, 'empty') and conn_types.empty):
+                conn_types, unconserved_types = self._filter_hemisphere_unconserved_edges(
+                    conn_types, pre_col='type_pre', post_col='type_post', weight_col='weight'
+                )
+            
+            # Filter conn_groups (custom group edges) if available
+            if conn_groups is not None and not (hasattr(conn_groups, 'is_empty') and conn_groups.is_empty()) and \
+               not (hasattr(conn_groups, 'empty') and conn_groups.empty):
+                # Check column names - might be group_pre/group_post or type_pre/type_post
+                group_pre_col = 'group_pre' if 'group_pre' in (conn_groups.columns if hasattr(conn_groups, 'columns') else conn_groups.collect_schema().names()) else 'type_pre'
+                group_post_col = 'group_post' if 'group_post' in (conn_groups.columns if hasattr(conn_groups, 'columns') else conn_groups.collect_schema().names()) else 'type_post'
+                conn_groups, unconserved_groups = self._filter_hemisphere_unconserved_edges(
+                    conn_groups, pre_col=group_pre_col, post_col=group_post_col, weight_col='weight'
+                )
+            
+            # Also filter conn_types_global for matrices
+            if conn_types_global is not None and not (hasattr(conn_types_global, 'is_empty') and conn_types_global.is_empty()) and \
+               not (hasattr(conn_types_global, 'empty') and conn_types_global.empty):
+                conn_types_global, _ = self._filter_hemisphere_unconserved_edges(
+                    conn_types_global, pre_col='type_pre', post_col='type_post', weight_col='weight'
+                )
+
         # Save main data (type-level aggregations)
         # Force print this message so user knows we are moving to save phase
         # print('\nSaving connection data...', flush=True)
@@ -7728,6 +7801,12 @@ class FindNeuronConnection:
             csv_folder = os.path.join(self.allpath_folder, 'data_details')
             os.makedirs(csv_folder, exist_ok=True)
             self._vprint(f'  💾 Saving data as CSV files to: {csv_folder}', level='simple', flush=True)
+            
+            # Save unconserved edges if they were filtered out
+            if unconserved_types is not None and not (hasattr(unconserved_types, 'is_empty') and unconserved_types.is_empty()) and \
+               not (hasattr(unconserved_types, 'empty') and unconserved_types.empty):
+                self._save_df_to_csv_polars(unconserved_types, os.path.join(csv_folder, 'hemisphere_unconserved_edges.csv'))
+                self._vprint(f'    ✓ Saved hemisphere_unconserved_edges.csv ({len(unconserved_types)} edges)', level='full')
             
             # print("    - parameters.csv", flush=True)
             self._save_df_to_csv_polars(self.parameter_df, os.path.join(csv_folder, 'parameters.csv'))
@@ -7759,6 +7838,15 @@ class FindNeuronConnection:
             output_excel_name = os.path.join(self.allpath_folder, self.source_fname + '_to_' + self.target_fname + '_allpaths_info.xlsx')
             print(f'  💾 Saving type-level data to: {output_excel_name}', flush=True)
             print(f'  ⏳ Writing Excel file (this may take a while)...', flush=True)
+            
+            # Save unconserved edges to a separate CSV file (even in Excel mode)
+            if unconserved_types is not None and not (hasattr(unconserved_types, 'is_empty') and unconserved_types.is_empty()) and \
+               not (hasattr(unconserved_types, 'empty') and unconserved_types.empty):
+                unconserved_folder = os.path.join(self.allpath_folder, 'data_details')
+                os.makedirs(unconserved_folder, exist_ok=True)
+                self._save_df_to_csv_polars(unconserved_types, os.path.join(unconserved_folder, 'hemisphere_unconserved_edges.csv'))
+                self._vprint(f'    ✓ Saved hemisphere_unconserved_edges.csv ({len(unconserved_types)} edges)', level='full')
+            
             with pd.ExcelWriter(output_excel_name, mode='w', engine='xlsxwriter') as writer:
                 self.parameter_df.to_excel(writer,sheet_name='parameters',index=False)
                 worksheet = writer.sheets['parameters']
@@ -8157,6 +8245,52 @@ class FindNeuronConnection:
             if before_filter > after_filter:
                 self._vprint(f'  Removed {before_filter - after_filter} paths with zero-weight hops at type level', level='full')
         
+        # Filter paths containing hemisphere-unconserved edges
+        if self.keep_only_hemisphere_conserved_connections and self.separate_hemispheres and len(path_df_type) > 0:
+            # Build set of conserved edge pairs
+            conserved_edge_set = set()
+            if conn_types is not None:
+                ct_pd = conn_types.to_pandas() if isinstance(conn_types, pl.DataFrame) else conn_types
+                for _, row in ct_pd.iterrows():
+                    pre = str(row['type_pre'])
+                    post = str(row['type_post'])
+                    conserved_edge_set.add((pre, post))
+            
+            def path_has_unconserved_edge(path_str_val):
+                """Check if a path contains any unconserved edge."""
+                if path_str_val is None:
+                    return True
+                # path_str is a list of node names like ['A_L', 'B_L', 'C_L']
+                if isinstance(path_str_val, str):
+                    # Try to parse as list representation
+                    try:
+                        nodes = eval(path_str_val)
+                    except:
+                        nodes = path_str_val.split('->')
+                else:
+                    nodes = path_str_val
+                
+                # Check each edge in the path
+                for i in range(len(nodes) - 1):
+                    edge = (str(nodes[i]).strip(), str(nodes[i+1]).strip())
+                    if edge not in conserved_edge_set:
+                        return True
+                return False
+            
+            # Determine which column has the path nodes
+            path_col = None
+            for col in ['path_str', 'path', 'path_block', 'nodes']:
+                if col in path_df_type.columns:
+                    path_col = col
+                    break
+            
+            if path_col:
+                before_filter = len(path_df_type)
+                path_df_type = path_df_type[~path_df_type[path_col].apply(path_has_unconserved_edge)]
+                after_filter = len(path_df_type)
+                if before_filter > after_filter:
+                    self._vprint(f'  Removed {before_filter - after_filter} paths with hemisphere-unconserved edges', level='full')
+        
         path_df_type = sv.split_path(path_df_type)
         path_df_type, path_df_type_excluded = sv.path_filter(path_df_type,self.keyword_in_path_to_remove)
         
@@ -8463,17 +8597,8 @@ class FindNeuronConnection:
         # VISUALIZATION: Using VisualizePath only (PHASE 4)
         # ============================================================================
 
-        # Hemisphere symmetry analysis (type-level)
-        try:
-            if self.symmetry_analysis and self._is_symmetric_dataset():
-                sym_conn_types = conn_types
-                if isinstance(sym_conn_types, pl.DataFrame):
-                    sym_conn_types = sym_conn_types.to_pandas()
-                # Pass path_df_type if available for path conservation analysis
-                sym_paths = path_df_type if len(path_df_type) > 0 else None
-                self._run_hemisphere_symmetry_analysis(sym_conn_types, sym_paths)
-        except Exception as e:
-            self._vprint(f'  Warning: Hemisphere symmetry analysis failed: {e}', level='full')
+        # Note: Hemisphere symmetry analysis was already run BEFORE filtering
+        # to analyze the original unfiltered connectivity structure.
         
         # VisualizePath network visualization
         if self.verbose_mode == 'simple':
@@ -8866,6 +8991,102 @@ class FindNeuronConnection:
             hemi = base[-1]
             base = base[:-2]
         return base, hemi
+
+    def _filter_hemisphere_unconserved_edges(self, conn_df, pre_col: str = 'type_pre', 
+                                              post_col: str = 'type_post', 
+                                              weight_col: str = 'weight') -> tuple:
+        """
+        Filter out hemisphere-unconserved edges from connection data.
+        
+        An edge is considered "conserved" if both it and its mirror counterpart
+        (L->L paired with R->R, or L->R paired with R->L) are present.
+        
+        Edges without hemisphere suffixes (_L/_R/_U) in their labels are kept as-is
+        since they cannot be evaluated for hemisphere conservation.
+        
+        Args:
+            conn_df: DataFrame (pandas or polars) with connection data
+            pre_col: Column name for pre-synaptic type
+            post_col: Column name for post-synaptic type
+            weight_col: Column name for weight
+            
+        Returns:
+            Tuple of (filtered_df, unconserved_df) - both as same type as input
+        """
+        if conn_df is None or (hasattr(conn_df, 'is_empty') and conn_df.is_empty()) or \
+           (hasattr(conn_df, 'empty') and conn_df.empty):
+            return conn_df, None
+        
+        # Convert polars to pandas for processing
+        is_polars = isinstance(conn_df, pl.DataFrame)
+        if is_polars:
+            df = conn_df.to_pandas()
+        else:
+            df = conn_df.copy()
+        
+        # Build set of all existing edges as (base_pre, base_post, hemi_pre, hemi_post)
+        def get_edge_key(pre, post):
+            """Get normalized edge key as (base_pre, base_post, hemi_pre, hemi_post)"""
+            base_pre, hemi_pre = self._extract_hemi_from_label(str(pre))
+            base_post, hemi_post = self._extract_hemi_from_label(str(post))
+            return (base_pre, base_post, hemi_pre, hemi_post)
+        
+        def get_mirror_hemi(hemi: str) -> str:
+            """Get the mirror hemisphere"""
+            return 'R' if hemi == 'L' else 'L'
+        
+        # Build edge lookup
+        edge_keys = {}
+        for idx, row in df.iterrows():
+            pre = row[pre_col]
+            post = row[post_col]
+            key = get_edge_key(pre, post)
+            edge_keys[idx] = key
+        
+        # Find which edges have a mirror counterpart
+        # Mirror of (base_A, base_B, L, L) is (base_A, base_B, R, R)
+        # Mirror of (base_A, base_B, L, R) is (base_A, base_B, R, L)
+        all_base_pairs = set()
+        for idx, (base_pre, base_post, hemi_pre, hemi_post) in edge_keys.items():
+            if hemi_pre in ('L', 'R') and hemi_post in ('L', 'R'):
+                all_base_pairs.add((base_pre, base_post, hemi_pre, hemi_post))
+        
+        # Mark conserved/unconserved
+        conserved_indices = []
+        unconserved_indices = []
+        
+        for idx, (base_pre, base_post, hemi_pre, hemi_post) in edge_keys.items():
+            # If no hemisphere info, keep as-is (cannot evaluate conservation)
+            if hemi_pre not in ('L', 'R') or hemi_post not in ('L', 'R'):
+                conserved_indices.append(idx)
+                continue
+            
+            # Check for mirror counterpart
+            mirror_hemi_pre = get_mirror_hemi(hemi_pre)
+            mirror_hemi_post = get_mirror_hemi(hemi_post)
+            mirror_key = (base_pre, base_post, mirror_hemi_pre, mirror_hemi_post)
+            
+            if mirror_key in all_base_pairs:
+                # Has mirror counterpart - conserved
+                conserved_indices.append(idx)
+            else:
+                # No mirror counterpart - unconserved
+                unconserved_indices.append(idx)
+        
+        # Create filtered DataFrames
+        conserved_df = df.loc[conserved_indices].copy()
+        unconserved_df = df.loc[unconserved_indices].copy() if unconserved_indices else None
+        
+        # Convert back to polars if input was polars
+        if is_polars:
+            conserved_df = pl.from_pandas(conserved_df)
+            if unconserved_df is not None:
+                unconserved_df = pl.from_pandas(unconserved_df)
+        
+        self._vprint(f'  Hemisphere filtering: kept {len(conserved_indices)} conserved edges, '
+                     f'removed {len(unconserved_indices)} unconserved edges', level='full')
+        
+        return conserved_df, unconserved_df
 
     def _count_hemisphere_from_df(self, df: pd.DataFrame) -> dict:
         """Count neurons by hemisphere from a DataFrame."""
