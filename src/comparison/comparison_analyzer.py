@@ -6802,6 +6802,7 @@ class ComparisonAnalyzer:
         
         # Generate network visualization
         output_path = vp.create_network()
+        output_path_heatmap = vp.create_heatmap()
         
         self._log_file(output_path, "Saved conserved path visualization")
         
