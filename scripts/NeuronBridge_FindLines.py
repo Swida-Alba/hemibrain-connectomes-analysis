@@ -171,6 +171,11 @@ if __name__ == "__main__":
     # Verbose output
     verbose = True
     
+    # Maximum number of parallel workers for processing neurons
+    # Higher values speed up processing but may hit API rate limits
+    # Default: 8, set to 1 for sequential processing
+    max_workers = 8
+    
     # ==========================================================================
     # IMAGE DOWNLOAD OPTIONS (Optional)
     # ==========================================================================
@@ -250,6 +255,7 @@ if __name__ == "__main__":
         separate_splitgal4=separate_splitgal4,
         match_type=match_type,                    # Set default match algorithm
         region=region,                            # Set region filter
+        max_workers=max_workers,                  # Parallel processing workers
     )
     
     # Run batch search (with optional image download)

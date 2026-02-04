@@ -39,6 +39,7 @@ Author: Generated for hemibrain-connectomes-analysis project
 import json
 import os
 import re
+import threading
 import time
 import warnings
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -49,6 +50,14 @@ from typing import Any, Dict, List, Optional, Tuple, Union, TYPE_CHECKING
 import bokeh.palettes
 import numpy as np
 import pandas as pd
+
+# Try to import polars for faster DataFrame operations on large datasets
+try:
+    import polars as pl
+    HAS_POLARS = True
+except ImportError:
+    HAS_POLARS = False
+    pl = None
 
 if TYPE_CHECKING:
     from comparison.label_mapper import LabelMapper
@@ -384,6 +393,8 @@ class NeuronBridgeFinder:
     _suppress_loading_msgs: bool = field(init=False, repr=False, default=False)
     _batch_mode: bool = field(init=False, repr=False, default=False)
     _warning_collector: List[str] = field(init=False, repr=False, default_factory=list)
+    _cache_lock: threading.Lock = field(init=False, repr=False, default_factory=threading.Lock)
+    _cache_index: Dict[str, set] = field(init=False, repr=False, default_factory=dict)  # {cache_type: set of cache_keys}
     
     def __post_init__(self):
         """Initialize the finder after dataclass initialization."""
@@ -430,6 +441,8 @@ class NeuronBridgeFinder:
         # Create cache folder if needed
         if self.use_cache:
             os.makedirs(self.cache_folder, exist_ok=True)
+            # Build cache index for fast lookups
+            self._build_cache_index()
         
         # Initialize client
         self._init_client()
@@ -460,6 +473,93 @@ class NeuronBridgeFinder:
                     print(msg, end=end)
             else:
                 print(msg, end=end)
+    
+    def _build_cache_index(self):
+        """
+        Build an in-memory index of all cached files for fast O(1) lookups.
+        
+        This scans the cache folder once at initialization and builds a set of
+        cache keys for each cache type (e.g., 'id_to_lines', 'line_to_neuron').
+        
+        The index maps cache_type -> set of full cache keys (filename without extension).
+        """
+        self._cache_index = {}
+        
+        if not self.use_cache or not self.cache_folder:
+            return
+        
+        if not os.path.exists(self.cache_folder):
+            return
+        
+        try:
+            # Get list of all CSV files in cache folder
+            cache_files = [f for f in os.listdir(self.cache_folder) 
+                          if f.endswith('.csv') and os.path.isfile(os.path.join(self.cache_folder, f))]
+            
+            # Parse each filename and build index
+            # Format: {cache_type}_{identifier}.csv
+            for filename in cache_files:
+                # Remove .csv extension
+                cache_key = filename[:-4]
+                
+                # Extract cache_type (everything before the first underscore + identifier separator)
+                # Files are named like: id_to_lines_12345_cds_male-cns_v0.9_Brain_all.csv
+                # We need to extract cache_type = 'id_to_lines'
+                for cache_type in ['id_to_lines', 'line_to_neuron']:
+                    if filename.startswith(f"{cache_type}_"):
+                        if cache_type not in self._cache_index:
+                            self._cache_index[cache_type] = set()
+                        self._cache_index[cache_type].add(cache_key)
+                        break
+            
+            # Report stats
+            total_cached = sum(len(keys) for keys in self._cache_index.values())
+            if total_cached > 0 and self.verbose:
+                self._vprint(f"  📁 Cache index: {total_cached} cached files "
+                           f"({len(self._cache_index.get('id_to_lines', set()))} neurons, "
+                           f"{len(self._cache_index.get('line_to_neuron', set()))} lines)")
+        except Exception as e:
+            # If indexing fails, continue without index (will fallback to file checks)
+            self._cache_index = {}
+            if self.verbose:
+                self._vprint(f"  ⚠️ Could not build cache index: {e}")
+    
+    def _is_cached(self, cache_type: str, identifier: str) -> bool:
+        """
+        Check if a cache entry exists using the in-memory index.
+        
+        This is O(1) instead of checking file existence on disk.
+        
+        Parameters
+        ----------
+        cache_type : str
+            Type of cache (e.g., 'id_to_lines', 'line_to_neuron')
+        identifier : str
+            The identifier used to build the cache key
+            
+        Returns
+        -------
+        bool
+            True if the entry is in the cache index
+        """
+        if not self._cache_index:
+            # Fallback to file check if no index
+            cache_path = self._get_cache_path(cache_type, identifier)
+            return os.path.exists(cache_path)
+        
+        safe_id = str(identifier).replace('/', '_').replace(':', '_')
+        cache_key = f"{cache_type}_{safe_id}"
+        
+        return cache_key in self._cache_index.get(cache_type, set())
+    
+    def _add_to_cache_index(self, cache_type: str, identifier: str):
+        """Add a new entry to the cache index after saving to disk."""
+        safe_id = str(identifier).replace('/', '_').replace(':', '_')
+        cache_key = f"{cache_type}_{safe_id}"
+        
+        if cache_type not in self._cache_index:
+            self._cache_index[cache_type] = set()
+        self._cache_index[cache_type].add(cache_key)
     
     def _validate_match_type(self, match_type: str) -> str:
         """
@@ -945,6 +1045,384 @@ class NeuronBridgeFinder:
             'gal4_lexa': lines_df[lines_df['line_type'] == 'gal4_lexa'].copy(),
             'split_gal4': lines_df[lines_df['line_type'] == 'split_gal4'].copy()
         }
+    
+    def _aggregate_results_polars(
+        self,
+        combined_df: pd.DataFrame,
+        match_type: str,
+        is_multi_dataset: bool,
+        sort_by: str
+    ) -> Tuple[pd.DataFrame, pd.DataFrame]:
+        """
+        Aggregate results using Polars for fast processing of large datasets.
+        
+        This optimized version uses Polars DataFrames for aggregation operations,
+        which is significantly faster than pandas for datasets with >100k rows.
+        
+        Parameters
+        ----------
+        combined_df : pd.DataFrame
+            Combined results DataFrame.
+        match_type : str
+            Match type: 'cds', 'pppm', or 'both'.
+        is_multi_dataset : bool
+            Whether multi-dataset mode is enabled.
+        sort_by : str
+            Sorting method: 'completeness' or 'max'.
+            
+        Returns
+        -------
+        tuple
+            (combined_df, line_stats) - processed DataFrames.
+        """
+        import polars as pl
+        
+        # Ensure consistent column types before Polars conversion
+        # bodyId columns can have mixed int/str types (especially FlyWire IDs)
+        for col in ['source_bodyId', 'bodyId']:
+            if col in combined_df.columns:
+                combined_df[col] = combined_df[col].astype(str)
+        
+        # Convert to polars for fast aggregation
+        pl_df = pl.from_pandas(combined_df)
+        
+        # Calculate total unique query neurons
+        total_query_neurons = 0
+        if 'source_bodyId' in pl_df.columns:
+            total_query_neurons = pl_df.select(
+                pl.col('source_bodyId').cast(pl.Utf8).drop_nulls().n_unique()
+            ).item()
+        
+        self._vprint(f"   📊 Total unique query neurons: {total_query_neurons}")
+        
+        # Add line_type classification if needed
+        if self.separate_splitgal4 and 'line' in pl_df.columns:
+            # Vectorized line type classification
+            split_prefixes = [p.upper() for p in SPLIT_GAL4_PREFIXES]
+            
+            # Create classification expression
+            line_type_expr = pl.when(
+                pl.col('line').str.to_uppercase().str.starts_with(pl.lit(split_prefixes[0]))
+            ).then(pl.lit('split_gal4'))
+            
+            for prefix in split_prefixes[1:]:
+                line_type_expr = line_type_expr.when(
+                    pl.col('line').str.to_uppercase().str.starts_with(pl.lit(prefix))
+                ).then(pl.lit('split_gal4'))
+            
+            line_type_expr = line_type_expr.otherwise(pl.lit('gal4_lexa'))
+            
+            pl_df = pl_df.with_columns(line_type_expr.alias('line_type'))
+        
+        # Build type lookup table for enrichment (vectorized)
+        if 'source_bodyId' in pl_df.columns and 'source_dataset' in pl_df.columns:
+            # Get unique (bodyId, dataset) pairs
+            unique_pairs = pl_df.select(['source_bodyId', 'source_dataset']).unique()
+            
+            # Build type mapping from neuron_dfs
+            type_mappings = []
+            for ds in unique_pairs.select('source_dataset').unique().to_series().to_list():
+                if ds is None:
+                    continue
+                ds_folder = self._dataset_name_to_folder(ds)
+                neuron_df = self._load_neuron_df_for_dataset(ds_folder)
+                if neuron_df is not None and 'bodyId' in neuron_df.columns and 'type' in neuron_df.columns:
+                    # Convert to polars and create mapping
+                    type_df = pl.from_pandas(neuron_df[['bodyId', 'type']].copy())
+                    type_df = type_df.with_columns([
+                        pl.col('bodyId').cast(pl.Utf8).alias('source_bodyId'),
+                        pl.lit(ds).alias('source_dataset')
+                    ]).select(['source_bodyId', 'source_dataset', 'type'])
+                    type_mappings.append(type_df)
+            
+            if type_mappings:
+                type_lookup = pl.concat(type_mappings)
+                pl_df = pl_df.with_columns(pl.col('source_bodyId').cast(pl.Utf8))
+                pl_df = pl_df.join(
+                    type_lookup.rename({'type': 'source_type'}),
+                    on=['source_bodyId', 'source_dataset'],
+                    how='left'
+                )
+            elif 'source_type' not in pl_df.columns:
+                pl_df = pl_df.with_columns(pl.lit('').alias('source_type'))
+        
+        # Aggregate line-level results
+        if 'line' in pl_df.columns:
+            self._vprint(f"   🔄 Aggregating {pl_df.shape[0]:,} rows by line...")
+            
+            # Build aggregation expressions
+            agg_exprs = [
+                pl.col('score').mean().alias('agg_mean_score'),
+                pl.col('score').max().alias('agg_max_score'),
+                pl.col('source_bodyId').cast(pl.Utf8).drop_nulls().n_unique().alias('match_count'),
+                pl.col('source_bodyId').cast(pl.Utf8).drop_nulls().unique().sort().str.concat(',').alias('matched_bodyIds'),
+            ]
+            
+            if 'source_type' in pl_df.columns:
+                agg_exprs.append(
+                    pl.col('source_type').drop_nulls().filter(pl.col('source_type') != '').unique().sort().str.concat(',').alias('matched_types')
+                )
+            
+            if self.separate_splitgal4 and 'line_type' in pl_df.columns:
+                agg_exprs.append(pl.col('line_type').first().alias('line_type'))
+            
+            if is_multi_dataset and 'source_dataset' in pl_df.columns:
+                agg_exprs.extend([
+                    pl.col('source_dataset').drop_nulls().n_unique().alias('datasets_labeled'),
+                    pl.col('source_dataset').drop_nulls().unique().sort().str.concat(',').alias('matched_datasets'),
+                ])
+            
+            # Perform aggregation
+            line_stats_pl = pl_df.group_by('line').agg(agg_exprs)
+            
+            # Calculate cross-dataset scores if multi-dataset
+            if is_multi_dataset and 'source_dataset' in pl_df.columns:
+                self._vprint(f"   🔄 Calculating cross-dataset scores...")
+                
+                # Get max score per (line, dataset) pair
+                line_ds_scores = pl_df.group_by(['line', 'source_dataset']).agg(
+                    pl.col('score').max().alias('max_score_per_ds')
+                )
+                
+                # Calculate min and mean of max scores per line
+                cross_ds_stats = line_ds_scores.group_by('line').agg([
+                    pl.col('max_score_per_ds').min().alias('min_score_per_dataset'),
+                    pl.col('max_score_per_ds').mean().alias('cross_dataset_score'),
+                ])
+                
+                # Join back to line_stats
+                line_stats_pl = line_stats_pl.join(cross_ds_stats, on='line', how='left')
+            
+            # Calculate weighted_score
+            if total_query_neurons > 0:
+                line_stats_pl = line_stats_pl.with_columns([
+                    (pl.col('match_count') / total_query_neurons).alias('coverage_ratio'),
+                    (pl.col('agg_mean_score') * pl.col('match_count') / total_query_neurons).alias('weighted_score'),
+                ])
+                
+                # Sort based on sort_by parameter
+                if sort_by == 'completeness':
+                    line_stats_pl = line_stats_pl.sort('weighted_score', descending=True)
+                    self._vprint(f"   📊 Sorting by weighted_score (agg_mean_score × coverage_ratio)")
+                else:
+                    line_stats_pl = line_stats_pl.sort('agg_mean_score', descending=True)
+                    self._vprint(f"   📊 Sorting by agg_mean_score (average match scores)")
+            elif is_multi_dataset and 'min_score_per_dataset' in line_stats_pl.columns:
+                line_stats_pl = line_stats_pl.sort('min_score_per_dataset', descending=True)
+                self._vprint(f"   📊 Multi-dataset sorting: by min_score_per_dataset")
+            else:
+                line_stats_pl = line_stats_pl.sort('agg_mean_score', descending=True)
+            
+            # Convert back to pandas
+            line_stats = line_stats_pl.to_pandas()
+            
+            # Reorder columns
+            priority_cols = ['line', 'line_type', 'match_count', 'weighted_score', 'coverage_ratio', 
+                             'agg_mean_score', 'agg_max_score', 'min_score_per_dataset', 
+                             'cross_dataset_score', 'datasets_labeled', 'matched_bodyIds', 
+                             'matched_types', 'matched_datasets']
+            cols = list(line_stats.columns)
+            ordered_cols = [col for col in priority_cols if col in cols]
+            remaining_cols = [col for col in cols if col not in ordered_cols]
+            line_stats = line_stats[ordered_cols + remaining_cols]
+            
+            # Add matched info back to combined_df
+            merge_cols = ['line', 'matched_bodyIds']
+            if 'matched_types' in line_stats.columns:
+                merge_cols.append('matched_types')
+            
+            # Convert pl_df back to pandas for merge
+            combined_df = pl_df.to_pandas()
+            combined_df = combined_df.merge(
+                line_stats[merge_cols],
+                on='line',
+                how='left',
+                suffixes=('', '_agg')
+            )
+            
+            # Clean up duplicate columns
+            for col in list(combined_df.columns):
+                if col.endswith('_agg'):
+                    base_col = col[:-4]
+                    if base_col in combined_df.columns:
+                        combined_df[base_col] = combined_df[col]
+                    combined_df = combined_df.drop(columns=[col])
+            
+            self._vprint(f"   ✅ Aggregation complete: {len(line_stats):,} unique lines")
+            
+            return combined_df, line_stats
+        
+        return combined_df, pd.DataFrame()
+    
+    def _aggregate_results_pandas(
+        self,
+        combined_df: pd.DataFrame,
+        match_type: str,
+        is_multi_dataset: bool,
+        sort_by: str
+    ) -> Tuple[pd.DataFrame, pd.DataFrame]:
+        """
+        Aggregate results using pandas (original implementation).
+        
+        Used for smaller datasets where Polars overhead isn't worth it.
+        
+        Parameters
+        ----------
+        combined_df : pd.DataFrame
+            Combined results DataFrame.
+        match_type : str
+            Match type: 'cds', 'pppm', or 'both'.
+        is_multi_dataset : bool
+            Whether multi-dataset mode is enabled.
+        sort_by : str
+            Sorting method: 'completeness' or 'max'.
+            
+        Returns
+        -------
+        tuple
+            (combined_df, line_stats) - processed DataFrames.
+        """
+        # Calculate total unique query neurons
+        total_query_neurons = 0
+        if 'source_bodyId' in combined_df.columns:
+            total_query_neurons = len(set(str(v) for v in combined_df['source_bodyId'].dropna().unique()))
+        
+        # Add line_type classification if separate_splitgal4 is enabled
+        if self.separate_splitgal4 and 'line' in combined_df.columns:
+            combined_df['line_type'] = combined_df['line'].apply(self._classify_line_type)
+        
+        # Enrich with type information from neuron_df if available
+        if 'source_bodyId' in combined_df.columns and 'source_dataset' in combined_df.columns:
+            # Get unique (bodyId, dataset) pairs first to minimize lookups
+            unique_pairs = combined_df[['source_bodyId', 'source_dataset']].drop_duplicates()
+            
+            type_cache = {}
+            for _, row in unique_pairs.iterrows():
+                body_id = row['source_bodyId']
+                ds = row['source_dataset']
+                if pd.isna(body_id) or pd.isna(ds):
+                    continue
+                key = (str(body_id), ds)
+                if key not in type_cache:
+                    ds_folder = self._dataset_name_to_folder(ds)
+                    neuron_df = self._load_neuron_df_for_dataset(ds_folder)
+                    if neuron_df is not None and 'bodyId' in neuron_df.columns and 'type' in neuron_df.columns:
+                        match = neuron_df[neuron_df['bodyId'].astype(str) == str(body_id)]
+                        if not match.empty:
+                            type_cache[key] = match['type'].iloc[0]
+                        else:
+                            type_cache[key] = None
+                    else:
+                        type_cache[key] = None
+            
+            # Vectorized lookup
+            combined_df['source_type'] = combined_df.apply(
+                lambda row: type_cache.get((str(row.get('source_bodyId', '')), row.get('source_dataset', '')), ''),
+                axis=1
+            )
+        
+        line_stats = pd.DataFrame()
+        
+        # Aggregate line-level results
+        if 'line' in combined_df.columns:
+            # Build aggregation dict
+            agg_dict = {
+                'score': ['mean', 'max'],
+                'source_bodyId': [
+                    lambda x: len(set(str(v) for v in x.dropna().unique())),
+                    lambda x: ','.join(sorted(set(str(v) for v in x.dropna().unique())))
+                ]
+            }
+            
+            if 'source_type' in combined_df.columns:
+                agg_dict['source_type'] = lambda x: ','.join(sorted(set(str(v) for v in x.dropna().unique() if v)))
+            
+            if is_multi_dataset and 'source_dataset' in combined_df.columns:
+                agg_dict['source_dataset'] = [
+                    lambda x: len(set(str(v) for v in x.dropna().unique())),
+                    lambda x: ','.join(sorted(set(str(v) for v in x.dropna().unique())))
+                ]
+            
+            line_stats = combined_df.groupby('line').agg(agg_dict).reset_index()
+            
+            # Flatten multi-level columns
+            new_cols = ['line']
+            for col in line_stats.columns[1:]:
+                if isinstance(col, tuple):
+                    new_cols.append(f"{col[0]}_{col[1] if isinstance(col[1], str) else 'agg'}")
+                else:
+                    new_cols.append(col)
+            line_stats.columns = new_cols
+            
+            # Rename columns
+            rename_map = {'score_mean': 'agg_mean_score', 'score_max': 'agg_max_score'}
+            for col in line_stats.columns:
+                if 'source_bodyId' in col and 'lambda' in col and '0' in col:
+                    rename_map[col] = 'match_count'
+                elif 'source_bodyId' in col and 'lambda' in col:
+                    rename_map[col] = 'matched_bodyIds'
+                elif 'source_type' in col and 'lambda' in col:
+                    rename_map[col] = 'matched_types'
+                elif 'source_dataset' in col and 'lambda' in col and '0' in col:
+                    rename_map[col] = 'datasets_labeled'
+                elif 'source_dataset' in col and 'lambda' in col:
+                    rename_map[col] = 'matched_datasets'
+            
+            line_stats = line_stats.rename(columns=rename_map)
+            
+            # Add line_type if available
+            if self.separate_splitgal4 and 'line_type' in combined_df.columns:
+                line_type_map = combined_df.groupby('line')['line_type'].first()
+                line_stats['line_type'] = line_stats['line'].map(line_type_map)
+            
+            # Calculate cross-dataset scores
+            if is_multi_dataset and 'source_dataset' in combined_df.columns:
+                # Vectorized approach: group by (line, source_dataset), get max score
+                line_ds_scores = combined_df.groupby(['line', 'source_dataset'])['score'].max().reset_index()
+                
+                # Group by line to get min and mean of max scores
+                cross_ds_stats = line_ds_scores.groupby('line').agg(
+                    min_score_per_dataset=('score', 'min'),
+                    cross_dataset_score=('score', 'mean')
+                ).reset_index()
+                
+                line_stats = line_stats.merge(cross_ds_stats, on='line', how='left')
+            
+            # Calculate weighted_score
+            if 'match_count' in line_stats.columns and total_query_neurons > 0:
+                line_stats['coverage_ratio'] = line_stats['match_count'] / total_query_neurons
+                line_stats['weighted_score'] = line_stats['agg_mean_score'] * line_stats['coverage_ratio']
+                
+                if sort_by == 'completeness':
+                    line_stats = line_stats.sort_values('weighted_score', ascending=False)
+                    self._vprint(f"   📊 Sorting by weighted_score (agg_mean_score × coverage_ratio)")
+                else:
+                    line_stats = line_stats.sort_values('agg_mean_score', ascending=False)
+                    self._vprint(f"   📊 Sorting by agg_mean_score (average match scores)")
+                self._vprint(f"      Total query neurons: {total_query_neurons}")
+            elif is_multi_dataset:
+                line_stats = line_stats.sort_values('min_score_per_dataset', ascending=False)
+                self._vprint(f"   📊 Multi-dataset sorting: by min_score_per_dataset")
+            else:
+                line_stats = line_stats.sort_values('agg_mean_score', ascending=False)
+            
+            # Reorder columns
+            priority_cols = ['line', 'line_type', 'match_count', 'weighted_score', 'coverage_ratio', 
+                             'agg_mean_score', 'agg_max_score', 'min_score_per_dataset', 
+                             'cross_dataset_score', 'datasets_labeled', 'matched_bodyIds', 
+                             'matched_types', 'matched_datasets']
+            cols = list(line_stats.columns)
+            ordered_cols = [col for col in priority_cols if col in cols]
+            remaining_cols = [col for col in cols if col not in ordered_cols]
+            line_stats = line_stats[ordered_cols + remaining_cols]
+            
+            # Add matched info back to combined_df
+            merge_cols = ['line', 'matched_bodyIds']
+            if 'matched_types' in line_stats.columns:
+                merge_cols.append('matched_types')
+            combined_df = combined_df.merge(line_stats[merge_cols], on='line', how='left')
+        
+        return combined_df, line_stats
     
     def _calculate_expression_entropy(self, type_counts: Dict[str, int]) -> float:
         """
@@ -3833,14 +4311,24 @@ class NeuronBridgeFinder:
         return os.path.join(self.cache_folder, f"{cache_type}_{safe_id}.csv")
     
     def _load_from_cache(self, cache_type: str, identifier: str) -> Optional[pd.DataFrame]:
-        """Load cached results if available."""
+        """Load cached results if available. Lock-free for reads. Uses Polars for fast I/O."""
         if not self.use_cache:
             return None
         
+        # Fast check using in-memory index
+        if not self._is_cached(cache_type, identifier):
+            return None
+        
         cache_path = self._get_cache_path(cache_type, identifier)
+        # Reading is thread-safe - no lock needed for file reads
         if os.path.exists(cache_path):
             try:
-                df = pd.read_csv(cache_path)
+                # Always use Polars for CSV reading - it's faster even for small files
+                # Only convert to pandas at the final output boundary
+                if HAS_POLARS:
+                    df = pl.read_csv(cache_path).to_pandas()
+                else:
+                    df = pd.read_csv(cache_path)
                 # Only print cache loads when not in batch mode (verbose individual loads suppressed)
                 if not self._batch_mode:
                     self._vprint(f"  ⏩ Loaded from cache: {cache_path}")
@@ -3849,19 +4337,168 @@ class NeuronBridgeFinder:
                 return None
         return None
     
+    def _load_from_cache_polars(self, cache_type: str, identifier: str) -> Optional['pl.DataFrame']:
+        """Load cached results as Polars DataFrame. Lock-free for reads."""
+        if not self.use_cache or not HAS_POLARS:
+            return None
+        
+        # Fast check using in-memory index
+        if not self._is_cached(cache_type, identifier):
+            return None
+        
+        cache_path = self._get_cache_path(cache_type, identifier)
+        if os.path.exists(cache_path):
+            try:
+                return pl.read_csv(cache_path)
+            except Exception:
+                return None
+        return None
+    
+    def _load_cached_neurons_bulk_polars(
+        self,
+        body_info_list: List[Dict[str, Any]],
+        match_type: str,
+        max_workers: int = 16,
+        progress_desc: Optional[str] = None
+    ) -> Tuple['pl.DataFrame', List[int]]:
+        """
+        Load multiple cached neurons in parallel using pure Polars, then concatenate.
+        
+        This is significantly faster than loading individually because:
+        1. Parallel I/O with ThreadPoolExecutor
+        2. Polars native concat (no pandas conversion until final output)
+        3. Single schema inference pass
+        
+        Parameters
+        ----------
+        body_info_list : list of dict
+            List of body info dicts with 'bodyId' and 'dataset' keys.
+        match_type : str
+            Match type for cache key generation.
+        max_workers : int
+            Number of parallel workers for I/O.
+            
+        Returns
+        -------
+        tuple
+            (pl.DataFrame with all results concatenated, list of successful body_ids)
+        """
+        if not HAS_POLARS or not body_info_list:
+            return pl.DataFrame(), []
+        
+        loaded_body_ids = []
+        loaded_dfs = []
+        
+        def load_single(body_info):
+            body_id = body_info['bodyId']
+            expected_ds = body_info.get('dataset', 'unknown')
+            cache_key = self._get_id_to_lines_cache_key(int(body_id), match_type, expected_ds)
+            
+            df = self._load_from_cache_polars('id_to_lines', cache_key)
+            if df is not None and df.height > 0:
+                # Add source columns using Polars (no pandas!)
+                df = df.with_columns([
+                    pl.lit(expected_ds).alias('source_dataset'),
+                    pl.lit(body_id).alias('source_bodyId')
+                ])
+                return body_id, df
+            return body_id, None
+        
+        # Parallel loading with ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = [executor.submit(load_single, bi) for bi in body_info_list]
+
+            if HAS_TQDM and self.verbose:
+                from tqdm import tqdm as tqdm_progress
+                pbar_cache = tqdm_progress(
+                    as_completed(futures),
+                    total=len(futures),
+                    desc=progress_desc or "  ⏩ Loading from cache",
+                    unit="neuron",
+                    bar_format='{desc}: {percentage:3.0f}%|{bar:30}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]',
+                    ncols=110,
+                    position=0,
+                    leave=False
+                )
+                for future in pbar_cache:
+                    try:
+                        body_id, df = future.result()
+                        if df is not None:
+                            loaded_body_ids.append(body_id)
+                            loaded_dfs.append(df)
+                        pbar_cache.set_postfix_str(f"{body_id}")
+                    except Exception:
+                        pass
+                pbar_cache.close()
+            else:
+                for future in as_completed(futures):
+                    try:
+                        body_id, df = future.result()
+                        if df is not None:
+                            loaded_body_ids.append(body_id)
+                            loaded_dfs.append(df)
+                    except Exception:
+                        pass
+        
+        # Concatenate all Polars DataFrames
+        if loaded_dfs:
+            # Normalize schemas before concat to avoid type mismatches
+            # Cast all numeric columns to consistent types
+            normalized_dfs = []
+            for df in loaded_dfs:
+                try:
+                    # Cast score to Float64, and any integer columns that might vary
+                    cast_exprs = []
+                    for col_name in df.columns:
+                        col_type = df.schema[col_name]
+                        if col_type in (pl.Int32, pl.Int64, pl.UInt32, pl.UInt64):
+                            # Cast all integers to Int64 for consistency
+                            cast_exprs.append(pl.col(col_name).cast(pl.Int64))
+                        elif col_type in (pl.Float32, pl.Float64):
+                            # Cast all floats to Float64 for consistency
+                            cast_exprs.append(pl.col(col_name).cast(pl.Float64))
+                        else:
+                            cast_exprs.append(pl.col(col_name))
+                    
+                    if cast_exprs:
+                        df = df.select(cast_exprs)
+                    normalized_dfs.append(df)
+                except Exception:
+                    # If casting fails, skip this dataframe
+                    pass
+            
+            if normalized_dfs:
+                # Use diagonal concat to handle any remaining schema differences
+                combined = pl.concat(normalized_dfs, how='diagonal')
+                return combined, loaded_body_ids
+        
+        return pl.DataFrame(), []
+    
     def _save_to_cache(self, cache_type: str, identifier: str, df: pd.DataFrame):
-        """Save results to cache."""
+        """Save results to cache. Thread-safe. Uses Polars for fast I/O."""
         if not self.use_cache or df.empty:
             return
         
         cache_path = self._get_cache_path(cache_type, identifier)
-        try:
-            df.to_csv(cache_path, index=False)
-            # Only print cache saves when not in batch mode
-            if not self._batch_mode:
-                self._vprint(f"  💾 Saved to cache: {cache_path}")
-        except Exception as e:
-            warnings.warn(f"Failed to save cache: {e}")
+        with self._cache_lock:
+            try:
+                # Use Polars for much faster CSV writing
+                if HAS_POLARS:
+                    # Ensure consistent column types for Polars conversion
+                    df_to_save = df.copy()
+                    for col in ['source_bodyId', 'bodyId']:
+                        if col in df_to_save.columns:
+                            df_to_save[col] = df_to_save[col].astype(str)
+                    pl.from_pandas(df_to_save).write_csv(cache_path)
+                else:
+                    df.to_csv(cache_path, index=False)
+                # Update in-memory index
+                self._add_to_cache_index(cache_type, identifier)
+                # Only print cache saves when not in batch mode
+                if not self._batch_mode:
+                    self._vprint(f"  💾 Saved to cache: {cache_path}")
+            except Exception as e:
+                warnings.warn(f"Failed to save cache: {e}")
     
     # =========================================================================
     # Image-based Cache System (indexed by image_id)
@@ -3894,7 +4531,7 @@ class NeuronBridgeFinder:
     
     def _load_line_mapping(self) -> Dict[str, Any]:
         """
-        Load the line-to-image mapping file.
+        Load the line-to-image mapping file. Thread-safe.
         
         Structure:
         {
@@ -3916,22 +4553,24 @@ class NeuronBridgeFinder:
         }
         """
         mapping_path = self._get_line_mapping_path()
-        if os.path.exists(mapping_path):
-            try:
-                with open(mapping_path, 'r') as f:
-                    return json.load(f)
-            except Exception:
-                pass
+        with self._cache_lock:
+            if os.path.exists(mapping_path):
+                try:
+                    with open(mapping_path, 'r') as f:
+                        return json.load(f)
+                except Exception:
+                    pass
         return {"lines": {}, "images": {}}
     
     def _save_line_mapping(self, mapping: Dict[str, Any]):
-        """Save the line-to-image mapping file."""
+        """Save the line-to-image mapping file. Thread-safe."""
         mapping_path = self._get_line_mapping_path()
-        try:
-            with open(mapping_path, 'w') as f:
-                json.dump(mapping, f, indent=2)
-        except Exception as e:
-            warnings.warn(f"Failed to save line mapping: {e}")
+        with self._cache_lock:
+            try:
+                with open(mapping_path, 'w') as f:
+                    json.dump(mapping, f, indent=2)
+            except Exception as e:
+                warnings.warn(f"Failed to save line mapping: {e}")
     
     def _update_line_mapping(
         self, 
@@ -4490,6 +5129,54 @@ class NeuronBridgeFinder:
             
         except Exception:
             return expected_dataset  # On error, assume expected dataset
+    
+    def _validate_body_ids_parallel(
+        self,
+        body_info_list: List[Dict[str, Any]],
+        max_workers: Optional[int] = None
+    ) -> Dict[int, Optional[str]]:
+        """
+        Validate multiple body IDs in parallel against NeuronBridge API.
+        
+        This batches all validation API calls to run concurrently, significantly
+        speeding up validation for large numbers of uncached neurons.
+        
+        Parameters
+        ----------
+        body_info_list : list of dict
+            List of body info dicts with 'bodyId' and 'dataset' keys.
+        max_workers : int, optional
+            Maximum parallel workers. Defaults to self.max_workers.
+            
+        Returns
+        -------
+        dict
+            Mapping of body_id -> actual_dataset (or None if not found)
+        """
+        if not body_info_list:
+            return {}
+        
+        workers = max_workers or self.max_workers
+        results = {}
+        
+        def validate_single(body_info):
+            body_id = body_info['bodyId']
+            expected_ds = body_info.get('dataset', 'unknown')
+            actual_ds = self._validate_body_id_dataset(int(body_id), expected_ds)
+            return body_id, actual_ds
+        
+        # Use ThreadPoolExecutor for parallel API calls
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            futures = {executor.submit(validate_single, bi): bi for bi in body_info_list}
+            for future in as_completed(futures):
+                try:
+                    body_id, actual_ds = future.result()
+                    results[body_id] = actual_ds
+                except Exception:
+                    body_info = futures[future]
+                    results[body_info['bodyId']] = body_info.get('dataset', 'unknown')
+        
+        return results
     
     def _sort_matches_by_rank(
         self, 
@@ -5118,6 +5805,17 @@ class NeuronBridgeFinder:
     # Public Methods
     # =========================================================================
     
+    def _get_id_to_lines_cache_key(self, body_id: int, match_type: str, expected_dataset: Optional[str] = None) -> str:
+        """
+        Build the cache key for id_to_lines lookups.
+        
+        This allows checking if a body ID is cached without loading the data.
+        """
+        ds_key = expected_dataset.replace(':', '_') if expected_dataset else 'any'
+        region_key = self.region if self.region else 'all'
+        max_imgs_key = self.max_api_images_per_line if self.max_api_images_per_line > 0 else 'all'
+        return f"{body_id}_{match_type}_{ds_key}_{region_key}_{max_imgs_key}"
+    
     def id_to_lines(
         self, 
         body_id: int, 
@@ -5154,11 +5852,8 @@ class NeuronBridgeFinder:
         
         self._vprint(f"🔍 Searching for lines matching body ID: {body_id}")
         
-        # Check cache (include all parameters in key)
-        ds_key = expected_dataset.replace(':', '_') if expected_dataset else 'any'
-        region_key = self.region if self.region else 'all'
-        max_imgs_key = self.max_api_images_per_line if self.max_api_images_per_line > 0 else 'all'
-        cache_key = f"{body_id}_{match_type}_{ds_key}_{region_key}_{max_imgs_key}"
+        # Check cache using helper method
+        cache_key = self._get_id_to_lines_cache_key(body_id, match_type, expected_dataset)
         cached = self._load_from_cache('id_to_lines', cache_key)
         if cached is not None:
             return cached
@@ -5238,6 +5933,90 @@ class NeuronBridgeFinder:
         results = {}
         skipped_count = 0
         
+        # =====================================================================
+        # Phase 1: Partition neurons into cached vs uncached using in-memory index
+        # =====================================================================
+        cached_neurons = []
+        uncached_neurons = []
+        
+        for body_info in body_info_list:
+            body_id = body_info['bodyId']
+            expected_ds = body_info.get('dataset', 'unknown')
+            cache_key = self._get_id_to_lines_cache_key(int(body_id), match_type, expected_ds)
+            
+            if self._is_cached('id_to_lines', cache_key):
+                cached_neurons.append(body_info)
+            else:
+                uncached_neurons.append(body_info)
+        
+        self._vprint(f"  📁 Cache status: {len(cached_neurons)} cached, {len(uncached_neurons)} need API fetch")
+        
+        # Determine if parallel processing should be used
+        use_parallel = self.max_workers > 1 and len(uncached_neurons) > 1
+        
+        # =====================================================================
+        # Pre-validate ALL uncached neurons in parallel (single batch of API calls)
+        # =====================================================================
+        validation_results = {}  # body_id -> actual_dataset
+        if uncached_neurons:
+            self._vprint(f"  🔄 Pre-validating {len(uncached_neurons)} neurons against NeuronBridge API...")
+            validation_results = self._validate_body_ids_parallel(
+                uncached_neurons, 
+                max_workers=min(self.max_workers * 2, 16)  # Use more workers for validation (lightweight API calls)
+            )
+            self._vprint(f"  ✓ Validation complete")
+        
+        # Worker function for cached neurons (no API validation needed)
+        def load_cached_neuron(body_info):
+            """Load a cached neuron - no API calls needed."""
+            body_id = body_info['bodyId']
+            expected_ds = body_info.get('dataset', 'unknown')
+            
+            try:
+                lines_df = self.id_to_lines(
+                    int(body_id), 
+                    match_type=match_type,
+                    expected_dataset=expected_ds
+                )
+                if not lines_df.empty:
+                    lines_df = lines_df.copy()
+                    lines_df['source_dataset'] = expected_ds
+                    lines_df['source_bodyId'] = body_id
+                return body_id, lines_df, False  # skipped=False
+            except Exception as e:
+                return body_id, pd.DataFrame(), False
+        
+        # Worker function for uncached neurons (uses PRE-VALIDATED results - no API call here)
+        def fetch_uncached_neuron(body_info):
+            """Process an uncached neuron using pre-validated dataset info."""
+            body_id = body_info['bodyId']
+            expected_ds = body_info.get('dataset', 'unknown')
+            
+            # Use pre-validated result (no API call needed here!)
+            actual_ds = validation_results.get(body_id, expected_ds)
+            
+            # Check for dataset mismatch
+            if actual_ds and expected_ds != 'unknown':
+                expected_base = self._normalize_dataset_name(expected_ds)
+                actual_base = self._normalize_dataset_name(actual_ds)
+                
+                if expected_base != actual_base:
+                    return body_id, None, True  # skipped=True
+            
+            try:
+                lines_df = self.id_to_lines(
+                    int(body_id), 
+                    match_type=match_type,
+                    expected_dataset=expected_ds
+                )
+                if not lines_df.empty:
+                    lines_df = lines_df.copy()
+                    lines_df['source_dataset'] = actual_ds or expected_ds
+                    lines_df['source_bodyId'] = body_id
+                return body_id, lines_df, False  # skipped=False
+            except Exception as e:
+                return body_id, pd.DataFrame(), False
+        
         # Use progress bar for multiple body IDs
         if HAS_TQDM and self.verbose and len(body_info_list) > 1:
             from tqdm import tqdm as tqdm_progress
@@ -5245,94 +6024,194 @@ class NeuronBridgeFinder:
             # Enable batch mode to suppress individual messages
             self._batch_mode = True
             
-            pbar = tqdm_progress(
-                body_info_list,
-                desc=f"  🔄 Processing {len(body_info_list)} neurons",
-                unit="neuron",
-                bar_format='{desc}: {percentage:3.0f}%|{bar:30}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]',
-                ncols=110,
-                position=0,
-                leave=False
-            )
-            
-            for body_info in pbar:
-                body_id = body_info['bodyId']
-                expected_ds = body_info.get('dataset', 'unknown')
-                pbar.set_postfix_str(f"{body_id}")
-                
-                # Validate body ID against NeuronBridge to ensure dataset match
-                actual_ds = self._validate_body_id_dataset(int(body_id), expected_ds)
-                
-                # Check for dataset mismatch
-                if actual_ds and expected_ds != 'unknown':
-                    expected_base = self._normalize_dataset_name(expected_ds)
-                    actual_base = self._normalize_dataset_name(actual_ds)
-                    
-                    if expected_base != actual_base:
-                        skipped_count += 1
-                        continue
-                
-                try:
-                    lines_df = self.id_to_lines(
-                        int(body_id), 
-                        match_type=match_type,
-                        expected_dataset=expected_ds
+            # =====================================================================
+            # Phase 2: Load cached neurons using BULK Polars loader (fastest path)
+            # =====================================================================
+            if cached_neurons:
+                if HAS_POLARS and len(cached_neurons) > 1:
+                    # Use bulk Polars loader for maximum speed
+                    self._vprint(
+                        f"  ⏩ Loading {len(cached_neurons)} from cache with online API validation...",
+                        force=True
                     )
-                    if not lines_df.empty:
-                        lines_df = lines_df.copy()
-                        lines_df['source_dataset'] = actual_ds or expected_ds
-                        lines_df['source_bodyId'] = body_id
-                    results[body_id] = lines_df
-                except Exception as e:
-                    results[body_id] = pd.DataFrame()
+                    import time
+                    t0 = time.perf_counter()
+                    
+                    combined_pl, loaded_ids = self._load_cached_neurons_bulk_polars(
+                        cached_neurons,
+                        match_type,
+                        max_workers=16,
+                        progress_desc=f"  ⏩ Loading {len(cached_neurons)} from cache with online API validation"
+                    )
+                    
+                    # Convert to per-neuron results dict (still in Polars until final output)
+                    if combined_pl.height > 0:
+                        # Group by source_bodyId and convert each group to pandas
+                        for body_id in loaded_ids:
+                            mask = combined_pl.filter(pl.col('source_bodyId') == body_id)
+                            results[body_id] = mask.to_pandas()
+                    
+                    elapsed = time.perf_counter() - t0
+                    self._vprint(f"  ✓ Loaded {len(loaded_ids)} neurons ({combined_pl.height:,} rows) in {elapsed:.2f}s", force=True)
+                else:
+                    # Fallback to parallel loading for single neuron or no Polars
+                    cache_workers = min(16, len(cached_neurons))
+                    
+                    with ThreadPoolExecutor(max_workers=cache_workers) as executor:
+                        futures = {executor.submit(load_cached_neuron, bi): bi for bi in cached_neurons}
+                        
+                        pbar_cache = tqdm_progress(
+                            as_completed(futures),
+                            total=len(cached_neurons),
+                            desc=f"  ⏩ Loading {len(cached_neurons)} from cache with online API validation",
+                            unit="neuron",
+                            bar_format='{desc}: {percentage:3.0f}%|{bar:30}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]',
+                            ncols=110,
+                            position=0,
+                            leave=False
+                        )
+                        
+                        for future in pbar_cache:
+                            try:
+                                body_id, lines_df, skipped = future.result()
+                                if skipped:
+                                    skipped_count += 1
+                                else:
+                                    results[body_id] = lines_df if lines_df is not None else pd.DataFrame()
+                                pbar_cache.set_postfix_str(f"{body_id}")
+                            except Exception as e:
+                                body_info = futures[future]
+                                results[body_info['bodyId']] = pd.DataFrame()
+                        
+                        pbar_cache.close()
             
-            pbar.close()
+            # =====================================================================
+            # Phase 3: Fetch uncached neurons from API (parallel if enabled)
+            # =====================================================================
+            if uncached_neurons:
+                if use_parallel:
+                    # Parallel processing with ThreadPoolExecutor
+                    self._vprint(f"  🚀 Using parallel processing ({min(self.max_workers, len(uncached_neurons))} workers)", force=True)
+                    
+                    with ThreadPoolExecutor(max_workers=min(self.max_workers, len(uncached_neurons))) as executor:
+                        # Submit all tasks - use fetch_uncached_neuron (with API validation)
+                        futures = {executor.submit(fetch_uncached_neuron, bi): bi for bi in uncached_neurons}
+                        
+                        # Process results with progress bar
+                        pbar = tqdm_progress(
+                            as_completed(futures),
+                            total=len(uncached_neurons),
+                            desc=f"  🌐 Fetching {len(uncached_neurons)} from API",
+                            unit="neuron",
+                            bar_format='{desc}: {percentage:3.0f}%|{bar:30}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]',
+                            ncols=110,
+                            position=0,
+                            leave=False
+                        )
+                        
+                        for future in pbar:
+                            try:
+                                body_id, lines_df, skipped = future.result()
+                                if skipped:
+                                    skipped_count += 1
+                                else:
+                                    results[body_id] = lines_df if lines_df is not None else pd.DataFrame()
+                                pbar.set_postfix_str(f"{body_id}")
+                            except Exception as e:
+                                # Get body_info from futures dict for error handling
+                                body_info = futures[future]
+                                results[body_info['bodyId']] = pd.DataFrame()
+                        
+                        pbar.close()
+                else:
+                    # Sequential processing with progress bar
+                    pbar = tqdm_progress(
+                        uncached_neurons,
+                        desc=f"  🌐 Fetching {len(uncached_neurons)} from API",
+                        unit="neuron",
+                        bar_format='{desc}: {percentage:3.0f}%|{bar:30}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]',
+                        ncols=110,
+                        position=0,
+                        leave=False
+                    )
+                    
+                    for body_info in pbar:
+                        body_id, lines_df, skipped = fetch_uncached_neuron(body_info)
+                        if skipped:
+                            skipped_count += 1
+                        else:
+                            results[body_id] = lines_df if lines_df is not None else pd.DataFrame()
+                        pbar.set_postfix_str(f"{body_id}")
+                    
+                    pbar.close()
+            
             self._batch_mode = False
             
             if skipped_count > 0:
                 self._vprint(f"  ℹ️  Skipped {skipped_count} body IDs due to dataset mismatch")
         else:
-            # Single neuron or no tqdm - original behavior
+            # Single neuron or no tqdm - use parallel validation for uncached
+            # Pre-validate uncached neurons in parallel
+            seq_validation_results = {}
+            seq_uncached = [bi for bi in body_info_list 
+                           if not self._is_cached('id_to_lines', 
+                               self._get_id_to_lines_cache_key(int(bi['bodyId']), match_type, bi.get('dataset', 'unknown')))]
+            if seq_uncached:
+                seq_validation_results = self._validate_body_ids_parallel(seq_uncached)
+            
             for i, body_info in enumerate(body_info_list):
                 body_id = body_info['bodyId']
                 expected_ds = body_info.get('dataset', 'unknown')
                 
-                # Validate body ID against NeuronBridge to ensure dataset match
-                actual_ds = self._validate_body_id_dataset(int(body_id), expected_ds)
+                # Check if cached - skip validation if so
+                cache_key = self._get_id_to_lines_cache_key(int(body_id), match_type, expected_ds)
+                is_cached = self._is_cached('id_to_lines', cache_key)
                 
-                # Check for dataset mismatch
-                if actual_ds and expected_ds != 'unknown':
-                    # Normalize for comparison - extract base dataset name
-                    # Handle different naming conventions:
-                    # - 'flywire_FAFB_v783' (underscore + version suffix)
-                    # - 'flywire_fafb:v783' (colon-separated version)
-                    # - 'male-cns:v0.9' -> 'male-cns'
-                    # - 'hemibrain:v1.2.1' -> 'hemibrain'
-                    expected_base = self._normalize_dataset_name(expected_ds)
-                    actual_base = self._normalize_dataset_name(actual_ds)
+                if is_cached:
+                    # Cached - just load without API validation
+                    try:
+                        lines_df = self.id_to_lines(
+                            int(body_id), 
+                            match_type=match_type,
+                            expected_dataset=expected_ds
+                        )
+                        if not lines_df.empty:
+                            lines_df = lines_df.copy()
+                            lines_df['source_dataset'] = expected_ds
+                            lines_df['source_bodyId'] = body_id
+                        results[body_id] = lines_df
+                    except Exception as e:
+                        self._vprint(f"    ⚠️ Error processing body ID {body_id}: {e}")
+                        results[body_id] = pd.DataFrame()
+                else:
+                    # Uncached - use pre-validated result (no API call here)
+                    actual_ds = seq_validation_results.get(body_id, expected_ds)
                     
-                    if expected_base != actual_base:
-                        self._vprint(f"  ⏭️  Skipping {body_id}: belongs to {actual_ds}, not {expected_ds} (dataset mismatch)")
-                        skipped_count += 1
-                        continue
-                
-                self._vprint(f"  Processing {i+1}/{len(body_info_list)}: {body_id} ({actual_ds or expected_ds})")
-                try:
-                    # Pass expected dataset to get correct EM image
-                    lines_df = self.id_to_lines(
-                        int(body_id), 
-                        match_type=match_type,
-                        expected_dataset=expected_ds
-                    )
-                    # Add source dataset info (use actual dataset from NeuronBridge)
-                    if not lines_df.empty:
-                        lines_df = lines_df.copy()
-                        lines_df['source_dataset'] = actual_ds or expected_ds
-                        lines_df['source_bodyId'] = body_id
-                    results[body_id] = lines_df
-                except Exception as e:
-                    self._vprint(f"    ⚠️ Error processing body ID {body_id}: {e}")
-                    results[body_id] = pd.DataFrame()
+                    # Check for dataset mismatch
+                    if actual_ds and expected_ds != 'unknown':
+                        expected_base = self._normalize_dataset_name(expected_ds)
+                        actual_base = self._normalize_dataset_name(actual_ds)
+                        
+                        if expected_base != actual_base:
+                            self._vprint(f"  ⏭️  Skipping {body_id}: belongs to {actual_ds}, not {expected_ds} (dataset mismatch)")
+                            skipped_count += 1
+                            continue
+                    
+                    self._vprint(f"  Processing {i+1}/{len(body_info_list)}: {body_id} ({actual_ds or expected_ds})")
+                    try:
+                        lines_df = self.id_to_lines(
+                            int(body_id), 
+                            match_type=match_type,
+                            expected_dataset=expected_ds
+                        )
+                        if not lines_df.empty:
+                            lines_df = lines_df.copy()
+                            lines_df['source_dataset'] = actual_ds or expected_ds
+                            lines_df['source_bodyId'] = body_id
+                        results[body_id] = lines_df
+                    except Exception as e:
+                        self._vprint(f"    ⚠️ Error processing body ID {body_id}: {e}")
+                        results[body_id] = pd.DataFrame()
             
             if skipped_count > 0:
                 self._vprint(f"  ℹ️  Skipped {skipped_count} body IDs due to dataset mismatch")
@@ -8281,249 +9160,59 @@ class NeuronBridgeFinder:
                 except Exception as e:
                     self._vprint(f"   ❌ Error: {e}")
         
-        # Combine results
+        # Combine results - use optimized path for large datasets
         if all_results:
             combined_df = pd.concat(all_results, ignore_index=True)
+            n_rows = len(combined_df)
             
-            # Calculate total unique query neurons (bodyIds) for weighted_score normalization
-            total_query_neurons = 0
-            if 'source_bodyId' in combined_df.columns:
-                total_query_neurons = len(set(str(v) for v in combined_df['source_bodyId'].dropna().unique()))
+            # For large datasets (>100k rows), use optimized Polars-based processing
+            use_polars = HAS_POLARS and n_rows > 100000
             
-            # Add line_type classification if separate_splitgal4 is enabled
-            if self.separate_splitgal4 and 'line' in combined_df.columns:
-                combined_df['line_type'] = combined_df['line'].apply(self._classify_line_type)
-            
-            # Enrich with type information from neuron_df if available
-            if 'source_bodyId' in combined_df.columns and 'source_dataset' in combined_df.columns:
-                # Lookup type info for each bodyId
-                type_cache = {}
-                for _, row in combined_df.iterrows():
-                    body_id = row.get('source_bodyId')
-                    ds = row.get('source_dataset')
-                    if pd.isna(body_id) or pd.isna(ds):
-                        continue
-                    key = (str(body_id), ds)
-                    if key not in type_cache:
-                        ds_folder = self._dataset_name_to_folder(ds)
-                        neuron_df = self._load_neuron_df_for_dataset(ds_folder)
-                        if neuron_df is not None and 'bodyId' in neuron_df.columns and 'type' in neuron_df.columns:
-                            match = neuron_df[neuron_df['bodyId'].astype(str) == str(body_id)]
-                            if not match.empty:
-                                type_cache[key] = match['type'].iloc[0]
-                            else:
-                                type_cache[key] = None
-                        else:
-                            type_cache[key] = None
-                
-                # Add source_type column
-                combined_df['source_type'] = combined_df.apply(
-                    lambda row: type_cache.get((str(row.get('source_bodyId', '')), row.get('source_dataset', '')), ''),
-                    axis=1
+            if use_polars:
+                self._vprint(f"\n⚡ Using Polars for fast processing of {n_rows:,} rows...")
+                combined_df, line_stats = self._aggregate_results_polars(
+                    combined_df, 
+                    match_type=match_type,
+                    is_multi_dataset=is_multi_dataset,
+                    sort_by=sort_by
                 )
-            
-            # Aggregate line-level results across bodyIds for ranking
-            # For each unique line, compute aggregate score/rank
-            if 'line' in combined_df.columns:
-                if match_type == 'both' and 'combined_rank' in combined_df.columns:
-                    # For 'both', use mean combined_rank (lower is better)
-                    agg_dict = {
-                        'combined_rank': 'mean',
-                        'score': 'max',
-                        # Use nunique for unique bodyId count instead of count with repeats
-                        'source_bodyId': [
-                            lambda x: len(set(str(v) for v in x.dropna().unique())),  # unique count
-                            lambda x: ','.join(sorted(set(str(v) for v in x.dropna().unique())))  # unique list
-                        ]
-                    }
-                    if self.separate_splitgal4 and 'line_type' in combined_df.columns:
-                        agg_dict['line_type'] = 'first'
-                    if 'source_type' in combined_df.columns:
-                        agg_dict['source_type'] = lambda x: ','.join(sorted(set(str(v) for v in x.dropna().unique() if v)))
-                    
-                    line_stats = combined_df.groupby('line').agg(agg_dict).reset_index()
-                    # Flatten multi-level columns
-                    line_stats.columns = ['_'.join(col).strip('_') if isinstance(col, tuple) else col 
-                                         for col in line_stats.columns]
-                    line_stats = line_stats.rename(columns={
-                        'combined_rank_mean': 'agg_combined_rank',
-                        'score_max': 'agg_max_score',
-                        'source_bodyId_<lambda_0>': 'match_count',
-                        'source_bodyId_<lambda_1>': 'matched_bodyIds',
-                        'source_type_<lambda>': 'matched_types'
-                    })
-                    
-                    # Calculate weighted_score for 'both' match_type
-                    # weighted_score = agg_max_score * (match_count / total_query_neurons)
-                    if 'match_count' in line_stats.columns and total_query_neurons > 0:
-                        line_stats['coverage_ratio'] = line_stats['match_count'] / total_query_neurons
-                        line_stats['weighted_score'] = line_stats['agg_max_score'] * line_stats['coverage_ratio']
-                        # Sort based on sort_by parameter
-                        if sort_by == 'completeness':
-                            # Sort by weighted_score (higher is better), then by combined_rank (lower is better)
-                            line_stats = line_stats.sort_values(
-                                ['weighted_score', 'agg_combined_rank'], 
-                                ascending=[False, True]
-                            )
-                        else:  # sort_by == 'max'
-                            # Sort by agg_mean_score (higher is better), then by combined_rank (lower is better)
-                            line_stats = line_stats.sort_values(
-                                ['agg_mean_score', 'agg_combined_rank'], 
-                                ascending=[False, True]
-                            )
-                    else:
-                        line_stats = line_stats.sort_values('agg_combined_rank', ascending=True)
-                else:
-                    # For cds/pppm, use mean score (higher is better)
-                    # FIXED: match_count now uses nunique for unique bodyId count
-                    agg_dict = {
-                        'score': ['mean', 'max'],
-                        # Use nunique for unique bodyId count instead of count with repeats
-                        'source_bodyId': [
-                            lambda x: len(set(str(v) for v in x.dropna().unique())),  # unique count
-                            lambda x: ','.join(sorted(set(str(v) for v in x.dropna().unique())))  # unique list
-                        ]
-                    }
-                    # Add type aggregation if available
-                    if 'source_type' in combined_df.columns:
-                        agg_dict['source_type'] = lambda x: ','.join(sorted(set(str(v) for v in x.dropna().unique() if v)))
-                    
-                    # Add dataset info for cross-dataset scoring
-                    if 'source_dataset' in combined_df.columns and is_multi_dataset:
-                        agg_dict['source_dataset'] = [
-                            lambda x: len(set(str(v) for v in x.dropna().unique())),  # datasets_labeled
-                            lambda x: ','.join(sorted(set(str(v) for v in x.dropna().unique())))  # dataset list
-                        ]
-                    
-                    line_stats = combined_df.groupby('line').agg(agg_dict).reset_index()
-                    # Flatten multi-level columns
-                    new_cols = ['line']
-                    for col in line_stats.columns[1:]:
-                        if isinstance(col, tuple):
-                            new_cols.append(f"{col[0]}_{col[1] if isinstance(col[1], str) else 'agg'}")
-                        else:
-                            new_cols.append(col)
-                    line_stats.columns = new_cols
-                    
-                    # Rename columns properly
-                    rename_map = {
-                        'score_mean': 'agg_mean_score',
-                        'score_max': 'agg_max_score',
-                    }
-                    # Find and rename source_bodyId columns
-                    for col in line_stats.columns:
-                        if 'source_bodyId' in col and 'lambda' in col and '0' in col:
-                            rename_map[col] = 'match_count'
-                        elif 'source_bodyId' in col and 'lambda' in col:
-                            rename_map[col] = 'matched_bodyIds'
-                        elif 'source_type' in col and 'lambda' in col:
-                            rename_map[col] = 'matched_types'
-                        elif 'source_dataset' in col and 'lambda' in col and '0' in col:
-                            rename_map[col] = 'datasets_labeled'
-                        elif 'source_dataset' in col and 'lambda' in col:
-                            rename_map[col] = 'matched_datasets'
-                    
-                    line_stats = line_stats.rename(columns=rename_map)
-                    
-                    # Add line_type if available
-                    if self.separate_splitgal4 and 'line_type' in combined_df.columns:
-                        line_type_map = combined_df.groupby('line')['line_type'].first()
-                        line_stats['line_type'] = line_stats['line'].map(line_type_map)
-                    
-                    # Calculate cross-dataset score if multi-dataset
-                    if is_multi_dataset and 'source_dataset' in combined_df.columns:
-                        # Calculate min score per dataset for each line
-                        # This rewards lines that have good scores across ALL datasets
-                        def calc_min_score_across_datasets(line_name):
-                            line_data = combined_df[combined_df['line'] == line_name]
-                            if 'source_dataset' not in line_data.columns:
-                                return line_data['score'].mean() if 'score' in line_data.columns else 0
-                            
-                            # Get max score per dataset for this line
-                            dataset_scores = line_data.groupby('source_dataset')['score'].max()
-                            if len(dataset_scores) == 0:
-                                return 0
-                            # Return minimum of max scores (worst dataset performance)
-                            return dataset_scores.min()
-                        
-                        def calc_cross_dataset_score(line_name):
-                            """Calculate mean of max scores across datasets."""
-                            line_data = combined_df[combined_df['line'] == line_name]
-                            if 'source_dataset' not in line_data.columns:
-                                return line_data['score'].mean() if 'score' in line_data.columns else 0
-                            
-                            # Get max score per dataset for this line
-                            dataset_scores = line_data.groupby('source_dataset')['score'].max()
-                            if len(dataset_scores) == 0:
-                                return 0
-                            return dataset_scores.mean()
-                        
-                        line_stats['min_score_per_dataset'] = line_stats['line'].apply(calc_min_score_across_datasets)
-                        line_stats['cross_dataset_score'] = line_stats['line'].apply(calc_cross_dataset_score)
-                    
-                    # =================================================================
-                    # WEIGHTED SCORE CALCULATION
-                    # =================================================================
-                    # weighted_score = agg_mean_score * (match_count / total_query_neurons)
-                    # 
-                    # This score prioritizes lines that:
-                    # 1. Have high average matching scores (agg_mean_score)
-                    # 2. Label MORE of the queried neurons (match_count / total_query_neurons)
-                    #
-                    # For multi-type queries, this finds lines that label ALL queried neurons.
-                    # A line labeling all N queried neurons with score S gets weighted_score = S
-                    # A line labeling only 1 of N neurons with score S gets weighted_score = S/N
-                    # =================================================================
-                    if 'match_count' in line_stats.columns and total_query_neurons > 0:
-                        # coverage_ratio = match_count / total_query_neurons
-                        # weighted_score = agg_mean_score * coverage_ratio
-                        line_stats['coverage_ratio'] = line_stats['match_count'] / total_query_neurons
-                        line_stats['weighted_score'] = line_stats['agg_mean_score'] * line_stats['coverage_ratio']
-                        
-                        # Sort based on sort_by parameter
-                        if sort_by == 'completeness':
-                            # Sort by weighted_score (prioritizes lines labeling ALL queried neurons)
-                            line_stats = line_stats.sort_values('weighted_score', ascending=False)
-                            self._vprint(f"   📊 Sorting by weighted_score (agg_mean_score × coverage_ratio)")
-                        else:  # sort_by == 'max'
-                            # Sort by agg_mean_score (prioritizes lines with highest average scores)
-                            line_stats = line_stats.sort_values('agg_mean_score', ascending=False)
-                            self._vprint(f"   📊 Sorting by agg_mean_score (average match scores)")
-                        self._vprint(f"      Total query neurons: {total_query_neurons}")
-                    elif is_multi_dataset:
-                        # Fallback to min_score_per_dataset for multi-dataset
-                        line_stats = line_stats.sort_values('min_score_per_dataset', ascending=False)
-                        self._vprint(f"   📊 Multi-dataset sorting: by min_score_per_dataset (descending)")
-                    else:
-                        if sort_by == 'completeness':
-                            line_stats = line_stats.sort_values('agg_mean_score', ascending=False)
-                        else:  # sort_by == 'max'
-                            line_stats = line_stats.sort_values('agg_mean_score', ascending=False)
-                
-                # Add aggregated stats back to combined_df
-                merge_cols = ['line', 'matched_bodyIds']
-                if 'matched_types' in line_stats.columns:
-                    merge_cols.append('matched_types')
-                combined_df = combined_df.merge(
-                    line_stats[merge_cols], 
-                    on='line', 
-                    how='left'
+            else:
+                # Original pandas-based processing for smaller datasets
+                combined_df, line_stats = self._aggregate_results_pandas(
+                    combined_df,
+                    match_type=match_type,
+                    is_multi_dataset=is_multi_dataset,
+                    sort_by=sort_by
                 )
             
             # Save combined results (sorted by score descending)
             if output_path:
-                combined_file = os.path.join(output_path, 'all_lines.csv')
-                # Sort by score descending before saving
-                if 'score' in combined_df.columns:
-                    combined_df_sorted = combined_df.sort_values('score', ascending=False)
-                else:
-                    combined_df_sorted = combined_df
-                combined_df_sorted.to_csv(combined_file, index=False)
-                self._vprint(f"\n💾 Combined results: {combined_file}")
-                self._vprint(f"   Total: {len(combined_df)} lines from {len(query_list)} query(s)")
+                # Skip all_lines.csv in separate_splitgal4 mode to avoid duplicate output
+                if not self.separate_splitgal4:
+                    combined_file = os.path.join(output_path, 'all_lines.csv')
+                    # Sort by score descending before saving
+                    if 'score' in combined_df.columns:
+                        combined_df_sorted = combined_df.sort_values('score', ascending=False)
+                    else:
+                        combined_df_sorted = combined_df
+                    
+                    # Use Polars for fast CSV writing if available and dataset is large
+                    self._vprint(f"\n💾 Saving results...")
+                    if HAS_POLARS and len(combined_df_sorted) > 100000:
+                        self._vprint(f"   ⚡ Using Polars for fast CSV write ({len(combined_df_sorted):,} rows)")
+                        # Ensure consistent column types for Polars conversion
+                        df_to_save = combined_df_sorted.copy()
+                        for col in ['source_bodyId', 'bodyId']:
+                            if col in df_to_save.columns:
+                                df_to_save[col] = df_to_save[col].astype(str)
+                        pl.from_pandas(df_to_save).write_csv(combined_file)
+                    else:
+                        combined_df_sorted.to_csv(combined_file, index=False)
+                    self._vprint(f"   Combined results: {combined_file}")
+                    self._vprint(f"   Total: {len(combined_df)} lines from {len(query_list)} query(s)")
                 
                 # Save line-level aggregate summary
-                if 'line' in combined_df.columns:
+                if 'line' in combined_df.columns and not line_stats.empty:
                     summary_file = os.path.join(output_path, 'line_summary.csv')
                     
                     # Reorder columns: put weighted_score before agg_mean_score

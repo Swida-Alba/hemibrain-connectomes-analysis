@@ -6779,6 +6779,10 @@ class VisualizeSkeleton:
                             neuron_type = str(row[type_col]) if pd.notna(row[type_col]) else None
                             if neuron_type:
                                 neuron_type_map[body_id] = neuron_type
+                                # Also map neuron name/instance to type if available (helpful when trace name != bodyId)
+                                for name_col in ['name', 'instance', 'roi']:
+                                    if name_col in row and pd.notna(row[name_col]):
+                                        neuron_type_map[str(row[name_col])] = neuron_type
 
                 # Track which legend groups we've shown (for type/layer modes)
                 shown_legend_groups = set()
@@ -6816,6 +6820,24 @@ class VisualizeSkeleton:
                     elif self.legend_mode == 'type':
                         # Group by neuron type - each type gets separate legend but keeps layer color
                         neuron_type = neuron_type_map.get(neuron_id, None)
+                        
+                        # Fallback: try different ID strategies if type not found
+                        if not neuron_type and j < len(neuron_vols):
+                            # Try using the ID from the source neuron object
+                            try:
+                                vid = str(neuron_vols[j].id)
+                                neuron_type = neuron_type_map.get(vid, None)
+                            except:
+                                pass
+                            
+                            # If still not found, try using the name from source neuron
+                            if not neuron_type and hasattr(neuron_vols[j], 'name'):
+                                try:
+                                    vname = str(neuron_vols[j].name)
+                                    neuron_type = neuron_type_map.get(vname, None)
+                                except:
+                                    pass
+
                         if neuron_type:
                             legend_group = f"{neuron_type}"
                         else:

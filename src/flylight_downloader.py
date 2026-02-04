@@ -118,6 +118,30 @@ GEN1_MCFO_VIEW_CGI = 'https://gen1mcfo.janelia.org/cgi-bin/view_gen1mcfo_imagery
 GEN1_MCFO_SEARCH_CGI = 'https://gen1mcfo.janelia.org/cgi-bin/gen1mcfo.cgi'
 GEN1_MCFO_CDN_BASE = 'https://gen1mcfo.janelia.org/imagery'
 
+# User-Agent for HTTP requests to Janelia servers (they block Python's default User-Agent)
+HTTP_USER_AGENT = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+
+
+def _create_request(url: str, method: str = 'GET') -> urllib.request.Request:
+    """
+    Create an HTTP request with proper headers for Janelia servers.
+    
+    The Janelia servers (flweb.janelia.org, flimg.janelia.org, gen1mcfo.janelia.org)
+    block requests without proper User-Agent headers.
+    
+    Args:
+        url: The URL to request
+        method: HTTP method (GET, HEAD, POST, etc.)
+        
+    Returns:
+        urllib.request.Request object with proper headers
+    """
+    req = urllib.request.Request(url, method=method)
+    req.add_header('User-Agent', HTTP_USER_AGENT)
+    req.add_header('Accept', 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8')
+    req.add_header('Accept-Language', 'en-US,en;q=0.5')
+    return req
+
 # Known collections in the S3 bucket (top-level folders)
 # Note: VT GAL4 lines are NOT in this S3 bucket - they use the HTTP CDN above
 FLYLIGHT_COLLECTIONS = [
@@ -624,7 +648,8 @@ class FlyLightDownloader:
         session_id = ''
         
         try:
-            with urllib.request.urlopen(url, timeout=30) as response:
+            req = _create_request(url)
+            with urllib.request.urlopen(req, timeout=30) as response:
                 html = response.read().decode('utf-8')
         except Exception as e:
             self._log(f"❌ Error fetching VT page: {e}")
@@ -777,7 +802,8 @@ class FlyLightDownloader:
         files = []
         
         try:
-            with urllib.request.urlopen(url, timeout=30) as response:
+            req = _create_request(url)
+            with urllib.request.urlopen(req, timeout=30) as response:
                 html = response.read().decode('utf-8')
         except Exception as e:
             self._log(f"❌ Error fetching R-line page: {e}")
@@ -863,7 +889,8 @@ class FlyLightDownloader:
             try:
                 # Use SSL context to avoid SSL handshake errors
                 ctx = ssl.create_default_context()
-                with urllib.request.urlopen(url, timeout=30, context=ctx) as response:
+                req = _create_request(url)
+                with urllib.request.urlopen(req, timeout=30, context=ctx) as response:
                     html = response.read().decode('utf-8')
                 break  # Success - stop trying endpoints
             except Exception as e:
@@ -925,7 +952,7 @@ class FlyLightDownloader:
     def _verify_vt_file_exists(self, file: FlyLightFile) -> bool:
         """Check if a VT file URL is accessible."""
         try:
-            req = urllib.request.Request(file.http_url, method='HEAD')
+            req = _create_request(file.http_url, method='HEAD')
             with urllib.request.urlopen(req, timeout=10) as response:
                 return response.status == 200
         except:
@@ -1806,9 +1833,15 @@ class FlyLightDownloader:
         
         for f in files:
             try:
-                with urllib.request.urlopen(f.url, timeout=30) as response:
-                    data = json.loads(response.read())
-                    metadata_list.append(data)
+                # Use proper headers for Janelia servers
+                if 'janelia.org' in f.url:
+                    req = _create_request(f.url)
+                    with urllib.request.urlopen(req, timeout=30) as response:
+                        data = json.loads(response.read())
+                else:
+                    with urllib.request.urlopen(f.url, timeout=30) as response:
+                        data = json.loads(response.read())
+                metadata_list.append(data)
             except Exception as e:
                 self._log(f"⚠️  Error fetching metadata from {f.filename}: {e}")
         
