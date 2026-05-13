@@ -1,5 +1,6 @@
 import os
 import json
+import threading
 from copy import copy
 from types import SimpleNamespace
 import warnings
@@ -32,6 +33,8 @@ from tqdm import tqdm
 # Avoids repeated CSV reads when getNeurons() is called multiple times
 # Structure: {dataset: {'neuron_df': DataFrame, 'roi_df': DataFrame}}
 _NEURON_DF_CACHE = {}
+_DATASET_DOWNLOAD_LOCKS = {}
+_FAILED_DATASET_DOWNLOADS = set()
 
 # Try to import polars for faster I/O
 try:
@@ -150,6 +153,74 @@ def clear_neuron_cache(dataset: str = None):
         del _NEURON_DF_CACHE[dataset]
 
 
+def _get_dataset_path_body(dataset: str) -> tuple[str, str, str]:
+    """Return normalized dataset name, dataset directory, and file prefix."""
+    dataset_normalized = dataset.replace(':', '_').replace('.', '_')
+    project_root = os.path.dirname(os.path.dirname(__file__))
+    dataset_dir = os.path.join(project_root, "datasets", dataset_normalized)
+
+    if os.path.exists(dataset_dir):
+        dataset_path_body = os.path.join(dataset_dir, f"{dataset_normalized}_allneurons")
+    else:
+        dataset_path_body = os.path.join(project_root, "datasets", f"{dataset_normalized}_allneurons")
+
+    return dataset_normalized, dataset_dir, dataset_path_body
+
+
+def _ensure_local_dataset_files(dataset: str, client=None, verbose: bool = True) -> tuple[str, str]:
+    """
+    Ensure local dataset CSVs exist exactly once per dataset per process.
+
+    This prevents repeated pull attempts when visualization requests the same
+    dataset layer-by-layer and a previous pull failed or did not materialize
+    the expected CSV files.
+    """
+    global _DATASET_DOWNLOAD_LOCKS, _FAILED_DATASET_DOWNLOADS
+
+    dataset_normalized, dataset_dir, dataset_path_body = _get_dataset_path_body(dataset)
+    neuron_csv = dataset_path_body + '_neuron_df.csv'
+    roi_csv = dataset_path_body + '_roi_count_df.csv'
+
+    if os.path.exists(neuron_csv) and os.path.exists(roi_csv):
+        return dataset_normalized, dataset_path_body
+
+    if dataset_normalized in _FAILED_DATASET_DOWNLOADS:
+        raise FileNotFoundError(
+            f"Dataset '{dataset}' is still missing local CSV files after a previous pull attempt. "
+            f"Expected: {neuron_csv} and {roi_csv}"
+        )
+
+    lock = _DATASET_DOWNLOAD_LOCKS.setdefault(dataset_normalized, threading.Lock())
+    with lock:
+        if os.path.exists(neuron_csv) and os.path.exists(roi_csv):
+            return dataset_normalized, dataset_path_body
+
+        if verbose:
+            print(f'\033[33mcsv files of dataset "{dataset}" not found, downloading...\033[0m')
+
+        os.makedirs(dataset_dir, exist_ok=True)
+        dataset_path_body = os.path.join(dataset_dir, f"{dataset_normalized}_allneurons")
+        neuron_csv = dataset_path_body + '_neuron_df.csv'
+        roi_csv = dataset_path_body + '_roi_count_df.csv'
+
+        try:
+            pull_dataset(dataset, save_path=dataset_path_body, omitNoneType=False, client=client)
+        except Exception:
+            _FAILED_DATASET_DOWNLOADS.add(dataset_normalized)
+            raise
+
+        if not os.path.exists(neuron_csv) or not os.path.exists(roi_csv):
+            _FAILED_DATASET_DOWNLOADS.add(dataset_normalized)
+            raise FileNotFoundError(
+                f"pull_dataset('{dataset}') completed without creating the expected files: "
+                f"{neuron_csv} and {roi_csv}"
+            )
+
+        _FAILED_DATASET_DOWNLOADS.discard(dataset_normalized)
+        clear_neuron_cache(dataset_normalized)
+        return dataset_normalized, dataset_path_body
+
+
 # ============================================================================
 # Neuron Query Helper Functions
 # ============================================================================
@@ -200,14 +271,8 @@ def _get_neuron_df(dataset: str = 'male-cns:v0.9', verbose: bool = False) -> pd.
         raise FileNotFoundError(f"Dataset '{dataset}' not found locally")
     
     # Standard neuprint datasets
-    project_root = os.path.dirname(os.path.dirname(__file__))
-    dataset_dir = os.path.join(project_root, "datasets", dataset_normalized)
-    
-    if os.path.exists(dataset_dir):
-        dataset_path_body = os.path.join(dataset_dir, f"{dataset_normalized}_allneurons")
-    else:
-        dataset_path_body = os.path.join(project_root, "datasets", f"{dataset_normalized}_allneurons")
-    
+    _, _, dataset_path_body = _get_dataset_path_body(dataset)
+
     neuron_csv = dataset_path_body + '_neuron_df.csv'
     if not os.path.exists(neuron_csv):
         raise FileNotFoundError(
@@ -1216,31 +1281,11 @@ def getNeurons(requiredNeurons, dataset='hemibrain:v1.2.1', custom_group_names=N
     if type(requiredNeurons) != list:
         requiredNeurons = [requiredNeurons]
     
-    # Go up from src/ to project root, then into datasets/
-    dataset_normalized = dataset.replace(':','_').replace('.','_')
-    project_root = os.path.dirname(os.path.dirname(__file__))
-    
-    # Check if dataset is in a subdirectory (new structure)
-    dataset_dir = os.path.join(project_root, "datasets", dataset_normalized)
-    if os.path.exists(dataset_dir):
-        dataset_path_body = os.path.join(dataset_dir, f"{dataset_normalized}_allneurons")
-    else:
-        # Fallback to old structure (flat in datasets/)
-        dataset_path_body = os.path.join(project_root, "datasets", f"{dataset_normalized}_allneurons")
-
-    if not os.path.exists(dataset_path_body + '_neuron_df.csv') or not os.path.exists(dataset_path_body + '_roi_count_df.csv'):
-        print(f'\033[33mcsv files of dataset "{dataset}" not found, downloading...\033[0m')
-        # If using new structure, ensure directory exists before downloading
-        if os.path.exists(dataset_dir):
-             pull_dataset(dataset, save_path=dataset_path_body, omitNoneType=False, client=client)
-        else:
-             # If directory doesn't exist, pull_dataset might create files in root or fail if it expects dir
-             # Let's assume pull_dataset handles path creation or we should create it
-             os.makedirs(dataset_dir, exist_ok=True)
-             dataset_path_body = os.path.join(dataset_dir, f"{dataset_normalized}_allneurons")
-             pull_dataset(dataset, save_path=dataset_path_body, omitNoneType=False, client=client)
-        # After download, clear any stale cache for this dataset
-        clear_neuron_cache(dataset_normalized)
+    dataset_normalized, dataset_path_body = _ensure_local_dataset_files(
+        dataset,
+        client=client,
+        verbose=verbose,
+    )
 
     # Use in-memory cache for neuron DataFrames (avoids repeated CSV reads)
     ndf_alltypes, rdf_alltypes = _get_cached_neuron_df(dataset_normalized, dataset_path_body)

@@ -7381,6 +7381,8 @@ class NeuronBridgeFinder:
                     output_dir=output_path,
                     neuron_layers=neuron_layers,
                     custom_layer_names=layer_names,
+                    server=self.neuprint_server,
+                    token=self.neuprint_token,
                     saveas=custom_saveas,
                     include_timestamp=False,  # No timestamp for cleaner folder names
                     skip_synapse=True,
