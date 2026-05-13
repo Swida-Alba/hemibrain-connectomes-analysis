@@ -1742,6 +1742,13 @@ class VisualizeSkeleton:
     Default: True (all 6 views)
     '''
 
+    export_svg: bool = True
+    '''
+    Whether to export SVG files along with PNGs.
+    If True, exports SVG for each view specified in export_views.
+    Default: False
+    '''
+
     export_scale: int = 3
     '''
     Scale factor for PNG export resolution (1-4 recommended).
@@ -10444,9 +10451,48 @@ class VisualizeSkeleton:
                         
                         if exported_views:
                             self._vprint(f'   ✓ Exported {len(exported_views)} view PNGs to exported_views/ ({", ".join(exported_views)})')
+                        
+                        # Export SVG if requested
+                        if getattr(self, 'export_svg', False):
+                            try:
+                                self._vprint('   Exporting static SVGs (multiple views)...')
+                                svg_exported_views = []
+                                
+                                for view_name in views_to_export:
+                                    if view_name not in view_cameras:
+                                        continue
+                                        
+                                    camera = view_cameras[view_name]
+                                    svg_path = os.path.join(views_folder, f"{self.saveas}_{view_name}.svg")
+                                    export_fig.update_layout(scene_camera=camera)
+                                    
+                                    success, msg, _ = self._export_png_with_timeout(
+                                        export_fig, svg_path, 
+                                        width=1200, height=900, 
+                                        scale=1,  # Scale doesn't matter for SVG
+                                        timeout=300,
+                                        auto_crop=False  # Cannot auto-crop SVG
+                                    )
+                                    
+                                    if success:
+                                        self._vprint(f'      {view_name} (SVG): {msg}', level='full')
+                                        svg_exported_views.append(view_name)
+                                        
+                                        # Save front view path for copying to root
+                                        if view_name == 'front':
+                                            root_svg_path = os.path.join(self.save_folder, f"{self.saveas}.svg")
+                                            shutil.copy2(svg_path, root_svg_path)
+                                            self._vprint(f'   ✓ Copied front view SVG to root: {self.saveas}.svg')
+                                    else:
+                                        self._vprint(f'      ⚠️  {view_name} SVG export failed: {msg}')
+                                
+                                if svg_exported_views:
+                                    self._vprint(f'   ✓ Exported {len(svg_exported_views)} view SVGs to exported_views/ ({", ".join(svg_exported_views)})')
+                            except Exception as e:
+                                self._vprint(f'\\n   ⚠️  SVG export failed: {e}. Continuing...')
                 
                 except Exception as e:
-                    self._vprint(f'\\n   ⚠️  PNG export failed: {e}. Continuing without PNG...')
+                    self._vprint(f'\\n   ⚠️  PNG/SVG export failed: {e}. Continuing without static images...')
             
         elif self.backend == 'k3d':
             self.fig_path = os.path.join(self.save_folder,self.saveas)
