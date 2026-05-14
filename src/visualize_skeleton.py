@@ -1915,6 +1915,18 @@ class VisualizeSkeleton:
     >>> neuron_colors = 'rgba(255, 0, 0, 0.5)'  # Single RGBA color for all
     '''
 
+    color_mode: str = 'per_layer'
+    '''
+    Controls how `neuron_colors` are assigned to neurons.
+
+    Options:
+    - 'per_layer' (default): One color per layer. All neurons in the same layer share a color.
+    - 'per_neuron': One color per neuron across the full selection. Colors are assigned
+      in layer order, then neuron order within each layer.
+
+    This is independent of `legend_mode`, which still controls how legend entries are grouped.
+    '''
+
     neuron_alpha: float = 0.2
     '''Alpha (transparency) for neurons. 0.0 = transparent, 1.0 = opaque.
     
@@ -2553,7 +2565,7 @@ class VisualizeSkeleton:
                 ),
                 # Controls hint at bottom
                 dict(
-                    text="🖱️ Drag: Rotate | Scroll: Zoom | Shift+Drag: Pan",
+                    text="🖱️ Drag: Rotate | Scroll: Zoom | Ctrl+Drag: Pan",
                     x=0.5, y=0.01,
                     xref='paper', yref='paper',
                     xanchor='center', yanchor='bottom',
@@ -3940,6 +3952,9 @@ class VisualizeSkeleton:
             
         if not isinstance(self.legend_mode, str):
             errors.append(f"legend_mode must be a string, got {type(self.legend_mode).__name__}")
+
+        if not isinstance(self.color_mode, str):
+            errors.append(f"color_mode must be a string, got {type(self.color_mode).__name__}")
             
         if not isinstance(self.expand_colors, str):
             errors.append(f"expand_colors must be a string, got {type(self.expand_colors).__name__}")
@@ -4263,6 +4278,9 @@ class VisualizeSkeleton:
         # Validate legend_mode
         if self.legend_mode not in ['single', 'type', 'layer']:
             raise ValueError('legend_mode must be "single", "type", or "layer"')
+
+        if self.color_mode not in ['per_layer', 'per_neuron']:
+            raise ValueError('color_mode must be "per_layer" or "per_neuron"')
         
         # Validate expand_colors
         if self.expand_colors not in ['interpolation', 'darken', 'cycle']:
@@ -4369,6 +4387,7 @@ class VisualizeSkeleton:
             self.neuron_colors = self._standardize_color_input(self.neuron_colors, 'neuron_colors', default_alpha=1.0)
         else:
             self.neuron_colors = self._standardize_color_input(self.neuron_colors, 'neuron_colors', self.neuron_alpha)
+        self._base_neuron_colors = tuple(self.neuron_colors)
         
         # Standardize synapse_colors
         # Check if synapse_colors have explicit alpha values that override synapse_alpha
@@ -4418,62 +4437,21 @@ class VisualizeSkeleton:
         
         # Ensure enough colors for all layers by expanding if needed
         n_layers = len(self.neuron_layers)
-        n_colors = len(self.neuron_colors)
-        if n_layers <= n_colors: 
-            self.neuron_colors = self.neuron_colors[:n_layers]
-        else:
-            if self.expand_colors == 'interpolation':
-                # Create interpolated colors from base palette
-                extended_colors = self._interpolate_colors(self.neuron_colors, n_layers)
-                self._vprint(f'\033[33m⚠️  Warning: {n_layers} layers but only {n_colors} colors. Generated {n_layers} colors via interpolation.\033[0m')
-            elif self.expand_colors == 'darken':
-                # Recycle colors with progressive darkening (100% to 70% brightness)
-                n_cycles = (n_layers - 1) // n_colors
-                extended_colors = []
-                for i in range(n_layers):
-                    cycle_num = i // n_colors
-                    color_idx = i % n_colors
-                    base_color = self.neuron_colors[color_idx]
-                    # brightness goes from 100% to 70% over cycles
-                    if n_cycles > 0:
-                        brightness = 1.0 - (0.3 * cycle_num / n_cycles)
-                    else:
-                        brightness = 1.0
-                    darkened = self._darken_color(base_color, brightness)
-                    extended_colors.append(darkened)
-                self._vprint(f'\033[33m⚠️  Warning: {n_layers} layers but only {n_colors} colors. Recycling with darkening (100%→70%).\033[0m')
-            else:  # 'cycle' mode
-                # Simple cycling - just repeat the colors
-                extended_colors = [self.neuron_colors[i % n_colors] for i in range(n_layers)]
-                self._vprint(f'\033[33m⚠️  Warning: {n_layers} layers but only {n_colors} colors. Cycling colors (repeating pattern).\033[0m')
-            
-            self.neuron_colors = tuple(extended_colors)
-            self._vprint(f'\033[33m   💡 Tip: Use neuron_colors parameter with custom palette to specify more colors.\033[0m')
+        self.neuron_colors = self._expand_color_sequence(
+            self._base_neuron_colors,
+            n_layers,
+            target_label='layers',
+            tip_parameter='neuron_colors',
+            warn=self.color_mode == 'per_layer',
+        )
         
         # Same for synapse colors (one fewer than neuron layers for connections between layers)
-        n_synapse_colors = len(self.synapse_colors)
         n_synapse_needed = max(0, n_layers - 1)
-        if n_synapse_needed <= n_synapse_colors:
-            self.synapse_colors = self.synapse_colors[:n_synapse_needed]
-        else:
-            if self.expand_colors == 'interpolation':
-                extended_synapse = self._interpolate_colors(self.synapse_colors, n_synapse_needed)
-            elif self.expand_colors == 'darken':
-                n_syn_cycles = (n_synapse_needed - 1) // n_synapse_colors
-                extended_synapse = []
-                for i in range(n_synapse_needed):
-                    cycle_num = i // n_synapse_colors
-                    color_idx = i % n_synapse_colors
-                    base_color = self.synapse_colors[color_idx]
-                    if n_syn_cycles > 0:
-                        brightness = 1.0 - (0.3 * cycle_num / n_syn_cycles)
-                    else:
-                        brightness = 1.0
-                    darkened = self._darken_color(base_color, brightness)
-                    extended_synapse.append(darkened)
-            else:  # 'cycle' mode
-                extended_synapse = [self.synapse_colors[i % n_synapse_colors] for i in range(n_synapse_needed)]
-            self.synapse_colors = tuple(extended_synapse)
+        self.synapse_colors = self._expand_color_sequence(
+            tuple(self.synapse_colors),
+            n_synapse_needed,
+            target_label='synapse layers',
+        )
         
         if self.skeleton_mode == 'line':
             self.show_skeleton_radius = False
@@ -4556,6 +4534,10 @@ class VisualizeSkeleton:
                     merged_names.append(f"layer_{i}")
             
             self.layer_names = merged_names
+
+        self._per_neuron_colors = {}
+        if self.color_mode == 'per_neuron':
+            self._per_neuron_colors = self._build_per_neuron_color_map()
             
         if self.saveas is None:
             # Generate saveas from layer names
@@ -6755,21 +6737,54 @@ class VisualizeSkeleton:
                 layer_neuron_alpha = self.neuron_alpha
             
             if self.backend == 'plotly':
-                # Convert rgba color to hex for navis compatibility
-                layer_color_hex = self._rgba_to_hex(self.neuron_colors[i])
-                
-                with self._suppress_output():
-                    fig_layer = navis.plot3d(
-                        neuron_vols,
-                        backend='plotly',
-                        color=layer_color_hex,
-                        alpha=layer_neuron_alpha,
-                        soma=show_soma_here,
-                        # fig=self.fig_3d,
-                        radius=self.show_skeleton_radius,
-                        connectors=self.show_connectors if not isinstance(neuron_vols, navis.Volume) else False,
-                    )
-                fig_traces = fig_layer.data
+                trace_entries = []
+                if self.color_mode == 'per_neuron' and not isinstance(neuron_vols, navis.Volume):
+                    for unit_index, neuron in enumerate(neuron_vols):
+                        neuron_id = str(getattr(neuron, 'id', f'neuron_{unit_index}'))
+                        neuron_color = self._resolve_neuron_color(neuron_id, i)
+                        neuron_alpha = self._extract_alpha_from_color(neuron_color)
+                        neuron_color_hex = self._rgba_to_hex(neuron_color)
+
+                        with self._suppress_output():
+                            fig_layer = navis.plot3d(
+                                neuron,
+                                backend='plotly',
+                                color=neuron_color_hex,
+                                alpha=neuron_alpha,
+                                soma=show_soma_here,
+                                radius=self.show_skeleton_radius,
+                                connectors=self.show_connectors,
+                            )
+
+                        for trace in fig_layer.data:
+                            trace_entries.append((trace, neuron_id, unit_index, neuron_color))
+                else:
+                    # Convert rgba color to hex for navis compatibility
+                    layer_color_hex = self._rgba_to_hex(self.neuron_colors[i])
+
+                    with self._suppress_output():
+                        fig_layer = navis.plot3d(
+                            neuron_vols,
+                            backend='plotly',
+                            color=layer_color_hex,
+                            alpha=layer_neuron_alpha,
+                            soma=show_soma_here,
+                            # fig=self.fig_3d,
+                            radius=self.show_skeleton_radius,
+                            connectors=self.show_connectors if not isinstance(neuron_vols, navis.Volume) else False,
+                        )
+                    fig_traces = fig_layer.data
+                    for j, trace in enumerate(fig_traces):
+                        existing_name = getattr(trace, 'name', None)
+                        if existing_name:
+                            neuron_id = str(existing_name)
+                        elif j < len(neuron_vols):
+                            neuron_id = str(neuron_vols[j].id)
+                        else:
+                            neuron_id = f"neuron_{j}"
+
+                        neuron_color = self._resolve_neuron_color(neuron_id, i)
+                        trace_entries.append((trace, neuron_id, j, neuron_color))
 
                 # Build a mapping of neuron ID to type for 'type' legend mode
                 neuron_type_map = {}
@@ -6796,19 +6811,14 @@ class VisualizeSkeleton:
                 # Track legend info for fixing opacity later
                 legend_color_map = {}  # legend_group -> (color, should_show)
 
-                for j, trace in enumerate(fig_traces):
+                for trace, neuron_id, source_index, neuron_color in trace_entries:
                     # Enforce opacity for lines if not already set or if we want to override
                     if self.skeleton_mode == 'line':
-                        trace.opacity = layer_neuron_alpha  # Use layer-specific alpha
+                        trace.opacity = self._extract_alpha_from_color(neuron_color)
 
-                    # Get neuron_id from existing trace name (navis sets this to neuron ID)
-                    existing_name = getattr(trace, 'name', None)
-                    if existing_name:
-                        neuron_id = str(existing_name)
-                    elif j < len(neuron_vols):
-                        neuron_id = str(neuron_vols[j].id)
-                    else:
-                        neuron_id = f"neuron_{j}"
+                    neuron_color = self._resolve_neuron_color(neuron_id, i)
+                    if neuron_color != self.neuron_colors[i]:
+                        self._apply_plotly_trace_color(trace, neuron_color)
 
                     if self.legend_mode == 'layer':
                         # Group all neurons in layer under one legend entry
@@ -6829,18 +6839,18 @@ class VisualizeSkeleton:
                         neuron_type = neuron_type_map.get(neuron_id, None)
                         
                         # Fallback: try different ID strategies if type not found
-                        if not neuron_type and j < len(neuron_vols):
+                        if not neuron_type and source_index < len(neuron_vols):
                             # Try using the ID from the source neuron object
                             try:
-                                vid = str(neuron_vols[j].id)
+                                vid = str(neuron_vols[source_index].id)
                                 neuron_type = neuron_type_map.get(vid, None)
                             except:
                                 pass
                             
                             # If still not found, try using the name from source neuron
-                            if not neuron_type and hasattr(neuron_vols[j], 'name'):
+                            if not neuron_type and hasattr(neuron_vols[source_index], 'name'):
                                 try:
-                                    vname = str(neuron_vols[j].name)
+                                    vname = str(neuron_vols[source_index].name)
                                     neuron_type = neuron_type_map.get(vname, None)
                                 except:
                                     pass
@@ -6850,21 +6860,6 @@ class VisualizeSkeleton:
                         else:
                             # Fallback to layer name if type unknown
                             legend_group = self.layer_names[i]
-                        
-                        # Check for per-neuron color override from CSV
-                        neuron_color = self.neuron_colors[i]  # Default to layer color
-                        if hasattr(self, '_neuron_color_overrides') and self._neuron_color_overrides:
-                            override = self._neuron_color_overrides.get(neuron_id) or self._neuron_color_overrides.get(int(neuron_id) if neuron_id.isdigit() else neuron_id)
-                            if override:
-                                neuron_color = override
-                                # Re-color the trace
-                                override_hex = self._rgba_to_hex(neuron_color)
-                                override_alpha = self._extract_alpha_from_color(neuron_color)
-                                if hasattr(trace, 'line') and trace.line is not None:
-                                    trace.line.color = override_hex
-                                if hasattr(trace, 'marker') and trace.marker is not None:
-                                    trace.marker.color = override_hex
-                                trace.opacity = override_alpha
                         
                         trace.name = legend_group
                         trace.legendgroup = legend_group  # Same type shares legend group
@@ -6880,21 +6875,6 @@ class VisualizeSkeleton:
                     elif self.legend_mode == 'single':
                         # Each neuron gets its own legend entry with layer color
                         new_trace_name = f"{neuron_id}_{self.layer_names[i]}"
-                        
-                        # Check for per-neuron color override from CSV
-                        neuron_color = self.neuron_colors[i]  # Default to layer color
-                        if hasattr(self, '_neuron_color_overrides') and self._neuron_color_overrides:
-                            override = self._neuron_color_overrides.get(neuron_id) or self._neuron_color_overrides.get(int(neuron_id) if neuron_id.isdigit() else neuron_id)
-                            if override:
-                                neuron_color = override
-                                # Re-color the trace
-                                override_hex = self._rgba_to_hex(neuron_color)
-                                override_alpha = self._extract_alpha_from_color(neuron_color)
-                                if hasattr(trace, 'line') and trace.line is not None:
-                                    trace.line.color = override_hex
-                                if hasattr(trace, 'marker') and trace.marker is not None:
-                                    trace.marker.color = override_hex
-                                trace.opacity = override_alpha
                         
                         trace.name = new_trace_name
                         trace.legendgroup = new_trace_name
@@ -6934,26 +6914,56 @@ class VisualizeSkeleton:
             
             elif self.backend == 'k3d':
                 try:
-                    # navis.plot3d with k3d backend returns a k3d.Plot object
-                    # Convert rgba color to hex for navis compatibility
-                    layer_color_hex = self._rgba_to_hex(self.neuron_colors[i])
-                    
-                    with self._suppress_output():
-                        temp_plot = navis.plot3d(
-                            neuron_vols,
-                            backend='k3d',
-                            color=layer_color_hex,
-                            alpha=layer_neuron_alpha,  # Use layer-specific alpha (from color or neuron_alpha)
-                            soma=show_soma_here,
-                            radius=self.show_skeleton_radius,
-                            connectors=self.show_connectors if not isinstance(neuron_vols, navis.Volume) else False,
-                            inline=False
-                        )
-                    
-                    for obj in temp_plot.objects:
-                        if hasattr(obj, 'name'):
-                            obj.name = self.layer_names[i]
-                        self.fig_3d += obj
+                    if self.color_mode == 'per_neuron' and not isinstance(neuron_vols, navis.Volume):
+                        for unit_index, neuron in enumerate(neuron_vols):
+                            neuron_id = str(getattr(neuron, 'id', f'neuron_{unit_index}'))
+                            neuron_color = self._resolve_neuron_color(neuron_id, i)
+                            neuron_alpha = self._extract_alpha_from_color(neuron_color)
+                            neuron_color_hex = self._rgba_to_hex(neuron_color)
+
+                            with self._suppress_output():
+                                temp_plot = navis.plot3d(
+                                    neuron,
+                                    backend='k3d',
+                                    color=neuron_color_hex,
+                                    alpha=neuron_alpha,
+                                    soma=show_soma_here,
+                                    radius=self.show_skeleton_radius,
+                                    connectors=self.show_connectors,
+                                    inline=False
+                                )
+
+                            for obj in temp_plot.objects:
+                                self._apply_k3d_object_color(obj, neuron_color)
+                                if hasattr(obj, 'name'):
+                                    obj.name = self.layer_names[i]
+                                self.fig_3d += obj
+                    else:
+                        # navis.plot3d with k3d backend returns a k3d.Plot object
+                        # Convert rgba color to hex for navis compatibility
+                        layer_color_hex = self._rgba_to_hex(self.neuron_colors[i])
+                        
+                        with self._suppress_output():
+                            temp_plot = navis.plot3d(
+                                neuron_vols,
+                                backend='k3d',
+                                color=layer_color_hex,
+                                alpha=layer_neuron_alpha,  # Use layer-specific alpha (from color or neuron_alpha)
+                                soma=show_soma_here,
+                                radius=self.show_skeleton_radius,
+                                connectors=self.show_connectors if not isinstance(neuron_vols, navis.Volume) else False,
+                                inline=False
+                            )
+                        
+                        for j, obj in enumerate(temp_plot.objects):
+                            neuron_id = getattr(obj, 'name', None)
+                            if not neuron_id and j < len(neuron_vols):
+                                neuron_id = str(neuron_vols[j].id)
+                            neuron_color = self._resolve_neuron_color(neuron_id, i)
+                            self._apply_k3d_object_color(obj, neuron_color)
+                            if hasattr(obj, 'name'):
+                                obj.name = self.layer_names[i]
+                            self.fig_3d += obj
                 except Exception as e:
                     self._vprint(f'⚠️  k3d plotting failed: {e}', level='full')
 
@@ -8145,6 +8155,137 @@ class VisualizeSkeleton:
             result.append(f'rgba({r}, {g}, {b}, {avg_alpha})')
         
         return result
+
+    def _expand_color_sequence(self, colors, n_needed, target_label='items', tip_parameter=None, warn=True):
+        """Expand a color sequence to the requested size using the configured policy."""
+        colors = tuple(colors)
+        n_colors = len(colors)
+
+        if n_needed <= 0:
+            return tuple()
+        if n_needed <= n_colors:
+            return tuple(colors[:n_needed])
+
+        if self.expand_colors == 'interpolation':
+            expanded = self._interpolate_colors(colors, n_needed)
+            warning = f'\033[33m⚠️  Warning: {n_needed} {target_label} but only {n_colors} colors. Generated {n_needed} colors via interpolation.\033[0m'
+        elif self.expand_colors == 'darken':
+            n_cycles = (n_needed - 1) // n_colors
+            expanded = []
+            for i in range(n_needed):
+                cycle_num = i // n_colors
+                color_idx = i % n_colors
+                base_color = colors[color_idx]
+                brightness = 1.0 - (0.3 * cycle_num / n_cycles) if n_cycles > 0 else 1.0
+                expanded.append(self._darken_color(base_color, brightness))
+            warning = f'\033[33m⚠️  Warning: {n_needed} {target_label} but only {n_colors} colors. Recycling with darkening (100%→70%).\033[0m'
+        else:
+            expanded = [colors[i % n_colors] for i in range(n_needed)]
+            warning = f'\033[33m⚠️  Warning: {n_needed} {target_label} but only {n_colors} colors. Cycling colors (repeating pattern).\033[0m'
+
+        if warn:
+            self._vprint(warning)
+            if tip_parameter:
+                self._vprint(f'\033[33m   💡 Tip: Use {tip_parameter} parameter with custom palette to specify more colors.\033[0m')
+
+        return tuple(expanded)
+
+    def _normalize_neuron_lookup_keys(self, value):
+        """Normalize neuron identifiers for robust lookup by bodyId or name-like fields."""
+        if value is None:
+            return []
+
+        if isinstance(value, (int, np.integer)):
+            int_value = int(value)
+            return [int_value, str(int_value)]
+
+        try:
+            if pd.isna(value):
+                return []
+        except TypeError:
+            pass
+
+        value_str = str(value).strip()
+        if not value_str or value_str.lower() == 'nan':
+            return []
+
+        keys = [value_str]
+        if value_str.isdigit():
+            keys.insert(0, int(value_str))
+        return keys
+
+    def _build_per_neuron_color_map(self):
+        """Build a lookup of neuron identifiers to per-neuron colors."""
+        total_neurons = sum(len(ndf) for ndf in self.neuron_dfs if ndf is not None)
+        if total_neurons == 0:
+            return {}
+
+        neuron_palette = self._expand_color_sequence(
+            self._base_neuron_colors,
+            total_neurons,
+            target_label='neurons',
+            tip_parameter='neuron_colors',
+        )
+
+        neuron_color_map = {}
+        color_index = 0
+        for ndf in self.neuron_dfs:
+            if ndf is None or ndf.empty:
+                continue
+            for _, row in ndf.iterrows():
+                neuron_color = neuron_palette[color_index]
+                for column in ['bodyId', 'name', 'instance', 'roi']:
+                    if column in row.index:
+                        for key in self._normalize_neuron_lookup_keys(row[column]):
+                            neuron_color_map[key] = neuron_color
+                color_index += 1
+
+        return neuron_color_map
+
+    def _resolve_neuron_color(self, neuron_id, layer_index):
+        """Resolve the display color for a neuron trace, including overrides."""
+        neuron_color = self.neuron_colors[layer_index]
+        lookup_keys = self._normalize_neuron_lookup_keys(neuron_id)
+
+        if self.color_mode == 'per_neuron' and hasattr(self, '_per_neuron_colors'):
+            for key in lookup_keys:
+                if key in self._per_neuron_colors:
+                    neuron_color = self._per_neuron_colors[key]
+                    break
+
+        if hasattr(self, '_neuron_color_overrides') and self._neuron_color_overrides:
+            for key in lookup_keys:
+                if key in self._neuron_color_overrides:
+                    return self._neuron_color_overrides[key]
+
+        return neuron_color
+
+    def _apply_plotly_trace_color(self, trace, neuron_color):
+        """Apply a resolved neuron color to a Plotly trace."""
+        color_hex = self._rgba_to_hex(neuron_color)
+        color_alpha = self._extract_alpha_from_color(neuron_color)
+
+        if hasattr(trace, 'color'):
+            try:
+                trace.color = color_hex
+            except Exception:
+                pass
+        if hasattr(trace, 'line') and trace.line is not None:
+            trace.line.color = color_hex
+        if hasattr(trace, 'marker') and trace.marker is not None:
+            trace.marker.color = color_hex
+        trace.opacity = color_alpha
+
+    def _apply_k3d_object_color(self, obj, neuron_color):
+        """Apply a resolved neuron color to a k3d object when supported."""
+        try:
+            r, g, b, a = extract_rgba_tuple(neuron_color)
+            if hasattr(obj, 'color'):
+                obj.color = (int(r) << 16) + (int(g) << 8) + int(b)
+            if hasattr(obj, 'opacity'):
+                obj.opacity = a
+        except Exception:
+            pass
 
     def _flatten_nested_roi_groups(self, roi_list, color_input):
         """Flatten nested ROI lists while assigning same color to grouped ROIs.
