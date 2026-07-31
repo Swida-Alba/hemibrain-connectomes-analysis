@@ -1742,13 +1742,6 @@ class VisualizeSkeleton:
     Default: True (all 6 views)
     '''
 
-    export_svg: bool = True
-    '''
-    Whether to export SVG files along with PNGs.
-    If True, exports SVG for each view specified in export_views.
-    Default: False
-    '''
-
     export_scale: int = 3
     '''
     Scale factor for PNG export resolution (1-4 recommended).
@@ -2841,63 +2834,53 @@ class VisualizeSkeleton:
         try:
             if has_alarm_support:
                 signal.alarm(actual_timeout)
-            
-            # Direct kaleido export
-            fig.write_image(output_path, width=width, height=height, scale=scale, validate=False)
-            
-            if has_alarm_support:
-                signal.alarm(0)  # Cancel timeout
 
-            # Verify file existence and size
-            if os.path.exists(output_path):
-                size_kb = os.path.getsize(output_path) / 1024
-                if size_kb < 10:
-                    return (False, f"Export produced blank image ({size_kb:.1f}KB)", scale)
-                
-                # Apply auto-crop if requested
-                if auto_crop:
-                    try:
-                        from PIL import Image
-                        img = Image.open(output_path)
-                        bounds = self._detect_content_bounds(img, (255, 255, 255))
-                        if bounds:
-                            row_min, row_max, col_min, col_max = bounds
-                            # Add margin
-                            row_min = max(0, row_min - crop_margin)
-                            row_max = min(img.height - 1, row_max + crop_margin)
-                            col_min = max(0, col_min - crop_margin)
-                            col_max = min(img.width - 1, col_max + crop_margin)
-                            # Crop and save
-                            cropped = img.crop((col_min, row_min, col_max + 1, row_max + 1))
-                            cropped.save(output_path, 'PNG')
-                            size_kb = os.path.getsize(output_path) / 1024
-                    except Exception as crop_e:
-                        # If cropping fails, keep the original
-                        pass
-                
-                return (True, f"{size_kb:.1f}KB", scale)
-            else:
+            fig.write_image(output_path, width=width, height=height, scale=scale, validate=False)
+
+            if has_alarm_support:
+                signal.alarm(0)
+
+            if not os.path.exists(output_path):
                 return (False, "Export failed - no file created", scale)
-        
+
+            size_kb = os.path.getsize(output_path) / 1024
+            if size_kb < 10:
+                return (False, f"Export produced blank image ({size_kb:.1f}KB)", scale)
+
+            if auto_crop:
+                try:
+                    from PIL import Image
+
+                    img = Image.open(output_path)
+                    bounds = self._detect_content_bounds(img, (255, 255, 255))
+                    if bounds:
+                        row_min, row_max, col_min, col_max = bounds
+                        row_min = max(0, row_min - crop_margin)
+                        row_max = min(img.height - 1, row_max + crop_margin)
+                        col_min = max(0, col_min - crop_margin)
+                        col_max = min(img.width - 1, col_max + crop_margin)
+                        cropped = img.crop((col_min, row_min, col_max + 1, row_max + 1))
+                        cropped.save(output_path, 'PNG')
+                        size_kb = os.path.getsize(output_path) / 1024
+                except Exception:
+                    pass
+
+            return (True, f"{size_kb:.1f}KB", scale)
+
         except PNGExportTimeout:
-            if has_alarm_support:
-                signal.alarm(0)
-            return (False, f"Kaleido export timed out after {actual_timeout}s - figure too complex", scale)
-                
+            return (False, f"Export timed out after {actual_timeout}s", scale)
         except Exception as e:
-            if has_alarm_support:
-                signal.alarm(0)
-            self._vprint(f'      ⚠️  Error in kaleido export: {e}')
-            return (False, f"Kaleido export error: {e}", scale)
-        
+            return (False, str(e), scale)
         finally:
-            # Restore original handler
-            if has_alarm_support and old_handler is not None:
+            if has_alarm_support:
                 try:
                     signal.alarm(0)
-                    signal.signal(signal.SIGALRM, old_handler)
-                except:
+                except Exception:
                     pass
+            try:
+                signal.signal(signal.SIGALRM, old_handler)
+            except Exception:
+                pass
 
     def _export_png_with_webdriver(self, html_path, output_path, width=1200, height=900, scale=3, timeout=120):
         """
@@ -4672,47 +4655,7 @@ class VisualizeSkeleton:
             f.write(f"  Synapse Alpha:    {self.synapse_alpha}\n")
             f.write("\n")
             
-            # Export Settings
-            f.write("[Export Settings]\n")
-            f.write(f"  Export Method:    {self.export_method}\n")
-            f.write(f"  Export Scale:     {self.export_scale}\n")
-            if isinstance(self.export_views, list):
-                export_views_str = ', '.join(self.export_views)
-            elif self.export_views is True:
-                export_views_str = 'all (front, back, top, bottom, left, right)'
-            else:
-                export_views_str = 'disabled'
-            f.write(f"  Export Views:     {export_views_str}\n")
-            f.write(f"  Simplified PNG:   {self.export_simplified_png}\n")
-            f.write("\n")
-            
-            # Mesh Simplification Settings
-            f.write("[Mesh Simplification]\n")
-            f.write(f"  Skeleton Mesh:    {self.skeleton_mesh_simplification}\n")
-            f.write(f"  Soma Mesh:        {self.soma_mesh_simplification}\n")
-            f.write(f"  ROI Mesh:         {self.roi_mesh_simplification}\n")
-            f.write("\n")
-            
-            # Cache Settings
-            f.write("[Cache Settings]\n")
-            f.write(f"  Cache Neurons:    {self.cache_neurons}\n")
-            f.write(f"  Cache Synapses:   {self.cache_synapses}\n")
-            f.write(f"  Force API Fetch:  {self.force_API_fetching}\n")
-            f.write("\n")
-            
-            # FAFB/FlyWire Specific Settings (only show if relevant)
-            if 'FAFB' in self.dataset.upper() or 'flywire' in self.dataset.lower():
-                f.write("[FAFB/FlyWire Settings]\n")
-                f.write(f"  Auto Fix Extrusions:     {self.auto_fix_extrusions}\n")
-                f.write(f"  Template Correction:     {self.FAFB_template_correction}\n")
-                f.write(f"  Soma Region Radius:      {self.soma_region_radius}\n")
-                f.write(f"  Force API Fetching:      {self.force_API_fetching}\n")
-                f.write("\n")
-            
             f.write("=" * 70 + "\n")
-            f.write(f"Generated by VisualizeSkeleton\n")
-            f.write("=" * 70 + "\n")
-        
         if self.backend == 'plotly':
             self.fig_3d = go.Figure()
         elif self.backend == 'k3d':
@@ -6735,6 +6678,20 @@ class VisualizeSkeleton:
                 layer_neuron_alpha = self._extract_alpha_from_color(self.neuron_colors[i])
             else:
                 layer_neuron_alpha = self.neuron_alpha
+
+            if self.skeleton_mode == 'tube' and neuron_vols is not None:
+                neurons_for_export = neuron_vols if isinstance(neuron_vols, (list, navis.NeuronList)) else [neuron_vols]
+                for unit_index, neuron in enumerate(neurons_for_export):
+                    neuron_id = str(getattr(neuron, 'id', f'neuron_{unit_index}'))
+                    neuron_color = self._resolve_neuron_color(neuron_id, i)
+                    neuron_alpha = self._extract_alpha_from_color(neuron_color)
+                    self._append_exportable_mesh(
+                        neuron,
+                        color=neuron_color,
+                        alpha=neuron_alpha,
+                        name=getattr(neuron, 'name', neuron_id),
+                        role='neuron',
+                    )
             
             if self.backend == 'plotly':
                 trace_entries = []
@@ -7539,6 +7496,13 @@ class VisualizeSkeleton:
                 mesh.hovertemplate = '<b>%{fullData.name}</b><extra></extra>'
                 mesh.showlegend = False
                 self.fig_3d.add_trace(mesh)
+                self._append_exportable_mesh(
+                    mesh,
+                    color=self.synapse_colors[i],
+                    alpha=synapse_opacity,
+                    name=f'synapses {i} -> {i+1} ({len(conn_df)})',
+                    role='synapse',
+                )
 
                 # Add dummy scatter trace for legend with opaque color for visibility
                 opaque_synapse_color = self._get_opaque_color(self.synapse_colors[i])
@@ -9980,24 +9944,7 @@ class VisualizeSkeleton:
 
                     # Collect for export
                     try:
-                        tm = None
-                        if hasattr(mesh, 'trimesh'):
-                            tm = mesh.trimesh
-                        elif hasattr(mesh, 'mesh'):
-                            tm = mesh.mesh
-                        elif hasattr(mesh, 'vertices') and hasattr(mesh, 'faces'):
-                            import trimesh
-                            tm = trimesh.Trimesh(vertices=mesh.vertices, faces=mesh.faces)
-                        
-                        if tm:
-                            # Copy and apply color
-                            tm = tm.copy()
-                            rgba = self._to_rgba(color)
-                            tm.visual.face_colors = rgba
-                            self.exportable_meshes.append(tm)
-                        else:
-                            # self._vprint(f' (export skip: no mesh in {type(mesh)})', end='')
-                            pass
+                        self._append_exportable_mesh(mesh, color=color, name=getattr(mesh, 'name', roi), role='roi')
                     except Exception as e:
                         self._vprint(f' (export collection failed: {e})', end='', level='full')
 
@@ -10193,6 +10140,13 @@ class VisualizeSkeleton:
                     for obj in temp_plot.objects:
                         obj.name = mesh_display_name
                         self.fig_3d += obj
+
+                self._append_exportable_mesh(
+                    brain_mesh,
+                    color=self._get_effective_mesh_color('brain'),
+                    name=mesh_display_name,
+                    role='brain',
+                )
                         
                 self._vprint(f'✓ {mesh_display_name} mesh loaded successfully', level='full')
             except Exception as e:
@@ -10219,6 +10173,12 @@ class VisualizeSkeleton:
                             for obj in temp_plot.objects:
                                 obj.name = mesh_display_name
                                 self.fig_3d += obj
+                        self._append_exportable_mesh(
+                            retry_mesh,
+                            color=self._get_effective_mesh_color('brain'),
+                            name=mesh_display_name,
+                            role='brain',
+                        )
                         self._vprint(f'✓ {mesh_display_name} mesh loaded successfully after download', level='full')
                     except Exception as retry_e:
                         self._vprint(f'⚠️  Still failed to load {mesh_display_name} mesh: {retry_e}', level='full')
@@ -10266,6 +10226,13 @@ class VisualizeSkeleton:
                             for obj in temp_plot.objects:
                                 obj.name = vnc_display_name
                                 self.fig_3d += obj
+
+                        self._append_exportable_mesh(
+                            vnc_mesh,
+                            color=self._get_effective_mesh_color('vnc'),
+                            name=vnc_display_name,
+                            role='vnc',
+                        )
                         
                         self._vprint(f'✓ {vnc_display_name} mesh loaded successfully', level='full')
                     except Exception as e:
@@ -10593,45 +10560,6 @@ class VisualizeSkeleton:
                         if exported_views:
                             self._vprint(f'   ✓ Exported {len(exported_views)} view PNGs to exported_views/ ({", ".join(exported_views)})')
                         
-                        # Export SVG if requested
-                        if getattr(self, 'export_svg', False):
-                            try:
-                                self._vprint('   Exporting static SVGs (multiple views)...')
-                                svg_exported_views = []
-                                
-                                for view_name in views_to_export:
-                                    if view_name not in view_cameras:
-                                        continue
-                                        
-                                    camera = view_cameras[view_name]
-                                    svg_path = os.path.join(views_folder, f"{self.saveas}_{view_name}.svg")
-                                    export_fig.update_layout(scene_camera=camera)
-                                    
-                                    success, msg, _ = self._export_png_with_timeout(
-                                        export_fig, svg_path, 
-                                        width=1200, height=900, 
-                                        scale=1,  # Scale doesn't matter for SVG
-                                        timeout=300,
-                                        auto_crop=False  # Cannot auto-crop SVG
-                                    )
-                                    
-                                    if success:
-                                        self._vprint(f'      {view_name} (SVG): {msg}', level='full')
-                                        svg_exported_views.append(view_name)
-                                        
-                                        # Save front view path for copying to root
-                                        if view_name == 'front':
-                                            root_svg_path = os.path.join(self.save_folder, f"{self.saveas}.svg")
-                                            shutil.copy2(svg_path, root_svg_path)
-                                            self._vprint(f'   ✓ Copied front view SVG to root: {self.saveas}.svg')
-                                    else:
-                                        self._vprint(f'      ⚠️  {view_name} SVG export failed: {msg}')
-                                
-                                if svg_exported_views:
-                                    self._vprint(f'   ✓ Exported {len(svg_exported_views)} view SVGs to exported_views/ ({", ".join(svg_exported_views)})')
-                            except Exception as e:
-                                self._vprint(f'\\n   ⚠️  SVG export failed: {e}. Continuing...')
-                
                 except Exception as e:
                     self._vprint(f'\\n   ⚠️  PNG/SVG export failed: {e}. Continuing without static images...')
             
@@ -11764,21 +11692,98 @@ class VisualizeSkeleton:
 
     def _to_rgba(self, color, alpha=None):
         # Convert color to uint8 RGBA for trimesh.
-        import matplotlib.colors as mcolors
         import numpy as np
-        
-        # Convert to RGBA float (0-1)
+
         try:
-            # If alpha is provided, override the alpha channel of the color
+            r, g, b, a = extract_rgba_tuple(color, default_alpha=1.0)
             if alpha is not None:
-                c = mcolors.to_rgba(color, alpha=alpha)
-            else:
-                c = mcolors.to_rgba(color)
+                a = float(alpha)
+            c = np.array([r, g, b, max(0.0, min(1.0, a))], dtype=float)
         except:
-            c = (0.5, 0.5, 0.5, 1.0) # Default gray
-            
-        # Convert to uint8 (0-255)
-        return (np.array(c) * 255).astype(np.uint8)
+            c = np.array([128.0, 128.0, 128.0, 255.0], dtype=float)
+            return c.astype(np.uint8)
+
+        return np.array([
+            int(np.clip(round(c[0]), 0, 255)),
+            int(np.clip(round(c[1]), 0, 255)),
+            int(np.clip(round(c[2]), 0, 255)),
+            int(np.clip(round(c[3] * 255), 0, 255)),
+        ], dtype=np.uint8)
+
+    def _extract_trimesh(self, mesh):
+        """Extract a trimesh.Trimesh from navis/trimesh-like objects."""
+        import trimesh
+
+        if mesh is None:
+            return None
+        if isinstance(mesh, trimesh.Trimesh):
+            return mesh
+        if isinstance(mesh, go.Mesh3d):
+            vertices = np.column_stack([np.asarray(mesh.x), np.asarray(mesh.y), np.asarray(mesh.z)])
+            faces = np.column_stack([np.asarray(mesh.i), np.asarray(mesh.j), np.asarray(mesh.k)]).astype(np.int64)
+            if len(vertices) == 0 or len(faces) == 0:
+                return None
+            return trimesh.Trimesh(vertices=vertices, faces=faces, process=False)
+        if hasattr(mesh, 'trimesh'):
+            return mesh.trimesh
+        if hasattr(mesh, 'mesh') and isinstance(mesh.mesh, trimesh.Trimesh):
+            return mesh.mesh
+        if hasattr(mesh, 'vertices') and hasattr(mesh, 'faces'):
+            return trimesh.Trimesh(vertices=mesh.vertices, faces=mesh.faces, process=False)
+        return None
+
+    def _append_exportable_mesh(self, mesh, color=None, alpha=None, name=None, role='mesh'):
+        """Append a colored mesh copy to the cached export scene."""
+        try:
+            tm = self._extract_trimesh(mesh)
+            if tm is None:
+                return False
+
+            tm = tm.copy()
+            rgba = self._to_rgba(color if color is not None else 'gray', alpha=alpha)
+            tm.visual.face_colors = rgba
+            tm.metadata['export_rgba'] = rgba.tolist()
+            if name:
+                tm.metadata['name'] = name
+            tm.metadata['export_role'] = role
+            self.exportable_meshes.append(tm)
+            return True
+        except Exception:
+            return False
+
+    def _get_mesh_export_role(self, mesh):
+        """Return the cached export role for a mesh."""
+        return getattr(mesh, 'metadata', {}).get('export_role', 'mesh')
+
+    def _get_glb_export_rgba(self, mesh):
+        """Return the exact cached RGBA color for GLB export."""
+        metadata_rgba = getattr(mesh, 'metadata', {}).get('export_rgba')
+        if metadata_rgba is not None:
+            return np.asarray(metadata_rgba, dtype=np.uint8)
+
+        face_colors = np.asarray(mesh.visual.face_colors)
+        if face_colors.ndim == 2 and len(face_colors) > 0:
+            return face_colors[0].astype(np.uint8).copy()
+
+        return np.array([128, 128, 128, 255], dtype=np.uint8)
+
+    def _prepare_glb_mesh(self, mesh, geometry_name):
+        """Convert a cached mesh into a GLB-friendly mesh with explicit PBR material."""
+        import trimesh
+
+        tm = mesh.copy()
+        rgba = self._get_glb_export_rgba(tm)
+        material = trimesh.visual.material.PBRMaterial(
+            name=geometry_name,
+            baseColorFactor=rgba,
+            metallicFactor=0.0,
+            roughnessFactor=1.0,
+            doubleSided=True,
+            alphaMode='BLEND' if rgba[3] < 255 else 'OPAQUE',
+        )
+        tm.visual = trimesh.visual.texture.TextureVisuals(material=material)
+        tm.metadata.update(getattr(mesh, 'metadata', {}))
+        return tm
 
     def export_3d_model(self, filename=None, format='glb'):
         """Export the 3D scene to a model file (GLB, OBJ, STL).
@@ -11818,17 +11823,20 @@ class VisualizeSkeleton:
             
             # Collect all meshes
             meshes = []
-            
-            # 1. ROI meshes (already collected in self.exportable_meshes during plot_mesh)
             if hasattr(self, 'exportable_meshes'):
-                meshes.extend(self.exportable_meshes)
+                for index, mesh in enumerate(self.exportable_meshes):
+                    geometry_name = getattr(mesh, 'metadata', {}).get('name', f'mesh_{index}')
+                    meshes.append(self._prepare_glb_mesh(mesh, geometry_name))
                 
             if not meshes:
                 self._vprint('⚠️  No meshes found to export.')
                 return None
                 
             # Combine scene
-            scene = trimesh.Scene(meshes)
+            scene = trimesh.Scene()
+            for index, mesh in enumerate(meshes):
+                geometry_name = getattr(mesh, 'metadata', {}).get('name', f'mesh_{index}')
+                scene.add_geometry(mesh, geom_name=geometry_name, node_name=geometry_name)
             
             # Export
             scene.export(filepath)
