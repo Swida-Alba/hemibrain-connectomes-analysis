@@ -2289,6 +2289,7 @@ class HomologFinder:
         token: str = '',
         vector_prefiltering: bool = False,
         use_auto_type_mapping: bool = True,
+        ensure_cache_complete: bool = False,
     ):
         """
         Initialize HomologFinder with configuration and default parameters.
@@ -2340,6 +2341,11 @@ class HomologFinder:
                 This allows proper matching of types that have different names
                 in different datasets (e.g., 'MTe07' in FAFB → 'MeVPLo2' in male-cns).
                 For intra-dataset comparison, original types are always used.
+            ensure_cache_complete: If True, build/complete the FULL dataset connection
+                cache before searching (fetches connections for every uncached neuron).
+                This can take hours on first use with a new dataset. Default False:
+                the search fetches only the connections it needs (recommended for
+                the UI and normal first-time use).
         
         Example:
             >>> # Set up finder with visualization
@@ -2399,6 +2405,7 @@ class HomologFinder:
         # Profiler configuration
         self.verbose = verbose
         self.use_cache = use_cache
+        self.ensure_cache_complete = ensure_cache_complete
         self.min_synapse_threshold = min_synapse_threshold
         
         config = ProfilerConfig(
@@ -2947,11 +2954,16 @@ class HomologFinder:
         """
         import gc
         
-        # Step 1: Ensure connection cache is complete (will fetch if needed)
-        self._log(f"Ensuring connection data for {dataset}...")
-        cache_ready = self._ensure_connection_cache_complete(dataset)
-        if not cache_ready:
-            self._log(f"Warning: Connection cache may be incomplete for {dataset}")
+        # Step 1: Optionally ensure connection cache is complete.
+        # Full-dataset completion is opt-in; normal runs use existing cache
+        # entries and fetch missing neurons on demand via FindNeuronConnection.
+        if self.ensure_cache_complete:
+            self._log(f"Ensuring connection data for {dataset}...")
+            cache_ready = self._ensure_connection_cache_complete(dataset)
+            if not cache_ready:
+                self._log(f"Warning: Connection cache may be incomplete for {dataset}")
+        else:
+            self._log(f"Using existing connection cache for {dataset} (ensure_cache_complete=False).")
         
         # Step 2: Build profiles using existing batch method (indexed)
         # This loads connections, builds indexes, and processes efficiently
@@ -5127,14 +5139,19 @@ class HomologFinder:
         
         self._log(f"Fast homolog search: {query_label} from {source_dataset} → {target_dataset}")
         
-        # Step 0: Ensure connection caches are complete BEFORE loading
-        # This must happen first to respect cache hierarchy (connections → profiles)
-        self._log("Ensuring connection caches are complete...")
-        self._ensure_connection_cache_complete(source_dataset)
-        if is_cross_dataset:
-            self._log(f"Checking target dataset: {target_dataset}...")
-            self._ensure_connection_cache_complete(target_dataset)
-        self._log("Connection caches verified.")
+        # Step 0: Optionally ensure connection caches are complete BEFORE loading.
+        # This is opt-in because completing a full dataset cache can fetch
+        # connections for 100k+ neurons (hours on first use). By default the
+        # search fetches only the connections it needs via FindNeuronConnection.
+        if self.ensure_cache_complete:
+            self._log("Ensuring connection caches are complete...")
+            self._ensure_connection_cache_complete(source_dataset)
+            if is_cross_dataset:
+                self._log(f"Checking target dataset: {target_dataset}...")
+                self._ensure_connection_cache_complete(target_dataset)
+            self._log("Connection caches verified.")
+        else:
+            self._log("Skipping full-dataset cache build (ensure_cache_complete=False).")
 
         # Step 0.5: Pre-warm profile caches so subsequent loads avoid cold reads
         self._log("Pre-warming profile caches...")
@@ -7684,6 +7701,7 @@ class ConnectivityProfileComparer:
         group_map_csv: Optional[str] = None,
         skip_bodyId_level: Union[bool, str] = 'auto',
         use_auto_type_mapping: bool = True,
+        ensure_cache_complete: bool = False,
     ):
         """
         Initialize ConnectivityProfileComparer.
@@ -7730,6 +7748,10 @@ class ConnectivityProfileComparer:
                 proper matching of types that have different names in different datasets
                 (e.g., 'MTe07' in FAFB → 'MeVPLo2' in male-cns).
                 Has no effect for intra-dataset comparison.
+            ensure_cache_complete: If True, build/complete the FULL dataset connection
+                cache before profiling (fetches connections for every uncached neuron).
+                This can take hours on first use with a new dataset. Default False:
+                profiling uses the connections already cached (recommended for the UI).
         """
         self.group_map_csv = group_map_csv
         self.use_auto_type_mapping = use_auto_type_mapping
@@ -7805,6 +7827,7 @@ class ConnectivityProfileComparer:
         self.show_figures = show_figures
         self.verbose = verbose
         self.use_cache = use_cache
+        self.ensure_cache_complete = ensure_cache_complete
         if not self.is_cross_dataset:
             self.skip_bodyId_level = skip_bodyId_level
         
@@ -8299,8 +8322,9 @@ class ConnectivityProfileComparer:
         for dataset, neurons in self._cross_dataset_query.items():
             self._log(f"Extracting profiles from {dataset}...")
             
-            # Ensure connection cache is complete for this dataset
-            if self.use_cache:
+            # Optionally ensure connection cache is complete for this dataset
+            # (full-dataset builds are opt-in; see ensure_cache_complete)
+            if self.use_cache and self.ensure_cache_complete:
                 self._ensure_connection_cache_complete_for_dataset(dataset)
             
             dataset_profiles = {}
@@ -9263,8 +9287,10 @@ class ConnectivityProfileComparer:
         self._log(f"Starting connectivity profile comparison for {self.dataset}")
         self._log(f"Query: {self._format_query_for_log(self.query)}")
         
-        # Step 0: Ensure connection cache is complete BEFORE profile extraction
-        if self.use_cache:
+        # Step 0: Optionally ensure connection cache is complete BEFORE profile
+        # extraction. Full-dataset completion is opt-in to avoid multi-hour
+        # first-run cache builds for small profile queries.
+        if self.use_cache and self.ensure_cache_complete:
             self._ensure_connection_cache_complete()
         
         # Step 1: Extract both type-aggregated and individual bodyId profiles
@@ -9557,8 +9583,8 @@ class ConnectivityProfileComparer:
             self._log("No neuron types in query - cannot perform intra/inter-type comparison")
             return {'intra_type': pd.DataFrame(), 'inter_type': pd.DataFrame()}
         
-        # Ensure connection cache is complete before profile extraction
-        if self.use_cache:
+        # Optionally ensure connection cache is complete before profile extraction
+        if self.use_cache and self.ensure_cache_complete:
             self._ensure_connection_cache_complete()
         
         self._log(f"Computing intra-type and inter-type comparisons for: {neuron_types}")

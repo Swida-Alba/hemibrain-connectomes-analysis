@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hemibrain-connectomes-analysis"
-version = "4.4.2"
+version = "4.5.0"
 description = "Hemibrain connectome analysis and visualization toolkit with reorganized modular structure"
 readme = {file = "README.md", content-type = "text/markdown"}
 requires-python = ">=3.8"
@@ -72,6 +72,11 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# Web UI for local execution
+ui = [
+    "nicegui>=2.0.0",
+]
+
 # Visualization sub-project (minimal dependencies for standalone vispath)
 vispath = [
     "numpy==1.26.4",
@@ -104,8 +109,11 @@ gui = [
 ]
 
 all = [
-    "hemibrain-connectomes-analysis[dev,viz,gui]"
+    "hemibrain-connectomes-analysis[dev,viz,gui,ui]"
 ]
+
+[project.scripts]
+drocat-ui = "ui.app:main"
 
 [project.urls]
 Homepage = "https://github.com/Swida-Alba/hemibrain-connectomes-analysis"

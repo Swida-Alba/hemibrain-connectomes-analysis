@@ -12,13 +12,21 @@ from dataclasses import dataclass, field
 import cv2
 import matplotlib.patches as mp
 import matplotlib.pyplot as plt
-import navis
-import navis.interfaces.neuprint as neu
+try:
+    import navis
+    import navis.interfaces.neuprint as neu
+    HAS_NAVIS = True
+except ImportError:
+    HAS_NAVIS = False
 # import networkx as nx
 import numpy as np
 import pandas as pd
 import polars as pl
-import flybrains
+try:
+    import flybrains
+    HAS_FLYBRAINS = True
+except ImportError:
+    HAS_FLYBRAINS = False
 # import plotly.graph_objects as go
 import seaborn as sns
 from tqdm import tqdm
@@ -30,8 +38,12 @@ try:
     import src.statvis_polars as svp
     from src.statvis_polars import EnrichConnectionTablePolars
 except ImportError:
-    import statvis_polars as svp
-    from statvis_polars import EnrichConnectionTablePolars
+    try:
+        import statvis_polars as svp
+        from statvis_polars import EnrichConnectionTablePolars
+    except ImportError:
+        svp = None
+        EnrichConnectionTablePolars = None
 
 # Add vispath-subproject to path for VisualizePath import
 vispath_src = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'vispath-subproject', 'src')
@@ -79,8 +91,16 @@ import bokeh.palettes
 import img2pdf
 
 import statvis as sv
-import FAFB_file_converter
-import BANC_file_converter
+try:
+    import FAFB_file_converter
+    HAS_FAFB_CONVERTER = True
+except ImportError:
+    HAS_FAFB_CONVERTER = False
+try:
+    import BANC_file_converter
+    HAS_BANC_CONVERTER = True
+except ImportError:
+    HAS_BANC_CONVERTER = False
 
 try:
     from .visualize_skeleton import VisualizeSkeleton
@@ -753,6 +773,15 @@ class FindNeuronConnection:
         except Exception:
             # Fallback for polars issues
             return pd.read_csv(filepath, encoding='utf-8', **kwargs)
+
+    @staticmethod
+    def _is_empty_df(df) -> bool:
+        """Return True for empty/None DataFrames (works for pandas and polars)."""
+        if df is None:
+            return True
+        if hasattr(df, 'is_empty'):
+            return bool(df.is_empty())
+        return len(df) == 0
 
     def _save_matrices_to_csv(self, df, folder, level='bodyId'):
         """Generate and save connection matrices to CSV using Polars for speed"""
@@ -3415,7 +3444,7 @@ class FindNeuronConnection:
         except ImportError:
             pass
         
-        if not cached_conn.empty:
+        if not self._is_empty_df(cached_conn):
             self._vprint(f'  📂 Found {len(set(upstream_bodyIds) - set(uncached_upstream))}/{len(upstream_bodyIds)} neurons in cache', level='full')
             self._vprint(f'     Retrieved {len(cached_conn):,} connections from database', level='full')
         
@@ -3427,7 +3456,7 @@ class FindNeuronConnection:
                 self._vprint(f'  ⚠️  {len(uncached_upstream)} neurons not in cache (cache-only mode - skipping API fetch)', level='full')
                 self._vprint(f'     Using only cached data. Results may be incomplete.', level='full')
                 # Return only cached connections
-                if cached_conn.empty:
+                if self._is_empty_df(cached_conn):
                     self._vprint(f'     No cached connections found for these neurons.', level='full')
                 # Continue without API fetch - api_conn stays empty
             else:
@@ -3623,12 +3652,16 @@ class FindNeuronConnection:
             self._save_connections_only(api_conn, uncached_upstream)
         
         # Step 3: Combine cached and API results
-        if cached_conn.empty and api_conn.empty:
+        if self._is_empty_df(cached_conn) and self._is_empty_df(api_conn):
             # Return empty DataFrame with correct columns to avoid KeyErrors downstream
             return pd.DataFrame(columns=['bodyId_pre', 'bodyId_post', 'weight', 'roi', 'type_pre', 'type_post', 'instance_pre', 'instance_post'])
         
         # Combine results
-        combined = pd.concat([cached_conn, api_conn], ignore_index=True) if not cached_conn.empty and not api_conn.empty else (cached_conn if not cached_conn.empty else api_conn)
+        combined = (
+            pd.concat([cached_conn, api_conn], ignore_index=True)
+            if not self._is_empty_df(cached_conn) and not self._is_empty_df(api_conn)
+            else (cached_conn if not self._is_empty_df(cached_conn) else api_conn)
+        )
         
         total_before_filter = len(combined)
         

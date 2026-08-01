@@ -88,16 +88,71 @@ If you only need the visualization path component:
 cd vispath-subproject
 pip install -e .
 ```
+
+### Option 4: One-Click Install with Web UI (Recommended for New Users)
+
+**macOS** — Double-click `DROCAT.command` in Finder:
+```bash
+chmod +x DROCAT.command
+./DROCAT.command
+```
+
+**macOS/Linux** — Run the installer:
+```bash
+chmod +x install.sh
+./install.sh
+```
+
+**Windows** — Double-click `install.bat` or run in PowerShell:
+```powershell
+powershell -ExecutionPolicy Bypass -File install.ps1
+```
+
+These scripts automatically:
+1. Install Miniconda (if not already present)
+2. Create a `drocat` conda environment with Python 3.11
+3. Install all dependencies including NiceGUI (web UI)
+4. Create launcher scripts (`run_ui.sh` / `run_ui.bat`)
+
+After installation, launch the Web UI:
+
+| Platform | Command |
+|----------|--------|
+| macOS (double-click) | `DROCAT.command` |
+| macOS/Linux | `./run_ui.sh` |
+| Windows | `run_ui.bat` |
+| Manual | `conda activate drocat && python ui/app.py` |
+
+The UI opens at **http://127.0.0.1:8080**
+
+#### Web UI Dependencies
+
+The Web UI requires the `nicegui` package (installed automatically by the one-click installer):
+
+```bash
+pip install -r ui/requirements.txt
+```
+
+Or install with the optional UI extra:
+```bash
+pip install -e ".[ui]"
+```
+
 ## Authentication Setup
 
 To access NeuPrint and FlyWire datasets, you need to configure your authentication tokens.
 
 1.  **Get your tokens:**
     *   **NeuPrint Token:** Log in to [neuprint.janelia.org](https://neuprint.janelia.org/account) and copy your token.
-    *   **CAVE Token (FlyWire/FAFB):** Log in to [codex.flywire.ai](https://codex.flywire.ai/auth_token) and copy your token.
+    *   **CAVE Token (FlyWire/FAFB/BANC):** Log in to [codex.flywire.ai](https://codex.flywire.ai/auth_token) and copy your token.
     *   **NeuronBridge:** No authentication required - NeuronBridge API is publicly accessible.
 
-2.  **Configure local tokens:**
+2.  **Configure tokens (choose one method):**
+
+    **Method A: Via Web UI (Recommended)**
+    Open the Web UI → Settings tab → Enter tokens in the API Tokens section → Click "Save Tokens".
+
+    **Method B: Via token file**
     The project uses a local file `token_info_local.txt` to store your secrets. This file is gitignored to prevent accidental commits.
 
     *   Copy the template file:
@@ -110,12 +165,18 @@ To access NeuPrint and FlyWire datasets, you need to configure your authenticati
         CAVE_TOKEN='your_actual_cave_token_here'
         ```
 
-    Alternatively, you can set environment variables `NEUPRINT_TOKEN` and `CAVE_TOKEN`.
+    **Method C: Via environment variables**
+    ```bash
+    export NEUPRINT_APPLICATION_TOKEN='your_token_here'
+    export CAVE_TOKEN='your_cave_token_here'
+    ```
 
 **Token Requirements:**
-- `NEUPRINT_TOKEN`: **Required** for accessing all NeuPrint datasets (hemibrain, male-cns, MANC, optic-lobe)
-- `CAVE_TOKEN`: **Required** for accessing FlyWire datasets (FAFB, BANC)
+- `NEUPRINT_TOKEN`: **Required** for accessing all NeuPrint datasets (hemibrain, male-cns v1.0/v0.9, MANC, optic-lobe)
+- `CAVE_TOKEN`: **Required** for accessing FlyWire datasets (FAFB v783, BANC v888/v626)
 - NeuronBridge API: **No token required** (publicly accessible)
+
+> **Note:** FlyWire datasets require **both** a CAVE token AND manually downloaded local data files. See the Web UI Settings tab for detailed FlyWire setup instructions.
 ## Core Dependencies
 
 The following packages are **required**:
@@ -138,6 +199,27 @@ The following packages are **required**:
 **Note on Polars:** Polars is used for memory-efficient operations when building and loading large connection caches (millions of connections). It gracefully falls back to pandas if not available, but Polars is recommended for cross-dataset comparison workflows.
 
 ## Optional Dependencies
+
+### Web UI (NiceGUI)
+
+The Web UI provides a browser-based interface for all DROCAT tools with dark theme, parameter forms, and real-time execution logs.
+
+```bash
+# Install Web UI dependency
+pip install -r ui/requirements.txt
+
+# Or use the optional extra
+pip install -e ".[ui]"
+```
+
+After installation, launch with:
+```bash
+python ui/app.py
+# or
+./run_ui.sh          # macOS/Linux
+run_ui.bat           # Windows
+./DROCAT.command     # macOS double-click
+```
 
 ### For Better Performance
 
@@ -477,26 +559,47 @@ COPY . .
 
 ## Summary
 
-**Recommended (with conda):**
+### One-Click Install (Recommended for New Users)
+
+| Platform | Install | Launch UI |
+|----------|---------|----------|
+| macOS | Double-click `DROCAT.command` | Auto-launches |
+| macOS/Linux | `./install.sh` | `./run_ui.sh` |
+| Windows | `install.bat` | `run_ui.bat` |
+
+### Manual Install
+
+**With conda (recommended):**
 ```bash
 conda create -n drocat python=3.11 -y
 conda activate drocat
 pip install -r requirements.txt
-```
-
-**Easiest (without conda):**
-```bash
-pip install -r requirements.txt
-```
-
-**Editable install (for development):**
-```bash
+pip install -r ui/requirements.txt
 pip install -e .
 ```
 
-**With extras:**
+**Without conda:**
 ```bash
-pip install -e ".[all]"
+pip install -r requirements.txt
+pip install -r ui/requirements.txt
+pip install -e .
 ```
+
+**With all extras:**
+```bash
+pip install -e ".[all,ui]"
+```
+
+### Launch the Web UI
+
+```bash
+# After installation, launch the browser-based interface:
+python ui/app.py          # Manual
+./DROCAT.command          # macOS double-click
+./run_ui.sh               # macOS/Linux
+run_ui.bat                # Windows
+```
+
+The UI opens at **http://127.0.0.1:8080** with a dark theme interface for all 10 analysis tools.
 
 All methods will install PyQt5 for optimal GUI performance and numpy <2.0.0 for compatibility! 🚀

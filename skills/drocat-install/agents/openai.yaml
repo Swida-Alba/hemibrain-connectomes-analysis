@@ -1,0 +1,4 @@
+interface:
+  display_name: "DROCAT Auto-Install"
+  short_description: "DROCAT auto-install: env, deps, tokens, verification"
+  default_prompt: "Install DROCAT on this machine and verify it works."

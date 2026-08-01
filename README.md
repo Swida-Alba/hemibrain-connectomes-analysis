@@ -1,4 +1,4 @@
-# *Drosophila* Connectome Analysis Toolkit (DROCAT) v4.4.3
+# *Drosophila* Connectome Analysis Toolkit (DROCAT) v4.5.0
 
 A comprehensive Python toolkit for analyzing and visualizing connectome data from **all NeuPrint databases and FlyWire datasets**. Features type-based pathfinding algorithms, interactive network visualizations with NT grouping, 3D neuron morphology rendering, and EM↔LM driver line mapping.
 
@@ -149,7 +149,32 @@ analyzer.generate_report()
 
 ## Installation
 
-### Quick Install (Conda Recommended)
+### Option 1: One-Click Install (Recommended)
+
+**macOS** — Double-click `DROCAT.command` in Finder (or run in Terminal):
+```bash
+chmod +x DROCAT.command
+./DROCAT.command
+```
+
+**macOS/Linux** — Run the installer script:
+```bash
+chmod +x install.sh
+./install.sh
+```
+
+**Windows** — Double-click `install.bat` or run in PowerShell:
+```powershell
+powershell -ExecutionPolicy Bypass -File install.ps1
+```
+
+These scripts automatically:
+1. Install Miniconda (if not present)
+2. Create a `drocat` conda environment with Python 3.11
+3. Install all dependencies
+4. Create launcher scripts
+
+### Option 2: Manual Install
 
 ```bash
 # Create environment
@@ -157,18 +182,132 @@ conda create -n drocat python=3.11 -y
 conda activate drocat
 
 # Install dependencies
-pip install -r requirements.txt  # Linux/macOS
-# or
-pip install -r requirements-windows.txt # Windows
+pip install -r requirements.txt       # Linux/macOS
+pip install -r ui/requirements.txt    # Web UI (NiceGUI)
+pip install -e .                      # Install package in editable mode
+
+# Windows users:
+pip install -r requirements-windows.txt
 pip install neuronbridge-python --no-deps
+pip install -r ui/requirements.txt
+pip install -e .
 ```
 
-### Get NeuPrint Token
+### Option 3: Agent-Assisted Install (Codex)
 
-1. Visit [NeuPrint](https://neuprint.janelia.org/)
-2. Login → Account → Copy Auth Token
+DROCAT ships a Codex skill that lets an AI agent install, verify, and launch the toolkit for you:
+
+- **Skill source (repo):** [`skills/drocat-install/`](skills/drocat-install/SKILL.md)
+- **Global copy (auto-discovered):** `~/.codex/skills/drocat-install/`
+
+**Usage** — open Codex in this repository and ask:
+
+> Install DROCAT on this machine and verify it works.
+
+The agent will:
+
+1. Run the OS-appropriate installer (`install.sh` / `install.ps1` / `install.bat`)
+2. Create the `drocat` conda environment (Python 3.11) and install all dependencies
+3. Ask you for NeuPrint / CAVE tokens and write them to `token_info_local.txt`
+4. Verify the installation with [`verify_install.py`](skills/drocat-install/scripts/verify_install.py) (Python version, imports, token file, UI)
+5. Launch the web UI and confirm it responds at <http://127.0.0.1:8080>
+
+Manual verification (or to re-check an existing install):
+
+```bash
+conda activate drocat
+python skills/drocat-install/scripts/verify_install.py --project .
+```
+
+To install/refresh the global skill copy after updating the repo version:
+
+```bash
+mkdir -p ~/.codex/skills/drocat-install
+cp -R skills/drocat-install/. ~/.codex/skills/drocat-install/
+```
+
+### Authentication Setup
+
+1. **NeuPrint Token** (required for NeuPrint datasets):
+   - Visit [neuprint.janelia.org/account](https://neuprint.janelia.org/account)
+   - Login → Copy Auth Token
+   - Enter in UI Settings tab or save to `token_info_local.txt`
+
+2. **CAVE Token** (required for FlyWire FAFB/BANC datasets):
+   - Visit [codex.flywire.ai/auth_token](https://codex.flywire.ai/auth_token)
+   - Copy token → Enter in UI Settings tab
 
 📖 **[Full Installation Guide](docs/INSTALLATION.md)**
+
+---
+
+## 🖥️ Web UI (v4.5.0)
+
+DROCAT includes a local web interface (light theme, photo-selector-inspired design) for all analysis tools.
+
+### Launch the UI
+
+**macOS** — Double-click `DROCAT.command` in Finder, or:
+```bash
+./DROCAT.command
+```
+
+**macOS/Linux:**
+```bash
+./run_ui.sh
+```
+
+**Windows:**
+```
+run_ui.bat
+```
+
+**Manual:**
+```bash
+conda activate drocat
+python ui/app.py
+```
+
+The UI opens at **http://127.0.0.1:8080**
+
+### UI Features
+
+| Tab | Tool | Description |
+|-----|------|-------------|
+| **Pathfinding** | FindPath | Multi-hop path analysis between neuron groups |
+| **Direct** | FindDirect | Direct synaptic connection analysis |
+| **Profiling** | ConnectivityProfiling | Intra-dataset connectivity profile comparison |
+| **Homologs** | FindHomologs | Cross-dataset homolog finding |
+| **Cross-Dataset** | InterDatasetComparator | Compare connectivity across datasets |
+| **Find Lines** | NeuronBridge_FindLines | EM→LM driver line search |
+| **Find Neurons** | NeuronBridge_FindNeuron | LM→EM neuron search |
+| **Co-Labeling** | NeuronBridge_Colabel | Driver line co-labeling analysis |
+| **Visualization** | plot3dSkeleton/PlotPath | 3D neuron visualization |
+| **Settings** | - | Token configuration and dataset status |
+
+### Advanced Neuron Search
+
+All neuron input fields support **filter modes**:
+
+| Mode | Behavior | Example |
+|------|----------|--------|
+| Exact | Match type/bodyId exactly | `aMe12` → only aMe12 |
+| Starts with | Types beginning with text | `DN` → DN1p, DN2, DNa01... |
+| Contains | Types containing text | `PN` → adPN, lPN, vPN... |
+| Ends with | Types ending with text | `_R` → all right-hemisphere types |
+| Regex | Full regex pattern | `KC.*` → all KC types |
+
+### Dataset Selection
+
+- **NeuPrint datasets** (hemibrain, male-cns v1.0/v0.9, optic-lobe, manc): Fetched from server automatically
+- **FlyWire FAFB v783**: Requires CAVE token + manual data download
+- **FlyWire BANC v888/v626**: Requires CAVE token + manual data download
+
+See the **Settings** tab for detailed setup instructions.
+
+### Directory Selection
+
+All output path fields include a browse button (📁) that opens your system's native file picker dialog.
 
 ---
 
@@ -176,12 +315,14 @@ pip install neuronbridge-python --no-deps
 
 | Dataset             | Type      | Description               |
 | ------------------- | --------- | ------------------------- |
-| `hemibrain:v1.2.1`  | NeuPrint  | Adult fly brain (central) |
+| `male-cns:v1.0`     | NeuPrint  | Full male CNS (latest)    |
 | `male-cns:v0.9`     | NeuPrint  | Full male CNS             |
+| `hemibrain:v1.2.1`  | NeuPrint  | Adult fly brain (central) |
 | `optic-lobe:v1.1`   | NeuPrint  | Optic lobe detailed       |
-| `manc:v1.2.3`       | NeuPrint  | Male VNC                  |
-| `flywire_FAFB_v783` | Local&API | FlyWire female brain      |
-| `flywire_BANC_v626` | Local     | FlyWire male VNC          |
+| `manc:v1.2.1`       | NeuPrint  | Male VNC                  |
+| `flywire_FAFB_v783` | FlyWire   | Female brain (CAVE+local) |
+| `flywire_BANC_v888` | FlyWire   | Male VNC latest (CAVE+local) |
+| `flywire_BANC_v626` | FlyWire   | Male VNC (CAVE+local)     |
 
 📖 **[FlyWire Setup Guide](docs/FLYWIRE_USAGE.md)**
 

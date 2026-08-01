@@ -614,6 +614,14 @@ class VisualizePath:
         
         # Load and validate data
         self._load_data()
+        # Accept 'path' / 'path_str' columns as aliases of 'path_block'
+        # (FindAllPath saves the path column as 'path' in its CSV output)
+        if self.path_df is not None and 'path_block' not in self.path_df.columns:
+            for alias in ('path', 'path_str'):
+                if alias in self.path_df.columns:
+                    self.path_df = self.path_df.rename(columns={alias: 'path_block'})
+                    self._vprint(f"Renamed column '{alias}' to 'path_block'")
+                    break
         self._validate_data()
         
         # Load custom colors if provided
