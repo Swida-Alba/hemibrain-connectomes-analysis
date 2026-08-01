@@ -118,6 +118,45 @@ html, body {
 }
 .drocat-tabs .q-tab__icon { font-size: 19px; }
 .drocat-tabs .q-tab__label { font-size: 13px; font-weight: 600; }
+.drocat-tabs .drocat-tab-group {
+    display: flex;
+    align-items: center;
+    padding: 0 8px 0 14px;
+    margin: 8px 2px;
+    border-left: 1px solid var(--drocat-line-strong);
+    font-size: 10px;
+    font-weight: 800;
+    letter-spacing: .14em;
+    text-transform: uppercase;
+    color: var(--drocat-faint);
+    user-select: none;
+    white-space: nowrap;
+}
+.drocat-tabs .drocat-tab-group:first-child { border-left: 0; padding-left: 6px; }
+.drocat-tabs .drocat-tab-group-nb { color: #7c3aed; }
+.drocat-nb-tab .q-tab__label::after {
+    content: "NB";
+    margin-left: 6px;
+    padding: 1px 5px;
+    border-radius: 999px;
+    background: #7c3aed;
+    color: #fff;
+    font-size: 9px;
+    font-weight: 800;
+    letter-spacing: .06em;
+}
+.drocat-tabs .q-tab--active.drocat-nb-tab {
+    color: #7c3aed !important;
+}
+.drocat-tabs .drocat-nb-tab:hover { background: #f5f0ff !important; }
+
+/* Panel tag badge (NeuronBridge etc.) */
+.drocat-tag-badge {
+    font-size: 10px !important;
+    font-weight: 700;
+    letter-spacing: .1em;
+    text-transform: uppercase;
+}
 
 /* ---------- Page workspace ---------- */
 .drocat-page { max-width: 1500px; margin: 0 auto; padding: 24px 28px 40px; }
@@ -310,15 +349,18 @@ def main_page():
     with ui.column().classes("w-full drocat-page gap-3"):
         # Segmented navigation
         with ui.tabs().classes("drocat-tabs w-full") as tabs:
+            ui.label("Connectome").classes("drocat-tab-group")
             tab_pathfinding = ui.tab("Find Path", icon="route")
             tab_direct = ui.tab("Direct", icon="arrow_forward")
             tab_viz = ui.tab("Visualization", icon="view_in_ar")
             tab_comparison = ui.tab("Cross-Dataset", icon="sync_alt")
-            tab_find_lines = ui.tab("Find Lines", icon="biotech")
-            tab_find_neuron = ui.tab("Find Neurons", icon="search")
-            tab_colabel = ui.tab("Co-Labeling", icon="layers")
             tab_homologs = ui.tab("Homologs", icon="compare")
             tab_profiling = ui.tab("Profiling", icon="analytics")
+            ui.label("NeuronBridge").classes("drocat-tab-group drocat-tab-group-nb")
+            tab_find_lines = ui.tab("Find Lines", icon="biotech").classes("drocat-nb-tab")
+            tab_find_neuron = ui.tab("Find Neurons", icon="search").classes("drocat-nb-tab")
+            tab_colabel = ui.tab("Co-Labeling", icon="layers").classes("drocat-nb-tab")
+            ui.label("System").classes("drocat-tab-group")
             tab_settings = ui.tab("Settings", icon="settings")
 
         with ui.tab_panels(tabs, value=tab_pathfinding).classes("w-full bg-transparent"):

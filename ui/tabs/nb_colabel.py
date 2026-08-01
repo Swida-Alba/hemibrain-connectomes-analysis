@@ -17,7 +17,8 @@ def create_nb_colabel_tab():
     form_col, results_col = tool_page(
         "Co-Labeling Analysis",
         "Analyze co-labeling patterns between driver lines.",
-        icon="overlap",
+        icon="layers",
+        tag="NeuronBridge",
     )
 
     with form_col:

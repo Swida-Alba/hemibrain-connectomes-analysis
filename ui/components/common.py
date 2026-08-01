@@ -24,6 +24,7 @@ def tool_page(
     title: str,
     subtitle: str = "",
     icon: str = "science",
+    tag: Optional[str] = None,
 ) -> tuple:
     """
     Create the two-column workspace used by every tool tab.
@@ -37,7 +38,10 @@ def tool_page(
             with ui.element("div").classes("drocat-page-mark"):
                 ui.icon(icon).classes("text-white")
             with ui.column().classes("gap-1"):
-                ui.label(title).classes("drocat-page-title")
+                with ui.row().classes("items-center gap-2"):
+                    ui.label(title).classes("drocat-page-title")
+                    if tag:
+                        ui.badge(tag, color="purple").classes("drocat-tag-badge")
                 if subtitle:
                     ui.label(subtitle).classes("drocat-page-sub")
         with ui.row().classes("w-full drocat-workspace items-start"):
