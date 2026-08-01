@@ -1,19 +1,33 @@
 ---
 name: drocat-install
-description: Auto-install the DROCAT Drosophila connectome analysis toolkit (hemibrain-connectomes-analysis) on macOS, Linux, or Windows. Use when the user asks to install, set up, repair, or prepare DROCAT (e.g., "install DROCAT", "set up the connectome toolkit", "fix my DROCAT install", "fresh machine setup") - covers conda environment creation, dependency installation, NeuPrint/CAVE token configuration, verification, and launching the web UI.
+description: Auto-install the DROCAT Drosophila connectome analysis toolkit (hemibrain-connectomes-analysis) on macOS, Linux, or Windows. Use when the user asks to install, set up, repair, or prepare DROCAT (e.g., "install DROCAT", "set up the connectome toolkit", "fix my DROCAT install", "fresh machine setup") - fetches the repository from GitHub, creates the conda environment, installs dependencies, configures NeuPrint/CAVE tokens, verifies the installation, and launches the web UI.
 ---
 
 # DROCAT Install
 
 ## Overview
 
-Install DROCAT end-to-end on a fresh machine: create the `drocat` conda environment, install pinned dependencies, configure API tokens, verify the installation, and launch the web UI.
+Install DROCAT end-to-end on a fresh machine: fetch the repository from GitHub, create the `drocat` conda environment, install pinned dependencies, configure API tokens, verify the installation, and launch the web UI.
 
 ## Workflow
 
-### 1. Locate the project
+### 1. Fetch the repository
 
-- Find the repository (folder usually named `hemibrain-connectomes-analysis*` or `DROCAT`). Ask the user if it is not obvious.
+Pull DROCAT v4.5.0 from GitHub (works in any agent that can run shell commands):
+
+```bash
+git clone --branch v4.5.0 https://github.com/Swida-Alba/Drosophila-cross-dataset-connectome-analysis.git drocat
+cd drocat
+```
+
+If a checkout already exists, fetch the branch instead:
+
+```bash
+git fetch origin v4.5.0
+git checkout v4.5.0
+```
+
+- If the user already has the repository locally, reuse it (ask if the path is not obvious) and skip the clone.
 - Confirm the required files exist: `install.sh` (macOS/Linux), `install.ps1` / `install.bat` (Windows), `ui/app.py`, `src/coana.py`, `requirements.txt`.
 
 ### 2. Check prerequisites

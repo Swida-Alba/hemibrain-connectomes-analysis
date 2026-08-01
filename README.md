@@ -4,8 +4,9 @@ A comprehensive Python toolkit for analyzing and visualizing connectome data fro
 
 > [!TIP]
 > 🤖 **Agent-assisted installation:** ask your AI agent (e.g., Codex) to run the bundled
-> [`drocat-install`](skills/drocat-install/SKILL.md) skill — it installs all dependencies,
-> configures tokens, verifies the installation, and launches the web UI for you.
+> [`drocat-install`](skills/drocat-install/SKILL.md) skill — it fetches this repository from
+> GitHub, installs all dependencies, configures tokens, verifies the installation, and
+> launches the web UI for you.
 > See [Option 3: Agent-Assisted Install](#option-3-agent-assisted-install-codex).
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
@@ -211,13 +212,21 @@ DROCAT ships a Codex skill that lets an AI agent install, verify, and launch the
 
 > Install DROCAT on this machine and verify it works.
 
+The agent fetches the repository from GitHub first (no local copy needed):
+
+```bash
+git clone --branch v4.5.0 https://github.com/Swida-Alba/Drosophila-cross-dataset-connectome-analysis.git drocat
+cd drocat
+```
+
 The agent will:
 
-1. Run the OS-appropriate installer (`install.sh` / `install.ps1` / `install.bat`)
-2. Create the `drocat` conda environment (Python 3.11) and install all dependencies
-3. Ask you for NeuPrint / CAVE tokens and write them to `token_info_local.txt`
-4. Verify the installation with [`verify_install.py`](skills/drocat-install/scripts/verify_install.py) (Python version, imports, token file, UI)
-5. Launch the web UI and confirm it responds at <http://127.0.0.1:8080>
+1. Fetch the repository from [GitHub](https://github.com/Swida-Alba/Drosophila-cross-dataset-connectome-analysis) (branch `v4.5.0`) if it is not already present
+2. Run the OS-appropriate installer (`install.sh` / `install.ps1` / `install.bat`)
+3. Create the `drocat` conda environment (Python 3.11) and install all dependencies
+4. Ask you for NeuPrint / CAVE tokens and write them to `token_info_local.txt`
+5. Verify the installation with [`verify_install.py`](skills/drocat-install/scripts/verify_install.py) (Python version, imports, token file, UI)
+6. Launch the web UI and confirm it responds at <http://127.0.0.1:8080>
 
 Manual verification (or to re-check an existing install):
 
