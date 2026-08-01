@@ -93,10 +93,14 @@ class OutputPanel:
 
             # Log console
             ui.label("Execution Log").classes("drocat-mini-label")
-            with ui.element("div").classes("drocat-log-wrap"):
+            # Keep the log as a plain, light console (pre-redesign styling that
+            # streams reliably); only the max height is capped.
+            with ui.element("div").classes("w-full").style(
+                "resize: vertical; overflow: hidden; min-height: 100px; max-height: 600px;"
+            ):
                 self.log_area = ui.log(max_lines=500).classes(
-                    "w-full font-mono drocat-log"
-                )
+                    "w-full font-mono text-xs"
+                ).style("height: 200px;")
 
             ui.separator()
             ui.label("Output Files").classes("drocat-mini-label")

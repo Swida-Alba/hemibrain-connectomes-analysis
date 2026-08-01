@@ -246,17 +246,6 @@ html, body {
 .drocat-action-bar { padding: 12px 0 10px; border-top: 1px solid var(--drocat-line); }
 .drocat-progress-row { padding-bottom: 4px; }
 .drocat-mini-label { font-size: 11px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: var(--drocat-faint); margin: 8px 0 4px; }
-.drocat-log-wrap { border: 1px solid var(--drocat-line); border-radius: 12px; overflow: hidden; }
-.drocat-log {
-    background: #0d1b2e !important;
-    color: #d7e3f4 !important;
-    font-size: 11.5px !important;
-    line-height: 1.5 !important;
-    padding: 10px 12px !important;
-    max-height: 300px;
-    overflow-y: auto;
-    border-radius: 0 !important;
-}
 .drocat-empty { color: var(--drocat-faint); font-style: italic; font-size: 12.5px; }
 .drocat-muted { color: var(--drocat-muted); }
 .drocat-ok { color: var(--drocat-ok); }
