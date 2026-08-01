@@ -1,0 +1,4 @@
+interface:
+  display_name: "DROCAT v4.4.3 Auto-Install"
+  short_description: "DROCAT v4.4.3 auto-install: env, deps, tokens, verify"
+  default_prompt: "Install DROCAT v4.4.3 on this machine and verify it works."
