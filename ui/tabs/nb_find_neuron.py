@@ -38,6 +38,20 @@ def create_nb_find_neuron_tab():
                 with param_grid(2):
                     visualize = checkbox_input("Visualize Top Neurons", True, hint="Generate 3D skeleton visualizations of matched neurons.")
                     viz_top_n = number_input("Visualize Top N", 10, 1, 50, hint="Number of top types/bodyIds to render in 3D.")
+                    visualize_by = select_input(
+                        "Visualize By", ["type", "bodyId"], "type",
+                        hint="Group 3D visualizations by neuron type or individual bodyId.",
+                    )
+                    sort_by = select_input(
+                        "Sort By", ["max_score", "type_avg_score"], "max_score",
+                        hint="Sorting key for matched neuron results.",
+                    )
+                    pdf_cols = number_input("Profile Images Per Page (cols)", 4, 1, 6)
+                    pdf_rows = number_input("Profile Images Per Page (rows)", 3, 1, 6)
+                    background_color = select_input(
+                        "Profile Background", ["white", "black"], "white",
+                        hint="Background color for individual profile PDFs.",
+                    )
                 generate_pdf = checkbox_input("PDF Summary", True, hint="Generate PDF/PPTX with individual neuron profiles.")
 
     with results_col:
@@ -61,6 +75,10 @@ def create_nb_find_neuron_tab():
             "top_n": int(top_n.value),
             "visualize_top_n": int(viz_top_n.value) if visualize.value else 0,
             "generate_individual_profiles": ['pdf'] if generate_pdf.value else None,
+            "visualize_by": visualize_by.value,
+            "sort_by": sort_by.value,
+            "pdf_images_per_page": (int(pdf_cols.value), int(pdf_rows.value)),
+            "background_color": background_color.value,
         }
 
         result = await output_panel.run(runner, "nb_find_neuron", constructor_params, "find_neurons",

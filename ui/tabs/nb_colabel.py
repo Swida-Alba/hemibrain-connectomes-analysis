@@ -3,7 +3,7 @@
 from nicegui import ui
 from ..config import DATASETS
 from ..components.common import (
-    dataset_selector, neuron_input, number_input, checkbox_input,
+    dataset_selector, neuron_input, number_input, select_input, checkbox_input,
     dir_input, parse_neuron_list, section_header, param_grid, tool_page,
 )
 from ..components.output_panel import OutputPanel
@@ -43,6 +43,30 @@ def create_nb_colabel_tab():
                     gen_report = checkbox_input("HTML Report", True, hint="Generate comprehensive HTML analysis report.")
                     visualize_3d = checkbox_input("3D Skeleton", False, hint="Render 3D skeletons of top co-labeled types.")
                 viz_top_n = number_input("Visualize Top N Types", 5, 1, 20, hint="Number of top co-labeled types to visualize in 3D.")
+                with param_grid(3):
+                    top_n_neurons = number_input(
+                        "Top N Neurons Per Line", 200, 5, 2000,
+                        hint="Maximum neurons considered per driver line for the analysis.",
+                    )
+                    min_score = number_input(
+                        "Min Match Score", 20000, 0, 200000, 1000,
+                        hint="Minimum NeuronBridge score for a neuron to be included.",
+                    )
+                    min_type_avg_score = number_input(
+                        "Min Type Avg Score", 10000, 0, 200000, 1000,
+                        hint="Minimum average score for a type to be included.",
+                    )
+                with param_grid(3):
+                    sort_by = select_input(
+                        "Sort By", ["max_score", "type_avg_score"], "max_score",
+                        hint="Sorting key for expression matrices.",
+                    )
+                    background_color = select_input(
+                        "Profile Background", ["white", "black"], "white",
+                        hint="Background color for individual profile PDFs.",
+                    )
+                    pdf_cols = number_input("Profile Images Per Page (cols)", 3, 1, 6)
+                    pdf_rows = number_input("Profile Images Per Page (rows)", 2, 1, 6)
 
     with results_col:
         output_panel.create(run_label="Run Co-Labeling", run_icon="play_arrow")
@@ -71,6 +95,12 @@ def create_nb_colabel_tab():
             "generate_report": gen_report.value,
             "visualize": gen_heatmap.value,
             "visualize_top_n": int(viz_top_n.value) if visualize_3d.value else 0,
+            "top_n_neurons": int(top_n_neurons.value),
+            "min_score": float(min_score.value),
+            "min_type_avg_score": float(min_type_avg_score.value),
+            "sort_by": sort_by.value,
+            "background_color": background_color.value,
+            "pdf_images_per_page": (int(pdf_cols.value), int(pdf_rows.value)),
         }
 
         result = await output_panel.run(runner, "nb_colabel", constructor_params, "colabel",

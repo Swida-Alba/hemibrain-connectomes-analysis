@@ -3,7 +3,7 @@
 from nicegui import ui
 from ..config import DEFAULTS
 from ..components.common import (
-    dataset_selector, neuron_list_input, number_input, checkbox_input,
+    dataset_selector, neuron_list_input, number_input, select_input, checkbox_input,
     dir_input, apply_filter_mode, section_header, param_grid, tool_page,
 )
 from ..components.output_panel import OutputPanel
@@ -62,6 +62,25 @@ def create_connectivity_profiling_tab():
                     "Cluster Heatmaps (Ward)", True,
                     hint="Apply Ward hierarchical clustering to reorder heatmap rows/columns.",
                 )
+                with param_grid(3):
+                    min_synapse_threshold = number_input(
+                        "Min Synapse Threshold", 3, 1, 100,
+                        hint="Minimum synapse count for a connection to enter a profile.",
+                    )
+                    aggregation_level = select_input(
+                        "Aggregation Level", ["type", "bodyid"], "type",
+                        hint="'type': aggregate profiles per neuron type. 'bodyid': per individual neuron.",
+                    )
+                    skip_bodyid_level = select_input(
+                        "BodyId-Level Computation", ["auto", "skip", "compute"], "auto",
+                        hint="'auto': skip when >1000 bodyIds. 'skip': type-level only. "
+                             "'compute': always compute bodyId-level matrices.",
+                    )
+                with ui.row().classes("gap-4"):
+                    show_figures = checkbox_input(
+                        "Show Figures", False,
+                        hint="Open generated heatmaps in the browser.",
+                    )
                 full_cache = checkbox_input(
                     "Pre-build Full Dataset Cache", False,
                     hint="Fetch connections for EVERY uncached neuron before profiling. "
@@ -78,6 +97,12 @@ def create_connectivity_profiling_tab():
         if not query:
             ui.notify("Please enter at least one neuron", type="warning")
             return
+
+        skip_bodyid_param = {
+            "auto": "auto",
+            "skip": True,
+            "compute": False,
+        }.get(skip_bodyid_level.value, "auto")
 
         output_panel.clear()
         output_panel.set_running(True)
@@ -98,10 +123,14 @@ def create_connectivity_profiling_tab():
             "output_dir": output_dir.value,
             "top_k": int(top_k.value),
             "top_m": int(top_m.value),
+            "min_synapse_threshold": int(min_synapse_threshold.value),
             "direction": direction,
             "generate_heatmaps": cluster_heatmap.value,
+            "show_figures": show_figures.value,
             "verbose": True,
             "use_cache": True,
+            "aggregation_level": aggregation_level.value,
+            "skip_bodyId_level": skip_bodyid_param,
             "ensure_cache_complete": full_cache.value,
         }
 

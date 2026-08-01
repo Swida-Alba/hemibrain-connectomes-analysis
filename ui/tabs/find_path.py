@@ -119,6 +119,19 @@ def create_find_path_tab():
                         "Show Figure", False,
                         hint="Open the interactive HTML visualization automatically after completion.",
                     )
+                    cache_only = checkbox_input(
+                        "Cache Only (Offline)", False,
+                        hint="Use only local cache and never contact the server. "
+                             "Requires the cache to be pre-built.",
+                    )
+                with param_grid(2):
+                    saveas = ui.input(
+                        label="Save Folder Name (optional)",
+                        placeholder="e.g., aMe_clock_paths",
+                    ).classes("w-full drocat-input").tooltip(
+                        "Custom output folder name. Leave empty for the unified auto name "
+                        "(findpath_<dataset>_<src>_to_<tgt>_<params>_<timestamp>)."
+                    )
 
                 ui.separator()
                 with ui.row().classes("gap-4"):
@@ -190,6 +203,8 @@ def create_find_path_tab():
             "custom_source_name": custom_source_name.value or '',
             "custom_target_name": custom_target_name.value or '',
             "keyword_in_path_to_remove": keywords,
+            "cache_only": cache_only.value,
+            "saveas": saveas.value.strip() or "",
             "separate_hemispheres": separate_hemi.value,
             "keep_only_hemisphere_conserved_connections": keep_hemi_conserved.value,
             "symmetry_analysis": symmetry_analysis.value,

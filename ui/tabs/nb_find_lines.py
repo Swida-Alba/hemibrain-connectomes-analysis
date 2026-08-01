@@ -4,7 +4,8 @@ from nicegui import ui
 from ..config import DEFAULTS, DATASETS, MATCH_ALGORITHMS
 from ..components.common import (
     dataset_selector, advanced_neuron_input, number_input, select_input,
-    checkbox_input, dir_input, parse_neuron_list, apply_filter_mode, section_header, param_grid, tool_page,
+    checkbox_input, dir_input, multi_select_input, parse_neuron_list,
+    apply_filter_mode, section_header, param_grid, tool_page,
 )
 from ..components.output_panel import OutputPanel
 from ..runner import ScriptRunner
@@ -58,6 +59,54 @@ def create_nb_find_lines_tab():
                     download_images = checkbox_input("Download Images", False, hint="Download matched images from NeuronBridge.")
                     download_flylight = checkbox_input("From FlyLight", False, hint="Download from FlyLight S3/CDN.")
                     generate_pdf = checkbox_input("PDF Summary", True, hint="Create a PDF with downloaded images ordered by score.")
+                with param_grid(3):
+                    region = select_input(
+                        "Region", ["Brain", "VNC", "All"], "Brain",
+                        hint="Anatomical region filter for image downloads.",
+                    )
+                    max_workers = number_input(
+                        "Max Workers", 8, 1, 32,
+                        hint="Parallel workers for API searches (lower if rate-limited).",
+                    )
+                    sort_by = select_input(
+                        "Sort By", ["max", "completeness"], "max",
+                        hint="'max': highest match score. 'completeness': best coverage of all queries.",
+                    )
+                with param_grid(2):
+                    image_formats = multi_select_input(
+                        "Image Formats", ["png", "jpg"], ["png", "jpg"],
+                        hint="File formats to download (neuronbridge: png/jpg; flylight adds h5j/mp4/json).",
+                    )
+                    image_types = multi_select_input(
+                        "Image Types", ["cdm", "mip", "aligned", "translation", "metadata"], ["cdm", "mip"],
+                        hint="Image types to download (cdm/mip for NeuronBridge).",
+                    )
+                with param_grid(3):
+                    max_download_images = number_input(
+                        "Max Images / Line", 12, 1, 100,
+                        hint="Maximum number of images downloaded per driver line.",
+                    )
+                    flylight_category = multi_select_input(
+                        "FlyLight Collections", ["GAL4/LEXA", "SplitGAL4", "MCFO", "RawImages"],
+                        ["GAL4/LEXA", "SplitGAL4"],
+                        hint="FlyLight collections searched in priority order (MCFO is the fallback).",
+                    )
+                    simple_mode = checkbox_input(
+                        "Simple Mode (fewer files)", True,
+                        hint="Download only representative files (20x/multichannel for Split-GAL4, "
+                             "total for GAL4/LexA).",
+                    )
+                with param_grid(3):
+                    pdf_cols = number_input("PDF Images Per Page (cols)", 3, 1, 6)
+                    pdf_rows = number_input("PDF Images Per Page (rows)", 2, 1, 6)
+                    summary_background = select_input(
+                        "Summary Background", ["black", "white"], "black",
+                        hint="Background color for the PDF/PPTX image summary.",
+                    )
+                    organize_by_region = checkbox_input(
+                        "Organize by Region", False,
+                        hint="Group downloaded FlyLight images into Brain/VNC subfolders.",
+                    )
 
     with results_col:
         output_panel.create(run_label="Find Driver Lines", run_icon="play_arrow")
@@ -77,6 +126,8 @@ def create_nb_find_lines_tab():
         constructor_params = {
             "verbose": True,
             "separate_splitgal4": separate_split.value,
+            "region": region.value,
+            "max_workers": int(max_workers.value),
         }
 
         # Determine download_images source
@@ -96,6 +147,15 @@ def create_nb_find_lines_tab():
             "download_images": dl_source,
             "download_img_for_top_n_lines": int(top_n_gal4.value) if dl_source else None,
             "summary_format": 'pdf' if generate_pdf.value else None,
+            "sort_by": sort_by.value,
+            "image_formats": image_formats.value or ["png"],
+            "image_types": image_types.value or ["cdm"],
+            "max_download_images_per_line": int(max_download_images.value) if dl_source else None,
+            "flylight_category": flylight_category.value or None,
+            "simple_mode": simple_mode.value,
+            "organize_by_region": organize_by_region.value,
+            "pdf_images_per_page": (int(pdf_cols.value), int(pdf_rows.value)),
+            "summary_background_color": summary_background.value,
         }
 
         result = await output_panel.run(runner, "nb_find_lines", constructor_params, "find_lines",

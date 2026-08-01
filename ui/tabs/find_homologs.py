@@ -47,6 +47,26 @@ def create_find_homologs_tab():
                 vector_prefilter = checkbox_input("Vector Pre-filtering", True, hint="Pre-filter candidates using vector cosine similarity.")
                 expand_2hop = checkbox_input("2-Hop Expansion", True, hint="Include 2-hop typed partners for untyped 1-hop neurons.")
                 visualize = checkbox_input("Visualize Candidates", True, hint="Generate 3D skeleton visualizations of top matches.")
+                with param_grid(3):
+                    min_synapse_threshold = number_input(
+                        "Min Synapse Threshold", 3, 1, 100,
+                        hint="Minimum synapse count for a connection to enter a profile.",
+                    )
+                    use_cache = checkbox_input(
+                        "Use Cache", True,
+                        hint="Cache profiles and connections locally for faster repeat searches.",
+                    )
+                    use_auto_type_mapping = checkbox_input(
+                        "Auto Type Mapping", True,
+                        hint="Standardize partner type names to canonical (male-cns) names "
+                             "before cross-dataset comparison.",
+                    )
+                saveas = ui.input(
+                    label="Save Folder Name (optional)",
+                    placeholder="e.g., aMe12_homologs",
+                ).classes("w-full drocat-input").tooltip(
+                    "Custom output folder name. Leave empty for the unified auto name."
+                )
                 full_cache = checkbox_input(
                     "Pre-build Full Dataset Cache", False,
                     hint="Fetch connections for EVERY uncached neuron before searching. "
@@ -79,6 +99,10 @@ def create_find_homologs_tab():
             "include_untyped_partners": expand_2hop.value,
             "visualize_skeleton": visualize.value,
             "visualize_top_n": int(viz_top_n.value),
+            "min_synapse_threshold": int(min_synapse_threshold.value),
+            "use_cache": use_cache.value,
+            "saveas": saveas.value.strip() or "",
+            "use_auto_type_mapping": use_auto_type_mapping.value,
             "ensure_cache_complete": full_cache.value,
         }
 

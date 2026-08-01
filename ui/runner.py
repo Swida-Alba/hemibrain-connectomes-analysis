@@ -329,6 +329,8 @@ class ScriptRunner:
             return self._generate_inter_dataset_script(constructor_params, method_params)
         elif tool_name in ("nb_find_lines", "nb_find_neuron", "nb_colabel"):
             return self._generate_neuronbridge_script(tool_name, constructor_params, method_params)
+        elif tool_name == "plot3d_skeleton":
+            return self._generate_plot3d_script(constructor_params, method_params)
 
         # Standard script generation
         params_str = _format_params(constructor_params)
@@ -362,6 +364,60 @@ warnings.filterwarnings("ignore")
 {init_call}# Run the method
 {method_call}
 
+print("[DROCAT] Done.")
+'''
+        return script
+
+    def _generate_plot3d_script(
+        self, constructor_params: dict, method_params: Optional[dict]
+    ) -> str:
+        """Generate script for the 3D skeleton tool, including optional
+        individual-profile PDF/PPTX export and rotating-video export."""
+        params_str = _format_params(constructor_params)
+        mp = method_params or {}
+
+        extra_calls = ""
+        if mp.get("export_individual_profiles"):
+            extra_calls += f"""
+# Export individual profiles (PDF/PPTX)
+vs.plot_individuals(
+    pdf_images_per_page={_format_value(mp.get('pdf_images_per_page', (3, 2)))},
+    views={_format_value(mp.get('views', ['front']))},
+    summary_format={_format_value(mp.get('summary_format', ['pdf']))},
+)
+"""
+        if mp.get("export_video"):
+            extra_calls += f"""
+# Export rotating video / GIF
+vs.export_video(
+    fps={_format_value(mp.get('fps', 30))},
+    degree_per_frame={_format_value(mp.get('degree_per_frame', 1.0))},
+    rotate={_format_value(mp.get('rotate', 'horizontal'))},
+    export_gif={_format_value(mp.get('export_gif', True))},
+    gif_scale={_format_value(mp.get('gif_scale', 0.2))},
+)
+"""
+
+        script = f'''#!/usr/bin/env python
+"""Auto-generated DROCAT runner script for plot3d_skeleton."""
+import sys
+import warnings
+from pathlib import Path
+
+sys.path.insert(0, r"{SRC_DIR}")
+sys.path.insert(0, r"{PROJECT_ROOT}")
+sys.path.insert(0, r"{VISPATH_DIR}")
+
+warnings.filterwarnings("ignore")
+
+from visualize_skeleton import VisualizeSkeleton
+
+vs = VisualizeSkeleton(
+{params_str}
+)
+
+vs.plot_neurons()
+{extra_calls}
 print("[DROCAT] Done.")
 '''
         return script

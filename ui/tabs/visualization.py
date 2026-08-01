@@ -1,7 +1,6 @@
 """Visualization Tab - 3D skeleton and path network visualization."""
 
 import tempfile
-import os
 from pathlib import Path
 
 from nicegui import ui
@@ -22,7 +21,23 @@ COLOR_PRESETS = {
     "Purple": {"source": "#9C27B0", "intermediate": "#BA68C8", "target": "#FF1493", "link": "rgba(156,39,176,0.3)"},
 }
 
-# Common ROI options for multi-select
+# Neuron color palettes (per layer), matched to utils.color_utils.generate_color_palette
+NEURON_COLOR_PRESETS = {
+    "Category20": "category20",
+    "Category10": "category10",
+    "Cool": "cool",
+    "Warm": "warm",
+    "Rainbow": "rainbow",
+    "Viridis": "viridis",
+    "Plasma": "plasma",
+}
+
+ROI_COLOR_MODES = {
+    "auto": "Auto (single gray)",
+    "distinct": "Distinct color per ROI",
+    "custom": "Custom colors (comma-separated)",
+}
+
 COMMON_ROIS = [
     "AL", "LH", "EB", "FB", "PB", "NO", "CA", "PED", "aL", "bL", "gL",
     "AB", "BU", "LAL", "AOTU", "AVLP", "PVLP", "PLP", "WED", "SLP",
@@ -55,49 +70,194 @@ def create_visualization_tab():
                 "Path Network: plot a connection graph from a FindAllPath result file."
             )
 
-        # ---- 3D Skeleton options ----
+        # ================= 3D Skeleton options =================
         with ui.card().classes("w-full").props('id="card-3d"'):
             section_header("Neuron Selection (3D)", "hub")
             neuron_chips = chip_list_input(
                 label="Neurons / Layers",
-                hint="Type a neuron name and press Enter to add it as a chip. Each chip = one neuron/layer in the visualization.",
+                hint="Type a neuron name and press Enter to add a chip. "
+                     "Each chip = one neuron/layer; use 'A -> B -> C' for connected paths.",
+            )
+            custom_layer_names = ui.input(
+                label="Custom Layer Names (optional, comma-separated)",
+                placeholder="e.g., Input, Output",
+            ).classes("w-full drocat-input").tooltip(
+                "Display names for each neuron layer, in the same order as the chips."
             )
             with param_grid(2):
                 dataset = dataset_selector()
                 output_dir = dir_input()
 
-            section_header("3D Skeleton Options", "view_in_ar")
+            section_header("Appearance", "palette")
             with param_grid(2):
                 skeleton_mode = select_input(
                     "Skeleton Mode", SKELETON_MODES, "tube",
                     hint="'tube': 3D tube rendering (detailed). 'line': thin line (fast, for many neurons).",
                 )
+                legend_mode = select_input(
+                    "Legend Mode", ["layer", "type", "single"], "layer",
+                    hint="'layer': one legend entry per layer. 'type': per neuron type. 'single': every neuron.",
+                )
+                neuron_alpha = number_input(
+                    "Neuron Opacity", 0.2, 0, 1, 0.1,
+                    hint="Transparency of neuron tubes (0=invisible, 1=solid).",
+                )
+                neuron_color_preset = select_input(
+                    "Neuron Colors", list(NEURON_COLOR_PRESETS.keys()), "Category20",
+                    hint="Palette used to color neuron layers independently.",
+                )
+                bg_color = select_input(
+                    "Background", ["white", "black"], "white",
+                    hint="Background color for the 3D scene and exports.",
+                )
                 brain_mesh = select_input(
                     "Brain Mesh", BRAIN_MESH_OPTIONS, "template",
-                    hint="'template': show brain outline. 'whole': full brain surface. 'none': no mesh.",
+                    hint="'template': brain outline. 'whole': full brain surface. 'none': no mesh.",
+                )
+                vnc_mesh = checkbox_input(
+                    "VNC Mesh", False,
+                    hint="Show the ventral nerve cord mesh (male-cns / manc datasets).",
                 )
 
+            section_header("Synapses", "bubble_chart")
+            with param_grid(3):
+                skip_synapse = checkbox_input(
+                    "Skip Synapses", True,
+                    hint="Hide synapse markers for a cleaner view.",
+                )
+                min_synapse_num = number_input(
+                    "Min Synapse Count", 3, 1, 100,
+                    hint="Minimum synapses for a connection marker to be shown.",
+                )
+                synapse_size = select_input(
+                    "Synapse Size", ["real", "1", "2", "3"], "real",
+                    hint="'real': scale by synapse count. 1-3: fixed marker size.",
+                )
+                synapse_alpha = number_input(
+                    "Synapse Opacity", 0.6, 0, 1, 0.1,
+                    hint="Transparency of synapse markers.",
+                )
+                synapse_mode = select_input(
+                    "Synapse Mode", ["cone", "scatter"], "cone",
+                    hint="'cone': directional cone markers. 'scatter': simple points.",
+                )
+
+            section_header("Brain Region ROIs (independent)", "view_in_ar")
             roi_select = multi_select_input(
                 "Mesh ROIs",
                 COMMON_ROIS,
                 default=["EB", "LH", "AL"],
-                hint="Select brain regions to show as mesh overlays. Type to search.",
+                hint="Select brain regions to show as meshes. Type any ROI name or regex "
+                     "(e.g. ME.*, all, primary) and press Enter to add it.",
             )
+            roi_select.props('new-value-mode="add-unique"')
+            with param_grid(3):
+                roi_color_mode = select_input(
+                    "ROI Coloring", list(ROI_COLOR_MODES.keys()), "distinct",
+                    hint="'Distinct color per ROI': each selected ROI gets its own color "
+                         "so regions are shown independently. 'Custom': provide your own colors.",
+                )
+                roi_custom_colors = ui.input(
+                    label="ROI Colors (comma-separated)",
+                    placeholder="e.g., rgba(255,0,0,0.15), rgba(0,255,0,0.2)",
+                ).classes("w-full drocat-input").tooltip(
+                    "One color per ROI in the same order as the Mesh ROIs list. "
+                    "Supports hex, named and rgba() colors; alpha inside the color is respected."
+                )
+                mesh_alpha = number_input(
+                    "ROI Mesh Opacity", 0.1, 0, 1, 0.05,
+                    hint="Transparency applied to all ROI meshes (per-ROI alpha can be "
+                         "embedded in custom colors instead).",
+                )
 
             with ui.expansion("Advanced Settings", icon="settings_suggest").classes("w-full"):
-                with param_grid(3):
-                    neuron_alpha = number_input(
-                        "Neuron Opacity", 0.2, 0, 1, 0.1,
-                        hint="Transparency of neuron tubes (0=invisible, 1=solid).",
-                    )
-                    bg_color = select_input("Background", ["white", "black"], "white", hint="Background color for exports.")
-                    export_scale = number_input("Export Scale", 3, 1, 5, hint="Resolution multiplier for PNG exports (higher = sharper).")
+                ui.label("Data & Rendering").classes("drocat-mini-label")
                 with ui.row().classes("gap-4"):
-                    skip_synapse = checkbox_input("Skip Synapses", True, hint="Hide synapse markers for cleaner view.")
-                    show_fig = checkbox_input("Show Figure", True, hint="Open the 3D HTML visualization after rendering.")
-                    export_views = checkbox_input("Export Views", True, hint="Export PNG screenshots from 6 angles.")
+                    cache_neurons = checkbox_input(
+                        "Cache Neurons", True,
+                        hint="Cache fetched skeletons locally for faster repeat renders.",
+                    )
+                    cache_synapses = checkbox_input(
+                        "Cache Synapses", True,
+                        hint="Cache fetched synapse data locally.",
+                    )
+                    smooth_skeleton = checkbox_input(
+                        "Smooth Skeleton", False,
+                        hint="Apply mesh smoothing to neuron skeletons.",
+                    )
+                    show_soma = checkbox_input(
+                        "Show Soma", True,
+                        hint="Render the soma sphere for neurons that have one.",
+                    )
+                    show_connectors = checkbox_input(
+                        "Show Connectors", False,
+                        hint="Show synaptic connector markers.",
+                    )
 
-        # ---- Path Network options ----
+                ui.label("Export").classes("drocat-mini-label")
+                with param_grid(3):
+                    export_method = select_input(
+                        "Export Method", ["webdriver", "kaleido"], "webdriver",
+                        hint="'webdriver': fast, needs Chrome 109+. 'kaleido': slower but stable fallback.",
+                    )
+                    export_scale = number_input(
+                        "Export Scale", 3, 1, 5,
+                        hint="Resolution multiplier for PNG exports (higher = sharper).",
+                    )
+                    brain_mesh_color = ui.input(
+                        label="Brain Mesh Color",
+                        value="auto",
+                        placeholder="auto",
+                    ).classes("w-full drocat-input").tooltip(
+                        "Color for the brain/VNC envelope mesh ('auto', hex, rgba(...))."
+                    )
+                with ui.row().classes("gap-4"):
+                    show_fig = checkbox_input(
+                        "Show Figure", True,
+                        hint="Open the 3D HTML visualization after rendering.",
+                    )
+                    export_views = checkbox_input(
+                        "Export Views", True,
+                        hint="Export PNG screenshots from 6 angles.",
+                    )
+
+                ui.label("Individual Profiles (PDF / PPTX)").classes("drocat-mini-label")
+                with ui.row().classes("gap-4"):
+                    export_individual_profiles = checkbox_input(
+                        "Export Individual Profiles", False,
+                        hint="After rendering, generate a PDF/PPTX with per-neuron profile plots.",
+                    )
+                    summary_format = multi_select_input(
+                        "Summary Format", ["pdf", "pptx"], ["pdf"],
+                        hint="Output formats for the individual-profile summary.",
+                    )
+                with param_grid(3):
+                    profile_cols = number_input("Images Per Page (cols)", 3, 1, 6)
+                    profile_rows = number_input("Images Per Page (rows)", 2, 1, 6)
+                    profile_views = multi_select_input(
+                        "Profile Views", ["front", "side", "top", "back", "bottom"], ["front"],
+                        hint="Camera views included in each individual profile.",
+                    )
+
+                ui.label("Rotating Video / GIF").classes("drocat-mini-label")
+                with ui.row().classes("gap-4"):
+                    export_video = checkbox_input(
+                        "Export Video", False,
+                        hint="Render a rotating video of the 3D scene (needs Chrome/WebDriver).",
+                    )
+                    rotate = select_input(
+                        "Rotate", ["horizontal", "vertical"], "horizontal",
+                    )
+                    export_gif = checkbox_input(
+                        "Also Export GIF", True,
+                        hint="Convert the video to a small GIF as well.",
+                    )
+                with param_grid(3):
+                    fps = number_input("FPS", 30, 5, 60, 5)
+                    degree_per_frame = number_input("Degrees / Frame", 1.0, 0.1, 5.0, 0.1)
+                    gif_scale = number_input("GIF Scale", 0.2, 0.05, 1.0, 0.05)
+
+        # ================= Path Network options =================
         with ui.card().classes("w-full").props('id="card-path"'):
             section_header("Path Network (PlotPath)", "account_tree")
             ui.label(
@@ -176,19 +336,79 @@ def create_visualization_tab():
                 ui.notify("Please add at least one neuron", type="warning")
                 return
             rois = roi_select.value or []
+
+            from src.utils.color_utils import generate_color_palette
+
+            # Per-layer neuron colors (independent coloring)
+            palette_name = NEURON_COLOR_PRESETS.get(
+                neuron_color_preset.value, "category20"
+            )
+            neuron_colors = generate_color_palette(
+                max(len(neurons), 1), palette_name, alpha=1.0
+            )
+
+            # Per-ROI colors so brain regions render independently
+            mesh_color = None
+            if roi_color_mode.value == "distinct" and rois:
+                mesh_color = generate_color_palette(len(rois), "cool", alpha=1.0)
+            elif roi_color_mode.value == "custom" and roi_custom_colors.value.strip():
+                mesh_color = [
+                    c.strip()
+                    for c in roi_custom_colors.value.split(",")
+                    if c.strip()
+                ]
+
+            custom_names = [
+                n.strip()
+                for n in custom_layer_names.value.split(",")
+                if n.strip()
+            ] if custom_layer_names.value else []
+
             constructor_params = {
                 "dataset": dataset.value,
                 "neuron_layers": neurons,
+                "custom_layer_names": custom_names,
                 "output_dir": output_dir.value,
                 "skeleton_mode": skeleton_mode.value,
                 "brain_mesh": brain_mesh.value,
+                "vnc_mesh": vnc_mesh.value,
+                "legend_mode": legend_mode.value,
                 "neuron_alpha": float(neuron_alpha.value),
-                "mesh_roi": rois,
-                "skip_synapse": skip_synapse.value,
-                "show_fig": show_fig.value,
-                "export_views": export_views.value,
+                "neuron_colors": neuron_colors,
                 "background_color": bg_color.value,
+                "skip_synapse": skip_synapse.value,
+                "min_synapse_num": int(min_synapse_num.value),
+                "synapse_size": synapse_size.value,
+                "synapse_alpha": float(synapse_alpha.value),
+                "synapse_mode": synapse_mode.value,
+                "mesh_roi": rois,
+                "mesh_color": mesh_color,
+                "mesh_alpha": float(mesh_alpha.value),
+                "cache_neurons": cache_neurons.value,
+                "cache_synapses": cache_synapses.value,
+                "smooth_skeleton": smooth_skeleton.value,
+                "show_soma": show_soma.value,
+                "show_connectors": show_connectors.value,
+                "export_method": export_method.value,
                 "export_scale": int(export_scale.value),
+                "export_views": export_views.value,
+                "show_fig": show_fig.value,
+                "brain_mesh_color": brain_mesh_color.value.strip() or "auto",
+            }
+            method_params = {
+                "export_individual_profiles": export_individual_profiles.value,
+                "pdf_images_per_page": (
+                    int(profile_cols.value),
+                    int(profile_rows.value),
+                ),
+                "views": profile_views.value or ["front"],
+                "summary_format": summary_format.value or ["pdf"],
+                "export_video": export_video.value,
+                "fps": int(fps.value),
+                "degree_per_frame": float(degree_per_frame.value),
+                "rotate": rotate.value,
+                "export_gif": export_gif.value,
+                "gif_scale": float(gif_scale.value),
             }
             tool_name = "plot3d_skeleton"
             output_dir_for_scan = output_dir.value
@@ -206,6 +426,7 @@ def create_visualization_tab():
                 "network_layout": path_layout.value,
                 "showfig": show_path_fig.value,
             }
+            method_params = None
             tool_name = "plot_path"
             output_dir_for_scan = path_output_dir.value
 
@@ -215,6 +436,7 @@ def create_visualization_tab():
             tool_name,
             constructor_params,
             "plot",
+            method_params=method_params,
             output_dir=output_dir_for_scan,
         )
 

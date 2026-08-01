@@ -146,6 +146,33 @@ class TestRunner:
         assert "vispath_pkg" in script
         assert "vp.visualize()" in script
 
+    def test_generate_plot3d_script_includes_optional_exports(self):
+        """Plot3D optional profile/video calls must be appended after plot_neurons."""
+        from ui.runner import ScriptRunner
+        sr = ScriptRunner()
+        script = sr._generate_script(
+            "plot3d_skeleton",
+            {"dataset": "male-cns:v0.9", "neuron_layers": ["aMe12"]},
+            "plot",
+            {
+                "export_individual_profiles": True,
+                "pdf_images_per_page": (3, 2),
+                "views": ["front"],
+                "summary_format": ["pdf"],
+                "export_video": True,
+                "fps": 30,
+                "degree_per_frame": 1.0,
+                "rotate": "horizontal",
+                "export_gif": True,
+                "gif_scale": 0.2,
+            },
+        )
+        assert "vs.plot_neurons()" in script
+        assert "vs.plot_individuals(" in script
+        assert "vs.export_video(" in script
+        # Optional export keys must not leak into the VisualizeSkeleton constructor
+        assert "export_individual_profiles" not in script.split("VisualizeSkeleton(")[1].split(")")[0]
+
     def test_homologs_ui_params_match_signature(self):
         """Regression: the UI used to send expand_untyped_2hop, which does not exist."""
         import inspect
@@ -187,6 +214,15 @@ class TestRunner:
         sr2 = ScriptRunner()
         sr2._run_logs = [("stdout", "nothing here")]
         assert sr2._extract_output_folder("/tmp") is None
+
+    def test_generate_color_palette_small_n(self):
+        """Bokeh categorical palettes have minimum sizes; small n must still work."""
+        import sys
+        sys.path.insert(0, str(PROJECT_ROOT / "src"))
+        from utils.color_utils import generate_color_palette
+        assert len(generate_color_palette(1, "category20")) == 1
+        assert len(generate_color_palette(2, "category10")) == 2
+        assert len(generate_color_palette(3, "cool")) == 3
 
     def test_pick_directory_exists(self):
         from ui.runner import pick_directory, pick_file

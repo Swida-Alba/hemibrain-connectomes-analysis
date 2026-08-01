@@ -911,10 +911,12 @@ def generate_color_palette(
         import bokeh.palettes as bp
         
         palette_map = {
-            'category10': lambda n: bp.Category10[min(n, 10)],
-            'category20': lambda n: bp.Category20[min(n, 20)],
-            'category20b': lambda n: bp.Category20b[min(n, 20)],
-            'category20c': lambda n: bp.Category20c[min(n, 20)],
+            # Bokeh categorical palettes have minimum sizes (Category10: 2,
+            # Category20: 3); generate at the minimum and slice for small n.
+            'category10': lambda n: bp.Category10[min(max(n, 3), 10)][:n],
+            'category20': lambda n: bp.Category20[min(max(n, 3), 20)][:n],
+            'category20b': lambda n: bp.Category20b[min(max(n, 3), 20)][:n],
+            'category20c': lambda n: bp.Category20c[min(max(n, 3), 20)][:n],
             'viridis': lambda n: bp.Viridis256[::(256 // max(n, 1))][:n],
             'plasma': lambda n: bp.Plasma256[::(256 // max(n, 1))][:n],
             'inferno': lambda n: bp.Inferno256[::(256 // max(n, 1))][:n],

@@ -84,6 +84,30 @@ def create_find_direct_tab():
                     "Exclude Intra-type Connections", False,
                     hint="Remove connections between neurons of the same type.",
                 )
+                with param_grid(2):
+                    custom_source_name = ui.input(
+                        label="Custom Source Name (optional)",
+                        placeholder="e.g., aMe_clock",
+                    ).classes("w-full drocat-input").tooltip(
+                        "Custom label for the source group in output files."
+                    )
+                    custom_target_name = ui.input(
+                        label="Custom Target Name (optional)",
+                        placeholder="e.g., PPL1_dopamine",
+                    ).classes("w-full drocat-input").tooltip(
+                        "Custom label for the target group in output files."
+                    )
+                with param_grid(2):
+                    saveas = ui.input(
+                        label="Save Folder Name (optional)",
+                        placeholder="e.g., aMe_to_PPL_direct",
+                    ).classes("w-full drocat-input").tooltip(
+                        "Custom output folder name. Leave empty for the unified auto name."
+                    )
+                    cache_only = checkbox_input(
+                        "Cache Only (Offline)", False,
+                        hint="Use only local cache and never contact the server.",
+                    )
 
                 ui.separator()
                 with ui.row().classes("gap-4"):
@@ -136,6 +160,10 @@ def create_find_direct_tab():
             "edgeN_limit": int(edge_limit.value),
             "output_format": output_format.value,
             "exclude_intra_type_connections": exclude_intra.value,
+            "custom_source_name": custom_source_name.value.strip() or "",
+            "custom_target_name": custom_target_name.value.strip() or "",
+            "saveas": saveas.value.strip() or "",
+            "cache_only": cache_only.value,
             "separate_hemispheres": separate_hemi.value,
             "keep_only_hemisphere_conserved_connections": keep_hemi_conserved.value,
             "symmetry_analysis": symmetry_analysis.value,

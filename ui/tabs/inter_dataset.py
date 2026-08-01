@@ -78,6 +78,28 @@ def create_inter_dataset_tab():
                     skip_bodyid = checkbox_input("Skip BodyId Level", True, hint="Skip bodyId-level results for speed.")
                     cache_only = checkbox_input("Cache Only (Offline)", False, hint="Use only local cache, no server connection.")
                     auto_type_mapping = checkbox_input("Auto Type Mapping", False, hint="Auto-map type names across datasets.")
+                with param_grid(3):
+                    min_ratio = number_input(
+                        "Min Connection Ratio", 0.0, 0, 1, 0.01,
+                        hint="Minimum weight/post ratio for an edge to be kept.",
+                    )
+                    min_prob = number_input(
+                        "Min Traversal Prob.", 0.0, 0, 1, 0.01,
+                        hint="Minimum traversal probability for an edge to be kept.",
+                    )
+                    output_format = select_input(
+                        "Output Format", ["csv", "xlsx"], "csv",
+                        hint="Format for exported data tables.",
+                    )
+                with param_grid(2):
+                    parallel = checkbox_input(
+                        "Parallel Processing", True,
+                        hint="Run per-dataset work in parallel where possible.",
+                    )
+                    max_workers = number_input(
+                        "Max Workers", 4, 1, 16,
+                        hint="Number of parallel workers (only used when Parallel Processing is on).",
+                    )
 
                 ui.separator()
                 with ui.row().classes("gap-4"):
@@ -155,6 +177,11 @@ def create_inter_dataset_tab():
             "skip_bodyId": skip_bodyid.value,
             "cache_only": cache_only.value,
             "auto_type_mapping": auto_type_mapping.value,
+            "_min_ratio": float(min_ratio.value),
+            "_min_prob": float(min_prob.value),
+            "_output_format": output_format.value,
+            "parallel": parallel.value,
+            "max_workers": int(max_workers.value) if parallel.value else None,
             "separate_hemispheres": separate_hemi.value,
             "keep_only_hemisphere_conserved_connections": keep_hemi_conserved.value,
             "symmetry_analysis": symmetry_analysis.value,
