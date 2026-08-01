@@ -223,7 +223,7 @@ def create_visualization_tab():
             "Completed" if result["returncode"] == 0 else "Failed",
             "green" if result["returncode"] == 0 else "red",
         )
-        output_panel.show_files(result["files"], output_dir_for_scan)
+        output_panel.show_files(result["files"], result.get("output_folder") or output_dir_for_scan)
 
     output_panel.run_button.on_click(run_visualization)
     output_panel.cancel_button.on_click(runner.cancel)

@@ -163,6 +163,7 @@ class ScriptRunner:
         self.process: Optional[asyncio.subprocess.Process] = None
         self.is_running = False
         self._cancelled = False
+        self._run_logs: List[tuple] = []
 
     async def run(
         self,
@@ -196,7 +197,14 @@ class ScriptRunner:
         tool = TOOL_REGISTRY[tool_name]
         self.is_running = True
         self._cancelled = False
+        self._run_logs = []
         start_time = datetime.now()
+
+        def _log(line: str, level: str = "stdout"):
+            """Record every log line and forward it to the UI callback."""
+            self._run_logs.append((level, line))
+            if log_callback:
+                log_callback(line, level)
 
         # Generate the script
         script_content = self._generate_script(
@@ -209,25 +217,22 @@ class ScriptRunner:
             f.write(script_content)
 
         try:
-            if log_callback:
-                label = tool.get("label", tool_name)
-                log_callback("", "system")
-                log_callback(
-                    f"━━━ ▶ UI FUNCTION: {label}  ({tool_name}) ━━━", "system"
-                )
-                log_callback(
-                    "Output streams live below while the function runs; "
-                    "generated files appear in Output Files when it finishes.",
-                    "system",
-                )
-                log_callback("", "system")
-                # Log params as multi-line for readability
-                log_callback("[DROCAT] Parameters:", "system")
-                for k, v in constructor_params.items():
-                    log_callback(f"  {k}: {v}", "system")
-                if method_params:
-                    for k, v in method_params.items():
-                        log_callback(f"  {k}: {v}", "system")
+            label = tool.get("label", tool_name)
+            _log("", "system")
+            _log(f"━━━ ▶ UI FUNCTION: {label}  ({tool_name}) ━━━", "system")
+            _log(
+                "Output streams live below while the function runs; "
+                "generated files appear in Output Files when it finishes.",
+                "system",
+            )
+            _log("", "system")
+            # Log params as multi-line for readability
+            _log("[DROCAT] Parameters:", "system")
+            for k, v in constructor_params.items():
+                _log(f"  {k}: {v}", "system")
+            if method_params:
+                for k, v in method_params.items():
+                    _log(f"  {k}: {v}", "system")
 
             # Get Python executable
             python_exe = sys.executable or "python"
@@ -250,8 +255,7 @@ class ScriptRunner:
             )
 
             # Stream output
-            if log_callback:
-                await self._stream_output(log_callback)
+            await self._stream_output(_log)
 
             # Wait for completion
             returncode = await self.process.wait()
@@ -259,37 +263,43 @@ class ScriptRunner:
             duration = (datetime.now() - start_time).total_seconds()
 
             if self._cancelled:
-                if log_callback:
-                    log_callback("[DROCAT] Execution cancelled by user.", "error")
+                _log("[DROCAT] Execution cancelled by user.", "error")
             elif returncode == 0:
-                if log_callback:
-                    log_callback(
-                        f"━━━ ■ FINISHED: {tool.get('label', tool_name)} — "
-                        f"completed in {duration:.1f}s ━━━",
-                        "success",
-                    )
+                _log(
+                    f"━━━ ■ FINISHED: {tool.get('label', tool_name)} — "
+                    f"completed in {duration:.1f}s ━━━",
+                    "success",
+                )
             else:
-                if log_callback:
-                    log_callback(
-                        f"━━━ ■ FINISHED: {tool.get('label', tool_name)} — "
-                        f"failed with return code {returncode} ━━━",
-                        "error",
-                    )
+                _log(
+                    f"━━━ ■ FINISHED: {tool.get('label', tool_name)} — "
+                    f"failed with return code {returncode} ━━━",
+                    "error",
+                )
 
-            # Scan output directory for files
-            files = self._scan_output_files(output_dir) if output_dir else []
+            # Scan only the folder this run actually generated (not the whole
+            # storage directory, which may contain previous runs).
+            run_output_folder = self._extract_output_folder(output_dir)
+            scan_dir = run_output_folder or output_dir
+            files = self._scan_output_files(scan_dir) if scan_dir else []
 
             return {
                 "returncode": returncode,
                 "files": files,
                 "duration": duration,
                 "cancelled": self._cancelled,
+                "output_folder": scan_dir,
             }
 
         except Exception as e:
-            if log_callback:
-                log_callback(f"[DROCAT] Error: {str(e)}", "error")
-            return {"returncode": -1, "files": [], "duration": 0, "cancelled": False}
+            _log(f"[DROCAT] Error: {str(e)}", "error")
+            return {
+                "returncode": -1,
+                "files": [],
+                "duration": 0,
+                "cancelled": False,
+                "output_folder": None,
+            }
         finally:
             self.is_running = False
             self.process = None
@@ -494,6 +504,51 @@ print("[DROCAT] Done.")
         # Sort by modification time (newest first)
         files.sort(key=lambda x: x["modified"], reverse=True)
         return files[:50]
+
+    OUTPUT_FOLDER_MARKERS = [
+        "Created output folder: ",
+        "data will be saved in: ",
+        "Output files in: ",
+        "Output folder: ",
+        "📁 Output folder: ",
+        "📁 Output: ",
+        "Saving results to: ",
+        "Results saved to: ",
+        "Output will be saved to: ",
+    ]
+
+    def _extract_output_folder(self, output_dir: Optional[str] = None) -> Optional[str]:
+        """
+        Return the folder the current run actually generated.
+
+        Backend functions log where they create their per-run output folder
+        (e.g. "Created output folder: ..."). The last logged path that exists
+        and lies under the requested output directory wins, so the results
+        panel links to the current run instead of older runs in the same
+        storage directory.
+        """
+        candidates = []
+        for _level, line in self._run_logs:
+            for marker in self.OUTPUT_FOLDER_MARKERS:
+                if marker in line:
+                    candidate = line.split(marker, 1)[1].strip().strip("`").strip()
+                    if candidate and os.path.isdir(candidate):
+                        candidates.append(candidate)
+                    break
+        if not candidates:
+            return None
+        if output_dir:
+            base = os.path.abspath(output_dir)
+            # Prefer the newest top-level run folder (a direct child of the
+            # requested output dir); avoid nested folders like
+            # bodyId_visualization that internal tools also log.
+            direct_children = [
+                c for c in candidates if os.path.dirname(os.path.abspath(c)) == base
+            ]
+            for candidate in reversed(direct_children or candidates):
+                if os.path.abspath(candidate).startswith(base):
+                    return candidate
+        return candidates[-1]
 
     def cancel(self):
         """Cancel the running process."""

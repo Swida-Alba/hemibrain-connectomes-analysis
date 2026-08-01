@@ -45,6 +45,15 @@ except ImportError:
         svp = None
         EnrichConnectionTablePolars = None
 
+try:
+    from .utils.naming_utils import dataset_abbrev
+except ImportError:
+    try:
+        from utils.naming_utils import dataset_abbrev
+    except ImportError:
+        def dataset_abbrev(dataset):
+            return "DS"
+
 # Add vispath-subproject to path for VisualizePath import
 vispath_src = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'vispath-subproject', 'src')
 if vispath_src not in sys.path:
@@ -5296,7 +5305,10 @@ class FindNeuronConnection:
                 self.save_folder = os.path.join(self.output_dir, self.saveas)
         elif not self.save_folder: # if save_folder is not specified, save in data_folder, with auto-generated name
             # Create base folder with just source_to_target (no parameters)
-            folder_name = self.source_fname + '_to_' + self.target_fname
+            folder_name = (
+                f"{dataset_abbrev(self.dataset)}_{self.source_fname}"
+                f"_to_{self.target_fname}"
+            )
             if self.folder_prefix:
                 folder_name = f"{self.folder_prefix}_{folder_name}"
             self.save_folder = os.path.join(self.output_dir, folder_name)
@@ -5519,7 +5531,9 @@ class FindNeuronConnection:
         def _format_decimal_for_folder(value):
             """Format decimal numbers for folder-safe string (replace . with _ and negative sign with 'neg')"""
             if isinstance(value, (int, float)):
-                s = str(value)
+                if value == int(value):
+                    return str(int(value))
+                s = f"{value:.6f}".rstrip('0').rstrip('.')
                 return s.replace('.', '_').replace('-', 'neg')
             return str(value)
 
@@ -5536,10 +5550,15 @@ class FindNeuronConnection:
             # If saveas is set, use save_folder directly (it was set to saveas in InitializeNeuronInfo)
             self.direct_folder = self.save_folder
         else:
-            # Otherwise create subfolder with parameters
-            self.direct_folder = os.path.join(self.save_folder, f'direct_{param_suffix}')
+            # Unified per-run folder: finddirect_{dataset}_{src}_to_{tgt}{params}_{ts}
+            self.direct_folder = os.path.join(
+                self.output_dir,
+                f"finddirect_{dataset_abbrev(self.dataset)}_{self.source_fname}"
+                f"_to_{self.target_fname}_{param_suffix.lstrip('_')}",
+            )
             
         if not os.path.exists(self.direct_folder): os.makedirs(self.direct_folder)
+        self._vprint(f'  📁 Created output folder: {self.direct_folder}', level='full')
         
         # Initialize parameter.txt file
         self.parameter_txt = os.path.join(self.direct_folder, 'parameters.txt')
@@ -5989,7 +6008,9 @@ class FindNeuronConnection:
         def format_decimal(value):
             """Convert decimal to folder-safe string (replace . with _)"""
             if isinstance(value, (int, float)):
-                str_val = str(value)
+                if value == int(value):
+                    return str(int(value))
+                str_val = f"{value:.6f}".rstrip('0').rstrip('.')
                 return str_val.replace('.', '_').replace('-', 'neg')
             return str(value)
         
@@ -6006,11 +6027,16 @@ class FindNeuronConnection:
             # If saveas is set, use save_folder directly
             self.path_folder = self.save_folder
         else:
-            # Otherwise create subfolder with parameters
-            self.path_folder = os.path.join(base_folder, f'paths_{param_suffix}')
+            # Unified per-run folder: tool_dataset_src_to_tgt_params_timestamp
+            self.path_folder = os.path.join(
+                self.output_dir,
+                f"findpath_{dataset_abbrev(self.dataset)}_{self.source_fname}"
+                f"_to_{self.target_fname}_{param_suffix.lstrip('_')}",
+            )
             
         if not os.path.exists(self.path_folder):
             os.makedirs(self.path_folder)
+            self._vprint(f'  📁 Created output folder: {self.path_folder}', level='full')
         targetNum = len(self.target_df)
         self.target_df.insert(loc=0,column='Checked',value=False)
         
@@ -6782,8 +6808,12 @@ class FindNeuronConnection:
             # If saveas is set, use save_folder directly
             self.allpath_folder = self.save_folder
         else:
-            # Otherwise create subfolder with parameters
-            self.allpath_folder = os.path.join(self.save_folder, f'allpaths{param_suffix}')
+            # Unified per-run folder: findpath_{dataset}_{src}_to_{tgt}{params}_{ts}
+            self.allpath_folder = os.path.join(
+                self.output_dir,
+                f"findpath_{dataset_abbrev(self.dataset)}_{self.source_fname}"
+                f"_to_{self.target_fname}_{param_suffix.lstrip('_')}",
+            )
             
         if not os.path.exists(self.allpath_folder): 
             os.makedirs(self.allpath_folder, exist_ok=True)

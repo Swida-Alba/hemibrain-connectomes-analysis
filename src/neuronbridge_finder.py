@@ -50,6 +50,14 @@ from typing import Any, Dict, List, Optional, Tuple, Union, TYPE_CHECKING
 import bokeh.palettes
 import numpy as np
 import pandas as pd
+try:
+    from .utils.naming_utils import dataset_abbrev
+except ImportError:
+    try:
+        from utils.naming_utils import dataset_abbrev
+    except ImportError:
+        def dataset_abbrev(dataset):
+            return "DS"
 
 # Try to import polars for faster DataFrame operations on large datasets
 try:
@@ -7553,7 +7561,7 @@ class NeuronBridgeFinder:
             line_info = ''.join(c if c.isalnum() or c in '-_' else '_' for c in line_info)
             output_path = os.path.join(output_dir, f'findneuron_{line_info}_{timestamp}')
             os.makedirs(output_path, exist_ok=True)
-            self._vprint(f"   Output: {output_path}")
+            self._vprint(f"   📁 Output folder: {output_path}")
             
             # Save parameters for reproducibility
             self._save_parameters(
@@ -8099,7 +8107,7 @@ class NeuronBridgeFinder:
             lines_info = ''.join(c if c.isalnum() or c in '-_' else '_' for c in lines_info)
             output_path = os.path.join(output_dir, f'colabel_{lines_info}_{timestamp}')
             os.makedirs(output_path, exist_ok=True)
-            self._vprint(f"   Output: {output_path}")
+            self._vprint(f"   📁 Output folder: {output_path}")
             
             # Save parameters for reproducibility
             self._save_parameters(
@@ -8935,9 +8943,10 @@ class NeuronBridgeFinder:
                 query_info += '_etc'
             # Sanitize folder name (remove special characters)
             query_info = ''.join(c if c.isalnum() or c in '-_' else '_' for c in query_info)
-            output_path = os.path.join(output_dir, f'findlines_{query_info}_{timestamp}')
+            ds_abbr = dataset_abbrev(dataset) if isinstance(dataset, str) else 'ALL'
+            output_path = os.path.join(output_dir, f'findlines_{ds_abbr}_{query_info}_{timestamp}')
             os.makedirs(output_path, exist_ok=True)
-            self._vprint(f"   Output: {output_path}")
+            self._vprint(f"   📁 Output folder: {output_path}")
             
             # Save parameters for reproducibility
             self._save_parameters(

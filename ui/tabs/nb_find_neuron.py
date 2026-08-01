@@ -69,7 +69,7 @@ def create_nb_find_neuron_tab():
         output_panel.set_running(False)
         output_panel.set_status("Completed" if result["returncode"] == 0 else "Failed",
                                 "green" if result["returncode"] == 0 else "red")
-        output_panel.show_files(result["files"], output_dir.value)
+        output_panel.show_files(result["files"], result.get("output_folder") or output_dir.value)
 
     output_panel.run_button.on_click(run_find_neuron)
     output_panel.cancel_button.on_click(runner.cancel)

@@ -1814,6 +1814,8 @@ class ComparisonAnalyzer:
         Returns:
             Dictionary with all comparison metrics and findings
         """
+        if self.parameters and self.parameters.full_output_path:
+            self._log(f"📁 Output folder: {self.parameters.full_output_path}")
         # Run path analyses
         self.run_all_analyses(skip_existing=skip_existing)
         

@@ -169,6 +169,25 @@ class TestRunner:
             files = sr._scan_output_files(tmpdir)
             assert len(files) >= 1
 
+    def test_extract_output_folder_picks_current_run(self):
+        """The results panel must link to THIS run's folder, not older ones."""
+        from ui.runner import ScriptRunner
+        sr = ScriptRunner()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            old = Path(tmpdir) / "aMe12_to_aMe10"
+            new = Path(tmpdir) / "findpath_MCNS_aMe12_to_aMe10_L2w3r0p0_20260801_120000"
+            old.mkdir()
+            new.mkdir()
+            sr._run_logs = [
+                ("stdout", f"data will be saved in: {old}"),
+                ("stdout", f"  📁 Created output folder: {new}"),
+            ]
+            assert sr._extract_output_folder(tmpdir) == str(new)
+
+        sr2 = ScriptRunner()
+        sr2._run_logs = [("stdout", "nothing here")]
+        assert sr2._extract_output_folder("/tmp") is None
+
     def test_pick_directory_exists(self):
         from ui.runner import pick_directory, pick_file
         assert callable(pick_directory)

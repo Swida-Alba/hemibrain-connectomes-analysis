@@ -33,6 +33,14 @@ import warnings
 import math
 import heapq
 import json
+try:
+    from ..utils.naming_utils import dataset_abbrev
+except ImportError:
+    try:
+        from utils.naming_utils import dataset_abbrev
+    except ImportError:
+        def dataset_abbrev(dataset):
+            return "DS"
 
 import numpy as np
 import pandas as pd
@@ -6089,7 +6097,11 @@ class HomologFinder:
         if saveas is None:
             timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
             safe_query = str(query).replace('/', '_').replace(':', '_').replace('*', '_')
-            folder_name = f'homologs_{safe_query}_{timestamp}'
+            folder_name = (
+                f"homologs_{dataset_abbrev(getattr(self, 'source_dataset', None))}"
+                f"_to_{dataset_abbrev(getattr(self, 'target_dataset', None))}"
+                f"_{safe_query}_{timestamp}"
+            )
         else:
             folder_name = saveas
         
@@ -6106,6 +6118,7 @@ class HomologFinder:
         dirs_to_create = [output_path, results_dir, query_profiles_dir, match_profiles_dir, overlaps_dir]
         if visualize_skeleton:
             dirs_to_create.append(visualization_dir)
+        self._log(f"📁 Output folder: {output_path}")
         for dir_path in dirs_to_create:
             dir_path.mkdir(parents=True, exist_ok=True)
         
@@ -8147,7 +8160,10 @@ class ConnectivityProfileComparer:
     def _get_output_path(self) -> Path:
         """Generate the full output path with timestamp."""
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        folder_name = f"connectivity_profiling_{self.query_name}_{timestamp}"
+        folder_name = (
+            f"profiling_{dataset_abbrev(getattr(self, 'dataset', None))}"
+            f"_{self.query_name}_{timestamp}"
+        )
         
         if self.output_dir:
             return Path(self.output_dir) / folder_name
@@ -8954,6 +8970,7 @@ class ConnectivityProfileComparer:
         """
         output_path = self._get_output_path()
         output_path.mkdir(parents=True, exist_ok=True)
+        self._log(f"📁 Output folder: {output_path}")
         
         # Create main directory structure
         profiles_dir = output_path / 'profiles'
