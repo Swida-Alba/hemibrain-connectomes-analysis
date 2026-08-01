@@ -65,6 +65,47 @@ class TestRunner:
                      "inter_dataset", "nb_find_lines", "nb_find_neuron", "nb_colabel",
                      "plot3d_skeleton", "plot_path"}
         assert expected.issubset(TOOL_REGISTRY.keys())
+        for name in expected:
+            assert "label" in TOOL_REGISTRY[name], f"missing UI label for {name}"
+
+    def test_streaming_logs_emit_lines_and_progress_immediately(self):
+        """Partial lines and \\r progress must reach the log before the run ends."""
+        import asyncio
+        import sys
+        from ui.runner import ScriptRunner
+
+        async def run() -> list:
+            runner = ScriptRunner()
+            code = (
+                "import sys, time\n"
+                "print('start-line', flush=True)\n"
+                "for i in range(3):\n"
+                "    sys.stdout.write(f'\\rprogress {i}')\n"
+                "    sys.stdout.flush()\n"
+                "    time.sleep(0.02)\n"
+                "print()\n"
+                "print('end-line', flush=True)\n"
+            )
+            runner.process = await asyncio.create_subprocess_exec(
+                sys.executable,
+                "-u",
+                "-c",
+                code,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            events = []
+            await runner._stream_output(lambda msg, level: events.append((level, msg)))
+            await runner.process.wait()
+            return events
+
+        events = asyncio.run(run())
+        assert ("stdout", "start-line") in events
+        assert ("stdout", "end-line") in events
+        progress_events = [(lvl, msg) for lvl, msg in events if lvl == "progress"]
+        assert any("progress" in msg for _, msg in progress_events), progress_events
+        first_progress = next(i for i, (lvl, _) in enumerate(events) if lvl == "progress")
+        assert first_progress < events.index(("stdout", "end-line"))
 
     def test_generate_find_path_script(self):
         from ui.runner import ScriptRunner

@@ -54,6 +54,7 @@ class OutputPanel:
         self.run_button: Optional[ui.button] = None
         self.cancel_button: Optional[ui.button] = None
         self._files: List[dict] = []
+        self._last_is_progress = False
 
     def create(
         self,
@@ -107,6 +108,20 @@ class OutputPanel:
         """Add a log message to the panel."""
         if not self.log_area:
             return
+        # Progress lines (tqdm-style \r updates) replace the previous progress
+        # line in place so long-running functions show a live-updating status.
+        if level == "progress":
+            children = self.log_area.default_slot.children
+            if self._last_is_progress and children:
+                last = children[-1]
+                if hasattr(last, "set_text"):
+                    last.set_text(message)
+                    last.update()
+                    return
+            self._last_is_progress = True
+            self.log_area.push(message)
+            return
+        self._last_is_progress = False
         prefix_map = {
             "stdout": "",
             "stderr": "[WARN] ",
@@ -202,6 +217,7 @@ class OutputPanel:
 
     def clear(self):
         """Clear the log and files."""
+        self._last_is_progress = False
         if self.log_area:
             self.log_area.clear()
         self._files = []

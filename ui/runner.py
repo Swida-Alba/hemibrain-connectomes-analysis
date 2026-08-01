@@ -27,6 +27,7 @@ VISPATH_DIR = PROJECT_ROOT / "vispath-subproject" / "src"
 # =============================================================================
 TOOL_REGISTRY: Dict[str, dict] = {
     "find_path": {
+        "label": "Find All Paths",
         "import": "from coana import FindNeuronConnection",
         "class": "FindNeuronConnection",
         "var": "fc",
@@ -37,6 +38,7 @@ TOOL_REGISTRY: Dict[str, dict] = {
         },
     },
     "find_direct": {
+        "label": "Find Direct Connections",
         "import": "from coana import FindNeuronConnection",
         "class": "FindNeuronConnection",
         "var": "fc",
@@ -46,6 +48,7 @@ TOOL_REGISTRY: Dict[str, dict] = {
         },
     },
     "connectivity_profiling": {
+        "label": "Connectivity Profiling",
         "import": "from comparison.profile_comparator import ConnectivityProfileComparer",
         "class": "ConnectivityProfileComparer",
         "var": "comparer",
@@ -55,6 +58,7 @@ TOOL_REGISTRY: Dict[str, dict] = {
         },
     },
     "find_homologs": {
+        "label": "Homolog Finding",
         "import": "from comparison.profile_comparator import HomologFinder",
         "class": "HomologFinder",
         "var": "finder",
@@ -65,6 +69,7 @@ TOOL_REGISTRY: Dict[str, dict] = {
         },
     },
     "inter_dataset": {
+        "label": "Cross-Dataset Comparison",
         "import": "from comparison import ComparisonParameters, ComparisonAnalyzer",
         "class": "ComparisonAnalyzer",
         "var": "analyzer",
@@ -75,6 +80,7 @@ TOOL_REGISTRY: Dict[str, dict] = {
         "wrapper": True,  # Needs special wrapper for ComparisonParameters
     },
     "nb_find_lines": {
+        "label": "Find Driver Lines",
         "import": "from neuronbridge_finder import NeuronBridgeFinder",
         "class": "NeuronBridgeFinder",
         "var": "finder",
@@ -84,6 +90,7 @@ TOOL_REGISTRY: Dict[str, dict] = {
         },
     },
     "nb_find_neuron": {
+        "label": "Find EM Neurons",
         "import": "from neuronbridge_finder import NeuronBridgeFinder",
         "class": "NeuronBridgeFinder",
         "var": "finder",
@@ -93,6 +100,7 @@ TOOL_REGISTRY: Dict[str, dict] = {
         },
     },
     "nb_colabel": {
+        "label": "Co-Labeling Analysis",
         "import": "from neuronbridge_finder import NeuronBridgeFinder",
         "class": "NeuronBridgeFinder",
         "var": "finder",
@@ -102,6 +110,7 @@ TOOL_REGISTRY: Dict[str, dict] = {
         },
     },
     "plot3d_skeleton": {
+        "label": "3D Skeleton Visualization",
         "import": "from visualize_skeleton import VisualizeSkeleton",
         "class": "VisualizeSkeleton",
         "var": "vs",
@@ -111,6 +120,7 @@ TOOL_REGISTRY: Dict[str, dict] = {
         },
     },
     "plot_path": {
+        "label": "Path Network Visualization",
         "import": "from vispath_pkg import VisualizePath",
         "class": "VisualizePath",
         "var": "vp",
@@ -183,6 +193,7 @@ class ScriptRunner:
                 log_callback(msg, "error")
             return {"returncode": -1, "files": [], "duration": 0, "cancelled": False}
 
+        tool = TOOL_REGISTRY[tool_name]
         self.is_running = True
         self._cancelled = False
         start_time = datetime.now()
@@ -199,11 +210,24 @@ class ScriptRunner:
 
         try:
             if log_callback:
-                log_callback(f"[DROCAT] Starting: {tool_name}", "system")
+                label = tool.get("label", tool_name)
+                log_callback("", "system")
+                log_callback(
+                    f"━━━ ▶ UI FUNCTION: {label}  ({tool_name}) ━━━", "system"
+                )
+                log_callback(
+                    "Output streams live below while the function runs; "
+                    "generated files appear in Output Files when it finishes.",
+                    "system",
+                )
+                log_callback("", "system")
                 # Log params as multi-line for readability
                 log_callback("[DROCAT] Parameters:", "system")
                 for k, v in constructor_params.items():
                     log_callback(f"  {k}: {v}", "system")
+                if method_params:
+                    for k, v in method_params.items():
+                        log_callback(f"  {k}: {v}", "system")
 
             # Get Python executable
             python_exe = sys.executable or "python"
@@ -239,10 +263,18 @@ class ScriptRunner:
                     log_callback("[DROCAT] Execution cancelled by user.", "error")
             elif returncode == 0:
                 if log_callback:
-                    log_callback(f"[DROCAT] Completed successfully in {duration:.1f}s", "success")
+                    log_callback(
+                        f"━━━ ■ FINISHED: {tool.get('label', tool_name)} — "
+                        f"completed in {duration:.1f}s ━━━",
+                        "success",
+                    )
             else:
                 if log_callback:
-                    log_callback(f"[DROCAT] Failed with return code {returncode}", "error")
+                    log_callback(
+                        f"━━━ ■ FINISHED: {tool.get('label', tool_name)} — "
+                        f"failed with return code {returncode} ━━━",
+                        "error",
+                    )
 
             # Scan output directory for files
             files = self._scan_output_files(output_dir) if output_dir else []
@@ -393,18 +425,42 @@ print("[DROCAT] Done.")
         return script
 
     async def _stream_output(self, log_callback: Callable[[str, str], None]):
-        """Stream stdout and stderr in real-time."""
+        """
+        Stream stdout/stderr to the UI in real time.
+
+        Reads chunks as soon as they arrive (unbuffered subprocess), emits
+        complete lines immediately, and forwards carriage-return progress
+        (e.g. tqdm bars) as a live-updating 'progress' line so the log never
+        appears frozen while a long-running function works.
+        """
         if not self.process:
             return
 
         async def read_stream(stream, stream_name):
+            buffer = ""
             while True:
-                line = await stream.readline()
-                if not line:
+                chunk = await stream.read(4096)
+                if not chunk:
                     break
-                decoded = line.decode("utf-8", errors="replace").rstrip()
-                if decoded:
-                    log_callback(decoded, stream_name)
+                buffer += chunk.decode("utf-8", errors="replace")
+
+                # Emit every complete line immediately
+                while "\n" in buffer:
+                    line, buffer = buffer.split("\n", 1)
+                    line = line.rstrip("\r")
+                    if line:
+                        log_callback(line, stream_name)
+
+                # A trailing carriage return means an in-place progress update
+                # (e.g. tqdm). Forward the latest segment as a 'progress' line.
+                if "\r" in buffer:
+                    progress = buffer.rsplit("\r", 1)[-1].strip("\r")
+                    if progress:
+                        log_callback(progress, "progress")
+
+            # Flush any remaining partial line at EOF
+            if buffer.strip():
+                log_callback(buffer.rstrip("\r"), stream_name)
 
         # Read both streams concurrently
         await asyncio.gather(
