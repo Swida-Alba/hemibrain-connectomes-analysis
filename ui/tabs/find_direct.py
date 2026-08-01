@@ -141,8 +141,8 @@ def create_find_direct_tab():
             "symmetry_analysis": symmetry_analysis.value,
         }
 
-        result = await runner.run("find_direct", constructor_params, "find_direct",
-                                  log_callback=output_panel.log, output_dir=output_dir.value)
+        result = await output_panel.run(runner, "find_direct", constructor_params, "find_direct",
+                                        output_dir=output_dir.value)
 
         output_panel.set_running(False)
         output_panel.set_status("Completed" if result["returncode"] == 0 else "Failed",

@@ -108,28 +108,38 @@ class OutputPanel:
         """Add a log message to the panel."""
         if not self.log_area:
             return
-        # Progress lines (tqdm-style \r updates) replace the previous progress
-        # line in place so long-running functions show a live-updating status.
-        if level == "progress":
-            children = self.log_area.default_slot.children
-            if self._last_is_progress and children:
-                last = children[-1]
-                if hasattr(last, "set_text"):
-                    last.set_text(message)
-                    last.update()
-                    return
-            self._last_is_progress = True
-            self.log_area.push(message)
-            return
-        self._last_is_progress = False
-        prefix_map = {
-            "stdout": "",
-            "stderr": "[WARN] ",
-            "error": "[ERROR] ",
-            "success": "[OK] ",
-            "system": "[SYS] ",
-        }
-        self.log_area.push(prefix_map.get(level, "") + message)
+        try:
+            # Progress lines (tqdm-style \r updates) replace the previous
+            # progress line in place so long-running functions show a
+            # live-updating status.
+            if level == "progress":
+                children = self.log_area.default_slot.children
+                if self._last_is_progress and children:
+                    last = children[-1]
+                    if hasattr(last, "set_text"):
+                        last.set_text(message)
+                        last.update()
+                        return
+                self._last_is_progress = True
+                self.log_area.push(message)
+                self.log_area.update()
+                return
+            self._last_is_progress = False
+            prefix_map = {
+                "stdout": "",
+                "stderr": "[WARN] ",
+                "error": "[ERROR] ",
+                "success": "[OK] ",
+                "system": "[SYS] ",
+            }
+            self.log_area.push(prefix_map.get(level, "") + message)
+            # Force an immediate flush to the browser
+            self.log_area.update()
+        except Exception:
+            # The page may have been closed or navigated away while the run
+            # was active; silently drop further log lines instead of crashing
+            # the run handler.
+            pass
 
     def set_status(self, status: str, color: str = "grey"):
         """Update the status pill."""
@@ -150,6 +160,11 @@ class OutputPanel:
                 self.progress_row.set_visibility(True)
             if self.progress_bar:
                 self.progress_bar.props("indeterminate")
+            # Make sure the results panel (with the log) is visible
+            ui.run_javascript(
+                "const card = document.querySelector('.drocat-results-card');"
+                "if (card) card.scrollIntoView({behavior:'smooth', block:'nearest'});"
+            )
         else:
             if self.run_button:
                 self.run_button.enable()
@@ -160,6 +175,38 @@ class OutputPanel:
             if self.progress_bar:
                 self.progress_bar.props(":indeterminate='false'")
                 self.progress_bar.value = 1.0 if self._files else 0.0
+
+    async def run(
+        self,
+        runner,
+        tool_name: str,
+        constructor_params: dict,
+        method_name: str,
+        method_params: Optional[dict] = None,
+        output_dir: Optional[str] = None,
+    ) -> dict:
+        """
+        Run a tool through the UI runner and always surface errors in the log.
+
+        Any exception is written into the execution log (instead of silently
+        failing the handler and leaving an empty log with a stuck Run button).
+        """
+        try:
+            return await runner.run(
+                tool_name,
+                constructor_params,
+                method_name,
+                method_params=method_params,
+                log_callback=self.log,
+                output_dir=output_dir,
+            )
+        except Exception as exc:  # noqa: BLE001
+            import traceback
+            self.log(
+                f"[DROCAT] Unexpected UI error: {type(exc).__name__}: {exc}", "error"
+            )
+            self.log(traceback.format_exc().rstrip(), "error")
+            return {"returncode": -1, "files": [], "duration": 0, "cancelled": False}
 
     def show_files(self, files: List[dict], output_dir: Optional[str] = None):
         """Display output files organized by category as a card grid."""

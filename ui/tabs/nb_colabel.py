@@ -72,9 +72,9 @@ def create_nb_colabel_tab():
             "visualize_top_n": int(viz_top_n.value) if visualize_3d.value else 0,
         }
 
-        result = await runner.run("nb_colabel", constructor_params, "colabel",
-                                  method_params=method_params,
-                                  log_callback=output_panel.log, output_dir=output_dir.value)
+        result = await output_panel.run(runner, "nb_colabel", constructor_params, "colabel",
+                                        method_params=method_params,
+                                        output_dir=output_dir.value)
 
         output_panel.set_running(False)
         output_panel.set_status("Completed" if result["returncode"] == 0 else "Failed",

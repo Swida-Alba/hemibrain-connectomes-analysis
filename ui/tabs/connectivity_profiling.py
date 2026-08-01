@@ -105,8 +105,8 @@ def create_connectivity_profiling_tab():
             "ensure_cache_complete": full_cache.value,
         }
 
-        result = await runner.run("connectivity_profiling", constructor_params, "run",
-                                  log_callback=output_panel.log, output_dir=output_dir.value)
+        result = await output_panel.run(runner, "connectivity_profiling", constructor_params, "run",
+                                        output_dir=output_dir.value)
 
         output_panel.set_running(False)
         output_panel.set_status("Completed" if result["returncode"] == 0 else "Failed",

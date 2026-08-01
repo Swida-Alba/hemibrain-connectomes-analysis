@@ -163,8 +163,8 @@ def create_inter_dataset_tab():
         if nicknames:
             constructor_params["datasets_nickname"] = nicknames
 
-        result = await runner.run("inter_dataset", constructor_params, "run",
-                                  log_callback=output_panel.log, output_dir=output_dir.value)
+        result = await output_panel.run(runner, "inter_dataset", constructor_params, "run",
+                                        output_dir=output_dir.value)
 
         output_panel.set_running(False)
         output_panel.set_status("Completed" if result["returncode"] == 0 else "Failed",

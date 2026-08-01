@@ -210,11 +210,11 @@ def create_visualization_tab():
             output_dir_for_scan = path_output_dir.value
 
         output_panel.set_running(True)
-        result = await runner.run(
+        result = await output_panel.run(
+            runner,
             tool_name,
             constructor_params,
             "plot",
-            log_callback=output_panel.log,
             output_dir=output_dir_for_scan,
         )
 

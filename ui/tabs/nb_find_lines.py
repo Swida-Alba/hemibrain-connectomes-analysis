@@ -97,9 +97,9 @@ def create_nb_find_lines_tab():
             "summary_format": 'pdf' if generate_pdf.value else None,
         }
 
-        result = await runner.run("nb_find_lines", constructor_params, "find_lines",
-                                  method_params=method_params,
-                                  log_callback=output_panel.log, output_dir=output_dir.value)
+        result = await output_panel.run(runner, "nb_find_lines", constructor_params, "find_lines",
+                                        method_params=method_params,
+                                        output_dir=output_dir.value)
 
         output_panel.set_running(False)
         output_panel.set_status("Completed" if result["returncode"] == 0 else "Failed",

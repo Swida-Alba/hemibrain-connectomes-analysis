@@ -196,8 +196,8 @@ def create_find_path_tab():
             "find_reciprocal": find_reciprocal.value,
         }
 
-        result = await runner.run("find_path", constructor_params, "find_all_path",
-                                  log_callback=output_panel.log, output_dir=output_dir.value)
+        result = await output_panel.run(runner, "find_path", constructor_params, "find_all_path",
+                                        output_dir=output_dir.value)
 
         output_panel.set_running(False)
         output_panel.set_status("Completed" if result["returncode"] == 0 else "Failed",
