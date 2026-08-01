@@ -181,7 +181,11 @@ DROCAT ships a Codex skill that lets an AI agent install, verify, and prepare th
 
 > Install DROCAT on this machine and verify it works.
 
-The agent fetches the repository from GitHub first (no local copy needed):
+**One-line command for Codex / any agent** — copy and paste this anywhere (no local repo needed):
+
+> Fetch https://raw.githubusercontent.com/Swida-Alba/Drosophila-cross-dataset-connectome-analysis/v4.4.3/skills/drocat-install/SKILL.md and follow it to install DROCAT on this machine.
+
+Equivalent manual fetch (what the agent runs):
 
 ```bash
 git clone --branch v4.4.3 https://github.com/Swida-Alba/Drosophila-cross-dataset-connectome-analysis.git drocat

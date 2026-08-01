@@ -16,7 +16,12 @@ The fastest way to install DROCAT is to let an AI agent do it with the bundled
 
    > Install DROCAT on this machine and verify it works.
 
-3. The agent will:
+3. **Or copy-paste this one-liner anywhere** (no local repo needed) — the agent fetches the
+   skill file and follows it:
+
+   > Fetch https://raw.githubusercontent.com/Swida-Alba/Drosophila-cross-dataset-connectome-analysis/v4.4.3/skills/drocat-install/SKILL.md and follow it to install DROCAT on this machine.
+
+4. The agent will:
    - Fetch the repository from GitHub:
 
      ```bash
