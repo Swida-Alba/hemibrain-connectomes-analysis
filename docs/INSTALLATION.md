@@ -1,5 +1,43 @@
 # Installation Guide
 
+> [!TIP]
+> 🤖 **Agent-assisted installation (Codex):** DROCAT ships an AI-agent skill
+> ([`skills/drocat-install/SKILL.md`](../skills/drocat-install/SKILL.md)) that installs,
+> verifies, and prepares the toolkit automatically. See
+> [Agent-Assisted Installation](#agent-assisted-installation-codex) below.
+
+## Agent-Assisted Installation (Codex)
+
+The fastest way to install DROCAT is to let an AI agent do it with the bundled
+`drocat-install` skill:
+
+1. **Open Codex** in this repository.
+2. **Ask:**
+
+   > Install DROCAT on this machine and verify it works.
+
+3. The agent will:
+   - Create the `drocat` conda environment (Python 3.11)
+   - Install `requirements.txt` (Linux/macOS) or `requirements-windows.txt` (Windows)
+   - Install `neuronbridge-python --no-deps` (required for NeuronBridge scripts)
+   - Ask you for NeuPrint / CAVE tokens and write them to `token_info_local.txt`
+   - Verify the installation with `skills/drocat-install/scripts/verify_install.py`
+   - Leave you ready to run any `scripts/*.py` entry point (this version has no web UI)
+
+**Manual verification** (or to re-check an existing install):
+
+```bash
+conda activate drocat
+python skills/drocat-install/scripts/verify_install.py --project .
+```
+
+**Install the skill globally** so any Codex session can use it:
+
+```bash
+mkdir -p ~/.codex/skills/drocat-install
+cp -R skills/drocat-install/. ~/.codex/skills/drocat-install/
+```
+
 ## Quick Start
 
 ### Recommended: Using Conda Environment

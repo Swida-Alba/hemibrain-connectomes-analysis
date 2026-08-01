@@ -2,6 +2,12 @@
 
 A comprehensive Python toolkit for analyzing and visualizing connectome data from **all NeuPrint databases and FlyWire datasets**. Features type-based pathfinding algorithms, interactive network visualizations with NT grouping, 3D neuron morphology rendering, and EM↔LM driver line mapping.
 
+> [!TIP]
+> 🤖 **Agent-assisted installation:** ask your AI agent (e.g., Codex) to run the bundled
+> [`drocat-install`](skills/drocat-install/SKILL.md) skill — it installs all dependencies,
+> configures tokens, and verifies the installation for you.
+> See [Agent-Assisted Install](#agent-assisted-install-codex).
+
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 ---
@@ -28,6 +34,7 @@ A comprehensive Python toolkit for analyzing and visualizing connectome data fro
 | **[Installation](docs/INSTALLATION.md)**                        | Detailed installation instructions  |
 | **[Authentication](docs/INSTALLATION.md#authentication-setup)** | **Set up NeuPrint and CAVE tokens** |
 | **[Troubleshooting](docs/TROUBLESHOOTING.md)**                  | Common issues and solutions         |
+| **[Agent Install (Codex)](skills/drocat-install/SKILL.md)**     | **Let Codex install, verify & run DROCAT** |
 | **[Basic Usage](#basic-usage)**                                 | Core script tutorials               |
 
 ### 📖 Feature Documentation
@@ -161,6 +168,38 @@ pip install -r requirements.txt  # Linux/macOS
 # or
 pip install -r requirements-windows.txt # Windows
 pip install neuronbridge-python --no-deps
+```
+
+### Agent-Assisted Install (Codex)
+
+DROCAT ships a Codex skill that lets an AI agent install, verify, and prepare the toolkit for you:
+
+- **Skill source (repo):** [`skills/drocat-install/`](skills/drocat-install/SKILL.md)
+- **Global copy (auto-discovered):** `~/.codex/skills/drocat-install/`
+
+**Usage** — open Codex in this repository and ask:
+
+> Install DROCAT on this machine and verify it works.
+
+The agent will:
+
+1. Create the `drocat` conda environment (Python 3.11) and install `requirements.txt` (or `requirements-windows.txt`) plus `neuronbridge-python --no-deps`
+2. Ask you for NeuPrint / CAVE tokens and write them to `token_info_local.txt`
+3. Verify the installation with [`verify_install.py`](skills/drocat-install/scripts/verify_install.py) (Python version, imports, backend modules, token file)
+4. Leave you ready to run any `scripts/*.py` entry point
+
+Manual verification (or to re-check an existing install):
+
+```bash
+conda activate drocat
+python skills/drocat-install/scripts/verify_install.py --project .
+```
+
+To install/refresh the global skill copy after updating the repo version:
+
+```bash
+mkdir -p ~/.codex/skills/drocat-install
+cp -R skills/drocat-install/. ~/.codex/skills/drocat-install/
 ```
 
 ### Get NeuPrint Token
