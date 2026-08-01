@@ -2,6 +2,12 @@
 
 A comprehensive Python toolkit for analyzing and visualizing connectome data from **all NeuPrint databases and FlyWire datasets**. Features type-based pathfinding algorithms, interactive network visualizations with NT grouping, 3D neuron morphology rendering, and EM↔LM driver line mapping.
 
+> [!TIP]
+> 🤖 **Agent-assisted installation:** ask your AI agent (e.g., Codex) to run the bundled
+> [`drocat-install`](skills/drocat-install/SKILL.md) skill — it installs all dependencies,
+> configures tokens, verifies the installation, and launches the web UI for you.
+> See [Option 3: Agent-Assisted Install](#option-3-agent-assisted-install-codex).
+
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 ---
@@ -28,6 +34,7 @@ A comprehensive Python toolkit for analyzing and visualizing connectome data fro
 | **[Installation](docs/INSTALLATION.md)**                        | Detailed installation instructions  |
 | **[Authentication](docs/INSTALLATION.md#authentication-setup)** | **Set up NeuPrint and CAVE tokens** |
 | **[Troubleshooting](docs/TROUBLESHOOTING.md)**                  | Common issues and solutions         |
+| **[Agent Install (Codex)](skills/drocat-install/SKILL.md)**     | **Let Codex install, verify & launch DROCAT** |
 | **[Basic Usage](#basic-usage)**                                 | Core script tutorials               |
 
 ### 📖 Feature Documentation
