@@ -235,6 +235,8 @@ html, body {
 .drocat-upload-trigger:hover { border-color: var(--drocat-cobalt) !important; color: var(--drocat-cobalt) !important; }
 .drocat-upload-trigger .q-icon { font-size: 17px; }
 .q-menu .q-uploader { border: 1px solid var(--drocat-line) !important; border-radius: 12px !important; }
+.drocat-clear-btn { color: var(--drocat-faint); font-size: 12px; }
+.drocat-clear-btn:hover { color: var(--drocat-err); }
 
 /* ---------- Results panel ---------- */
 .drocat-results-head { padding-bottom: 12px; }

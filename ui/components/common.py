@@ -209,10 +209,20 @@ def neuron_input(
 def neuron_list_input(
     label: str = "Neurons",
     placeholder: str = "e.g., aMe12, aMe10, DN1p (or upload CSV/XLSX)",
-    hint: str = "Type neurons or upload a CSV/XLSX file (first column). Supports filter mode.",
+    hint: str = (
+        "Type a neuron and press Enter to add it as a chip. "
+        "Paste comma/newline lists or upload a CSV/XLSX file (first column). "
+        "Supports types, bodyIds and regex patterns."
+    ),
 ) -> ui.element:
     """
-    Create a neuron input with file upload support (CSV/XLSX).
+    Create a chip-based list input for neurons.
+
+    - Type a neuron (type, bodyId or pattern) and press Enter to add a chip.
+    - Paste a comma/newline separated list via the playlist button.
+    - Upload a CSV/XLSX file (first column) via the upload dropdown.
+    - A live count badge and a Clear button keep the list manageable.
+
     Returns container with .get_value() -> (filter_mode, neuron_list).
     """
     uploaded_neurons: List[str] = []
@@ -252,10 +262,17 @@ def neuron_list_input(
 
     with ui.column().classes("w-full gap-1") as container:
         with ui.row().classes("w-full items-end gap-2"):
-            textarea = ui.textarea(
+            # Chip-based list input: type + Enter to add each neuron
+            chip_input = ui.select(
+                options=[],
+                value=[],
                 label=label,
-                placeholder=placeholder,
-            ).props("autogrow").classes("flex-grow drocat-input").tooltip(hint)
+                multiple=True,
+            ).props(
+                'use-chips use-input new-value-mode="add-unique" '
+                'input-debounce="0"'
+            ).classes("flex-grow drocat-select").tooltip(hint)
+
             filter_mode = ui.select(
                 options={
                     "exact": "Exact",
@@ -266,9 +283,43 @@ def neuron_list_input(
                 },
                 value="exact",
                 label="Filter",
-            ).classes("w-28 drocat-select").props("dense outlined").tooltip(
+            ).classes("w-32 drocat-select").props("dense outlined").tooltip(
                 "Exact: match exactly\nStarts with: prefix match\nContains: substring\nEnds with: suffix\nRegex: pattern"
             )
+
+            # Paste a whole list (comma / newline separated)
+            with ui.button(icon="playlist_add").props("flat dense round").classes(
+                "drocat-upload-trigger"
+            ).tooltip("Paste a list of neurons (comma or newline separated)"):
+                with ui.menu() as paste_menu:
+                    ui.label("Paste neuron list").classes(
+                        "text-caption drocat-muted px-3 pt-2"
+                    )
+                    ui.label(
+                        "One per line or comma-separated — e.g. aMe12, aMe10"
+                    ).classes("text-caption drocat-muted px-3 pb-1")
+                    paste_area = ui.textarea(
+                        placeholder="aMe12, aMe10\nPPL101, PPL103"
+                    ).props("autogrow").classes("w-80 drocat-input")
+
+                    def add_pasted():
+                        items = parse_neuron_list(paste_area.value)
+                        if not items:
+                            return
+                        current = list(chip_input.value or [])
+                        existing = {str(c) for c in current}
+                        for item in items:
+                            if str(item) not in existing:
+                                current.append(item)
+                                existing.add(str(item))
+                        chip_input.value = current
+                        update_status()
+                        paste_area.value = ""
+                        paste_menu.close()
+
+                    ui.button(
+                        "Add to list", icon="add", on_click=add_pasted
+                    ).props("flat dense color=primary")
 
             # Compact upload: hidden inside a dropdown attached to the input row
             with ui.button(icon="upload_file").props("flat dense round").classes(
@@ -287,15 +338,36 @@ def neuron_list_input(
                         auto_upload=True,
                     ).props('accept=".csv,.xlsx,.xls,.tsv" flat dense').classes("w-72")
 
-        upload_label = ui.label("").classes("text-caption drocat-muted")
-        upload_label.set_visibility(False)
+        # Status row: live count + upload status + clear
+        with ui.row().classes("w-full items-center gap-2"):
+            count_badge = ui.badge("0 neurons", color="grey-6").props("outline")
+            upload_label = ui.label("").classes("text-caption drocat-muted")
+            upload_label.set_visibility(False)
+            ui.button(
+                "Clear",
+                icon="clear_all",
+                on_click=lambda: chip_input.set_value([]),
+            ).props("flat dense").classes("drocat-clear-btn")
+
+    def update_status():
+        count = len(chip_input.value or [])
+        count_badge.text = f"{count} neuron{'s' if count != 1 else ''}"
+        count_badge.props(f"color={'primary' if count else 'grey-6'}")
+
+    chip_input.on_value_change(lambda _e: update_status())
+    update_status()
 
     def get_value():
-        typed = parse_neuron_list(textarea.value)
-        return (filter_mode.value, list(uploaded_neurons) + typed)
+        def _normalize(item):
+            s = str(item)
+            return int(s) if s.isdigit() else s
+
+        typed = [_normalize(item) for item in (chip_input.value or [])]
+        uploaded = [_normalize(item) for item in uploaded_neurons]
+        return (filter_mode.value, uploaded + typed)
 
     container.get_value = get_value
-    container.textarea = textarea
+    container.chip_input = chip_input
     container.filter_mode = filter_mode
     container.uploaded_neurons = uploaded_neurons
     return container
