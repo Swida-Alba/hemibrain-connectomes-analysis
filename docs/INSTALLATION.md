@@ -11,12 +11,18 @@
 The fastest way to install DROCAT is to let an AI agent do it with the bundled
 `drocat-install` skill:
 
-1. **Open Codex** in this repository.
+1. **Open Codex** anywhere (the agent fetches the repository itself, so no local copy is needed).
 2. **Ask:**
 
    > Install DROCAT on this machine and verify it works.
 
 3. The agent will:
+   - Fetch the repository from GitHub:
+
+     ```bash
+     git clone --branch v4.4.3 https://github.com/Swida-Alba/Drosophila-cross-dataset-connectome-analysis.git drocat
+     cd drocat
+     ```
    - Create the `drocat` conda environment (Python 3.11)
    - Install `requirements.txt` (Linux/macOS) or `requirements-windows.txt` (Windows)
    - Install `neuronbridge-python --no-deps` (required for NeuronBridge scripts)

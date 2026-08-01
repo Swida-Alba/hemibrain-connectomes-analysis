@@ -1,19 +1,33 @@
 ---
 name: drocat-install
-description: Auto-install the DROCAT Drosophila connectome analysis toolkit (hemibrain-connectomes-analysis, v4.4.x script edition - no web UI) on macOS, Linux, or Windows. Use when the user asks to install, set up, repair, or prepare DROCAT on the v4.4.3 branch (e.g., "install DROCAT", "set up the connectome toolkit", "fix my DROCAT install", "fresh machine setup") - covers conda environment creation, dependency installation, NeuPrint/CAVE token configuration, verification, and running the standalone scripts.
+description: Auto-install the DROCAT Drosophila connectome analysis toolkit (hemibrain-connectomes-analysis, v4.4.x script edition - no web UI) on macOS, Linux, or Windows. Use when the user asks to install, set up, repair, or prepare DROCAT on the v4.4.3 branch (e.g., "install DROCAT", "set up the connectome toolkit", "fix my DROCAT install", "fresh machine setup") - fetches the repository from GitHub, creates the conda environment, installs dependencies, configures NeuPrint/CAVE tokens, verifies the installation, and runs the standalone scripts.
 ---
 
 # DROCAT Install (v4.4.3)
 
 ## Overview
 
-Install DROCAT v4.4.3 end-to-end on a fresh machine: create the `drocat` conda environment, install pinned dependencies, configure API tokens, verify the installation, and run the standalone analysis scripts. This branch has **no web UI** - all entry points are `scripts/*.py`.
+Install DROCAT v4.4.3 end-to-end on a fresh machine: fetch the repository from GitHub, create the `drocat` conda environment, install pinned dependencies, configure API tokens, verify the installation, and run the standalone analysis scripts. This branch has **no web UI** - all entry points are `scripts/*.py`.
 
 ## Workflow
 
-### 1. Locate the project
+### 1. Fetch the repository
 
-- Find the repository (folder usually named `hemibrain-connectomes-analysis*` or `DROCAT`) checked out on the `v4.4.3` branch. Ask the user if it is not obvious.
+Pull DROCAT v4.4.3 from GitHub (works in any agent that can run shell commands):
+
+```bash
+git clone --branch v4.4.3 https://github.com/Swida-Alba/Drosophila-cross-dataset-connectome-analysis.git drocat
+cd drocat
+```
+
+If a checkout already exists, fetch the branch instead:
+
+```bash
+git fetch origin v4.4.3
+git checkout v4.4.3
+```
+
+- If the user already has the repository locally, reuse it (ask if the path is not obvious) and skip the clone.
 - Confirm the required files exist: `scripts/FindPath.py`, `scripts/FindDirect.py`, `src/coana.py`, `requirements.txt`, `requirements-windows.txt`, `vispath-subproject/src/vispath_pkg`.
 - Expected layout (v4.4.3 has no `ui/` directory):
 
