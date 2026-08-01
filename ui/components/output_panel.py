@@ -242,16 +242,20 @@ class OutputPanel:
                 with ui.expansion(
                     f"{category}  ({len(cat_files)})", icon="folder"
                 ).classes("w-full drocat-expansion"):
-                    with ui.element("div").classes("drocat-file-grid"):
+                    with ui.element("div").classes("drocat-file-list"):
                         for f in cat_files:
-                            with ui.card().classes("drocat-file-card").on(
-                                "click", lambda path=f["path"]: open_file(path)
-                            ):
-                                with ui.column().classes("items-start gap-1 w-full"):
-                                    with ui.row().classes("items-center gap-2 w-full"):
-                                        ui.icon("insert_drive_file").classes("drocat-file-icon")
-                                        ui.label(self._format_size(f.get("size", 0))).classes("text-caption drocat-muted")
-                                    ui.label(f["name"]).classes("drocat-file-name")
+                            with ui.row().classes(
+                                "drocat-file-row items-center gap-2"
+                            ).on("click", lambda path=f["path"]: open_file(path)):
+                                ui.icon("insert_drive_file").classes("drocat-file-icon")
+                                ui.label(f["name"]).classes("drocat-file-name flex-grow")
+                                ui.label(self._format_size(f.get("size", 0))).classes(
+                                    "text-caption drocat-muted drocat-file-size"
+                                )
+                                ui.button(
+                                    icon="open_in_new",
+                                    on_click=lambda path=f["path"]: open_file(path),
+                                ).props("flat dense round").classes("drocat-file-open")
 
     def _format_size(self, size: int) -> str:
         """Format file size in human-readable format."""

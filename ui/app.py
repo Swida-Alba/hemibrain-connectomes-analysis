@@ -225,32 +225,37 @@ html, body {
 .drocat-warn { color: var(--drocat-warn); }
 .drocat-truncate { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 380px; }
 
-/* ---------- Output file grid (contact sheet) ---------- */
-.drocat-file-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+/* ---------- Output file list (file-manager style) ---------- */
+.drocat-file-list {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    padding: 4px 0;
+}
+.drocat-file-row {
+    display: flex;
+    align-items: center;
     gap: 10px;
-}
-.drocat-file-card {
-    margin: 0 !important;
-    padding: 12px !important;
-    border: 1px solid var(--drocat-line) !important;
-    border-radius: 12px !important;
-    background: var(--drocat-surface) !important;
-    box-shadow: 0 1px 4px rgba(11, 31, 58, .05) !important;
+    padding: 7px 10px;
+    border: 1px solid var(--drocat-line);
+    border-radius: 10px;
+    background: var(--drocat-surface);
     cursor: pointer;
-    transition: border-color .15s ease, transform .15s ease, box-shadow .15s ease;
+    min-width: 0;
+    transition: border-color .15s ease, background .15s ease;
 }
-.drocat-file-card:hover {
-    border-color: var(--drocat-cobalt) !important;
-    transform: translateY(-2px);
-    box-shadow: 0 8px 18px rgba(11, 31, 58, .10) !important;
+.drocat-file-row:hover {
+    border-color: var(--drocat-cobalt);
+    background: var(--drocat-soft);
 }
-.drocat-file-icon { color: var(--drocat-cobalt); font-size: 20px; }
+.drocat-file-icon { color: var(--drocat-cobalt); font-size: 18px; flex: none; }
 .drocat-file-name {
-    font-size: 11.5px; font-weight: 600; color: var(--drocat-navy);
-    word-break: break-all; line-height: 1.3;
+    font-size: 12.5px; font-weight: 600; color: var(--drocat-navy);
+    word-break: break-all; line-height: 1.3; min-width: 0;
 }
+.drocat-file-size { flex: none; font-variant-numeric: tabular-nums; }
+.drocat-file-open { color: var(--drocat-muted); flex: none; }
+.drocat-file-row:hover .drocat-file-open { color: var(--drocat-cobalt); }
 .drocat-expansion { border: 1px solid var(--drocat-line); border-radius: 12px; margin-bottom: 8px; overflow: hidden; }
 .drocat-expansion .q-expansion-item__container { background: var(--drocat-surface); }
 
