@@ -311,7 +311,7 @@ def main_page():
             tab_comparison = ui.tab("Cross-Dataset", icon="sync_alt")
             tab_find_lines = ui.tab("Find Lines", icon="biotech")
             tab_find_neuron = ui.tab("Find Neurons", icon="search")
-            tab_colabel = ui.tab("Co-Labeling", icon="overlap")
+            tab_colabel = ui.tab("Co-Labeling", icon="layers")
             tab_homologs = ui.tab("Homologs", icon="compare")
             tab_profiling = ui.tab("Profiling", icon="analytics")
             tab_settings = ui.tab("Settings", icon="settings")
