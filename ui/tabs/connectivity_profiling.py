@@ -18,6 +18,7 @@ def create_connectivity_profiling_tab():
         "Connectivity Profiling",
         "Compare connectivity profiles within a single dataset.",
         icon="analytics",
+        doc="connectivity_profiling.md",
     )
 
     with form_col:

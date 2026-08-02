@@ -18,6 +18,7 @@ def create_find_direct_tab():
         "Direct Connections",
         "Find direct synaptic connections between neuron groups.",
         icon="arrow_forward",
+        doc="find_direct.md",
     )
 
     with form_col:

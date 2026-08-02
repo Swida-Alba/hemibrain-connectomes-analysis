@@ -22,6 +22,7 @@ def create_find_path_tab():
         "Find All Paths",
         "Discover multi-hop pathways between source and target neuron groups.",
         icon="route",
+        doc="find_path.md",
     )
 
     with form_col:

@@ -19,6 +19,7 @@ def create_inter_dataset_tab():
         "Cross-Dataset Comparison",
         "Compare connectivity across multiple datasets (2+).",
         icon="sync_alt",
+        doc="cross_dataset.md",
     )
 
     with form_col:

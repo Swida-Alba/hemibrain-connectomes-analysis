@@ -19,6 +19,7 @@ def create_nb_find_neuron_tab():
         "Find EM neurons matching GAL4 driver line morphology.",
         icon="search",
         tag="NeuronBridge",
+        doc="nb_find_neuron.md",
     )
 
     with form_col:

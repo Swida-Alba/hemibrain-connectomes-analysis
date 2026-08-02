@@ -19,6 +19,7 @@ def create_nb_colabel_tab():
         "Analyze co-labeling patterns between driver lines.",
         icon="layers",
         tag="NeuronBridge",
+        doc="nb_colabel.md",
     )
 
     with form_col:

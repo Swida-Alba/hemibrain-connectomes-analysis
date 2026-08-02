@@ -20,6 +20,7 @@ def create_nb_find_lines_tab():
         "Find GAL4 / Split-GAL4 driver lines matching EM neurons.",
         icon="biotech",
         tag="NeuronBridge",
+        doc="nb_find_lines.md",
     )
 
     with form_col:

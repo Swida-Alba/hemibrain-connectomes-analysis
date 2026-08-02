@@ -20,6 +20,10 @@ sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
 from nicegui import ui, app
 
+# Serve the local documentation so relative links (docs/ui_guides/...)
+# open the local instruction files instead of GitHub.
+app.add_static_files("/docs", PROJECT_ROOT / "docs")
+
 from ui.config import APP_TITLE, APP_VERSION, APP_PORT, APP_HOST
 from ui.tabs import (
     create_find_path_tab,
@@ -93,6 +97,14 @@ html, body {
     text-decoration: none !important;
 }
 .drocat-header-link:hover { color: var(--drocat-cobalt) !important; }
+.drocat-doc-link {
+    color: var(--drocat-cobalt) !important;
+    font-size: 11px;
+    font-weight: 650;
+    text-decoration: none !important;
+    white-space: nowrap;
+}
+.drocat-doc-link:hover { text-decoration: underline !important; }
 
 /* ---------- Segmented navigation ---------- */
 .drocat-tabs {
@@ -402,8 +414,7 @@ def main_page():
                 ui.label("Drosophila Connectome Analysis Toolkit").classes("drocat-brand-sub")
         with ui.row().classes("items-center gap-4"):
             ui.label(f"v{APP_VERSION}").classes("drocat-version-pill")
-            ui.link("Documentation", "https://github.com/Swida-Alba/hemibrain-connectomes-analysis/blob/main/README.md",
-                    new_tab=True).classes("drocat-header-link")
+            ui.link("Documentation", "docs/README.md").classes("drocat-header-link")
 
     # Main content
     with ui.column().classes("w-full drocat-page gap-3"):

@@ -25,6 +25,7 @@ def tool_page(
     subtitle: str = "",
     icon: str = "science",
     tag: Optional[str] = None,
+    doc: Optional[str] = None,
 ) -> tuple:
     """
     Create the two-column workspace used by every tool tab.
@@ -42,6 +43,11 @@ def tool_page(
                     ui.label(title).classes("drocat-page-title")
                     if tag:
                         ui.badge(tag, color="purple").classes("drocat-tag-badge")
+                    if doc:
+                        ui.link(
+                            "Instructions",
+                            f"docs/ui_guides/{doc}",
+                        ).classes("drocat-doc-link")
                 if subtitle:
                     ui.label(subtitle).classes("drocat-page-sub")
         with ui.row().classes("w-full drocat-workspace items-start"):
@@ -337,6 +343,10 @@ def neuron_list_input(
                         on_upload=handle_upload,
                         auto_upload=True,
                     ).props('accept=".csv,.xlsx,.xls,.tsv" flat dense').classes("w-72")
+                    ui.link(
+                        "File format instructions",
+                        "docs/ui_guides/input_formats.md",
+                    ).classes("drocat-doc-link px-3 pb-2")
 
         # Status row: live count + upload status + clear
         with ui.row().classes("w-full items-center gap-2"):

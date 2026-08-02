@@ -52,6 +52,7 @@ def create_visualization_tab():
         "Visualization",
         "3D neuron skeleton rendering and path network plotting.",
         icon="view_in_ar",
+        doc="visualization.md",
     )
 
     with form_col:
@@ -282,6 +283,10 @@ def create_visualization_tab():
                             on_upload=handle_path_upload,
                             auto_upload=True,
                         ).props('accept=".csv,.xlsx,.xls,.tsv" flat dense').classes("w-72")
+                        ui.link(
+                            "File format instructions",
+                            "docs/ui_guides/input_formats.md",
+                        ).classes("drocat-doc-link px-3 pb-2")
                 path_upload_label = ui.label("No path file selected.").classes(
                     "text-caption drocat-muted drocat-truncate"
                 )

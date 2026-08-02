@@ -18,6 +18,7 @@ def create_find_homologs_tab():
         "Homolog Finding",
         "Find potential homologs across datasets via connectivity profile similarity.",
         icon="compare",
+        doc="find_homologs.md",
     )
 
     with form_col:

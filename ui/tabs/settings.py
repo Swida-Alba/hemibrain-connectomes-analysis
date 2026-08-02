@@ -16,7 +16,12 @@ def create_settings_tab():
             with ui.element("div").classes("drocat-page-mark"):
                 ui.icon("settings").classes("text-white")
             with ui.column().classes("gap-1"):
-                ui.label("Settings").classes("drocat-page-title")
+                with ui.row().classes("items-center gap-2"):
+                    ui.label("Settings").classes("drocat-page-title")
+                    ui.link(
+                        "Instructions",
+                        "docs/ui_guides/settings.md",
+                    ).classes("drocat-doc-link")
                 ui.label("Configure API tokens, view dataset status, and manage preferences.").classes("drocat-page-sub")
 
         # Dataset Status
