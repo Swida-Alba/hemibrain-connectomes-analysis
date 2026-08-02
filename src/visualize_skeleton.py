@@ -4049,6 +4049,9 @@ class VisualizeSkeleton:
         _validate_mesh_color(self.vnc_mesh_color, 'vnc_mesh_color')
             
         # === mesh_color validation (flexible formats now) ===
+        if self.mesh_color is None:
+            # None means "not specified": use the default gray tuple
+            self.mesh_color = (100, 100, 100)
         if isinstance(self.mesh_color, str):
             pass  # Will be standardized later
         elif isinstance(self.mesh_color, (tuple, list)):

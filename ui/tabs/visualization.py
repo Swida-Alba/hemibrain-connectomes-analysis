@@ -328,7 +328,7 @@ def create_visualization_tab():
             )
 
             # Per-ROI colors so brain regions render independently (Auto = gray)
-            mesh_color = None
+            mesh_color = (100, 100, 100)
             if roi_palette.get_value() != "Auto (single gray)" and rois:
                 mesh_color = sample_palette(roi_palette.get_colors(), len(rois))
 
