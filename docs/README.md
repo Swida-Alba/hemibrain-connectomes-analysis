@@ -77,7 +77,7 @@ Welcome to the Drosophila Connectome Analysis Toolkit (DROCAT) documentation!
 - **✨ [Cross-Dataset Comparison Guide](./core-features/CrossDatasetComparison_Guide.md)** - Compare connectivity across hemibrain, male-cns, FlyWire, and more
 - **✨ [Connectivity Profile Verification](./core-features/ConnectivityProfileVerification_Guide.md)** - Verify neuron types using connectivity fingerprints
 - **[BANC Integration](./BANC_INTEGRATION.md)** - Added support for BANC dataset (FlyWire-based).
-- **[Visualization Update Summary](./VISUALIZATION_UPDATE.md)** - Summary of all visualization-related updates and deprecations.
+- **[Visualization Guides](visualizations/README.md)** - Visualization docs and update summaries.
 - **[VisualizePath Updates Nov 2025](./visualizations/VisualizePath_Updates_Nov2025.md)** - Detailed guide on connection matrix support and new features.
 - **[vispath-subproject README](../vispath-subproject/README.md)** - Corrected data format documentation
 - **[vispath-subproject Installation](../vispath-subproject/INSTALLATION.md)** - Added data format examples
@@ -316,7 +316,7 @@ Historical documentation and fixes are in the [archive](./archive/) directory:
 - Review [FAQ](#) (coming soon)
 
 ### Contributing
-- See [Contributing Guide](../CONTRIBUTING.md) (if available)
+- See [Contributing Guide](../README.md#contributing)
 - Read [Technical Documentation](./technical/README.md)
 - Follow coding standards
 
