@@ -20,7 +20,7 @@ def create_settings_tab():
                     ui.label("Settings").classes("drocat-page-title")
                     ui.link(
                         "Instructions",
-                        "docs/ui_guides/settings.md",
+                        "guide/settings",
                     ).classes("drocat-doc-link")
                 ui.label("Configure API tokens, view dataset status, and manage preferences.").classes("drocat-page-sub")
 

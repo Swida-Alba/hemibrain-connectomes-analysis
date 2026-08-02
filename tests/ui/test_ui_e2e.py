@@ -350,6 +350,35 @@ class TestApp:
         assert callable(main)
         assert callable(main_page)
 
+    def test_guide_pages_render_and_links_are_direct(self):
+        """Instruction links must point to the rendered /guide routes."""
+        from nicegui.page import page
+        from nicegui import Client
+        import ui.app as app_module
+
+        p = page('/guide-test')
+        client = Client(p)
+        with client:
+            app_module._render_guide('find_path.md')
+        texts = [
+            getattr(e, 'text', '') or ''
+            for e in client.elements.values()
+        ]
+        assert any('Find Path' in t for t in texts if isinstance(t, str))
+
+        p2 = page('/smoke-guide')
+        client2 = Client(p2)
+        with client2:
+            app_module.main_page()
+        hrefs = [
+            str((getattr(e, '_props', None) or {}).get('href', ''))
+            for e in client2.elements.values()
+        ]
+        guide_links = [h for h in hrefs if h.startswith('guide/')]
+        assert 'guide/find_path.md' in guide_links
+        assert 'guide/input_formats' in guide_links
+        assert 'guide/index' in guide_links
+
 
 # =============================================================================
 # Test Installer Scripts

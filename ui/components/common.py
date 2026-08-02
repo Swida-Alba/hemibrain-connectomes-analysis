@@ -46,7 +46,7 @@ def tool_page(
                     if doc:
                         ui.link(
                             "Instructions",
-                            f"docs/ui_guides/{doc}",
+                            f"guide/{doc}",
                         ).classes("drocat-doc-link")
                 if subtitle:
                     ui.label(subtitle).classes("drocat-page-sub")
@@ -345,7 +345,7 @@ def neuron_list_input(
                     ).props('accept=".csv,.xlsx,.xls,.tsv" flat dense').classes("w-72")
                     ui.link(
                         "File format instructions",
-                        "docs/ui_guides/input_formats.md",
+                        "guide/input_formats",
                     ).classes("drocat-doc-link px-3 pb-2")
 
         # Status row: live count + upload status + clear

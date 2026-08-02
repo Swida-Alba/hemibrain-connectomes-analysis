@@ -392,6 +392,119 @@ html, body {
 .nicegui-upload { border: 1px dashed var(--drocat-line-strong) !important; border-radius: 10px !important; }
 """
 
+GUIDE_CSS = """
+body {
+    background: #f7f8fa !important;
+    font-family: Inter, "Avenir Next", "Segoe UI", Helvetica, Arial, sans-serif;
+    color: #0b1f3a;
+}
+.guide-page {
+    max-width: 920px;
+    margin: 0 auto;
+    padding: 28px 32px 64px;
+}
+.guide-top {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding-bottom: 14px;
+    margin-bottom: 10px;
+    border-bottom: 1px solid #e2e7ee;
+}
+.guide-back {
+    color: #145cff;
+    font-size: 13px;
+    font-weight: 650;
+    text-decoration: none;
+}
+.guide-title {
+    font-size: 24px;
+    font-weight: 750;
+    letter-spacing: -.02em;
+}
+.guide-content {
+    background: #ffffff;
+    border: 1px solid #e2e7ee;
+    border-radius: 18px;
+    padding: 28px 34px;
+    box-shadow: 0 8px 28px rgba(11, 31, 58, .06);
+    line-height: 1.65;
+    font-size: 14.5px;
+}
+.guide-content h1 { font-size: 24px; margin: 0 0 14px; }
+.guide-content h2 {
+    font-size: 17px;
+    margin: 26px 0 8px;
+    padding-bottom: 6px;
+    border-bottom: 1px solid #eef1f6;
+}
+.guide-content h3 { font-size: 15px; margin: 18px 0 6px; }
+.guide-content code {
+    background: #f1f3f6;
+    border-radius: 5px;
+    padding: 1px 5px;
+    font-size: 12.5px;
+    color: #145cff;
+}
+.guide-content pre {
+    background: #0d1b2e;
+    color: #d7e3f4;
+    border-radius: 10px;
+    padding: 12px 14px;
+    overflow-x: auto;
+}
+.guide-content pre code { background: transparent; color: inherit; }
+.guide-content table {
+    border-collapse: collapse;
+    width: 100%;
+    margin: 10px 0;
+}
+.guide-content th, .guide-content td {
+    border: 1px solid #e2e7ee;
+    padding: 7px 10px;
+    text-align: left;
+    font-size: 13px;
+}
+.guide-content th { background: #f1f3f6; }
+.guide-content a { color: #145cff; }
+.guide-content blockquote {
+    margin: 10px 0;
+    padding: 8px 14px;
+    border-left: 4px solid #145cff;
+    background: #eaf0ff;
+    border-radius: 0 8px 8px 0;
+}
+"""
+
+
+def _render_guide(guide: str):
+    """Build the rendered local instruction page for a ui_guides markdown file."""
+    name = Path(guide).name
+    if name.endswith(".md"):
+        name = name[:-3]
+    path = PROJECT_ROOT / "docs" / "ui_guides" / f"{name}.md"
+    if not path.exists():
+        name = "README"
+        path = PROJECT_ROOT / "docs" / "ui_guides" / "README.md"
+    content = path.read_text(encoding="utf-8", errors="replace")
+
+    ui.add_head_html(f"<style>{GUIDE_CSS}</style>")
+    with ui.column().classes("guide-page w-full"):
+        with ui.row().classes("guide-top w-full"):
+            ui.link("← Back to guides", "guide/index").classes("guide-back")
+            ui.label(name.replace("_", " ").title()).classes("guide-title")
+        ui.markdown(content).classes("guide-content w-full")
+
+
+@ui.page("/guide")
+def guide_index_page():
+    _render_guide("README")
+
+
+@ui.page("/guide/{guide}")
+def guide_page(guide: str):
+    _render_guide(guide)
+
 
 @ui.page("/")
 def main_page():
@@ -414,7 +527,7 @@ def main_page():
                 ui.label("Drosophila Connectome Analysis Toolkit").classes("drocat-brand-sub")
         with ui.row().classes("items-center gap-4"):
             ui.label(f"v{APP_VERSION}").classes("drocat-version-pill")
-            ui.link("Documentation", "docs/README.md").classes("drocat-header-link")
+            ui.link("Documentation", "guide/index").classes("drocat-header-link")
 
     # Main content
     with ui.column().classes("w-full drocat-page gap-3"):

@@ -285,7 +285,7 @@ def create_visualization_tab():
                         ).props('accept=".csv,.xlsx,.xls,.tsv" flat dense').classes("w-72")
                         ui.link(
                             "File format instructions",
-                            "docs/ui_guides/input_formats.md",
+                            "guide/input_formats",
                         ).classes("drocat-doc-link px-3 pb-2")
                 path_upload_label = ui.label("No path file selected.").classes(
                     "text-caption drocat-muted drocat-truncate"
