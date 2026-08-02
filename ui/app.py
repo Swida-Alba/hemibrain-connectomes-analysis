@@ -293,6 +293,19 @@ html, body {
 }
 .drocat-swatch:hover { transform: scale(1.08); }
 .drocat-swatch.selected { border-color: var(--drocat-cobalt); }
+.drocat-palette-strip {
+    border-radius: 6px;
+    border: 1px solid rgba(11, 31, 58, .10);
+    min-height: 18px;
+    cursor: pointer;
+}
+.drocat-custom-color-row {
+    padding: 4px 8px;
+    border: 1px solid var(--drocat-line);
+    border-radius: 10px;
+    background: var(--drocat-surface);
+}
+.drocat-custom-color-row:hover { background: var(--drocat-soft); }
 
 /* ---------- Results panel ---------- */
 .drocat-results-head { padding-bottom: 12px; }

@@ -227,7 +227,11 @@ class TestRunner:
     def test_palette_catalog_and_sampling(self):
         """The bokeh catalog must include categorical/sequential/diverging
         palettes and sample them evenly for any requested count."""
-        from ui.components.palette_picker import get_palette_catalog, sample_palette
+        from ui.components.palette_picker import (
+            get_palette_catalog,
+            palette_slice,
+            sample_palette,
+        )
         catalog = get_palette_catalog()
         names = [name for name, _ in catalog]
         assert "Category20" in names
@@ -238,6 +242,9 @@ class TestRunner:
         assert len(sample_palette(colors, 1)) == 1
         assert len(sample_palette(colors, 5)) == 5
         assert len(sample_palette(colors, 50)) == 50
+        half = palette_slice(colors, 0, 50)
+        assert 0 < len(half) < len(colors)
+        assert palette_slice(colors, 100, 100) == colors[-1:]
 
     def test_pick_directory_exists(self):
         from ui.runner import pick_directory, pick_file

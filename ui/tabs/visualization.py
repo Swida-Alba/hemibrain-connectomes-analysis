@@ -14,6 +14,7 @@ from ..components.output_panel import OutputPanel
 from ..runner import ScriptRunner
 from ..components.palette_picker import (
     palette_picker,
+    palette_editor,
     color_swatch_picker,
     sample_palette,
 )
@@ -109,7 +110,7 @@ def create_visualization_tab():
                     "VNC Mesh", False,
                     hint="Show the ventral nerve cord mesh (male-cns / manc datasets).",
                 )
-            neuron_palette = palette_picker(
+            neuron_palette = palette_editor(
                 "Neuron Colors",
                 value="Category20",
                 include_auto=False,
@@ -147,7 +148,7 @@ def create_visualization_tab():
                      "(e.g. ME.*, all, primary) and press Enter to add it.",
             )
             roi_select.props('new-value-mode="add-unique"')
-            roi_palette = palette_picker(
+            roi_palette = palette_editor(
                 "ROI Colors",
                 value="Cool",
                 include_auto=True,
