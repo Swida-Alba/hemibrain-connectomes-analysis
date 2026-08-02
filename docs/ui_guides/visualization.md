@@ -2,6 +2,18 @@
 
 Two tools: **3D Skeleton (plot3dSkeleton)** and **Path Network (PlotPath)**.
 
+## Quick start (3D)
+
+1. Add neurons/layers as chips (e.g. `aMe12`, or `aMe12 -> MBON01`).
+2. Pick the dataset; keep **Brain Mesh = template** and **ROIs = EB, LH, AL**.
+3. Click **Generate Visualization**.
+
+## Quick start (Path Network)
+
+1. Run **Find All Paths** first.
+2. Upload its `*_allpaths_type.csv` (or `*_allpaths_info.xlsx`) file.
+3. Click **Generate Visualization**.
+
 ## 3D Skeleton
 
 - **Neurons / Layers**: type names, bodyIds, or `A -> B -> C` layer chains.

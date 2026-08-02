@@ -5,6 +5,12 @@
 Find one-hop synaptic connections between source and target neuron groups.
 Leave targets empty to get all downstream targets of the sources.
 
+## Quick start
+
+1. Add source neurons and (optionally) target neurons.
+2. Leave **Target Neurons** empty to list every downstream target.
+3. Click **Find Direct Connections**.
+
 ## Inputs
 
 Same neuron-list input as Find All Paths (chips, paste, CSV/XLSX upload).

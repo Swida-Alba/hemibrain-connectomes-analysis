@@ -5,6 +5,13 @@
 Compare connectivity between two or more datasets (e.g. `male-cns:v0.9` vs
 `hemibrain:v1.2.1`) for the same source→target query.
 
+## Quick start
+
+1. Select 2+ **Datasets** (optional nicknames in the same order).
+2. Add source and target neurons.
+3. Click **Run Comparison** - a report plus matrices are produced for every
+   threshold.
+
 ## Inputs
 
 - **Datasets (2+)**, optional nicknames in the same order.

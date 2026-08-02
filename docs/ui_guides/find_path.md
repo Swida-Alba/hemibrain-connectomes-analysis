@@ -5,6 +5,14 @@
 Discover multi-hop pathways between source and target neuron groups in a
 single dataset (e.g. `aMe12` → `aMe10`).
 
+## Quick start
+
+1. Add **Source Neurons** (e.g. `aMe12`, `aMe10`) and **Target Neurons**
+   (e.g. `PPL101`, `PPL103`) as chips, paste, or upload a list.
+2. Pick the **Dataset** and an **Output Directory**.
+3. Keep **Max Intermediate Layers = 2**, then click **Find All Paths** and
+   watch the live log.
+
 ## Inputs
 
 - **Source / Target Neurons**: type names, bodyIds, or patterns

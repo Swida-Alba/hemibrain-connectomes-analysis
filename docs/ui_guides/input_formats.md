@@ -15,8 +15,9 @@ Cross-Dataset panels.
   ```
 
 - **XLSX**: the first column of the first sheet is read.
-- Optional header names are skipped automatically:
+- Optional header names are skipped automatically (case-insensitive):
   `type`, `neuron`, `name`, `bodyId`, `id`, `body_id`.
+- XLSX files are read from the **first sheet, first column**.
 - Accepted entries: neuron types (`aMe12`), bodyIds
   (`720575940610453042`) and patterns (`KC.*`, `PPL.*`).
 

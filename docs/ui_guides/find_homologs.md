@@ -5,6 +5,12 @@
 Find potential cross-dataset homologs of a source neuron via connectivity
 profile similarity (e.g. `aMe12` in `male-cns` → candidates in `hemibrain`).
 
+## Quick start
+
+1. Enter the **Source Neuron** (type or bodyId).
+2. Choose **Source Dataset** and **Target Dataset**.
+3. Click **Find Homologs** (Fast Search is on by default).
+
 ## Inputs
 
 - **Source Neuron**: one type or bodyId.

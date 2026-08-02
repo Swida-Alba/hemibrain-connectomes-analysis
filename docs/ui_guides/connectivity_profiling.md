@@ -5,6 +5,12 @@
 Compare connectivity profiles of neuron types (or bodyIds) inside one
 dataset using Jaccard, cosine and rank-correlation similarities.
 
+## Quick start
+
+1. Enter 2+ neurons (e.g. `aMe12`, `aMe10`, `aMe9`).
+2. Pick the dataset; keep **Top K Partners = 15**.
+3. Click **Run Profiling** - heatmaps and similarity matrices are generated.
+
 ## Inputs
 
 - **Neurons to Compare**: at least two entries (types, bodyIds or patterns).

@@ -5,6 +5,12 @@
 Find GAL4 / Split-GAL4 driver lines whose expression matches EM neurons,
 using NeuronBridge color-depth search (CDS) or point-pattern matching (PPPM).
 
+## Quick start
+
+1. Enter EM neurons (bodyIds, types, or patterns).
+2. Keep **Dataset** at `(all)` or restrict to one dataset.
+3. Click **Find Driver Lines** - line summaries are saved per query.
+
 ## Inputs
 
 - **EM Neurons**: bodyIds, types, instances, or patterns.

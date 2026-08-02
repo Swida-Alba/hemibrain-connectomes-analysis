@@ -250,7 +250,10 @@ The following packages are **required**:
 
 ### Web UI (NiceGUI)
 
-The Web UI provides a browser-based interface for all DROCAT tools with dark theme, parameter forms, and real-time execution logs.
+The Web UI provides a browser-based interface for all DROCAT tools with a light
+photo-selector-inspired theme, parameter forms, and real-time execution logs.
+Every tool panel links to its own local instruction guide
+([docs/ui_guides/README.md](ui_guides/README.md)).
 
 ```bash
 # Install Web UI dependency
@@ -566,7 +569,7 @@ For contributing to the project:
 
 ```bash
 # Clone repository
-git clone https://github.com/Swida-Alba/hemibrain-connectomes-analysis.git
+git clone https://github.com/Swida-Alba/Drosophila-cross-dataset-connectome-analysis.git
 cd hemibrain-connectomes-analysis
 
 # Create conda environment (recommended)
@@ -648,6 +651,8 @@ python ui/app.py          # Manual
 run_ui.bat                # Windows
 ```
 
-The UI opens at **http://127.0.0.1:8080** with a dark theme interface for all 10 analysis tools.
+The UI opens at **http://127.0.0.1:8080** with a light theme interface for all
+10 analysis tools. Each panel has an **Instructions** link that opens its
+local guide (see [docs/ui_guides/README.md](ui_guides/README.md)).
 
 All methods will install PyQt5 for optimal GUI performance and numpy <2.0.0 for compatibility! 🚀
