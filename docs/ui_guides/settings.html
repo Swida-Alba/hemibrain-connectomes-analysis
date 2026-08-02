@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Settings - DROCAT Instructions</title>
+  <link rel="stylesheet" href="guide.css">
+</head>
+<body>
+<main class="guide">
+  <header class="guide-top">
+    <a class="back" href="README.html">&larr; Back to guides</a>
+    <span class="tag sys">System</span>
+  </header>
+  <h1>Settings</h1>
+  <p class="lede">
+    Tokens, dataset availability, default output directory and dataset
+    preparation.
+  </p>
+
+  <h2>API tokens</h2>
+  <table>
+    <tr><th>Token</th><th>Needed for</th><th>Where to get it</th></tr>
+    <tr><td>NeuPrint Token</td><td>All NeuPrint datasets (hemibrain, male-cns, optic-lobe, manc, ...)</td><td>neuprint.janelia.org/account</td></tr>
+    <tr><td>CAVE Token</td><td>FlyWire FAFB / BANC datasets</td><td>codex.flywire.ai/auth_token</td></tr>
+  </table>
+  <p>Tokens are saved to <code>token_info_local.txt</code> (gitignored) and
+    take precedence over the template <code>token_info.txt</code>.</p>
+  <div class="callout tip">
+    <b>Test NeuPrint</b> verifies the token by counting neurons in
+    hemibrain:v1.2.1.
+  </div>
+
+  <h2>Dataset availability</h2>
+  <p>Click <b>Refresh</b> to query the server for available datasets. The
+    status column shows:</p>
+  <table>
+    <tr><th>Status</th><th>Meaning</th></tr>
+    <tr><td>✓ local</td><td>Full local data files ready</td></tr>
+    <tr><td>◐ cached</td><td>Partial local cache exists</td></tr>
+    <tr><td>☁ server</td><td>Available online (token required)</td></tr>
+    <tr><td>not ready</td><td>No token or no data</td></tr>
+  </table>
+
+  <h2>Output settings</h2>
+  <p><b>Default Output Directory</b> is pre-filled in every panel; change it
+    here and click <b>Save Default Directory</b>. Each run creates its own
+    timestamped subfolder.</p>
+
+  <h2>Dataset preparation</h2>
+  <ul>
+    <li><b>NeuPrint</b>: downloaded automatically on first use (needs token
+      + network).</li>
+    <li><b>FlyWire FAFB/BANC</b>: download the neuron-table CSV from
+      codex.flywire.ai, save it as
+      <code>datasets/flywire_FAFB_v783/flywire_FAFB_v783_allneurons_neuron_df.csv</code>
+      (similar for BANC), and provide a CAVE token.</li>
+  </ul>
+
+  <h2>About</h2>
+  <p>Version, GitHub repository and documentation links.</p>
+</main>
+</body>
+</html>

@@ -35,7 +35,7 @@ A comprehensive Python toolkit for analyzing and visualizing connectome data fro
 | **[Installation](docs/INSTALLATION.md)**                        | Detailed installation instructions  |
 | **[Authentication](docs/INSTALLATION.md#authentication-setup)** | **Set up NeuPrint and CAVE tokens** |
 | **[Troubleshooting](docs/TROUBLESHOOTING.md)**                  | Common issues and solutions         |
-| **[UI Guides](docs/ui_guides/README.md)**                       | **Per-panel instructions & quick starts** |
+| **[UI Guides](docs/ui_guides/README.html)**                      | **Per-panel instructions & quick starts** |
 | **[Agent Install (Codex)](skills/drocat-install/SKILL.md)**     | **Let Codex install, verify & launch DROCAT** |
 | **[Basic Usage](#basic-usage)**                                 | Core script tutorials               |
 
@@ -47,7 +47,7 @@ A comprehensive Python toolkit for analyzing and visualizing connectome data fro
 | **Score Calculations** | [Score Calculation Guide](docs/core-features/ScoreCalculation_Guide.md)     | All pathfinding scripts        |
 | **EM↔LM Mapping**      | [NeuronBridge Guide](docs/core-features/NeuronBridge_Guide.md)              | `NeuronBridge_FindLines.py`    |
 | **Line Analysis**      | [Workflow Guide](docs/core-features/NeuronBridge_Workflow.md)               | `NeuronBridge_Colabel.py`      |
-| **UI Guides**          | [docs/ui_guides/README.md](docs/ui_guides/README.md)                        | All web UI panels              |
+| **UI Guides**          | [docs/ui_guides/README.html](docs/ui_guides/README.html)                    | All web UI panels              |
 | **FlyLight Images**    | [FlyLight Guide](docs/core-features/FlyLight_Guide.md)                      | `FlyLight_fetcher.py`          |
 | **Cross-Dataset**      | [Comparison Guide](docs/core-features/CrossDatasetComparison_Guide.md)      | `InterDatasetComparator.py`    |
 | **Auto Type Mapping**  | [Type Mapping Guide](docs/AUTO_TYPE_MAPPING.md)                             | Cross-dataset comparisons      |
@@ -267,7 +267,7 @@ cp -R skills/drocat-install/. ~/.codex/skills/drocat-install/
 
 DROCAT includes a local web interface (light theme, photo-selector-inspired design) for all analysis tools.
 Every panel links to its own local instruction guide - see the
-[UI Guides index](docs/ui_guides/README.md).
+[UI Guides index](docs/ui_guides/README.html).
 
 ### Launch the UI
 

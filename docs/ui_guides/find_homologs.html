@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Homolog Finding - DROCAT Instructions</title>
+  <link rel="stylesheet" href="guide.css">
+</head>
+<body>
+<main class="guide">
+  <header class="guide-top">
+    <a class="back" href="README.html">&larr; Back to guides</a>
+    <span class="tag">Connectome</span>
+  </header>
+  <h1>Homolog Finding</h1>
+  <p class="lede">
+    Find potential cross-dataset homologs of a source neuron via connectivity
+    profile similarity, e.g. <code>aMe12</code> in <code>male-cns</code> →
+    candidates in <code>hemibrain</code>.
+  </p>
+
+  <h2>Quick start</h2>
+  <ol>
+    <li>Enter the <b>Source Neuron</b> (type or bodyId).</li>
+    <li>Choose <b>Source Dataset</b> and <b>Target Dataset</b>.</li>
+    <li>Click <b>Find Homologs</b> (Fast Search is on by default).</li>
+  </ol>
+
+  <h2>Inputs &amp; examples</h2>
+  <table>
+    <tr><th>Source</th><th>Datasets</th><th>Result</th></tr>
+    <tr><td><code>aMe12</code></td><td>male-cns:v0.9 → hemibrain:v1.2.1</td><td>Top 30 hemibrain candidates ranked by profile similarity</td></tr>
+    <tr><td><code>720575940610453042</code></td><td>hemibrain:v1.2.1 → male-cns:v1.0</td><td>Candidates for one bodyId</td></tr>
+    <tr><td><code>KC.*</code></td><td>same dataset twice</td><td>Intra-dataset redundancy check</td></tr>
+  </table>
+
+  <h2>Parameters</h2>
+  <table>
+    <tr><th>Parameter</th><th>Default</th><th>Meaning</th></tr>
+    <tr><td>Top N Candidates</td><td>30</td><td>Number of ranked candidates returned</td></tr>
+    <tr><td>Top K Partners</td><td>15</td><td>Partners per direction in the profile</td></tr>
+    <tr><td>Min Types (M)</td><td>5</td><td>Minimum unique partner types</td></tr>
+    <tr><td>Min Synapse Threshold</td><td>3</td><td>Connection weight cutoff</td></tr>
+    <tr><td>Similarity Metric</td><td>rank_union</td><td>rank_union, rank_corr, jaccard, cosine</td></tr>
+  </table>
+
+  <h2>Options</h2>
+  <ul>
+    <li><b>Fast Search</b>: adjacency-expansion discovery (recommended).</li>
+    <li><b>Vector Pre-filtering</b>: cosine pre-filter for speed.</li>
+    <li><b>2-Hop Expansion</b>: include untyped partners via 2-hop typed
+      partners.</li>
+    <li><b>Visualize Candidates</b>: render top matches as 3D skeletons.</li>
+    <li><b>Auto Type Mapping</b>: canonicalize partner type names across
+      datasets (recommended for cross-dataset searches).</li>
+    <li><b>Pre-build Full Dataset Cache</b>: leave OFF; the search fetches
+      what it needs.</li>
+  </ul>
+
+  <h2>Output</h2>
+  <pre><code>{output_dir}/homologs_{SRC}_to_{TGT}_{query}_{timestamp}/
+  results/bodyid_results.csv
+  results/type_summary.csv
+  homolog_results.csv
+  profiles/query/...
+  profiles/matches/...
+  visualization/...            (when visualization enabled)</code></pre>
+</main>
+</body>
+</html>

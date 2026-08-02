@@ -253,7 +253,7 @@ The following packages are **required**:
 The Web UI provides a browser-based interface for all DROCAT tools with a light
 photo-selector-inspired theme, parameter forms, and real-time execution logs.
 Every tool panel links to its own local instruction guide
-([docs/ui_guides/README.md](ui_guides/README.md)).
+([docs/ui_guides/README.html](ui_guides/README.html)).
 
 ```bash
 # Install Web UI dependency
@@ -653,6 +653,6 @@ run_ui.bat                # Windows
 
 The UI opens at **http://127.0.0.1:8080** with a light theme interface for all
 10 analysis tools. Each panel has an **Instructions** link that opens its
-local guide (see [docs/ui_guides/README.md](ui_guides/README.md)).
+local guide (see [docs/ui_guides/README.html](ui_guides/README.html)).
 
 All methods will install PyQt5 for optimal GUI performance and numpy <2.0.0 for compatibility! 🚀

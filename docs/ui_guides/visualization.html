@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Visualization - DROCAT Instructions</title>
+  <link rel="stylesheet" href="guide.css">
+</head>
+<body>
+<main class="guide">
+  <header class="guide-top">
+    <a class="back" href="README.html">&larr; Back to guides</a>
+    <span class="tag">Visualization</span>
+  </header>
+  <h1>Visualization</h1>
+  <p class="lede">
+    Two tools: <b>3D Skeleton (plot3dSkeleton)</b> for neuron morphology and
+    <b>Path Network (PlotPath)</b> for pathway graphs.
+  </p>
+
+  <h2>Quick start - 3D skeleton</h2>
+  <ol>
+    <li>Add neurons/layers as chips (e.g. <code>aMe12</code> or
+      <code>aMe12 -&gt; MBON01</code>).</li>
+    <li>Pick the dataset; keep <b>Brain Mesh = template</b> and
+      <b>ROIs = EB, LH, AL</b>.</li>
+    <li>Click <b>Generate Visualization</b>.</li>
+  </ol>
+
+  <h2>Quick start - path network</h2>
+  <ol>
+    <li>Run <b>Find All Paths</b> first.</li>
+    <li>Upload its <code>*_allpaths_type.csv</code> (or
+      <code>*_allpaths_info.xlsx</code>) file.</li>
+    <li>Click <b>Generate Visualization</b>.</li>
+  </ol>
+
+  <h2>3D skeleton - inputs &amp; examples</h2>
+  <table>
+    <tr><th>Neuron / Layer value</th><th>Meaning</th></tr>
+    <tr><td><code>aMe12</code></td><td>All bodyIds of type aMe12</td></tr>
+    <tr><td><code>720575940610453042</code></td><td>Single bodyId</td></tr>
+    <tr><td><code>aMe12 -&gt; aMe10 -&gt; MBON01</code></td><td>Chain rendered as one connected path</td></tr>
+    <tr><td>Custom layer names</td><td>Display names, one per chip in order</td></tr>
+  </table>
+
+  <h2>3D skeleton - options</h2>
+  <div class="grid">
+    <div class="card">
+      <h3>Appearance</h3>
+      <ul>
+        <li><b>Skeleton Mode</b>: tube (detailed) or line (fast).</li>
+        <li><b>Legend Mode</b>: layer, type, or single.</li>
+        <li><b>Neuron Opacity</b> and <b>Neuron Colors</b> (full bokeh
+          palette catalog with range/custom editing).</li>
+        <li><b>Background</b>: white or black.</li>
+      </ul>
+    </div>
+    <div class="card">
+      <h3>Synapses</h3>
+      <ul>
+        <li><b>Skip Synapses</b>: hide markers for a clean view.</li>
+        <li><b>Min Synapse Count</b>, <b>Synapse Size</b> (real or fixed),
+          <b>Opacity</b>, <b>Mode</b> (cone or scatter).</li>
+      </ul>
+    </div>
+    <div class="card">
+      <h3>Brain region ROIs</h3>
+      <ul>
+        <li><b>Mesh ROIs</b>: presets or regex (<code>ME.*</code>,
+          <code>all</code>, <code>primary</code>).</li>
+        <li><b>ROI Colors</b>: Auto gray, or any palette sampled per ROI so
+          each region shows independently; custom colors with reorder.</li>
+        <li><b>ROI Mesh Opacity</b>.</li>
+        <li><b>Brain Mesh</b>: template, whole, or none; <b>VNC Mesh</b>
+          toggle for male-cns/manc.</li>
+      </ul>
+    </div>
+  </div>
+
+  <h2>3D skeleton - advanced</h2>
+  <ul>
+    <li><b>Cache Neurons/Synapses</b>: faster repeat renders.</li>
+    <li><b>Smooth Skeleton</b>, <b>Show Soma</b>, <b>Show Connectors</b>.</li>
+    <li><b>Export Method</b>: webdriver (fast, needs Chrome 109+) or kaleido
+      (stable fallback). <b>Export Scale</b> and <b>Export Views</b>.</li>
+    <li><b>Brain Mesh Color</b>: swatch picker with custom color.</li>
+    <li><b>Individual Profiles</b>: PDF/PPTX per neuron, with images per page
+      and camera views.</li>
+    <li><b>Rotating Video / GIF</b>: fps, degrees per frame, rotation axis,
+      GIF scale.</li>
+  </ul>
+
+  <h2>Path network - options</h2>
+  <ul>
+    <li><b>Color Scheme</b>: swatch-preview schemes for
+      source/intermediate/target/link.</li>
+    <li><b>Network Layout</b>: hierarchical, spring, circular, distributed.</li>
+    <li>Interactive HTML and XLSX connection tables are always generated.</li>
+  </ul>
+
+  <h2>Output</h2>
+  <pre><code>3D:  {output_dir}/plot3d_{DATASET}_{layers}_{timestamp}/
+       {layers}.html, {layers}_neuron_info.xlsx, parameters.txt
+Path: {path_output_dir}/{folder_name}_{timestamp}/
+       {folder}_Sankey.html, {folder}_heatmap.html, {folder}_network.html
+       {folder}_data.xlsx</code></pre>
+
+  <div class="callout warn">
+    <b>3D export needs Chrome</b> when Export Method = webdriver and
+    Export Views is on; use kaleido if Chrome is unavailable.
+  </div>
+</main>
+</body>
+</html>

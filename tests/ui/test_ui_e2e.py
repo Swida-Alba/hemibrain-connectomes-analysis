@@ -350,21 +350,13 @@ class TestApp:
         assert callable(main)
         assert callable(main_page)
 
-    def test_guide_pages_render_and_links_are_direct(self):
-        """Instruction links must point to the rendered /guide routes."""
+    def test_guide_html_files_and_links_are_direct(self):
+        """Instruction links must point to real local HTML guides with valid
+        internal links."""
+        import re as _re
         from nicegui.page import page
         from nicegui import Client
         import ui.app as app_module
-
-        p = page('/guide-test')
-        client = Client(p)
-        with client:
-            app_module._render_guide('find_path.md')
-        texts = [
-            getattr(e, 'text', '') or ''
-            for e in client.elements.values()
-        ]
-        assert any('Find Path' in t for t in texts if isinstance(t, str))
 
         p2 = page('/smoke-guide')
         client2 = Client(p2)
@@ -374,10 +366,24 @@ class TestApp:
             str((getattr(e, '_props', None) or {}).get('href', ''))
             for e in client2.elements.values()
         ]
-        guide_links = [h for h in hrefs if h.startswith('guide/')]
-        assert 'guide/find_path.md' in guide_links
-        assert 'guide/input_formats' in guide_links
-        assert 'guide/index' in guide_links
+        guide_links = [h for h in hrefs if h.startswith('docs/ui_guides/')]
+        assert 'docs/ui_guides/find_path.md'.replace('.md', '.html') in guide_links
+        assert 'docs/ui_guides/input_formats.html' in guide_links
+        assert 'docs/ui_guides/README.html' in guide_links
+
+        # Every linked HTML guide must exist and its internal links must resolve
+        guides_dir = PROJECT_ROOT / 'docs' / 'ui_guides'
+        html_files = sorted(guides_dir.glob('*.html'))
+        assert len(html_files) >= 12
+        for html_file in html_files:
+            text = html_file.read_text(encoding='utf-8')
+            assert text.lstrip().startswith('<!doctype html>')
+            assert '<title>' in text
+            assert 'guide.css' in text
+            for target in _re.findall(r'href="([^"]+\.html)"', text):
+                if target == 'guide.css' or target.startswith(('http:', 'https:')):
+                    continue
+                assert (guides_dir / target).exists(), f'{html_file.name} -> {target}'
 
 
 # =============================================================================

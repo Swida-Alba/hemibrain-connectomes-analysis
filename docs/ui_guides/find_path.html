@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Find All Paths - DROCAT Instructions</title>
+  <link rel="stylesheet" href="guide.css">
+</head>
+<body>
+<main class="guide">
+  <header class="guide-top">
+    <a class="back" href="README.html">&larr; Back to guides</a>
+    <span class="tag">Connectome</span>
+  </header>
+  <h1>Find All Paths</h1>
+  <p class="lede">
+    Discover multi-hop pathways between source and target neuron groups in a
+    single dataset, e.g. <code>aMe12</code> → <code>aMe10</code>.
+  </p>
+
+  <h2>Quick start</h2>
+  <ol>
+    <li>Add <b>Source Neurons</b> (<code>aMe12</code>, <code>aMe10</code>)
+      and <b>Target Neurons</b> (<code>PPL101</code>, <code>PPL103</code>)
+      as chips, paste, or upload a list.</li>
+    <li>Pick the <b>Dataset</b> and an <b>Output Directory</b>.</li>
+    <li>Keep <b>Max Intermediate Layers = 2</b> and click
+      <b>Find All Paths</b>; watch the live log.</li>
+  </ol>
+
+  <h2>Inputs &amp; examples</h2>
+  <p>Every entry may be a type, bodyId, instance, or pattern.
+    See <a href="input_formats.html">Input File Formats</a> for CSV/XLSX.</p>
+  <table>
+    <tr><th>Example</th><th>What it does</th></tr>
+    <tr><td><code>aMe12</code>, <code>aMe10</code> (source)</td><td>Two source types: all their bodyIds are starting points</td></tr>
+    <tr><td><code>PPL101</code>, <code>PPL103</code> (target)</td><td>Two target types</td></tr>
+    <tr><td><code>KC.*</code> with Filter = Starts with</td><td>Expands to <code>KC.*</code> - all KC types</td></tr>
+    <tr><td><code>720575940610453042</code></td><td>A single bodyId (kept as integer)</td></tr>
+    <tr><td><code>aMe12, aMe10</code> pasted</td><td>Both added as chips, duplicates removed</td></tr>
+  </table>
+
+  <h2>Parameters</h2>
+  <table>
+    <tr><th>Parameter</th><th>Default</th><th>Meaning</th><th>Example</th></tr>
+    <tr><td>Max Intermediate Layers</td><td>2</td><td>Path length: 0 = direct, 2 = two intermediates</td><td>3 finds longer circuits but is slower</td></tr>
+    <tr><td>Min Synapse Count</td><td>3</td><td>Connections below this weight are removed</td><td>10 keeps only strong edges</td></tr>
+    <tr><td>Edge Limit</td><td>500</td><td>Maximum edges considered per neuron</td><td>50 for very dense regions</td></tr>
+    <tr><td>Min Connection Ratio</td><td>0.0</td><td>Minimum weight/post ratio</td><td>0.1 keeps only dominant outputs</td></tr>
+    <tr><td>Min Traversal Prob.</td><td>0.0</td><td>ratio/0.3, capped at 1.0</td><td>0.5 = confident paths only</td></tr>
+    <tr><td>Algorithm</td><td>Bidirectional</td><td>Bidirectional (fast), DP, MemoizedDFS, DFS</td><td>MemoizedDFS for deep paths</td></tr>
+    <tr><td>Filter By</td><td>bodyId</td><td>bodyId (per neuron) or type (aggregated)</td><td>type for cleaner summaries</td></tr>
+    <tr><td>Output Format</td><td>csv</td><td>csv (fast) or xlsx</td><td>xlsx for Excel formatting</td></tr>
+    <tr><td>Network Layout</td><td>distributed</td><td>HTML graph layout</td><td>spring for organic look</td></tr>
+  </table>
+
+  <h2>Advanced options</h2>
+  <ul>
+    <li><b>Custom source/target names</b>: labels used in file and folder
+      names (e.g. <code>aMe_clock</code>).</li>
+    <li><b>Keywords to exclude</b>: paths containing e.g. <code>None</code>
+      or <code>unknown</code> are removed.</li>
+    <li><b>Skip BodyId in Output</b>: only type-level results are saved.</li>
+    <li><b>Cache Only (Offline)</b>: never contacts the server; requires a
+      pre-built cache.</li>
+    <li><b>Save Folder Name</b>: custom output folder instead of the auto
+      name.</li>
+    <li><b>Hemisphere analysis</b>: separate L/R labels, symmetry outputs,
+      keep only hemisphere-conserved edges, find reciprocal connections.</li>
+  </ul>
+
+  <h2>Output &amp; examples</h2>
+  <p>One folder per run:</p>
+  <pre><code>{output_dir}/findpath_{DATASET}_{source}_to_{target}_{params}_{timestamp}/
+  aMe12_to_aMe10_allpaths_type.csv
+  connection_type.csv
+  conn_mat_type_weight.csv
+  neurons_included.csv
+  *_{heatmap,Sankey,network}.html
+  parameters.txt</code></pre>
+  <div class="example">
+    <div class="example-title">Example folder</div>
+    <pre><code>findpath_MCNS_aMe12_to_aMe10_L2w3r0p0_20260801_183000/</code></pre>
+  </div>
+
+  <h2>Common issues &amp; tips</h2>
+  <div class="callout tip">
+    <b>No paths found</b> - raise Max Intermediate Layers, lower Min Synapse,
+    or check that targets exist in the dataset (log shows target counts).
+  </div>
+  <div class="callout warn">
+    <b>Slow runs</b> - large networks (100k+ neurons) take minutes. Keep the
+    query small first, then expand.
+  </div>
+  <div class="callout info">
+    <b>Repeated runs</b> - the local cache gives 10-100x speedups; the second
+    run with the same dataset is much faster.
+  </div>
+</main>
+</body>
+</html>

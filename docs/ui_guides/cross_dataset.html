@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Cross-Dataset Comparison - DROCAT Instructions</title>
+  <link rel="stylesheet" href="guide.css">
+</head>
+<body>
+<main class="guide">
+  <header class="guide-top">
+    <a class="back" href="README.html">&larr; Back to guides</a>
+    <span class="tag">Connectome</span>
+  </header>
+  <h1>Cross-Dataset Comparison</h1>
+  <p class="lede">
+    Compare connectivity between two or more datasets (e.g.
+    <code>male-cns:v0.9</code> vs <code>hemibrain:v1.2.1</code>) for the
+    same source → target query, across multiple synapse thresholds.
+  </p>
+
+  <h2>Quick start</h2>
+  <ol>
+    <li>Select 2+ <b>Datasets</b> (optional nicknames in the same order).</li>
+    <li>Add <b>Source Neurons</b> and <b>Target Neurons</b>.</li>
+    <li>Click <b>Run Comparison</b> - a report plus matrices are produced
+      for every threshold.</li>
+  </ol>
+
+  <h2>Inputs &amp; examples</h2>
+  <table>
+    <tr><th>Example</th><th>Behavior</th></tr>
+    <tr><td>Datasets: male-cns:v0.9, hemibrain:v1.2.1; nicknames: MCNS, HEMI</td><td>Two datasets with short display names</td></tr>
+    <tr><td>Thresholds: <code>3, 5, 10</code></td><td>Separate analyses per threshold</td></tr>
+    <tr><td>Mode: <code>edge</code></td><td>Edges compared by weight only</td></tr>
+    <tr><td>Mode: <code>path</code> (default)</td><td>Edges discovered through paths</td></tr>
+  </table>
+
+  <h2>Parameters</h2>
+  <table>
+    <tr><th>Parameter</th><th>Default</th><th>Meaning</th></tr>
+    <tr><td>Max Intermediate Layers</td><td>2</td><td>Path depth for path mode</td></tr>
+    <tr><td>Top Edges</td><td>500</td><td>Edge cap per threshold</td></tr>
+    <tr><td>Pathfinding Algorithm</td><td>Bidirectional</td><td>Algorithm used per dataset</td></tr>
+    <tr><td>Min Connection Ratio</td><td>0.0</td><td>Weight/post ratio filter</td></tr>
+    <tr><td>Min Traversal Prob.</td><td>0.0</td><td>Traversal probability filter</td></tr>
+    <tr><td>Output Format</td><td>csv</td><td>csv or xlsx</td></tr>
+  </table>
+
+  <h2>Advanced options</h2>
+  <ul>
+    <li><b>Skip BodyId Level</b>: type-level only (faster, recommended).</li>
+    <li><b>Cache Only (Offline)</b>: no server contact; requires caches.</li>
+    <li><b>Auto Type Mapping</b>: map equivalent type names across datasets.</li>
+    <li><b>Parallel Processing / Max Workers</b>: tune speed vs API load.</li>
+    <li><b>Hemisphere analysis</b>: L/R separation, symmetry, conserved
+      edges, reciprocal graphs.</li>
+  </ul>
+
+  <h2>Output</h2>
+  <pre><code>{output_dir}/comp_{source}_to_{target}_{dataset_codes}_{timestamp}/
+  dataset_data/{dataset}/...
+  comparison_results/path_count_comparison.csv
+  comparison_results/edge_weight_comparison.csv
+  comparison_results/presence_matrices/...
+  report.html</code></pre>
+
+  <div class="callout tip">
+    <b>Deprecated datasets</b> (e.g. male-cns:v0.9) may no longer answer
+    server queries; enable <b>Cache Only</b> after warming the cache once.
+  </div>
+</main>
+</body>
+</html>

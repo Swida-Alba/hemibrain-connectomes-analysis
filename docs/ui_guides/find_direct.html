@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Direct Connections - DROCAT Instructions</title>
+  <link rel="stylesheet" href="guide.css">
+</head>
+<body>
+<main class="guide">
+  <header class="guide-top">
+    <a class="back" href="README.html">&larr; Back to guides</a>
+    <span class="tag">Connectome</span>
+  </header>
+  <h1>Direct Connections</h1>
+  <p class="lede">
+    Find one-hop synaptic connections between source and target neuron
+    groups. Leave targets empty to list every downstream target of the
+    sources.
+  </p>
+
+  <h2>Quick start</h2>
+  <ol>
+    <li>Add <b>Source Neurons</b> (e.g. <code>aMe12</code>,
+      <code>aMe10</code>).</li>
+    <li>Add <b>Target Neurons</b>, or leave empty for all downstream targets.</li>
+    <li>Click <b>Find Direct Connections</b>.</li>
+  </ol>
+
+  <h2>Inputs &amp; examples</h2>
+  <table>
+    <tr><th>Situation</th><th>Source</th><th>Target</th><th>Result</th></tr>
+    <tr><td>Specific pair</td><td><code>aMe12</code></td><td><code>aMe10</code></td><td>Only aMe12→aMe10 edges</td></tr>
+    <tr><td>All downstream</td><td><code>aMe12</code>, <code>aMe10</code></td><td><i>empty</i></td><td>Every downstream target of both sources</td></tr>
+    <tr><td>Group to group</td><td><code>KC.*</code></td><td><code>MBON.*</code></td><td>KC → MBON edges only</td></tr>
+  </table>
+
+  <h2>Parameters</h2>
+  <table>
+    <tr><th>Parameter</th><th>Default</th><th>Meaning</th></tr>
+    <tr><td>Min Synapse Count</td><td>3</td><td>Minimum edge weight</td></tr>
+    <tr><td>Edge Limit</td><td>50</td><td>Maximum output rows (memory cap)</td></tr>
+    <tr><td>Min Connection Ratio</td><td>0.0</td><td>Minimum weight/post ratio</td></tr>
+    <tr><td>Min Traversal Prob.</td><td>0.0</td><td>Traversal probability threshold</td></tr>
+    <tr><td>Filter By</td><td>bodyId</td><td>bodyId or type aggregation</td></tr>
+    <tr><td>Exclude Intra-type</td><td>off</td><td>Removes edges where type_pre == type_post</td></tr>
+    <tr><td>Output Format</td><td>csv</td><td>csv or xlsx</td></tr>
+  </table>
+
+  <h2>Advanced options</h2>
+  <ul>
+    <li><b>Custom source/target names</b> for output labels.</li>
+    <li><b>Cache Only (Offline)</b> and <b>Save Folder Name</b>.</li>
+    <li><b>Hemisphere options</b>: separate L/R, keep conserved edges,
+      symmetry analysis.</li>
+  </ul>
+
+  <h2>Output</h2>
+  <pre><code>{output_dir}/finddirect_{DATASET}_{source}_to_{target}_{params}_{timestamp}/
+  bodyId_visualization_data_connections.csv
+  bodyId_visualization_data_connMatrix_weight.csv
+  bodyId_visualization_network.html
+  parameters.txt</code></pre>
+
+  <div class="callout tip">
+    <b>No direct connections found</b> means there are no edges above the
+    thresholds between the chosen groups - try lowering Min Synapse or
+    widening the target list.
+  </div>
+</main>
+</body>
+</html>

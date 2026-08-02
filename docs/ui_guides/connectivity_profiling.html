@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Connectivity Profiling - DROCAT Instructions</title>
+  <link rel="stylesheet" href="guide.css">
+</head>
+<body>
+<main class="guide">
+  <header class="guide-top">
+    <a class="back" href="README.html">&larr; Back to guides</a>
+    <span class="tag">Connectome</span>
+  </header>
+  <h1>Connectivity Profiling</h1>
+  <p class="lede">
+    Compare connectivity profiles of neuron types (or bodyIds) inside one
+    dataset using Jaccard, cosine and rank-correlation similarities.
+  </p>
+
+  <h2>Quick start</h2>
+  <ol>
+    <li>Enter 2+ neurons (e.g. <code>aMe12</code>, <code>aMe10</code>,
+      <code>aMe9</code>).</li>
+    <li>Pick the dataset; keep <b>Top K Partners = 15</b>.</li>
+    <li>Click <b>Run Profiling</b>.</li>
+  </ol>
+
+  <h2>Inputs &amp; examples</h2>
+  <table>
+    <tr><th>Query</th><th>Meaning</th></tr>
+    <tr><td><code>aMe12, aMe10, aMe9</code></td><td>Three types compared pairwise</td></tr>
+    <tr><td><code>720575940610453042, aMe12</code></td><td>BodyId vs type (mixed allowed)</td></tr>
+    <tr><td><code>KC.*</code> (Filter = Starts with)</td><td>All KC types compared</td></tr>
+  </table>
+
+  <h2>Profile construction</h2>
+  <table>
+    <tr><th>Parameter</th><th>Default</th><th>Meaning</th></tr>
+    <tr><td>Top K Partners</td><td>15</td><td>Top partners per direction by synapse weight</td></tr>
+    <tr><td>Min Unique Types (M)</td><td>5</td><td>Minimum partner types; K expands automatically if fewer</td></tr>
+    <tr><td>Min Synapse Threshold</td><td>3</td><td>Connection weight cutoff for profiles</td></tr>
+    <tr><td>Aggregation Level</td><td>type</td><td>type (grouped) or bodyid (per neuron)</td></tr>
+    <tr><td>Direction</td><td>both</td><td>upstream, downstream, or both</td></tr>
+  </table>
+
+  <h2>Advanced options</h2>
+  <ul>
+    <li><b>BodyId-Level Computation</b>: auto (skip over 1000 bodyIds),
+      skip, or compute always.</li>
+    <li><b>Cluster Heatmaps (Ward)</b>: hierarchical reordering of matrices.</li>
+    <li><b>Show Figures</b>: open heatmaps in the browser.</li>
+    <li><b>Pre-build Full Dataset Cache</b>: OFF by default - leave it off;
+      the tool uses connections already cached. Turning it on fetches every
+      uncached neuron and can take hours.</li>
+  </ul>
+
+  <h2>Output</h2>
+  <pre><code>{output_dir}/profiling_{DATASET}_{query}_{timestamp}/
+  profiles/individual/...
+  profiles/aggregated/...
+  type_level/results/type_similarity_*.csv
+  type_level/visualization/heatmap_*.html
+  bodyid_level/results/bodyid_similarity_*.csv</code></pre>
+
+  <div class="callout warn">
+    <b>First run on a new dataset</b> - profile extraction needs connection
+    data. If the cache is empty the tool may take a long time or return
+    insufficient profiles; run a small Find Path/Direct query first to warm
+    the cache.
+  </div>
+</main>
+</body>
+</html>
