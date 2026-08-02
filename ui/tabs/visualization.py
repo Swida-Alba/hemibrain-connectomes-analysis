@@ -12,6 +12,11 @@ from ..components.common import (
 )
 from ..components.output_panel import OutputPanel
 from ..runner import ScriptRunner
+from ..components.palette_picker import (
+    palette_picker,
+    color_swatch_picker,
+    sample_palette,
+)
 
 
 COLOR_PRESETS = {
@@ -22,21 +27,11 @@ COLOR_PRESETS = {
 }
 
 # Neuron color palettes (per layer), matched to utils.color_utils.generate_color_palette
-NEURON_COLOR_PRESETS = {
-    "Category20": "category20",
-    "Category10": "category10",
-    "Cool": "cool",
-    "Warm": "warm",
-    "Rainbow": "rainbow",
-    "Viridis": "viridis",
-    "Plasma": "plasma",
-}
-
-ROI_COLOR_MODES = {
-    "auto": "Auto (single gray)",
-    "distinct": "Distinct color per ROI",
-    "custom": "Custom colors (comma-separated)",
-}
+# Path-network color schemes (source / intermediate / target / link)
+PATH_SCHEMES = [
+    (name, [scheme["source"], scheme["intermediate"], scheme["target"], scheme["link"]])
+    for name, scheme in COLOR_PRESETS.items()
+]
 
 COMMON_ROIS = [
     "AL", "LH", "EB", "FB", "PB", "NO", "CA", "PED", "aL", "bL", "gL",
@@ -102,10 +97,6 @@ def create_visualization_tab():
                     "Neuron Opacity", 0.2, 0, 1, 0.1,
                     hint="Transparency of neuron tubes (0=invisible, 1=solid).",
                 )
-                neuron_color_preset = select_input(
-                    "Neuron Colors", list(NEURON_COLOR_PRESETS.keys()), "Category20",
-                    hint="Palette used to color neuron layers independently.",
-                )
                 bg_color = select_input(
                     "Background", ["white", "black"], "white",
                     hint="Background color for the 3D scene and exports.",
@@ -118,6 +109,11 @@ def create_visualization_tab():
                     "VNC Mesh", False,
                     hint="Show the ventral nerve cord mesh (male-cns / manc datasets).",
                 )
+            neuron_palette = palette_picker(
+                "Neuron Colors",
+                value="Category20",
+                include_auto=False,
+            )
 
             section_header("Synapses", "bubble_chart")
             with param_grid(3):
@@ -151,19 +147,12 @@ def create_visualization_tab():
                      "(e.g. ME.*, all, primary) and press Enter to add it.",
             )
             roi_select.props('new-value-mode="add-unique"')
+            roi_palette = palette_picker(
+                "ROI Colors",
+                value="Cool",
+                include_auto=True,
+            )
             with param_grid(3):
-                roi_color_mode = select_input(
-                    "ROI Coloring", list(ROI_COLOR_MODES.keys()), "distinct",
-                    hint="'Distinct color per ROI': each selected ROI gets its own color "
-                         "so regions are shown independently. 'Custom': provide your own colors.",
-                )
-                roi_custom_colors = ui.input(
-                    label="ROI Colors (comma-separated)",
-                    placeholder="e.g., rgba(255,0,0,0.15), rgba(0,255,0,0.2)",
-                ).classes("w-full drocat-input").tooltip(
-                    "One color per ROI in the same order as the Mesh ROIs list. "
-                    "Supports hex, named and rgba() colors; alpha inside the color is respected."
-                )
                 mesh_alpha = number_input(
                     "ROI Mesh Opacity", 0.1, 0, 1, 0.05,
                     hint="Transparency applied to all ROI meshes (per-ROI alpha can be "
@@ -204,13 +193,7 @@ def create_visualization_tab():
                         "Export Scale", 3, 1, 5,
                         hint="Resolution multiplier for PNG exports (higher = sharper).",
                     )
-                    brain_mesh_color = ui.input(
-                        label="Brain Mesh Color",
-                        value="auto",
-                        placeholder="auto",
-                    ).classes("w-full drocat-input").tooltip(
-                        "Color for the brain/VNC envelope mesh ('auto', hex, rgba(...))."
-                    )
+                brain_mesh_picker = color_swatch_picker("Brain Mesh Color", value="auto")
                 with ui.row().classes("gap-4"):
                     show_fig = checkbox_input(
                         "Show Figure", True,
@@ -308,9 +291,10 @@ def create_visualization_tab():
                     "Network Layout", NETWORK_LAYOUTS + ["hierarchical"], "hierarchical",
                     hint="Layout algorithm for the HTML network visualization.",
                 )
-            color_preset = select_input(
-                "Color Preset", list(COLOR_PRESETS.keys()), "Cool",
-                hint="Color scheme for source/intermediate/target nodes in path network.",
+            color_preset = palette_picker(
+                "Color Scheme",
+                value="Cool",
+                catalog=PATH_SCHEMES,
             )
             with ui.row().classes("gap-4"):
                 show_path_fig = checkbox_input(
@@ -328,7 +312,7 @@ def create_visualization_tab():
         output_panel.clear()
 
         is_3d = "3D Skeleton" in tool_select.value
-        colors = COLOR_PRESETS.get(color_preset.value, COLOR_PRESETS["Cool"])
+        colors = COLOR_PRESETS.get(color_preset.get_value(), COLOR_PRESETS["Cool"])
 
         if is_3d:
             neurons = neuron_chips.value or []
@@ -337,26 +321,15 @@ def create_visualization_tab():
                 return
             rois = roi_select.value or []
 
-            from src.utils.color_utils import generate_color_palette
-
-            # Per-layer neuron colors (independent coloring)
-            palette_name = NEURON_COLOR_PRESETS.get(
-                neuron_color_preset.value, "category20"
-            )
-            neuron_colors = generate_color_palette(
-                max(len(neurons), 1), palette_name, alpha=1.0
+            # Per-layer neuron colors sampled from the chosen palette
+            neuron_colors = sample_palette(
+                neuron_palette.get_colors(), len(neurons)
             )
 
-            # Per-ROI colors so brain regions render independently
+            # Per-ROI colors so brain regions render independently (Auto = gray)
             mesh_color = None
-            if roi_color_mode.value == "distinct" and rois:
-                mesh_color = generate_color_palette(len(rois), "cool", alpha=1.0)
-            elif roi_color_mode.value == "custom" and roi_custom_colors.value.strip():
-                mesh_color = [
-                    c.strip()
-                    for c in roi_custom_colors.value.split(",")
-                    if c.strip()
-                ]
+            if roi_palette.get_value() != "Auto (single gray)" and rois:
+                mesh_color = sample_palette(roi_palette.get_colors(), len(rois))
 
             custom_names = [
                 n.strip()
@@ -393,7 +366,7 @@ def create_visualization_tab():
                 "export_scale": int(export_scale.value),
                 "export_views": export_views.value,
                 "show_fig": show_fig.value,
-                "brain_mesh_color": brain_mesh_color.value.strip() or "auto",
+                "brain_mesh_color": brain_mesh_picker.get_value(),
             }
             method_params = {
                 "export_individual_profiles": export_individual_profiles.value,

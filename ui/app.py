@@ -238,6 +238,62 @@ html, body {
 .drocat-clear-btn { color: var(--drocat-faint); font-size: 12px; }
 .drocat-clear-btn:hover { color: var(--drocat-err); }
 
+/* ---------- Palette picker (color previews) ---------- */
+.drocat-palette-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+    gap: 8px;
+    overflow-y: auto;
+    padding: 2px;
+}
+.drocat-palette-card {
+    border: 1px solid var(--drocat-line);
+    border-radius: 10px;
+    padding: 6px;
+    cursor: pointer;
+    background: var(--drocat-surface);
+    transition: border-color .15s ease, box-shadow .15s ease;
+}
+.drocat-palette-card:hover { border-color: var(--drocat-line-strong); }
+.drocat-palette-card.selected {
+    border-color: var(--drocat-cobalt);
+    box-shadow: 0 0 0 2px var(--drocat-cobalt-soft);
+}
+.drocat-palette-swatches {
+    overflow: hidden;
+    border-radius: 6px;
+    border: 1px solid rgba(11, 31, 58, .08);
+}
+.drocat-palette-name {
+    font-size: 10.5px;
+    font-weight: 650;
+    color: var(--drocat-navy);
+    margin-top: 4px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.drocat-palette-preview {
+    min-height: 26px;
+    padding: 4px 8px;
+    background: var(--drocat-soft);
+    border-radius: 10px;
+}
+.drocat-palette-expansion {
+    border: 1px solid var(--drocat-line);
+    border-radius: 12px;
+    overflow: hidden;
+}
+.drocat-swatch {
+    padding: 3px;
+    border-radius: 50%;
+    border: 2px solid transparent;
+    cursor: pointer;
+    transition: border-color .15s ease, transform .15s ease;
+}
+.drocat-swatch:hover { transform: scale(1.08); }
+.drocat-swatch.selected { border-color: var(--drocat-cobalt); }
+
 /* ---------- Results panel ---------- */
 .drocat-results-head { padding-bottom: 12px; }
 .drocat-results-mark {
