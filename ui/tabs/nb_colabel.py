@@ -23,19 +23,29 @@ def create_nb_colabel_tab():
     )
 
     with form_col:
-        with ui.card().classes("w-full"):
+        with ui.card().classes("w-full drocat-card"):
             section_header("Driver Lines", "search")
             line_input = neuron_input(label="Driver Line Names", placeholder="e.g., VT000770, SS00001, R10A06")
             with param_grid(2):
-                dataset = dataset_selector(label="Dataset (optional)", default=None, datasets=["(all)"] + DATASETS)
+                dataset = dataset_selector(
+                    label="3D Dataset (optional)",
+                    default=None,
+                    datasets=["(all)"] + DATASETS,
+                    hint=(
+                        "Limits the optional 3D skeleton output. Co-labeling "
+                        "statistics always use all datasets in NeuronBridge."
+                    ),
+                )
                 output_dir = dir_input()
 
-        with ui.card().classes("w-full"):
+        with ui.card().classes("w-full drocat-card"):
             section_header("Analysis Settings", "tune")
             with ui.row().classes("gap-4"):
                 method_jaccard = checkbox_input("Jaccard", True, hint="Binary Jaccard similarity of labeled types.")
                 method_weighted = checkbox_input("Weighted Jaccard", True, hint="Score-weighted Jaccard similarity.")
-                calc_sparsity = checkbox_input("Line Specificity", True, hint="Calculate sparsity metric per line.")
+            ui.label(
+                "Line-specificity and sparsity metrics are included automatically."
+            ).classes("text-caption drocat-muted")
 
             # --- Advanced Settings (collapsed) ---
             with ui.expansion("Advanced Settings", icon="settings_suggest").classes("w-full"):
@@ -81,11 +91,15 @@ def create_nb_colabel_tab():
         output_panel.clear()
         output_panel.set_running(True)
 
-        ds = None if dataset.value == "(all)" else dataset.value
+        ds = "all" if dataset.value in (None, "(all)") else dataset.value
 
         methods = []
         if method_jaccard.value: methods.append("jaccard")
         if method_weighted.value: methods.append("weighted_jaccard")
+        if not methods:
+            ui.notify("Select at least one similarity method", type="warning")
+            output_panel.set_running(False)
+            return
 
         constructor_params = {"verbose": True}
 
@@ -102,6 +116,7 @@ def create_nb_colabel_tab():
             "sort_by": sort_by.value,
             "background_color": background_color.value,
             "pdf_images_per_page": (int(pdf_cols.value), int(pdf_rows.value)),
+            "datasets_to_visualize": ds,
         }
 
         result = await output_panel.run(runner, "nb_colabel", constructor_params, "colabel",

@@ -10,6 +10,7 @@ light canvas, white surfaces, cobalt accent, segmented navigation,
 focus-panel + contact-sheet workspace.
 """
 
+import os
 import sys
 from pathlib import Path
 
@@ -67,6 +68,7 @@ html, body {
     color: var(--drocat-navy);
     font-family: Inter, "Avenir Next", "Segoe UI", Helvetica, Arial, sans-serif;
     -webkit-font-smoothing: antialiased;
+    line-height: 1.45;
 }
 
 /* ---------- Header ---------- */
@@ -171,7 +173,8 @@ html, body {
 }
 
 /* ---------- Page workspace ---------- */
-.drocat-page { max-width: 1500px; margin: 0 auto; padding: 24px 28px 40px; }
+.drocat-shell { width: 100%; max-width: 1500px; margin: 0 auto; padding: 20px 28px 44px; }
+.drocat-page { width: 100%; padding: 20px 0 0; }
 .drocat-page-head { padding-bottom: 18px; border-bottom: 1px solid var(--drocat-line); margin-bottom: 20px; }
 .drocat-page-mark {
     width: 46px; height: 46px; border-radius: 14px; display: grid; place-items: center;
@@ -190,11 +193,24 @@ html, body {
 }
 .drocat-form { min-width: 0; }
 .drocat-results { min-width: 0; }
-.drocat-results-card { position: sticky; top: 20px; }
+.drocat-results-card { position: sticky; top: 96px; }
 
 @media (max-width: 1280px) {
     .drocat-workspace { grid-template-columns: 1fr; }
     .drocat-results-card { position: static; }
+}
+
+@media (max-width: 700px) {
+    .drocat-header { min-height: 64px !important; padding: 0 16px !important; }
+    .drocat-brand-mark { width: 36px; height: 36px; border-radius: 11px; }
+    .drocat-brand-sub, .drocat-header-link { display: none; }
+    .drocat-shell { padding: 14px 14px 32px; }
+    .drocat-page { padding-top: 16px; }
+    .drocat-page-head { align-items: flex-start; padding-bottom: 14px; margin-bottom: 16px; }
+    .drocat-page-mark { width: 40px; height: 40px; border-radius: 12px; }
+    .drocat-page-title { font-size: 19px; }
+    .q-card.drocat-card { padding: 15px 14px; border-radius: 14px !important; }
+    .drocat-param-grid { grid-template-columns: minmax(0, 1fr) !important; }
 }
 
 /* ---------- Cards ---------- */
@@ -398,10 +414,6 @@ def main_page():
 
     # Global theme
     ui.add_head_html(f"<style>{DROCAT_CSS}</style>")
-    ui.add_head_html(
-        '<link rel="preconnect" href="https://fonts.googleapis.com">'
-        '<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">'
-    )
 
     # Header
     with ui.header(elevated=False).classes("drocat-header items-center justify-between"):
@@ -416,7 +428,7 @@ def main_page():
             ui.link("Documentation", "docs/ui_guides/README.html").classes("drocat-header-link")
 
     # Main content
-    with ui.column().classes("w-full drocat-page gap-3"):
+    with ui.column().classes("w-full drocat-shell gap-3"):
         # Segmented navigation
         with ui.tabs().classes("drocat-tabs w-full") as tabs:
             ui.label("Connectome").classes("drocat-tab-group")
@@ -464,12 +476,20 @@ def main_page():
 
 def main():
     """Entry point for the DROCAT UI application."""
+    host = os.environ.get("DROCAT_UI_HOST", APP_HOST)
+    port = int(os.environ.get("DROCAT_UI_PORT", APP_PORT))
+    show = os.environ.get("DROCAT_UI_SHOW", "1").strip().lower() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }
     ui.run(
         title=APP_TITLE,
-        host=APP_HOST,
-        port=APP_PORT,
+        host=host,
+        port=port,
         reload=False,
-        show=True,
+        show=show,
         favicon="🧠",
     )
 

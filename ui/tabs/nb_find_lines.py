@@ -24,7 +24,7 @@ def create_nb_find_lines_tab():
     )
 
     with form_col:
-        with ui.card().classes("w-full"):
+        with ui.card().classes("w-full drocat-card"):
             section_header("Query Neurons", "search")
             query_input = advanced_neuron_input(
                 label="EM Neurons (bodyId, type, or instance)",
@@ -38,18 +38,27 @@ def create_nb_find_lines_tab():
                 )
                 output_dir = dir_input()
 
-        with ui.card().classes("w-full"):
+        with ui.card().classes("w-full drocat-card"):
             section_header("Search Parameters", "tune")
             with param_grid(2):
                 match_algo = select_input(
                     "Algorithm", MATCH_ALGORITHMS, DEFAULTS["match_algorithm"],
                     hint="'cds': Color Depth Search (fast). 'pppm': Point Pattern (precise). 'both': run both.",
                 )
-                top_n_gal4 = number_input("Top N Lines", 20, 5, 100, hint="Max driver lines to return per query.")
+                top_image_lines = number_input(
+                    "Top Lines for Images",
+                    20,
+                    1,
+                    100,
+                    hint=(
+                        "When image download is enabled, download only the top N "
+                        "ranked lines (per category in separate mode). Search CSVs "
+                        "still contain all matches."
+                    ),
+                )
 
             # --- Advanced Settings (collapsed) ---
             with ui.expansion("Advanced Settings", icon="settings_suggest").classes("w-full"):
-                top_n_split = number_input("Top N Split-GAL4 (separate)", 20, 5, 100, hint="Max Split-GAL4 lines when separated.")
                 separate_split = checkbox_input(
                     "Separate Split-GAL4 Results", True,
                     hint="Generate separate summary CSVs for GAL4/LexA vs Split-GAL4 lines.",
@@ -146,7 +155,7 @@ def create_nb_find_lines_tab():
             "output_dir": output_dir.value,
             "match_type": match_algo.value,
             "download_images": dl_source,
-            "download_img_for_top_n_lines": int(top_n_gal4.value) if dl_source else None,
+            "download_img_for_top_n_lines": int(top_image_lines.value) if dl_source else None,
             "summary_format": 'pdf' if generate_pdf.value else None,
             "sort_by": sort_by.value,
             "image_formats": image_formats.value or ["png"],

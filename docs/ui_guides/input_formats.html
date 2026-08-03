@@ -18,12 +18,12 @@
     typed/pasted neuron lists.
   </p>
 
-  <h2>Neuron lists (CSV / XLSX)</h2>
+  <h2>Neuron lists (CSV / TSV / Excel)</h2>
   <p>Used by Find Path, Direct Connections, Connectivity Profiling and
     Cross-Dataset panels.</p>
   <table>
     <tr><th>Format</th><th>Rule</th><th>Example</th></tr>
-    <tr><td>CSV / TXT</td><td>One neuron per line, or comma-separated. The
+    <tr><td>CSV / TSV</td><td>One neuron per row. The
       <b>first column</b> is read.</td>
       <td><code>aMe12</code><br><code>aMe10</code><br><code>PPL101</code></td></tr>
     <tr><td>XLSX / XLS</td><td>The <b>first sheet, first column</b> is read.</td>
@@ -43,11 +43,12 @@ PPL101</code></pre>
   </div>
 
   <div class="example">
-    <div class="example-title">CSV without header (comma separated)</div>
-    <pre><code>aMe12, aMe10, PPL101, PPL103
-KC.*, MBON01</code></pre>
-    <p class="small">Both lines are split on commas/newlines; five entries
-      are loaded.</p>
+    <div class="example-title">CSV without header</div>
+    <pre><code>aMe12
+aMe10
+PPL101</code></pre>
+    <p class="small">Each first-column row becomes one neuron entry. Use the
+      paste control for comma-separated text.</p>
   </div>
 
   <div class="example">

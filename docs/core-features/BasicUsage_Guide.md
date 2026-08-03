@@ -23,8 +23,8 @@ This guide demonstrates the core functionality of DROCAT using the **practical e
 
 ```bash
 # Create and activate environment
-conda create -n drocat python=3.11 -y
-conda activate drocat
+conda create -n drocat-4.5.0 python=3.11 -y
+conda activate drocat-4.5.0
 
 # Install dependencies
 pip install -r requirements.txt

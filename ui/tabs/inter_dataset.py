@@ -23,7 +23,7 @@ def create_inter_dataset_tab():
     )
 
     with form_col:
-        with ui.card().classes("w-full"):
+        with ui.card().classes("w-full drocat-card"):
             section_header("Datasets", "storage")
             datasets_select = dataset_multi_selector(
                 label="Datasets to compare (select 2+)",
@@ -34,21 +34,21 @@ def create_inter_dataset_tab():
                 placeholder="e.g., MCNS, Hemi",
             ).classes("w-full").tooltip("Short display names for each dataset (same order). Leave empty for auto.")
 
-        with ui.card().classes("w-full"):
+        with ui.card().classes("w-full drocat-card"):
             section_header("Neuron Selection", "hub")
             source_input = neuron_list_input(
                 label="Source Neurons",
-                placeholder="Type or upload CSV/XLSX with neuron types/bodyIds",
-                hint="Source neurons for pathfinding. Upload a CSV/XLSX file (first column) or type comma-separated.",
+                placeholder="Type or upload CSV/TSV/Excel with neuron types/bodyIds",
+                hint="Source neurons for pathfinding. Upload a CSV/TSV/Excel file (first column) or type comma-separated.",
             )
             target_input = neuron_list_input(
                 label="Target Neurons",
-                placeholder="Type or upload CSV/XLSX with neuron types/bodyIds",
-                hint="Target neurons for pathfinding. Upload a CSV/XLSX file (first column) or type comma-separated.",
+                placeholder="Type or upload CSV/TSV/Excel with neuron types/bodyIds",
+                hint="Target neurons for pathfinding. Upload a CSV/TSV/Excel file (first column) or type comma-separated.",
             )
             output_dir = dir_input()
 
-        with ui.card().classes("w-full"):
+        with ui.card().classes("w-full drocat-card"):
             section_header("Core Parameters", "tune")
             with param_grid(3):
                 comparison_mode = select_input(

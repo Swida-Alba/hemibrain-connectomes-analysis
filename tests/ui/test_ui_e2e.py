@@ -113,6 +113,7 @@ class TestRunner:
         script = sr._generate_script("find_path", {"dataset": "male-cns:v0.9"}, "find_all_path", None)
         assert "from coana import FindNeuronConnection" in script
         assert "FindAllPath" in script
+        assert "find_reciprocal=fc.find_reciprocal" in script
         assert "male-cns:v0.9" in script
 
     def test_generate_find_direct_script(self):
@@ -135,6 +136,15 @@ class TestRunner:
         script = sr._generate_neuronbridge_script("nb_find_lines", {"verbose": True}, {"queries": ["aMe12"]})
         assert "NeuronBridgeFinder" in script
         assert "find_lines" in script
+
+        colabel_script = sr._generate_script(
+            "nb_colabel",
+            {"verbose": True},
+            "colabel",
+            {"lines": ["A", "B"], "datasets_to_visualize": "male-cns:v1.0"},
+        )
+        assert "datasets_to_visualize" in colabel_script
+        assert "male-cns:v1.0" in colabel_script
 
     def test_generated_scripts_include_vispath(self):
         """The PlotPath tool must resolve vispath_pkg in a fresh subprocess."""
@@ -211,6 +221,14 @@ class TestRunner:
             ]
             assert sr._extract_output_folder(tmpdir) == str(new)
 
+            sibling = Path(f"{tmpdir}-outside")
+            sibling.mkdir()
+            try:
+                sr._run_logs = [("stdout", f"Created output folder: {sibling}")]
+                assert sr._extract_output_folder(tmpdir) is None
+            finally:
+                sibling.rmdir()
+
         sr2 = ScriptRunner()
         sr2._run_logs = [("stdout", "nothing here")]
         assert sr2._extract_output_folder("/tmp") is None
@@ -229,6 +247,8 @@ class TestRunner:
         palettes and sample them evenly for any requested count."""
         from ui.components.palette_picker import (
             get_palette_catalog,
+            move_color,
+            normalize_palette_range,
             palette_slice,
             sample_palette,
         )
@@ -245,6 +265,10 @@ class TestRunner:
         half = palette_slice(colors, 0, 50)
         assert 0 < len(half) < len(colors)
         assert palette_slice(colors, 100, 100) == colors[-1:]
+        assert normalize_palette_range(80, 20) == (80, 81)
+        assert normalize_palette_range(-5, 200) == (0, 100)
+        assert move_color(["a", "b", "c"], 1, -1) == ["b", "a", "c"]
+        assert move_color(["a", "b", "c"], 0, -1) == ["a", "b", "c"]
 
     def test_pick_directory_exists(self):
         from ui.runner import pick_directory, pick_file
@@ -331,6 +355,37 @@ class TestComponents:
         assert parse_neuron_list("") == []
         assert parse_neuron_list(None) == []
 
+    def test_parse_neuron_upload_text_and_excel(self):
+        import asyncio
+        import io
+        from types import SimpleNamespace
+        import pandas as pd
+        from ui.components.common import parse_neuron_upload, read_upload_event
+
+        class NiceGUIFile:
+            name = "neurons.csv"
+
+            async def read(self):
+                return b"type\naMe12\n"
+
+        filename, content = asyncio.run(
+            read_upload_event(SimpleNamespace(file=NiceGUIFile()))
+        )
+        assert (filename, content) == ("neurons.csv", b"type\naMe12\n")
+
+        csv_bytes = b"type,notes\naMe12,first\naMe10,second\n"
+        assert parse_neuron_upload("neurons.csv", csv_bytes) == ["aMe12", "aMe10"]
+        tsv_bytes = b"bodyId\tlabel\n720575940610453042\tcell\n"
+        assert parse_neuron_upload("neurons.tsv", tsv_bytes) == [720575940610453042]
+
+        workbook = io.BytesIO()
+        pd.DataFrame({"type": ["PPL101", "DN1p"]}).to_excel(workbook, index=False)
+        assert parse_neuron_upload("neurons.xlsx", workbook.getvalue()) == ["PPL101", "DN1p"]
+
+        numeric_workbook = io.BytesIO()
+        pd.DataFrame({"bodyId": [42, None]}).to_excel(numeric_workbook, index=False)
+        assert parse_neuron_upload("body_ids.xlsx", numeric_workbook.getvalue()) == [42]
+
     def test_output_panel(self):
         from ui.components.output_panel import OutputPanel
         panel = OutputPanel("Test")
@@ -404,12 +459,16 @@ class TestInstallerScripts:
 # =============================================================================
 class TestPyproject:
     def test_version(self):
-        import tomllib
+        try:
+            import tomllib
+        except ModuleNotFoundError:  # Python 3.10
+            import tomli as tomllib
         with open(PROJECT_ROOT / "pyproject.toml", "rb") as f:
             data = tomllib.load(f)
         assert data["project"]["version"] == "4.5.0"
         assert "ui" in data["project"]["optional-dependencies"]
-        assert "drocat-ui" in data["project"]["scripts"]
+        assert "coana" in data["tool"]["setuptools"]["py-modules"]
+        assert "neuronbridge_client" in data["tool"]["setuptools"]["py-modules"]
 
 
 # =============================================================================
@@ -417,22 +476,56 @@ class TestPyproject:
 # =============================================================================
 class TestHTTPServer:
     def test_server_starts_and_responds(self):
-        import subprocess, time, urllib.request
+        import socket
+        import subprocess
+        import time
+        import urllib.error
+        import urllib.request
+
+        with socket.socket() as port_probe:
+            port_probe.bind(("127.0.0.1", 0))
+            port = port_probe.getsockname()[1]
+
+        child_env = os.environ.copy()
+        # NiceGUI enables its own screen-test mode when this pytest variable is
+        # inherited, which requires unrelated test-runner configuration.
+        child_env.pop("PYTEST_CURRENT_TEST", None)
+        child_env.pop("NICEGUI_SCREEN_TEST_PORT", None)
+        child_env["DROCAT_UI_PORT"] = str(port)
+        child_env["DROCAT_UI_SHOW"] = "0"
         proc = subprocess.Popen(
             [sys.executable, str(PROJECT_ROOT / "ui" / "app.py")],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             cwd=str(PROJECT_ROOT),
+            env=child_env,
+            text=True,
         )
         try:
-            time.sleep(4)
-            response = urllib.request.urlopen("http://127.0.0.1:8080", timeout=5)
-            html = response.read().decode()
-            assert response.status == 200
-            assert "DROCAT" in html
-            assert "drocat-cobalt" in html  # Light Photo-Selector theme
+            url = f"http://127.0.0.1:{port}"
+            deadline = time.monotonic() + 15
+            while True:
+                if proc.poll() is not None:
+                    stdout, stderr = proc.communicate()
+                    pytest.fail(
+                        "UI server exited before becoming ready.\n"
+                        f"stdout:\n{stdout}\nstderr:\n{stderr}"
+                    )
+                try:
+                    with urllib.request.urlopen(url, timeout=1) as response:
+                        html = response.read().decode()
+                        assert response.status == 200
+                        assert "DROCAT" in html
+                        assert "drocat-cobalt" in html
+                        break
+                except urllib.error.URLError as error:
+                    if time.monotonic() >= deadline:
+                        pytest.fail(f"UI server did not become ready: {error}")
+                    time.sleep(0.2)
         finally:
-            proc.terminate()
-            proc.wait(timeout=5)
+            if proc.poll() is None:
+                proc.terminate()
+            proc.communicate(timeout=5)
 
 
 if __name__ == "__main__":

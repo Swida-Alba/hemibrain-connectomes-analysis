@@ -26,18 +26,18 @@ def create_find_path_tab():
     )
 
     with form_col:
-        with ui.card().classes("w-full"):
+        with ui.card().classes("w-full drocat-card"):
             section_header("Neuron Selection", "hub")
             with param_grid(2):
                 source_input = neuron_list_input(
                     label="Source Neurons",
-                    placeholder="Type or upload CSV/XLSX (e.g., aMe12, aMe10)",
-                    hint="Enter neuron types, bodyIds, or patterns. Upload CSV/XLSX for large lists.",
+                    placeholder="Type or upload CSV/TSV/Excel (e.g., aMe12, aMe10)",
+                    hint="Enter neuron types, bodyIds, or patterns. Upload CSV/TSV/Excel for large lists.",
                 )
                 target_input = neuron_list_input(
                     label="Target Neurons",
-                    placeholder="Type or upload CSV/XLSX (e.g., PPL101, DN1p)",
-                    hint="Enter neuron types, bodyIds, or patterns. Upload CSV/XLSX for large lists.",
+                    placeholder="Type or upload CSV/TSV/Excel (e.g., PPL101, DN1p)",
+                    hint="Enter neuron types, bodyIds, or patterns. Upload CSV/TSV/Excel for large lists.",
                 )
             with param_grid(2):
                 dataset = dataset_selector(
@@ -46,7 +46,7 @@ def create_find_path_tab():
                 )
                 output_dir = dir_input()
 
-        with ui.card().classes("w-full"):
+        with ui.card().classes("w-full drocat-card"):
             section_header("Core Parameters", "tune")
             with param_grid(3):
                 max_interlayer = number_input(
@@ -175,6 +175,9 @@ def create_find_path_tab():
 
         if not sources:
             ui.notify("Please enter at least one source neuron", type="warning")
+            return
+        if not targets:
+            ui.notify("Please enter at least one target neuron", type="warning")
             return
 
         output_panel.clear()

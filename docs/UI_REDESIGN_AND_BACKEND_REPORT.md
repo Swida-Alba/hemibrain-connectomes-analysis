@@ -218,7 +218,7 @@ Requirement: "integrated scripts (also implemented in the UI) must work independ
 - NeuPrint datasets need a valid token and network for the first fetch; offline use requires pre-building `cache/<dataset>/`.
 - FlyWire FAFB/BANC need manually downloaded local files plus a CAVE token (documented in Settings).
 - `export_views`/video exports in `VisualizeSkeleton` need Chrome + WebDriver (or Kaleido fallback).
-- Windows: `neuronbridge-python` may fail to install (memray dep); `install.ps1` already falls back to `--no-deps`, but this can leave NeuronBridge tabs broken — keep an eye on it.
+- NeuronBridge now uses the bundled Requests/Pillow client on every platform; legacy environments should be repaired with the one-click installer to remove the incompatible upstream distribution.
 
 ---
 
@@ -268,7 +268,7 @@ Requirement: "integrated scripts (also implemented in the UI) must work independ
 **Method:** launched the real DROCAT UI server (light redesign verified over HTTP), then drove all 10 tools through the exact UI execution layer (`ui.runner.ScriptRunner` → generated subprocess → real backend) against live NeuPrint / NeuronBridge data with the user's real tokens. Re-runnable via:
 
 ```bash
-conda activate drocat
+conda activate drocat-4.5.0
 python tests/e2e/run_real_data_e2e.py
 ```
 

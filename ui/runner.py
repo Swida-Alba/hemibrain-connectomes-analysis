@@ -34,7 +34,12 @@ TOOL_REGISTRY: Dict[str, dict] = {
         "init_method": "InitializeNeuronInfo",
         "methods": {
             "find_path": "fc.FindPath()",
-            "find_all_path": "fc.FindAllPath(forward_only=True)",
+            # Keep the UI constructor toggle when FindAllPath's method-level
+            # default would otherwise overwrite it with False.
+            "find_all_path": (
+                "fc.FindAllPath(forward_only=True, "
+                "find_reciprocal=fc.find_reciprocal)"
+            ),
         },
     },
     "find_direct": {
@@ -594,16 +599,24 @@ print("[DROCAT] Done.")
         if not candidates:
             return None
         if output_dir:
-            base = os.path.abspath(output_dir)
+            base = Path(output_dir).expanduser().resolve()
             # Prefer the newest top-level run folder (a direct child of the
             # requested output dir); avoid nested folders like
             # bodyId_visualization that internal tools also log.
             direct_children = [
-                c for c in candidates if os.path.dirname(os.path.abspath(c)) == base
+                c for c in candidates
+                if Path(c).expanduser().resolve().parent == base
             ]
             for candidate in reversed(direct_children or candidates):
-                if os.path.abspath(candidate).startswith(base):
-                    return candidate
+                resolved = Path(candidate).expanduser().resolve()
+                try:
+                    resolved.relative_to(base)
+                except ValueError:
+                    continue
+                # Return the logged spelling (important on macOS where
+                # /var resolves to /private/var), after validating it safely.
+                return candidate
+            return None
         return candidates[-1]
 
     def cancel(self):

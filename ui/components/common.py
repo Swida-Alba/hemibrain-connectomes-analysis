@@ -9,6 +9,7 @@ a focus-panel + contact-sheet workspace layout.
 from nicegui import ui
 from typing import List, Optional, Callable, Dict
 from pathlib import Path
+import inspect
 import platform
 import subprocess
 
@@ -212,12 +213,75 @@ def neuron_input(
     ).props("autogrow").classes("w-full drocat-input").tooltip(hint)
 
 
+async def read_upload_event(event) -> tuple[str, bytes]:
+    """Read a NiceGUI 3 upload event, with compatibility for older events."""
+    upload = getattr(event, "file", None)
+    if upload is not None:
+        return upload.name, await upload.read()
+
+    name = getattr(event, "name", "upload")
+    content = getattr(event, "content", None)
+    if content is None:
+        raise ValueError("Upload event contains no file")
+    data = content.read()
+    if inspect.isawaitable(data):
+        data = await data
+    return name, data
+
+
+def parse_neuron_upload(filename: str, content: bytes) -> List:
+    """Parse the first column of a CSV/TSV/Excel neuron-list upload."""
+    import csv
+    import io
+    from numbers import Integral, Real
+
+    suffix = Path(filename).suffix.lower()
+    if suffix not in {".csv", ".tsv", ".xlsx", ".xls"}:
+        raise ValueError("Use a CSV, TSV, XLSX, or XLS neuron-list file")
+    if suffix in {".xlsx", ".xls"}:
+        import pandas as pd
+
+        frame = pd.read_excel(io.BytesIO(content), header=None)
+        values = frame.iloc[:, 0].dropna().tolist()
+    else:
+        text = content.decode("utf-8-sig", errors="replace")
+        delimiter = "\t" if suffix == ".tsv" else ","
+        values = [
+            row[0]
+            for row in csv.reader(io.StringIO(text), delimiter=delimiter)
+            if row
+        ]
+
+    loaded = [
+        (value, str(value).strip().strip("\"'"))
+        for value in values
+        if str(value).strip().strip("\"'")
+    ]
+    if loaded and loaded[0][1].lower() in {
+        "type", "neuron", "name", "bodyid", "id", "body_id",
+    }:
+        loaded = loaded[1:]
+    parsed = []
+    for raw_value, value in loaded:
+        if isinstance(raw_value, Integral):
+            parsed.append(int(raw_value))
+            continue
+        if isinstance(raw_value, Real) and float(raw_value).is_integer():
+            parsed.append(int(raw_value))
+            continue
+        try:
+            parsed.append(int(value))
+        except ValueError:
+            parsed.append(value)
+    return parsed
+
+
 def neuron_list_input(
     label: str = "Neurons",
-    placeholder: str = "e.g., aMe12, aMe10, DN1p (or upload CSV/XLSX)",
+    placeholder: str = "e.g., aMe12, aMe10, DN1p (or upload CSV/TSV/Excel)",
     hint: str = (
         "Type a neuron and press Enter to add it as a chip. "
-        "Paste comma/newline lists or upload a CSV/XLSX file (first column). "
+        "Paste comma/newline lists or upload a CSV/TSV/Excel file (first column). "
         "Supports types, bodyIds and regex patterns."
     ),
 ) -> ui.element:
@@ -226,44 +290,30 @@ def neuron_list_input(
 
     - Type a neuron (type, bodyId or pattern) and press Enter to add a chip.
     - Paste a comma/newline separated list via the playlist button.
-    - Upload a CSV/XLSX file (first column) via the upload dropdown.
+    - Upload a CSV/TSV/Excel file (first column) via the upload dropdown.
     - A live count badge and a Clear button keep the list manageable.
 
     Returns container with .get_value() -> (filter_mode, neuron_list).
     """
-    uploaded_neurons: List[str] = []
+    uploaded_neurons: List = []
 
-    def handle_upload(e):
-        """Parse the first column of an uploaded CSV/XLSX as a neuron list."""
-        nonlocal uploaded_neurons
+    async def handle_upload(e):
+        """Parse the first column of an uploaded CSV/TSV/Excel neuron list."""
         try:
-            content = e.content.read().decode("utf-8", errors="replace")
-            lines = [
-                l.strip().split(",")[0].strip().strip("\"'")
-                for l in content.splitlines()
-                if l.strip()
-            ]
-            if lines and lines[0].lower() in (
-                "type", "neuron", "name", "bodyid", "id", "body_id",
-            ):
-                lines = lines[1:]
-            uploaded_neurons = [l for l in lines if l]
-            upload_label.text = f"✓ {len(uploaded_neurons)} neurons loaded from {e.name}"
+            filename, raw = await read_upload_event(e)
+            loaded = parse_neuron_upload(filename, raw)
+            # Mutate in place so container.uploaded_neurons remains current.
+            uploaded_neurons[:] = loaded
+            upload_label.text = (
+                f"✓ {len(uploaded_neurons)} neurons loaded from {filename}"
+            )
             upload_label.classes(replace="text-caption drocat-ok")
-        except Exception:
-            try:
-                import pandas as pd
-                import io
-                e.content.seek(0)
-                df = pd.read_excel(io.BytesIO(e.content.read()), header=None)
-                uploaded_neurons = [str(v) for v in df.iloc[:, 0].dropna().tolist()]
-                upload_label.text = f"✓ {len(uploaded_neurons)} neurons loaded from {e.name}"
-                upload_label.classes(replace="text-caption drocat-ok")
-            except Exception as ex2:
-                uploaded_neurons = []
-                upload_label.text = f"Error: {ex2}"
-                upload_label.classes(replace="text-caption drocat-err")
+        except Exception as exc:
+            uploaded_neurons.clear()
+            upload_label.text = f"Error: {exc}"
+            upload_label.classes(replace="text-caption drocat-err")
         upload_label.set_visibility(True)
+        update_status()
         upload_menu.close()
 
     with ui.column().classes("w-full gap-1") as container:
@@ -330,16 +380,16 @@ def neuron_list_input(
             # Compact upload: hidden inside a dropdown attached to the input row
             with ui.button(icon="upload_file").props("flat dense round").classes(
                 "drocat-upload-trigger"
-            ).tooltip("Upload CSV/XLSX (first column = neurons)"):
+            ).tooltip("Upload CSV/TSV/Excel (first column = neurons)"):
                 with ui.menu() as upload_menu:
                     ui.label("Load neuron list from file").classes(
                         "text-caption drocat-muted px-3 pt-2"
                     )
-                    ui.label("CSV / XLSX · first column is read as the neuron list").classes(
+                    ui.label("CSV / TSV / XLSX / XLS · first column is read").classes(
                         "text-caption drocat-muted px-3 pb-1"
                     )
                     ui.upload(
-                        label="Choose CSV / XLSX",
+                        label="Choose neuron file",
                         on_upload=handle_upload,
                         auto_upload=True,
                     ).props('accept=".csv,.xlsx,.xls,.tsv" flat dense').classes("w-72")
@@ -353,28 +403,37 @@ def neuron_list_input(
             count_badge = ui.badge("0 neurons", color="grey-6").props("outline")
             upload_label = ui.label("").classes("text-caption drocat-muted")
             upload_label.set_visibility(False)
-            ui.button(
+            clear_button = ui.button(
                 "Clear",
                 icon="clear_all",
-                on_click=lambda: chip_input.set_value([]),
             ).props("flat dense").classes("drocat-clear-btn")
 
+    def normalize_neuron(item):
+        value = str(item)
+        return int(value) if value.isdigit() else value
+
     def update_status():
-        count = len(chip_input.value or [])
+        combined = [normalize_neuron(item) for item in uploaded_neurons]
+        combined.extend(normalize_neuron(item) for item in (chip_input.value or []))
+        count = len(dict.fromkeys(combined))
         count_badge.text = f"{count} neuron{'s' if count != 1 else ''}"
         count_badge.props(f"color={'primary' if count else 'grey-6'}")
 
+    def clear_all():
+        uploaded_neurons.clear()
+        chip_input.set_value([])
+        upload_label.text = ""
+        upload_label.set_visibility(False)
+        update_status()
+
     chip_input.on_value_change(lambda _e: update_status())
+    clear_button.on_click(clear_all)
     update_status()
 
     def get_value():
-        def _normalize(item):
-            s = str(item)
-            return int(s) if s.isdigit() else s
-
-        typed = [_normalize(item) for item in (chip_input.value or [])]
-        uploaded = [_normalize(item) for item in uploaded_neurons]
-        return (filter_mode.value, uploaded + typed)
+        combined = [normalize_neuron(item) for item in uploaded_neurons]
+        combined.extend(normalize_neuron(item) for item in (chip_input.value or []))
+        return (filter_mode.value, list(dict.fromkeys(combined)))
 
     container.get_value = get_value
     container.chip_input = chip_input

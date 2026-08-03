@@ -80,17 +80,34 @@ def sample_palette(colors: List[str], n: int) -> List[str]:
     return [colors[i] for i in indices]
 
 
+def normalize_palette_range(start_pct: int, end_pct: int) -> Tuple[int, int]:
+    """Clamp a palette range and guarantee at least one percentage point."""
+    start = max(0, min(99, int(start_pct)))
+    end = max(1, min(100, int(end_pct)))
+    if end <= start:
+        end = start + 1
+    return start, end
+
+
 def palette_slice(colors: List[str], start_pct: int, end_pct: int) -> List[str]:
     """Select a sub-range of a palette by percentage (0-100)."""
     if not colors:
         return []
-    start_pct = max(0, min(99, int(start_pct)))
-    end_pct = max(1, min(100, int(end_pct)))
-    if end_pct <= start_pct:
-        end_pct = start_pct + 1
+    start_pct, end_pct = normalize_palette_range(start_pct, end_pct)
     start_idx = round(start_pct / 100 * (len(colors) - 1))
     end_idx = round(end_pct / 100 * (len(colors) - 1))
     return colors[start_idx:end_idx + 1]
+
+
+def move_color(colors: List[str], index: int, delta: int) -> List[str]:
+    """Return a copy with one color moved left/right by ``delta`` places."""
+    reordered = list(colors)
+    target = index + delta
+    if index < 0 or index >= len(reordered) or target < 0 or target >= len(reordered):
+        return reordered
+    color = reordered.pop(index)
+    reordered.insert(target, color)
+    return reordered
 
 
 def _gradient_style(colors: List[str], height: int = 18) -> str:
@@ -108,15 +125,14 @@ def _render_color_strip(
     classes: str = "",
 ) -> None:
     """Render a color strip in the current context (gradient for long palettes)."""
-    if len(colors) > 20:
+    if len(colors) > 20 and click is None:
         strip = ui.element("div").classes(f"drocat-palette-strip {classes}").style(
             _gradient_style(colors, height)
         )
-        if click is not None:
-            strip.on("click", click)
         return
+    display_colors = sample_palette(colors, 20) if len(colors) > 20 else colors
     with ui.row().classes(f"gap-0 w-full drocat-palette-swatches {classes}"):
-        for color in colors:
+        for color in display_colors:
             sw = ui.element("div").style(
                 f"background:{color}; flex:1; min-width:5px; height:{height}px;"
             )
@@ -202,9 +218,10 @@ def palette_editor(
     Features:
     - Preset palettes from bokeh.palettes with full-gradient previews
     - Select part of a palette with Start/End range controls
+    - Reorder any selected discrete preset without rebuilding it color-by-color
     - Custom colors: add single colors via a native color picker, click the
-      palette strip to append its colors, reorder (move left/right, reverse)
-      and remove entries
+      selected palette strip to append colors, reorder (move left/right,
+      reverse) and remove entries
     """
     catalog = list(get_palette_catalog())
     if include_auto:
@@ -219,11 +236,14 @@ def palette_editor(
         "start": 0,
         "end": 100,
         "custom": [],
+        "preset_orders": {},
     }
     cards: List[Tuple[ui.element, str]] = []
 
     def palette_colors(name: Optional[str] = None) -> List[str]:
-        return dict(catalog)[name or state["palette"]]
+        palette_name = name or state["palette"]
+        original = list(dict(catalog)[palette_name])
+        return list(state["preset_orders"].get(palette_name, original))
 
     def effective_slice() -> List[str]:
         return palette_slice(
@@ -287,8 +307,12 @@ def palette_editor(
                 ).classes("w-28")
 
                 def apply_range():
-                    state["start"] = int(start_input.value)
-                    state["end"] = int(end_input.value)
+                    start, end = normalize_palette_range(
+                        start_input.value if start_input.value is not None else 0,
+                        end_input.value if end_input.value is not None else 100,
+                    )
+                    state["start"], state["end"] = start, end
+                    start_input.value, end_input.value = start, end
                     render_preview()
 
                 ui.button("Apply", icon="check", on_click=apply_range).props(
@@ -297,7 +321,85 @@ def palette_editor(
             ui.label(
                 "Full palette preview below; use Start/End % to select part of it."
             ).classes("text-caption drocat-muted")
-            _render_color_strip(palette_colors(), height=22, classes="w-full")
+            preset_strip = ui.column().classes("w-full gap-0")
+
+            def render_preset_strip():
+                preset_strip.clear()
+                with preset_strip:
+                    _render_color_strip(palette_colors(), height=22, classes="w-full")
+
+            with ui.expansion(
+                "Reorder discrete colors", icon="swap_horiz"
+            ).classes("w-full drocat-palette-expansion") as reorder_expansion:
+                discrete_editor = ui.column().classes("w-full gap-1")
+
+            def render_discrete_editor():
+                colors = palette_colors()
+                is_discrete = len(colors) <= 20
+                reorder_expansion.set_visibility(is_discrete)
+                discrete_editor.clear()
+                if not is_discrete:
+                    return
+                with discrete_editor:
+                    with ui.row().classes("w-full items-center justify-between gap-2"):
+                        ui.label(
+                            "Set the assignment order used for layers and groups."
+                        ).classes("text-caption drocat-muted")
+                        with ui.row().classes("items-center gap-1"):
+                            ui.button(
+                                "Reverse", icon="swap_vert", on_click=lambda: reverse_preset()
+                            ).props("flat dense")
+                            ui.button(
+                                "Reset", icon="restart_alt", on_click=lambda: reset_preset()
+                            ).props("flat dense")
+                    for index, color in enumerate(colors):
+                        with ui.row().classes(
+                            "items-center gap-2 w-full drocat-custom-color-row"
+                        ):
+                            ui.label(str(index + 1)).classes(
+                                "text-caption drocat-palette-position"
+                            )
+                            ui.element("div").style(
+                                f"background:{color}; width:28px; height:24px;"
+                                "border-radius:6px; border:1px solid rgba(11,31,58,.15);"
+                            )
+                            ui.label(color).classes(
+                                "text-caption font-mono drocat-muted flex-grow"
+                            )
+                            if index > 0:
+                                ui.button(
+                                    icon="arrow_upward",
+                                    on_click=lambda i=index: move_preset(i, -1),
+                                ).props(
+                                    'flat dense round aria-label="Move color earlier"'
+                                ).tooltip("Move earlier")
+                            if index < len(colors) - 1:
+                                ui.button(
+                                    icon="arrow_downward",
+                                    on_click=lambda i=index: move_preset(i, 1),
+                                ).props(
+                                    'flat dense round aria-label="Move color later"'
+                                ).tooltip("Move later")
+
+            def update_preset_order(colors: List[str]):
+                state["preset_orders"][state["palette"]] = list(colors)
+                render_preset_strip()
+                render_discrete_editor()
+                render_custom_source_strip()
+                render_preview()
+
+            def move_preset(index: int, delta: int):
+                update_preset_order(move_color(palette_colors(), index, delta))
+
+            def reverse_preset():
+                update_preset_order(list(reversed(palette_colors())))
+
+            def reset_preset():
+                state["preset_orders"].pop(state["palette"], None)
+                render_preset_strip()
+                render_discrete_editor()
+                render_custom_source_strip()
+                render_preview()
 
         # ---------------- Custom panel ----------------
         with ui.column().classes("w-full gap-1") as custom_panel:
@@ -310,15 +412,21 @@ def palette_editor(
                     "Reverse list", icon="swap_vert", on_click=lambda: reverse_custom()
                 ).props("flat dense")
             ui.label(
-                "Click the palette strip below to append individual colors, "
+                "Click the selected palette strip below to append individual colors, "
                 "then reorder with ◀ ▶."
             ).classes("text-caption drocat-muted")
-            _render_color_strip(
-                palette_colors(),
-                height=22,
-                classes="w-full",
-                click=lambda color: add_single_color(color),
-            )
+            custom_source_strip = ui.column().classes("w-full gap-0")
+
+            def render_custom_source_strip():
+                custom_source_strip.clear()
+                with custom_source_strip:
+                    _render_color_strip(
+                        palette_colors(),
+                        height=22,
+                        classes="w-full",
+                        click=lambda color: add_single_color(color),
+                    )
+
             custom_list = ui.column().classes("w-full gap-1")
 
             def render_custom_list():
@@ -343,14 +451,21 @@ def palette_editor(
                             if index > 0:
                                 ui.button(
                                     "◀", on_click=lambda i=index: move_custom(i, -1)
-                                ).props("flat dense round")
+                                ).props(
+                                    'flat dense round aria-label="Move custom color earlier"'
+                                ).tooltip("Move earlier")
                             if index < len(state["custom"]) - 1:
                                 ui.button(
                                     "▶", on_click=lambda i=index: move_custom(i, 1)
-                                ).props("flat dense round")
+                                ).props(
+                                    'flat dense round aria-label="Move custom color later"'
+                                ).tooltip("Move later")
                             ui.button(
                                 "✕", on_click=lambda i=index: remove_custom(i)
-                            ).props("flat dense round color=negative")
+                            ).props(
+                                'flat dense round color=negative '
+                                'aria-label="Remove custom color"'
+                            ).tooltip("Remove color")
 
             def add_single_color(color: str):
                 if color and color not in state["custom"]:
@@ -381,14 +496,19 @@ def palette_editor(
                 render_preview()
 
             render_custom_list()
+            render_custom_source_strip()
 
         def select_preset(name: str):
             state["palette"] = name
+            container.value = name
             for element, card_name in cards:
                 element.classes(
                     replace="drocat-palette-card"
                     + (" selected" if card_name == name else "")
                 )
+            render_preset_strip()
+            render_discrete_editor()
+            render_custom_source_strip()
             render_preview()
 
         def on_mode_change():
@@ -399,12 +519,15 @@ def palette_editor(
 
         mode_toggle.on_value_change(lambda _e: on_mode_change())
         on_mode_change()
+        render_preset_strip()
+        render_discrete_editor()
         render_preview()
 
     container.value = state["palette"]
     container.get_value = lambda: state["palette"]
     container.get_mode = lambda: state["mode"]
     container.get_custom_colors = lambda: list(state["custom"])
+    container.get_palette_order = lambda: list(palette_colors())
     container.get_range = lambda: (state["start"], state["end"])
     container.get_colors = effective_colors
     return container

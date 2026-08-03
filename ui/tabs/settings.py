@@ -1,6 +1,6 @@
 """Settings Tab - Token configuration, dataset status, and app settings."""
 
-from nicegui import ui
+from nicegui import run, ui
 from pathlib import Path
 
 from ..config import (
@@ -29,7 +29,7 @@ def create_settings_tab():
         dataset_status_card()
 
         # Tokens
-        with ui.card().classes("w-full"):
+        with ui.card().classes("w-full drocat-card"):
             section_header("API Tokens", "key")
 
             with ui.column().classes("w-full gap-1"):
@@ -63,7 +63,7 @@ def create_settings_tab():
                 test_btn = ui.button("Test NeuPrint", icon="wifi", color="secondary")
 
         # Output
-        with ui.card().classes("w-full"):
+        with ui.card().classes("w-full drocat-card"):
             section_header("Output Settings", "folder")
             default_dir = dir_input(label="Default Output Directory", default=get_default_output_dir())
             ui.label(
@@ -90,7 +90,7 @@ def create_settings_tab():
             reset_default_btn.on_click(reset_default_dir)
 
         # Dataset Preparation Guide
-        with ui.card().classes("w-full"):
+        with ui.card().classes("w-full drocat-card"):
             section_header("Dataset Preparation Guide", "menu_book")
 
             with ui.expansion("NeuPrint Datasets (hemibrain, male-cns, optic-lobe, manc)", icon="cloud").classes("w-full"):
@@ -161,7 +161,7 @@ def create_settings_tab():
                 """)
 
         # About
-        with ui.card().classes("w-full"):
+        with ui.card().classes("w-full drocat-card"):
             section_header("About", "info")
             ui.label("DROCAT - Drosophila Connectome Analysis Toolkit").classes("text-subtitle1 font-bold")
             ui.label("Version 4.5.0").classes("text-caption drocat-muted")
@@ -171,34 +171,52 @@ def create_settings_tab():
 
     def save_tokens():
         local_file = PROJECT_ROOT / "token_info_local.txt"
-        content = f"""# DROCAT Token Configuration
-NEUPRINT_TOKEN='{neuprint_token.value}'
-CAVE_TOKEN='{cave_token.value}'
-"""
+        neuprint_value = (neuprint_token.value or "").strip()
+        cave_value = (cave_token.value or "").strip()
+        content = (
+            "# DROCAT Token Configuration\n"
+            f"NEUPRINT_TOKEN={neuprint_value!r}\n"
+            f"CAVE_TOKEN={cave_value!r}\n"
+        )
         try:
-            local_file.write_text(content)
+            local_file.write_text(content, encoding="utf-8")
+            local_file.chmod(0o600)
             ui.notify("Tokens saved to token_info_local.txt", type="positive")
             from ..dataset_service import get_dataset_service
             service = get_dataset_service()
-            service._token = neuprint_token.value or None
-            service._cave_token = cave_token.value or None
+            service._token = neuprint_value or None
+            service._cave_token = cave_value or None
             service._cache.clear()
         except Exception as e:
             ui.notify(f"Failed to save: {e}", type="negative")
 
-    def test_connection():
-        if not neuprint_token.value:
+    async def test_connection():
+        token = (neuprint_token.value or "").strip()
+        if not token:
             ui.notify("Enter a NeuPrint token first", type="warning")
             return
         ui.notify("Testing NeuPrint connection...", type="info")
+        test_btn.disable()
         try:
             from neuprint import Client
-            client = Client("neuprint.janelia.org", "hemibrain:v1.2.1", neuprint_token.value)
-            result = client.fetch_custom("MATCH (n:Neuron) RETURN count(n) as count LIMIT 1")
-            count = result["count"].iloc[0] if not result.empty else 0
+
+            def probe_neuprint():
+                client = Client(
+                    "neuprint.janelia.org",
+                    "hemibrain:v1.2.1",
+                    token,
+                )
+                result = client.fetch_custom(
+                    "MATCH (n:Neuron) RETURN count(n) as count LIMIT 1"
+                )
+                return result["count"].iloc[0] if not result.empty else 0
+
+            count = await run.io_bound(probe_neuprint)
             ui.notify(f"Connected! {count:,} neurons in hemibrain.", type="positive")
         except Exception as e:
             ui.notify(f"Connection failed: {str(e)[:80]}", type="negative")
+        finally:
+            test_btn.enable()
 
     save_btn.on_click(save_tokens)
     test_btn.on_click(test_connection)

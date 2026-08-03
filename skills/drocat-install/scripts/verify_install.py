@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Verify a DROCAT installation without requiring network access.
 
-Checks project layout, Python version, core/optional imports, the token file,
-and that the UI package imports. Exits 0 when all required checks pass.
+Checks project layout, the supported Python window, dependency consistency,
+core/optional imports, token configuration, and the UI package import.
+Token configuration is advisory unless ``--require-token`` is passed.
 
 Usage:
     python verify_install.py --project /path/to/hemibrain-connectomes-analysis
@@ -11,6 +12,7 @@ Usage:
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -26,6 +28,7 @@ CORE_IMPORTS = [
     "plotly",
     "networkx",
     "openpyxl",
+    "xlrd",
     "xlsxwriter",
     "bokeh",
     "requests",
@@ -39,10 +42,10 @@ CORE_IMPORTS = [
     "reportlab",
     "pptx",
     "img2pdf",
+    "neuronbridge_client",
 ]
 
 OPTIONAL_IMPORTS = [
-    "neuronbridge",
     "caveclient",
     "cloudvolume",
     "navis",
@@ -50,7 +53,6 @@ OPTIONAL_IMPORTS = [
     "selenium",
     "webdriver_manager",
     "fitz",
-    "rapidjson",
     "psutil",
     "trimesh",
 ]
@@ -68,12 +70,50 @@ for name in mods:
 print(json.dumps(out))
 """
 
+VERSION_PROBE = r"""
+import importlib.metadata as metadata
+import json
+import sys
+from pathlib import Path
+from packaging.requirements import Requirement
+
+results = {}
+for filename in sys.argv[1:]:
+    manifest = {}
+    for raw_line in Path(filename).read_text(encoding="utf-8-sig").splitlines():
+        line = raw_line.split("#", 1)[0].strip()
+        if not line:
+            continue
+        requirement = Requirement(line)
+        if requirement.marker and not requirement.marker.evaluate():
+            continue
+        try:
+            installed = metadata.version(requirement.name)
+        except metadata.PackageNotFoundError:
+            manifest[requirement.name] = "missing"
+            continue
+        if requirement.specifier and installed not in requirement.specifier:
+            manifest[requirement.name] = (
+                f"installed {installed}, expected {requirement.specifier}"
+            )
+    results[filename] = manifest
+print(json.dumps(results))
+"""
+
+
+def isolated_python_env() -> dict[str, str]:
+    """Keep probes inside the selected environment, excluding user site packages."""
+    env = os.environ.copy()
+    env["PYTHONNOUSERSITE"] = "1"
+    return env
+
 
 def run_probe(python_exe: str, modules: list) -> dict:
     code = IMPORT_PROBE.replace("__MODS_JSON__", json.dumps(modules))
     proc = subprocess.run(
         [python_exe, "-c", code],
         capture_output=True,
+        env=isolated_python_env(),
         text=True,
         timeout=300,
     )
@@ -83,6 +123,21 @@ def run_probe(python_exe: str, modules: list) -> dict:
         return {m: f"probe failed: {proc.stderr[-200:]}" for m in modules}
 
 
+def run_version_probe(python_exe: str, manifests: list[Path]) -> dict:
+    proc = subprocess.run(
+        [python_exe, "-c", VERSION_PROBE, *(str(path) for path in manifests)],
+        capture_output=True,
+        env=isolated_python_env(),
+        text=True,
+        timeout=300,
+    )
+    try:
+        return json.loads(proc.stdout.strip().splitlines()[-1])
+    except (ValueError, IndexError):
+        detail = (proc.stderr or proc.stdout)[-300:]
+        return {str(path): {"probe": f"failed: {detail}"} for path in manifests}
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--project", required=True, help="Path to the DROCAT repository")
@@ -90,6 +145,11 @@ def main() -> int:
         "--python",
         default=sys.executable,
         help="Python interpreter to test (default: the interpreter running this script)",
+    )
+    parser.add_argument(
+        "--require-token",
+        action="store_true",
+        help="Fail when a real NeuPrint token has not been configured",
     )
     args = parser.parse_args()
 
@@ -106,11 +166,15 @@ def main() -> int:
     for rel in [
         "install.sh",
         "install.ps1",
+        "install.bat",
+        "run_ui.sh",
+        "run_ui.bat",
         "requirements.txt",
         "ui/requirements.txt",
         "ui/app.py",
         "src/coana.py",
         "src/neuronbridge_finder.py",
+        "src/neuronbridge_client.py",
         "src/visualize_skeleton.py",
         "vispath-subproject/src/vispath_pkg",
     ]:
@@ -122,12 +186,17 @@ def main() -> int:
         proc = subprocess.run(
             [python_exe, "-c", "import sys; print('%d.%d' % sys.version_info[:2])"],
             capture_output=True,
+            env=isolated_python_env(),
             text=True,
             timeout=60,
         )
         version = proc.stdout.strip()
         major_minor = tuple(int(x) for x in version.split("."))
-        check("python version >= 3.9", major_minor >= (3, 9), version)
+        check(
+            "python version 3.10-3.11",
+            (3, 10) <= major_minor < (3, 12),
+            version,
+        )
     except Exception as exc:
         check("python version", False, str(exc))
 
@@ -140,6 +209,34 @@ def main() -> int:
         if status != "ok":
             check(f"import {mod} (optional)", True, f"missing: {status}")
 
+    manifests = [
+        project / ("requirements-windows.txt" if sys.platform == "win32" else "requirements.txt"),
+        project / "ui/requirements.txt",
+    ]
+    version_results = run_version_probe(python_exe, manifests)
+    for manifest, failures in version_results.items():
+        manifest_label = str(Path(manifest).relative_to(project))
+        check(
+            f"pinned versions ({manifest_label})",
+            not failures,
+            "; ".join(f"{name}: {detail}" for name, detail in failures.items()),
+        )
+
+    # Dependency metadata must also agree. Successful imports alone do not
+    # expose conflicts such as NiceGUI and an old NeuronBridge Pydantic pin.
+    try:
+        proc = subprocess.run(
+            [python_exe, "-m", "pip", "check"],
+            capture_output=True,
+            env=isolated_python_env(),
+            text=True,
+            timeout=300,
+        )
+        detail = (proc.stdout or proc.stderr).strip()
+        check("pip dependency consistency", proc.returncode == 0, detail)
+    except Exception as exc:
+        check("pip dependency consistency", False, str(exc))
+
     # Token file
     local_token = project / "token_info_local.txt"
     token_file = local_token if local_token.exists() else project / "token_info.txt"
@@ -151,9 +248,18 @@ def main() -> int:
             and len(line.split("=", 1)[1].strip().strip("'\"")) > 20
             for line in text.splitlines()
         )
-        check("token_info (NeuPrint token configured)", has_neuprint, str(token_file))
+        check(
+            "token_info (NeuPrint token configured)"
+            + ("" if args.require_token else " (optional)"),
+            has_neuprint or not args.require_token,
+            str(token_file),
+        )
     else:
-        check("token_info file", False, "missing token_info.txt / token_info_local.txt")
+        check(
+            "token_info file" + ("" if args.require_token else " (optional)"),
+            not args.require_token,
+            "missing token_info.txt / token_info_local.txt",
+        )
 
     # UI import (project must be on sys.path)
     ui_probe = (
@@ -165,6 +271,7 @@ def main() -> int:
             [python_exe, "-c", ui_probe],
             cwd=str(project),
             capture_output=True,
+            env=isolated_python_env(),
             text=True,
             timeout=300,
         )

@@ -22,12 +22,12 @@ def create_find_direct_tab():
     )
 
     with form_col:
-        with ui.card().classes("w-full"):
+        with ui.card().classes("w-full drocat-card"):
             section_header("Neuron Selection", "hub")
             with param_grid(2):
                 source_input = neuron_list_input(
                     label="Source Neurons",
-                    placeholder="Type or upload CSV/XLSX (e.g., aMe.*)",
+                    placeholder="Type or upload CSV/TSV/Excel (e.g., aMe.*)",
                     hint="Enter source neuron types/bodyIds or upload file. Leave empty for all neurons.",
                 )
                 target_input = neuron_list_input(
@@ -41,7 +41,7 @@ def create_find_direct_tab():
                 )
                 output_dir = dir_input()
 
-        with ui.card().classes("w-full"):
+        with ui.card().classes("w-full drocat-card"):
             section_header("Core Parameters", "tune")
             with param_grid(3):
                 min_synapse = number_input(

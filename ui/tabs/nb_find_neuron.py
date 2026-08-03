@@ -23,12 +23,12 @@ def create_nb_find_neuron_tab():
     )
 
     with form_col:
-        with ui.card().classes("w-full"):
+        with ui.card().classes("w-full drocat-card"):
             section_header("Driver Line Query", "search")
             line_input = neuron_input(label="Driver Line Names", placeholder="e.g., LH173, VT037867, SS00731")
             output_dir = dir_input()
 
-        with ui.card().classes("w-full"):
+        with ui.card().classes("w-full drocat-card"):
             section_header("Search Parameters", "tune")
             with param_grid(2):
                 match_algo = select_input("Algorithm", MATCH_ALGORITHMS, DEFAULTS["match_algorithm"])

@@ -22,18 +22,18 @@ def create_connectivity_profiling_tab():
     )
 
     with form_col:
-        with ui.card().classes("w-full"):
+        with ui.card().classes("w-full drocat-card"):
             section_header("Query Neurons", "search")
             query_input = neuron_list_input(
                 label="Neurons to Compare",
-                placeholder="Type or upload CSV/XLSX (e.g., aMe12, aMe10, aMe9)",
-                hint="Enter 2+ neurons to compare profiles. Upload CSV/XLSX for large lists.",
+                placeholder="Type or upload CSV/TSV/Excel (e.g., aMe12, aMe10, aMe9)",
+                hint="Enter 2+ neurons to compare profiles. Upload CSV/TSV/Excel for large lists.",
             )
             with param_grid(2):
                 dataset = dataset_selector(hint="Dataset to compute profiles from.")
                 output_dir = dir_input()
 
-        with ui.card().classes("w-full"):
+        with ui.card().classes("w-full drocat-card"):
             section_header("Profile Construction", "build")
             with param_grid(2):
                 top_k = number_input(
@@ -50,18 +50,15 @@ def create_connectivity_profiling_tab():
                 with ui.row().classes("gap-4"):
                     analyze_upstream = checkbox_input("Upstream", True, hint="Include presynaptic (input) partners in profile.")
                     analyze_downstream = checkbox_input("Downstream", True, hint="Include postsynaptic (output) partners in profile.")
-                    analyze_combined = checkbox_input("Combined", True, hint="Include both directions combined.")
 
                 ui.separator()
-
-                with ui.row().classes("gap-4"):
-                    metric_jaccard = checkbox_input("Jaccard", True, hint="Set overlap of partner types.")
-                    metric_cosine = checkbox_input("Cosine", True, hint="Cosine similarity of weight vectors.")
-                    metric_rank = checkbox_input("Rank Correlation", True, hint="Spearman rank correlation of partner ordering.")
-                    metric_rank_union = checkbox_input("Rank Corr Union", True, hint="Rank correlation on union of partners.")
+                ui.label(
+                    "All four similarity matrices are generated: Jaccard, cosine, "
+                    "rank correlation, and rank-correlation union."
+                ).classes("text-caption drocat-muted")
                 cluster_heatmap = checkbox_input(
-                    "Cluster Heatmaps (Ward)", True,
-                    hint="Apply Ward hierarchical clustering to reorder heatmap rows/columns.",
+                    "Generate Heatmaps", True,
+                    hint="Create the interactive Ward-clustered heatmap files.",
                 )
                 with param_grid(3):
                     min_synapse_threshold = number_input(
@@ -116,7 +113,8 @@ def create_connectivity_profiling_tab():
         elif analyze_downstream.value:
             direction = 'downstream'
         else:
-            direction = 'both'
+            ui.notify("Select upstream, downstream, or both", type="warning")
+            return
 
         constructor_params = {
             "query": query,

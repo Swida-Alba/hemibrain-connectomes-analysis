@@ -180,27 +180,29 @@ powershell -ExecutionPolicy Bypass -File install.ps1
 
 These scripts automatically:
 1. Install Miniconda (if not present)
-2. Create a `drocat` conda environment with Python 3.11
-3. Install all dependencies
-4. Create launcher scripts
+2. Create or reuse the versioned `drocat-4.5.0` environment with Python 3.11
+3. Install the pinned, cross-platform dependency set
+4. Reject dependency conflicts with `pip check` and verify the installation
 
 ### Option 2: Manual Install
 
+Set `PYTHONNOUSERSITE=1` first (`export PYTHONNOUSERSITE=1` in bash/zsh, or
+`$env:PYTHONNOUSERSITE = "1"` in PowerShell).
+
 ```bash
 # Create environment
-conda create -n drocat python=3.11 -y
-conda activate drocat
+conda create -n drocat-4.5.0 python=3.11 -y
+conda activate drocat-4.5.0
 
 # Install dependencies
-pip install -r requirements.txt       # Linux/macOS
-pip install -r ui/requirements.txt    # Web UI (NiceGUI)
-pip install -e .                      # Install package in editable mode
+pip install -r requirements.txt -r ui/requirements.txt  # Linux/macOS
+pip install -e . --no-deps
+python -m pip check
 
 # Windows users:
-pip install -r requirements-windows.txt
-pip install neuronbridge-python --no-deps
-pip install -r ui/requirements.txt
-pip install -e .
+pip install -r requirements-windows.txt -r ui/requirements.txt
+pip install -e . --no-deps
+python -m pip check
 ```
 
 ### Option 3: Agent-Assisted Install (Codex)
@@ -229,15 +231,15 @@ The agent will:
 
 1. Fetch the repository from [GitHub](https://github.com/Swida-Alba/Drosophila-cross-dataset-connectome-analysis) (branch `v4.5.0`) if it is not already present
 2. Run the OS-appropriate installer (`install.sh` / `install.ps1` / `install.bat`)
-3. Create the `drocat` conda environment (Python 3.11) and install all dependencies
+3. Create/reuse `drocat-4.5.0` (Python 3.11) and install the pinned dependencies
 4. Ask you for NeuPrint / CAVE tokens and write them to `token_info_local.txt`
-5. Verify the installation with [`verify_install.py`](skills/drocat-install/scripts/verify_install.py) (Python version, imports, token file, UI)
+5. Verify Python, imports, dependency consistency, project layout, and the UI with [`verify_install.py`](skills/drocat-install/scripts/verify_install.py)
 6. Launch the web UI and confirm it responds at <http://127.0.0.1:8080>
 
 Manual verification (or to re-check an existing install):
 
 ```bash
-conda activate drocat
+conda activate drocat-4.5.0
 python skills/drocat-install/scripts/verify_install.py --project .
 ```
 
@@ -288,7 +290,7 @@ run_ui.bat
 
 **Manual:**
 ```bash
-conda activate drocat
+conda activate drocat-4.5.0
 python ui/app.py
 ```
 

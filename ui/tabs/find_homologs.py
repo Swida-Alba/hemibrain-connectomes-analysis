@@ -22,7 +22,7 @@ def create_find_homologs_tab():
     )
 
     with form_col:
-        with ui.card().classes("w-full"):
+        with ui.card().classes("w-full drocat-card"):
             section_header("Source Neuron", "search")
             source_input = neuron_input(
                 label="Source Neuron (type or bodyId)",
@@ -34,7 +34,7 @@ def create_find_homologs_tab():
                 target_dataset = dataset_selector(label="Target Dataset", default=DATASETS[1], hint="Dataset to search for homologs in.")
             output_dir = dir_input()
 
-        with ui.card().classes("w-full"):
+        with ui.card().classes("w-full drocat-card"):
             section_header("Search Parameters", "tune")
             with param_grid(3):
                 top_n = number_input("Top N Candidates", DEFAULTS["top_n"], 5, 100, hint="Number of top homolog candidates to return.")

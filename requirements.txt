@@ -6,10 +6,12 @@
 
 # Core Dependencies
 # -----------------------------------------------------------------------------
-numpy>=1.24.0              # NumPy - compatible with most packages
-pandas>=1.5.0              # Pandas - supports both 1.x and 2.x workflows
-scipy>=1.10.0              # Scientific computing (clustering, etc.)
-pyarrow>=12.0.0            # Parquet file support for fast caching
+# Keep this stack identical to pyproject.toml. Loose bounds previously let
+# clean installs drift to NumPy/Pandas majors that this release has not tested.
+numpy==1.26.4              # NumPy - tested version (do not upgrade to 2.x)
+pandas==1.5.3              # Pandas - tested 1.x version
+scipy==1.13.1              # Scientific computing (clustering, etc.)
+pyarrow==17.0.0            # Parquet file support for fast caching
 
 # Visualization
 # -----------------------------------------------------------------------------
@@ -19,8 +21,8 @@ seaborn==0.13.2            # Statistical visualizations
 opencv-python==4.10.0.84   # Computer vision (video generation, image processing)
 bokeh==3.6.0               # Additional visualization (palettes)
 kaleido==0.2.1             # Plotly static image export (0.2.1 is stable for large 3D figures)
-selenium>=4.0.0            # Browser automation for WebGL-based exports
-webdriver-manager>=4.0.0   # Automatic ChromeDriver management
+selenium>=4.0.0,<5         # Browser automation for WebGL-based exports
+webdriver-manager>=4.0.0,<5 # Automatic ChromeDriver management
 
 # Network Analysis
 # -----------------------------------------------------------------------------
@@ -29,19 +31,14 @@ networkx==3.3              # Graph algorithms and network analysis
 # Data Processing
 # -----------------------------------------------------------------------------
 openpyxl==3.1.5            # Excel file support (.xlsx)
+xlrd==2.0.2                # Legacy Excel file support (.xls)
 tqdm==4.66.5               # Progress bars
 requests==2.32.3           # HTTP requests
+chardet==5.2.0             # requests-compatible detector; constrains CloudVolume's loose bound
 Jinja2==3.1.6              # HTML templating (>=3.1.6 required by nicegui)
 pillow==11.0.0             # Image processing
 polars==1.34.0             # Memory-efficient DataFrames for large cache operations
-pydantic>=2.10,<3.0.0      # Data validation.
-                           # v4.5.0 (UI edition) MUST satisfy nicegui, which
-                           # requires pydantic-core>=2.35 (pydantic>=2.12).
-                           # neuronbridge-python 3.3.0 declares ~=2.9.1 but is
-                           # installed with --no-deps and verified import- and
-                           # runtime-compatible with 2.10+ (the strict pin
-                           # cannot coexist with the UI in one env).
-python-rapidjson>=1.20     # Fast JSON parsing (required for NeuronBridge API)
+pydantic==2.13.4           # Exact pair with pydantic-core 2.46.4; compatible with NiceGUI 3.15
 
 # GUI Backends (for file picker and sheet selection dialogs)
 # -----------------------------------------------------------------------------
@@ -51,14 +48,14 @@ PyQt5==5.15.10             # Recommended - Fastest, most responsive dialogs
 # -----------------------------------------------------------------------------
 neuprint-python==0.4.26    # NeuPrint database access
 navis==1.5.0               # Neuron visualization and analysis toolkit
-flybrains>=0.6.3           # Drosophila brain templates and meshes (0.6.3+ adds VNC mesh support)
+flybrains==0.6.3           # Adds VNC mesh support; also constrains h5py<=3.12.1
 
 # NeuronBridge & FlyLight Integration (v4.3.0)
 # -----------------------------------------------------------------------------
-boto3>=1.26.0              # AWS S3 access for FlyLight imagery downloads
-reportlab>=4.0.0           # PDF generation for image summaries
-python-pptx>=0.6.21        # PowerPoint generation for image summaries
-pymupdf>=1.23.0            # PDF to PPTX conversion
+boto3>=1.26.0,<2           # AWS S3 access for FlyLight imagery downloads
+reportlab>=4.0.0,<6        # PDF generation for image summaries
+python-pptx>=0.6.21,<2     # PowerPoint generation for image summaries
+pymupdf>=1.23.0,<2         # PDF to PPTX conversion
 
 # Document Processing
 # -----------------------------------------------------------------------------
@@ -74,15 +71,15 @@ open3d==0.19.0             # 3D mesh processing - REQUIRED for accurate mesh sim
 
 # CAVE API / FlyWire Integration (v4.3.4)
 # -----------------------------------------------------------------------------
-caveclient>=8.0.0          # CAVE materialization API for FlyWire FAFB
-cloud-volume>=12.0.0       # CloudVolume for mesh fetching via graphene protocol
-fast-simplification>=0.1.0 # Mesh simplification (used by trimesh 4.x, but limited to ~60% on tube meshes)
-trimesh>=4.0.0             # Mesh processing for skeletonization (simplification uses open3d instead)
+caveclient>=8.0.0,<9       # CAVE materialization API for FlyWire FAFB
+cloud-volume>=12.0.0,<13   # CloudVolume for mesh fetching via graphene protocol
+fast-simplification>=0.1.0,<0.2 # Mesh simplification used by trimesh 4.x
+trimesh==4.12.2            # Last stable 4.x API; avoid the incompatible 5.x line
 
 # System Utilities
 # -----------------------------------------------------------------------------
-psutil>=5.9.0              # System monitoring utilities (memory usage tracking)
-xlsxwriter>=3.1.0          # Excel file generation (.xlsx)
+psutil>=5.9.0,<8           # System monitoring utilities (memory usage tracking)
+xlsxwriter>=3.1.0,<4       # Excel file generation (.xlsx)
 
 # Optional Dependencies (uncomment as needed)
 # -----------------------------------------------------------------------------
@@ -104,9 +101,9 @@ xlsxwriter>=3.1.0          # Excel file generation (.xlsx)
 
 # NeuronBridge API (EM↔LM Integration)
 # -----------------------------------------------------------------------------
-# NOTE: On Windows, this may fail due to memray dependency (Linux/macOS only).
-# See Troubleshooting section in docs/INSTALLATION.md for the workaround.
-neuronbridge-python>=3.3.0  # NeuronBridge API for EM-LM matching
+# Implemented by src/neuronbridge_client.py using requests + Pillow. This
+# intentionally avoids neuronbridge-python's incompatible Pydantic/Ray/Memray
+# dependency tree and works identically on macOS, Linux, and Windows.
 
 # =============================================================================
 # Installation
@@ -120,5 +117,3 @@ neuronbridge-python>=3.3.0  # NeuronBridge API for EM-LM matching
 # The -e flag means "editable" - changes to source files take effect immediately
 # without needing to reinstall. Use this if you're developing/modifying the code.
 #
-# Windows Users: If neuronbridge-python fails to install, see:
-#   docs/INSTALLATION.md#neuronbridge-installation-windows-troubleshooting
