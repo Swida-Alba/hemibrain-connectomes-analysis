@@ -1,7 +1,14 @@
 #!/usr/bin/env python3
 """Create the DROCAT conda environment, handling env-name conflicts.
 
-Behavior:
+Conda discovery:
+  - Looks for a local conda (PATH, then well-known install locations such as
+    ~/miniconda3, ~/anaconda3, ~/miniforge3, /opt/*, C:\\ProgramData\\*).
+  - If NO local conda is found, Miniconda is downloaded and installed
+    automatically into ~/miniconda3 (use --no-install to disable; dry runs
+    never install anything).
+
+Env-name behavior:
   - If the preferred env name (default: 'drocat') is free, it is created.
   - If an env with that name ALREADY EXISTS on this machine, this script
     warns the user (on stderr) and instead creates a fresh env whose name
@@ -16,6 +23,7 @@ Usage:
     python setup_conda_env.py                        # env 'drocat', Python 3.11
     python setup_conda_env.py --name drocat --python 3.11 --version 4.4.5
     python setup_conda_env.py --conda /path/to/conda # explicit conda binary
+    python setup_conda_env.py --no-install           # fail instead of installing Miniconda
     python setup_conda_env.py --dry-run              # report the name only
 
 Exit codes: 0 = env ready, 1 = conda not found / creation failed.
@@ -24,14 +32,92 @@ Exit codes: 0 = env ready, 1 = conda not found / creation failed.
 import argparse
 import json
 import os
+import platform
 import shutil
 import subprocess
 import sys
 from pathlib import Path
 
 
-def find_conda(explicit: str = None) -> str:
-    """Locate the conda binary."""
+def _miniconda_installer_url() -> str:
+    """Pick the right Miniconda installer for this OS/architecture."""
+    if sys.platform == "darwin":
+        arch = "arm64" if platform.machine() in ("arm64", "aarch64") else "x86_64"
+        return f"https://repo.anaconda.com/miniconda/Miniconda3-latest-MacOSX-{arch}.sh"
+    if sys.platform.startswith("linux"):
+        arch = "aarch64" if platform.machine() in ("arm64", "aarch64") else "x86_64"
+        return f"https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-{arch}.sh"
+    if sys.platform == "win32":
+        return "https://repo.anaconda.com/miniconda/Miniconda3-latest-Windows-x86_64.exe"
+    raise SystemExit(f"ERROR: unsupported platform for Miniconda auto-install: {sys.platform}")
+
+
+def install_miniconda() -> str:
+    """Download and silently install Miniconda; return the new conda binary path.
+
+    Used as the fallback when no local conda is found, so the pipeline works
+    on a fresh machine without manual steps.
+    """
+    import tempfile
+    import urllib.request
+
+    url = _miniconda_installer_url()
+    install_dir = Path.home() / "miniconda3"
+    is_windows = sys.platform == "win32"
+    suffix = ".exe" if is_windows else ".sh"
+
+    print(f"WARNING: conda not found on this machine.", file=sys.stderr)
+    print(f"Downloading Miniconda from: {url}", file=sys.stderr)
+    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
+        installer_path = Path(tmp.name)
+    try:
+        urllib.request.urlretrieve(url, installer_path)
+        print("Installing Miniconda (silent)...", file=sys.stderr)
+        if is_windows:
+            # /D= must be the LAST argument and must not be quoted
+            subprocess.run(
+                [str(installer_path), "/InstallationType=JustMe",
+                 "/RegisterPython=0", "/S", f"/D={install_dir}"],
+                check=True,
+            )
+        else:
+            subprocess.run(
+                ["bash", str(installer_path), "-b", "-p", str(install_dir)],
+                check=True,
+            )
+    finally:
+        try:
+            installer_path.unlink()
+        except OSError:
+            pass
+
+    conda_bin = install_dir / ("Scripts/conda.exe" if is_windows else "bin/conda")
+    if not conda_bin.exists():
+        raise SystemExit(f"ERROR: Miniconda install finished but {conda_bin} was not found.")
+
+    # Register conda in the user's shells so future terminals can use it
+    try:
+        if is_windows:
+            subprocess.run([str(conda_bin), "init", "powershell"],
+                           capture_output=True, timeout=120)
+        else:
+            for shell in ("bash", "zsh"):
+                subprocess.run([str(conda_bin), "init", shell],
+                               capture_output=True, timeout=120)
+    except Exception:
+        pass  # shell init is best-effort; the env can still be used directly
+
+    print(f"Miniconda installed at: {install_dir}", file=sys.stderr)
+    return str(conda_bin)
+
+
+def find_conda(explicit: str = None, allow_install: bool = True) -> str:
+    """Locate the conda binary.
+
+    Discovery order: explicit path -> PATH -> well-known install locations.
+    If nothing is found and allow_install is True, Miniconda is downloaded
+    and installed automatically (pass --no-install to disable).
+    """
     if explicit:
         if Path(explicit).exists():
             return str(Path(explicit).expanduser().resolve())
@@ -59,6 +145,9 @@ def find_conda(explicit: str = None) -> str:
             cand = base / rel
             if cand.exists():
                 return str(cand)
+
+    if allow_install:
+        return install_miniconda()
     raise SystemExit(
         "ERROR: conda not found. Install Miniconda first: "
         "https://docs.conda.io/en/latest/miniconda.html"
@@ -125,13 +214,20 @@ def main() -> int:
     )
     parser.add_argument("--conda", default=None, help="Explicit path to the conda binary")
     parser.add_argument(
+        "--no-install",
+        action="store_true",
+        help="Do not auto-install Miniconda when no local conda is found",
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Only report the env name that would be used; do not create it",
     )
     args = parser.parse_args()
 
-    conda = find_conda(args.conda)
+    # Never auto-install Miniconda for a dry run
+    allow_install = not args.no_install and not args.dry_run
+    conda = find_conda(args.conda, allow_install=allow_install)
     existing = list_env_names(conda)
     chosen, conflicted = pick_env_name(args.name, args.version, existing)
 

@@ -46,8 +46,11 @@ git checkout v4.4.5
   3.9 (matplotlib 3.10.0 requires >=3.10) or 3.12+ (no wheels for PyQt5
   5.15.10 / open3d 0.19 / ray 2.39). The env created below pins 3.11, so an
   existing system Python version does not matter.
-- conda is required. If conda is missing, install Miniconda from
-  <https://docs.conda.io/miniconda.html> after user approval.
+- conda is required. The helper finds a local conda automatically (PATH and
+  common install locations); if none exists it downloads and installs
+  Miniconda into `~/miniconda3` on its own (tell the user this is happening;
+  pass `--no-install` to opt out and install manually from
+  <https://docs.conda.io/miniconda.html> instead).
 - Dependency download and token checks need network access. In a sandboxed environment, request escalation for network commands.
 
 ### 3. Install dependencies
