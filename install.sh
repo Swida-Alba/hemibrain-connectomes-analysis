@@ -23,9 +23,14 @@ echo "╚═══════════════════════�
 echo -e "${NC}"
 
 # Configuration
-ENV_NAME="drocat"
 PYTHON_VERSION="3.11"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DROCAT_VERSION="$(sed -n 's/^APP_VERSION = "\([^"]*\)"/\1/p' "$SCRIPT_DIR/ui/config.py" | head -1)"
+DROCAT_VERSION="${DROCAT_VERSION:-4.5.0}"
+ENV_BASE="drocat-${DROCAT_VERSION}"
+DROCAT_VERSION="$(sed -n 's/^APP_VERSION = "\([^"]*\)"/\1/p' "$SCRIPT_DIR/ui/config.py" | head -1)"
+DROCAT_VERSION="${DROCAT_VERSION:-4.5.0}"
+ENV_BASE="drocat-${DROCAT_VERSION}"
 
 # Detect OS and architecture
 OS="$(uname -s)"
@@ -115,16 +120,18 @@ fi
 # =============================================================================
 echo -e "\n${BLUE}[2/5] Selecting conda environment...${NC}"
 
-# If 'drocat' already exists, NEVER touch it: warn and pick the next free
-# name (drocat-2, drocat-3, ...) so no environment name conflicts occur.
-if conda env list | grep -qE "^${ENV_NAME} "; then
-    echo -e "${YELLOW}WARNING: conda env '${ENV_NAME}' already exists - leaving it untouched.${NC}"
+# If the versioned base env already exists, NEVER touch it: warn and pick the
+# next free name (drocat-<version>-2, ...) so no name conflicts occur.
+if conda env list | grep -qE "^${ENV_BASE} "; then
+    echo -e "${YELLOW}WARNING: conda env '${ENV_BASE}' already exists - leaving it untouched.${NC}"
     env_num=2
-    while conda env list | grep -qE "^${ENV_NAME}-${env_num} "; do
+    while conda env list | grep -qE "^${ENV_BASE}-${env_num} "; do
         env_num=$((env_num + 1))
     done
-    ENV_NAME="${ENV_NAME}-${env_num}"
+    ENV_NAME="${ENV_BASE}-${env_num}"
     echo -e "${GREEN}Using a new environment instead: '${ENV_NAME}'${NC}"
+else
+    ENV_NAME="${ENV_BASE}"
 fi
 
 echo -e "${BLUE}Creating conda environment '${ENV_NAME}' (Python ${PYTHON_VERSION})...${NC}"
@@ -197,12 +204,13 @@ fi
 source "$(dirname "$(dirname "$CONDA_BIN")")/etc/profile.d/conda.sh" 2>/dev/null || \
     eval "$($CONDA_BIN shell.bash hook)"
 
-# Resolve the environment: use 'drocat' if it does not exist yet; otherwise
-# leave it untouched and use the next free name (drocat-2, drocat-3, ...).
+# Resolve the environment: use 'drocat-<version>' if it does not exist yet;
+# otherwise leave it untouched and use the next free name
+# (drocat-<version>-2, drocat-<version>-3, ...).
 ENV_NAME=""
 env_num=0
 while [[ -z "$ENV_NAME" && $env_num -le 20 ]]; do
-    if [[ $env_num -eq 0 ]]; then candidate="drocat"; else candidate="drocat-${env_num}"; fi
+    if [[ $env_num -eq 0 ]]; then candidate="$ENV_BASE"; else candidate="${ENV_BASE}-${env_num}"; fi
     if conda run -n "$candidate" python -c "import sys, nicegui; assert sys.version_info[:2]==(3,11)" >/dev/null 2>&1; then
         ENV_NAME="$candidate"
     elif ! conda env list | grep -qE "^${candidate} "; then
@@ -211,16 +219,16 @@ while [[ -z "$ENV_NAME" && $env_num -le 20 ]]; do
         ENV_NAME="$candidate"
     else
         if [[ $env_num -eq 0 ]]; then
-            echo "WARNING: existing 'drocat' env is not usable (wrong Python or missing deps) - using a new env."
+            echo "WARNING: existing '$ENV_BASE' env is not usable (wrong Python or missing deps) - using a new env."
         fi
         env_num=$((env_num + 1))
     fi
 done
 if [[ -z "$ENV_NAME" ]]; then
-    echo "ERROR: could not resolve a usable drocat environment." >&2
+    echo "ERROR: could not resolve a usable $ENV_BASE environment." >&2
     exit 1
 fi
-if [[ "$ENV_NAME" != "drocat" ]]; then
+if [[ "$ENV_NAME" != "$ENV_BASE" ]]; then
     echo "Using environment: $ENV_NAME"
 fi
 conda activate "$ENV_NAME"

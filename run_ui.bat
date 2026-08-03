@@ -21,12 +21,18 @@ if not defined CONDA_BIN (
     exit /b 1
 )
 
-REM Resolve environment: use 'drocat' if it is free/usable; otherwise leave
-REM any existing env untouched and pick the next free name (drocat-2, ...).
+REM Parse DROCAT version from ui\config.py (fallback 4.5.0)
+set "DROCAT_VERSION=4.5.0"
+for /f "tokens=3" %%v in ('findstr /C:"APP_VERSION = " "%SCRIPT_DIR%ui\config.py"') do set "DROCAT_VERSION=%%v"
+set "DROCAT_VERSION=%DROCAT_VERSION:"=%"
+set "ENV_BASE=drocat-%DROCAT_VERSION%"
+
+REM Resolve environment: use 'drocat-<version>' if it is free/usable; otherwise
+REM leave existing envs untouched and pick the next free name.
 set "ENV_NAME="
 set "N=0"
 :env_resolve
-if "%N%"=="0" (set "CAND=drocat") else (set "CAND=drocat-%N%")
+if "%N%"=="0" (set "CAND=%ENV_BASE%") else (set "CAND=%ENV_BASE%-%N%")
 call %CONDA_BIN% run -n %CAND% python -c "import sys, nicegui; assert sys.version_info[:2]==(3,11)" >nul 2>nul
 if not errorlevel 1 (
     set "ENV_NAME=%CAND%"
@@ -37,10 +43,10 @@ if errorlevel 1 (
     set "ENV_NAME=%CAND%"
     goto :env_create
 )
-if "%N%"=="0" echo WARNING: existing 'drocat' env is not usable - using a new env.
+if "%N%"=="0" echo WARNING: existing "%ENV_BASE%" env is not usable - using a new env.
 set /a N+=1
 if %N% GTR 20 (
-    echo ERROR: could not resolve a usable drocat environment.
+    echo ERROR: could not resolve a usable %ENV_BASE% environment.
     pause
     exit /b 1
 )
@@ -51,7 +57,7 @@ echo Creating environment %ENV_NAME% (first run)...
 call %CONDA_BIN% create -n %ENV_NAME% python=3.11 -y || goto :err
 
 :env_found
-if not "%ENV_NAME%"=="drocat" echo Using environment: %ENV_NAME%
+if not "%ENV_NAME%"=="%ENV_BASE%" echo Using environment: %ENV_NAME%
 
 REM First run: create the environment and install dependencies
 call %CONDA_BIN% run -n %ENV_NAME% python -c "import nicegui" >nul 2>nul

@@ -56,12 +56,17 @@ fi
 if [ "$CONDA_AVAILABLE" = true ]; then
   eval "$(conda shell.zsh hook 2>/dev/null || conda shell.bash hook 2>/dev/null)"
 
-  # Resolve the environment: use 'drocat' if it is free/usable; otherwise
-  # leave any existing env untouched and pick the next free name.
+  ROOT="$(cd "$(dirname "$0")" && pwd)"
+  DROCAT_VERSION="$(sed -n 's/^APP_VERSION = "\([^"]*\)"/\1/p' "$ROOT/ui/config.py" | head -1)"
+  DROCAT_VERSION="${DROCAT_VERSION:-4.5.0}"
+  ENV_BASE="drocat-${DROCAT_VERSION}"
+
+  # Resolve the environment: use 'drocat-<version>' if it is free/usable;
+  # otherwise leave existing envs untouched and pick the next free name.
   CONDA_ENV=""
   env_num=0
   while [[ -z "$CONDA_ENV" && $env_num -le 20 ]]; do
-    if [[ $env_num -eq 0 ]]; then candidate="drocat"; else candidate="drocat-$env_num"; fi
+    if [[ $env_num -eq 0 ]]; then candidate="$ENV_BASE"; else candidate="${ENV_BASE}-${env_num}"; fi
     if conda run -n "$candidate" python -c "import sys, nicegui; assert sys.version_info[:2]==(3,11)" >/dev/null 2>&1; then
       CONDA_ENV="$candidate"
     elif ! conda env list 2>/dev/null | grep -qE "^$candidate "; then
@@ -76,18 +81,18 @@ if [ "$CONDA_AVAILABLE" = true ]; then
       echo "Setup complete!"
     else
       if [[ $env_num -eq 0 ]]; then
-        echo "WARNING: existing 'drocat' env is not usable - using a new environment."
+        echo "WARNING: existing '$ENV_BASE' env is not usable - using a new environment."
       fi
       env_num=$((env_num + 1))
     fi
   done
   if [[ -z "$CONDA_ENV" ]]; then
-    echo "ERROR: could not resolve a usable drocat environment."
+    echo "ERROR: could not resolve a usable $ENV_BASE environment."
     echo
     read "?Press Return to close."
     exit 1
   fi
-  if [[ "$CONDA_ENV" != "drocat" ]]; then
+  if [[ "$CONDA_ENV" != "$ENV_BASE" ]]; then
     echo "Using environment: $CONDA_ENV"
   fi
   conda activate "$CONDA_ENV" 2>/dev/null || true

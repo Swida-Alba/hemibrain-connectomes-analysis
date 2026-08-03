@@ -35,13 +35,18 @@ source "$(dirname "$(dirname "$CONDA_BIN")")/etc/profile.d/conda.sh" 2>/dev/null
     eval "$($CONDA_BIN shell.bash hook)"
 
 # ---------------------------------------------------------------------------
-# Resolve environment: use 'drocat' if it is free/usable; otherwise leave the
-# existing env untouched and pick the next free name (drocat-2, drocat-3, ...).
+# ---------------------------------------------------------------------------
+DROCAT_VERSION="$(sed -n 's/^APP_VERSION = "\([^"]*\)"/\1/p' "$SCRIPT_DIR/ui/config.py" | head -1)"
+DROCAT_VERSION="${DROCAT_VERSION:-4.5.0}"
+ENV_BASE="drocat-${DROCAT_VERSION}"
+# Resolve environment: use 'drocat-<version>' if it is free/usable; otherwise
+# leave existing envs untouched and pick the next free name
+# (drocat-<version>-2, drocat-<version>-3, ...).
 # ---------------------------------------------------------------------------
 ENV_NAME=""
 env_num=0
 while [[ -z "$ENV_NAME" && $env_num -le 20 ]]; do
-    if [[ $env_num -eq 0 ]]; then candidate="drocat"; else candidate="drocat-${env_num}"; fi
+    if [[ $env_num -eq 0 ]]; then candidate="$ENV_BASE"; else candidate="${ENV_BASE}-${env_num}"; fi
     if conda run -n "$candidate" python -c "import sys, nicegui; assert sys.version_info[:2]==(3,11)" >/dev/null 2>&1; then
         ENV_NAME="$candidate"
     elif ! conda env list | grep -qE "^${candidate} "; then
@@ -50,16 +55,16 @@ while [[ -z "$ENV_NAME" && $env_num -le 20 ]]; do
         ENV_NAME="$candidate"
     else
         if [[ $env_num -eq 0 ]]; then
-            echo "WARNING: existing 'drocat' env is not usable (wrong Python or missing deps) - using a new env."
+            echo "WARNING: existing '$ENV_BASE' env is not usable (wrong Python or missing deps) - using a new env."
         fi
         env_num=$((env_num + 1))
     fi
 done
 if [[ -z "$ENV_NAME" ]]; then
-    echo "ERROR: could not resolve a usable drocat environment." >&2
+    echo "ERROR: could not resolve a usable $ENV_BASE environment." >&2
     exit 1
 fi
-if [[ "$ENV_NAME" != "drocat" ]]; then
+if [[ "$ENV_NAME" != "$ENV_BASE" ]]; then
     echo "Using environment: $ENV_NAME"
 fi
 conda activate "$ENV_NAME"

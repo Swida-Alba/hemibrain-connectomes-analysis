@@ -50,15 +50,17 @@ cp -R skills/drocat-install/. ~/.codex/skills/drocat-install/
 
 ## Quick Start
 
-**If a `drocat` environment already exists on this machine:**
+**Environment naming:** DROCAT uses a versioned environment name based on
+the app version (read from `ui/config.py`): `drocat-4.5.0`. If that name
+already exists on this machine, the installer warns and **never touches the
+existing env** - it creates the next free name instead:
+`drocat-4.5.0-2`, `drocat-4.5.0-3`, ... (skipping every name that exists).
 
-- The installer warns and **never touches the existing env** - it creates a
-  new environment with the next free name instead: `drocat-2`, `drocat-3`,
-  ... (skipping every name that already exists).
 - The launchers (`run_ui.sh`, `run_ui.bat`, `DROCAT.command`) resolve the
-  same way: they use `drocat` only if it is free/usable, otherwise the next
-  available `drocat-N`, and create it on first launch.
-- Existing environments are never modified or deleted.
+  same way: they use `drocat-<version>` only if it is free/usable, otherwise
+  the next available `drocat-<version>-N`, creating it on first launch.
+- Existing environments (including legacy unversioned `drocat`) are never
+  modified or deleted.
 
 ### Recommended: Using Conda Environment
 

@@ -71,21 +71,27 @@ REM ============================================================================
 echo.
 echo [2/5] Creating conda environment '%ENV_NAME%'...
 
-REM If 'drocat' already exists, never touch it: warn and pick the next free
-REM name (drocat-2, drocat-3, ...) so no environment name conflicts occur.
+REM Parse DROCAT version from ui\config.py (fallback 4.5.0)
+set "DROCAT_VERSION=4.5.0"
+for /f "tokens=3" %%v in ('findstr /C:"APP_VERSION = " "%SCRIPT_DIR%ui\config.py"') do set "DROCAT_VERSION=%%v"
+set "DROCAT_VERSION=!DROCAT_VERSION:"=!"
+set "ENV_BASE=drocat-!DROCAT_VERSION!"
+
+REM If the versioned base env already exists, never touch it: warn and pick
+REM the next free name (drocat-<version>-2, ...) so no name conflicts occur.
 call conda env list > "%TEMP%\drocat_envlist.txt" 2>nul
-set "ENV_NAME=drocat"
-findstr /R /C:"^drocat " "%TEMP%\drocat_envlist.txt" >nul 2>nul
+set "ENV_NAME=!ENV_BASE!"
+findstr /C:"!ENV_BASE! " "%TEMP%\drocat_envlist.txt" >nul 2>nul
 if errorlevel 1 goto :env_create
-echo [WARN] Conda env 'drocat' already exists - leaving it untouched.
+echo [WARN] Conda env '!ENV_BASE!' already exists - leaving it untouched.
 set ENV_NUM=2
 :env_loop
-findstr /R /C:"^drocat-!ENV_NUM! " "%TEMP%\drocat_envlist.txt" >nul 2>nul
+findstr /C:"!ENV_BASE!-!ENV_NUM! " "%TEMP%\drocat_envlist.txt" >nul 2>nul
 if errorlevel 1 goto :env_ready
 set /a ENV_NUM+=1
 goto :env_loop
 :env_ready
-set "ENV_NAME=drocat-!ENV_NUM!"
+set "ENV_NAME=!ENV_BASE!-!ENV_NUM!"
 :env_create
 echo Using environment: !ENV_NAME!
 call conda create -n !ENV_NAME! python=%PYTHON_VERSION% -y
@@ -155,9 +161,12 @@ if exist "%SCRIPT_DIR%run_ui.bat" (
 echo @echo off
 echo REM DROCAT UI Launcher
 echo setlocal
-echo set ENV_NAME=%ENV_NAME%
 echo set SCRIPT_DIR=%%~dp0
 echo set CONDA_BIN=
+echo set "DROCAT_VERSION=4.5.0"
+echo for /f "tokens=3" %%%%v in ('findstr /C:"APP_VERSION = " "%%SCRIPT_DIR%%ui\config.py"') do set "DROCAT_VERSION=%%%%v"
+echo set "DROCAT_VERSION=%%DROCAT_VERSION:"=%%"
+echo set "ENV_BASE=drocat-%%DROCAT_VERSION%"
 echo where conda ^>nul 2^>nul ^&^& set CONDA_BIN=conda
 echo if not defined CONDA_BIN if exist "%%USERPROFILE%%\miniconda3\Scripts\conda.exe" set CONDA_BIN=%%USERPROFILE%%\miniconda3\Scripts\conda.exe
 echo if not defined CONDA_BIN if exist "%%USERPROFILE%%\anaconda3\Scripts\conda.exe" set CONDA_BIN=%%USERPROFILE%%\anaconda3\Scripts\conda.exe
@@ -165,7 +174,7 @@ echo if not defined CONDA_BIN ^(echo ERROR: conda not found. Run install.bat fir
 echo set "ENV_NAME="
 echo set "N=0"
 echo :env_resolve
-echo if "%%N%%"=="0" ^(set "CAND=drocat"^) else ^(set "CAND=drocat-%%N%%"^)
+echo if "%%N%%"=="0" ^(set "CAND=%%ENV_BASE%%"^) else ^(set "CAND=%%ENV_BASE%%-%%N%%"^)
 echo call %%CONDA_BIN%% run -n %%CAND%% python -c "import sys, nicegui; assert sys.version_info[:2]==(3,11)" ^>nul 2^>nul
 echo if not errorlevel 1 ^(
 echo     set "ENV_NAME=%%CAND%%"
@@ -176,10 +185,10 @@ echo if errorlevel 1 ^(
 echo     set "ENV_NAME=%%CAND%%"
 echo     goto :env_create
 echo ^)
-echo if "%%N%%"=="0" echo WARNING: existing 'drocat' env is not usable - using a new env.
+echo if "%%N%%"=="0" echo WARNING: existing "%%ENV_BASE%%" env is not usable - using a new env.
 echo set /a N+=1
 echo if %%N%% GTR 20 ^(
-echo     echo ERROR: could not resolve a usable drocat environment.
+echo     echo ERROR: could not resolve a usable %%ENV_BASE%% environment.
 echo     pause
 echo     exit /b 1
 echo ^)
@@ -188,7 +197,7 @@ echo :env_create
 echo echo Creating environment %%ENV_NAME%% ^(first run^)...
 echo call %%CONDA_BIN%% create -n %%ENV_NAME%% python=3.11 -y ^|^| goto :err
 echo :env_found
-echo if not "%%ENV_NAME%%"=="drocat" echo Using environment: %%ENV_NAME%%
+echo if not "%%ENV_NAME%%"=="%%ENV_BASE%%" echo Using environment: %%ENV_NAME%%
 echo call %%CONDA_BIN%% run -n %%ENV_NAME%% python -c "import nicegui" ^>nul 2^>nul
 echo if errorlevel 1 ^(
 echo     echo Installing dependencies ^(first run^)...
