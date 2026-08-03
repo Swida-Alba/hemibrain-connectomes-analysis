@@ -1,26 +1,43 @@
 @echo off
 REM =============================================================================
-REM DROCAT UI Launcher for Windows
+REM DROCAT UI Launcher for Windows (self-healing)
+REM Creates the conda env and installs dependencies on first run, then starts
+REM the web UI inside the environment.
 REM =============================================================================
-REM Usage: Double-click or run: run_ui.bat
-REM =============================================================================
+setlocal
+
+set ENV_NAME=drocat
+set SCRIPT_DIR=%~dp0
+set CONDA_BIN=
 
 echo Starting DROCAT UI...
 
-REM Try to activate conda environment
-call conda activate drocat 2>nul
-if %ERRORLEVEL% NEQ 0 (
-    REM Try common conda locations
-    if exist "%USERPROFILE%\miniconda3\Scripts\activate.bat" (
-        call "%USERPROFILE%\miniconda3\Scripts\activate.bat" drocat
-    ) else if exist "%USERPROFILE%\anaconda3\Scripts\activate.bat" (
-        call "%USERPROFILE%\anaconda3\Scripts\activate.bat" drocat
-    ) else (
-        echo Warning: Could not activate conda environment 'drocat'
-        echo Trying to run with system Python...
-    )
+REM Locate conda
+where conda >nul 2>nul && set CONDA_BIN=conda
+if not defined CONDA_BIN if exist "%USERPROFILE%\miniconda3\Scripts\conda.exe" set CONDA_BIN=%USERPROFILE%\miniconda3\Scripts\conda.exe
+if not defined CONDA_BIN if exist "%USERPROFILE%\anaconda3\Scripts\conda.exe" set CONDA_BIN=%USERPROFILE%\anaconda3\Scripts\conda.exe
+if not defined CONDA_BIN (
+    echo ERROR: conda not found. Run install.bat first.
+    pause
+    exit /b 1
 )
 
-REM Launch UI
-cd /d "%~dp0"
-python ui/app.py
+REM First run: create the environment and install dependencies
+call %CONDA_BIN% run -n %ENV_NAME% python -c "import nicegui" >nul 2>nul
+if errorlevel 1 (
+    echo Creating environment and installing dependencies (first run)...
+    call %CONDA_BIN% create -n %ENV_NAME% python=3.11 -y || goto :err
+    call %CONDA_BIN% run -n %ENV_NAME% --no-capture-output python -m pip install -r "%SCRIPT_DIR%requirements-windows.txt" || goto :err
+    call %CONDA_BIN% run -n %ENV_NAME% --no-capture-output python -m pip install neuronbridge-python --no-deps
+    call %CONDA_BIN% run -n %ENV_NAME% --no-capture-output python -m pip install -r "%SCRIPT_DIR%ui\requirements.txt" || goto :err
+    call %CONDA_BIN% run -n %ENV_NAME% --no-capture-output python -m pip install -e "%SCRIPT_DIR%" --no-deps || goto :err
+)
+
+cd /d "%SCRIPT_DIR%"
+call %CONDA_BIN% run -n %ENV_NAME% --no-capture-output python ui\app.py
+exit /b 0
+
+:err
+echo Installation failed. See messages above.
+pause
+exit /b 1

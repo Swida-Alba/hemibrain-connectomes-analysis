@@ -37,6 +37,17 @@ function Write-Warning-Custom {
     Write-Host "[WARN] $Message" -ForegroundColor Yellow
 }
 
+# Run a command inside the drocat environment via `conda run`.
+# Falls back to plain `conda run` on older conda versions that do not
+# support --no-capture-output.
+function Invoke-InEnv {
+    param([string[]]$Command)
+    & $CondaPath run -n $EnvName --no-capture-output @Command 2>$null
+    if ($LASTEXITCODE -eq 2) {
+        & $CondaPath run -n $EnvName @Command
+    }
+}
+
 # =============================================================================
 # Step 1: Check/Install Miniconda
 # =============================================================================
@@ -110,10 +121,7 @@ else {
     & $CondaPath create -n $EnvName python=$PythonVersion -y
 }
 
-# Activate environment
-& $CondaPath activate $EnvName
-
-Write-Success "Environment ready"
+Write-Success "Environment ready (all steps run inside the env via 'conda run')"
 
 # =============================================================================
 # Step 3: Install Dependencies
@@ -123,20 +131,28 @@ Write-Step "3/5" "Installing dependencies..."
 
 Set-Location $ScriptDir
 
-Write-Host "Installing core dependencies (this may take a few minutes)..."
-pip install -r requirements.txt --quiet
-
-# Handle neuronbridge-python Windows issue
-Write-Host "Installing neuronbridge-python (with Windows workaround)..."
-try {
-    pip install neuronbridge-python --no-deps --quiet 2>$null
+# Windows uses requirements-windows.txt (two-step neuronbridge install):
+# memray (a neuronbridge-python dependency) does not support Windows, so we
+# install the compatible deps first, then neuronbridge-python --no-deps.
+Write-Host "Installing core dependencies from requirements-windows.txt..."
+Invoke-InEnv @("python", "-m", "pip", "install", "-r", "requirements-windows.txt")
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "Core dependency install failed (exit $LASTEXITCODE)." -ForegroundColor Red
+    exit 1
 }
-catch {
-    Write-Warning-Custom "neuronbridge-python may not be available on Windows"
+
+Write-Host "Installing neuronbridge-python (--no-deps, Windows memray workaround)..."
+Invoke-InEnv @("python", "-m", "pip", "install", "neuronbridge-python", "--no-deps")
+if ($LASTEXITCODE -ne 0) {
+    Write-Warning-Custom "neuronbridge-python could not be installed; NeuronBridge panels will be limited"
 }
 
 Write-Host "Installing UI dependencies..."
-pip install -r ui/requirements.txt --quiet
+Invoke-InEnv @("python", "-m", "pip", "install", "-r", "ui/requirements.txt")
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "UI dependency install failed (exit $LASTEXITCODE)." -ForegroundColor Red
+    exit 1
+}
 
 Write-Success "Dependencies installed"
 
@@ -146,7 +162,11 @@ Write-Success "Dependencies installed"
 Write-Host ""
 Write-Step "4/5" "Installing DROCAT package..."
 
-pip install -e . --quiet
+Invoke-InEnv @("python", "-m", "pip", "install", "-e", ".", "--no-deps")
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "Editable install failed (exit $LASTEXITCODE)." -ForegroundColor Red
+    exit 1
+}
 
 Write-Success "DROCAT installed in editable mode"
 
@@ -156,27 +176,66 @@ Write-Success "DROCAT installed in editable mode"
 Write-Host ""
 Write-Step "5/5" "Creating launcher scripts..."
 
-# Create run_ui.bat
+# Create run_ui.bat (self-healing launcher; only if missing)
+$RunBat = "$ScriptDir\run_ui.bat"
+if (Test-Path $RunBat) {
+    Write-Warning-Custom "run_ui.bat already exists - keeping it"
+}
+else {
 $LauncherContent = @"
 @echo off
 REM DROCAT UI Launcher
-call conda activate $EnvName
-cd /d "%~dp0"
-python ui/app.py
+setlocal
+set ENV_NAME=$EnvName
+set SCRIPT_DIR=%~dp0
+set CONDA_BIN=
+where conda >nul 2>nul && set CONDA_BIN=conda
+if not defined CONDA_BIN if exist "%USERPROFILE%\miniconda3\Scripts\conda.exe" set CONDA_BIN=%USERPROFILE%\miniconda3\Scripts\conda.exe
+if not defined CONDA_BIN if exist "%USERPROFILE%\anaconda3\Scripts\conda.exe" set CONDA_BIN=%USERPROFILE%\anaconda3\Scripts\conda.exe
+if not defined CONDA_BIN (
+    echo ERROR: conda not found. Run install.bat first.
+    pause
+    exit /b 1
+)
+call %CONDA_BIN% run -n %ENV_NAME% python -c "import nicegui" >nul 2>nul
+if errorlevel 1 (
+    echo Creating environment and installing dependencies (first run)...
+    call %CONDA_BIN% create -n %ENV_NAME% python=3.11 -y || goto :err
+    call %CONDA_BIN% run -n %ENV_NAME% --no-capture-output python -m pip install -r "%SCRIPT_DIR%requirements-windows.txt" || goto :err
+    call %CONDA_BIN% run -n %ENV_NAME% --no-capture-output python -m pip install neuronbridge-python --no-deps
+    call %CONDA_BIN% run -n %ENV_NAME% --no-capture-output python -m pip install -r "%SCRIPT_DIR%ui\requirements.txt" || goto :err
+    call %CONDA_BIN% run -n %ENV_NAME% --no-capture-output python -m pip install -e "%SCRIPT_DIR%" --no-deps || goto :err
+)
+cd /d "%SCRIPT_DIR%"
+call %CONDA_BIN% run -n %ENV_NAME% --no-capture-output python ui/app.py
+exit /b 0
+:err
+echo Installation failed. See messages above.
+pause
+exit /b 1
 "@
-$LauncherContent | Out-File -FilePath "$ScriptDir\run_ui.bat" -Encoding ASCII
+$LauncherContent | Out-File -FilePath $RunBat -Encoding ASCII
+Write-Success "Launcher created: run_ui.bat"
+}
 
-# Create run_ui.ps1
-$PsLauncherContent = @"
-# DROCAT UI Launcher (PowerShell)
-`$ScriptDir = Split-Path -Parent `$MyInvocation.MyCommand.Path
-conda activate $EnvName
-Set-Location `$ScriptDir
-python ui/app.py
-"@
-$PsLauncherContent | Out-File -FilePath "$ScriptDir\run_ui.ps1" -Encoding UTF8
+# =============================================================================
+# Step 6: Verify the installation
+# =============================================================================
+Write-Host ""
+Write-Step "6/6" "Verifying installation..."
 
-Write-Success "Launchers created: run_ui.bat, run_ui.ps1"
+Invoke-InEnv @("python", "-m", "pip", "check")
+if ($LASTEXITCODE -ne 0) {
+    Write-Warning-Custom "pip check reported dependency conflicts"
+}
+
+Invoke-InEnv @("python", "-c", "import numpy,pandas,polars,scipy,matplotlib,plotly,networkx,neuprint,nicegui; import neuronbridge; print('OK')")
+if ($LASTEXITCODE -eq 0) {
+    Write-Success "Core imports verified"
+}
+else {
+    Write-Warning-Custom "Some imports failed - check the messages above"
+}
 
 # =============================================================================
 # Installation Complete

@@ -93,6 +93,23 @@ if ! command_exists conda; then
     fi
 fi
 
+# Resolve the conda binary and initialize the shell hook so that
+# `conda activate` works in this non-interactive session.
+CONDA_BIN="$(command -v conda 2>/dev/null || true)"
+if [[ -z "$CONDA_BIN" && -f "$HOME/miniconda3/bin/conda" ]]; then
+    CONDA_BIN="$HOME/miniconda3/bin/conda"
+fi
+if [[ -z "$CONDA_BIN" && -f "$HOME/anaconda3/bin/conda" ]]; then
+    CONDA_BIN="$HOME/anaconda3/bin/conda"
+fi
+if [[ -n "$CONDA_BIN" ]]; then
+    CONDA_BASE="$("$CONDA_BIN" info --base 2>/dev/null)"
+    if [[ -f "$CONDA_BASE/etc/profile.d/conda.sh" ]]; then
+        # shellcheck disable=SC1090
+        source "$CONDA_BASE/etc/profile.d/conda.sh"
+    fi
+fi
+
 # =============================================================================
 # Step 2: Create Conda Environment
 # =============================================================================
@@ -101,11 +118,10 @@ echo -e "\n${BLUE}[2/5] Creating conda environment '${ENV_NAME}'...${NC}"
 # Check if environment already exists
 if conda env list | grep -q "^${ENV_NAME} "; then
     echo -e "${YELLOW}Environment '${ENV_NAME}' already exists. Updating...${NC}"
-    conda activate "$ENV_NAME" 2>/dev/null || source activate "$ENV_NAME"
 else
     conda create -n "$ENV_NAME" python="$PYTHON_VERSION" -y
-    conda activate "$ENV_NAME" 2>/dev/null || source activate "$ENV_NAME"
 fi
+conda activate "$ENV_NAME" 2>/dev/null || source activate "$ENV_NAME"
 
 echo -e "${GREEN}✓ Environment ready (Python $(python --version 2>&1 | cut -d' ' -f2))${NC}"
 
@@ -120,6 +136,15 @@ cd "$SCRIPT_DIR"
 echo "Installing core dependencies (this may take a few minutes)..."
 pip install -r requirements.txt --quiet
 
+# NeuronBridge safety net: memray (a neuronbridge-python dependency) can fail
+# to build on some platforms. If the import is missing, retry without deps -
+# the compatible deps are already covered by requirements.txt.
+if ! python -c "import neuronbridge" >/dev/null 2>&1; then
+    echo "NeuronBridge not importable - retrying with --no-deps..."
+    pip install neuronbridge-python --no-deps --quiet || \
+        echo -e "${YELLOW}[WARN] neuronbridge-python could not be installed; NeuronBridge panels will be limited${NC}"
+fi
+
 # Install UI dependencies
 echo "Installing UI dependencies..."
 pip install -r ui/requirements.txt --quiet
@@ -131,26 +156,52 @@ echo -e "${GREEN}✓ Dependencies installed${NC}"
 # =============================================================================
 echo -e "\n${BLUE}[4/5] Installing DROCAT package...${NC}"
 
-pip install -e . --quiet
+pip install -e . --quiet || pip install -e . --no-deps --quiet
 
 echo -e "${GREEN}✓ DROCAT installed in editable mode${NC}"
 
 # =============================================================================
-# Step 5: Create Launcher Scripts
+# Step 5: Create Launcher Scripts (never overwrite an existing launcher)
 # =============================================================================
 echo -e "\n${BLUE}[5/5] Creating launcher scripts...${NC}"
 
 # Create run_ui.sh
+if [[ -f "$SCRIPT_DIR/run_ui.sh" ]]; then
+    echo -e "${YELLOW}run_ui.sh already exists - keeping it${NC}"
+else
 cat > "$SCRIPT_DIR/run_ui.sh" << 'EOF'
 #!/bin/bash
-# DROCAT UI Launcher
+# DROCAT UI Launcher (self-healing: creates the env on first run)
+set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ENV_NAME="drocat"
 
-# Activate conda environment
-if command -v conda &> /dev/null; then
-    conda activate drocat 2>/dev/null || source activate drocat
-elif [[ -f "$HOME/miniconda3/bin/activate" ]]; then
-    source "$HOME/miniconda3/bin/activate" drocat
+CONDA_BIN="$(command -v conda 2>/dev/null || true)"
+if [[ -z "$CONDA_BIN" && -f "$HOME/miniconda3/bin/conda" ]]; then
+    CONDA_BIN="$HOME/miniconda3/bin/conda"
+fi
+if [[ -z "$CONDA_BIN" && -f "$HOME/anaconda3/bin/conda" ]]; then
+    CONDA_BIN="$HOME/anaconda3/bin/conda"
+fi
+if [[ -z "$CONDA_BIN" ]]; then
+    echo "ERROR: conda not found. Run ./install.sh first." >&2
+    exit 1
+fi
+source "$(dirname "$(dirname "$CONDA_BIN")")/etc/profile.d/conda.sh" 2>/dev/null || \
+    eval "$($CONDA_BIN shell.bash hook)"
+
+if ! conda env list | grep -q "^${ENV_NAME} "; then
+    echo "Creating conda environment '$ENV_NAME' (one-time setup)..."
+    conda create -n "$ENV_NAME" python=3.11 -y
+fi
+conda activate "$ENV_NAME"
+
+if ! python -c "import nicegui, pandas, numpy, neuprint" &> /dev/null; then
+    echo "Installing dependencies (first run)..."
+    pip install -r "$SCRIPT_DIR/requirements.txt" --quiet
+    pip install neuronbridge-python --no-deps --quiet 2>/dev/null || true
+    pip install -r "$SCRIPT_DIR/ui/requirements.txt" --quiet
+    pip install -e "$SCRIPT_DIR" --no-deps --quiet
 fi
 
 # Launch UI
@@ -158,8 +209,20 @@ cd "$SCRIPT_DIR"
 python ui/app.py
 EOF
 chmod +x "$SCRIPT_DIR/run_ui.sh"
+fi
 
 echo -e "${GREEN}✓ Launcher created: run_ui.sh${NC}"
+
+# =============================================================================
+# Step 6: Verify the installation
+# =============================================================================
+echo -e "\n${BLUE}[6/6] Verifying installation...${NC}"
+python -m pip check || echo -e "${YELLOW}[WARN] pip check reported dependency conflicts${NC}"
+if python -c "import numpy, pandas, polars, scipy, matplotlib, plotly, networkx, neuprint, nicegui, neuronbridge" 2>/dev/null; then
+    echo -e "${GREEN}✓ Core imports verified${NC}"
+else
+    echo -e "${YELLOW}[WARN] Some imports failed - check the messages above.${NC}"
+fi
 
 # =============================================================================
 # Installation Complete

@@ -91,14 +91,25 @@ echo [3/5] Installing dependencies...
 cd /d "%SCRIPT_DIR%"
 
 echo Installing core dependencies (this may take a few minutes)...
-pip install -r requirements.txt --quiet
+call conda run -n %ENV_NAME% --no-capture-output python -m pip install -r requirements-windows.txt
+if errorlevel 1 (
+    echo [ERROR] Core dependency install failed.
+    pause
+    exit /b 1
+)
 
 REM Handle neuronbridge-python Windows issue
 echo Installing neuronbridge-python (with Windows workaround)...
-pip install neuronbridge-python --no-deps --quiet 2>nul || echo [WARN] neuronbridge-python may not be available on Windows.
+call conda run -n %ENV_NAME% --no-capture-output python -m pip install neuronbridge-python --no-deps
+if errorlevel 1 echo [WARN] neuronbridge-python could not be installed; NeuronBridge panels will be limited.
 
 echo Installing UI dependencies...
-pip install -r ui/requirements.txt --quiet
+call conda run -n %ENV_NAME% --no-capture-output python -m pip install -r ui\requirements.txt
+if errorlevel 1 (
+    echo [ERROR] UI dependency install failed.
+    pause
+    exit /b 1
+)
 
 echo [OK] Dependencies installed.
 
@@ -108,7 +119,12 @@ REM ============================================================================
 echo.
 echo [4/5] Installing DROCAT package...
 
-pip install -e . --quiet
+call conda run -n %ENV_NAME% --no-capture-output python -m pip install -e . --no-deps
+if errorlevel 1 (
+    echo [ERROR] Editable install failed.
+    pause
+    exit /b 1
+)
 
 echo [OK] DROCAT installed in editable mode.
 
@@ -118,16 +134,48 @@ REM ============================================================================
 echo.
 echo [5/5] Creating launcher scripts...
 
-REM Create run_ui.bat
+REM Create run_ui.bat (keep an existing launcher)
+if exist "%SCRIPT_DIR%run_ui.bat" (
+    echo [OK] run_ui.bat already exists - keeping it.
+    goto :verify
+)
 (
 echo @echo off
 echo REM DROCAT UI Launcher
-echo call conda activate %ENV_NAME%
-echo cd /d "%%~dp0"
-echo python ui/app.py
+echo setlocal
+echo set ENV_NAME=%ENV_NAME%
+echo set SCRIPT_DIR=%%~dp0
+echo set CONDA_BIN=
+echo where conda ^>nul 2^>nul ^&^& set CONDA_BIN=conda
+echo if not defined CONDA_BIN if exist "%%USERPROFILE%%\miniconda3\Scripts\conda.exe" set CONDA_BIN=%%USERPROFILE%%\miniconda3\Scripts\conda.exe
+echo if not defined CONDA_BIN if exist "%%USERPROFILE%%\anaconda3\Scripts\conda.exe" set CONDA_BIN=%%USERPROFILE%%\anaconda3\Scripts\conda.exe
+echo if not defined CONDA_BIN ^(echo ERROR: conda not found. Run install.bat first. ^& pause ^& exit /b 1^)
+echo call %%CONDA_BIN%% run -n %%ENV_NAME%% python -c "import nicegui" ^>nul 2^>nul
+echo if errorlevel 1 ^(
+echo     echo Creating environment and installing dependencies ^(first run^)...
+echo     call %%CONDA_BIN%% create -n %%ENV_NAME%% python=3.11 -y ^|^| goto :err
+echo     call %%CONDA_BIN%% run -n %%ENV_NAME%% --no-capture-output python -m pip install -r "%%SCRIPT_DIR%%requirements-windows.txt" ^|^| goto :err
+echo     call %%CONDA_BIN%% run -n %%ENV_NAME%% --no-capture-output python -m pip install neuronbridge-python --no-deps
+echo     call %%CONDA_BIN%% run -n %%ENV_NAME%% --no-capture-output python -m pip install -r "%%SCRIPT_DIR%%ui\requirements.txt" ^|^| goto :err
+echo     call %%CONDA_BIN%% run -n %%ENV_NAME%% --no-capture-output python -m pip install -e "%%SCRIPT_DIR%%" --no-deps ^|^| goto :err
+echo ^)
+echo cd /d "%%SCRIPT_DIR%%"
+echo call %%CONDA_BIN%% run -n %%ENV_NAME%% --no-capture-output python ui\app.py
+echo exit /b 0
+echo :err
+echo echo Installation failed. See messages above.
+echo pause
+echo exit /b 1
 ) > "%SCRIPT_DIR%run_ui.bat"
 
 echo [OK] Launcher created: run_ui.bat
+
+:verify
+echo.
+echo [6/6] Verifying installation...
+call conda run -n %ENV_NAME% --no-capture-output python -m pip check
+call conda run -n %ENV_NAME% --no-capture-output python -c "import numpy,pandas,polars,scipy,matplotlib,plotly,networkx,neuprint,nicegui; import neuronbridge; print('Core imports OK')"
+if errorlevel 1 echo [WARN] Some imports failed - check the messages above.
 
 REM =============================================================================
 REM Installation Complete

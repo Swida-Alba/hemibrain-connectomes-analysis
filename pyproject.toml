@@ -48,7 +48,7 @@ dependencies = [
     "requests==2.32.3",
     "Jinja2==3.1.4",
     "pillow==11.0.0",
-    "pydantic>=2.9.1,<3.0.0",
+    "pydantic~=2.9.1",
     "python-rapidjson>=1.20",
     "PyQt5==5.15.10",
     "neuprint-python==0.4.26",
@@ -74,7 +74,7 @@ dependencies = [
 [project.optional-dependencies]
 # Web UI for local execution
 ui = [
-    "nicegui>=2.0.0",
+    "nicegui>=3.0.0",
 ]
 
 # Visualization sub-project (minimal dependencies for standalone vispath)

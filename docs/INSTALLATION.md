@@ -355,6 +355,45 @@ pip install neuronbridge-python --no-deps
 
 **Note:** Make sure Python was installed with tkinter support (should be default on Windows).
 
+## Version Compatibility & Conflict Handling
+
+DROCAT pins tested versions in `requirements.txt` (macOS/Linux) and
+`requirements-windows.txt` (Windows). The pins are verified together; do not
+upgrade individual packages.
+
+### Known constraints
+
+| Constraint | Why |
+| --- | --- |
+| `numpy==1.26.4` (never 2.x) | `pandas 1.5.3` and `scipy 1.13.1` require numpy < 2 |
+| `pandas==1.5.3` | Tested with Python 3.11; newer pandas changes column semantics used by the toolkit |
+| `kaleido==0.2.1` | Plotly static export; if a wheel is missing on your platform, install from conda-forge (`conda install -n drocat -c conda-forge kaleido`) |
+| `PyQt5==5.15.10` | File/sheet dialogs; on Apple Silicon install the conda-forge build if pip has no wheel |
+| `neuronbridge-python` | `memray` does not build on Windows (and can fail on some macOS setups); the installers retry with `--no-deps` automatically |
+| NiceGUI | The UI requires NiceGUI 3.x (`ui/requirements.txt` pins `nicegui>=3.0.0`) |
+
+### If a pinned package fails to install
+
+1. Re-run the installer - pip installs are idempotent and resume cleanly.
+2. Check the failing package with `conda run -n drocat python -m pip check`.
+3. For a single missing wheel (e.g. `kaleido`, `PyQt5`), install that one
+   package from conda-forge, then re-run the installer.
+4. On Windows, never use `requirements.txt` directly - use
+   `requirements-windows.txt` (the two-step NeuronBridge flow).
+
+### Verification
+
+Every installer finishes with an import check:
+
+```bash
+conda run -n drocat python -c "import numpy,pandas,polars,scipy,matplotlib,plotly,networkx,neuprint,nicegui; import neuronbridge; print('OK')"
+```
+
+The bundled verifier
+([`skills/drocat-install/scripts/verify_install.py`](../skills/drocat-install/scripts/verify_install.py))
+also checks Python version, project layout, all core imports, the token file
+and the UI package.
+
 ## NeuronBridge Installation
 
 The `neuronbridge-python` package is included in requirements.txt and works directly on **Linux and macOS**. However, **Windows users must use the special `requirements-windows.txt` file** due to platform compatibility issues.

@@ -67,7 +67,7 @@ if [ "$CONDA_AVAILABLE" = true ]; then
     echo "Installing dependencies (this may take a few minutes)..."
     pip install -r requirements.txt --quiet
     pip install -r ui/requirements.txt --quiet
-    pip install -e . --quiet
+    pip install -e . --quiet || pip install -e . --no-deps --quiet
     echo "Setup complete!"
   fi
 else
@@ -81,12 +81,22 @@ else
 fi
 
 # -----------------------------------------------------------------------------
-# Step 4: Verify nicegui is installed
+# Step 4: Verify key packages (with NeuronBridge memray fallback)
 # -----------------------------------------------------------------------------
+if ! python3 -c "import neuronbridge" >/dev/null 2>&1; then
+  echo "NeuronBridge not importable - retrying with --no-deps..."
+  pip install neuronbridge-python --no-deps --quiet || \
+    echo "Warning: neuronbridge-python unavailable; NeuronBridge panels will be limited."
+fi
+
 if ! python3 -c "import nicegui" >/dev/null 2>&1; then
   echo "NiceGUI not found. Installing..."
   pip install nicegui --quiet
 fi
+
+python3 -c "import numpy, pandas, polars, neuprint, nicegui, neuronbridge" >/dev/null 2>&1 && \
+  echo "✓ Core imports verified" || \
+  echo "⚠️  Import check failed - see messages above."
 
 # -----------------------------------------------------------------------------
 # Step 5: Launch the UI
