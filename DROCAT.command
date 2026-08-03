@@ -57,9 +57,28 @@ if [ "$CONDA_AVAILABLE" = true ]; then
   eval "$(conda shell.zsh hook 2>/dev/null || conda shell.bash hook 2>/dev/null)"
 
   if conda env list 2>/dev/null | grep -q "^$CONDA_ENV "; then
-    echo "Activating conda environment: $CONDA_ENV"
-    conda activate "$CONDA_ENV" 2>/dev/null
-  else
+    ENV_PY=$(conda run -n "$CONDA_ENV" python -c \
+      'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")' \
+      2>/dev/null || echo "unknown")
+    if [[ "$ENV_PY" == "3.11" ]]; then
+      echo "Activating existing conda environment: $CONDA_ENV (Python 3.11)"
+    else
+      echo "The existing '$CONDA_ENV' env uses Python $ENV_PY (expected 3.11)."
+      echo "Recreating it will remove any other packages installed in that env."
+      read "?Recreate the env with Python 3.11? [y/N] " answer
+      if [[ "$answer" == "y" || "$answer" == "Y" ]]; then
+        echo "Removing existing env..."
+        conda env remove -n "$CONDA_ENV" -y
+      else
+        echo "Aborting. To fix manually: conda env remove -n $CONDA_ENV -y, then re-run ./install.sh"
+        echo
+        read "?Press Return to close."
+        exit 1
+      fi
+    fi
+  fi
+
+  if ! conda env list 2>/dev/null | grep -q "^$CONDA_ENV "; then
     echo "Conda environment '$CONDA_ENV' not found."
     echo "Creating conda environment with Python 3.11..."
     conda create -n "$CONDA_ENV" python=3.11 -y
@@ -70,6 +89,8 @@ if [ "$CONDA_AVAILABLE" = true ]; then
     pip install -e . --quiet || pip install -e . --no-deps --quiet
     echo "Setup complete!"
   fi
+
+  conda activate "$CONDA_ENV" 2>/dev/null || true
 else
   echo "Conda not found. Using system Python."
   echo "ERROR: DROCAT requires the 'drocat' conda environment."

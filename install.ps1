@@ -115,7 +115,31 @@ Write-Step "2/5" "Creating conda environment '$EnvName'..."
 # Check if environment exists
 $EnvList = & $CondaPath env list 2>$null
 if ($EnvList -match $EnvName) {
-    Write-Warning-Custom "Environment '$EnvName' already exists. Updating..."
+    Write-Warning-Custom "Environment '$EnvName' already exists - checking Python version..."
+    $EnvPy = & $CondaPath run -n $EnvName python -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')" 2>$null
+    if ($EnvPy -eq $PythonVersion) {
+        Write-Success "Existing env uses Python $EnvPy - reusing it (dependencies will be updated in place)."
+    }
+    else {
+        Write-Warning-Custom "Existing env uses Python $EnvPy (expected $PythonVersion)."
+        Write-Host "Recreating the env will remove any other packages installed in it." -ForegroundColor Yellow
+        if ([Console]::IsInputRedirected) {
+            $Answer = ""
+            Write-Warning-Custom "Non-interactive session detected - not recreating automatically."
+        }
+        else {
+            $Answer = Read-Host "Recreate the env with Python $PythonVersion? [y/N]"
+        }
+        if ($Answer -eq "y" -or $Answer -eq "Y") {
+            Write-Host "Removing existing env..."
+            & $CondaPath env remove -n $EnvName -y
+            & $CondaPath create -n $EnvName python=$PythonVersion -y
+        }
+        else {
+            Write-Host "Aborting. To fix manually: conda env remove -n $EnvName -y, then re-run this installer." -ForegroundColor Red
+            exit 1
+        }
+    }
 }
 else {
     & $CondaPath create -n $EnvName python=$PythonVersion -y
@@ -194,6 +218,14 @@ if not defined CONDA_BIN if exist "%USERPROFILE%\miniconda3\Scripts\conda.exe" s
 if not defined CONDA_BIN if exist "%USERPROFILE%\anaconda3\Scripts\conda.exe" set CONDA_BIN=%USERPROFILE%\anaconda3\Scripts\conda.exe
 if not defined CONDA_BIN (
     echo ERROR: conda not found. Run install.bat first.
+    pause
+    exit /b 1
+)
+set "ENV_PY="
+for /f "delims=" %%v in ('call %CONDA_BIN% run -n %ENV_NAME% python -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')" 2^>nul') do set "ENV_PY=%%v"
+if defined ENV_PY if not "%ENV_PY%"=="3.11" (
+    echo ERROR: existing env uses Python %ENV_PY% (expected 3.11).
+    echo Recreate it: conda env remove -n drocat -y, then re-run install.bat
     pause
     exit /b 1
 )

@@ -22,6 +22,16 @@ if not defined CONDA_BIN (
     exit /b 1
 )
 
+REM Guard against an existing env with the wrong Python version
+set "ENV_PY="
+for /f "delims=" %%v in ('call %CONDA_BIN% run -n %ENV_NAME% python -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')" 2^>nul') do set "ENV_PY=%%v"
+if defined ENV_PY if not "%ENV_PY%"=="3.11" (
+    echo ERROR: existing env uses Python %ENV_PY% (expected 3.11).
+    echo Recreate it: conda env remove -n drocat -y, then re-run install.bat
+    pause
+    exit /b 1
+)
+
 REM First run: create the environment and install dependencies
 call %CONDA_BIN% run -n %ENV_NAME% python -c "import nicegui" >nul 2>nul
 if errorlevel 1 (

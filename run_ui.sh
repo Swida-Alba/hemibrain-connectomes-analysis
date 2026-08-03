@@ -45,6 +45,13 @@ fi
 
 conda activate "$ENV_NAME"
 
+PYVER="$(python -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")' 2>/dev/null || echo '')"
+if [[ -n "$PYVER" && "$PYVER" != "3.11" ]]; then
+    echo "ERROR: the existing '$ENV_NAME' env uses Python $PYVER (expected 3.11)." >&2
+    echo "Recreate it with: conda env remove -n $ENV_NAME -y && ./install.sh" >&2
+    exit 1
+fi
+
 # ---------------------------------------------------------------------------
 # Install dependencies if missing
 # ---------------------------------------------------------------------------

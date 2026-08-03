@@ -117,7 +117,30 @@ echo -e "\n${BLUE}[2/5] Creating conda environment '${ENV_NAME}'...${NC}"
 
 # Check if environment already exists
 if conda env list | grep -q "^${ENV_NAME} "; then
-    echo -e "${YELLOW}Environment '${ENV_NAME}' already exists. Updating...${NC}"
+    echo -e "${YELLOW}Environment '${ENV_NAME}' already exists. Checking Python version...${NC}"
+    ENV_PY="$("$CONDA_BIN" run -n "$ENV_NAME" python -c \
+        'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")' \
+        2>/dev/null || echo 'unknown')"
+    if [[ "$ENV_PY" == "$PYTHON_VERSION" ]]; then
+        echo -e "${GREEN}✓ Existing env uses Python ${ENV_PY} - reusing it. Dependencies will be updated in place.${NC}"
+    else
+        echo -e "${RED}The existing '${ENV_NAME}' env uses Python ${ENV_PY} (expected ${PYTHON_VERSION}).${NC}"
+        echo -e "${YELLOW}Reusing it may break pinned dependencies; recreating it removes any other packages in that env.${NC}"
+        if [[ -t 0 ]]; then
+            read -r -p "Recreate the '${ENV_NAME}' env with Python ${PYTHON_VERSION}? [y/N] " answer
+        else
+            answer=""
+            echo -e "${YELLOW}Non-interactive session detected - not recreating automatically.${NC}"
+        fi
+        if [[ "$answer" == "y" || "$answer" == "Y" ]]; then
+            echo "Removing existing env and creating a fresh one..."
+            conda env remove -n "$ENV_NAME" -y
+            conda create -n "$ENV_NAME" python="$PYTHON_VERSION" -y
+        else
+            echo -e "${RED}Aborting. To fix manually: conda env remove -n ${ENV_NAME} -y, then re-run ./install.sh${NC}"
+            exit 1
+        fi
+    fi
 else
     conda create -n "$ENV_NAME" python="$PYTHON_VERSION" -y
 fi
@@ -195,6 +218,13 @@ if ! conda env list | grep -q "^${ENV_NAME} "; then
     conda create -n "$ENV_NAME" python=3.11 -y
 fi
 conda activate "$ENV_NAME"
+
+PYVER="$(python -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")' 2>/dev/null || echo '')"
+if [[ -n "$PYVER" && "$PYVER" != "3.11" ]]; then
+    echo "ERROR: the existing '$ENV_NAME' env uses Python $PYVER (expected 3.11)." >&2
+    echo "Recreate it with: conda env remove -n $ENV_NAME -y && ./install.sh" >&2
+    exit 1
+fi
 
 if ! python -c "import nicegui, pandas, numpy, neuprint" &> /dev/null; then
     echo "Installing dependencies (first run)..."

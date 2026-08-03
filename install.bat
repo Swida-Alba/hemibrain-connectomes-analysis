@@ -73,7 +73,26 @@ echo [2/5] Creating conda environment '%ENV_NAME%'...
 
 call conda env list | findstr /C:"%ENV_NAME%" >nul 2>nul
 if %ERRORLEVEL% EQU 0 (
-    echo Environment '%ENV_NAME%' already exists. Updating...
+    echo Environment '%ENV_NAME%' already exists. Checking Python version...
+    set "ENV_PY="
+    for /f "delims=" %%v in ('call conda run -n %ENV_NAME% python -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')" 2^>nul') do set "ENV_PY=%%v"
+    if "!ENV_PY!"=="%PYTHON_VERSION%" (
+        echo Reusing existing env ^(Python %PYTHON_VERSION%^). Dependencies will be updated in place.
+    ) else (
+        echo [WARN] Existing env uses Python !ENV_PY! ^(expected %PYTHON_VERSION%^).
+        echo Recreating the env will remove any other packages installed in it.
+        set "RECREATE="
+        set /p RECREATE="Recreate the env with Python %PYTHON_VERSION%? [y/N] "
+        if /i "!RECREATE!"=="y" (
+            echo Removing existing env...
+            call conda env remove -n %ENV_NAME% -y
+            call conda create -n %ENV_NAME% python=%PYTHON_VERSION% -y
+        ) else (
+            echo Aborting. To fix manually: conda env remove -n %ENV_NAME% -y, then re-run install.bat
+            pause
+            exit /b 1
+        )
+    )
 ) else (
     call conda create -n %ENV_NAME% python=%PYTHON_VERSION% -y
 )
@@ -150,6 +169,14 @@ echo where conda ^>nul 2^>nul ^&^& set CONDA_BIN=conda
 echo if not defined CONDA_BIN if exist "%%USERPROFILE%%\miniconda3\Scripts\conda.exe" set CONDA_BIN=%%USERPROFILE%%\miniconda3\Scripts\conda.exe
 echo if not defined CONDA_BIN if exist "%%USERPROFILE%%\anaconda3\Scripts\conda.exe" set CONDA_BIN=%%USERPROFILE%%\anaconda3\Scripts\conda.exe
 echo if not defined CONDA_BIN ^(echo ERROR: conda not found. Run install.bat first. ^& pause ^& exit /b 1^)
+echo set "ENV_PY="
+echo for /f "delims=" %%%%v in ('call %%CONDA_BIN%% run -n %%ENV_NAME%% python -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')" 2^>nul') do set "ENV_PY=%%%%v"
+echo if defined ENV_PY if not "%%ENV_PY%%"=="3.11" ^(
+echo     echo ERROR: existing env uses Python %%ENV_PY%% ^(expected 3.11^).
+echo     echo Recreate it: conda env remove -n drocat -y, then re-run install.bat
+echo     pause
+echo     exit /b 1
+echo ^)
 echo call %%CONDA_BIN%% run -n %%ENV_NAME%% python -c "import nicegui" ^>nul 2^>nul
 echo if errorlevel 1 ^(
 echo     echo Creating environment and installing dependencies ^(first run^)...
