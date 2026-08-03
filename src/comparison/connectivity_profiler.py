@@ -1414,13 +1414,22 @@ class ConnectivityProfiler:
             # Apply vectorized mapping using Polars (fastest)
             pl_series = pl.Series(type_series.fillna(''))
             
-            # Use Polars replace for vectorized mapping
-            normalized = pl_series.replace(norm_map, default=pl_series).to_pandas()
+            # Use Polars replace_strict for vectorized mapping
+            # (Series.replace(default=) is deprecated since polars 1.0).
+            normalized = pl_series.replace_strict(norm_map, default=pl_series).to_pandas()
+            
+            # CRITICAL: the polars round-trip resets the index to RangeIndex.
+            # Callers assign the result back into frames with non-contiguous
+            # indexes (e.g. conn_df.iloc[...]); without realigning, pandas
+            # aligns by label and silently scrambles the values.
+            normalized.index = type_series.index
             
             return normalized
             
-        except ImportError:
+        except Exception:
             # Fallback: Use pandas map with pre-computed normalization map
+            # (broadened from ImportError: pl.Series() also raises conversion
+            # errors on non-string inputs, which must fall back, not crash)
             unique_types = type_series.dropna().unique()
             norm_map = {t: normalize_partner_type(t, config) for t in unique_types}
             
@@ -2579,7 +2588,13 @@ class ConnectivityProfiler:
             self._log("Warning: No bodyId column found in neuron_df")
             return conn_df
         
-        # Create type lookup - ensure bodyId types match
+        # Create type lookup - ensure bodyId types match.
+        # IMPORTANT: conn_df may be the shared _FNC_CACHE frame and neuron_df
+        # may come from statvis' module cache - mutating either in place would
+        # silently flip dtypes/add columns for every other consumer. Work on
+        # copies.
+        neuron_df = neuron_df.copy()
+        conn_df = conn_df.copy()
         neuron_df['bodyId'] = neuron_df['bodyId'].astype(str)
         type_lookup = neuron_df.set_index('bodyId')[type_col].to_dict()
         

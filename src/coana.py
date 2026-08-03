@@ -277,8 +277,15 @@ def clear_findallpath_cache(dataset: str = None):
     if dataset is None:
         _FINDALLPATH_GRAPH_CACHE.clear()
     else:
-        # Clear entries that start with the dataset name
-        keys_to_delete = [k for k in _FINDALLPATH_GRAPH_CACHE if k.startswith(dataset)]
+        # Cache keys are built from the NORMALIZED dataset name
+        # (dataset_safe: ':' and '.' replaced with '_'), so matching must
+        # normalize too - otherwise e.g. 'hemibrain:v1.2.1' never matches
+        # 'hemibrain_v1_2_1_...' and the clear silently no-ops.
+        dataset_safe = dataset.replace(':', '_').replace('.', '_')
+        keys_to_delete = [
+            k for k in _FINDALLPATH_GRAPH_CACHE
+            if k.startswith(dataset_safe) or k.startswith(dataset)
+        ]
         for k in keys_to_delete:
             del _FINDALLPATH_GRAPH_CACHE[k]
 
@@ -562,7 +569,7 @@ class FindNeuronConnection:
                     totals = df.group_by(post_col).agg(pl.col('weight').sum().alias('_total_weight'))
                     df = df.join(totals, on=post_col, how='left')
                     df = df.with_columns((pl.col('weight') / pl.col('_total_weight')).alias('connection_ratio'))
-                    df = df.with_columns((pl.col('connection_ratio') / 0.3).clip_max(1.0).alias('traversal_probability'))
+                    df = df.with_columns((pl.col('connection_ratio') / 0.3).clip(upper_bound=1.0).alias('traversal_probability'))
                     df = df.drop('_total_weight')
                 return df
         except Exception:
@@ -947,10 +954,12 @@ class FindNeuronConnection:
         import pandas as pd
         try:
             import polars as pl
-            # Check for pandas-specific args that polars doesn't support
-            pandas_only_args = {'index_col', 'low_memory', 'dtype'}
-            if any(k in kwargs for k in pandas_only_args):
-                # Use pandas directly for complex reads
+            # Any caller-supplied kwargs (dtype, usecols, na_values, skiprows,
+            # header, sep, ...) must be honored exactly; the polars fast path
+            # cannot express all of them, so fall back to pandas whenever the
+            # caller passed anything. Silently dropping them previously turned
+            # str bodyId columns into int64 and broke joins.
+            if kwargs:
                 return pd.read_csv(filepath, encoding='utf-8', **kwargs)
             # Use polars for simple reads
             return pl.read_csv(filepath, infer_schema_length=10000).to_pandas()
@@ -1859,6 +1868,17 @@ class FindNeuronConnection:
         '''
         # Return cached DataFrame if available
         if self._conn_df_cache is not None and not force_reload:
+            # Boundary normalization: the shared _FNC_CACHE stores pandas (for
+            # the comparison modules), so a frame picked up from there must be
+            # converted before callers use polars-only APIs (.is_empty(),
+            # pl.concat, .filter ...). Otherwise they crash with AttributeError.
+            # NOTE: no local `import polars as pl` here - it would shadow the
+            # module-level binding for the rest of this function.
+            if hasattr(self._conn_df_cache, 'empty') and not hasattr(self._conn_df_cache, 'is_empty'):
+                try:
+                    self._conn_df_cache = pl.from_pandas(self._conn_df_cache)
+                except Exception:
+                    pass
             return self._conn_df_cache
         
         db_path = self._get_connection_db_path()
@@ -2021,23 +2041,37 @@ class FindNeuronConnection:
                     'idx': range(n_rows)
                 })
             
-            # Group by pre and collect indices using iter_rows for efficiency
-            pre_result = df_pl.group_by('bodyId_pre').agg(pl.col('idx'))
+            # Group by pre and collect indices using iter_rows for efficiency.
+            # maintain_order=True: consumers slice the connection table with
+            # these row-index lists; a nondeterministic aggregation order would
+            # scramble result ordering between runs.
+            pre_result = df_pl.group_by('bodyId_pre', maintain_order=True).agg(pl.col('idx'))
             self._conn_index = {row[0]: row[1] for row in pre_result.iter_rows()}
             
             # Group by post and collect indices
-            post_result = df_pl.group_by('bodyId_post').agg(pl.col('idx'))
+            post_result = df_pl.group_by('bodyId_post', maintain_order=True).agg(pl.col('idx'))
             self._conn_index_post = {row[0]: row[1] for row in post_result.iter_rows()}
             
             # del df_pl, pre_result, post_result
             
-        except ImportError:
-            # Fallback to optimized Python with defaultdict
+        except Exception:
+            # Fallback: build the index with pandas (previously this branch
+            # created empty defaultdicts and never populated them, making
+            # every cached neuron appear uncached -> refetch storms).
             from collections import defaultdict
             self._conn_index = defaultdict(list)
             self._conn_index_post = defaultdict(list)
-            # Assuming Polars DF, convert to numpy/list for iteration if Polars not available (unlikely)
-            pass
+            try:
+                fallback_df = self._conn_df_cache
+                if hasattr(fallback_df, 'to_pandas'):
+                    fallback_df = fallback_df.to_pandas()
+                for idx, (pre, post) in enumerate(
+                    zip(fallback_df['bodyId_pre'], fallback_df['bodyId_post'])
+                ):
+                    self._conn_index[pre].append(idx)
+                    self._conn_index_post[post].append(idx)
+            except Exception:
+                pass
 
         self._vprint(f'  ✓ Index built: {len(self._conn_index):,} upstream, {len(self._conn_index_post):,} downstream neurons', level='always')
         
@@ -2138,8 +2172,12 @@ class FindNeuronConnection:
         # Write this batch to its own file - NO loading of existing data
         conn.to_parquet(batch_path, index=False, compression='gzip')
         
-        # Calculate connection counts per neuron
-        conn_counts = connections.groupby('bodyId_pre').size().to_dict()
+        # Calculate connection counts per neuron.
+        # NOTE: group on the str-cast copy (`conn`), not the original
+        # `connections` - downstream lookups (_update_neuron_index_batch) use
+        # str keys, and grouping the original would produce int keys that
+        # never match, silently writing connection_count=0 for every neuron.
+        conn_counts = conn.groupby('bodyId_pre').size().to_dict()
         # Ensure all neurons_fetched have a count (0 if not in connections)
         for n in neurons_fetched:
             n_str = str(n)
@@ -5482,8 +5520,11 @@ class FindNeuronConnection:
                 client=active_client,
                 verbose=neurons_verbose
             )
-            # Reuse source data for target
-            self.target_df = self.source_df
+            # Reuse source data for target.
+            # IMPORTANT: copy() - later stages insert status columns
+            # ('Checked'/'Layer'/'isInPath') into target_df; aliasing the same
+            # object would corrupt source_df as well.
+            self.target_df = self.source_df.copy()
             target_fname_auto = source_fname_auto
             self.target_criteria = self.source_criteria
         else:
@@ -7155,9 +7196,6 @@ class FindNeuronConnection:
             _FINDALLPATH_GRAPH_CACHE[cache_key] = cached_data
             # ===== FAST PATH: Reuse cached graph and filter by threshold =====
             all_connections = cached_data['all_connections']
-            layer_neurons = cached_data['layer_neurons']
-            all_neurons_in_network = cached_data['all_neurons_in_network']
-            # Note: targets_found will be recomputed in Phase 2 based on filtered graph
             
             # Filter connections by current threshold
             if self.min_synapse_num > cached_threshold:
@@ -7173,8 +7211,21 @@ class FindNeuronConnection:
             else:
                 all_connections_filtered = all_connections
             
-            # Skip to Phase 2 - target identification still needed for this threshold
-            # because some targets may become unreachable after filtering
+            # CRITICAL: recompute network membership / layer discovery from the
+            # FILTERED tables. The cached layer_neurons/all_neurons_in_network
+            # were built at the lower cached threshold; reusing them would mark
+            # targets as found (and assign layers) via edges that no longer
+            # exist at the current threshold.
+            all_neurons_in_network = set(source_ID)
+            layer_neurons = [set(source_ID)]
+            for conn_pl in all_connections_filtered:
+                if conn_pl.is_empty():
+                    post_neurons = set()
+                else:
+                    post_neurons = set(conn_pl['bodyId_post'].unique().to_list())
+                next_layer = post_neurons - all_neurons_in_network
+                all_neurons_in_network.update(next_layer)
+                layer_neurons.append(next_layer)
         else:
             # ===== STANDARD PATH: Fetch connections and build graph =====
             all_connections_filtered = None  # Will be set in Phase 1
@@ -7289,18 +7340,19 @@ class FindNeuronConnection:
         self.target_df.insert(loc=0, column='Checked', value=False)
         self.target_df.insert(loc=1, column='Layer', value=-1)
         
-        # Check which targets are in the network
-        targets_found = []
-        for idx in self.target_df.index:
-            target_bodyId = self.target_df.at[idx, 'bodyId']
-            if target_bodyId in all_neurons_in_network:
-                self.target_df.at[idx, 'Checked'] = True
-                targets_found.append(target_bodyId)
-                # Find which layer this target first appears in
-                for layer_idx, layer_set in enumerate(layer_neurons):
-                    if target_bodyId in layer_set:
-                        self.target_df.at[idx, 'Layer'] = layer_idx
-                        break
+        # Check which targets are in the network (vectorized: avoids row-wise
+        # .at access, which was O(targets x layers) with slow scalar lookups)
+        first_layer_of = {}
+        for layer_idx, layer_set in enumerate(layer_neurons):
+            for neuron_id in layer_set:
+                if neuron_id not in first_layer_of:
+                    first_layer_of[neuron_id] = layer_idx
+        
+        checked_mask = self.target_df['bodyId'].isin(all_neurons_in_network)
+        self.target_df.loc[checked_mask, 'Checked'] = True
+        mapped_layers = self.target_df.loc[checked_mask, 'bodyId'].map(first_layer_of)
+        self.target_df.loc[checked_mask, 'Layer'] = mapped_layers.fillna(-1).astype(int)
+        targets_found = self.target_df.loc[checked_mask, 'bodyId'].tolist()
         
         targetNum = len(self.target_df)
         targetNum_checked = len(targets_found)

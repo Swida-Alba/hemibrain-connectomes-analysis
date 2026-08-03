@@ -669,18 +669,29 @@ class FastGraph:
         R = self.reverse()
         
         def simple_dfs_paths(start_node, graph, target_depth, valid_end_nodes=None):
-            stack = [(start_node, [start_node])]
-            while stack:
-                u, path = stack.pop()
-                current_len = len(path) - 1
-                if current_len == target_depth:
+            # In-place backtracking: the previous implementation copied the
+            # whole path list (`path + [v]`) on every edge traversal, which is
+            # O(depth) allocation per step and dominates runtime on dense
+            # graphs. A shared path/visited pair with one copy at the leaf is
+            # equivalent and much cheaper.
+            path = [start_node]
+            visited = {start_node}
+
+            def dfs(u, depth):
+                if depth == target_depth:
                     if valid_end_nodes is None or u in valid_end_nodes:
-                        yield u, path
-                    continue
+                        yield u, list(path)
+                    return
                 if u in graph.adj:
                     for v in graph.adj[u]:
-                        if v not in path:
-                            stack.append((v, path + [v]))
+                        if v not in visited:
+                            visited.add(v)
+                            path.append(v)
+                            yield from dfs(v, depth + 1)
+                            path.pop()
+                            visited.discard(v)
+
+            yield from dfs(start_node, 0)
 
         def get_reachable_set(start_nodes, graph, depth):
             current = set(start_nodes)

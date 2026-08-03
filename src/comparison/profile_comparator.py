@@ -3882,12 +3882,16 @@ class HomologFinder:
                 
                 if fnc_df is not None and not fnc_is_empty:
                     self._log(f"Using FNC cache for {dataset} ({len(fnc_df):,} connections)")
-                    # FNC cache may not have type columns - add them IN-PLACE to avoid copying
+                    # FNC cache may not have type columns. The cached frame is
+                    # SHARED with FNC and the connectivity profiler, so it must
+                    # not be mutated in place (to_numeric here would flip the
+                    # bodyId dtypes for every other consumer). Enrich a copy.
                     if 'type_pre' not in fnc_df.columns or 'type_post' not in fnc_df.columns:
                         index_path = self._get_neuron_index_path(dataset)
                         type_map = self._load_type_mapping(dataset, project_root, safe_name, index_path)
                         if type_map:
-                            # Convert bodyIds to numeric in-place
+                            fnc_df = fnc_df.copy()
+                            # Convert bodyIds to numeric on the copy only
                             fnc_df['bodyId_pre'] = pd.to_numeric(fnc_df['bodyId_pre'], errors='coerce')
                             fnc_df['bodyId_post'] = pd.to_numeric(fnc_df['bodyId_post'], errors='coerce')
                             type_map_int = {int(k) if str(k).isdigit() else k: v for k, v in type_map.items()}

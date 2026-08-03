@@ -285,7 +285,11 @@ class ComparisonAnalyzer:
         """
         try:
             import polars as pl
-            # Use polars for faster reading, then convert to pandas
+            # Use polars for faster reading ONLY when no pandas-specific kwargs
+            # were passed. Silently dropping dtype=/index_col=/header= here
+            # used to turn str bodyId columns into int64 and break joins.
+            if kwargs:
+                return pd.read_csv(filepath, encoding='utf-8', **kwargs)
             return pl.read_csv(filepath, infer_schema_length=10000).to_pandas()
         except ImportError:
             return pd.read_csv(filepath, encoding='utf-8', **kwargs)

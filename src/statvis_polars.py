@@ -22,7 +22,9 @@ _NEURON_DF_CACHE_MAX = 4
 def _load_local_neuron_df_cached(dataset_path: str, is_fafb: bool) -> pl.DataFrame:
     """Load the full local neuron CSV once per (path, mtime), cached."""
     try:
-        mtime = os.path.getmtime(dataset_path)
+        # mtime_ns: getmtime() has only second resolution on some filesystems,
+        # so a file regenerated within the same second would hit a stale entry.
+        mtime = os.stat(dataset_path).st_mtime_ns
     except OSError:
         mtime = None
     cache_key = (dataset_path, mtime)
@@ -30,9 +32,10 @@ def _load_local_neuron_df_cached(dataset_path: str, is_fafb: bool) -> pl.DataFra
     if cached is not None:
         return cached
 
-    # Handle FlyWire/FAFB which might use string bodyIds
+    # Handle FlyWire/FAFB which might use string bodyIds.
+    # NOTE: polars >= 1.0 removed the `dtypes=` kwarg (use schema_overrides).
     if is_fafb:
-        ndf = pl.read_csv(dataset_path, infer_schema_length=10000, dtypes={'bodyId': pl.Utf8})
+        ndf = pl.read_csv(dataset_path, infer_schema_length=10000, schema_overrides={'bodyId': pl.Utf8})
     else:
         ndf = pl.read_csv(dataset_path, infer_schema_length=10000)
         if 'bodyId' in ndf.columns:
