@@ -5199,36 +5199,40 @@ def EnrichConnectionTable(conn_table, traversal_probability_threshold=0, dataset
             if label_mapper and 'type' in ndf_complete.columns:
                 # Create a copy to avoid modifying the original cache
                 ndf_complete = ndf_complete.copy()
-                
-                # Define mapping function that prioritizes bodyId mapping
-                def get_mapped_label(row):
-                    # 1. Try bodyId first (most specific)
-                    body_id = str(row['bodyId'])
-                    # Use get_label to check all roles (Source -> Target -> Intermediate)
-                    mapped_body = label_mapper.get_label(dataset, body_id)
-                    
-                    if body_id == '720575940634984800':
-                        # print(f"DEBUG: Mapping 720575940634984800 -> {mapped_body}")
-                        pass
-                    
-                    # Check if mapped (heuristic: different from original ID)
-                    if mapped_body != body_id:
-                         return mapped_body
-                    
-                    # 2. Try type if available
-                    if pd.notna(row['type']):
-                        type_val = str(row['type'])
-                        # Skip if type is same as bodyId (redundant)
-                        if type_val != body_id:
-                            mapped_type = label_mapper.get_label(dataset, type_val)
-                            if mapped_type != type_val:
-                                return mapped_type
-                            
-                    # No mapping found
-                    return ''
 
-                # Apply mapping
-                ndf_complete['std_label'] = ndf_complete.apply(get_mapped_label, axis=1)
+                # Vectorized label mapping (same semantics as the old
+                # row-wise apply, but one get_label call per UNIQUE bodyId/
+                # type instead of two calls per neuron row).
+                body_ids = ndf_complete['bodyId'].astype(str)
+                bid_map = {
+                    b: label_mapper.get_label(dataset, b)
+                    for b in body_ids.unique()
+                }
+                mapped_body = body_ids.map(bid_map)
+                # BodyId mapping wins when it differs from the raw ID.
+                # (None results are treated as unmapped, matching the old
+                # fillna fallback behaviour downstream.)
+                mask_body = mapped_body.notna() & (mapped_body != body_ids)
+
+                type_vals = ndf_complete['type'].fillna('').astype(str)
+                type_map = {
+                    t: label_mapper.get_label(dataset, t)
+                    for t in type_vals[~mask_body].unique()
+                    if t != ''
+                }
+                mapped_type = type_vals.map(type_map)
+                mask_type = (
+                    (~mask_body)
+                    & (type_vals != '')
+                    & (type_vals != body_ids)
+                    & mapped_type.notna()
+                    & (mapped_type != type_vals)
+                )
+
+                std_label = pd.Series('', index=ndf_complete.index, dtype=object)
+                std_label.loc[mask_body] = mapped_body[mask_body]
+                std_label.loc[mask_type] = mapped_type[mask_type]
+                ndf_complete['std_label'] = std_label
                 
                 # Overwrite type with std_label where available
                 mask = ndf_complete['std_label'] != ''
@@ -5330,14 +5334,14 @@ def EnrichConnectionTable(conn_table, traversal_probability_threshold=0, dataset
                     
                     # Apply mapping to pre neurons, preserving hemisphere suffix
                     mapped_pre = conn_df['bodyId_pre'].map(mapped_dict)
-                    hemi_suffix_pre = conn_df['type_pre'].apply(extract_hemi_suffix)
+                    hemi_suffix_pre = conn_df['type_pre'].map(extract_hemi_suffix)
                     mapped_pre_with_suffix = mapped_pre.astype(str) + hemi_suffix_pre
                     # Only apply where mapping exists (mapped_pre is not NaN)
                     conn_df['type_pre'] = mapped_pre_with_suffix.where(mapped_pre.notna(), conn_df['type_pre'])
                     
                     # Apply mapping to post neurons, preserving hemisphere suffix
                     mapped_post = conn_df['bodyId_post'].map(mapped_dict)
-                    hemi_suffix_post = conn_df['type_post'].apply(extract_hemi_suffix)
+                    hemi_suffix_post = conn_df['type_post'].map(extract_hemi_suffix)
                     mapped_post_with_suffix = mapped_post.astype(str) + hemi_suffix_post
                     conn_df['type_post'] = mapped_post_with_suffix.where(mapped_post.notna(), conn_df['type_post'])
                 else:
@@ -5397,10 +5401,13 @@ def EnrichConnectionTable(conn_table, traversal_probability_threshold=0, dataset
         conn_df = conn_df.merge(total_incoming, how='left', on='bodyId_post')
         
         # Calculate connection_ratio using local method: weight / local_incoming_weight
-        conn_df['connection_ratio'] = conn_df.apply(
-            lambda row: row['weight'] / row['total_incoming_weight'] 
-            if pd.notnull(row['total_incoming_weight']) and row['total_incoming_weight'] > 0 
-            else float('nan'), axis=1
+        weight_arr = conn_df['weight'].to_numpy(dtype=float)
+        total_arr = conn_df['total_incoming_weight'].to_numpy(dtype=float)
+        valid_mask = ~np.isnan(total_arr) & (total_arr > 0)
+        conn_df['connection_ratio'] = np.divide(
+            weight_arr, total_arr,
+            out=np.full(len(conn_df), np.nan, dtype=float),
+            where=valid_mask,
         )
         
         # Drop temporary column
@@ -6226,4 +6233,3 @@ def build_synapse_mesh(pre_coords, post_coords, mode='sphere', size=100, color='
         lighting=dict(ambient=0.5, diffuse=0.8, roughness=0.1, specular=0.1),
         lightposition=dict(x=1000, y=1000, z=2000)
     )
-

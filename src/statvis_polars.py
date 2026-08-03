@@ -6,6 +6,44 @@ import polars as pl
 from tqdm import tqdm
 
 
+# ---------------------------------------------------------------------------
+# Module-level cache for the full local neuron table.
+#
+# EnrichConnectionTablePolars is called once per network layer in
+# FindAllPath, and every call used to re-read the (potentially hundreds of
+# MB) *_allneurons_neuron_df.csv from disk.  The table is read-only within
+# the enrichment pipeline, so a small mtime-keyed cache removes all repeated
+# I/O while staying correct if the dataset file is regenerated.
+# ---------------------------------------------------------------------------
+_NEURON_DF_CACHE = {}  # (dataset_path, mtime_ns) -> pl.DataFrame
+_NEURON_DF_CACHE_MAX = 4
+
+
+def _load_local_neuron_df_cached(dataset_path: str, is_fafb: bool) -> pl.DataFrame:
+    """Load the full local neuron CSV once per (path, mtime), cached."""
+    try:
+        mtime = os.path.getmtime(dataset_path)
+    except OSError:
+        mtime = None
+    cache_key = (dataset_path, mtime)
+    cached = _NEURON_DF_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+
+    # Handle FlyWire/FAFB which might use string bodyIds
+    if is_fafb:
+        ndf = pl.read_csv(dataset_path, infer_schema_length=10000, dtypes={'bodyId': pl.Utf8})
+    else:
+        ndf = pl.read_csv(dataset_path, infer_schema_length=10000)
+        if 'bodyId' in ndf.columns:
+            ndf = ndf.with_columns(pl.col('bodyId').cast(pl.Utf8))
+
+    if len(_NEURON_DF_CACHE) >= _NEURON_DF_CACHE_MAX:
+        _NEURON_DF_CACHE.pop(next(iter(_NEURON_DF_CACHE)))
+    _NEURON_DF_CACHE[cache_key] = ndf
+    return ndf
+
+
 def build_bodyid_label_map(label_mapper, dataset: str, neuron_df: pl.DataFrame) -> dict:
     """
     Build a comprehensive bodyId → std_label map from label_mapper.
@@ -76,11 +114,14 @@ def build_bodyid_label_map(label_mapper, dataset: str, neuron_df: pl.DataFrame) 
                 all_mappings.append((str(neuron_id), std_label))
     
     # Process each mapping and expand to bodyIds
+    # Precompute the set of existing bodyIds once (O(1) lookups) instead of
+    # filtering the whole neuron_df for every mapping (O(M*N) per call).
+    bodyid_set = set(neuron_df['bodyId'].to_list())
+
     for neuron_id, std_label in all_mappings:
         # First, check if neuron_id is a direct bodyId
         # If it matches a bodyId in the neuron_df, map it directly
-        bodyid_check = neuron_df.filter(pl.col('bodyId') == neuron_id)
-        if not bodyid_check.is_empty():
+        if neuron_id in bodyid_set:
             bodyid_label_map[neuron_id] = std_label
             continue
         
@@ -592,13 +633,8 @@ def EnrichConnectionTablePolars(conn_table, traversal_probability_threshold=0, d
 
         if os.path.exists(dataset_path):
             use_local = True
-            # Handle FlyWire/FAFB which might use string bodyIds
-            if 'flywire' in dataset.lower() or 'fafb' in dataset.lower():
-                ndf_complete = pl.read_csv(dataset_path, infer_schema_length=10000, dtypes={'bodyId': pl.Utf8})
-            else:
-                ndf_complete = pl.read_csv(dataset_path, infer_schema_length=10000)
-                if 'bodyId' in ndf_complete.columns:
-                    ndf_complete = ndf_complete.with_columns(pl.col('bodyId').cast(pl.Utf8))
+            is_fafb = 'flywire' in dataset.lower() or 'fafb' in dataset.lower()
+            ndf_complete = _load_local_neuron_df_cached(dataset_path, is_fafb)
     
     # Step 3: Build complete bodyId → std_label map from label_mapper
     bodyid_label_map = {}
@@ -890,11 +926,6 @@ def EnrichConnectionTablePolars(conn_table, traversal_probability_threshold=0, d
             if group_post_col == 'std_label_post':
                 # For std_label aggregation, we need to join bodyid_pairs with global weights
                 # first, then aggregate. This handles the case where std_label differs from type.
-                # Create a mapping from type_post to total_incoming_weight
-                type_to_weight = dict(zip(
-                    global_incoming_pl['type_post'].to_list(),
-                    global_incoming_pl['total_incoming_weight'].to_list()
-                ))
                 
                 # Get unique std_label_post -> type_post mappings from bodyid_pairs
                 # Since bodyid_pairs still has both type_post and std_label_post
@@ -903,12 +934,16 @@ def EnrichConnectionTablePolars(conn_table, traversal_probability_threshold=0, d
                     # Each std_label_post may map to multiple type_post, so we sum their incoming weights
                     std_label_type_map = bodyid_pairs.select(['std_label_post', 'type_post']).unique()
                     
-                    # Add global incoming weight for each type_post
-                    std_label_type_map = std_label_type_map.with_columns(
-                        pl.col('type_post').map_elements(
-                            lambda t: type_to_weight.get(t, 0),
-                            return_dtype=pl.Float64
-                        ).alias('type_incoming')
+                    # Add global incoming weight for each type_post (vectorized
+                    # join instead of row-wise map_elements with a Python dict)
+                    std_label_type_map = std_label_type_map.join(
+                        global_incoming_pl.select(['type_post', 'total_incoming_weight']),
+                        on='type_post',
+                        how='left',
+                    ).with_columns(
+                        pl.col('total_incoming_weight')
+                        .fill_null(0.0)
+                        .alias('type_incoming')
                     )
                     
                     # Sum by std_label_post (in case one std_label maps to multiple types)

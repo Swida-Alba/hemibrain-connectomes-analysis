@@ -6715,9 +6715,10 @@ class ComparisonAnalyzer:
             
             # Find nodes reachable from sources (forward)
             reachable_from_source = set()
-            queue = list(source_nodes)
+            from collections import deque
+            queue = deque(source_nodes)
             while queue:
-                node = queue.pop(0)
+                node = queue.popleft()
                 if node in reachable_from_source:
                     continue
                 reachable_from_source.add(node)
@@ -6727,9 +6728,9 @@ class ComparisonAnalyzer:
             
             # Find nodes that can reach targets (backward)
             can_reach_target = set()
-            queue = list(target_nodes)
+            queue = deque(target_nodes)
             while queue:
-                node = queue.pop(0)
+                node = queue.popleft()
                 if node in can_reach_target:
                     continue
                 can_reach_target.add(node)
@@ -7017,9 +7018,10 @@ class ComparisonAnalyzer:
                 backward_adj[row['target']].add(row['source'])
 
             reachable_from_source = set()
-            queue = list(source_nodes)
+            from collections import deque
+            queue = deque(source_nodes)
             while queue:
-                node = queue.pop(0)
+                node = queue.popleft()
                 if node in reachable_from_source:
                     continue
                 reachable_from_source.add(node)
@@ -7028,9 +7030,9 @@ class ComparisonAnalyzer:
                         queue.append(next_node)
 
             can_reach_target = set()
-            queue = list(target_nodes)
+            queue = deque(target_nodes)
             while queue:
-                node = queue.pop(0)
+                node = queue.popleft()
                 if node in can_reach_target:
                     continue
                 can_reach_target.add(node)

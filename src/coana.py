@@ -442,13 +442,15 @@ class FindNeuronConnection:
         if 'hemisphere' not in df.columns:
             # Derive from instance if available
             if 'instance' in df.columns:
-                df['hemisphere'] = df['instance'].apply(
-                    lambda x: 'right' if isinstance(x, str) and x.endswith('_R') else ('left' if isinstance(x, str) and x.endswith('_L') else '')
-                )
+                inst = df['instance'].fillna('').astype(str)
+                hemi = pd.Series('', index=df.index, dtype=object)
+                hemi[inst.str.endswith('_R')] = 'right'
+                hemi[inst.str.endswith('_L')] = 'left'
+                df['hemisphere'] = hemi
             else:
                 df['hemisphere'] = ''
         if 'hemisphere_code' not in df.columns:
-            df['hemisphere_code'] = df['hemisphere'].apply(self._normalize_hemisphere_value)
+            df['hemisphere_code'] = self._normalize_hemisphere_series(df['hemisphere'])
         return df
 
     def _append_hemi_suffix(self, label: str, hemi_code: str) -> str:
@@ -459,15 +461,74 @@ class FindNeuronConnection:
             return label_str
         return f"{label_str}_{hemi_code}"
 
+    _HEMI_CODE_ALIASES = {
+        'r': 'R', 'right': 'R', 'rhs': 'R', 'right hemisphere': 'R',
+        'l': 'L', 'left': 'L', 'lhs': 'L', 'left hemisphere': 'L',
+    }
+
+    def _normalize_hemisphere_series(self, series) -> pd.Series:
+        """Vectorized version of _normalize_hemisphere_value."""
+        vals = series.fillna('').astype(str).str.strip().str.lower()
+        codes = vals.map(self._HEMI_CODE_ALIASES).fillna('U')
+        return codes
+
+    def _hemi_code_series(self, df: pd.DataFrame, side: str) -> pd.Series:
+        """
+        Vectorized per-row hemisphere-code resolution.
+
+        Mirrors the previous scalar _get_hemi_code logic: hemisphere_code_
+        wins (returned verbatim), then hemisphere_ (normalized), then
+        instance_ _R/_L suffix, defaulting to 'U'.  The first non-null
+        column "wins" even when its value cannot be normalized, exactly like
+        the old row-wise implementation.
+        """
+        code_col = f"hemisphere_code_{side}" if side else 'hemisphere_code'
+        hemi_col = f"hemisphere_{side}" if side else 'hemisphere'
+        inst_col = f"instance_{side}" if side else 'instance'
+
+        codes = pd.Series('U', index=df.index, dtype=object)
+        handled = pd.Series(False, index=df.index)
+        if code_col in df.columns:
+            col = df[code_col]
+            mask = col.notna()
+            if mask.any():
+                codes[mask] = col[mask].astype(str).values
+                handled[mask] = True
+        if hemi_col in df.columns:
+            col = df[hemi_col]
+            mask = col.notna() & ~handled
+            if mask.any():
+                codes[mask] = self._normalize_hemisphere_series(col[mask]).values
+                handled[mask] = True
+        if inst_col in df.columns:
+            col = df[inst_col]
+            mask = col.notna() & ~handled
+            if mask.any():
+                inst = col[mask].astype(str)
+                codes[mask & inst.str.endswith('_R')] = 'R'
+                codes[mask & inst.str.endswith('_L')] = 'L'
+        return codes
+
+    def _append_hemi_suffix_series(self, labels, codes: pd.Series) -> pd.Series:
+        """Vectorized version of _append_hemi_suffix."""
+        labels = labels.fillna('Unknown').astype(str)
+        has_suffix = labels.str.endswith(('_L', '_R', '_U'))
+        out = labels.copy()
+        out[~has_suffix] = labels[~has_suffix] + '_' + codes[~has_suffix]
+        return out
+
     def _apply_hemisphere_suffix_to_neuron_df(self, df: pd.DataFrame) -> pd.DataFrame:
         if df is None or df.empty:
             return df
         df = self._ensure_hemisphere_columns(df)
         if self.separate_hemispheres:
+            codes = self._hemi_code_series(df, '')
             if 'type' in df.columns:
-                df['type'] = df.apply(lambda row: self._append_hemi_suffix(row['type'], row.get('hemisphere_code', 'U')), axis=1)
+                df['type'] = self._append_hemi_suffix_series(df['type'], codes)
             if 'custom_group' in df.columns:
-                df['custom_group'] = df.apply(lambda row: self._append_hemi_suffix(row['custom_group'], row.get('hemisphere_code', 'U')), axis=1)
+                df['custom_group'] = self._append_hemi_suffix_series(
+                    df['custom_group'], codes
+                )
         return df
 
     def _ensure_ratio_prob_columns(self, df, pre_col: str, post_col: str):
@@ -540,30 +601,26 @@ class FindNeuronConnection:
     def _apply_hemisphere_suffix_to_conn_df(self, conn_df: pd.DataFrame) -> pd.DataFrame:
         if conn_df is None or conn_df.empty or not self.separate_hemispheres:
             return conn_df
-        def _get_hemi_code(row, side: str) -> str:
-            code_col = f"hemisphere_code_{side}"
-            if code_col in row and pd.notna(row[code_col]):
-                return str(row[code_col])
-            hemi_col = f"hemisphere_{side}"
-            if hemi_col in row and pd.notna(row[hemi_col]):
-                return self._normalize_hemisphere_value(row[hemi_col])
-            inst_col = f"instance_{side}"
-            if inst_col in row and isinstance(row[inst_col], str):
-                if row[inst_col].endswith('_R'):
-                    return 'R'
-                if row[inst_col].endswith('_L'):
-                    return 'L'
-            return 'U'
 
         conn_df = conn_df.copy()
+        codes_pre = self._hemi_code_series(conn_df, 'pre')
+        codes_post = self._hemi_code_series(conn_df, 'post')
         if 'type_pre' in conn_df.columns:
-            conn_df['type_pre'] = conn_df.apply(lambda row: self._append_hemi_suffix(row['type_pre'], _get_hemi_code(row, 'pre')), axis=1)
+            conn_df['type_pre'] = self._append_hemi_suffix_series(
+                conn_df['type_pre'], codes_pre
+            )
         if 'type_post' in conn_df.columns:
-            conn_df['type_post'] = conn_df.apply(lambda row: self._append_hemi_suffix(row['type_post'], _get_hemi_code(row, 'post')), axis=1)
+            conn_df['type_post'] = self._append_hemi_suffix_series(
+                conn_df['type_post'], codes_post
+            )
         if 'custom_group_pre' in conn_df.columns:
-            conn_df['custom_group_pre'] = conn_df.apply(lambda row: self._append_hemi_suffix(row['custom_group_pre'], _get_hemi_code(row, 'pre')), axis=1)
+            conn_df['custom_group_pre'] = self._append_hemi_suffix_series(
+                conn_df['custom_group_pre'], codes_pre
+            )
         if 'custom_group_post' in conn_df.columns:
-            conn_df['custom_group_post'] = conn_df.apply(lambda row: self._append_hemi_suffix(row['custom_group_post'], _get_hemi_code(row, 'post')), axis=1)
+            conn_df['custom_group_post'] = self._append_hemi_suffix_series(
+                conn_df['custom_group_post'], codes_post
+            )
         return conn_df
 
     def _query_has_hemisphere_suffix(self, query) -> bool:
@@ -902,6 +959,40 @@ class FindNeuronConnection:
         except Exception:
             # Fallback for polars issues
             return pd.read_csv(filepath, encoding='utf-8', **kwargs)
+
+    def _load_local_neuron_df(self, dataset_path: str, is_fafb: bool) -> 'pd.DataFrame':
+        """
+        Load the full local neuron CSV once per file (mtime-aware).
+
+        Several per-layer functions (neuron lookup, hemisphere enrichment,
+        ratio denominators) read the same *_allneurons_neuron_df.csv.  The
+        table is read-only after loading, so caching it per instance removes
+        the repeated disk I/O while staying correct if the file is rebuilt.
+        """
+        try:
+            mtime = os.path.getmtime(dataset_path)
+        except OSError:
+            mtime = None
+        cached = self._local_neuron_df_cache.get(dataset_path)
+        if cached is not None and cached[0] == mtime:
+            return cached[1]
+
+        if is_fafb:
+            ndf_complete = self._read_csv(
+                dataset_path, header=0, index_col=None,
+                dtype={'bodyId': str}, low_memory=False,
+            )
+            ndf_complete['bodyId'] = ndf_complete['bodyId'].astype(str)
+        else:
+            ndf_complete = self._read_csv(
+                dataset_path, header=0, index_col=0, low_memory=False,
+            )
+            if 'bodyId' in ndf_complete.columns:
+                ndf_complete['bodyId'] = ndf_complete['bodyId'].astype(str)
+
+        ndf_complete = self._ensure_hemisphere_columns(ndf_complete)
+        self._local_neuron_df_cache[dataset_path] = (mtime, ndf_complete)
+        return ndf_complete
 
     @staticmethod
     def _is_empty_df(df) -> bool:
@@ -1405,6 +1496,17 @@ class FindNeuronConnection:
         
         # Lazy-initialized CAVE fetcher (reused across calls)
         self._cave_fetcher = None
+
+        # Per-instance performance caches.
+        # - Local neuron CSV cache: path -> (mtime_ns, DataFrame).  Avoids
+        #   re-reading the full neuron table for every layer/function call.
+        # - Incoming-weight caches: full-dataset aggregates keyed by
+        #   (data source, mtimes, min_weight).  The type/bodyId totals are the
+        #   same regardless of which post neurons/types a caller asks for, so
+        #   one vectorized computation serves all per-layer calls.
+        self._local_neuron_df_cache = {}
+        self._total_incoming_by_type_cache = {}
+        self._total_incoming_by_bodyid_cache = {}
         
         self._vprint('Initializing...', level='full')
         
@@ -3125,22 +3227,12 @@ class FindNeuronConnection:
                 dataset_path = fafb_path
         
         if os.path.exists(dataset_path):
-            # Fast: Load from local CSV
-            # Check if it's FAFB to decide on index_col (FAFB utils saves without index)
+            # Fast: Load from local CSV (cached per file - avoids re-reading
+            # the full neuron table on every per-layer call)
             is_fafb = 'fafb' in self.dataset.lower() or 'flywire' in self.dataset.lower()
-            
             if is_fafb:
-                ndf_complete = self._read_csv(dataset_path, header=0, index_col=None, dtype={'bodyId': str}, low_memory=False)
-            else:
-                ndf_complete = self._read_csv(dataset_path, header=0, index_col=0, low_memory=False)
-            
-            # Ensure bodyId is string for FAFB
-            if is_fafb:
-                ndf_complete['bodyId'] = ndf_complete['bodyId'].astype(str)
                 bodyIds = [str(b) for b in bodyIds]
-
-            # Ensure hemisphere columns exist
-            ndf_complete = self._ensure_hemisphere_columns(ndf_complete)
+            ndf_complete = self._load_local_neuron_df(dataset_path, is_fafb)
             
             neuron_df = ndf_complete[ndf_complete['bodyId'].isin(bodyIds)].copy()
             if columns:
@@ -3227,21 +3319,9 @@ class FindNeuronConnection:
                 dataset_path = fafb_path
         
         if os.path.exists(dataset_path):
-            # Fast: Load from local CSV
-            # Check if it's FAFB to decide on index_col (FAFB utils saves without index)
+            # Fast: Load from local CSV (cached per file)
             is_fafb = 'fafb' in self.dataset.lower() or 'flywire' in self.dataset.lower()
-            
-            if is_fafb:
-                ndf_complete = self._read_csv(dataset_path, header=0, index_col=None, dtype={'bodyId': str}, low_memory=False)
-            else:
-                ndf_complete = self._read_csv(dataset_path, header=0, index_col=0, low_memory=False)
-            
-            # Ensure bodyId is string for FAFB
-            if is_fafb:
-                ndf_complete['bodyId'] = ndf_complete['bodyId'].astype(str)
-
-            # Ensure hemisphere columns exist
-            ndf_complete = self._ensure_hemisphere_columns(ndf_complete)
+            ndf_complete = self._load_local_neuron_df(dataset_path, is_fafb)
             
             neuron_df = ndf_complete[ndf_complete['type'].isin(types)].copy()
             if columns:
@@ -3868,6 +3948,125 @@ class FindNeuronConnection:
         
         return combined
     
+    def _incoming_weight_source_key(self, min_weight: int):
+        """
+        Return a stable cache key for the full-dataset incoming-weight tables.
+
+        The key covers the data source (in-memory cache identity or disk
+        paths + mtimes) and the weight threshold, so a rebuilt/updated cache
+        invalidates old aggregates automatically.
+        """
+        db_path = self._get_connection_db_path()
+        index_path = os.path.join(os.path.dirname(db_path), 'neuron_index.parquet')
+        if self._conn_df_cache is not None and not self._is_empty_df(self._conn_df_cache):
+            return ('mem', id(self._conn_df_cache), min_weight)
+        try:
+            db_mtime = os.path.getmtime(db_path)
+            idx_mtime = os.path.getmtime(index_path)
+        except OSError:
+            db_mtime = idx_mtime = None
+        return ('disk', db_path, index_path, db_mtime, idx_mtime, min_weight)
+
+    def _get_total_incoming_by_type_table(self, min_weight: int = 1):
+        """
+        Full-dataset aggregate ``type_post -> total_incoming_weight``.
+
+        The aggregate is independent of which post types a caller asks for,
+        so it is computed once per (data source, min_weight) with fully
+        vectorized Polars operations and reused by every per-layer call.
+        Previously every call re-read the whole connections parquet in
+        row-group chunks and aggregated with a Python loop over every row.
+        """
+        key = self._incoming_weight_source_key(min_weight)
+        cached = self._total_incoming_by_type_cache.get(key)
+        if cached is not None:
+            return cached
+
+        db_path = self._get_connection_db_path()
+        index_path = os.path.join(os.path.dirname(db_path), 'neuron_index.parquet')
+
+        neuron_index = pl.read_parquet(index_path, columns=['bodyId', 'type'])
+        # Preserve the old dict semantics: the LAST entry wins for duplicates.
+        neuron_index = neuron_index.unique(subset=['bodyId'], keep='last')
+        if 'type' in neuron_index.columns:
+            neuron_index = neuron_index.filter(
+                pl.col('type').is_not_null() & (pl.col('type') != '')
+            )
+
+        if self._conn_df_cache is not None and not self._is_empty_df(self._conn_df_cache):
+            conn = self._conn_df_cache
+            # The module-level shared cache may hand us pandas (other modules
+            # expect pandas); convert once here so vectorized ops always work.
+            if isinstance(conn, pd.DataFrame):
+                conn = pl.from_pandas(conn)
+            if min_weight > 1:
+                conn = conn.filter(pl.col('weight') >= min_weight)
+            result = (
+                conn.join(
+                    neuron_index,
+                    left_on='bodyId_post',
+                    right_on='bodyId',
+                    how='inner',
+                )
+                .group_by('type')
+                .agg(pl.col('weight').sum().alias('total_incoming_weight'))
+                .rename({'type': 'type_post'})
+            )
+        else:
+            scan = pl.scan_parquet(db_path)
+            if min_weight > 1:
+                scan = scan.filter(pl.col('weight') >= min_weight)
+            result = (
+                scan.join(
+                    neuron_index.lazy(),
+                    left_on='bodyId_post',
+                    right_on='bodyId',
+                    how='inner',
+                )
+                .group_by('type')
+                .agg(pl.col('weight').sum().alias('total_incoming_weight'))
+                .rename({'type': 'type_post'})
+                .collect()
+            )
+
+        self._total_incoming_by_type_cache[key] = result
+        return result
+
+    def _get_total_incoming_by_bodyid_table(self, min_weight: int = 1):
+        """
+        Full-dataset aggregate ``bodyId_post -> total_incoming_weight``.
+
+        Cached and vectorized like the type-level table; each caller then
+        filters the cached table down to the post neurons it needs.
+        """
+        key = self._incoming_weight_source_key(min_weight)
+        cached = self._total_incoming_by_bodyid_cache.get(key)
+        if cached is not None:
+            return cached
+
+        db_path = self._get_connection_db_path()
+        if self._conn_df_cache is not None and not self._is_empty_df(self._conn_df_cache):
+            conn = self._conn_df_cache
+            if isinstance(conn, pd.DataFrame):
+                conn = pl.from_pandas(conn)
+            if min_weight > 1:
+                conn = conn.filter(pl.col('weight') >= min_weight)
+            result = conn.group_by('bodyId_post').agg(
+                pl.col('weight').sum().alias('total_incoming_weight')
+            )
+        else:
+            scan = pl.scan_parquet(db_path)
+            if min_weight > 1:
+                scan = scan.filter(pl.col('weight') >= min_weight)
+            result = (
+                scan.group_by('bodyId_post')
+                .agg(pl.col('weight').sum().alias('total_incoming_weight'))
+                .collect()
+            )
+
+        self._total_incoming_by_bodyid_cache[key] = result
+        return result
+
     def _fetch_total_incoming_weight(self, post_bodyIds: list, min_weight: int = 1, auto_build_cache: bool = True) -> pd.DataFrame:
         """
         Fetch ALL incoming connections to the given post-synaptic bodyIds.
@@ -3896,25 +4095,11 @@ class FindNeuronConnection:
         
         # Convert to strings for consistency
         post_strs = [str(x) for x in post_bodyIds]
-        
-        # Check if we have a cached connection database
-        if self._conn_df_cache is not None:
-            # Query from cached database - much faster
-            import polars as pl
-            if isinstance(self._conn_df_cache, pl.DataFrame):
-                incoming = self._conn_df_cache.filter(
-                    pl.col('bodyId_post').is_in(post_strs) & 
-                    (pl.col('weight') >= min_weight)
-                )
-                total_incoming = incoming.group_by('bodyId_post').agg(
-                    pl.col('weight').sum().alias('total_incoming_weight')
-                ).to_pandas()
-                self._vprint(f'     ✓ Found {len(total_incoming)} post-synaptic neurons with incoming connections (from cache)', level='full')
-                return total_incoming
-        
-        # Fallback: query the database file directly
+
+        # The full-dataset aggregate is cached, so repeated per-layer calls
+        # with different post-neuron lists only filter the cached table.
         db_path = self._get_connection_db_path()
-        
+
         # If cache doesn't exist and auto_build_cache is enabled, build it first
         if not os.path.exists(db_path) and auto_build_cache:
             self._vprint(f'\n     ⚠️  Connection cache not found for {self.dataset}', level='simple')
@@ -3932,18 +4117,17 @@ class FindNeuronConnection:
             except Exception as e:
                 self._vprint(f'     ❌ Failed to build cache: {e}', level='simple')
         
-        if os.path.exists(db_path):
+        if os.path.exists(db_path) or (self._conn_df_cache is not None and not self._is_empty_df(self._conn_df_cache)):
             try:
-                import polars as pl
-                all_conn = pl.scan_parquet(db_path).filter(
-                    pl.col('bodyId_post').is_in(post_strs) &
-                    (pl.col('weight') >= min_weight)
-                ).collect()
-                
-                total_incoming = all_conn.group_by('bodyId_post').agg(
-                    pl.col('weight').sum().alias('total_incoming_weight')
+                total_table = self._get_total_incoming_by_bodyid_table(min_weight)
+                total_incoming = total_table.filter(
+                    pl.col('bodyId_post').is_in(post_strs)
                 ).to_pandas()
-                self._vprint(f'     ✓ Found {len(total_incoming)} post-synaptic neurons with incoming connections (from DB)', level='full')
+                self._vprint(
+                    f'     ✓ Found {len(total_incoming)} post-synaptic neurons '
+                    f'with incoming connections (vectorized + cached)',
+                    level='full',
+                )
                 return total_incoming
             except Exception as e:
                 self._vprint(f'     ⚠️ Error querying connection DB: {e}', level='full')
@@ -4004,11 +4188,13 @@ class FindNeuronConnection:
         
         # Calculate dynamic connection_ratio: weight / total_incoming_weight (from ALL sources)
         # This represents "what fraction of B's TOTAL input comes from A"
-        combined['connection_ratio'] = combined.apply(
-            lambda row: row['weight'] / row['total_incoming_weight'] 
-            if pd.notnull(row['total_incoming_weight']) and row['total_incoming_weight'] > 0 
-            else float('nan'),
-            axis=1
+        weight_arr = combined['weight'].to_numpy(dtype=float)
+        total_arr = combined['total_incoming_weight'].to_numpy(dtype=float)
+        valid_mask = ~np.isnan(total_arr) & (total_arr > 0)
+        combined['connection_ratio'] = np.divide(
+            weight_arr, total_arr,
+            out=np.full(len(combined), np.nan, dtype=float),
+            where=valid_mask,
         )
         combined['traversal_probability'] = combined['connection_ratio'] / 0.3
         combined.loc[combined['traversal_probability'] > 1, 'traversal_probability'] = 1
@@ -4097,74 +4283,29 @@ class FindNeuronConnection:
         
         if os.path.exists(db_path) and os.path.exists(neuron_index_path):
             try:
-                # Step 1: Load neuron index to create bodyId->type mapping (small, fits in memory)
-                # Only load bodyId and type columns to minimize memory
-                neuron_index = pl.read_parquet(neuron_index_path, columns=['bodyId', 'type'])
-                
-                # Create bodyId -> type lookup dictionary (memory efficient)
-                bodyid_to_type = dict(zip(
-                    neuron_index['bodyId'].to_list(),
-                    neuron_index['type'].to_list()
-                ))
-                
-                # Step 2: Build set of target bodyIds for the requested types
+                # Full-dataset type -> total incoming weights, computed once
+                # per (data source, min_weight) with vectorized Polars joins
+                # (previously every call re-scanned the whole parquet with a
+                # Python loop over every connection row).
+                total_table = self._get_total_incoming_by_type_table(min_weight)
                 post_types_set = set(post_types)
-                target_bodyIds = {bid for bid, t in bodyid_to_type.items() if t in post_types_set}
-                
-                if not target_bodyIds:
-                    self._vprint(f'     ⚠️ No neurons found for target types', level='full')
-                    return pd.DataFrame(columns=['type_post', 'total_incoming_weight'])
-                
-                self._vprint(f'     Processing {len(target_bodyIds):,} target neurons...', level='full')
-                
-                # Step 3: Process connections in row-group chunks (memory efficient)
-                # This approach never loads the full parquet into memory
-                import pyarrow.parquet as pq
-                
-                parquet_file = pq.ParquetFile(db_path)
-                num_row_groups = parquet_file.metadata.num_row_groups
-                total_rows = parquet_file.metadata.num_rows
-                
-                self._vprint(f'     Scanning {total_rows:,} connections in {num_row_groups} chunks...', level='full')
-                
-                # Aggregate weights by type in a simple dict (constant memory)
-                type_weights = {}  # type_post -> total weight
-                rows_processed = 0
-                
-                for i in range(num_row_groups):
-                    # Read only bodyId_post and weight columns from this row group
-                    table = parquet_file.read_row_group(i, columns=['bodyId_post', 'weight'])
-                    chunk_df = pl.from_arrow(table)
-                    rows_processed += len(chunk_df)
-                    
-                    # Filter by min_weight first (reduces data size)
-                    if min_weight > 1:
-                        chunk_df = chunk_df.filter(pl.col('weight') >= min_weight)
-                    
-                    if len(chunk_df) == 0:
-                        continue
-                    
-                    # Vectorized: Add type_post column using map
-                    bodyIds = chunk_df['bodyId_post'].to_list()
-                    weights = chunk_df['weight'].to_list()
-                    
-                    # Aggregate into type_weights dict
-                    for bid, weight in zip(bodyIds, weights):
-                        if bid in target_bodyIds:
-                            type_post = bodyid_to_type.get(bid)
-                            if type_post:
-                                type_weights[type_post] = type_weights.get(type_post, 0) + weight
-                
-                if type_weights:
-                    total_incoming = pd.DataFrame([
-                        {'type_post': t, 'total_incoming_weight': w}
-                        for t, w in type_weights.items()
-                    ])
-                    self._vprint(f'     ✓ Found incoming connections to {len(total_incoming)} types (indexed chunked)', level='full')
-                    return total_incoming
-                
-                self._vprint(f'     ⚠️ No connections found to target types at threshold {min_weight}', level='full')
-                return pd.DataFrame(columns=['type_post', 'total_incoming_weight'])
+                total_incoming = total_table.filter(
+                    pl.col('type_post').is_in(post_types_set)
+                ).to_pandas()
+
+                if total_incoming.empty:
+                    self._vprint(
+                        f'     ⚠️ No connections found to target types at '
+                        f'threshold {min_weight}',
+                        level='full',
+                    )
+                else:
+                    self._vprint(
+                        f'     ✓ Found incoming connections to '
+                        f'{len(total_incoming)} types (vectorized + cached)',
+                        level='full',
+                    )
+                return total_incoming
                     
             except Exception as e:
                 self._vprint(f'     ⚠️ Error querying connection DB: {e}', level='full')
@@ -4237,11 +4378,13 @@ class FindNeuronConnection:
         type_grouped = type_grouped.merge(total_incoming_per_type, on='type_post', how='left')
         
         # Calculate ratios at type level using global denominator
-        type_grouped['connection_ratio'] = type_grouped.apply(
-            lambda row: row['weight'] / row['total_incoming_weight'] 
-            if pd.notnull(row['total_incoming_weight']) and row['total_incoming_weight'] > 0 
-            else float('nan'),
-            axis=1
+        weight_arr = type_grouped['weight'].to_numpy(dtype=float)
+        total_arr = type_grouped['total_incoming_weight'].to_numpy(dtype=float)
+        valid_mask = ~np.isnan(total_arr) & (total_arr > 0)
+        type_grouped['connection_ratio'] = np.divide(
+            weight_arr, total_arr,
+            out=np.full(len(type_grouped), np.nan, dtype=float),
+            where=valid_mask,
         )
         type_grouped['traversal_probability'] = type_grouped['connection_ratio'] / 0.3
         type_grouped.loc[type_grouped['traversal_probability'] > 1, 'traversal_probability'] = 1
@@ -4255,8 +4398,13 @@ class FindNeuronConnection:
                 filtered_type_pairs = filtered_type_pairs[filtered_type_pairs['traversal_probability'] >= min_traversal_prob].copy()
             
             # Keep ALL bodyId connections that belong to passing type pairs
-            passing_type_pairs = set(zip(filtered_type_pairs['type_pre'], filtered_type_pairs['type_post']))
-            filtered_connections = connections_with_types[connections_with_types.apply(lambda row: (row['type_pre'], row['type_post']) in passing_type_pairs, axis=1)].copy()
+            # Vectorized MultiIndex membership test instead of row-wise apply
+            passing_type_pairs = list(zip(filtered_type_pairs['type_pre'], filtered_type_pairs['type_post']))
+            pair_index = pd.MultiIndex.from_tuples(passing_type_pairs)
+            conn_index = pd.MultiIndex.from_frame(
+                connections_with_types[['type_pre', 'type_post']]
+            )
+            filtered_connections = connections_with_types[conn_index.isin(pair_index)].copy()
         else:
             filtered_type_pairs = type_grouped
             filtered_connections = connections_with_types
@@ -5163,7 +5311,7 @@ class FindNeuronConnection:
     def _count_cached_connections(self) -> int:
         """Count total connections in cache."""
         # Return in-memory count if available
-        if self._conn_df_cache is not None and not self._conn_df_cache.empty:
+        if self._conn_df_cache is not None and not self._is_empty_df(self._conn_df_cache):
             return len(self._conn_df_cache)
             
         # Optimization: If using parquet, try to read metadata only to avoid loading full file
