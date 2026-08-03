@@ -51,6 +51,12 @@ git checkout v4.4.5
   Miniconda into `~/miniconda3` on its own (tell the user this is happening;
   pass `--no-install` to opt out and install manually from
   <https://docs.conda.io/miniconda.html> instead).
+- Export `PYTHONNOUSERSITE=1` before running pip installs: otherwise pip
+  treats packages in the user's `~/.local/lib/python3.11/site-packages` as
+  already installed and never installs them into the conda env.
+- Running `scripts/*.py` directly works from any working directory; the
+  toolkit resolves its own project root, so tokens in `token_info_local.txt`
+  are always loaded.
 - Dependency download and token checks need network access. In a sandboxed environment, request escalation for network commands.
 
 ### 3. Install dependencies

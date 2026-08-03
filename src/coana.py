@@ -34,6 +34,16 @@ from neuprint import *
 # Explicit imports for Pylance static analysis (already imported via *)
 from neuprint import Client, NeuronCriteria, fetch_neurons, fetch_roi_hierarchy
 from neuprint.utils import connection_table_to_matrix
+
+# Make the project root importable regardless of how this module was loaded.
+# Scripts put only src/ on sys.path, so when coana is imported as a top-level
+# module (e.g. `python scripts/FindDirect.py` from a non-repo cwd) the
+# `from src...` fallbacks below used to fail - silently leaving the NeuPrint
+# token unloaded ("No token provided").
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+
 try:
     import src.statvis_polars as svp
     from src.statvis_polars import EnrichConnectionTablePolars

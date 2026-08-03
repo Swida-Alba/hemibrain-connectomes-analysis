@@ -39,6 +39,7 @@ Author: Generated for hemibrain-connectomes-analysis project
 import json
 import os
 import re
+import sys
 import threading
 import time
 import warnings
@@ -46,6 +47,13 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple, Union, TYPE_CHECKING
+
+# Make the project root importable regardless of how this module was loaded
+# (scripts put only src/ on sys.path; the `from src...` fallbacks below
+# silently failed from a non-repo cwd).
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
 
 import bokeh.palettes
 import numpy as np
