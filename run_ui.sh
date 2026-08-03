@@ -8,6 +8,9 @@
 
 set -e
 
+# Ignore ~/.local user-site packages so the conda env stays self-contained
+export PYTHONNOUSERSITE=1
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 echo "Starting DROCAT UI..."

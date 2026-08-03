@@ -8,6 +8,9 @@ REM ============================================================================
 
 setlocal enabledelayedexpansion
 
+REM Keep conda environments self-contained: ignore ~/.local user-site packages
+set PYTHONNOUSERSITE=1
+
 echo.
 echo ===============================================================
 echo      DROCAT - Drosophila Connectome Analysis Toolkit

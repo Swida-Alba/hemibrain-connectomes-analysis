@@ -8,6 +8,11 @@
 
 set -e
 
+# Keep conda environments self-contained: ignore ~/.local user-site packages.
+# Otherwise pip treats user-site deps as "satisfied" and they never land in
+# the env (latent machine condition that silently breaks env reproducibility).
+export PYTHONNOUSERSITE=1
+
 # Colors for output
 RED='\033[0;31m'
 GREEN='\033[0;32m'

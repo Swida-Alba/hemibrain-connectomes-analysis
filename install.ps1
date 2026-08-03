@@ -7,6 +7,9 @@
 
 $ErrorActionPreference = "Stop"
 
+# Keep conda environments self-contained: ignore ~/.local user-site packages
+$env:PYTHONNOUSERSITE = "1"
+
 Write-Host ""
 Write-Host "===============================================================" -ForegroundColor Cyan
 Write-Host "     DROCAT - Drosophila Connectome Analysis Toolkit" -ForegroundColor Cyan

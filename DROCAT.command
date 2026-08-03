@@ -10,6 +10,9 @@ set -e
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 cd "$ROOT"
 
+# Keep conda environments self-contained: ignore ~/.local user-site packages
+export PYTHONNOUSERSITE=1
+
 clear 2>/dev/null || true
 echo "╔═══════════════════════════════════════════════════════════════╗"
 echo "║     DROCAT - Drosophila Connectome Analysis Toolkit          ║"

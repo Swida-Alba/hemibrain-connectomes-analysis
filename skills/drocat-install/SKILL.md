@@ -37,6 +37,13 @@ git checkout v4.5.0
   create a Python 3.11 environment, so the system Python version does not
   matter.
 - If conda is missing, install Miniconda from <https://docs.conda.io/miniconda.html> after user approval (install.sh / install.ps1 / install.bat do this automatically).
+- Export `PYTHONNOUSERSITE=1` before running pip (the installers do this
+  automatically): otherwise pip treats packages in the user's
+  `~/.local/lib/python3.11/site-packages` as already installed and never
+  installs them into the env.
+- Running `scripts/*.py` directly works from any working directory; the
+  toolkit resolves its own project root, so tokens in `token_info_local.txt`
+  are always loaded.
 - Dependency download and token checks need network access. In a sandboxed environment, request escalation for network commands.
 
 ### 3. Run the installer
