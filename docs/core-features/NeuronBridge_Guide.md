@@ -62,10 +62,10 @@ This module wraps the NeuronBridge API to provide:
 
 ## Installation
 
-The NeuronBridge module requires the `neuronbridge-python` package:
+The NeuronBridge module uses DROCAT's bundled cross-platform client:
 
 ```bash
-pip install neuronbridge-python
+pip install -r requirements.txt
 ```
 
 **Authentication:** NeuronBridge API is publicly accessible and requires **no authentication token**. 
@@ -1109,9 +1109,10 @@ For direct FlyLight access, see the [FlyLight Downloader Guide](./FlyLight_Guide
 - Use `download_top_n_img` to limit image downloads
 - Consider using `simple_mode=True` for FlyLight downloads
 
-**Q: Missing neuronbridge-python package**
+**Q: NeuronBridge client import fails**
 ```bash
-pip install neuronbridge-python
+pip install -e . --no-deps
+python -c "import neuronbridge_client; print('NeuronBridge client OK')"
 ```
 
 ### Clearing Cache
@@ -1133,4 +1134,3 @@ nbf.clear_cache(cache_type='line_to_neuron')
 
 - [FlyLight Downloader Guide](./FlyLight_Guide.md) - Direct FlyLight imagery access
 - [NeuronBridge Website](https://neuronbridge.janelia.org/) - Web interface
-- [NeuronBridge Python Package](https://github.com/JaneliaSciComp/neuronbridge-python) - API client

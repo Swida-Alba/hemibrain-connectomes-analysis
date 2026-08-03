@@ -62,23 +62,23 @@ This project requires pandas < 2.0.0 for compatibility with NeuPrint and visuali
 
 ---
 
-#### memray Installation Error (Windows)
+#### Legacy memray / Pydantic Conflict
 
 **Symptom:**
 ```
 ERROR: Could not find a version that satisfies the requirement memray
 ```
 
-**Cause:** `memray` is a Linux/macOS-only package, but `neuronbridge-python` lists it as a dependency.
+**Cause:** An older environment still contains the upstream `neuronbridge-python` distribution and its unnecessary dependency tree.
 
-**Solution:** Use the Windows-specific requirements file:
+**Solution:** Rerun the one-click installer. For a manual repair:
 ```bash
-# Step 1: Install core dependencies
-pip install -r requirements-windows.txt
-
-# Step 2: Install neuronbridge-python without its problematic dependencies
-pip install neuronbridge-python --no-deps
+python -m pip uninstall -y neuronbridge-python
+python -m pip install -r requirements-windows.txt
+python -m pip check
 ```
+
+DROCAT bundles its NeuronBridge client; do not reinstall the upstream package.
 
 ---
 
@@ -939,7 +939,7 @@ Clustering failed: {error}
 
 | Issue            | Solution                                                |
 | ---------------- | ------------------------------------------------------- |
-| memray error     | Use `requirements-windows.txt`                          |
+| legacy memray error | Rerun the one-click installer                       |
 | Chrome path      | `C:\Program Files\Google\Chrome\Application\chrome.exe` |
 | Long path errors | Enable long paths in Windows settings                   |
 

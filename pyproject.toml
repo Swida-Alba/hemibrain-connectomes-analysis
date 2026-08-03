@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=45", "wheel", "setuptools_scm[toml]>=6.2"]
+requires = ["setuptools>=68", "wheel", "setuptools_scm[toml]>=6.2"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -7,7 +7,7 @@ name = "hemibrain-connectomes-analysis"
 version = "4.4.5"
 description = "Hemibrain connectome analysis and visualization toolkit with reorganized modular structure"
 readme = {file = "README.md", content-type = "text/markdown"}
-requires-python = ">=3.10"
+requires-python = ">=3.10,<3.12"
 license = {text = "MIT"}
 authors = [
     {name = "Hemibrain Analysis Team"}
@@ -37,35 +37,35 @@ dependencies = [
     "opencv-python==4.10.0.84",
     "bokeh==3.6.0",
     "kaleido==0.2.1",
-    "selenium>=4.0.0",
-    "webdriver-manager>=4.0.0",
+    "selenium>=4.0.0,<5",
+    "webdriver-manager>=4.0.0,<5",
     "networkx==3.3",
     "openpyxl==3.1.5",
+    "xlrd==2.0.2",
     "tqdm==4.66.5",
     "requests==2.32.3",
-    "Jinja2==3.1.4",
+    "chardet==5.2.0",
+    "Jinja2==3.1.6",
     "pillow==11.0.0",
-    "pydantic~=2.9.1",
-    "python-rapidjson>=1.20",
+    "pydantic==2.13.4",
     "PyQt5==5.15.10",
     "neuprint-python==0.4.26",
     "navis==1.5.0",
-    "flybrains>=0.6.3",
-    "boto3>=1.26.0",
-    "reportlab>=4.0.0",
-    "python-pptx>=0.6.21",
-    "pymupdf>=1.23.0",
+    "flybrains==0.6.3",
+    "boto3>=1.26.0,<2",
+    "reportlab>=4.0.0,<6",
+    "python-pptx>=0.6.21,<2",
+    "pymupdf>=1.23.0,<2",
     "img2pdf==0.5.1",
-    # NOTE: neuronbridge-python may fail on Windows due to memray dependency.
-    # See docs/INSTALLATION.md for Windows troubleshooting.
-    "neuronbridge-python>=3.3.0",
+    # NeuronBridge metadata access uses src/neuronbridge_client.py. Keeping it
+    # native avoids neuronbridge-python's incompatible Pydantic/Ray/Memray tree.
     # CAVE API dependencies for FlyWire (FAFB) online data fetching
-    "caveclient>=8.0.0",
-    "cloud-volume>=12.0.0",
-    "fast-simplification>=0.1.0",
-    "trimesh>=4.0.0",
-    "psutil>=5.9.0",
-    "xlsxwriter>=3.1.0",
+    "caveclient>=8.0.0,<9",
+    "cloud-volume>=12.0.0,<13",
+    "fast-simplification>=0.1.0,<0.2",
+    "trimesh==4.12.2",
+    "psutil>=5.9.0,<8",
+    "xlsxwriter>=3.1.0,<4",
 ]
 
 [project.optional-dependencies]
@@ -73,16 +73,18 @@ dependencies = [
 vispath = [
     "numpy==1.26.4",
     "pandas==1.5.3",
+    "polars==1.34.0",
     "scipy==1.13.1",
     "plotly==6.4.0",
-    "networkx==3.3",
     "openpyxl==3.1.5",
+    "xlrd==2.0.2",
     "PyQt5==5.15.10",
 ]
 
 dev = [
     "pytest==7.0.0",
     "pytest-cov==3.0.0",
+    "tomli>=2.0.0,<3; python_version < '3.11'",
     "jupyter==1.0.0",
     "ipykernel==6.0.0",
     "black==22.0.0",
@@ -96,8 +98,7 @@ viz = [
 ]
 
 gui = [
-    "PyQt6==6.0.0",
-    "wxPython==4.2.0",
+    "PyQt5==5.15.10",
 ]
 
 all = [
@@ -114,6 +115,22 @@ Documentation = "https://github.com/Swida-Alba/hemibrain-connectomes-analysis/bl
 # Core modules are in src/: coana.py, statvis.py, vispath.py
 # Executable scripts are in scripts/: FindPath.py, FindDirect.py, etc.
 package-dir = {"" = "src"}
+py-modules = [
+    "BANC_file_converter",
+    "FAFB_file_converter",
+    "build_connection_cache",
+    "build_connectivity_profile_cache",
+    "cave_data_fetcher",
+    "coana",
+    "fafb_utils",
+    "flylight_downloader",
+    "inter_dataset_preliminary",
+    "neuronbridge_client",
+    "neuronbridge_finder",
+    "statvis",
+    "statvis_polars",
+    "visualize_skeleton",
+]
 
 [tool.setuptools.packages.find]
 where = ["src"]
@@ -129,7 +146,7 @@ namespaces = false
 
 [tool.black]
 line-length = 100
-target-version = ['py38', 'py39', 'py310', 'py311']
+target-version = ['py310', 'py311']
 include = '\.pyi?$'
 extend-exclude = '''
 /(

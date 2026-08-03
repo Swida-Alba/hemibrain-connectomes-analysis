@@ -9,18 +9,16 @@ Conda discovery:
     never install anything).
 
 Env-name behavior:
-  - If the preferred env name (default: 'drocat') is free, it is created.
-  - If an env with that name ALREADY EXISTS on this machine, this script
-    warns the user (on stderr) and instead creates a fresh env whose name
-    reflects the DROCAT version: '<preferred>-v<version>' (e.g.
-    'drocat-v4.4.5'). If that name is taken too, a free index is appended:
-    'drocat-v4.4.5-2', 'drocat-v4.4.5-3', ... The existing env is never
-    modified or removed.
+  - The preferred env is 'drocat-4.4.5'. A caller passing the legacy
+    '--name drocat' spelling is normalized to that versioned name.
+  - An existing candidate is reused when it has the requested Python.
+  - A candidate with the wrong Python is left untouched and the next suffix
+    is checked: 'drocat-4.4.5-2', 'drocat-4.4.5-3', ...
   - The chosen name is printed on the LAST stdout line as
     'DROCAT_ENV_NAME=<name>' so callers (agents, shell scripts) can parse it.
 
 Usage:
-    python setup_conda_env.py                        # env 'drocat', Python 3.11
+    python setup_conda_env.py                        # env 'drocat-4.4.5', Python 3.11
     python setup_conda_env.py --name drocat --python 3.11 --version 4.4.5
     python setup_conda_env.py --conda /path/to/conda # explicit conda binary
     python setup_conda_env.py --no-install           # fail instead of installing Miniconda
@@ -65,6 +63,9 @@ def install_miniconda() -> str:
     install_dir = Path.home() / "miniconda3"
     is_windows = sys.platform == "win32"
     suffix = ".exe" if is_windows else ".sh"
+    if is_windows and install_dir.exists() and not (install_dir / "Scripts/conda.exe").exists():
+        # The Windows installer cannot update an arbitrary partial directory.
+        install_dir = Path.home() / "miniconda3-drocat"
 
     print(f"WARNING: conda not found on this machine.", file=sys.stderr)
     print(f"Downloading Miniconda from: {url}", file=sys.stderr)
@@ -193,32 +194,50 @@ def list_env_names(conda: str) -> set:
     return names
 
 
-def pick_env_name(preferred: str, version: str, existing: set) -> tuple:
-    """Return (chosen_name, conflicted). Never collides with existing envs.
+def env_matches_python(conda: str, name: str, python_version: str) -> bool:
+    """Return whether an existing named env uses the requested Python."""
+    code = (
+        "import sys; raise SystemExit(0 if sys.version_info[:2] == "
+        f"tuple(map(int, {python_version!r}.split('.'))) else 1)"
+    )
+    return subprocess.run(
+        [conda, "run", "-n", name, "python", "-c", code],
+        capture_output=True,
+        timeout=120,
+    ).returncode == 0
 
-    Order: 'drocat' -> 'drocat-v<version>' -> 'drocat-v<version>-2', -3, ...
-    The versioned name keeps parallel installs of different DROCAT releases
-    distinguishable on the same machine.
-    """
-    if preferred not in existing:
-        return preferred, False
-    versioned = f"{preferred}-v{version}"
-    if versioned not in existing:
-        return versioned, True
-    n = 2
-    while f"{versioned}-{n}" in existing:
-        n += 1
-    return f"{versioned}-{n}", True
+
+def pick_env_name(
+    conda: str, preferred: str, python_version: str, existing: set
+) -> tuple:
+    """Return (chosen_name, create_required) using installer-compatible order."""
+    for index in range(21):
+        candidate = preferred if index == 0 else f"{preferred}-{index + 1}"
+        if candidate not in existing:
+            return candidate, True
+        if env_matches_python(conda, candidate, python_version):
+            return candidate, False
+        print(
+            f"WARNING: leaving '{candidate}' untouched because it does not "
+            f"use Python {python_version}.",
+            file=sys.stderr,
+        )
+    raise SystemExit(f"ERROR: no usable/free environment name for {preferred}.")
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--name", default="drocat", help="Preferred env name")
-    parser.add_argument("--python", default="3.11", help="Python version (3.10-3.11 supported)")
+    parser.add_argument("--name", default="drocat-4.4.5", help="Preferred env name")
+    parser.add_argument(
+        "--python",
+        default="3.11",
+        choices=("3.10", "3.11"),
+        help="Python version (3.10-3.11 supported)",
+    )
     parser.add_argument(
         "--version",
         default="4.4.5",
-        help="DROCAT version used to build the fallback env name (drocat-v<version>)",
+        help="DROCAT version used to build the fallback env name (drocat-<version>)",
     )
     parser.add_argument("--conda", default=None, help="Explicit path to the conda binary")
     parser.add_argument(
@@ -237,19 +256,22 @@ def main() -> int:
     allow_install = not args.no_install and not args.dry_run
     conda = find_conda(args.conda, allow_install=allow_install)
     existing = list_env_names(conda)
-    chosen, conflicted = pick_env_name(args.name, args.version, existing)
-
-    if conflicted:
-        print(
-            f"WARNING: a conda env named '{args.name}' already exists on this "
-            f"machine. Leaving it untouched and creating a new env named "
-            f"'{chosen}' instead (name reflects DROCAT v{args.version}).",
-            file=sys.stderr,
-        )
+    version = args.version.strip()
+    if version.lower().startswith("v"):
+        version = version[1:]
+    preferred_name = args.name.strip()
+    if not version:
+        parser.error("--version must not be empty")
+    if not preferred_name:
+        parser.error("--name must not be empty")
+    preferred = f"drocat-{version}" if preferred_name == "drocat" else preferred_name
+    chosen, create_required = pick_env_name(
+        conda, preferred, args.python, existing
+    )
 
     if args.dry_run:
         print(f"Would use conda env: {chosen}")
-    else:
+    elif create_required:
         cmd = [conda, "create", "-n", chosen, f"python={args.python}", "-y"]
         print(f"Running: {' '.join(cmd)}")
         result = subprocess.run(cmd)
@@ -259,6 +281,8 @@ def main() -> int:
                 file=sys.stderr,
             )
             return 1
+    else:
+        print(f"Reusing existing conda env: {chosen}")
 
     print(f"Activate with: conda activate {chosen}")
     # Machine-parseable result - must stay the LAST line of stdout.

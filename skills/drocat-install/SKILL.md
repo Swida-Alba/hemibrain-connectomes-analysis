@@ -1,160 +1,85 @@
 ---
 name: drocat-install
-description: Auto-install the DROCAT Drosophila connectome analysis toolkit (hemibrain-connectomes-analysis, v4.4.x script edition - no web UI) on macOS, Linux, or Windows. Use when the user asks to install, set up, repair, or prepare DROCAT on the v4.4.5 branch (e.g., "install DROCAT", "set up the connectome toolkit", "fix my DROCAT install", "fresh machine setup") - fetches the repository from GitHub, creates the conda environment, installs dependencies, configures NeuPrint/CAVE tokens, verifies the installation, and runs the standalone scripts.
+description: Auto-install the DROCAT Drosophila connectome analysis toolkit (hemibrain-connectomes-analysis, v4.4.5 command-line edition) on macOS, Linux, or Windows. Use when the user asks to install, set up, repair, or prepare DROCAT v4.4.5; fetches the branch, runs its one-click installer, configures NeuPrint/CAVE tokens, verifies the environment, and smoke-tests the standalone scripts.
 ---
 
 # DROCAT Install (v4.4.5)
 
 ## Overview
 
-Install DROCAT v4.4.5 end-to-end on a fresh machine: fetch the repository from GitHub, create the `drocat` conda environment, install pinned dependencies, configure API tokens, verify the installation, and run the standalone analysis scripts. This branch has **no web UI** - all entry points are `scripts/*.py`.
+DROCAT v4.4.5 is the standalone-script release; it does not include the v4.5 web UI. Prefer the repository's one-click installers so manual and agent-assisted setup use exactly the same dependency and environment policy.
 
 ## Workflow
 
-### 1. Fetch the repository
-
-Pull DROCAT v4.4.5 from GitHub (works in any agent that can run shell commands):
+### 1. Fetch the branch
 
 ```bash
 git clone --branch v4.4.5 https://github.com/Swida-Alba/Drosophila-cross-dataset-connectome-analysis.git drocat
 cd drocat
 ```
 
-If a checkout already exists, fetch the branch instead:
-
-```bash
-git fetch origin v4.4.5
-git checkout v4.4.5
-```
-
-- If the user already has the repository locally, reuse it (ask if the path is not obvious) and skip the clone.
-- Confirm the required files exist: `scripts/FindPath.py`, `scripts/FindDirect.py`, `src/coana.py`, `requirements.txt`, `requirements-windows.txt`, `vispath-subproject/src/vispath_pkg`.
-- Expected layout (v4.4.5 has no `ui/` directory):
-
-  ```
-  scripts/          # standalone entry points (10+ scripts)
-  src/              # backend modules (coana, statvis, comparison/, ...)
-  vispath-subproject/src/vispath_pkg
-  requirements.txt  # Linux/macOS
-  requirements-windows.txt
-  token_info.txt    # token template
-  ```
+For an existing checkout, fetch and switch to `v4.4.5` without discarding local work. Confirm these files exist: `install.sh`, `install.ps1`, `install.bat`, `DROCAT.command`, `scripts/FindPath.py`, `src/coana.py`, and `requirements.txt`.
 
 ### 2. Check prerequisites
 
-- Python 3.10-3.11 is supported; **Python 3.11 is recommended**. Do NOT use
-  3.9 (matplotlib 3.10.0 requires >=3.10) or 3.12+ (no wheels for PyQt5
-  5.15.10 / open3d 0.19 / ray 2.39). The env created below pins 3.11, so an
-  existing system Python version does not matter.
-- conda is required. The helper finds a local conda automatically (PATH and
-  common install locations); if none exists it downloads and installs
-  Miniconda into `~/miniconda3` on its own (tell the user this is happening;
-  pass `--no-install` to opt out and install manually from
-  <https://docs.conda.io/miniconda.html> instead).
-- Export `PYTHONNOUSERSITE=1` before running pip installs: otherwise pip
-  treats packages in the user's `~/.local/lib/python3.11/site-packages` as
-  already installed and never installs them into the conda env.
-- Running `scripts/*.py` directly works from any working directory; the
-  toolkit resolves its own project root, so tokens in `token_info_local.txt`
-  are always loaded.
-- Dependency download and token checks need network access. In a sandboxed environment, request escalation for network commands.
+- Python 3.10-3.11 is supported; the installers create Python 3.11.
+- The installers find Conda in common locations or install Miniconda after the user authorizes the download.
+- They set `PYTHONNOUSERSITE=1`, preventing user-site packages from contaminating the environment.
+- Network access is needed for dependencies and online datasets; request sandbox escalation when required.
 
-### 3. Install dependencies
+### 3. Run the one-click installer
 
-Create the conda env with the bundled helper, which handles name conflicts
-(an existing env is never modified or removed):
+- macOS/Linux: `bash install.sh`
+- macOS Finder: double-click `DROCAT.command`
+- Windows: double-click `install.bat`, or run `powershell -NoProfile -ExecutionPolicy Bypass -File install.ps1`
+
+The preferred environment is `drocat-4.4.5`. Reuse it when it already has Python 3.11. If a candidate has another Python version, leave it untouched and use the first free/usable suffix (`drocat-4.4.5-2`, `-3`, ...). Legacy unversioned `drocat` environments are not modified.
+
+The installer installs the pinned platform requirements, removes a legacy `neuronbridge-python` distribution if found, installs DROCAT in editable mode, requires a clean `pip check`, and runs the bundled verifier.
+
+DROCAT bundles `src/neuronbridge_client.py`; do not install the upstream `neuronbridge-python` package. Its Pydantic/Ray/Memray dependency tree is unnecessary and conflicts with the shared release stack.
+
+The legacy helper remains available for automation and now follows the same policy:
 
 ```bash
 python skills/drocat-install/scripts/setup_conda_env.py --name drocat --python 3.11 --version 4.4.5
 ```
 
-- If no env named `drocat` exists, it is created.
-- **If an env named `drocat` already exists**, the script warns the user and
-  creates a fresh env whose name reflects the DROCAT version:
-  `drocat-v4.4.5`; if that is taken too, a free index is appended
-  (`drocat-v4.4.5-2`, `drocat-v4.4.5-3`, ...).
-- The chosen name is printed on the last line as `DROCAT_ENV_NAME=<name>`.
-  Capture it and use it in every `conda activate` / run command below; also
-  tell the user explicitly which env name was used.
-
-Then install (substitute the chosen env name):
-
-```bash
-conda activate <DROCAT_ENV_NAME>
-
-# Linux/macOS:
-pip install -r requirements.txt
-# Windows:
-pip install -r requirements-windows.txt
-
-# NeuronBridge is installed separately per the README:
-pip install neuronbridge-python --no-deps
-
-# Optional (scripts work without it via sys.path manipulation):
-pip install -e .
-```
-
-- If `neuronbridge-python` fails on Windows (memray dependency), record the error, install the remaining dependencies, and continue; report that NeuronBridge scripts may be limited.
-- If `pip install -r requirements.txt` fails on macOS/Linux because memray
-  cannot build (no compiler, unsupported platform): comment out the
-  `neuronbridge-python` line in `requirements.txt`, install the rest, then
-  run `pip install neuronbridge-python --no-deps`. Report that NeuronBridge
-  scripts may be limited.
-- After installing, run `pip check` and confirm no DROCAT-related conflicts
-  are reported (the verifier in step 5 repeats this check automatically).
-  Do NOT upgrade individual packages to "fix" a conflict - the pins are
-  mutually constrained (especially `pydantic~=2.9.1`, required by
-  neuronbridge-python).
-- There is no installer script or launcher on v4.4.5 - the conda commands above ARE the install.
-
 ### 4. Configure tokens
 
-- Copy `token_info.txt` to `token_info_local.txt` (the local file is gitignored and takes precedence - `src/utils/token_manager.py` reads `token_info.txt` first, then `token_info_local.txt`).
-- Ask the user for their tokens; never invent or reuse tokens without permission:
-  - `NEUPRINT_TOKEN` from <https://neuprint.janelia.org/account>
-  - `CAVE_TOKEN` (FlyWire only) from <https://codex.flywire.ai/auth_token>
-- File format:
+Copy `token_info.txt` to the gitignored `token_info_local.txt`. Preserve any existing real tokens. Ask the user before writing secrets; never invent or reuse credentials without permission.
 
-  ```
-  NEUPRINT_TOKEN='...'
-  CAVE_TOKEN='...'
-  ```
+```text
+NEUPRINT_TOKEN='...'
+CAVE_TOKEN='...'
+```
 
-- If `token_info_local.txt` already exists with non-placeholder tokens, keep them.
+- NeuPrint: <https://neuprint.janelia.org/account>
+- CAVE/FlyWire: <https://codex.flywire.ai/auth_token>
 
 ### 5. Verify
 
-Run the bundled verifier with the environment Python (substitute the chosen env name):
-
 ```bash
-conda activate <DROCAT_ENV_NAME>
+conda activate drocat-4.4.5
 python skills/drocat-install/scripts/verify_install.py --project /path/to/repo
 ```
 
-Required checks: project layout, Python version (3.10-3.11), core imports (numpy, pandas, polars, neuprint, neuronbridge, ...), backend module imports (`src/coana.py`, `src/neuronbridge_finder.py`, ...), `pip check` consistency of DROCAT dependencies, token file, vispath subproject. Fix anything reported, then re-run until it passes.
+Required checks include Python 3.10-3.11, installer/script layout, every installed version against the pinned platform manifest, complete dependency consistency, the bundled NeuronBridge client, backend imports, and VisPath. Token configuration is advisory for installation; pass `--require-token` when validating an online-ready workstation.
 
 ### 6. Smoke-test a script
 
-- Edit the query parameters at the top of a script (e.g., `scripts/FindDirect.py` or `scripts/ConnectivityProfiling.py`) or run with its defaults, then:
+Scripts contain editable query parameters. Avoid starting a live dataset workflow unless the user has supplied tokens and expects network/data writes. A normal launch is:
 
-  ```bash
-  conda activate <DROCAT_ENV_NAME>
-  python scripts/FindDirect.py
-  ```
-
-- First run: the dataset auto-downloads on first query (requires token + network, can take minutes). FlyWire FAFB/BANC additionally require manually downloaded data files.
+```bash
+conda run -n drocat-4.4.5 python scripts/FindDirect.py
+```
 
 ## Key facts
 
-- Conda env name: `drocat` (Python 3.11). If `drocat` already existed on the
-  machine, the helper created `drocat-v4.4.5` (or `drocat-v4.4.5-N` if that
-  was also taken) instead - always check the `DROCAT_ENV_NAME=` line from
-  `setup_conda_env.py`.
-- No web UI on v4.4.5; entry points are `scripts/*.py`.
-- Token files: `token_info.txt` (template) + `token_info_local.txt` (user secrets, takes precedence).
-- `vispath-subproject/src` is added to `sys.path` by `scripts/PlotPath.py` and `src/core/fast_graph.py`; no separate pip install is needed.
-- Chrome + WebDriver are only needed for PNG/video exports in `scripts/plot3dSkeleton.py`.
+- No web UI exists on v4.4.5; use `scripts/*.py`.
+- Environment: `drocat-4.4.5`, Python 3.11.
+- Token file: `token_info_local.txt` at repository root.
+- VisPath is loaded from `vispath-subproject/src`; no separate install is needed.
+- Chrome/WebDriver are needed only for PNG/video export workflows.
 
-## Troubleshooting
-
-See [references/project-notes.md](references/project-notes.md) for platform notes and known issues.
+See [references/project-notes.md](references/project-notes.md) for platform notes.

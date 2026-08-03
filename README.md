@@ -156,18 +156,47 @@ analyzer.generate_report()
 
 ## Installation
 
-### Quick Install (Conda Recommended)
+### Option 1: One-Click Install (Recommended)
+
+**macOS** — double-click `DROCAT.command` in Finder, or run:
 
 ```bash
-# Create environment
-conda create -n drocat python=3.11 -y
-conda activate drocat
+chmod +x DROCAT.command install.sh
+./DROCAT.command
+```
+
+**macOS/Linux** — run the terminal installer:
+
+```bash
+chmod +x install.sh
+./install.sh
+```
+
+**Windows** — double-click `install.bat`, or run:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File install.ps1
+```
+
+All entry points share the same installer logic: they find or install Conda,
+create/reuse `drocat-4.4.5` with Python 3.11, install the pinned stack, require
+a clean `pip check`, and run the bundled verifier.
+
+### Option 2: Manual Install
+
+Set `PYTHONNOUSERSITE=1` first (`export PYTHONNOUSERSITE=1` in bash/zsh, or
+`$env:PYTHONNOUSERSITE = "1"` in PowerShell).
+
+```bash
+conda create -n drocat-4.4.5 python=3.11 -y
+conda activate drocat-4.4.5
 
 # Install dependencies
 pip install -r requirements.txt  # Linux/macOS
 # or
 pip install -r requirements-windows.txt # Windows
-pip install neuronbridge-python --no-deps
+pip install -e . --no-deps
+python -m pip check
 ```
 
 ### Agent-Assisted Install (Codex)
@@ -195,7 +224,7 @@ cd drocat
 The agent will:
 
 1. Fetch the repository from [GitHub](https://github.com/Swida-Alba/Drosophila-cross-dataset-connectome-analysis) (branch `v4.4.5`) if it is not already present
-2. Create the `drocat` conda environment (Python 3.11) and install `requirements.txt` (or `requirements-windows.txt`) plus `neuronbridge-python --no-deps`
+2. Run the OS-specific one-click installer and prepare `drocat-4.4.5` (Python 3.11)
 3. Ask you for NeuPrint / CAVE tokens and write them to `token_info_local.txt`
 4. Verify the installation with [`verify_install.py`](skills/drocat-install/scripts/verify_install.py) (Python version, imports, backend modules, token file)
 5. Leave you ready to run any `scripts/*.py` entry point
@@ -203,7 +232,7 @@ The agent will:
 Manual verification (or to re-check an existing install):
 
 ```bash
-conda activate drocat
+conda activate drocat-4.4.5
 python skills/drocat-install/scripts/verify_install.py --project .
 ```
 

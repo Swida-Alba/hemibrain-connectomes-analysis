@@ -16,7 +16,7 @@ Key features:
 - CSV export/import for offline analysis
 
 Dependencies:
-- neuronbridge-python
+- requests (via the bundled lightweight NeuronBridge client)
 - pandas
 
 Example usage:
@@ -123,98 +123,15 @@ except ImportError:
         HAS_IMG2PPTX = False
         img2pptx = None  # type: ignore
 
-# Try to import neuronbridge
-# Apply patch to fix API compatibility issue with pydantic validation
-# (NeuronBridge API added new fields 'defaultSearchLibrary' that the Python client doesn't recognize)
-NEURONBRIDGE_AVAILABLE = False
-
-def _patch_neuronbridge_models():
-    """
-    Patch neuronbridge pydantic models to allow extra fields.
-    
-    The NeuronBridge API has added new fields that the Python client doesn't
-    recognize, causing pydantic validation errors. This patches the models
-    to ignore unknown fields.
-    """
-    try:
-        import neuronbridge.client as nb_client
-        
-        # Get the original CustomSearchConfig class
-        OriginalCustomSearchConfig = nb_client.CustomSearchConfig
-        
-        # Create a new class that allows extra fields
-        from pydantic import BaseModel
-        
-        class PatchedCustomSearchConfig(BaseModel):
-            """Patched version that allows extra fields."""
-            model_config = {'extra': 'ignore'}
-            searchFolder: str = ""
-            lmLibraries: list = []
-            emLibraries: list = []
-        
-        # Replace in the module
-        nb_client.CustomSearchConfig = PatchedCustomSearchConfig
-        
-        # Also need to patch DataStore which contains customSearch
-        OriginalDataStore = nb_client.DataStore
-        
-        class PatchedDataStore(BaseModel):
-            """Patched version that allows extra fields."""
-            model_config = {'extra': 'ignore'}
-            label: str = ""
-            anatomicalArea: str = ""
-            prefixes: dict = {}
-            customSearch: PatchedCustomSearchConfig = None
-            
-            def __init__(self, **data):
-                # Handle customSearch conversion
-                if 'customSearch' in data and data['customSearch'] is not None:
-                    if not isinstance(data['customSearch'], PatchedCustomSearchConfig):
-                        data['customSearch'] = PatchedCustomSearchConfig(**data['customSearch'])
-                super().__init__(**data)
-        
-        nb_client.DataStore = PatchedDataStore
-        
-        # Patch DataConfig
-        OriginalDataConfig = nb_client.DataConfig
-        
-        class PatchedDataConfig(BaseModel):
-            """Patched version that allows extra fields."""
-            model_config = {'extra': 'ignore'}
-            stores: dict = {}
-            
-            def __init__(self, **data):
-                # Convert stores dict values to PatchedDataStore
-                if 'stores' in data:
-                    new_stores = {}
-                    for k, v in data['stores'].items():
-                        if isinstance(v, dict):
-                            new_stores[k] = PatchedDataStore(**v)
-                        else:
-                            new_stores[k] = v
-                    data['stores'] = new_stores
-                super().__init__(**data)
-        
-        nb_client.DataConfig = PatchedDataConfig
-        
-        return True
-    except Exception as e:
-        import warnings
-        warnings.warn(f"Failed to patch neuronbridge models: {e}")
-        return False
-
+# DROCAT only needs the public, read-only metadata subset of NeuronBridge.
+# The bundled client avoids the upstream package's unrelated Ray/Memray and
+# Pydantic 2.9 constraints.
 try:
-    # Apply patches before creating client
-    _patch_neuronbridge_models()
-    from neuronbridge.client import Client as NBClient
-    NEURONBRIDGE_AVAILABLE = True
+    from .neuronbridge_client import Client as NBClient
 except ImportError:
-    warnings.warn(
-        "neuronbridge-python is not installed. "
-        "Install it with: pip install neuronbridge-python"
-    )
-except Exception as e:
-    warnings.warn(f"Failed to initialize neuronbridge: {e}")
+    from neuronbridge_client import Client as NBClient
+
+NEURONBRIDGE_AVAILABLE = True
 
 # Mapping from NeuronBridge library names to our local dataset folder names
 LIBRARY_TO_DATASET = {
@@ -414,11 +331,6 @@ class NeuronBridgeFinder:
     
     def __post_init__(self):
         """Initialize the finder after dataclass initialization."""
-        if not NEURONBRIDGE_AVAILABLE:
-            raise ImportError(
-                "neuronbridge-python is required. Install with: pip install neuronbridge-python"
-            )
-        
         # Validate and normalize match_type (case-insensitive)
         if isinstance(self.match_type, str):
             normalized_match_type = self.match_type.lower().strip()
@@ -3848,12 +3760,13 @@ class NeuronBridgeFinder:
         """
         if hasattr(self._client, 'config') and hasattr(self._client.config, 'stores'):
             stores = self._client.config.stores
-            # stores is a dictionary of DataStore objects
-            if isinstance(stores, dict):
+            # Stores/prefixes support mapping access in both the bundled
+            # client and older upstream-client cache objects.
+            if hasattr(stores, 'items'):
                 for store_key, store in stores.items():
                     if hasattr(store, 'prefixes') and store.prefixes:
                         # prefixes is a dict like {'CDSResults': 'url', ...}
-                        if isinstance(store.prefixes, dict):
+                        if hasattr(store.prefixes, 'items'):
                             for key, url in store.prefixes.items():
                                 if isinstance(url, str):
                                     new_url = url
