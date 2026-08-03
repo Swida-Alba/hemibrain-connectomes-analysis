@@ -1516,6 +1516,14 @@ class FindNeuronConnection:
         self._local_neuron_df_cache = {}
         self._total_incoming_by_type_cache = {}
         self._total_incoming_by_bodyid_cache = {}
+        # Set of bodyId_pre values present in the connection DB, keyed by the
+        # id() of the loaded frame. Rebuilt only when the frame changes -
+        # _query_connection_db previously recomputed it (cast + unique over
+        # the FULL DB) on every fetch call.
+        self._conn_db_pre_id_cache = None
+        # Local FAFB/FlyWire connection table: (mtime, DataFrame), so layer
+        # fetches stop re-reading the multi-million-row CSV each time.
+        self._fafb_local_conn_cache = None
         
         self._vprint('Initializing...', level='full')
         
@@ -2473,12 +2481,19 @@ class FindNeuronConnection:
             return pl.DataFrame(), upstream_bodyIds, []
         
         # Build a set of neurons that actually have connections in the cache
-        # This provides a stricter validation than just trusting neuron_index
-        if isinstance(conn_db, pl.DataFrame):
-             neurons_with_connections = set(conn_db['bodyId_pre'].cast(pl.Utf8).unique().to_list())
+        # This provides a stricter validation than just trusting neuron_index.
+        # Cached per loaded frame: this used to re-cast + unique the FULL DB
+        # (millions of rows) on every fetch call - the dominant cost of
+        # layer-by-layer pathfinding on cached datasets.
+        if self._conn_db_pre_id_cache is not None and self._conn_db_pre_id_cache[0] == id(conn_db):
+            neurons_with_connections = self._conn_db_pre_id_cache[1]
         else:
-             # Fallback if somehow Pandas
-             neurons_with_connections = set(conn_db['bodyId_pre'].astype(str).unique())
+            if isinstance(conn_db, pl.DataFrame):
+                 neurons_with_connections = set(conn_db['bodyId_pre'].cast(pl.Utf8).unique().to_list())
+            else:
+                 # Fallback if somehow Pandas
+                 neurons_with_connections = set(conn_db['bodyId_pre'].astype(str).unique())
+            self._conn_db_pre_id_cache = (id(conn_db), neurons_with_connections)
         
         # Separate cached vs uncached neurons using O(1) dict lookups
         cached_upstream = []
@@ -2916,13 +2931,10 @@ class FindNeuronConnection:
             if 'bodyId' in ndf_complete.columns:
                 ndf_complete['bodyId'] = ndf_complete['bodyId'].astype(str)
         elif os.path.exists(dataset_path):
+            # Cached, mtime-aware load (same table enrichment reads; avoids
+            # re-parsing the CSV for every batch during cache building)
             is_fafb = 'fafb' in self.dataset.lower() or 'flywire' in self.dataset.lower()
-            if is_fafb:
-                ndf_complete = self._read_csv(dataset_path, header=0, index_col=None, dtype={'bodyId': str}, low_memory=False)
-            else:
-                ndf_complete = self._read_csv(dataset_path, header=0, index_col=0, low_memory=False)
-            if 'bodyId' in ndf_complete.columns:
-                ndf_complete['bodyId'] = ndf_complete['bodyId'].astype(str)
+            ndf_complete = self._load_local_neuron_df(dataset_path, is_fafb)
         else:
             ndf_complete = pd.DataFrame(columns=['bodyId', 'type', 'instance', 'post'])
         
@@ -2950,33 +2962,39 @@ class FindNeuronConnection:
         # Check existing in index
         existing_set = set(neuron_index['bodyId'].astype(str).values) if not neuron_index.empty else set()
         
-        # Update existing entries
+        # Update existing entries.
+        # Vectorized single-pass update: the previous per-bodyId loop ran
+        # `neuron_index['bodyId'].astype(str) == bid` (a full-index scan,
+        # re-casting every time) up to 3x per neuron -> O(index x batch),
+        # which dominated bulk cache building.
         now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        for bid in bodyids_str:
-            if bid in existing_set:
-                neuron_index.loc[neuron_index['bodyId'].astype(str) == bid, 'downstream_complete'] = True
-                neuron_index.loc[neuron_index['bodyId'].astype(str) == bid, 'last_fetched'] = now
-                # Update connection count if provided
-                if connection_counts is not None:
-                    count = connection_counts.get(bid, 0)
-                    neuron_index.loc[neuron_index['bodyId'].astype(str) == bid, 'connection_count'] = count
+        existing_bids = [bid for bid in bodyids_str if bid in existing_set]
+        if existing_bids and not neuron_index.empty:
+            index_str = neuron_index['bodyId'].astype(str)
+            hit_mask = index_str.isin(set(existing_bids))
+            neuron_index.loc[hit_mask, 'downstream_complete'] = True
+            neuron_index.loc[hit_mask, 'last_fetched'] = now
+            if connection_counts is not None:
+                count_map = {bid: connection_counts.get(bid, 0) for bid in existing_bids}
+                neuron_index.loc[hit_mask, 'connection_count'] = index_str[hit_mask].map(count_map)
         
         # Add new entries in bulk
         new_entries = []
         for bid in bodyids_str:
-            if bid not in existing_set:
-                info = neuron_info_dict.get(bid, {'type': '', 'instance': '', 'post': 0})
-                # Get connection count from dict if provided, else 0
-                count = connection_counts.get(bid, 0) if connection_counts else 0
-                new_entries.append({
-                    'bodyId': bid,
-                    'type': info['type'],
-                    'instance': info['instance'],
-                    'post': info['post'],
-                    'downstream_complete': True,
-                    'last_fetched': now,
-                    'connection_count': count
-                })
+            if bid in existing_set:
+                continue
+            info = neuron_info_dict.get(bid, {'type': '', 'instance': '', 'post': 0})
+            # Get connection count from dict if provided, else 0
+            count = connection_counts.get(bid, 0) if connection_counts else 0
+            new_entries.append({
+                'bodyId': bid,
+                'type': info['type'],
+                'instance': info['instance'],
+                'post': info['post'],
+                'downstream_complete': True,
+                'last_fetched': now,
+                'connection_count': count
+            })
         
         if new_entries:
             new_df = pd.DataFrame(new_entries)
@@ -3027,21 +3045,14 @@ class FindNeuronConnection:
             self._vprint(f'  ⚠️ Warning: Complete dataset not found, fetching from API...', level='full')
             neuron_df = self._fetch_neurons_local_or_api(all_bodyids, columns=['bodyId', 'type', 'instance'])
         else:
-            # Load complete dataset from CSV
-            # Check if it's FAFB to decide on index_col (FAFB utils saves without index)
+            # Load complete dataset from CSV via the mtime-aware instance
+            # cache. Enrichment runs on EVERY connection fetch (each path
+            # layer, FindDirect, ...); re-reading the multi-MB neuron CSV
+            # from disk each time was a major hot path.
             is_fafb = 'fafb' in self.dataset.lower() or 'flywire' in self.dataset.lower()
-            
-            if is_fafb:
-                ndf_complete = self._read_csv(dataset_path, header=0, index_col=None, dtype={'bodyId': str}, low_memory=False)
-            else:
-                ndf_complete = self._read_csv(dataset_path, header=0, index_col=0, low_memory=False)
-            
-            # Ensure bodyId is string for all datasets (not just FAFB)
-            # This is critical for matching with cached connections which use string bodyIds
-            if 'bodyId' in ndf_complete.columns:
-                ndf_complete['bodyId'] = ndf_complete['bodyId'].astype(str)
+            ndf_complete = self._load_local_neuron_df(dataset_path, is_fafb)
 
-            # Filter to only neurons we need
+            # Filter to only neurons we need (copy: the cached frame is shared)
             neuron_df = ndf_complete[ndf_complete['bodyId'].isin(all_bodyids)].copy()
             
             # Check for missing neurons and fetch from API if needed
@@ -3726,17 +3737,26 @@ class FindNeuronConnection:
                             # Only try local if the directory exists
                             _, conn_file = fafb_utils.prepare_fafb_data(data_dir)
                             
-                            # Load connections
-                            # Optimization: Load once if possible, but here we load on demand
-                            # Use string for IDs
-                            full_conn = self._read_csv(conn_file, dtype={'pre_root_id': str, 'post_root_id': str})
-                            full_conn = full_conn.rename(columns={
-                                'pre_root_id': 'bodyId_pre',
-                                'post_root_id': 'bodyId_post',
-                                'syn_count': 'weight'
-                            })
+                            # Load connections with an mtime-aware cache: the
+                            # FlyWire synapse table has millions of rows and
+                            # was re-parsed on EVERY layer fetch.
+                            try:
+                                conn_mtime = os.path.getmtime(conn_file)
+                            except OSError:
+                                conn_mtime = None
+                            if (self._fafb_local_conn_cache is not None
+                                    and self._fafb_local_conn_cache[0] == conn_mtime):
+                                full_conn = self._fafb_local_conn_cache[1]
+                            else:
+                                full_conn = self._read_csv(conn_file, dtype={'pre_root_id': str, 'post_root_id': str})
+                                full_conn = full_conn.rename(columns={
+                                    'pre_root_id': 'bodyId_pre',
+                                    'post_root_id': 'bodyId_post',
+                                    'syn_count': 'weight'
+                                })
+                                self._fafb_local_conn_cache = (conn_mtime, full_conn)
                             
-                            # Filter by upstream
+                            # Filter by upstream (copy: cached frame is shared)
                             upstream_strs = [str(x) for x in uncached_upstream]
                             api_conn = full_conn[full_conn['bodyId_pre'].isin(upstream_strs)].copy()
                             
