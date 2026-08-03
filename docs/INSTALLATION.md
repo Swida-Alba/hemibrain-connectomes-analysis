@@ -51,12 +51,23 @@ cp -R skills/drocat-install/. ~/.codex/skills/drocat-install/
 
 ## Quick Start
 
+> **Python version:** DROCAT supports Python 3.10-3.11 (3.11 recommended).
+> Python 3.9 and below fail because `matplotlib==3.10.0` requires >=3.10;
+> Python 3.12+ fails because PyQt5 5.15.10 / open3d 0.19 / ray 2.39 ship no
+> wheels for it.
+
 ### Recommended: Using Conda Environment
 
 **Create a new conda environment (recommended for isolation):**
 
 ```bash
-# Create environment with Python 3.11
+# Recommended: conflict-safe helper (warns if an env named 'drocat' already
+# exists and creates a versioned env 'drocat-v4.4.3' instead - appending
+# '-2', '-3', ... if needed - never touching the old env)
+python skills/drocat-install/scripts/setup_conda_env.py --name drocat --python 3.11 --version 4.4.3
+# The chosen name is printed as: DROCAT_ENV_NAME=<name>
+
+# Or manually (fails if 'drocat' already exists):
 conda create -n drocat python=3.11 -y
 
 # Activate the environment
@@ -104,6 +115,10 @@ This will install all necessary dependencies including PyQt5 for fast GUI dialog
 > **Note for Windows users:** The `requirements-windows.txt` file is specifically designed to handle the `memray` incompatibility issue. It includes all the same packages as `requirements.txt` but excludes `neuronbridge-python` (which will be installed separately without dependencies in Step 2).
 
 ### Option 2: Using pip install (Modern Python)
+
+> **macOS/Linux only.** On Windows, `pip install .` fails because the package
+> metadata depends on `neuronbridge-python`, whose `memray` dependency cannot
+> be built on Windows. Windows users must use Option 1 above.
 
 ```bash
 # Standard installation
@@ -515,7 +530,7 @@ python -c "import coana, statvis, vispath; print('✓ Root package works')"
 If you prefer containerized setup:
 
 ```dockerfile
-FROM python:3.9-slim
+FROM python:3.11-slim
 
 WORKDIR /app
 COPY requirements.txt .

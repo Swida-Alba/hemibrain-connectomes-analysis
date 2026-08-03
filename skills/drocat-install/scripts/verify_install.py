@@ -67,6 +67,20 @@ BACKEND_MODULES = [
     "core.fast_graph",
 ]
 
+# Distributions owned by DROCAT (normalized names). `pip check` lines about
+# other packages in the env are treated as noise; lines about these are real
+# install conflicts (e.g. pydantic drift breaking neuronbridge-python).
+DROCAT_DISTS = {
+    "numpy", "pandas", "polars", "scipy", "pyarrow", "plotly", "matplotlib",
+    "seaborn", "opencv-python", "bokeh", "kaleido", "selenium",
+    "webdriver-manager", "networkx", "openpyxl", "tqdm", "requests", "jinja2",
+    "pillow", "pydantic", "python-rapidjson", "pyqt5", "neuprint-python",
+    "navis", "flybrains", "boto3", "reportlab", "python-pptx", "pymupdf",
+    "img2pdf", "k3d", "ipywidgets", "open3d", "caveclient", "cloud-volume",
+    "fast-simplification", "trimesh", "psutil", "xlsxwriter",
+    "neuronbridge-python", "ray", "memray", "hemibrain-connectomes-analysis",
+}
+
 IMPORT_PROBE = """
 import importlib, json
 mods = json.loads('__MODS_JSON__')
@@ -105,6 +119,37 @@ def run_probe(
         return json.loads(proc.stdout.strip().splitlines()[-1])
     except (ValueError, IndexError):
         return {m: f"probe failed: {proc.stderr[-200:]}" for m in modules}
+
+
+def run_pip_check(python_exe: str) -> tuple:
+    """Run `pip check` and return (ok, detail). Only conflicts involving a
+    DROCAT-owned distribution count as failures; unrelated env noise is
+    reported in the detail string but does not fail the check."""
+    try:
+        proc = subprocess.run(
+            [python_exe, "-m", "pip", "check"],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+    except Exception as exc:
+        return True, f"pip check could not run: {exc}"
+    lines = [l.strip() for l in proc.stdout.splitlines() if l.strip()]
+    if not lines:
+        return True, "no conflicts"
+    # A conflict is a DROCAT problem only when a DROCAT-owned distribution is
+    # the one *declaring* the broken requirement (first token of the line),
+    # e.g. "neuronbridge-python 3.3.0 has requirement pydantic~=2.9.1, ...".
+    # Lines where unrelated packages complain about pinned versions (e.g.
+    # "pdfplumber ... requires Pillow>=12") are coexistence noise, not
+    # install failures.
+    drocat_conflicts = [
+        l for l in lines
+        if l.split()[0].lower().replace("_", "-").split("[")[0] in DROCAT_DISTS
+    ]
+    if drocat_conflicts:
+        return False, "; ".join(drocat_conflicts[:5])
+    return True, f"{len(lines)} conflict(s) in unrelated packages (ignored)"
 
 
 def main() -> int:
@@ -153,7 +198,16 @@ def main() -> int:
         )
         version = proc.stdout.strip()
         major_minor = tuple(int(x) for x in version.split("."))
-        check("python version >= 3.9", major_minor >= (3, 9), version)
+        check("python version >= 3.10", major_minor >= (3, 10), version)
+        if major_minor >= (3, 12):
+            checks.append(
+                (
+                    "python version <= 3.11 (recommended)",
+                    False,
+                    f"{version}: PyQt5 5.15.10 / open3d 0.19 / ray 2.39 have no "
+                    "wheels for 3.12+; recreate the env with Python 3.11",
+                )
+            )
     except Exception as exc:
         check("python version", False, str(exc))
 
@@ -175,6 +229,11 @@ def main() -> int:
     )
     for mod, status in backend_results.items():
         check(f"backend import {mod}", status == "ok", status)
+
+    # Dependency consistency (catches drift that imports alone cannot, e.g.
+    # pydantic upgraded past neuronbridge-python's ~=2.9.1 constraint)
+    pip_ok, pip_detail = run_pip_check(python_exe)
+    check("pip check (DROCAT dependencies consistent)", pip_ok, pip_detail)
 
     # Token file
     local_token = project / "token_info_local.txt"

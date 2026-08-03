@@ -42,15 +42,36 @@ git checkout v4.4.3
 
 ### 2. Check prerequisites
 
-- Python 3.9+ and conda are required (Python 3.11 is recommended).
-- If conda is missing, install Miniconda from <https://docs.conda.io/miniconda.html> after user approval.
+- Python 3.10-3.11 is supported; **Python 3.11 is recommended**. Do NOT use
+  3.9 (matplotlib 3.10.0 requires >=3.10) or 3.12+ (no wheels for PyQt5
+  5.15.10 / open3d 0.19 / ray 2.39). The env created below pins 3.11, so an
+  existing system Python version does not matter.
+- conda is required. If conda is missing, install Miniconda from
+  <https://docs.conda.io/miniconda.html> after user approval.
 - Dependency download and token checks need network access. In a sandboxed environment, request escalation for network commands.
 
 ### 3. Install dependencies
 
+Create the conda env with the bundled helper, which handles name conflicts
+(an existing env is never modified or removed):
+
 ```bash
-conda create -n drocat python=3.11 -y
-conda activate drocat
+python skills/drocat-install/scripts/setup_conda_env.py --name drocat --python 3.11 --version 4.4.3
+```
+
+- If no env named `drocat` exists, it is created.
+- **If an env named `drocat` already exists**, the script warns the user and
+  creates a fresh env whose name reflects the DROCAT version:
+  `drocat-v4.4.3`; if that is taken too, a free index is appended
+  (`drocat-v4.4.3-2`, `drocat-v4.4.3-3`, ...).
+- The chosen name is printed on the last line as `DROCAT_ENV_NAME=<name>`.
+  Capture it and use it in every `conda activate` / run command below; also
+  tell the user explicitly which env name was used.
+
+Then install (substitute the chosen env name):
+
+```bash
+conda activate <DROCAT_ENV_NAME>
 
 # Linux/macOS:
 pip install -r requirements.txt
@@ -65,6 +86,16 @@ pip install -e .
 ```
 
 - If `neuronbridge-python` fails on Windows (memray dependency), record the error, install the remaining dependencies, and continue; report that NeuronBridge scripts may be limited.
+- If `pip install -r requirements.txt` fails on macOS/Linux because memray
+  cannot build (no compiler, unsupported platform): comment out the
+  `neuronbridge-python` line in `requirements.txt`, install the rest, then
+  run `pip install neuronbridge-python --no-deps`. Report that NeuronBridge
+  scripts may be limited.
+- After installing, run `pip check` and confirm no DROCAT-related conflicts
+  are reported (the verifier in step 5 repeats this check automatically).
+  Do NOT upgrade individual packages to "fix" a conflict - the pins are
+  mutually constrained (especially `pydantic~=2.9.1`, required by
+  neuronbridge-python).
 - There is no installer script or launcher on v4.4.3 - the conda commands above ARE the install.
 
 ### 4. Configure tokens
@@ -84,21 +115,21 @@ pip install -e .
 
 ### 5. Verify
 
-Run the bundled verifier with the environment Python:
+Run the bundled verifier with the environment Python (substitute the chosen env name):
 
 ```bash
-conda activate drocat
+conda activate <DROCAT_ENV_NAME>
 python skills/drocat-install/scripts/verify_install.py --project /path/to/repo
 ```
 
-Required checks: project layout, Python version, core imports (numpy, pandas, polars, neuprint, neuronbridge, ...), backend module imports (`src/coana.py`, `src/neuronbridge_finder.py`, ...), token file, vispath subproject. Fix anything reported, then re-run until it passes.
+Required checks: project layout, Python version (3.10-3.11), core imports (numpy, pandas, polars, neuprint, neuronbridge, ...), backend module imports (`src/coana.py`, `src/neuronbridge_finder.py`, ...), `pip check` consistency of DROCAT dependencies, token file, vispath subproject. Fix anything reported, then re-run until it passes.
 
 ### 6. Smoke-test a script
 
 - Edit the query parameters at the top of a script (e.g., `scripts/FindDirect.py` or `scripts/ConnectivityProfiling.py`) or run with its defaults, then:
 
   ```bash
-  conda activate drocat
+  conda activate <DROCAT_ENV_NAME>
   python scripts/FindDirect.py
   ```
 
@@ -106,7 +137,10 @@ Required checks: project layout, Python version, core imports (numpy, pandas, po
 
 ## Key facts
 
-- Conda env name: `drocat` (Python 3.11).
+- Conda env name: `drocat` (Python 3.11). If `drocat` already existed on the
+  machine, the helper created `drocat-v4.4.3` (or `drocat-v4.4.3-N` if that
+  was also taken) instead - always check the `DROCAT_ENV_NAME=` line from
+  `setup_conda_env.py`.
 - No web UI on v4.4.3; entry points are `scripts/*.py`.
 - Token files: `token_info.txt` (template) + `token_info_local.txt` (user secrets, takes precedence).
 - `vispath-subproject/src` is added to `sys.path` by `scripts/PlotPath.py` and `src/core/fast_graph.py`; no separate pip install is needed.
