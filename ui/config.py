@@ -10,7 +10,7 @@ import json
 PROJECT_ROOT = Path(__file__).parent.parent
 SCRIPTS_DIR = PROJECT_ROOT / "scripts"
 SRC_DIR = PROJECT_ROOT / "src"
-DEFAULT_OUTPUT_DIR = PROJECT_ROOT.parent / "local_data"
+DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "local_data"
 TOKEN_FILE = PROJECT_ROOT / "token_info.txt"
 LOCAL_CONFIG_FILE = PROJECT_ROOT / "ui" / "local_config.json"
 

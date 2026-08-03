@@ -5637,6 +5637,12 @@ class FindNeuronConnection:
         self._vprint(f'Source neurons ({self.source_fname}) in processing: {len(self.source_df)}', level='simple')
         self._vprint(f'Target neurons ({self.target_fname}) in processing: {len(self.target_df)}', level='simple')
         
+        # Remember whether the user explicitly requested a save folder.
+        # With saveas empty, each method creates its own parameterized folder
+        # (findpath_..., finddirect_...); eagerly creating the auto-named
+        # save_folder here used to leave a stray empty folder like
+        # '<dataset>_<src>_to_<tgt>' next to the real output.
+        save_folder_explicit = bool(self.saveas or self.save_folder)
         if self.saveas:
             if os.path.isabs(self.saveas):
                 self.save_folder = self.saveas
@@ -5653,7 +5659,8 @@ class FindNeuronConnection:
             self.save_folder = os.path.join(self.output_dir, folder_name)
         elif not os.path.isabs(self.save_folder): # if save_folder is not absolute path, save in data_folder with specified relative path and name
             self.save_folder = os.path.join(self.output_dir, self.save_folder)
-        if not os.path.exists(self.save_folder): os.makedirs(self.save_folder)
+        if save_folder_explicit:
+            os.makedirs(self.save_folder, exist_ok=True)
         self._vprint(f'data will be saved in: {self.save_folder}\n', level='simple')
         
         # Prepare parameter dictionary (will be saved in method-specific subfolders)

@@ -1,4 +1,8 @@
 # DROCAT UI Requirements
 # Install with: pip install -r ui/requirements.txt
-
-nicegui>=3.0.0
+#
+# nicegui >=3.5 requires pydantic-core>=2.35 (pydantic>=2.12), which conflicts
+# with neuronbridge-python's ~=2.9.1 declaration - that package is installed
+# with --no-deps and works with the newer pydantic (verified). Keep the UI
+# major pinned so future nicegui majors can't break the UI silently.
+nicegui>=3.5,<4

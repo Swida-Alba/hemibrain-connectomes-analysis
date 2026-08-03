@@ -272,10 +272,10 @@ def palette_editor(
                             "drocat-palette-card"
                             + (" selected" if name == state["palette"] else "")
                         ).on("click", lambda n=name: select_preset(n))
-                    with card:
-                        _render_color_strip(colors, height=18)
-                        ui.label(name).classes("drocat-palette-name")
-                        cards.append((card, name))
+                        with card:
+                            _render_color_strip(colors, height=18)
+                            ui.label(name).classes("drocat-palette-name")
+                            cards.append((card, name))
 
             with ui.row().classes("w-full items-center gap-2"):
                 ui.label("Palette range").classes("text-caption drocat-muted")
