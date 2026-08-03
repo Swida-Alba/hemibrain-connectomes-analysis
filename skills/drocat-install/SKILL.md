@@ -42,7 +42,7 @@ git checkout v4.5.0
 - **Windows:** run `install.ps1` in PowerShell (`powershell -ExecutionPolicy Bypass -File install.ps1`) or `install.bat`.
 - **macOS alternative:** `DROCAT.command` (double-click) creates/activates the env and launches the UI.
 - The launchers are self-healing: `run_ui.sh` / `DROCAT.command` create the env if it is missing.
-- **If a `drocat` env already exists:** Python 3.11 is reused and dependencies are updated in place. A different Python version makes the installer ask whether to recreate the env - recreating removes any other packages installed in it, so always ask the user for approval first. In non-interactive sessions the installer aborts safely instead of deleting.
+- **If a `drocat` env already exists:** never modify or delete it. Warn the user and let the installer create the next free name instead (`drocat-2`, `drocat-3`, ... skipping all names that exist). The launchers resolve the same way, so repeat launches reuse the created `drocat-N` env.
 - If a single dependency fails (e.g., `neuronbridge-python` on Windows, PyQt5 wheels), record the error, install the remaining dependencies, and continue; report the limitation to the user.
 
 ### 4. Configure tokens

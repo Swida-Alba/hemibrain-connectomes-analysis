@@ -6,7 +6,6 @@ REM the web UI inside the environment.
 REM =============================================================================
 setlocal
 
-set ENV_NAME=drocat
 set SCRIPT_DIR=%~dp0
 set CONDA_BIN=
 
@@ -22,21 +21,42 @@ if not defined CONDA_BIN (
     exit /b 1
 )
 
-REM Guard against an existing env with the wrong Python version
-set "ENV_PY="
-for /f "delims=" %%v in ('call %CONDA_BIN% run -n %ENV_NAME% python -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')" 2^>nul') do set "ENV_PY=%%v"
-if defined ENV_PY if not "%ENV_PY%"=="3.11" (
-    echo ERROR: existing env uses Python %ENV_PY% (expected 3.11).
-    echo Recreate it: conda env remove -n drocat -y, then re-run install.bat
+REM Resolve environment: use 'drocat' if it is free/usable; otherwise leave
+REM any existing env untouched and pick the next free name (drocat-2, ...).
+set "ENV_NAME="
+set "N=0"
+:env_resolve
+if "%N%"=="0" (set "CAND=drocat") else (set "CAND=drocat-%N%")
+call %CONDA_BIN% run -n %CAND% python -c "import sys, nicegui; assert sys.version_info[:2]==(3,11)" >nul 2>nul
+if not errorlevel 1 (
+    set "ENV_NAME=%CAND%"
+    goto :env_found
+)
+call %CONDA_BIN% env list | findstr /R /C:"^%CAND% " >nul 2>nul
+if errorlevel 1 (
+    set "ENV_NAME=%CAND%"
+    goto :env_create
+)
+if "%N%"=="0" echo WARNING: existing 'drocat' env is not usable - using a new env.
+set /a N+=1
+if %N% GTR 20 (
+    echo ERROR: could not resolve a usable drocat environment.
     pause
     exit /b 1
 )
+goto :env_resolve
+
+:env_create
+echo Creating environment %ENV_NAME% (first run)...
+call %CONDA_BIN% create -n %ENV_NAME% python=3.11 -y || goto :err
+
+:env_found
+if not "%ENV_NAME%"=="drocat" echo Using environment: %ENV_NAME%
 
 REM First run: create the environment and install dependencies
 call %CONDA_BIN% run -n %ENV_NAME% python -c "import nicegui" >nul 2>nul
 if errorlevel 1 (
-    echo Creating environment and installing dependencies (first run)...
-    call %CONDA_BIN% create -n %ENV_NAME% python=3.11 -y || goto :err
+    echo Installing dependencies (first run)...
     call %CONDA_BIN% run -n %ENV_NAME% --no-capture-output python -m pip install -r "%SCRIPT_DIR%requirements-windows.txt" || goto :err
     call %CONDA_BIN% run -n %ENV_NAME% --no-capture-output python -m pip install neuronbridge-python --no-deps
     call %CONDA_BIN% run -n %ENV_NAME% --no-capture-output python -m pip install -r "%SCRIPT_DIR%ui\requirements.txt" || goto :err

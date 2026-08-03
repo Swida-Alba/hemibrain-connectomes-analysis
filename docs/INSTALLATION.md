@@ -52,12 +52,13 @@ cp -R skills/drocat-install/. ~/.codex/skills/drocat-install/
 
 **If a `drocat` environment already exists on this machine:**
 
-- Python **3.11** → the installer reuses it and updates dependencies in place.
-- Any other Python version → the installer warns and asks whether to
-  **recreate** the environment (this removes any other packages installed in
-  it). Answering No aborts safely; non-interactive runs never delete it.
-- The launchers (`run_ui.sh`, `run_ui.bat`) refuse to start with a
-  wrong-Python env and tell you how to fix it.
+- The installer warns and **never touches the existing env** - it creates a
+  new environment with the next free name instead: `drocat-2`, `drocat-3`,
+  ... (skipping every name that already exists).
+- The launchers (`run_ui.sh`, `run_ui.bat`, `DROCAT.command`) resolve the
+  same way: they use `drocat` only if it is free/usable, otherwise the next
+  available `drocat-N`, and create it on first launch.
+- Existing environments are never modified or deleted.
 
 ### Recommended: Using Conda Environment
 

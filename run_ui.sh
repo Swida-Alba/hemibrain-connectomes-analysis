@@ -9,7 +9,6 @@
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ENV_NAME="drocat"
 
 echo "Starting DROCAT UI..."
 
@@ -36,21 +35,34 @@ source "$(dirname "$(dirname "$CONDA_BIN")")/etc/profile.d/conda.sh" 2>/dev/null
     eval "$($CONDA_BIN shell.bash hook)"
 
 # ---------------------------------------------------------------------------
-# Create environment on first run
+# Resolve environment: use 'drocat' if it is free/usable; otherwise leave the
+# existing env untouched and pick the next free name (drocat-2, drocat-3, ...).
 # ---------------------------------------------------------------------------
-if ! conda env list | grep -q "^${ENV_NAME} "; then
-    echo "Conda environment '$ENV_NAME' not found. Creating it (one-time setup)..."
-    conda create -n "$ENV_NAME" python=3.11 -y
-fi
-
-conda activate "$ENV_NAME"
-
-PYVER="$(python -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")' 2>/dev/null || echo '')"
-if [[ -n "$PYVER" && "$PYVER" != "3.11" ]]; then
-    echo "ERROR: the existing '$ENV_NAME' env uses Python $PYVER (expected 3.11)." >&2
-    echo "Recreate it with: conda env remove -n $ENV_NAME -y && ./install.sh" >&2
+ENV_NAME=""
+env_num=0
+while [[ -z "$ENV_NAME" && $env_num -le 20 ]]; do
+    if [[ $env_num -eq 0 ]]; then candidate="drocat"; else candidate="drocat-${env_num}"; fi
+    if conda run -n "$candidate" python -c "import sys, nicegui; assert sys.version_info[:2]==(3,11)" >/dev/null 2>&1; then
+        ENV_NAME="$candidate"
+    elif ! conda env list | grep -qE "^${candidate} "; then
+        echo "Conda environment '$candidate' not found. Creating it (one-time setup)..."
+        conda create -n "$candidate" python=3.11 -y
+        ENV_NAME="$candidate"
+    else
+        if [[ $env_num -eq 0 ]]; then
+            echo "WARNING: existing 'drocat' env is not usable (wrong Python or missing deps) - using a new env."
+        fi
+        env_num=$((env_num + 1))
+    fi
+done
+if [[ -z "$ENV_NAME" ]]; then
+    echo "ERROR: could not resolve a usable drocat environment." >&2
     exit 1
 fi
+if [[ "$ENV_NAME" != "drocat" ]]; then
+    echo "Using environment: $ENV_NAME"
+fi
+conda activate "$ENV_NAME"
 
 # ---------------------------------------------------------------------------
 # Install dependencies if missing

@@ -112,38 +112,17 @@ if (-not $CondaPath) {
 Write-Host ""
 Write-Step "2/5" "Creating conda environment '$EnvName'..."
 
-# Check if environment exists
+# If 'drocat' already exists, never touch it: warn and pick the next free
+# name (drocat-2, drocat-3, ...) so no environment name conflicts occur.
 $EnvList = & $CondaPath env list 2>$null
-if ($EnvList -match $EnvName) {
-    Write-Warning-Custom "Environment '$EnvName' already exists - checking Python version..."
-    $EnvPy = & $CondaPath run -n $EnvName python -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')" 2>$null
-    if ($EnvPy -eq $PythonVersion) {
-        Write-Success "Existing env uses Python $EnvPy - reusing it (dependencies will be updated in place)."
-    }
-    else {
-        Write-Warning-Custom "Existing env uses Python $EnvPy (expected $PythonVersion)."
-        Write-Host "Recreating the env will remove any other packages installed in it." -ForegroundColor Yellow
-        if ([Console]::IsInputRedirected) {
-            $Answer = ""
-            Write-Warning-Custom "Non-interactive session detected - not recreating automatically."
-        }
-        else {
-            $Answer = Read-Host "Recreate the env with Python $PythonVersion? [y/N]"
-        }
-        if ($Answer -eq "y" -or $Answer -eq "Y") {
-            Write-Host "Removing existing env..."
-            & $CondaPath env remove -n $EnvName -y
-            & $CondaPath create -n $EnvName python=$PythonVersion -y
-        }
-        else {
-            Write-Host "Aborting. To fix manually: conda env remove -n $EnvName -y, then re-run this installer." -ForegroundColor Red
-            exit 1
-        }
-    }
+if ($EnvList -match "^$EnvName\s") {
+    Write-Warning-Custom "Conda env '$EnvName' already exists - leaving it untouched."
+    $envNum = 2
+    while ($EnvList -match "^$EnvName-$envNum\s") { $envNum++ }
+    $EnvName = "$EnvName-$envNum"
+    Write-Success "Using a new environment instead: $EnvName"
 }
-else {
-    & $CondaPath create -n $EnvName python=$PythonVersion -y
-}
+& $CondaPath create -n $EnvName python=$PythonVersion -y
 
 Write-Success "Environment ready (all steps run inside the env via 'conda run')"
 
@@ -210,7 +189,6 @@ $LauncherContent = @"
 @echo off
 REM DROCAT UI Launcher
 setlocal
-set ENV_NAME=$EnvName
 set SCRIPT_DIR=%~dp0
 set CONDA_BIN=
 where conda >nul 2>nul && set CONDA_BIN=conda
@@ -221,18 +199,36 @@ if not defined CONDA_BIN (
     pause
     exit /b 1
 )
-set "ENV_PY="
-for /f "delims=" %%v in ('call %CONDA_BIN% run -n %ENV_NAME% python -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')" 2^>nul') do set "ENV_PY=%%v"
-if defined ENV_PY if not "%ENV_PY%"=="3.11" (
-    echo ERROR: existing env uses Python %ENV_PY% (expected 3.11).
-    echo Recreate it: conda env remove -n drocat -y, then re-run install.bat
+set "ENV_NAME="
+set "N=0"
+:env_resolve
+if "%N%"=="0" (set "CAND=drocat") else (set "CAND=drocat-%N%")
+call %CONDA_BIN% run -n %CAND% python -c "import sys, nicegui; assert sys.version_info[:2]==(3,11)" >nul 2>nul
+if not errorlevel 1 (
+    set "ENV_NAME=%CAND%"
+    goto :env_found
+)
+call %CONDA_BIN% env list | findstr /R /C:"^%CAND% " >nul 2>nul
+if errorlevel 1 (
+    set "ENV_NAME=%CAND%"
+    goto :env_create
+)
+if "%N%"=="0" echo WARNING: existing 'drocat' env is not usable - using a new env.
+set /a N+=1
+if %N% GTR 20 (
+    echo ERROR: could not resolve a usable drocat environment.
     pause
     exit /b 1
 )
+goto :env_resolve
+:env_create
+echo Creating environment %ENV_NAME% (first run)...
+call %CONDA_BIN% create -n %ENV_NAME% python=3.11 -y || goto :err
+:env_found
+if not "%ENV_NAME%"=="drocat" echo Using environment: %ENV_NAME%
 call %CONDA_BIN% run -n %ENV_NAME% python -c "import nicegui" >nul 2>nul
 if errorlevel 1 (
-    echo Creating environment and installing dependencies (first run)...
-    call %CONDA_BIN% create -n %ENV_NAME% python=3.11 -y || goto :err
+    echo Installing dependencies (first run)...
     call %CONDA_BIN% run -n %ENV_NAME% --no-capture-output python -m pip install -r "%SCRIPT_DIR%requirements-windows.txt" || goto :err
     call %CONDA_BIN% run -n %ENV_NAME% --no-capture-output python -m pip install neuronbridge-python --no-deps
     call %CONDA_BIN% run -n %ENV_NAME% --no-capture-output python -m pip install -r "%SCRIPT_DIR%ui\requirements.txt" || goto :err

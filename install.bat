@@ -71,31 +71,24 @@ REM ============================================================================
 echo.
 echo [2/5] Creating conda environment '%ENV_NAME%'...
 
-call conda env list | findstr /C:"%ENV_NAME%" >nul 2>nul
-if %ERRORLEVEL% EQU 0 (
-    echo Environment '%ENV_NAME%' already exists. Checking Python version...
-    set "ENV_PY="
-    for /f "delims=" %%v in ('call conda run -n %ENV_NAME% python -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')" 2^>nul') do set "ENV_PY=%%v"
-    if "!ENV_PY!"=="%PYTHON_VERSION%" (
-        echo Reusing existing env ^(Python %PYTHON_VERSION%^). Dependencies will be updated in place.
-    ) else (
-        echo [WARN] Existing env uses Python !ENV_PY! ^(expected %PYTHON_VERSION%^).
-        echo Recreating the env will remove any other packages installed in it.
-        set "RECREATE="
-        set /p RECREATE="Recreate the env with Python %PYTHON_VERSION%? [y/N] "
-        if /i "!RECREATE!"=="y" (
-            echo Removing existing env...
-            call conda env remove -n %ENV_NAME% -y
-            call conda create -n %ENV_NAME% python=%PYTHON_VERSION% -y
-        ) else (
-            echo Aborting. To fix manually: conda env remove -n %ENV_NAME% -y, then re-run install.bat
-            pause
-            exit /b 1
-        )
-    )
-) else (
-    call conda create -n %ENV_NAME% python=%PYTHON_VERSION% -y
-)
+REM If 'drocat' already exists, never touch it: warn and pick the next free
+REM name (drocat-2, drocat-3, ...) so no environment name conflicts occur.
+call conda env list > "%TEMP%\drocat_envlist.txt" 2>nul
+set "ENV_NAME=drocat"
+findstr /R /C:"^drocat " "%TEMP%\drocat_envlist.txt" >nul 2>nul
+if errorlevel 1 goto :env_create
+echo [WARN] Conda env 'drocat' already exists - leaving it untouched.
+set ENV_NUM=2
+:env_loop
+findstr /R /C:"^drocat-!ENV_NUM! " "%TEMP%\drocat_envlist.txt" >nul 2>nul
+if errorlevel 1 goto :env_ready
+set /a ENV_NUM+=1
+goto :env_loop
+:env_ready
+set "ENV_NAME=drocat-!ENV_NUM!"
+:env_create
+echo Using environment: !ENV_NAME!
+call conda create -n !ENV_NAME! python=%PYTHON_VERSION% -y
 
 call conda activate %ENV_NAME%
 
@@ -169,18 +162,36 @@ echo where conda ^>nul 2^>nul ^&^& set CONDA_BIN=conda
 echo if not defined CONDA_BIN if exist "%%USERPROFILE%%\miniconda3\Scripts\conda.exe" set CONDA_BIN=%%USERPROFILE%%\miniconda3\Scripts\conda.exe
 echo if not defined CONDA_BIN if exist "%%USERPROFILE%%\anaconda3\Scripts\conda.exe" set CONDA_BIN=%%USERPROFILE%%\anaconda3\Scripts\conda.exe
 echo if not defined CONDA_BIN ^(echo ERROR: conda not found. Run install.bat first. ^& pause ^& exit /b 1^)
-echo set "ENV_PY="
-echo for /f "delims=" %%%%v in ('call %%CONDA_BIN%% run -n %%ENV_NAME%% python -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')" 2^>nul') do set "ENV_PY=%%%%v"
-echo if defined ENV_PY if not "%%ENV_PY%%"=="3.11" ^(
-echo     echo ERROR: existing env uses Python %%ENV_PY%% ^(expected 3.11^).
-echo     echo Recreate it: conda env remove -n drocat -y, then re-run install.bat
+echo set "ENV_NAME="
+echo set "N=0"
+echo :env_resolve
+echo if "%%N%%"=="0" ^(set "CAND=drocat"^) else ^(set "CAND=drocat-%%N%%"^)
+echo call %%CONDA_BIN%% run -n %%CAND%% python -c "import sys, nicegui; assert sys.version_info[:2]==(3,11)" ^>nul 2^>nul
+echo if not errorlevel 1 ^(
+echo     set "ENV_NAME=%%CAND%%"
+echo     goto :env_found
+echo ^)
+echo call %%CONDA_BIN%% env list ^| findstr /R /C:"^%%CAND%% " ^>nul 2^>nul
+echo if errorlevel 1 ^(
+echo     set "ENV_NAME=%%CAND%%"
+echo     goto :env_create
+echo ^)
+echo if "%%N%%"=="0" echo WARNING: existing 'drocat' env is not usable - using a new env.
+echo set /a N+=1
+echo if %%N%% GTR 20 ^(
+echo     echo ERROR: could not resolve a usable drocat environment.
 echo     pause
 echo     exit /b 1
 echo ^)
+echo goto :env_resolve
+echo :env_create
+echo echo Creating environment %%ENV_NAME%% ^(first run^)...
+echo call %%CONDA_BIN%% create -n %%ENV_NAME%% python=3.11 -y ^|^| goto :err
+echo :env_found
+echo if not "%%ENV_NAME%%"=="drocat" echo Using environment: %%ENV_NAME%%
 echo call %%CONDA_BIN%% run -n %%ENV_NAME%% python -c "import nicegui" ^>nul 2^>nul
 echo if errorlevel 1 ^(
-echo     echo Creating environment and installing dependencies ^(first run^)...
-echo     call %%CONDA_BIN%% create -n %%ENV_NAME%% python=3.11 -y ^|^| goto :err
+echo     echo Installing dependencies ^(first run^)...
 echo     call %%CONDA_BIN%% run -n %%ENV_NAME%% --no-capture-output python -m pip install -r "%%SCRIPT_DIR%%requirements-windows.txt" ^|^| goto :err
 echo     call %%CONDA_BIN%% run -n %%ENV_NAME%% --no-capture-output python -m pip install neuronbridge-python --no-deps
 echo     call %%CONDA_BIN%% run -n %%ENV_NAME%% --no-capture-output python -m pip install -r "%%SCRIPT_DIR%%ui\requirements.txt" ^|^| goto :err

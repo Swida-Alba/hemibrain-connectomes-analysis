@@ -111,39 +111,24 @@ if [[ -n "$CONDA_BIN" ]]; then
 fi
 
 # =============================================================================
-# Step 2: Create Conda Environment
+# Step 2: Select / Create Conda Environment
 # =============================================================================
-echo -e "\n${BLUE}[2/5] Creating conda environment '${ENV_NAME}'...${NC}"
+echo -e "\n${BLUE}[2/5] Selecting conda environment...${NC}"
 
-# Check if environment already exists
-if conda env list | grep -q "^${ENV_NAME} "; then
-    echo -e "${YELLOW}Environment '${ENV_NAME}' already exists. Checking Python version...${NC}"
-    ENV_PY="$("$CONDA_BIN" run -n "$ENV_NAME" python -c \
-        'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")' \
-        2>/dev/null || echo 'unknown')"
-    if [[ "$ENV_PY" == "$PYTHON_VERSION" ]]; then
-        echo -e "${GREEN}✓ Existing env uses Python ${ENV_PY} - reusing it. Dependencies will be updated in place.${NC}"
-    else
-        echo -e "${RED}The existing '${ENV_NAME}' env uses Python ${ENV_PY} (expected ${PYTHON_VERSION}).${NC}"
-        echo -e "${YELLOW}Reusing it may break pinned dependencies; recreating it removes any other packages in that env.${NC}"
-        if [[ -t 0 ]]; then
-            read -r -p "Recreate the '${ENV_NAME}' env with Python ${PYTHON_VERSION}? [y/N] " answer
-        else
-            answer=""
-            echo -e "${YELLOW}Non-interactive session detected - not recreating automatically.${NC}"
-        fi
-        if [[ "$answer" == "y" || "$answer" == "Y" ]]; then
-            echo "Removing existing env and creating a fresh one..."
-            conda env remove -n "$ENV_NAME" -y
-            conda create -n "$ENV_NAME" python="$PYTHON_VERSION" -y
-        else
-            echo -e "${RED}Aborting. To fix manually: conda env remove -n ${ENV_NAME} -y, then re-run ./install.sh${NC}"
-            exit 1
-        fi
-    fi
-else
-    conda create -n "$ENV_NAME" python="$PYTHON_VERSION" -y
+# If 'drocat' already exists, NEVER touch it: warn and pick the next free
+# name (drocat-2, drocat-3, ...) so no environment name conflicts occur.
+if conda env list | grep -qE "^${ENV_NAME} "; then
+    echo -e "${YELLOW}WARNING: conda env '${ENV_NAME}' already exists - leaving it untouched.${NC}"
+    env_num=2
+    while conda env list | grep -qE "^${ENV_NAME}-${env_num} "; do
+        env_num=$((env_num + 1))
+    done
+    ENV_NAME="${ENV_NAME}-${env_num}"
+    echo -e "${GREEN}Using a new environment instead: '${ENV_NAME}'${NC}"
 fi
+
+echo -e "${BLUE}Creating conda environment '${ENV_NAME}' (Python ${PYTHON_VERSION})...${NC}"
+conda create -n "$ENV_NAME" python="$PYTHON_VERSION" -y
 conda activate "$ENV_NAME" 2>/dev/null || source activate "$ENV_NAME"
 
 echo -e "${GREEN}✓ Environment ready (Python $(python --version 2>&1 | cut -d' ' -f2))${NC}"
@@ -197,7 +182,6 @@ cat > "$SCRIPT_DIR/run_ui.sh" << 'EOF'
 # DROCAT UI Launcher (self-healing: creates the env on first run)
 set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ENV_NAME="drocat"
 
 CONDA_BIN="$(command -v conda 2>/dev/null || true)"
 if [[ -z "$CONDA_BIN" && -f "$HOME/miniconda3/bin/conda" ]]; then
@@ -213,18 +197,33 @@ fi
 source "$(dirname "$(dirname "$CONDA_BIN")")/etc/profile.d/conda.sh" 2>/dev/null || \
     eval "$($CONDA_BIN shell.bash hook)"
 
-if ! conda env list | grep -q "^${ENV_NAME} "; then
-    echo "Creating conda environment '$ENV_NAME' (one-time setup)..."
-    conda create -n "$ENV_NAME" python=3.11 -y
-fi
-conda activate "$ENV_NAME"
-
-PYVER="$(python -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")' 2>/dev/null || echo '')"
-if [[ -n "$PYVER" && "$PYVER" != "3.11" ]]; then
-    echo "ERROR: the existing '$ENV_NAME' env uses Python $PYVER (expected 3.11)." >&2
-    echo "Recreate it with: conda env remove -n $ENV_NAME -y && ./install.sh" >&2
+# Resolve the environment: use 'drocat' if it does not exist yet; otherwise
+# leave it untouched and use the next free name (drocat-2, drocat-3, ...).
+ENV_NAME=""
+env_num=0
+while [[ -z "$ENV_NAME" && $env_num -le 20 ]]; do
+    if [[ $env_num -eq 0 ]]; then candidate="drocat"; else candidate="drocat-${env_num}"; fi
+    if conda run -n "$candidate" python -c "import sys, nicegui; assert sys.version_info[:2]==(3,11)" >/dev/null 2>&1; then
+        ENV_NAME="$candidate"
+    elif ! conda env list | grep -qE "^${candidate} "; then
+        echo "Creating conda environment '$candidate' (one-time setup)..."
+        conda create -n "$candidate" python=3.11 -y
+        ENV_NAME="$candidate"
+    else
+        if [[ $env_num -eq 0 ]]; then
+            echo "WARNING: existing 'drocat' env is not usable (wrong Python or missing deps) - using a new env."
+        fi
+        env_num=$((env_num + 1))
+    fi
+done
+if [[ -z "$ENV_NAME" ]]; then
+    echo "ERROR: could not resolve a usable drocat environment." >&2
     exit 1
 fi
+if [[ "$ENV_NAME" != "drocat" ]]; then
+    echo "Using environment: $ENV_NAME"
+fi
+conda activate "$ENV_NAME"
 
 if ! python -c "import nicegui, pandas, numpy, neuprint" &> /dev/null; then
     echo "Installing dependencies (first run)..."
