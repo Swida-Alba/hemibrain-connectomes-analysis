@@ -1340,6 +1340,10 @@ class ConnectivityProfiler:
         # Pre-computed at connection cache load time for vectorized lookups
         self._type_normalization_cache: Dict[str, Dict[str, str]] = {}
         
+        # Type -> row-position index for type-based connection queries
+        # dataset_safe -> {'conn_id': int, 'pre': {type -> [rows]}, 'post': {...}}
+        self._type_row_index: Dict[str, Dict[str, Any]] = {}
+        
         # Threading lock for cache writes (prevents corruption during parallel processing)
         import threading
         self._cache_write_lock = threading.Lock()
@@ -3049,48 +3053,88 @@ class ConnectivityProfiler:
             
             return upstream, downstream
         
-        # For type-based queries (string), fall back to O(n) filtering
+        # For type-based queries (string), resolve types via the lazily built
+        # type->row index instead of full-table regex scans per query.
         elif isinstance(neuron, str):
-            # Apply min_syn filter first
-            if min_syn > 0:
-                conn_df = conn_df[conn_df['weight'] >= min_syn]
+            if 'type_pre' not in conn_df.columns:
+                return pd.DataFrame(), pd.DataFrame()
+            
+            type_idx = self._get_type_row_index(conn_df, safe_name)
             
             if '.*' in neuron or '*' in neuron:
+                import re
                 pattern = neuron.replace('.*', '.*').replace('*', '.*')
-                if 'type_pre' in conn_df.columns:
-                    mask_up = conn_df['type_post'].astype(str).str.match(pattern, na=False)
-                    mask_down = conn_df['type_pre'].astype(str).str.match(pattern, na=False)
-                else:
-                    return pd.DataFrame(), pd.DataFrame()
+                rx = re.compile(pattern)
+                # Upstream of typed neurons: their type lives in type_post
+                up_types = [t for t in type_idx['post'] if rx.match(t)]
+                down_types = [t for t in type_idx['pre'] if rx.match(t)]
             else:
-                if 'type_pre' in conn_df.columns:
-                    mask_up = conn_df['type_post'] == neuron
-                    mask_down = conn_df['type_pre'] == neuron
-                else:
-                    return pd.DataFrame(), pd.DataFrame()
+                up_types = [neuron] if neuron in type_idx['post'] else []
+                down_types = [neuron] if neuron in type_idx['pre'] else []
             
-            upstream = conn_df[mask_up].copy()
-            if not upstream.empty:
-                upstream = upstream.rename(columns={
-                    'bodyId_pre': 'partner_bodyId',
-                    'type_pre': 'partner_type',
-                    'bodyId_post': 'neuron_bodyId',
-                })
-                upstream = upstream[['partner_bodyId', 'partner_type', 'neuron_bodyId', 'weight']]
+            up_indices = [i for t in up_types for i in type_idx['post'][t]]
+            down_indices = [i for t in down_types for i in type_idx['pre'][t]]
             
-            downstream = conn_df[mask_down].copy()
-            if not downstream.empty:
-                downstream = downstream.rename(columns={
-                    'bodyId_post': 'partner_bodyId',
-                    'type_post': 'partner_type',
-                    'bodyId_pre': 'neuron_bodyId',
-                })
-                downstream = downstream[['partner_bodyId', 'partner_type', 'neuron_bodyId', 'weight']]
+            if up_indices:
+                upstream = conn_df.iloc[up_indices].copy()
+                if min_syn > 0:
+                    upstream = upstream[upstream['weight'] >= min_syn]
+                if not upstream.empty:
+                    upstream = upstream.rename(columns={
+                        'bodyId_pre': 'partner_bodyId',
+                        'type_pre': 'partner_type',
+                        'bodyId_post': 'neuron_bodyId',
+                    })
+                    upstream = upstream[['partner_bodyId', 'partner_type', 'neuron_bodyId', 'weight']]
+            else:
+                upstream = pd.DataFrame()
+            
+            if down_indices:
+                downstream = conn_df.iloc[down_indices].copy()
+                if min_syn > 0:
+                    downstream = downstream[downstream['weight'] >= min_syn]
+                if not downstream.empty:
+                    downstream = downstream.rename(columns={
+                        'bodyId_post': 'partner_bodyId',
+                        'type_post': 'partner_type',
+                        'bodyId_pre': 'neuron_bodyId',
+                    })
+                    downstream = downstream[['partner_bodyId', 'partner_type', 'neuron_bodyId', 'weight']]
+            else:
+                downstream = pd.DataFrame()
             
             return upstream, downstream
         
         else:
             raise ValueError(f"Unsupported neuron type: {type(neuron)}")
+    
+    def _get_type_row_index(self, conn_df: pd.DataFrame, safe_name: str) -> Dict[str, Dict[str, List[int]]]:
+        """
+        Lazily build (and cache) type -> row-position maps for the connection
+        table, used by type-based queries.
+        
+        Type queries previously scanned the FULL table with a regex per query
+        (O(rows) pandas str.match on millions of rows, repeated for every
+        neuron type in a profiling run). With the index, a type query costs
+        O(types) lookup + O(matching rows) iloc, built once per dataset.
+        """
+        cached = self._type_row_index.get(safe_name)
+        # Rebuild if the underlying frame object changed (cache reload)
+        if cached is not None and cached.get('conn_id') == id(conn_df):
+            return cached
+        
+        pre_map: Dict[str, List[int]] = {}
+        post_map: Dict[str, List[int]] = {}
+        if 'type_pre' in conn_df.columns and 'type_post' in conn_df.columns:
+            positions = pd.Series(np.arange(len(conn_df)))
+            for t, idx_arr in positions.groupby(conn_df['type_pre'].astype(str)).indices.items():
+                pre_map[t] = idx_arr.tolist()
+            for t, idx_arr in positions.groupby(conn_df['type_post'].astype(str)).indices.items():
+                post_map[t] = idx_arr.tolist()
+        
+        entry = {'conn_id': id(conn_df), 'pre': pre_map, 'post': post_map}
+        self._type_row_index[safe_name] = entry
+        return entry
     
     def _fetch_2hop_partners(
         self,
@@ -3203,11 +3247,37 @@ class ConnectivityProfiler:
             
             # Ensure consistent type for bodyId column - cast to Int64 to match untyped_bid
             # This fixes "cannot compare string with numeric type (i32)" error
+            cast_failed = False
             try:
                 pl_df = pl_df.with_columns(pl.col(source_bid_col).cast(pl.Int64))
             except Exception:
-                # If cast fails, keep as-is (will handle comparison differently)
-                pass
+                # Keep as-is and compare with strings below
+                cast_failed = True
+            
+            # Single grouped top-k aggregation for ALL bodyIds at once.
+            # The previous implementation ran pl_df.filter(...) per untyped
+            # bodyId - a full scan of the table for each one (O(B x rows)).
+            # group_by + per-group sort/head computes the same per-bodyId
+            # top-k-then-aggregate result in one pass.
+            per_bid = (
+                pl_df
+                .sort([source_bid_col, 'weight'], descending=[False, True])
+                .group_by(source_bid_col, maintain_order=True)
+                .agg(
+                    pl.col('partner_type_normalized')
+                    .sort_by(pl.col('weight'), descending=True)
+                    .head(top_k_2hop)
+                    .alias('top_types'),
+                    pl.col('weight')
+                    .sort_by(pl.col('weight'), descending=True)
+                    .head(top_k_2hop)
+                    .alias('top_weights'),
+                )
+            )
+            per_bid_map = dict(zip(
+                per_bid[source_bid_col].to_list(),
+                zip(per_bid['top_types'].to_list(), per_bid['top_weights'].to_list()),
+            ))
             
             # Process each untyped bodyId
             for untyped_bid in untyped_bodyids:
@@ -3215,33 +3285,30 @@ class ConnectivityProfiler:
                     results[untyped_bid] = ({}, {})
                     continue
                 
-                # Filter for this bodyId - ensure consistent types
                 try:
-                    bid_df = pl_df.filter(pl.col(source_bid_col) == int(untyped_bid))
+                    key = str(untyped_bid) if cast_failed else int(untyped_bid)
                 except (ValueError, TypeError):
-                    # Fallback to string comparison
-                    bid_df = pl_df.filter(pl.col(source_bid_col).cast(pl.Utf8) == str(untyped_bid))
-                
-                if len(bid_df) == 0:
+                    key = str(untyped_bid)
+                entry = per_bid_map.get(key)
+                if entry is None and not cast_failed:
+                    # Defensive: retry with string key if int() succeeded but
+                    # the column somehow retained string values.
+                    entry = per_bid_map.get(str(untyped_bid))
+                if entry is None:
                     results[untyped_bid] = ({}, {})
                     continue
                 
-                # Take top-k by weight
-                bid_df = bid_df.sort('weight', descending=True).head(top_k_2hop)
+                top_types, top_weights = entry
                 
-                # Aggregate by type
-                aggregated = (
-                    bid_df
-                    .group_by('partner_type_normalized')
-                    .agg(pl.col('weight').sum())
-                )
+                # Aggregate the top-k rows by type
+                agg = {}
+                for t, w in zip(top_types, top_weights):
+                    agg[t] = agg.get(t, 0.0) + float(w)
                 
                 # Normalize weights
-                total_weight = aggregated['weight'].sum()
+                total_weight = sum(agg.values())
                 if total_weight > 0:
-                    types = aggregated['partner_type_normalized'].to_list()
-                    weights = aggregated['weight'].to_list()
-                    weights_dict = {t: w / total_weight for t, w in zip(types, weights)}
+                    weights_dict = {t: w / total_weight for t, w in agg.items()}
                 else:
                     weights_dict = {}
                 
@@ -3368,9 +3435,13 @@ class ConnectivityProfiler:
             conn_df.loc[untyped_mask, 'partner_type'] = 'untyped'
         
         if conn_df.empty:
-            # Round 6: Return with untyped bodyids even if no typed partners
+            # Round 6: Return with untyped bodyids even if no typed partners.
+            # NOTE: must return all 11 elements (including typed_bodyids_dict)
+            # - callers unpack 11 values, and returning 10 here used to raise
+            # ValueError, silently dropping every neuron with only-untyped
+            # partners from batch profiling.
             return ({}, {}, untyped_count, untyped_weight / total_weight if total_weight > 0 else 0.0, 
-                    total_weight, 0, 0, {}, top_k, untyped_bodyids_dict)
+                    total_weight, 0, 0, {}, top_k, untyped_bodyids_dict, {})
         
         # Apply fuzzy matching to partner types using vectorized lookup
         if self.config.fuzzy_match.enabled:
@@ -3388,20 +3459,36 @@ class ConnectivityProfiler:
         max_k = top_k * self.config.max_expansion_factor
         
         if self.config.dynamic_expansion:
-            # Sort by weight first
-            conn_df = conn_df.sort_values('weight', ascending=False)
+            # Sort by weight first (reset index: positional math below relies
+            # on a clean RangeIndex)
+            conn_df = conn_df.sort_values('weight', ascending=False, ignore_index=True)
             
-            # Initial selection
-            selected = conn_df.head(k_used)
-            unique_types = selected['partner_type_normalized'].nunique()
+            # Single-pass expansion: the old loop re-ran head(k).nunique()
+            # for k += 5 steps (quadratic work). The position where the
+            # top_m-th distinct type first appears is computed once with a
+            # cumulative unique count - identical selection semantics.
+            n_rows = len(conn_df)
+            is_first_occ = ~conn_df['partner_type_normalized'].duplicated(keep='first')
+            cum_unique = is_first_occ.cumsum()
+            total_unique = int(cum_unique.iloc[-1]) if n_rows > 0 else 0
             
-            # Expand until M types or max_k reached
-            while unique_types < top_m and k_used < max_k and k_used < len(conn_df):
-                k_used += 5  # Expand by 5
-                selected = conn_df.head(k_used)
-                unique_types = selected['partner_type_normalized'].nunique()
+            if total_unique >= top_m:
+                hit_positions = cum_unique[cum_unique >= top_m].index
+                first_hit_pos = conn_df.index.get_loc(hit_positions[0])
+                # k_hit = smallest head size reaching top_m unique types.
+                k_hit = first_hit_pos + 1
+                # Replicate the old +5 stepping exactly (same final k), but
+                # arithmetically - the old loop re-ran head(k).nunique() on
+                # every step, which was the quadratic cost.
+                k_used = top_k
+                while k_used < k_hit and k_used < max_k and k_used < n_rows:
+                    k_used += 5
+            else:
+                # Fewer unique types than top_m anywhere: keep as many rows as
+                # the expansion budget allows (matches previous behavior).
+                k_used = min(max_k, n_rows)
             
-            conn_df = selected
+            conn_df = conn_df.head(k_used)
         else:
             # No dynamic expansion - just sort and take top_k
             conn_df = conn_df.sort_values('weight', ascending=False).head(top_k)
