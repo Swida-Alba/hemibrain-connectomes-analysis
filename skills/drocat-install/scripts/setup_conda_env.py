@@ -81,10 +81,17 @@ def install_miniconda() -> str:
                 check=True,
             )
         else:
+            # The .sh installer REFUSES to install into an existing directory
+            # (e.g. a broken/partial earlier install); -u repairs it instead.
+            flags = ["-b"]
+            if install_dir.exists():
+                flags.append("-u")
             subprocess.run(
-                ["bash", str(installer_path), "-b", "-p", str(install_dir)],
+                ["bash", str(installer_path), *flags, "-p", str(install_dir)],
                 check=True,
             )
+    except subprocess.CalledProcessError as exc:
+        raise SystemExit(f"ERROR: Miniconda installer failed (exit {exc.returncode}).")
     finally:
         try:
             installer_path.unlink()
@@ -119,8 +126,9 @@ def find_conda(explicit: str = None, allow_install: bool = True) -> str:
     and installed automatically (pass --no-install to disable).
     """
     if explicit:
-        if Path(explicit).exists():
-            return str(Path(explicit).expanduser().resolve())
+        explicit_path = Path(explicit).expanduser()
+        if explicit_path.exists():
+            return str(explicit_path.resolve())
         raise SystemExit(f"ERROR: conda binary not found at: {explicit}")
 
     found = shutil.which("conda")
