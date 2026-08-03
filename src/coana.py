@@ -146,6 +146,126 @@ _CACHE_ONLY_DATASETS = {}
 _FINDALLPATH_GRAPH_CACHE = {}
 
 
+_FINDALLPATH_CACHE_MAX = 8
+
+
+def _id_set_digest(ids) -> str:
+    """
+    Build a stable, collision-safe digest for a set of neuron IDs.
+
+    The digest is deterministic (unlike Python's per-process ``hash()``) and
+    is used inside the FindAllPath graph-cache key.  Two queries that differ
+    only in the *order* of the same IDs still map to the same key, while two
+    queries with different ID sets map to different keys.
+    """
+    import hashlib
+    joined = "|".join(sorted({str(i) for i in ids}))
+    return hashlib.md5(joined.encode("utf-8", "surrogatepass")).hexdigest()[:24]
+
+
+def _findallpath_cache_key(
+    dataset_safe: str,
+    source_ID,
+    target_ID,
+    max_interlayer: int,
+    separate_hemispheres: bool,
+    filter_by: str,
+    min_ratio: float,
+    min_traversal_probability: float,
+    exclude_intra_type_connections: bool,
+) -> str:
+    """
+    Build the FindAllPath graph-cache key.
+
+    The key must include every parameter that changes which edges the
+    graph contains - not only the topology (source/target/interlayer) but
+    also the connection filters applied during fetching (filter_by level,
+    ratio/probability thresholds, intra-type exclusion, hemisphere mode).
+    Otherwise a later run with different filters would silently reuse a
+    graph built under different filter conditions.
+    """
+    source_hash = _id_set_digest(source_ID)
+    target_hash = _id_set_digest(target_ID)
+    hemi_flag = 'hemi' if separate_hemispheres else 'nohemi'
+    filters = (
+        f"{filter_by}|{min_ratio}|{min_traversal_probability}|"
+        f"{int(bool(exclude_intra_type_connections))}"
+    )
+    return (
+        f"{dataset_safe}_{source_hash}_{target_hash}_{max_interlayer}_"
+        f"{hemi_flag}_{filters}"
+    )
+
+
+def _findallpath_cache_put(key: str, entry: dict) -> None:
+    """Insert into the FindAllPath graph cache, evicting the oldest entry."""
+    global _FINDALLPATH_GRAPH_CACHE
+    _FINDALLPATH_GRAPH_CACHE[key] = entry
+    while len(_FINDALLPATH_GRAPH_CACHE) > _FINDALLPATH_CACHE_MAX:
+        _FINDALLPATH_GRAPH_CACHE.pop(next(iter(_FINDALLPATH_GRAPH_CACHE)))
+
+
+def _layer_table_edge_pairs(conn_df):
+    """
+    Return the set of (pre, post) edge pairs stored in a connection table.
+
+    Accepts either a Polars or a Pandas DataFrame.  Empty tables return an
+    empty set.
+    """
+    if conn_df is None:
+        return set()
+    try:
+        if conn_df.is_empty():
+            return set()
+    except AttributeError:
+        if conn_df.empty:
+            return set()
+    # Polars Series exposes .to_list(), Pandas exposes .tolist()
+    try:
+        pre = list(conn_df['bodyId_pre'].to_list())
+        post = list(conn_df['bodyId_post'].to_list())
+    except AttributeError:
+        pre = list(conn_df['bodyId_pre'].tolist())
+        post = list(conn_df['bodyId_post'].tolist())
+    return set(zip((str(p) for p in pre), (str(p) for p in post)))
+
+
+def _match_path_edges_to_layers(edges_in_paths, conn_layers):
+    """
+    Match the edges that appear on valid paths against the fetched layer
+    tables.
+
+    Paths are found on a graph built from the union of all layer tables, so
+    a path edge's *position* in the path is NOT the same as the layer table
+    that actually contains the row (e.g. reciprocal/recurrent edges, or a
+    neuron reachable through a longer route than its discovery layer).
+    Matching against the real table rows instead of the path position keeps
+    every occurrence of a path edge and never drops real connections.
+
+    Parameters
+    ----------
+    edges_in_paths : set of (pre, post) tuples
+        Unique edges that appear on at least one valid path.
+    conn_layers : iterable of DataFrames
+        Per-layer connection tables (Polars or Pandas), in layer order.
+
+    Returns
+    -------
+    (valid_pairs_by_layer, matched_edges)
+        valid_pairs_by_layer: list parallel to conn_layers with the path
+        edges present in each layer's table.
+        matched_edges: union of all valid pairs found in any layer table.
+    """
+    valid_pairs_by_layer = []
+    matched_edges = set()
+    for conn_df in conn_layers:
+        layer_edges = _layer_table_edge_pairs(conn_df)
+        valid = set(edges_in_paths) & layer_edges
+        valid_pairs_by_layer.append(valid)
+        matched_edges |= valid
+    return valid_pairs_by_layer, matched_edges
+
+
 def clear_findallpath_cache(dataset: str = None):
     """
     Clear the module-level FindAllPath graph cache.
@@ -6113,33 +6233,30 @@ class FindNeuronConnection:
         # Process paths to extract neurons and edges
         neurons_in_paths = set()
         edges_in_paths = set()
-        edges_in_paths_with_layer = set()
         
         for path in paths_found:
             neurons_in_paths.update(path)
             for i in range(len(path) - 1):
                 u, v = path[i], path[i+1]
                 edges_in_paths.add((u, v))
-                # Determine layer index
-                # Since conn_layers are sequential (L0->L1, L1->L2...), 
-                # edge at index i in path corresponds to layer i
-                edges_in_paths_with_layer.add((i, u, v))
         
         # Reconstruct conn_inpath and conn_types
         conn_inpath = pd.DataFrame()
         conn_types = pd.DataFrame()
         weight_layers = {}
         
-        # Filter conn_layers based on edges_in_paths_with_layer
+        # Match path edges against the ACTUAL rows of every layer table.
+        # An edge's position in a path is not the same as the layer table
+        # that contains the row (reciprocal/recurrent edges, neurons reached
+        # via longer routes than their discovery layer), so index-based
+        # matching can silently drop real path connections.
+        valid_edges_by_layer, matched_path_pairs = _match_path_edges_to_layers(
+            edges_in_paths, conn_layers
+        )
+        
         for i in range(len(conn_layers)):
             conn = conn_layers[i]
-            
-            # Filter rows where (i, bodyId_pre, bodyId_post) is in edges_in_paths_with_layer
-            # Create a set of (pre, post) for this layer for fast lookup
-            valid_edges_in_layer = set()
-            for layer_idx, u, v in edges_in_paths_with_layer:
-                if layer_idx == i:
-                    valid_edges_in_layer.add((u, v))
+            valid_edges_in_layer = valid_edges_by_layer[i]
             
             if not valid_edges_in_layer:
                 continue
@@ -6174,6 +6291,13 @@ class FindNeuronConnection:
             conn_types = pd.concat([conn_types,conn_type])
             
             weight_layers.update({str(i)+'->'+str(i+1): conn_df['weight'].sum()})
+        
+        unmatched_path_pairs = edges_in_paths - matched_path_pairs
+        if unmatched_path_pairs:
+            print(
+                f'⚠️ {len(unmatched_path_pairs)} path edges were not matched to '
+                f'any connection layer table (possible data inconsistency)'
+            )
             
         # Reconstruct neuron_layers for visualization
         neuron_layers = []
@@ -6848,13 +6972,21 @@ class FindNeuronConnection:
         # ============================================================================
         global _FINDALLPATH_GRAPH_CACHE
         
-        # Generate cache key based on query parameters (not threshold)
-        # Threshold is handled separately - we can filter a lower-threshold graph
-        # Include separate_hemispheres to differentiate cached data with/without hemisphere suffixes
-        source_hash = hash(tuple(sorted(str(s) for s in source_ID)))
-        target_hash = hash(tuple(sorted(str(t) for t in target_ID)))
-        hemi_flag = 'hemi' if self.separate_hemispheres else 'nohemi'
-        cache_key = f"{self._dataset_safe}_{source_hash}_{target_hash}_{self.max_interlayer}_{hemi_flag}"
+        # Generate cache key based on query parameters (not threshold).
+        # Threshold is handled separately (a lower-threshold graph is filtered
+        # up); all other edge-affecting filters are part of the key so a run
+        # with different filters never reuses the wrong graph.
+        cache_key = _findallpath_cache_key(
+            self._dataset_safe,
+            source_ID,
+            target_ID,
+            self.max_interlayer,
+            self.separate_hemispheres,
+            self.filter_by,
+            self.min_ratio,
+            self.min_traversal_probability,
+            self.exclude_intra_type_connections,
+        )
         
         cached_data = _FINDALLPATH_GRAPH_CACHE.get(cache_key) if use_graph_cache else None
         use_cached_graph = False
@@ -6870,6 +7002,9 @@ class FindNeuronConnection:
                 self._vprint(f'\n📊 Cache exists at threshold={cached_threshold}, but need threshold={self.min_synapse_num} - rebuilding', level='full')
         
         if use_cached_graph:
+            # Refresh recency so frequently used queries are evicted last
+            _FINDALLPATH_GRAPH_CACHE.pop(cache_key, None)
+            _FINDALLPATH_GRAPH_CACHE[cache_key] = cached_data
             # ===== FAST PATH: Reuse cached graph and filter by threshold =====
             all_connections = cached_data['all_connections']
             layer_neurons = cached_data['layer_neurons']
@@ -6980,12 +7115,12 @@ class FindNeuronConnection:
             
             # Cache the graph data for future runs at higher thresholds
             if use_graph_cache:
-                _FINDALLPATH_GRAPH_CACHE[cache_key] = {
+                _findallpath_cache_put(cache_key, {
                     'threshold': self.min_synapse_num,
                     'all_connections': all_connections,
                     'layer_neurons': layer_neurons,
                     'all_neurons_in_network': all_neurons_in_network,
-                }
+                })
                 self._vprint(f'  💾 Cached graph at threshold={self.min_synapse_num} for future reuse', level='full')
             
             # Use the freshly fetched connections
@@ -7108,11 +7243,12 @@ class FindNeuronConnection:
                 # This finds all nodes that can reach ANY target
                 reachable = set()
                 # Initialize queue with targets
-                queue = list(valid_targets)
+                from collections import deque
+                queue = deque(valid_targets)
                 visited = set(valid_targets)
                 
                 while queue:
-                    node = queue.pop(0)
+                    node = queue.popleft()
                     reachable.add(node)
                     
                     for neighbor in R.neighbors(node):
@@ -7243,6 +7379,16 @@ class FindNeuronConnection:
         conn_groups_list = []
         weight_layers = {}
         
+        # Match path edges against the ACTUAL rows of every layer table.
+        # The path position is only an approximation of the fetch layer, so
+        # index-based matching silently drops reciprocal/recurrent edges and
+        # edges of neurons reachable via a longer route than their discovery
+        # layer.  Matching against table rows keeps every occurrence (the
+        # documented intent: "keeping ALL layer-specific occurrences").
+        valid_pairs_by_layer, matched_path_pairs = _match_path_edges_to_layers(
+            edges_in_paths, all_connections
+        )
+        
         iterator = all_connections
         if self.verbose_mode in ['simple', 'full']:
             iterator = tqdm(all_connections, desc="Building paths", unit="layer", leave=True)
@@ -7252,13 +7398,11 @@ class FindNeuronConnection:
             if conn_df.is_empty():
                 continue
                 
-            # Get the actual layer index from the conn_layer label
+            # Get the layer label from the table (used for output tagging)
             layer_label = conn_df['conn_layer'][0]
-            actual_layer_idx = int(layer_label.split('->')[0])
             
-            # Filter to keep only edges that are in valid paths for THIS specific layer
-            # Create a set of valid (pre, post) for this layer
-            valid_pairs = { (u, v) for (l, u, v) in edges_in_paths_with_layer if l == actual_layer_idx }
+            # Keep only edges of this layer's table that appear on valid paths
+            valid_pairs = valid_pairs_by_layer[layer_idx]
             
             if not valid_pairs:
                 continue
@@ -7320,6 +7464,14 @@ class FindNeuronConnection:
             weight_layers[layer_label] = conn_enriched['weight'].sum()
             
             self._vprint(f'Layer {layer_label}: {len(conn_filtered)} connections kept', level='full')
+
+        unmatched_path_pairs = edges_in_paths - matched_path_pairs
+        if unmatched_path_pairs:
+            self._vprint(
+                f'⚠️ {len(unmatched_path_pairs)} path edges were not matched to a '
+                f'connection layer (reciprocal/recurrent edges may be under-counted)',
+                level='full',
+            )
         
         # Concatenate all results at once (avoids FutureWarning about empty/NA entries)
         if conn_inpath_list:

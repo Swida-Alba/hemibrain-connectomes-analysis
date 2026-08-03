@@ -262,3 +262,86 @@ The implementation is production-ready and fully documented.
 **Optimization Type**: Algorithm improvement (DFS with backtracking)  
 **Impact**: Major performance improvement for pathfinding  
 **Breaking Changes**: None
+
+---
+
+# 2026-08 Pathfinding Audit — Hidden Issue Fixes
+
+## Scope
+
+A deep audit of the full pathfinding stack (`FastGraph` algorithms in
+`vispath-subproject/src/vispath_pkg/fast_graph_core.py` and the orchestration
+in `FindAllPath` / `FindPath` in `src/coana.py`) found that the five
+`FastGraph` algorithms themselves are correct — each was validated against
+`all_simple_paths` on hundreds of seeded random directed graphs, with zero
+mismatches for positive-length simple paths.  The hidden issues were in the
+orchestration around the algorithms.
+
+## Issues Fixed
+
+### 1. FindAllPath graph cache ignored connection filters (correctness)
+
+The graph-cache key only contained dataset, source/target sets,
+`max_interlayer` and the hemisphere flag.  A run with different
+`filter_by`, `min_ratio`, `min_traversal_probability` or
+`exclude_intra_type_connections` could silently reuse a graph built under
+different filter conditions and return wrong results.
+
+**Fix**: `_findallpath_cache_key()` now includes every edge-affecting filter.
+The key uses a deterministic digest of the sorted ID sets (instead of
+Python's per-process `hash()`), so it is stable and collision-safe.
+
+### 2. FindAllPath graph cache was unbounded (memory)
+
+Every distinct query permanently added an entry to
+`_FINDALLPATH_GRAPH_CACHE`, leaking memory in long sessions.
+
+**Fix**: `_findallpath_cache_put()` caps the cache at
+`_FINDALLPATH_CACHE_MAX = 8` entries with oldest-first eviction, and cache
+hits refresh recency (LRU-style).
+
+### 3. O(n²) pruning BFS in Phase 3 (performance)
+
+The dead-end pruning BFS used `queue.pop(0)` on a Python list, which is
+O(n) per pop and O(n²) overall.
+
+**Fix**: switched to `collections.deque` with `popleft()`.
+
+### 4. Path edges matched to layers by path index dropped real connections
+
+`FindAllPath` and the legacy `FindPath` tagged each path edge with its
+*position* in the path and only kept the connection-table row from the layer
+whose index matched that position.  The fetch layer of an edge is not the
+same as its path position when:
+
+- the edge is reciprocal/recurrent (`B → A` returned from a fetch of `B`);
+- a neuron is reachable via a longer route than its discovery layer
+  (e.g. `A → X → B → Y` where `B → Y` was fetched from `B` at layer 1 but
+  appears at path index 2);
+- an edge exists in multiple layer tables (comprehensive mode).
+
+Those rows were silently dropped from `conn_inpath`, under-counting the
+connections on valid paths.
+
+**Fix**: new `_match_path_edges_to_layers()` helper matches path edges
+against the *actual rows* of every layer table.  All occurrences of an edge
+that lies on a valid path are kept, regardless of path position, and a
+warning reports any path edge that matches no table (a real data
+inconsistency).
+
+## Validation
+
+- 300 randomized directed graphs (cycles, multiple sources/targets,
+  variable cutoffs): all five `FastGraph` algorithms matched
+  `all_simple_paths` exactly (positive-length paths).
+- New regression suite `tests/core/test_pathfinding.py` (19 tests) covers
+  the cache key, the bounded cache, the layer-matching fix (Polars and
+  Pandas), and randomized algorithm-vs-`all_simple_paths` comparisons.
+- Full pytest: 55 passed; the single failure is the known sandbox-localhost
+  restriction in `TestHTTPServer`, unrelated to pathfinding.
+
+**Implementation Date**: August 2026  
+**Optimization Type**: Correctness + memory + performance fixes  
+**Impact**: Correct results across filter combinations; bounded cache memory;
+faster pruning; complete path-edge accounting  
+**Breaking Changes**: None

@@ -61,35 +61,45 @@ Path 4: S2 → A → B → A → T  (length: 4, uses Layer 0->1 S2→A, Layer 1-
                               Layer 2->3 B→A, Layer 3->4 A→T)
 ```
 
-**Step 2: Track layer-specific edges**
+**Step 2: Track the unique edges used by valid paths**
 ```python
-edges_in_paths_with_layer = {
-    (0, S1, A),   # Layer 0->1
-    (0, S2, A),   # Layer 0->1
-    (1, A, B),    # Layer 1->2
-    (1, A, T),    # Layer 1->2 ✓ Used in Path 1 & 3
-    (2, B, A),    # Layer 2->3
-    (3, A, T),    # Layer 3->4 ✓ Used in Path 2 & 4
+edges_in_paths = {
+    (S1, A),   # Used in all paths
+    (S2, A),   # Used in Path 3 & 4
+    (A, B),    # Used in Path 2 & 4
+    (B, A),    # Used in Path 2 & 4
+    (A, T),    # Used in ALL paths (both the direct and the reciprocal route)
 }
 ```
 
-**Key Point**: Both `(1, A, T)` and `(3, A, T)` are tracked separately!
+**Key Point**: The graph stores one merged edge `(A, T)`; the layer tables can
+contain that edge in several layers. Every layer-table occurrence of an edge
+that lies on a valid path is preserved.
 
-**Step 3: Filter connections per layer**
+**Step 3: Match path edges against the actual rows of each layer table**
+
+Each layer table is filtered to the rows whose `(bodyId_pre, bodyId_post)`
+pair appears in `edges_in_paths`. The matching uses the table rows themselves
+— NOT the edge's position inside a path. A path position is only an
+approximation of the fetch layer: a reciprocal edge (`B → A`) or an edge of a
+neuron reachable via a longer route than its discovery layer can live in a
+layer table that differs from the path index, and index-based matching would
+silently drop those real connections.
+
 ```python
 Layer 0->1 filtering:
-  Keep: S1 → A ✓ (in edges_in_paths_with_layer)
-  Keep: S2 → A ✓ (in edges_in_paths_with_layer)
+  Keep: S1 → A ✓ (in edges_in_paths)
+  Keep: S2 → A ✓ (in edges_in_paths)
 
 Layer 1->2 filtering:
-  Keep: A → B ✓ (in edges_in_paths_with_layer)
-  Keep: A → T ✓ (in edges_in_paths_with_layer as (1, A, T))
+  Keep: A → B ✓ (in edges_in_paths)
+  Keep: A → T ✓ (in edges_in_paths)
 
 Layer 2->3 filtering:
-  Keep: B → A ✓ (in edges_in_paths_with_layer)
+  Keep: B → A ✓ (in edges_in_paths)
 
 Layer 3->4 filtering:
-  Keep: A → T ✓ (in edges_in_paths_with_layer as (3, A, T))
+  Keep: A → T ✓ (in edges_in_paths)
 ```
 
 ### Final Output
@@ -140,30 +150,31 @@ Mushroom Body (MB) neurons can have:
 ### Code Structure
 
 ```python
-# 1. Track edges WITH layer information
-edges_in_paths_with_layer = set()
+# 1. Track the unique edges used by valid paths
+edges_in_paths = set()
 
 for path in all_paths:
     for i in range(len(path) - 1):
         pre_node = path[i]
         post_node = path[i+1]
-        
-        # Find which layer this edge originates from
-        for layer_idx, layer_set in enumerate(layer_neurons):
-            if pre_node in layer_set:
-                edges_in_paths_with_layer.add((layer_idx, pre_node, post_node))
+        edges_in_paths.add((pre_node, post_node))
 
-# 2. Filter layer-specifically
+# 2. Match against the ACTUAL rows of every layer table
+#    (see _match_path_edges_to_layers in src/coana.py)
+valid_pairs_by_layer, matched_path_pairs = _match_path_edges_to_layers(
+    edges_in_paths, all_connections
+)
+
 for layer_idx, conn_df in enumerate(all_connections):
-    actual_layer_idx = int(conn_df['conn_layer'].iloc[0].split('->')[0])
-    
-    conn_filtered = conn_df[
-        conn_df.apply(
-            lambda row: (actual_layer_idx, row['bodyId_pre'], row['bodyId_post']) 
-                        in edges_in_paths_with_layer,
-            axis=1
-        )
-    ]
+    if conn_df.is_empty():
+        continue
+    valid_pairs = valid_pairs_by_layer[layer_idx]
+    if not valid_pairs:
+        continue
+    valid_pairs_df = pl.DataFrame(
+        list(valid_pairs), schema=['bodyId_pre', 'bodyId_post'], orient='row'
+    )
+    conn_filtered = conn_df.join(valid_pairs_df, on=['bodyId_pre', 'bodyId_post'], how='inner')
 ```
 
 ### Statistics Reported
@@ -183,9 +194,10 @@ Layer-specific edges in valid paths: 6 ((0,S1,A), (0,S2,A), (1,A,B), (1,A,T), (2
 |----------|-------------|--------------|
 | Single connection (A→B) in one layer | Keep it ✓ | Keep it ✓ |
 | Same connection (A→B) in multiple layers, all used | Keep all ✓ | Keep all ✓ |
-| Same connection (A→B) in multiple layers, only one used | **Keep all ✗** | **Keep only used ✓** |
-| Different paths use different layer connections | Can't distinguish | Track separately ✓ |
-| Reciprocal connections creating multilayer paths | May include unused | Only include used ✓ |
+| Same connection (A→B) in multiple layers, only one used | Keep all ✗ | Keep all occurrences of used edges ✓ (the graph search cannot tell which layer occurrence was traversed, so all occurrences on a valid path are kept) |
+| Reciprocal/recurrent edges whose fetch layer differs from the path index | **Dropped ✗** | **Kept ✓** |
+| Different paths use different layer connections | Can't distinguish | All layer occurrences preserved ✓ |
+| Reciprocal connections creating multilayer paths | May drop real edges ✗ | Include every used edge ✓ |
 
 ## Benefits Summary
 
