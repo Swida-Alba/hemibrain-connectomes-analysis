@@ -101,6 +101,12 @@ if (-not $CondaPath) {
     
     Remove-Item $InstallerPath -Force -ErrorAction SilentlyContinue
     
+    # Verify the silent install actually produced conda (fails otherwise)
+    if (-not (Test-Path "$InstallDir\Scripts\conda.exe")) {
+        Write-Error "Miniconda installation failed - $InstallDir\Scripts\conda.exe not found."
+        exit 1
+    }
+    
     # Update PATH
     $env:PATH = "$InstallDir;$InstallDir\Scripts;$InstallDir\Library\bin;$env:PATH"
     $CondaPath = "$InstallDir\Scripts\conda.exe"
@@ -117,20 +123,41 @@ if (-not $CondaPath) {
 Write-Host ""
 Write-Step "2/5" "Creating conda environment '$EnvName'..."
 
-# If the versioned base env already exists, never touch it: warn and pick the
-# next free name (drocat-<version>-2, ...) so no name conflicts occur.
+# If the versioned base env already exists: reuse it (update deps in place)
+# when it has the right Python - this keeps installer re-runs consistent with
+# the launchers, which prefer the FIRST usable drocat-<version> env. A wrong
+# Python env is never touched; the next free name (-2, -3, ...) is used instead.
+# NOTE: escape the name for -match ('.' in the version is a regex wildcard).
 $EnvList = & $CondaPath env list 2>$null
-if ($EnvList -match "^$EnvBase\s") {
-    Write-Warning-Custom "Conda env '$EnvBase' already exists - leaving it untouched."
-    $envNum = 2
-    while ($EnvList -match "^$EnvBase-$envNum\s") { $envNum++ }
-    $EnvName = "$EnvBase-$envNum"
-    Write-Success "Using a new environment instead: $EnvName"
+$EnvBaseRx = [regex]::Escape($EnvBase)
+function Test-EnvUsable([string]$Name) {
+    & $CondaPath run -n $Name python -c "import sys; raise SystemExit(0 if sys.version_info[:2] == (3, 11) else 1)" 2>$null | Out-Null
+    return ($LASTEXITCODE -eq 0)
+}
+if ($EnvList -match "^$EnvBaseRx\s") {
+    if (Test-EnvUsable $EnvBase) {
+        $EnvName = $EnvBase
+        Write-Success "Reusing existing env '$EnvName' (Python $PythonVersion) - dependencies will be updated in place."
+    }
+    else {
+        Write-Warning-Custom "Conda env '$EnvBase' exists but does not use Python $PythonVersion - leaving it untouched."
+        $envNum = 2
+        while ($EnvList -match "^$EnvBaseRx-$envNum\s") { $envNum++ }
+        $EnvName = "$EnvBase-$envNum"
+        Write-Success "Creating a new environment instead: $EnvName"
+        & $CondaPath create -n $EnvName python=$PythonVersion -y
+    }
 }
 else {
     $EnvName = $EnvBase
+    & $CondaPath create -n $EnvName python=$PythonVersion -y
 }
-& $CondaPath create -n $EnvName python=$PythonVersion -y
+# Fail fast if the env was not actually created (e.g. resolver error above)
+$CheckList = & $CondaPath env list 2>$null
+if (-not ($CheckList -match "^$([regex]::Escape($EnvName))\s")) {
+    Write-Error "Failed to create conda environment '$EnvName'. See messages above."
+    exit 1
+}
 
 Write-Success "Environment ready (all steps run inside the env via 'conda run')"
 

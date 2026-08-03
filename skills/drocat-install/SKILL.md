@@ -32,8 +32,11 @@ git checkout v4.5.0
 
 ### 2. Check prerequisites
 
-- Python 3.9+ and conda are required (Python 3.11 is recommended).
-- If conda is missing, install Miniconda from <https://docs.conda.io/miniconda.html> after user approval.
+- Python 3.10-3.11 is supported; **Python 3.11 is recommended** (matplotlib
+  3.10.0 requires >=3.10; PyQt5 5.15.10 has no 3.12 wheels). The installers
+  create a Python 3.11 environment, so the system Python version does not
+  matter.
+- If conda is missing, install Miniconda from <https://docs.conda.io/miniconda.html> after user approval (install.sh / install.ps1 / install.bat do this automatically).
 - Dependency download and token checks need network access. In a sandboxed environment, request escalation for network commands.
 
 ### 3. Run the installer
@@ -42,7 +45,7 @@ git checkout v4.5.0
 - **Windows:** run `install.ps1` in PowerShell (`powershell -ExecutionPolicy Bypass -File install.ps1`) or `install.bat`.
 - **macOS alternative:** `DROCAT.command` (double-click) creates/activates the env and launches the UI.
 - The launchers are self-healing: `run_ui.sh` / `DROCAT.command` create the env if it is missing.
-- **Environment naming:** DROCAT uses a versioned env name read from `ui/config.py` (`drocat-4.5.0`). If that name already exists, never modify or delete it - warn the user and create the next free name instead (`drocat-4.5.0-2`, `drocat-4.5.0-3`, ... skipping all names that exist). The launchers resolve the same way, so repeat launches reuse the created env. Legacy unversioned `drocat` envs are left untouched.
+- **Environment naming:** DROCAT uses a versioned env name read from `ui/config.py` (`drocat-4.5.0`). If that name already exists with Python 3.11, the installers reuse it and update dependencies in place (this is the env the launchers prefer, so re-runs actually update the env in use). If it exists with a different Python, never modify or delete it - warn the user and create the next free name instead (`drocat-4.5.0-2`, `drocat-4.5.0-3`, ...). The launchers resolve the same way (first usable env wins). Legacy unversioned `drocat` envs are left untouched.
 - If a single dependency fails (e.g., `neuronbridge-python` on Windows, PyQt5 wheels), record the error, install the remaining dependencies, and continue; report the limitation to the user.
 
 ### 4. Configure tokens

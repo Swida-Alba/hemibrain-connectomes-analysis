@@ -62,7 +62,13 @@ else
     MINICONDA_URL="https://repo.anaconda.com/miniconda/Miniconda3-latest-MacOSX-x86_64.sh"
   fi
   INSTALLER="/tmp/miniconda_drocat.sh"
-  if curl -fsSL "$MINICONDA_URL" -o "$INSTALLER" && bash "$INSTALLER" -b -p "$HOME/miniconda3"; then
+  # The .sh installer refuses to run into an existing directory (broken or
+  # partial earlier install); -u repairs/updates it in that case.
+  MC_FLAGS="-b"
+  if [ -d "$HOME/miniconda3" ]; then
+    MC_FLAGS="-b -u"
+  fi
+  if curl -fsSL "$MINICONDA_URL" -o "$INSTALLER" && bash "$INSTALLER" $MC_FLAGS -p "$HOME/miniconda3" && [ -f "$HOME/miniconda3/bin/conda" ]; then
     rm -f "$INSTALLER"
     export PATH="$HOME/miniconda3/bin:$PATH"
     "$HOME/miniconda3/bin/conda" init zsh >/dev/null 2>&1 || true

@@ -63,7 +63,7 @@ set MINICONDA_URL=https://repo.anaconda.com/miniconda/Miniconda3-latest-Windows-
 set INSTALLER_PATH=%TEMP%\miniconda_installer.exe
 
 echo Downloading Miniconda...
-powershell -Command "Invoke-WebRequest -Uri '%MINICONDA_URL%' -OutFile '%INSTALLER_PATH%'"
+powershell -Command "Invoke-WebRequest -Uri '%MINICONDA_URL%' -OutFile '%INSTALLER_PATH%' -UseBasicParsing"
 
 echo Installing Miniconda (silent)...
 start /wait "" "%INSTALLER_PATH%" /InstallationType=JustMe /RegisterPython=0 /S /D=%USERPROFILE%\miniconda3

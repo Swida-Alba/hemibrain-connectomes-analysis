@@ -28,9 +28,6 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DROCAT_VERSION="$(sed -n 's/^APP_VERSION = "\([^"]*\)"/\1/p' "$SCRIPT_DIR/ui/config.py" | head -1)"
 DROCAT_VERSION="${DROCAT_VERSION:-4.5.0}"
 ENV_BASE="drocat-${DROCAT_VERSION}"
-DROCAT_VERSION="$(sed -n 's/^APP_VERSION = "\([^"]*\)"/\1/p' "$SCRIPT_DIR/ui/config.py" | head -1)"
-DROCAT_VERSION="${DROCAT_VERSION:-4.5.0}"
-ENV_BASE="drocat-${DROCAT_VERSION}"
 
 # Detect OS and architecture
 OS="$(uname -s)"
@@ -75,8 +72,20 @@ else
     curl -fsSL "$MINICONDA_URL" -o "$INSTALLER_PATH"
     
     echo "Installing Miniconda..."
-    bash "$INSTALLER_PATH" -b -p "$HOME/miniconda3"
+    # The .sh installer REFUSES to run into an existing directory (e.g. a
+    # broken/partial earlier install); -u repairs/updates it in that case.
+    if [[ -d "$HOME/miniconda3" ]]; then
+        bash "$INSTALLER_PATH" -b -u -p "$HOME/miniconda3"
+    else
+        bash "$INSTALLER_PATH" -b -p "$HOME/miniconda3"
+    fi
     rm "$INSTALLER_PATH"
+    
+    # Verify the install actually produced a conda binary
+    if [[ ! -f "$HOME/miniconda3/bin/conda" ]]; then
+        echo -e "${RED}ERROR: Miniconda installation failed - $HOME/miniconda3/bin/conda not found.${NC}" >&2
+        exit 1
+    fi
     
     # Initialize conda
     "$HOME/miniconda3/bin/conda" init bash 2>/dev/null || true
@@ -120,22 +129,38 @@ fi
 # =============================================================================
 echo -e "\n${BLUE}[2/5] Selecting conda environment...${NC}"
 
-# If the versioned base env already exists, NEVER touch it: warn and pick the
-# next free name (drocat-<version>-2, ...) so no name conflicts occur.
+# Policy (must stay consistent with run_ui.sh / install.ps1, which prefer the
+# FIRST usable drocat-<version> env):
+#  - env missing                  -> create it
+#  - env exists with Python 3.11  -> reuse it and update deps in place
+#    (re-running the installer then actually updates the env the launchers use;
+#     previously a fresh drocat-<version>-N env was created every re-run and
+#     the launchers kept using the stale base env)
+#  - env exists, wrong Python     -> never touch it; create the next free
+#    name drocat-<version>-2, -3, ...
+env_usable() {
+    conda run -n "$1" python -c 'import sys; raise SystemExit(0 if sys.version_info[:2] == (3, 11) else 1)' >/dev/null 2>&1
+}
+
 if conda env list | grep -qE "^${ENV_BASE} "; then
-    echo -e "${YELLOW}WARNING: conda env '${ENV_BASE}' already exists - leaving it untouched.${NC}"
-    env_num=2
-    while conda env list | grep -qE "^${ENV_BASE}-${env_num} "; do
-        env_num=$((env_num + 1))
-    done
-    ENV_NAME="${ENV_BASE}-${env_num}"
-    echo -e "${GREEN}Using a new environment instead: '${ENV_NAME}'${NC}"
+    if env_usable "$ENV_BASE"; then
+        ENV_NAME="$ENV_BASE"
+        echo -e "${GREEN}✓ Reusing existing env '${ENV_NAME}' (Python 3.11) - dependencies will be updated in place.${NC}"
+    else
+        echo -e "${YELLOW}WARNING: conda env '${ENV_BASE}' exists but does not use Python ${PYTHON_VERSION} - leaving it untouched.${NC}"
+        env_num=2
+        while conda env list | grep -qE "^${ENV_BASE}-${env_num} "; do
+            env_num=$((env_num + 1))
+        done
+        ENV_NAME="${ENV_BASE}-${env_num}"
+        echo -e "${GREEN}Creating a new environment instead: '${ENV_NAME}'${NC}"
+        conda create -n "$ENV_NAME" python="$PYTHON_VERSION" -y
+    fi
 else
     ENV_NAME="${ENV_BASE}"
+    echo -e "${BLUE}Creating conda environment '${ENV_NAME}' (Python ${PYTHON_VERSION})...${NC}"
+    conda create -n "$ENV_NAME" python="$PYTHON_VERSION" -y
 fi
-
-echo -e "${BLUE}Creating conda environment '${ENV_NAME}' (Python ${PYTHON_VERSION})...${NC}"
-conda create -n "$ENV_NAME" python="$PYTHON_VERSION" -y
 conda activate "$ENV_NAME" 2>/dev/null || source activate "$ENV_NAME"
 
 echo -e "${GREEN}✓ Environment ready (Python $(python --version 2>&1 | cut -d' ' -f2))${NC}"
