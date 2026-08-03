@@ -69,8 +69,10 @@ else {
     $PossiblePaths = @(
         "$env:USERPROFILE\miniconda3\Scripts\conda.exe",
         "$env:USERPROFILE\anaconda3\Scripts\conda.exe",
+        "$env:USERPROFILE\miniforge3\Scripts\conda.exe",
         "C:\ProgramData\miniconda3\Scripts\conda.exe",
-        "C:\ProgramData\anaconda3\Scripts\conda.exe"
+        "C:\ProgramData\anaconda3\Scripts\conda.exe",
+        "C:\ProgramData\miniforge3\Scripts\conda.exe"
     )
     
     foreach ($Path in $PossiblePaths) {

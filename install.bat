@@ -44,6 +44,18 @@ if exist "%USERPROFILE%\anaconda3\Scripts\conda.exe" (
     goto :conda_ready
 )
 
+if exist "%PROGRAMDATA%\miniconda3\Scripts\conda.exe" (
+    set PATH=%PROGRAMDATA%\miniconda3;%PROGRAMDATA%\miniconda3\Scripts;%PATH%
+    echo [OK] Conda found at %PROGRAMDATA%\miniconda3
+    goto :conda_ready
+)
+
+if exist "%PROGRAMDATA%\anaconda3\Scripts\conda.exe" (
+    set PATH=%PROGRAMDATA%\anaconda3;%PROGRAMDATA%\anaconda3\Scripts;%PATH%
+    echo [OK] Conda found at %PROGRAMDATA%\anaconda3
+    goto :conda_ready
+)
+
 echo Conda not found. Installing Miniconda...
 
 REM Download Miniconda

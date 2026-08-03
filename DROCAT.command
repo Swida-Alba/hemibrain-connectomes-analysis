@@ -48,6 +48,33 @@ elif [ -f "$HOME/anaconda3/bin/conda" ]; then
   export PATH="$HOME/anaconda3/bin:$PATH"
   CONDA_AVAILABLE=true
   echo "Found Anaconda at $HOME/anaconda3"
+elif [ -f "$HOME/miniforge3/bin/conda" ]; then
+  export PATH="$HOME/miniforge3/bin:$PATH"
+  CONDA_AVAILABLE=true
+  echo "Found Miniforge at $HOME/miniforge3"
+else
+  # No local conda: download and install Miniconda automatically
+  echo "Conda not found. Installing Miniconda into ~/miniconda3 ..."
+  ARCH="$(uname -m)"
+  if [ "$ARCH" = "arm64" ]; then
+    MINICONDA_URL="https://repo.anaconda.com/miniconda/Miniconda3-latest-MacOSX-arm64.sh"
+  else
+    MINICONDA_URL="https://repo.anaconda.com/miniconda/Miniconda3-latest-MacOSX-x86_64.sh"
+  fi
+  INSTALLER="/tmp/miniconda_drocat.sh"
+  if curl -fsSL "$MINICONDA_URL" -o "$INSTALLER" && bash "$INSTALLER" -b -p "$HOME/miniconda3"; then
+    rm -f "$INSTALLER"
+    export PATH="$HOME/miniconda3/bin:$PATH"
+    "$HOME/miniconda3/bin/conda" init zsh >/dev/null 2>&1 || true
+    "$HOME/miniconda3/bin/conda" init bash >/dev/null 2>&1 || true
+    CONDA_AVAILABLE=true
+    echo "Miniconda installed successfully."
+  else
+    echo "ERROR: could not install Miniconda automatically."
+    echo "Install it manually from https://docs.conda.io/miniconda.html and re-run."
+    read -r -p "Press Enter to exit..." _
+    exit 1
+  fi
 fi
 
 # -----------------------------------------------------------------------------
