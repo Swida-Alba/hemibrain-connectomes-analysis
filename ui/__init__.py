@@ -1,1 +1,0 @@
-"""DROCAT UI Package."""

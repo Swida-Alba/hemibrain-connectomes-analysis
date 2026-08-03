@@ -2,6 +2,8 @@
 # Hemibrain Connectomes Analysis - Windows Requirements
 # Project Structure: Reorganized with src/ layout (v4.1)
 # Versions pinned to tested working versions from conda env 'drocat'
+# Supported Python: 3.10 - 3.11 (3.11 recommended; matplotlib 3.10 requires
+# >=3.10, and PyQt5 5.15.10 / ray 2.39 / open3d 0.19 have no wheels for 3.12+)
 # =============================================================================
 # This is a Windows-specific version that handles neuronbridge-python dependencies
 # without the Linux/macOS-only memray package.
@@ -9,10 +11,13 @@
 
 # Core Dependencies
 # -----------------------------------------------------------------------------
-numpy>=1.24.0              # NumPy - compatible with most packages
-pandas>=1.5.0              # Pandas - supports both 1.x and 2.x workflows
-scipy>=1.10.0              # Scientific computing (clustering, etc.)
-pyarrow>=12.0.0            # Parquet file support for fast caching
+# Pinned exactly to the tested working versions (matches pyproject.toml).
+# Loose lower bounds previously let the resolver pick numpy 2.x / pandas 2.x,
+# which drifts from the tested stack and can break downstream behavior.
+numpy==1.26.4              # NumPy - tested version (do not upgrade to 2.x)
+pandas==1.5.3              # Pandas - tested 1.x version
+scipy==1.13.1              # Scientific computing (clustering, etc.)
+pyarrow==17.0.0            # Parquet file support for fast caching
 
 # Visualization
 # -----------------------------------------------------------------------------
@@ -59,6 +64,9 @@ trimesh>=4.0.0             # Mesh processing for skeletonization (simplification
 # -----------------------------------------------------------------------------
 boto3>=1.26.0              # AWS S3 access for FlyLight imagery downloads
 reportlab>=4.0.0           # PDF generation for image summaries
+python-pptx>=0.6.21        # PowerPoint generation for image summaries
+                           # (required core import 'pptx' in verify_install.py)
+pymupdf>=1.23.0            # PDF to PPTX conversion (optional import 'fitz')
 
 # Document Processing
 # -----------------------------------------------------------------------------

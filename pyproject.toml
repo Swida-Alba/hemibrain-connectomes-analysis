@@ -4,10 +4,10 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hemibrain-connectomes-analysis"
-version = "4.5.0"
+version = "4.4.5"
 description = "Hemibrain connectome analysis and visualization toolkit with reorganized modular structure"
 readme = {file = "README.md", content-type = "text/markdown"}
-requires-python = ">=3.8"
+requires-python = ">=3.10"
 license = {text = "MIT"}
 authors = [
     {name = "Hemibrain Analysis Team"}
@@ -20,11 +20,8 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Visualization",
     "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.8",
-    "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
-    "Programming Language :: Python :: 3.12",
 ]
 
 # Dependencies pinned to tested working versions from conda env 'drocat'
@@ -72,11 +69,6 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# Web UI for local execution
-ui = [
-    "nicegui>=3.0.0",
-]
-
 # Visualization sub-project (minimal dependencies for standalone vispath)
 vispath = [
     "numpy==1.26.4",
@@ -109,11 +101,8 @@ gui = [
 ]
 
 all = [
-    "hemibrain-connectomes-analysis[dev,viz,gui,ui]"
+    "hemibrain-connectomes-analysis[dev,viz,gui]"
 ]
-
-[project.scripts]
-drocat-ui = "ui.app:main"
 
 [project.urls]
 Homepage = "https://github.com/Swida-Alba/hemibrain-connectomes-analysis"

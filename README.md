@@ -1,13 +1,12 @@
-# *Drosophila* Connectome Analysis Toolkit (DROCAT) v4.5.0
+# *Drosophila* Connectome Analysis Toolkit (DROCAT) v4.4.5
 
 A comprehensive Python toolkit for analyzing and visualizing connectome data from **all NeuPrint databases and FlyWire datasets**. Features type-based pathfinding algorithms, interactive network visualizations with NT grouping, 3D neuron morphology rendering, and EM↔LM driver line mapping.
 
 > [!TIP]
 > 🤖 **Agent-assisted installation:** ask your AI agent (e.g., Codex) to run the bundled
 > [`drocat-install`](skills/drocat-install/SKILL.md) skill — it fetches this repository from
-> GitHub, installs all dependencies, configures tokens, verifies the installation, and
-> launches the web UI for you.
-> See [Option 3: Agent-Assisted Install](#option-3-agent-assisted-install-codex).
+> GitHub, installs all dependencies, configures tokens, and verifies the installation for you.
+> See [Agent-Assisted Install](#agent-assisted-install-codex).
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
@@ -35,8 +34,7 @@ A comprehensive Python toolkit for analyzing and visualizing connectome data fro
 | **[Installation](docs/INSTALLATION.md)**                        | Detailed installation instructions  |
 | **[Authentication](docs/INSTALLATION.md#authentication-setup)** | **Set up NeuPrint and CAVE tokens** |
 | **[Troubleshooting](docs/TROUBLESHOOTING.md)**                  | Common issues and solutions         |
-| **[UI Guides](docs/ui_guides/README.html)**                      | **Per-panel instructions & quick starts** |
-| **[Agent Install (Codex)](skills/drocat-install/SKILL.md)**     | **Let Codex install, verify & launch DROCAT** |
+| **[Agent Install (Codex)](skills/drocat-install/SKILL.md)**     | **Let Codex install, verify & run DROCAT** |
 | **[Basic Usage](#basic-usage)**                                 | Core script tutorials               |
 
 ### 📖 Feature Documentation
@@ -47,7 +45,6 @@ A comprehensive Python toolkit for analyzing and visualizing connectome data fro
 | **Score Calculations** | [Score Calculation Guide](docs/core-features/ScoreCalculation_Guide.md)     | All pathfinding scripts        |
 | **EM↔LM Mapping**      | [NeuronBridge Guide](docs/core-features/NeuronBridge_Guide.md)              | `NeuronBridge_FindLines.py`    |
 | **Line Analysis**      | [Workflow Guide](docs/core-features/NeuronBridge_Workflow.md)               | `NeuronBridge_Colabel.py`      |
-| **UI Guides**          | [docs/ui_guides/README.html](docs/ui_guides/README.html)                    | All web UI panels              |
 | **FlyLight Images**    | [FlyLight Guide](docs/core-features/FlyLight_Guide.md)                      | `FlyLight_fetcher.py`          |
 | **Cross-Dataset**      | [Comparison Guide](docs/core-features/CrossDatasetComparison_Guide.md)      | `InterDatasetComparator.py`    |
 | **Auto Type Mapping**  | [Type Mapping Guide](docs/AUTO_TYPE_MAPPING.md)                             | Cross-dataset comparisons      |
@@ -159,32 +156,7 @@ analyzer.generate_report()
 
 ## Installation
 
-### Option 1: One-Click Install (Recommended)
-
-**macOS** — Double-click `DROCAT.command` in Finder (or run in Terminal):
-```bash
-chmod +x DROCAT.command
-./DROCAT.command
-```
-
-**macOS/Linux** — Run the installer script:
-```bash
-chmod +x install.sh
-./install.sh
-```
-
-**Windows** — Double-click `install.bat` or run in PowerShell:
-```powershell
-powershell -ExecutionPolicy Bypass -File install.ps1
-```
-
-These scripts automatically:
-1. Install Miniconda (if not present)
-2. Create a `drocat` conda environment with Python 3.11
-3. Install all dependencies
-4. Create launcher scripts
-
-### Option 2: Manual Install
+### Quick Install (Conda Recommended)
 
 ```bash
 # Create environment
@@ -192,20 +164,15 @@ conda create -n drocat python=3.11 -y
 conda activate drocat
 
 # Install dependencies
-pip install -r requirements.txt       # Linux/macOS
-pip install -r ui/requirements.txt    # Web UI (NiceGUI)
-pip install -e .                      # Install package in editable mode
-
-# Windows users:
-pip install -r requirements-windows.txt
+pip install -r requirements.txt  # Linux/macOS
+# or
+pip install -r requirements-windows.txt # Windows
 pip install neuronbridge-python --no-deps
-pip install -r ui/requirements.txt
-pip install -e .
 ```
 
-### Option 3: Agent-Assisted Install (Codex)
+### Agent-Assisted Install (Codex)
 
-DROCAT ships a Codex skill that lets an AI agent install, verify, and launch the toolkit for you:
+DROCAT ships a Codex skill that lets an AI agent install, verify, and prepare the toolkit for you:
 
 - **Skill source (repo):** [`skills/drocat-install/`](skills/drocat-install/SKILL.md)
 - **Global copy (auto-discovered):** `~/.codex/skills/drocat-install/`
@@ -216,23 +183,22 @@ DROCAT ships a Codex skill that lets an AI agent install, verify, and launch the
 
 **One-line command for Codex / any agent** — copy and paste this anywhere (no local repo needed):
 
-> Fetch https://raw.githubusercontent.com/Swida-Alba/Drosophila-cross-dataset-connectome-analysis/v4.5.0/skills/drocat-install/SKILL.md and follow it to install DROCAT on this machine.
+> Fetch https://raw.githubusercontent.com/Swida-Alba/Drosophila-cross-dataset-connectome-analysis/v4.4.5/skills/drocat-install/SKILL.md and follow it to install DROCAT on this machine.
 
 Equivalent manual fetch (what the agent runs):
 
 ```bash
-git clone --branch v4.5.0 https://github.com/Swida-Alba/Drosophila-cross-dataset-connectome-analysis.git drocat
+git clone --branch v4.4.5 https://github.com/Swida-Alba/Drosophila-cross-dataset-connectome-analysis.git drocat
 cd drocat
 ```
 
 The agent will:
 
-1. Fetch the repository from [GitHub](https://github.com/Swida-Alba/Drosophila-cross-dataset-connectome-analysis) (branch `v4.5.0`) if it is not already present
-2. Run the OS-appropriate installer (`install.sh` / `install.ps1` / `install.bat`)
-3. Create the `drocat` conda environment (Python 3.11) and install all dependencies
-4. Ask you for NeuPrint / CAVE tokens and write them to `token_info_local.txt`
-5. Verify the installation with [`verify_install.py`](skills/drocat-install/scripts/verify_install.py) (Python version, imports, token file, UI)
-6. Launch the web UI and confirm it responds at <http://127.0.0.1:8080>
+1. Fetch the repository from [GitHub](https://github.com/Swida-Alba/Drosophila-cross-dataset-connectome-analysis) (branch `v4.4.5`) if it is not already present
+2. Create the `drocat` conda environment (Python 3.11) and install `requirements.txt` (or `requirements-windows.txt`) plus `neuronbridge-python --no-deps`
+3. Ask you for NeuPrint / CAVE tokens and write them to `token_info_local.txt`
+4. Verify the installation with [`verify_install.py`](skills/drocat-install/scripts/verify_install.py) (Python version, imports, backend modules, token file)
+5. Leave you ready to run any `scripts/*.py` entry point
 
 Manual verification (or to re-check an existing install):
 
@@ -248,90 +214,12 @@ mkdir -p ~/.codex/skills/drocat-install
 cp -R skills/drocat-install/. ~/.codex/skills/drocat-install/
 ```
 
-### Authentication Setup
+### Get NeuPrint Token
 
-1. **NeuPrint Token** (required for NeuPrint datasets):
-   - Visit [neuprint.janelia.org/account](https://neuprint.janelia.org/account)
-   - Login → Copy Auth Token
-   - Enter in UI Settings tab or save to `token_info_local.txt`
-
-2. **CAVE Token** (required for FlyWire FAFB/BANC datasets):
-   - Visit [codex.flywire.ai/auth_token](https://codex.flywire.ai/auth_token)
-   - Copy token → Enter in UI Settings tab
+1. Visit [NeuPrint](https://neuprint.janelia.org/)
+2. Login → Account → Copy Auth Token
 
 📖 **[Full Installation Guide](docs/INSTALLATION.md)**
-
----
-
-## 🖥️ Web UI (v4.5.0)
-
-DROCAT includes a local web interface (light theme, photo-selector-inspired design) for all analysis tools.
-Every panel links to its own local instruction guide - see the
-[UI Guides index](docs/ui_guides/README.html).
-
-### Launch the UI
-
-**macOS** — Double-click `DROCAT.command` in Finder, or:
-```bash
-./DROCAT.command
-```
-
-**macOS/Linux:**
-```bash
-./run_ui.sh
-```
-
-**Windows:**
-```
-run_ui.bat
-```
-
-**Manual:**
-```bash
-conda activate drocat
-python ui/app.py
-```
-
-The UI opens at **http://127.0.0.1:8080**
-
-### UI Features
-
-| Tab | Tool | Description |
-|-----|------|-------------|
-| **Pathfinding** | FindPath | Multi-hop path analysis between neuron groups |
-| **Direct** | FindDirect | Direct synaptic connection analysis |
-| **Profiling** | ConnectivityProfiling | Intra-dataset connectivity profile comparison |
-| **Homologs** | FindHomologs | Cross-dataset homolog finding |
-| **Cross-Dataset** | InterDatasetComparator | Compare connectivity across datasets |
-| **Find Lines** | NeuronBridge_FindLines | EM→LM driver line search |
-| **Find Neurons** | NeuronBridge_FindNeuron | LM→EM neuron search |
-| **Co-Labeling** | NeuronBridge_Colabel | Driver line co-labeling analysis |
-| **Visualization** | plot3dSkeleton/PlotPath | 3D neuron visualization |
-| **Settings** | - | Token configuration and dataset status |
-
-### Advanced Neuron Search
-
-All neuron input fields support **filter modes**:
-
-| Mode | Behavior | Example |
-|------|----------|--------|
-| Exact | Match type/bodyId exactly | `aMe12` → only aMe12 |
-| Starts with | Types beginning with text | `DN` → DN1p, DN2, DNa01... |
-| Contains | Types containing text | `PN` → adPN, lPN, vPN... |
-| Ends with | Types ending with text | `_R` → all right-hemisphere types |
-| Regex | Full regex pattern | `KC.*` → all KC types |
-
-### Dataset Selection
-
-- **NeuPrint datasets** (hemibrain, male-cns v1.0/v0.9, optic-lobe, manc): Fetched from server automatically
-- **FlyWire FAFB v783**: Requires CAVE token + manual data download
-- **FlyWire BANC v888/v626**: Requires CAVE token + manual data download
-
-See the **Settings** tab for detailed setup instructions.
-
-### Directory Selection
-
-All output path fields include a browse button (📁) that opens your system's native file picker dialog.
 
 ---
 
@@ -339,14 +227,12 @@ All output path fields include a browse button (📁) that opens your system's n
 
 | Dataset             | Type      | Description               |
 | ------------------- | --------- | ------------------------- |
-| `male-cns:v1.0`     | NeuPrint  | Full male CNS (latest)    |
-| `male-cns:v0.9`     | NeuPrint  | Full male CNS             |
 | `hemibrain:v1.2.1`  | NeuPrint  | Adult fly brain (central) |
+| `male-cns:v0.9`     | NeuPrint  | Full male CNS             |
 | `optic-lobe:v1.1`   | NeuPrint  | Optic lobe detailed       |
-| `manc:v1.2.1`       | NeuPrint  | Male VNC                  |
-| `flywire_FAFB_v783` | FlyWire   | Female brain (CAVE+local) |
-| `flywire_BANC_v888` | FlyWire   | Male VNC latest (CAVE+local) |
-| `flywire_BANC_v626` | FlyWire   | Male VNC (CAVE+local)     |
+| `manc:v1.2.3`       | NeuPrint  | Male VNC                  |
+| `flywire_FAFB_v783` | Local&API | FlyWire female brain      |
+| `flywire_BANC_v626` | Local     | FlyWire male VNC          |
 
 📖 **[FlyWire Setup Guide](docs/FLYWIRE_USAGE.md)**
 

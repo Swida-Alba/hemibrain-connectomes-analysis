@@ -1,4 +1,0 @@
-# DROCAT UI Requirements
-# Install with: pip install -r ui/requirements.txt
-
-nicegui>=3.0.0

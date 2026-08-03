@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Verify a DROCAT installation without requiring network access.
+"""Verify a DROCAT v4.4.5 installation without requiring network access.
 
 Checks project layout, Python version, core/optional imports, the token file,
-and that the UI package imports. Exits 0 when all required checks pass.
+and that the backend modules import. Exits 0 when all required checks pass.
 
 Usage:
     python verify_install.py --project /path/to/hemibrain-connectomes-analysis
@@ -33,16 +33,15 @@ CORE_IMPORTS = [
     "PIL",
     "pydantic",
     "neuprint",
-    "nicegui",
     "tqdm",
     "cv2",
     "reportlab",
     "pptx",
     "img2pdf",
+    "neuronbridge",
 ]
 
 OPTIONAL_IMPORTS = [
-    "neuronbridge",
     "caveclient",
     "cloudvolume",
     "navis",
@@ -54,6 +53,33 @@ OPTIONAL_IMPORTS = [
     "psutil",
     "trimesh",
 ]
+
+BACKEND_MODULES = [
+    "coana",
+    "statvis",
+    "statvis_polars",
+    "neuronbridge_finder",
+    "visualize_skeleton",
+    "flylight_downloader",
+    "comparison.profile_comparator",
+    "comparison.comparison_analyzer",
+    "comparison.connectivity_profiler",
+    "core.fast_graph",
+]
+
+# Distributions owned by DROCAT (normalized names). `pip check` lines about
+# other packages in the env are treated as noise; lines about these are real
+# install conflicts (e.g. pydantic drift breaking neuronbridge-python).
+DROCAT_DISTS = {
+    "numpy", "pandas", "polars", "scipy", "pyarrow", "plotly", "matplotlib",
+    "seaborn", "opencv-python", "bokeh", "kaleido", "selenium",
+    "webdriver-manager", "networkx", "openpyxl", "tqdm", "requests", "jinja2",
+    "pillow", "pydantic", "python-rapidjson", "pyqt5", "neuprint-python",
+    "navis", "flybrains", "boto3", "reportlab", "python-pptx", "pymupdf",
+    "img2pdf", "k3d", "ipywidgets", "open3d", "caveclient", "cloud-volume",
+    "fast-simplification", "trimesh", "psutil", "xlsxwriter",
+    "neuronbridge-python", "ray", "memray", "hemibrain-connectomes-analysis",
+}
 
 IMPORT_PROBE = """
 import importlib, json
@@ -69,18 +95,61 @@ print(json.dumps(out))
 """
 
 
-def run_probe(python_exe: str, modules: list) -> dict:
+def run_probe(
+    python_exe: str,
+    modules: list,
+    cwd: Path = None,
+    syspath: list = None,
+) -> dict:
     code = IMPORT_PROBE.replace("__MODS_JSON__", json.dumps(modules))
+    if syspath:
+        code = (
+            "import sys\n"
+            + "".join(f"sys.path.insert(0, {p!r})\n" for p in syspath)
+            + code
+        )
     proc = subprocess.run(
         [python_exe, "-c", code],
         capture_output=True,
         text=True,
         timeout=300,
+        cwd=str(cwd) if cwd else None,
     )
     try:
         return json.loads(proc.stdout.strip().splitlines()[-1])
     except (ValueError, IndexError):
         return {m: f"probe failed: {proc.stderr[-200:]}" for m in modules}
+
+
+def run_pip_check(python_exe: str) -> tuple:
+    """Run `pip check` and return (ok, detail). Only conflicts involving a
+    DROCAT-owned distribution count as failures; unrelated env noise is
+    reported in the detail string but does not fail the check."""
+    try:
+        proc = subprocess.run(
+            [python_exe, "-m", "pip", "check"],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+    except Exception as exc:
+        return True, f"pip check could not run: {exc}"
+    lines = [l.strip() for l in proc.stdout.splitlines() if l.strip()]
+    if not lines:
+        return True, "no conflicts"
+    # A conflict is a DROCAT problem only when a DROCAT-owned distribution is
+    # the one *declaring* the broken requirement (first token of the line),
+    # e.g. "neuronbridge-python 3.3.0 has requirement pydantic~=2.9.1, ...".
+    # Lines where unrelated packages complain about pinned versions (e.g.
+    # "pdfplumber ... requires Pillow>=12") are coexistence noise, not
+    # install failures.
+    drocat_conflicts = [
+        l for l in lines
+        if l.split()[0].lower().replace("_", "-").split("[")[0] in DROCAT_DISTS
+    ]
+    if drocat_conflicts:
+        return False, "; ".join(drocat_conflicts[:5])
+    return True, f"{len(lines)} conflict(s) in unrelated packages (ignored)"
 
 
 def main() -> int:
@@ -101,23 +170,25 @@ def main() -> int:
     def check(name: str, ok: bool, detail: str = ""):
         checks.append((name, ok, detail))
 
-    # Project layout
+    # Project layout (v4.4.5: scripts/ + src/, no ui/)
     check("project directory", project.is_dir(), str(project))
     for rel in [
-        "install.sh",
-        "install.ps1",
         "requirements.txt",
-        "ui/requirements.txt",
-        "ui/app.py",
+        "requirements-windows.txt",
+        "scripts/FindPath.py",
+        "scripts/FindDirect.py",
+        "scripts/ConnectivityProfiling.py",
+        "scripts/NeuronBridge_FindLines.py",
+        "scripts/plot3dSkeleton.py",
         "src/coana.py",
         "src/neuronbridge_finder.py",
         "src/visualize_skeleton.py",
+        "src/comparison/profile_comparator.py",
         "vispath-subproject/src/vispath_pkg",
     ]:
         check(f"file {rel}", (project / rel).exists(), str(project / rel))
 
     # Python version
-    version = "unknown"
     try:
         proc = subprocess.run(
             [python_exe, "-c", "import sys; print('%d.%d' % sys.version_info[:2])"],
@@ -127,7 +198,16 @@ def main() -> int:
         )
         version = proc.stdout.strip()
         major_minor = tuple(int(x) for x in version.split("."))
-        check("python version >= 3.9", major_minor >= (3, 9), version)
+        check("python version >= 3.10", major_minor >= (3, 10), version)
+        if major_minor >= (3, 12):
+            checks.append(
+                (
+                    "python version <= 3.11 (recommended)",
+                    False,
+                    f"{version}: PyQt5 5.15.10 / open3d 0.19 / ray 2.39 have no "
+                    "wheels for 3.12+; recreate the env with Python 3.11",
+                )
+            )
     except Exception as exc:
         check("python version", False, str(exc))
 
@@ -139,6 +219,21 @@ def main() -> int:
     for mod, status in optional_results.items():
         if status != "ok":
             check(f"import {mod} (optional)", True, f"missing: {status}")
+
+    # Backend module imports (project src/ on sys.path)
+    backend_results = run_probe(
+        python_exe,
+        BACKEND_MODULES,
+        cwd=project,
+        syspath=[str(project / "src")],
+    )
+    for mod, status in backend_results.items():
+        check(f"backend import {mod}", status == "ok", status)
+
+    # Dependency consistency (catches drift that imports alone cannot, e.g.
+    # pydantic upgraded past neuronbridge-python's ~=2.9.1 constraint)
+    pip_ok, pip_detail = run_pip_check(python_exe)
+    check("pip check (DROCAT dependencies consistent)", pip_ok, pip_detail)
 
     # Token file
     local_token = project / "token_info_local.txt"
@@ -155,26 +250,9 @@ def main() -> int:
     else:
         check("token_info file", False, "missing token_info.txt / token_info_local.txt")
 
-    # UI import (project must be on sys.path)
-    ui_probe = (
-        "import sys; sys.path.insert(0, '.'); "
-        "import ui.app; print('ui-ok')"
-    )
-    try:
-        proc = subprocess.run(
-            [python_exe, "-c", ui_probe],
-            cwd=str(project),
-            capture_output=True,
-            text=True,
-            timeout=300,
-        )
-        check("UI imports (ui.app)", "ui-ok" in proc.stdout, proc.stderr[-200:])
-    except Exception as exc:
-        check("UI imports (ui.app)", False, str(exc))
-
     # Report
     required_failures = []
-    print(f"DROCAT install verification - {project}")
+    print(f"DROCAT v4.4.5 install verification - {project}")
     print(f"Python: {version}")
     for name, ok, detail in checks:
         status = "PASS" if ok else "FAIL"

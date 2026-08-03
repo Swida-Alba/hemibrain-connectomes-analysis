@@ -3,7 +3,7 @@
 > [!TIP]
 > 🤖 **Agent-assisted installation (Codex):** DROCAT ships an AI-agent skill
 > ([`skills/drocat-install/SKILL.md`](../skills/drocat-install/SKILL.md)) that installs,
-> verifies, and launches the toolkit automatically. See
+> verifies, and prepares the toolkit automatically. See
 > [Agent-Assisted Installation](#agent-assisted-installation-codex) below.
 
 ## Agent-Assisted Installation (Codex)
@@ -19,20 +19,21 @@ The fastest way to install DROCAT is to let an AI agent do it with the bundled
 3. **Or copy-paste this one-liner anywhere** (no local repo needed) — the agent fetches the
    skill file and follows it:
 
-   > Fetch https://raw.githubusercontent.com/Swida-Alba/Drosophila-cross-dataset-connectome-analysis/v4.5.0/skills/drocat-install/SKILL.md and follow it to install DROCAT on this machine.
+   > Fetch https://raw.githubusercontent.com/Swida-Alba/Drosophila-cross-dataset-connectome-analysis/v4.4.5/skills/drocat-install/SKILL.md and follow it to install DROCAT on this machine.
 
 4. The agent will:
    - Fetch the repository from GitHub:
 
      ```bash
-     git clone --branch v4.5.0 https://github.com/Swida-Alba/Drosophila-cross-dataset-connectome-analysis.git drocat
+     git clone --branch v4.4.5 https://github.com/Swida-Alba/Drosophila-cross-dataset-connectome-analysis.git drocat
      cd drocat
      ```
-   - Run the OS-appropriate installer (`install.sh` / `install.ps1` / `install.bat`)
-   - Create the `drocat` conda environment (Python 3.11) and install all dependencies
+   - Create the `drocat` conda environment (Python 3.11)
+   - Install `requirements.txt` (Linux/macOS) or `requirements-windows.txt` (Windows)
+   - Install `neuronbridge-python --no-deps` (required for NeuronBridge scripts)
    - Ask you for NeuPrint / CAVE tokens and write them to `token_info_local.txt`
    - Verify the installation with `skills/drocat-install/scripts/verify_install.py`
-   - Launch the web UI and confirm it responds at <http://127.0.0.1:8080>
+   - Leave you ready to run any `scripts/*.py` entry point (this version has no web UI)
 
 **Manual verification** (or to re-check an existing install):
 
@@ -50,24 +51,23 @@ cp -R skills/drocat-install/. ~/.codex/skills/drocat-install/
 
 ## Quick Start
 
-**Environment naming:** DROCAT uses a versioned environment name based on
-the app version (read from `ui/config.py`): `drocat-4.5.0`. If that name
-already exists on this machine, the installer warns and **never touches the
-existing env** - it creates the next free name instead:
-`drocat-4.5.0-2`, `drocat-4.5.0-3`, ... (skipping every name that exists).
-
-- The launchers (`run_ui.sh`, `run_ui.bat`, `DROCAT.command`) resolve the
-  same way: they use `drocat-<version>` only if it is free/usable, otherwise
-  the next available `drocat-<version>-N`, creating it on first launch.
-- Existing environments (including legacy unversioned `drocat`) are never
-  modified or deleted.
+> **Python version:** DROCAT supports Python 3.10-3.11 (3.11 recommended).
+> Python 3.9 and below fail because `matplotlib==3.10.0` requires >=3.10;
+> Python 3.12+ fails because PyQt5 5.15.10 / open3d 0.19 / ray 2.39 ship no
+> wheels for it.
 
 ### Recommended: Using Conda Environment
 
 **Create a new conda environment (recommended for isolation):**
 
 ```bash
-# Create environment with Python 3.11
+# Recommended: conflict-safe helper (warns if an env named 'drocat' already
+# exists and creates a versioned env 'drocat-v4.4.5' instead - appending
+# '-2', '-3', ... if needed - never touching the old env)
+python skills/drocat-install/scripts/setup_conda_env.py --name drocat --python 3.11 --version 4.4.5
+# The chosen name is printed as: DROCAT_ENV_NAME=<name>
+
+# Or manually (fails if 'drocat' already exists):
 conda create -n drocat python=3.11 -y
 
 # Activate the environment
@@ -116,6 +116,10 @@ This will install all necessary dependencies including PyQt5 for fast GUI dialog
 
 ### Option 2: Using pip install (Modern Python)
 
+> **macOS/Linux only.** On Windows, `pip install .` fails because the package
+> metadata depends on `neuronbridge-python`, whose `memray` dependency cannot
+> be built on Windows. Windows users must use Option 1 above.
+
 ```bash
 # Standard installation
 pip install .
@@ -148,71 +152,16 @@ If you only need the visualization path component:
 cd vispath-subproject
 pip install -e .
 ```
-
-### Option 4: One-Click Install with Web UI (Recommended for New Users)
-
-**macOS** — Double-click `DROCAT.command` in Finder:
-```bash
-chmod +x DROCAT.command
-./DROCAT.command
-```
-
-**macOS/Linux** — Run the installer:
-```bash
-chmod +x install.sh
-./install.sh
-```
-
-**Windows** — Double-click `install.bat` or run in PowerShell:
-```powershell
-powershell -ExecutionPolicy Bypass -File install.ps1
-```
-
-These scripts automatically:
-1. Install Miniconda (if not already present)
-2. Create a `drocat` conda environment with Python 3.11
-3. Install all dependencies including NiceGUI (web UI)
-4. Create launcher scripts (`run_ui.sh` / `run_ui.bat`)
-
-After installation, launch the Web UI:
-
-| Platform | Command |
-|----------|--------|
-| macOS (double-click) | `DROCAT.command` |
-| macOS/Linux | `./run_ui.sh` |
-| Windows | `run_ui.bat` |
-| Manual | `conda activate drocat && python ui/app.py` |
-
-The UI opens at **http://127.0.0.1:8080**
-
-#### Web UI Dependencies
-
-The Web UI requires the `nicegui` package (installed automatically by the one-click installer):
-
-```bash
-pip install -r ui/requirements.txt
-```
-
-Or install with the optional UI extra:
-```bash
-pip install -e ".[ui]"
-```
-
 ## Authentication Setup
 
 To access NeuPrint and FlyWire datasets, you need to configure your authentication tokens.
 
 1.  **Get your tokens:**
     *   **NeuPrint Token:** Log in to [neuprint.janelia.org](https://neuprint.janelia.org/account) and copy your token.
-    *   **CAVE Token (FlyWire/FAFB/BANC):** Log in to [codex.flywire.ai](https://codex.flywire.ai/auth_token) and copy your token.
+    *   **CAVE Token (FlyWire/FAFB):** Log in to [codex.flywire.ai](https://codex.flywire.ai/auth_token) and copy your token.
     *   **NeuronBridge:** No authentication required - NeuronBridge API is publicly accessible.
 
-2.  **Configure tokens (choose one method):**
-
-    **Method A: Via Web UI (Recommended)**
-    Open the Web UI → Settings tab → Enter tokens in the API Tokens section → Click "Save Tokens".
-
-    **Method B: Via token file**
+2.  **Configure local tokens:**
     The project uses a local file `token_info_local.txt` to store your secrets. This file is gitignored to prevent accidental commits.
 
     *   Copy the template file:
@@ -225,18 +174,12 @@ To access NeuPrint and FlyWire datasets, you need to configure your authenticati
         CAVE_TOKEN='your_actual_cave_token_here'
         ```
 
-    **Method C: Via environment variables**
-    ```bash
-    export NEUPRINT_APPLICATION_TOKEN='your_token_here'
-    export CAVE_TOKEN='your_cave_token_here'
-    ```
+    Alternatively, you can set environment variables `NEUPRINT_TOKEN` and `CAVE_TOKEN`.
 
 **Token Requirements:**
-- `NEUPRINT_TOKEN`: **Required** for accessing all NeuPrint datasets (hemibrain, male-cns v1.0/v0.9, MANC, optic-lobe)
-- `CAVE_TOKEN`: **Required** for accessing FlyWire datasets (FAFB v783, BANC v888/v626)
+- `NEUPRINT_TOKEN`: **Required** for accessing all NeuPrint datasets (hemibrain, male-cns, MANC, optic-lobe)
+- `CAVE_TOKEN`: **Required** for accessing FlyWire datasets (FAFB, BANC)
 - NeuronBridge API: **No token required** (publicly accessible)
-
-> **Note:** FlyWire datasets require **both** a CAVE token AND manually downloaded local data files. See the Web UI Settings tab for detailed FlyWire setup instructions.
 ## Core Dependencies
 
 The following packages are **required**:
@@ -259,30 +202,6 @@ The following packages are **required**:
 **Note on Polars:** Polars is used for memory-efficient operations when building and loading large connection caches (millions of connections). It gracefully falls back to pandas if not available, but Polars is recommended for cross-dataset comparison workflows.
 
 ## Optional Dependencies
-
-### Web UI (NiceGUI)
-
-The Web UI provides a browser-based interface for all DROCAT tools with a light
-photo-selector-inspired theme, parameter forms, and real-time execution logs.
-Every tool panel links to its own local instruction guide
-([docs/ui_guides/README.html](ui_guides/README.html)).
-
-```bash
-# Install Web UI dependency
-pip install -r ui/requirements.txt
-
-# Or use the optional extra
-pip install -e ".[ui]"
-```
-
-After installation, launch with:
-```bash
-python ui/app.py
-# or
-./run_ui.sh          # macOS/Linux
-run_ui.bat           # Windows
-./DROCAT.command     # macOS double-click
-```
 
 ### For Better Performance
 
@@ -366,45 +285,6 @@ pip install neuronbridge-python --no-deps
 - **Excludes:** `neuronbridge-python` itself (installed separately in Step 2)
 
 **Note:** Make sure Python was installed with tkinter support (should be default on Windows).
-
-## Version Compatibility & Conflict Handling
-
-DROCAT pins tested versions in `requirements.txt` (macOS/Linux) and
-`requirements-windows.txt` (Windows). The pins are verified together; do not
-upgrade individual packages.
-
-### Known constraints
-
-| Constraint | Why |
-| --- | --- |
-| `numpy==1.26.4` (never 2.x) | `pandas 1.5.3` and `scipy 1.13.1` require numpy < 2 |
-| `pandas==1.5.3` | Tested with Python 3.11; newer pandas changes column semantics used by the toolkit |
-| `kaleido==0.2.1` | Plotly static export; if a wheel is missing on your platform, install from conda-forge (`conda install -n drocat -c conda-forge kaleido`) |
-| `PyQt5==5.15.10` | File/sheet dialogs; on Apple Silicon install the conda-forge build if pip has no wheel |
-| `neuronbridge-python` | `memray` does not build on Windows (and can fail on some macOS setups); the installers retry with `--no-deps` automatically |
-| NiceGUI | The UI requires NiceGUI 3.x (`ui/requirements.txt` pins `nicegui>=3.0.0`) |
-
-### If a pinned package fails to install
-
-1. Re-run the installer - pip installs are idempotent and resume cleanly.
-2. Check the failing package with `conda run -n drocat python -m pip check`.
-3. For a single missing wheel (e.g. `kaleido`, `PyQt5`), install that one
-   package from conda-forge, then re-run the installer.
-4. On Windows, never use `requirements.txt` directly - use
-   `requirements-windows.txt` (the two-step NeuronBridge flow).
-
-### Verification
-
-Every installer finishes with an import check:
-
-```bash
-conda run -n drocat python -c "import numpy,pandas,polars,scipy,matplotlib,plotly,networkx,neuprint,nicegui; import neuronbridge; print('OK')"
-```
-
-The bundled verifier
-([`skills/drocat-install/scripts/verify_install.py`](../skills/drocat-install/scripts/verify_install.py))
-also checks Python version, project layout, all core imports, the token file
-and the UI package.
 
 ## NeuronBridge Installation
 
@@ -620,7 +500,7 @@ For contributing to the project:
 
 ```bash
 # Clone repository
-git clone https://github.com/Swida-Alba/Drosophila-cross-dataset-connectome-analysis.git
+git clone https://github.com/Swida-Alba/hemibrain-connectomes-analysis.git
 cd hemibrain-connectomes-analysis
 
 # Create conda environment (recommended)
@@ -650,7 +530,7 @@ python -c "import coana, statvis, vispath; print('✓ Root package works')"
 If you prefer containerized setup:
 
 ```dockerfile
-FROM python:3.9-slim
+FROM python:3.11-slim
 
 WORKDIR /app
 COPY requirements.txt .
@@ -661,49 +541,26 @@ COPY . .
 
 ## Summary
 
-### One-Click Install (Recommended for New Users)
-
-| Platform | Install | Launch UI |
-|----------|---------|----------|
-| macOS | Double-click `DROCAT.command` | Auto-launches |
-| macOS/Linux | `./install.sh` | `./run_ui.sh` |
-| Windows | `install.bat` | `run_ui.bat` |
-
-### Manual Install
-
-**With conda (recommended):**
+**Recommended (with conda):**
 ```bash
 conda create -n drocat python=3.11 -y
 conda activate drocat
 pip install -r requirements.txt
-pip install -r ui/requirements.txt
-pip install -e .
 ```
 
-**Without conda:**
+**Easiest (without conda):**
 ```bash
 pip install -r requirements.txt
-pip install -r ui/requirements.txt
+```
+
+**Editable install (for development):**
+```bash
 pip install -e .
 ```
 
-**With all extras:**
+**With extras:**
 ```bash
-pip install -e ".[all,ui]"
+pip install -e ".[all]"
 ```
-
-### Launch the Web UI
-
-```bash
-# After installation, launch the browser-based interface:
-python ui/app.py          # Manual
-./DROCAT.command          # macOS double-click
-./run_ui.sh               # macOS/Linux
-run_ui.bat                # Windows
-```
-
-The UI opens at **http://127.0.0.1:8080** with a light theme interface for all
-10 analysis tools. Each panel has an **Instructions** link that opens its
-local guide (see [docs/ui_guides/README.html](ui_guides/README.html)).
 
 All methods will install PyQt5 for optimal GUI performance and numpy <2.0.0 for compatibility! 🚀
