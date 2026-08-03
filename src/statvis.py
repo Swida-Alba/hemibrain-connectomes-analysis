@@ -1,7 +1,15 @@
 import os
+import sys
 import json
 import threading
 from copy import copy
+
+# Make the project root importable regardless of how this module was loaded
+# (scripts put only src/ on sys.path; the `from src...` fallbacks below
+# silently failed from a non-repo cwd - e.g. the NeuPrint token stayed empty).
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
 from types import SimpleNamespace
 import warnings
 
