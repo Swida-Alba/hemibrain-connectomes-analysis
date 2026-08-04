@@ -21,7 +21,7 @@ agent which small script and backend signature to inspect for each task.
 
 Use the [installation guide](INSTALLATION.md) or ask an agent:
 
-> Install DROCAT v4.5.0 on this machine, verify `pip check`, and leave the UI closed. I will run scripts directly.
+> Install DROCAT v4.5.0 on this machine, verify `pip check`, leave the UI closed, and finish by reporting the environment status. I will run scripts directly.
 
 The direct-analysis workflow expects the `drocat-4.5.0` Python 3.11
 environment and a configured `token_info_local.txt` when NeuPrint or FlyWire
@@ -75,7 +75,7 @@ Official references:
 Do not manually copy the skill. Open the repository in Codex (or another
 tool-enabled agent) and paste this command:
 
-> Fetch https://raw.githubusercontent.com/Swida-Alba/Drosophila-cross-dataset-connectome-analysis/v4.5.0/skills/drocat-usage/SKILL.md and follow it to install and use the DROCAT v4.5.0 direct-analysis skill for this repository, then run the requested analysis without opening the UI.
+> Fetch https://raw.githubusercontent.com/Swida-Alba/Drosophila-cross-dataset-connectome-analysis/v4.5.0/skills/drocat-usage/SKILL.md and follow it to install and use the DROCAT v4.5.0 direct-analysis skill for this repository, then finish the requested analysis end-to-end without opening the UI.
 
 The agent can use the checked-in `skills/drocat-usage/SKILL.md` when local skill
 discovery is enabled; the raw URL is the fallback for a new agent session.
@@ -88,7 +88,8 @@ Open the repository in the agent and paste a focused request:
 Use the DROCAT v4.5.0 direct-analysis skill. Run a cached FindPath analysis
 from aMe12 to PPL101 in male-cns:v0.9, with max_interlayer=2, CSV output, and
 save everything under local_data/agent_runs/aMe12_to_PPL101. Use showfig=False,
-inspect the generated files, and summarize row counts and warnings.
+inspect the generated files, summarize row counts and warnings, and finish by
+reporting the validated artifacts. Do not stop at a plan.
 ```
 
 For a code repair:
@@ -97,7 +98,8 @@ For a code repair:
 Use the DROCAT v4.5.0 direct-analysis skill. Reproduce this direct-script
 failure with the smallest query, inspect only the relevant script and backend
 signature, patch the call, compile it, and run the focused regression test.
-Do not change tokens or dependencies.
+Finish by reporting the patch and test result. Do not change tokens or
+dependencies.
 ```
 
 ## Running scripts directly

@@ -13,6 +13,11 @@ Welcome to the Drosophila Connectome Analysis Toolkit (DROCAT) documentation!
 - **[Quick Start](../QUICK_START.md#agent-first-direct-mode-no-ui)**: Use the
   repository-safe direct launcher.
 
+Agent requests should be completion-oriented: ask the agent to run the
+requested operation, validate its outputs, and report the final artifacts in
+the same session. The [direct-analysis skill](../skills/drocat-usage/SKILL.md)
+defines this completion contract.
+
 ## 🆕 Recent Updates (January 2026) - V4.4.0
 
 ### 🚀 Local FAFB/BANC Dataset Support (RECOMMENDED)

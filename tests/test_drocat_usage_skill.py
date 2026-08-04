@@ -58,6 +58,7 @@ def test_readme_exposes_direct_analysis_and_beginner_setup() -> None:
     assert "docs/AGENT_SETUP.md" in readme
     assert "deepseek-v4-flash" in readme
     assert "raw.githubusercontent.com/Swida-Alba/Drosophila-cross-dataset-connectome-analysis/v4.5.0/skills/drocat-usage/SKILL.md" in readme
+    assert "finish the requested analysis end-to-end" in readme
 
 
 def test_skill_installation_uses_agent_command_not_manual_copy() -> None:
@@ -69,3 +70,17 @@ def test_skill_installation_uses_agent_command_not_manual_copy() -> None:
     assert raw_url in setup
     assert "mkdir -p ~/.codex/skills/drocat-usage" not in skill
     assert "mkdir -p ~/.codex/skills/drocat-usage" not in setup
+
+
+def test_agent_workflows_have_completion_contracts() -> None:
+    usage = (SKILL / "SKILL.md").read_text(encoding="utf-8")
+    install = (ROOT / "skills" / "drocat-install" / "SKILL.md").read_text(encoding="utf-8")
+    setup = (ROOT / "docs" / "AGENT_SETUP.md").read_text(encoding="utf-8")
+    deepseek = (SKILL / "references" / "deepseek-codex.md").read_text(encoding="utf-8")
+
+    assert "## Completion contract" in usage
+    assert "Do not stop after fetching this skill" in usage
+    assert "## Completion contract" in install
+    assert "Do not stop after cloning the" in install
+    assert "finish the requested analysis end-to-end" in setup
+    assert "finish by reporting the validated artifacts" in deepseek

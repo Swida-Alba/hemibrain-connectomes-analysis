@@ -9,6 +9,15 @@ description: Auto-install the DROCAT Drosophila connectome analysis toolkit (hem
 
 Install DROCAT end-to-end on a fresh machine: fetch the repository from GitHub, create a versioned conda environment, install pinned dependencies, configure API tokens, verify the installation, and launch the web UI.
 
+## Completion contract
+
+Unless the user asks for instructions only, complete the requested installation
+or repair in the current agent session. Do not stop after cloning the
+repository, showing shell commands, or starting an installer: wait for the
+installer and verifier to finish, confirm the final environment/UI status, and
+report the exact result. Ask only for required tokens, an unclear repository
+path, or an approval that the user must provide.
+
 ## Workflow
 
 ### 1. Fetch the repository
@@ -107,9 +116,9 @@ NeuronBridge, FlyLight, homolog, profile, and empty-network workflows. Keep
 the UI closed for unattended runs and use `showfig=False` until the output has
 been validated.
 
-Agent handoff command:
+Agent handoff command (continues through completion):
 
-> Fetch https://raw.githubusercontent.com/Swida-Alba/Drosophila-cross-dataset-connectome-analysis/v4.5.0/skills/drocat-usage/SKILL.md and follow it to install and use the DROCAT v4.5.0 direct-analysis skill for this repository, then run the requested analysis without opening the UI.
+> Fetch https://raw.githubusercontent.com/Swida-Alba/Drosophila-cross-dataset-connectome-analysis/v4.5.0/skills/drocat-usage/SKILL.md and follow it to install and use the DROCAT v4.5.0 direct-analysis skill for this repository, then finish the requested analysis end-to-end without opening the UI.
 
 ## Troubleshooting
 

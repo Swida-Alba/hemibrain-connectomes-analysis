@@ -10,6 +10,22 @@ tool. Keep the UI out of the execution path: edit a focused script or create a
 small run script, execute it in the versioned environment, inspect the generated
 artifacts, and report the exact parameters and output paths.
 
+## Completion contract
+
+Unless the user explicitly asks for a plan or diagnosis only, finish the
+requested operation end-to-end in the current agent session:
+
+1. prepare the smallest safe run;
+2. execute it with the requested parameters;
+3. validate exit status and generated artifacts; and
+4. report the command, output paths, counts, warnings, and any scientific
+   limitation.
+
+Do not stop after fetching this skill, reading source files, creating a run
+script, or printing a command. Ask the user only for a required credential,
+scientific choice, or approval; otherwise continue until the task is complete.
+If a real blocker remains, state the exact blocker and the last completed step.
+
 ## Operating contract
 
 1. Confirm the repository root and branch before running anything:
@@ -225,9 +241,9 @@ environment is already installed and focuses on direct analysis.
 
 Use the agent command below instead of manually copying files into a skill
 directory. It fetches the branch-pinned skill instructions and tells the agent
-to run the requested analysis directly, with the UI closed:
+to finish the requested analysis directly, with the UI closed:
 
-> Fetch https://raw.githubusercontent.com/Swida-Alba/Drosophila-cross-dataset-connectome-analysis/v4.5.0/skills/drocat-usage/SKILL.md and follow it to install and use the DROCAT v4.5.0 direct-analysis skill for this repository, then run the requested analysis without opening the UI.
+> Fetch https://raw.githubusercontent.com/Swida-Alba/Drosophila-cross-dataset-connectome-analysis/v4.5.0/skills/drocat-usage/SKILL.md and follow it to install and use the DROCAT v4.5.0 direct-analysis skill for this repository, then finish the requested analysis end-to-end without opening the UI.
 
 If the agent already discovers repository-local skills, simply ask it to use
 `skills/drocat-usage/SKILL.md`. The skill contains no credentials; API keys and

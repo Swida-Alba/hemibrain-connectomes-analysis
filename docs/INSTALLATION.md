@@ -111,6 +111,10 @@ The repository includes [`skills/drocat-install/SKILL.md`](../skills/drocat-inst
 
 The skill uses the same one-click installers; it additionally guides token setup and verifies that the server responds.
 
+To ask an agent to finish installation directly, paste:
+
+> Fetch https://raw.githubusercontent.com/Swida-Alba/Drosophila-cross-dataset-connectome-analysis/v4.5.0/skills/drocat-install/SKILL.md and follow it to finish installing, verifying, and launching DROCAT on this machine.
+
 For direct script execution after installation, use the separate
 [`drocat-usage` skill](../skills/drocat-usage/SKILL.md). It runs pathfinding,
 comparison, NeuronBridge, PlotPath, and 3D scripts without starting the UI.

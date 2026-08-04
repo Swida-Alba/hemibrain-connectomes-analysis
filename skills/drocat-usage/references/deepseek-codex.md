@@ -36,8 +36,9 @@ requests such as:
 ```text
 Use the DROCAT v4.5.0 direct-analysis skill. Run a cached FindPath analysis
 from aMe12 to PPL101 in male-cns:v0.9, with max_interlayer=2, CSV output, and
-save everything under local_data/agent_runs/aMe12_to_PPL101. Summarize the
-row counts and show the next command to render the network.
+save everything under local_data/agent_runs/aMe12_to_PPL101. Inspect the
+outputs, summarize row counts, and finish by reporting the validated artifacts
+and the next command to render the network. Do not stop at a plan.
 ```
 
 For a code repair:
@@ -46,7 +47,8 @@ For a code repair:
 Use the DROCAT v4.5.0 direct-analysis skill. Reproduce this direct-script
 failure with the smallest query, inspect only the relevant script and backend
 signature, patch the call, compile it, and run the focused regression test.
-Do not change tokens or dependencies.
+Finish by reporting the patch and test result. Do not change tokens or
+dependencies.
 ```
 
 ## Configure Codex with DeepSeek

@@ -221,11 +221,11 @@ DROCAT ships a Codex skill that lets an AI agent install, verify, and launch the
 
 **Usage** — open Codex in this repository and ask:
 
-> Install DROCAT on this machine and verify it works.
+> Install DROCAT on this machine, verify it works, and finish by reporting the final environment and UI status.
 
 **One-line command for Codex / any agent** — copy and paste this anywhere (no local repo needed):
 
-> Fetch https://raw.githubusercontent.com/Swida-Alba/Drosophila-cross-dataset-connectome-analysis/v4.5.0/skills/drocat-install/SKILL.md and follow it to install DROCAT on this machine.
+> Fetch https://raw.githubusercontent.com/Swida-Alba/Drosophila-cross-dataset-connectome-analysis/v4.5.0/skills/drocat-install/SKILL.md and follow it to finish installing, verifying, and launching DROCAT on this machine.
 
 Equivalent manual fetch (what the agent runs):
 
@@ -266,13 +266,14 @@ focused source files, and reports generated artifacts. For example:
 
 Copy-paste command for an agent that does not discover repository-local skills:
 
-> Fetch https://raw.githubusercontent.com/Swida-Alba/Drosophila-cross-dataset-connectome-analysis/v4.5.0/skills/drocat-usage/SKILL.md and follow it to install and use the DROCAT v4.5.0 direct-analysis skill for this repository, then run the requested analysis without opening the UI.
+> Fetch https://raw.githubusercontent.com/Swida-Alba/Drosophila-cross-dataset-connectome-analysis/v4.5.0/skills/drocat-usage/SKILL.md and follow it to install and use the DROCAT v4.5.0 direct-analysis skill for this repository, then finish the requested analysis end-to-end without opening the UI.
 
 ```text
 Use the DROCAT v4.5.0 direct-analysis skill. Run a cached FindPath analysis
 from aMe12 to PPL101 in male-cns:v0.9, with max_interlayer=2, CSV output, and
-save everything under local_data/agent_runs/aMe12_to_PPL101. Inspect the files
-and summarize row counts and warnings. Do not open the UI.
+save everything under local_data/agent_runs/aMe12_to_PPL101. Inspect the files,
+summarize row counts and warnings, and finish by reporting the validated
+artifacts. Do not open the UI or stop at a plan.
 ```
 
 The bundled launcher can also be used directly:
