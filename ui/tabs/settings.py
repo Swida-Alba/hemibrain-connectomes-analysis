@@ -4,8 +4,11 @@ from nicegui import run, ui
 from pathlib import Path
 
 from ..config import (
-    TOKEN_FILE, DEFAULT_OUTPUT_DIR, PROJECT_ROOT,
-    get_default_output_dir, save_local_config,
+    DEFAULT_OUTPUT_DIR,
+    PROJECT_ROOT,
+    get_default_output_dir,
+    load_local_config,
+    save_local_config,
 )
 from ..components.common import section_header, dataset_status_card, dir_input
 
@@ -24,22 +27,31 @@ def create_settings_tab():
                     ).classes("drocat-doc-link")
                 ui.label("Configure API tokens, view dataset status, and manage preferences.").classes("drocat-page-sub")
 
-        # Dataset Status
-        section_header("Dataset Availability", "storage")
+        # Dataset Status.  The card already owns its title; adding a second
+        # section header here made the Settings page look like it contained
+        # two different availability controls.
         dataset_status_card()
 
         # Tokens
         with ui.card().classes("w-full drocat-card"):
             section_header("API Tokens", "key")
 
+            existing_tokens = _load_tokens()
+            token_state = {
+                "neuprint": existing_tokens.get("neuprint", ""),
+                "cave": existing_tokens.get("cave", ""),
+            }
+
             with ui.column().classes("w-full gap-1"):
-                ui.label("NeuPrint Token (Required for all NeuPrint datasets)").classes("text-caption font-bold")
+                with ui.row().classes("items-center gap-2"):
+                    ui.label("NeuPrint Token (Required for all NeuPrint datasets)").classes("text-caption font-bold")
+                    neuprint_status = ui.label(_token_status(token_state["neuprint"])).classes("text-caption drocat-muted")
                 ui.html("Get it from <a href='https://neuprint.janelia.org/account' target='_blank' style='color:#145cff'>neuprint.janelia.org/account</a>").classes("text-caption drocat-muted")
 
-            existing_tokens = _load_tokens()
             neuprint_token = ui.input(
                 label="NeuPrint Token",
-                value=existing_tokens.get("neuprint", ""),
+                value="",
+                placeholder="Leave blank to keep the saved token",
                 password=True,
                 password_toggle_button=True,
             ).classes("w-full")
@@ -47,20 +59,31 @@ def create_settings_tab():
             ui.separator()
 
             with ui.column().classes("w-full gap-1"):
-                ui.label("CAVE Token (for FlyWire CAVE API features)").classes("text-caption font-bold drocat-warn")
+                with ui.row().classes("items-center gap-2"):
+                    ui.label("CAVE Token (for FlyWire CAVE API features)").classes("text-caption font-bold drocat-warn")
+                    cave_status = ui.label(_token_status(token_state["cave"])).classes("text-caption drocat-muted")
                 ui.html("Get it from <a href='https://codex.flywire.ai/auth_token' target='_blank' style='color:#145cff'>codex.flywire.ai/auth_token</a>").classes("text-caption drocat-muted")
                 ui.label("Local converted FlyWire tables work without this token. A CAVE token is needed only when a workflow fetches data or skeletons through the CAVE API; it never replaces the required local files.").classes("text-caption drocat-warn")
 
             cave_token = ui.input(
                 label="CAVE Token (for FlyWire)",
-                value=existing_tokens.get("cave", ""),
+                value="",
+                placeholder="Leave blank to keep the saved token",
                 password=True,
                 password_toggle_button=True,
             ).classes("w-full")
 
-            with ui.row():
+            with ui.row().classes("items-center gap-2 flex-wrap"):
                 save_btn = ui.button("Save Tokens", icon="save", color="primary")
                 test_btn = ui.button("Test NeuPrint", icon="wifi", color="secondary")
+                clear_blank = ui.checkbox(
+                    "Clear a saved value when its field is blank",
+                    value=False,
+                ).classes("text-caption")
+            ui.label(
+                "Saved token values stay on the server and are never pre-filled in the browser. "
+                "Enter a new value only when you want to replace the current one."
+            ).classes("text-caption drocat-muted")
 
         # Output
         with ui.card().classes("w-full drocat-card"):
@@ -75,16 +98,37 @@ def create_settings_tab():
                 reset_default_btn = ui.button("Reset", icon="restart_alt", color="secondary")
 
             def save_default_dir():
-                saved = save_local_config({"default_output_dir": default_dir.value.strip()})
+                raw_value = (default_dir.value or "").strip()
+                if not raw_value:
+                    ui.notify("Choose an output directory first", type="warning")
+                    return
+
+                output_path = Path(raw_value).expanduser()
+                if not output_path.is_absolute():
+                    output_path = (PROJECT_ROOT / output_path).resolve()
+                try:
+                    output_path.mkdir(parents=True, exist_ok=True)
+                except OSError as exc:
+                    ui.notify(f"Cannot use output directory: {exc}", type="negative")
+                    return
+
+                config = load_local_config()
+                config["default_output_dir"] = str(output_path)
+                saved = save_local_config(config)
                 if saved:
+                    default_dir.value = str(output_path)
                     ui.notify("Default output directory saved", type="positive")
                 else:
                     ui.notify("Failed to save default output directory", type="negative")
 
             def reset_default_dir():
                 default_dir.value = str(DEFAULT_OUTPUT_DIR)
-                save_local_config({"default_output_dir": str(DEFAULT_OUTPUT_DIR)})
-                ui.notify("Default output directory reset", type="positive")
+                config = load_local_config()
+                config.pop("default_output_dir", None)
+                if save_local_config(config):
+                    ui.notify("Default output directory reset", type="positive")
+                else:
+                    ui.notify("Failed to reset default output directory", type="negative")
 
             save_default_btn.on_click(save_default_dir)
             reset_default_btn.on_click(reset_default_dir)
@@ -182,29 +226,58 @@ python -c "import sys; sys.path.insert(0, 'src'); from BANC_file_converter impor
                 ui.link("GitHub", "https://github.com/Swida-Alba/hemibrain-connectomes-analysis", new_tab=True).classes("text-primary")
                 ui.link("Docs", "https://github.com/Swida-Alba/hemibrain-connectomes-analysis/blob/main/README.md", new_tab=True).classes("text-primary")
 
+    def _update_token_status():
+        neuprint_status.text = _token_status(token_state["neuprint"])
+        cave_status.text = _token_status(token_state["cave"])
+
     def save_tokens():
         local_file = PROJECT_ROOT / "token_info_local.txt"
-        neuprint_value = (neuprint_token.value or "").strip()
-        cave_value = (cave_token.value or "").strip()
+        entered_neuprint = (neuprint_token.value or "").strip()
+        entered_cave = (cave_token.value or "").strip()
+        saved_tokens = dict(token_state)
+
+        if entered_neuprint:
+            saved_tokens["neuprint"] = entered_neuprint
+        elif clear_blank.value:
+            saved_tokens.pop("neuprint", None)
+        if entered_cave:
+            saved_tokens["cave"] = entered_cave
+        elif clear_blank.value:
+            saved_tokens.pop("cave", None)
+
         content = (
             "# DROCAT Token Configuration\n"
-            f"NEUPRINT_TOKEN={neuprint_value!r}\n"
-            f"CAVE_TOKEN={cave_value!r}\n"
+            f"NEUPRINT_TOKEN={saved_tokens.get('neuprint', '')!r}\n"
+            f"CAVE_TOKEN={saved_tokens.get('cave', '')!r}\n"
         )
         try:
             local_file.write_text(content, encoding="utf-8")
             local_file.chmod(0o600)
+            token_state.clear()
+            token_state.update(saved_tokens)
+            # Clear the client-side fields after saving so a browser DOM
+            # snapshot can never retain a secret value.
+            neuprint_token.value = ""
+            cave_token.value = ""
+            clear_blank.value = False
+            _update_token_status()
+
             ui.notify("Tokens saved to token_info_local.txt", type="positive")
             from ..dataset_service import get_dataset_service
             service = get_dataset_service()
-            service._token = neuprint_value or None
-            service._cave_token = cave_value or None
+            service._token = saved_tokens.get("neuprint") or None
+            service._cave_token = saved_tokens.get("cave") or None
             service._cache.clear()
+            service._available_neuprint = None
+            service._server_datasets = {}
+            service._last_fetch_time = 0
         except Exception as e:
             ui.notify(f"Failed to save: {e}", type="negative")
 
     async def test_connection():
-        token = (neuprint_token.value or "").strip()
+        # The input is intentionally blank while a token is configured.  Use
+        # the server-side value for testing unless the user entered a new one.
+        token = (neuprint_token.value or "").strip() or token_state.get("neuprint", "")
         if not token:
             ui.notify("Enter a NeuPrint token first", type="warning")
             return
@@ -236,8 +309,15 @@ python -c "import sys; sys.path.insert(0, 'src'); from BANC_file_converter impor
 
 
 def _load_tokens() -> dict:
+    """Load valid tokens with local values overriding the template.
+
+    Parse the template first and the local file second, key by key.  The old
+    implementation stopped after seeing *any* token in the first file, so a
+    local CAVE-only file could hide a valid NeuPrint token from the template.
+    """
     tokens = {}
-    for filename in ["token_info_local.txt", "token_info.txt"]:
+    for filename in ["token_info.txt", "token_info_local.txt"]:
+        is_local = filename == "token_info_local.txt"
         token_path = PROJECT_ROOT / filename
         if token_path.exists():
             try:
@@ -245,14 +325,23 @@ def _load_tokens() -> dict:
                     line = line.strip()
                     if line.startswith("NEUPRINT_TOKEN="):
                         token = line.split("=", 1)[1].strip().strip("'\"")
-                        if token and not token.startswith("YOUR_"):
+                        if is_local:
+                            # A blank local value is an explicit clear and
+                            # must not fall back to a template secret.
+                            tokens["neuprint"] = token if token and not token.startswith("YOUR_") else ""
+                        elif "neuprint" not in tokens and token and not token.startswith("YOUR_"):
                             tokens["neuprint"] = token
                     elif line.startswith("CAVE_TOKEN="):
                         token = line.split("=", 1)[1].strip().strip("'\"")
-                        if token and not token.startswith("YOUR_"):
+                        if is_local:
+                            tokens["cave"] = token if token and not token.startswith("YOUR_") else ""
+                        elif "cave" not in tokens and token and not token.startswith("YOUR_"):
                             tokens["cave"] = token
-                if tokens:
-                    break
             except Exception:
                 pass
     return tokens
+
+
+def _token_status(token: str) -> str:
+    """Return a non-sensitive status label for a configured token."""
+    return "configured (kept hidden)" if token else "not configured"

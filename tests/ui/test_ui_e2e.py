@@ -384,6 +384,54 @@ class TestDatasetService:
         token = service.get_token()
         assert token is None or isinstance(token, str)
 
+    def test_settings_token_loader_merges_template_and_local_values(self, tmp_path, monkeypatch):
+        """A local value overrides only its key, without hiding the other token."""
+        from ui.tabs import settings as settings_module
+
+        (tmp_path / "token_info.txt").write_text(
+            "NEUPRINT_TOKEN='template-neuprint'\nCAVE_TOKEN='template-cave'\n",
+            encoding="utf-8",
+        )
+        (tmp_path / "token_info_local.txt").write_text(
+            "CAVE_TOKEN='local-cave'\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(settings_module, "PROJECT_ROOT", tmp_path)
+
+        assert settings_module._load_tokens() == {
+            "neuprint": "template-neuprint",
+            "cave": "local-cave",
+        }
+
+    def test_settings_token_status_is_non_sensitive(self):
+        from ui.tabs.settings import _token_status
+
+        assert _token_status("secret-token") == "configured (kept hidden)"
+        assert "secret-token" not in _token_status("secret-token")
+        assert _token_status("") == "not configured"
+
+    def test_local_dataset_listing_requires_complete_flywire_conversion(self, tmp_path):
+        from ui.dataset_service import DatasetService
+
+        service = DatasetService()
+        service._datasets_dir = tmp_path / "datasets"
+        dataset_path = service._datasets_dir / "flywire_FAFB_v783"
+        dataset_path.mkdir(parents=True)
+        (dataset_path / "flywire_FAFB_v783_metadata.json").write_text(
+            '{"neuron_counts": {"total": 10}}',
+            encoding="utf-8",
+        )
+        (dataset_path / "flywire_FAFB_v783_allneurons_neuron_df.parquet").touch()
+
+        listed = service.get_local_datasets()
+        assert listed[0].local_prepared is False
+        assert listed[0].available is False
+
+        (dataset_path / "flywire_FAFB_v783_merged_connections.parquet").touch()
+        listed = service.get_local_datasets()
+        assert listed[0].local_prepared is True
+        assert listed[0].available is True
+
     def test_flywire_prepared_requires_neurons_and_connections(self, tmp_path):
         from ui.dataset_service import DatasetService
 
@@ -520,6 +568,43 @@ class TestApp:
         from ui.app import main, main_page
         assert callable(main)
         assert callable(main_page)
+
+    def test_tab_toolbar_is_compact_and_non_scrolling(self):
+        from ui.app import DROCAT_CSS
+
+        assert ".drocat-tabs .q-tabs__content" in DROCAT_CSS
+        assert "overflow: hidden" in DROCAT_CSS
+        assert "flex: 1 1 0 !important" in DROCAT_CSS
+        assert ".drocat-tabs .q-tabs__arrow { display: none !important; }" in DROCAT_CSS
+
+    def test_settings_never_prefills_saved_tokens_in_browser_dom(self, tmp_path, monkeypatch):
+        """Saved secrets remain server-side instead of entering the client DOM."""
+        from nicegui import Client
+        from nicegui.page import page
+        import ui.tabs.settings as settings_module
+
+        secret_neuprint = "neuprint-secret-for-dom-test"
+        secret_cave = "cave-secret-for-dom-test"
+        (tmp_path / "token_info_local.txt").write_text(
+            f"NEUPRINT_TOKEN='{secret_neuprint}'\nCAVE_TOKEN='{secret_cave}'\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(settings_module, "PROJECT_ROOT", tmp_path)
+
+        client = Client(page("/settings-dom-test"))
+        with client:
+            settings_module.create_settings_tab()
+
+        input_props = [
+            getattr(element, "_props", {})
+            for element in client.elements.values()
+            if getattr(element, "_props", {}).get("label")
+            in {"NeuPrint Token", "CAVE Token (for FlyWire)"}
+        ]
+        assert len(input_props) == 2
+        assert all(props.get("value", "") == "" for props in input_props)
+        assert secret_neuprint not in repr(client.elements)
+        assert secret_cave not in repr(client.elements)
 
     def test_guide_html_files_and_links_are_direct(self):
         """Instruction links must point to real local HTML guides with valid

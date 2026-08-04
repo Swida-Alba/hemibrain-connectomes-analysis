@@ -642,7 +642,8 @@ def open_folder(path: str):
 def dataset_status_card() -> ui.card:
     """
     Create a card showing dataset availability status.
-    Does NOT auto-fetch on page load. Click Refresh to fetch from server.
+    Does NOT auto-fetch on page load. Click Refresh to fetch server metadata
+    and re-check local converted tables.
     """
     from ..dataset_service import get_dataset_service
     import threading
@@ -654,21 +655,26 @@ def dataset_status_card() -> ui.card:
         with ui.row().classes("w-full items-center justify-between"):
             ui.label("Dataset Availability").classes("drocat-card-title")
             refresh_btn = ui.button("Refresh", icon="refresh", color="primary").props("flat dense").tooltip(
-                "Check which datasets are available from the NeuPrint server.\n"
-                "Requires a valid NeuPrint token (set in API Tokens below)."
+                "Check local converted tables and server availability.\n"
+                "NeuPrint server status requires a valid token; FlyWire uses local files."
             )
 
         ui.separator()
         status_container = ui.column().classes("w-full gap-1")
 
         with status_container:
-            ui.label("Click 'Refresh' to check dataset availability from server.").classes("text-caption drocat-muted")
+            ui.label(
+                "Click Refresh to query NeuPrint/Codex; local dataset folders are shown immediately."
+            ).classes("text-caption drocat-muted")
 
         def render_results(results):
             status_container.clear()
             with status_container:
                 if not results:
-                    ui.label("No datasets found. Check your NeuPrint token in API Tokens section.").classes("text-caption drocat-warn")
+                    ui.label(
+                        "No datasets found. NeuPrint status needs a token; "
+                        "FlyWire status needs the converted local tables."
+                    ).classes("text-caption drocat-warn")
                     return
                 for name, info in results.items():
                     is_flywire = name.startswith("flywire_")
@@ -701,6 +707,16 @@ def dataset_status_card() -> ui.card:
                             ui.badge(src_badge_text, color=src_badge_color).props("outline")
                             ui.badge("not ready", color="grey").props("outline")
 
+        # Local status is useful even when the user has not configured a
+        # NeuPrint token or is working offline.  Avoid any network call here.
+        local_results = {
+            info.name: info
+            for info in service.get_local_datasets()
+            if info.local_prepared or info.local_cache
+        }
+        if local_results:
+            render_results(local_results)
+
         def render_error(msg):
             status_container.clear()
             with status_container:
@@ -726,7 +742,9 @@ def dataset_status_card() -> ui.card:
             status_container.clear()
             with status_container:
                 ui.spinner("dots", size="sm")
-                ui.label("Fetching from NeuPrint server... (may take 10-30s)").classes("text-caption drocat-muted")
+                ui.label(
+                    "Checking local files and NeuPrint/Codex availability... (may take 10-30s)"
+                ).classes("text-caption drocat-muted")
             thread = threading.Thread(target=do_refresh, daemon=True)
             thread.start()
 

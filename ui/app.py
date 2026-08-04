@@ -111,19 +111,28 @@ html, body {
 
 /* ---------- Segmented navigation ---------- */
 .drocat-tabs {
-    display: flex; gap: 4px; padding: 5px;
+    display: flex; gap: 2px; padding: 4px;
     background: var(--drocat-soft);
     border: 1px solid var(--drocat-line);
     border-radius: 14px;
     box-shadow: inset 0 1px 3px rgba(11, 31, 58, .04);
-    overflow-x: auto;
+    overflow: hidden;
     scrollbar-width: none;
 }
+.drocat-tabs .q-tabs__content {
+    width: 100%;
+    min-width: 0;
+    gap: 2px;
+    overflow: hidden !important;
+}
 .drocat-tabs .q-tab {
-    min-height: 42px !important; border-radius: 10px;
+    min-width: 0 !important;
+    min-height: 40px !important;
+    flex: 1 1 0 !important;
+    padding: 0 5px !important;
+    border-radius: 9px;
     color: var(--drocat-navy); font-size: 13px; font-weight: 600;
     transition: background .16s ease, color .16s ease, box-shadow .16s ease;
-    flex: 0 0 auto;
 }
 .drocat-tabs .q-tab:hover { background: #e8edf6; }
 .drocat-tabs .q-tab--active {
@@ -131,24 +140,34 @@ html, body {
     background: var(--drocat-surface) !important;
     box-shadow: 0 2px 6px rgba(11, 31, 58, .10);
 }
-.drocat-tabs .q-tab__icon { font-size: 19px; }
-.drocat-tabs .q-tab__label { font-size: 13px; font-weight: 600; }
+.drocat-tabs .q-tab__icon { font-size: 17px; }
+.drocat-tabs .q-tab__label {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 11px;
+    font-weight: 650;
+    letter-spacing: -.015em;
+}
 .drocat-tabs .drocat-tab-group {
     display: flex;
     align-items: center;
-    padding: 0 8px 0 14px;
-    margin: 8px 2px;
+    flex: 0 0 auto;
+    padding: 0 5px 0 7px;
+    margin: 6px 0;
     border-left: 1px solid var(--drocat-line-strong);
-    font-size: 10px;
+    font-size: 8px;
     font-weight: 800;
-    letter-spacing: .14em;
+    letter-spacing: .1em;
     text-transform: uppercase;
     color: var(--drocat-faint);
     user-select: none;
     white-space: nowrap;
 }
-.drocat-tabs .drocat-tab-group:first-child { border-left: 0; padding-left: 6px; }
+.drocat-tabs .drocat-tab-group:first-child { border-left: 0; padding-left: 3px; }
 .drocat-tabs .drocat-tab-group-nb { color: #7c3aed; }
+.drocat-tabs .drocat-tab-group-system { display: none; }
 .drocat-nb-tab .q-tab__label::after {
     content: "NB";
     margin-left: 6px;
@@ -164,6 +183,16 @@ html, body {
     color: #7c3aed !important;
 }
 .drocat-tabs .drocat-nb-tab:hover { background: #f5f0ff !important; }
+.drocat-tabs .q-tabs__arrow { display: none !important; }
+
+@media (max-width: 1100px) {
+    .drocat-tabs { gap: 1px; padding: 3px; }
+    .drocat-tabs .q-tabs__content { gap: 1px; }
+    .drocat-tabs .q-tab { padding: 0 3px !important; min-height: 36px !important; }
+    .drocat-tabs .q-tab__icon { font-size: 15px; }
+    .drocat-tabs .q-tab__label { font-size: 9px; letter-spacing: -.03em; }
+    .drocat-tabs .drocat-tab-group { padding-left: 4px; padding-right: 3px; font-size: 7px; }
+}
 
 /* Panel tag badge (NeuronBridge etc.) */
 .drocat-tag-badge {
@@ -456,7 +485,7 @@ def main_page():
             tab_find_lines = ui.tab("Find Lines", icon="biotech").classes("drocat-nb-tab")
             tab_find_neuron = ui.tab("Find Neurons", icon="search").classes("drocat-nb-tab")
             tab_colabel = ui.tab("Co-Labeling", icon="layers").classes("drocat-nb-tab")
-            ui.label("System").classes("drocat-tab-group")
+            ui.label("System").classes("drocat-tab-group drocat-tab-group-system")
             tab_settings = ui.tab("Settings", icon="settings")
 
         with ui.tab_panels(tabs, value=tab_pathfinding).classes("w-full bg-transparent"):

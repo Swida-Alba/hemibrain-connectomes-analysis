@@ -118,25 +118,47 @@ class DatasetService:
 
     def _load_tokens(self):
         """Load tokens from token_info_local.txt or token_info.txt."""
-        if self._token is not None:
+        if self._token is not None and self._cave_token is not None:
             return
 
-        for filename in ["token_info_local.txt", "token_info.txt"]:
+        # Parse the template first and the local file second so local values
+        # override only their own key.  Stopping after the first token caused
+        # a local NeuPrint-only file to hide a valid CAVE token (and vice
+        # versa) from the other file.
+        loaded = {}
+        for filename in ["token_info.txt", "token_info_local.txt"]:
+            is_local = filename == "token_info_local.txt"
             token_path = PROJECT_ROOT / filename
             if token_path.exists():
-                with open(token_path, "r") as f:
-                    for line in f:
-                        line = line.strip()
-                        if line.startswith("NEUPRINT_TOKEN="):
-                            token = line.split("=", 1)[1].strip().strip("'\"")
-                            if token and not token.startswith("YOUR_"):
-                                self._token = token
-                        elif line.startswith("CAVE_TOKEN="):
-                            token = line.split("=", 1)[1].strip().strip("'\"")
-                            if token and not token.startswith("YOUR_"):
-                                self._cave_token = token
-                if self._token:
-                    break
+                try:
+                    with open(token_path, "r") as f:
+                        for line in f:
+                            line = line.strip()
+                            if line.startswith("NEUPRINT_TOKEN="):
+                                token = line.split("=", 1)[1].strip().strip("'\"")
+                                if is_local:
+                                    # A blank local value explicitly clears
+                                    # the template value for this key.
+                                    loaded["neuprint"] = (
+                                        token if token and not token.startswith("YOUR_") else None
+                                    )
+                                elif "neuprint" not in loaded and token and not token.startswith("YOUR_"):
+                                    loaded["neuprint"] = token
+                            elif line.startswith("CAVE_TOKEN="):
+                                token = line.split("=", 1)[1].strip().strip("'\"")
+                                if is_local:
+                                    loaded["cave"] = (
+                                        token if token and not token.startswith("YOUR_") else None
+                                    )
+                                elif "cave" not in loaded and token and not token.startswith("YOUR_"):
+                                    loaded["cave"] = token
+                except OSError:
+                    continue
+
+        if self._token is None:
+            self._token = loaded.get("neuprint")
+        if self._cave_token is None:
+            self._cave_token = loaded.get("cave")
 
     def get_token(self) -> Optional[str]:
         """Get NeuPrint token."""
@@ -463,9 +485,16 @@ class DatasetService:
 
                 info = DatasetInfo(
                     name=name,
-                    source="flywire" if "flywire" in folder.name.lower() else "neuprint",
+                    source="flywire" if is_flywire_dataset(name) else "neuprint",
                     local_cache=True,
                 )
+
+                # Keep the local listing consistent with
+                # check_dataset_availability().  In particular, a FlyWire
+                # directory containing only the neuron table is not ready for
+                # pathfinding until its merged connection table is present.
+                info.local_prepared = self._check_local_prepared(name)
+                info.available = info.local_prepared
 
                 metadata_file = self._find_metadata_file(name)
                 if metadata_file and metadata_file.exists():
@@ -475,7 +504,6 @@ class DatasetService:
                             info.neuron_count = meta.get("neuron_counts", {}).get("total", 0)
                             info.typed_count = meta.get("neuron_counts", {}).get("typed", 0)
                             info.metadata = meta
-                            info.available = True
                     except Exception:
                         pass
 

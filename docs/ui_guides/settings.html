@@ -25,14 +25,20 @@
     <tr><td>CAVE Token</td><td>FAFB CAVE API fetching or skeleton fallback (not local conversion)</td><td>codex.flywire.ai/auth_token</td></tr>
   </table>
   <p>Tokens are saved to <code>token_info_local.txt</code> (gitignored) and
-    take precedence over the template <code>token_info.txt</code>.</p>
+    take precedence over the template <code>token_info.txt</code>. For safety,
+    the Settings page never pre-fills a saved secret into the browser. A
+    <b>configured (kept hidden)</b> status means the saved value will be used;
+    leave its field blank to keep it, or enter a new value to replace it.</p>
+  <p>Enable <b>Clear a saved value when its field is blank</b> only when you
+    intentionally want to remove a token from the local file.</p>
   <div class="callout tip">
     <b>Test NeuPrint</b> verifies the token by counting neurons in
     hemibrain:v1.2.1.
   </div>
 
   <h2>Dataset availability</h2>
-  <p>Click <b>Refresh</b> to query the server for available datasets. The
+  <p>Local dataset folders are shown as soon as the page opens. Click
+    <b>Refresh</b> to re-check converted tables and query server metadata. The
     status column shows:</p>
   <table>
     <tr><th>Status</th><th>Meaning</th></tr>
