@@ -111,6 +111,12 @@ The repository includes [`skills/drocat-install/SKILL.md`](../skills/drocat-inst
 
 The skill uses the same one-click installers; it additionally guides token setup and verifies that the server responds.
 
+For direct script execution after installation, use the separate
+[`drocat-usage` skill](../skills/drocat-usage/SKILL.md). It runs pathfinding,
+comparison, NeuronBridge, PlotPath, and 3D scripts without starting the UI.
+Beginners can follow the [agent setup guide](AGENT_SETUP.md), including the
+official low-cost DeepSeek/Codex configuration.
+
 To fetch this release first:
 
 ```bash

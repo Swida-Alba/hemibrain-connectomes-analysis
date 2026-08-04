@@ -8,6 +8,11 @@ A comprehensive Python toolkit for analyzing and visualizing connectome data fro
 > GitHub, installs all dependencies, configures tokens, verifies the installation, and
 > launches the web UI for you.
 > See [Option 3: Agent-Assisted Install](#option-3-agent-assisted-install-codex).
+>
+> 🧪 **Agent-assisted analysis without the UI:** use the
+> [`drocat-usage`](skills/drocat-usage/SKILL.md) skill to run and inspect the
+> v4.5.0 scripts directly. New to agents? Start with the
+> [beginner agent setup](docs/AGENT_SETUP.md).
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
@@ -37,6 +42,8 @@ A comprehensive Python toolkit for analyzing and visualizing connectome data fro
 | **[Troubleshooting](docs/TROUBLESHOOTING.md)**                  | Common issues and solutions         |
 | **[UI Guides](docs/ui_guides/README.html)**                      | **Per-panel instructions & quick starts** |
 | **[Agent Install (Codex)](skills/drocat-install/SKILL.md)**     | **Let Codex install, verify & launch DROCAT** |
+| **[Direct Analysis Skill](skills/drocat-usage/SKILL.md)**        | **Run backend scripts without the UI** |
+| **[Agent Setup](docs/AGENT_SETUP.md)**                           | **Beginner guide to Codex + DeepSeek** |
 | **[Basic Usage](#basic-usage)**                                 | Core script tutorials               |
 
 ### 📖 Feature Documentation
@@ -250,6 +257,66 @@ mkdir -p ~/.codex/skills/drocat-install
 cp -R skills/drocat-install/. ~/.codex/skills/drocat-install/
 ```
 
+### Direct script analysis with an agent (no UI)
+
+After installation, ask Codex to use
+[`skills/drocat-usage/SKILL.md`](skills/drocat-usage/SKILL.md). It runs the
+backend scripts directly, keeps their relative paths correct, inspects only the
+focused source files, and reports generated artifacts. For example:
+
+```text
+Use the DROCAT v4.5.0 direct-analysis skill. Run a cached FindPath analysis
+from aMe12 to PPL101 in male-cns:v0.9, with max_interlayer=2, CSV output, and
+save everything under local_data/agent_runs/aMe12_to_PPL101. Inspect the files
+and summarize row counts and warnings. Do not open the UI.
+```
+
+The bundled launcher can also be used directly:
+
+```bash
+python skills/drocat-usage/scripts/run_direct.py \
+  --conda-env drocat-4.5.0 \
+  --script scripts/FindPath.py \
+  --dry-run
+```
+
+Remove `--dry-run` to execute. Use `scripts/FindDirect.py` for one-hop edges,
+`scripts/PlotPath.py` for path HTML, `scripts/plot3dSkeleton.py` for morphology,
+and `scripts/InterDatasetComparator.py` for cross-dataset comparisons. The
+skill includes recipes for NeuronBridge, FlyLight, homologs, profiles, and the
+empty editable network canvas.
+
+## Agent setup for beginners
+
+An agent is a coding assistant that can run terminal commands, edit focused
+files, and explain results. You do not need to paste the full repository into a
+chat: open this checkout as the agent's project and use the direct-analysis
+skill above.
+
+For a reliable, low-cost setup, DeepSeek's official Codex integration currently
+documents `deepseek-v4-flash` for Codex and the Responses API. Configure it once
+for Codex CLI, the Codex desktop app, or the VS Code extension with the official
+setup script:
+
+```bash
+# macOS/Linux
+bash <(curl -fsSL https://cdn.deepseek.com/api-docs/codex-deepseek-setup-en.sh)
+```
+
+```powershell
+# Windows PowerShell
+irm https://cdn.deepseek.com/api-docs/codex-deepseek-setup-en.ps1 | iex
+```
+
+The script backs up `~/.codex/config.toml`, writes the model catalog, preserves
+compatible project/MCP settings, and validates the configuration. Create the
+DeepSeek API key at [platform.deepseek.com](https://platform.deepseek.com/) and
+never put it in this repository. Use Flash with low reasoning for routine runs;
+reserve high/max reasoning for difficult backend changes. See the full
+[beginner setup guide](docs/AGENT_SETUP.md) and DeepSeek's
+[Codex integration documentation](https://api-docs.deepseek.com/quick_start/agent_integrations/codex/)
+and [Responses API guide](https://api-docs.deepseek.com/guides/responses_api/).
+
 ### Authentication Setup
 
 1. **NeuPrint Token** (required for NeuPrint datasets):
@@ -400,6 +467,18 @@ fc = FindNeuronConnection(
 📖 **[Cache System Guide](docs/core-features/CacheSystem_Guide.md)**
 
 ---
+
+## What's New in v4.5.0
+
+### 🤖 Script-first analysis with coding agents
+- **Direct backend workflow**: Run pathfinding, comparison, NeuronBridge,
+  FlyLight, homolog, profile, PlotPath, and 3D skeleton scripts without
+  starting the NiceGUI UI.
+- **Focused context**: The [`drocat-usage` skill](skills/drocat-usage/SKILL.md)
+  gives an agent a tool catalog, safe launcher, output recipes, and guardrails
+  for targeted source edits.
+- **Beginner setup**: Configure a low-cost DeepSeek V4 Flash Codex provider
+  with the [agent setup guide](docs/AGENT_SETUP.md).
 
 ## What's New in v4.4.0
 

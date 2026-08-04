@@ -97,6 +97,16 @@ Required checks: Python 3.10-3.11, project layout, every installed version again
 - The UI runner adds `vispath-subproject/src` to `sys.path`; no separate pip install is needed for PlotPath.
 - Chrome + WebDriver are only needed for PNG/video exports in the 3D skeleton tool.
 
+## After installation: direct script mode
+
+If the user wants analysis without opening NiceGUI, hand off to the
+[`drocat-usage` skill](../drocat-usage/SKILL.md). It uses the same
+`drocat-4.5.0` environment and provides a repository-safe launcher for
+`FindDirect.py`, `FindPath.py`, `PlotPath.py`, `plot3dSkeleton.py`, comparison,
+NeuronBridge, FlyLight, homolog, profile, and empty-network workflows. Keep
+the UI closed for unattended runs and use `showfig=False` until the output has
+been validated.
+
 ## Troubleshooting
 
 See [references/project-notes.md](references/project-notes.md) for platform notes and known issues.

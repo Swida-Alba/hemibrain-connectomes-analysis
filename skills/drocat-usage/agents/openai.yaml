@@ -1,0 +1,4 @@
+interface:
+  display_name: "DROCAT Direct Analysis"
+  short_description: "Run and guide v4.5.0 connectome scripts without the UI"
+  default_prompt: "Use the DROCAT v4.5.0 direct-analysis workflow to run this connectome analysis."
