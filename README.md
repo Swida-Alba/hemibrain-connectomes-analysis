@@ -7,6 +7,11 @@ A comprehensive Python toolkit for analyzing and visualizing connectome data fro
 > [`drocat-install`](skills/drocat-install/SKILL.md) skill — it fetches this repository from
 > GitHub, installs all dependencies, configures tokens, and verifies the installation for you.
 > See [Agent-Assisted Install](#agent-assisted-install-codex).
+>
+> 🧪 **Agent-assisted script execution:** use the
+> [`drocat-usage`](skills/drocat-usage/SKILL.md) skill to finish connectome
+> analyses directly from the standalone scripts. Start with the
+> [beginner agent setup](docs/AGENT_SETUP.md).
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
@@ -35,6 +40,8 @@ A comprehensive Python toolkit for analyzing and visualizing connectome data fro
 | **[Authentication](docs/INSTALLATION.md#authentication-setup)** | **Set up NeuPrint and CAVE tokens** |
 | **[Troubleshooting](docs/TROUBLESHOOTING.md)**                  | Common issues and solutions         |
 | **[Agent Install (Codex)](skills/drocat-install/SKILL.md)**     | **Let Codex install, verify & run DROCAT** |
+| **[Direct Analysis Skill](skills/drocat-usage/SKILL.md)**        | **Run scripts without a web UI**          |
+| **[Agent Setup](docs/AGENT_SETUP.md)**                           | **Beginner guide to agent-assisted runs**  |
 | **[Basic Usage](#basic-usage)**                                 | Core script tutorials               |
 
 ### 📖 Feature Documentation
@@ -208,11 +215,11 @@ DROCAT ships a Codex skill that lets an AI agent install, verify, and prepare th
 
 **Usage** — open Codex in this repository and ask:
 
-> Install DROCAT on this machine and verify it works.
+> Install DROCAT on this machine, verify it works, and finish by reporting the final environment status.
 
 **One-line command for Codex / any agent** — copy and paste this anywhere (no local repo needed):
 
-> Fetch https://raw.githubusercontent.com/Swida-Alba/Drosophila-cross-dataset-connectome-analysis/v4.4.5/skills/drocat-install/SKILL.md and follow it to install DROCAT on this machine.
+> Fetch https://raw.githubusercontent.com/Swida-Alba/Drosophila-cross-dataset-connectome-analysis/v4.4.5/skills/drocat-install/SKILL.md and follow it to finish installing, verifying, and preparing DROCAT v4.4.5 on this machine.
 
 Equivalent manual fetch (what the agent runs):
 
@@ -236,12 +243,38 @@ conda activate drocat-4.4.5
 python skills/drocat-install/scripts/verify_install.py --project .
 ```
 
-To install/refresh the global skill copy after updating the repo version:
+To refresh the install skill after updating this branch, reuse the one-line
+agent command above; no manual skill copy is required.
+
+### Direct script analysis with an agent (no web UI)
+
+Use the branch-pinned agent command below when the agent does not discover
+repository-local skills. It must run the requested analysis, validate the
+outputs, and report the finished artifacts in the same session:
+
+> Fetch https://raw.githubusercontent.com/Swida-Alba/Drosophila-cross-dataset-connectome-analysis/v4.4.5/skills/drocat-usage/SKILL.md and follow it to install and use the DROCAT v4.4.5 direct-analysis skill for this repository, then finish the requested analysis end-to-end without opening a web UI.
+
+Example request:
+
+```text
+Use the DROCAT v4.4.5 direct-analysis skill. Run a cached FindPath analysis
+from aMe12 to PPL101 in male-cns:v0.9, with max_interlayer=2 and CSV output.
+Save it under local_data/agent_runs/aMe12_to_PPL101, inspect the results, and
+finish by reporting validated artifacts, row counts, and warnings. Do not stop
+at a plan.
+```
+
+The repository-safe launcher keeps script-relative paths correct:
 
 ```bash
-mkdir -p ~/.codex/skills/drocat-install
-cp -R skills/drocat-install/. ~/.codex/skills/drocat-install/
+python skills/drocat-usage/scripts/run_direct.py \
+  --conda-env drocat-4.4.5 \
+  --script scripts/FindPath.py \
+  --dry-run
 ```
+
+Remove `--dry-run` only after reviewing the command. See the
+[agent setup guide](docs/AGENT_SETUP.md) for the full workflow.
 
 ### Get NeuPrint Token
 

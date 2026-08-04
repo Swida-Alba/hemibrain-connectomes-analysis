@@ -1,6 +1,6 @@
 # Quick Start Guide
 
-This guide provides a quick overview of how to perform common tasks using the Drosophila Connectome Analysis Toolkit (DROCAT) v4.4.0.
+This guide provides a quick overview of how to perform common tasks using the Drosophila Connectome Analysis Toolkit (DROCAT) v4.4.5.
 
 ## Prerequisites
 
@@ -17,6 +17,24 @@ This guide provides a quick overview of how to perform common tasks using the Dr
    - NeuronBridge API requires **no authentication**
    
    📖 **[Authentication Setup](docs/INSTALLATION.md#authentication-setup)**
+
+## Agent-first direct mode (no web UI)
+
+Ask an agent to finish the requested script workflow end-to-end. It should
+prepare a focused run, execute it in `drocat-4.4.5`, validate the outputs, and
+report artifacts instead of stopping at a plan:
+
+> Fetch https://raw.githubusercontent.com/Swida-Alba/Drosophila-cross-dataset-connectome-analysis/v4.4.5/skills/drocat-usage/SKILL.md and follow it to install and use the DROCAT v4.4.5 direct-analysis skill for this repository, then finish the requested analysis end-to-end without opening a web UI.
+
+```bash
+python skills/drocat-usage/scripts/run_direct.py \
+  --conda-env drocat-4.4.5 \
+  --script scripts/FindPath.py \
+  --dry-run
+```
+
+See the [beginner agent setup](docs/AGENT_SETUP.md) for prompts, token
+safety, and output-validation rules.
 
 ## 1. Connection Path Finding
 

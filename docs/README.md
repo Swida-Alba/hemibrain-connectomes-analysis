@@ -2,6 +2,19 @@
 
 Welcome to the Drosophila Connectome Analysis Toolkit (DROCAT) documentation!
 
+## 🤖 Agent-assisted script runs (v4.4.5)
+
+- **[DROCAT Direct Analysis Skill](../skills/drocat-usage/SKILL.md)**: Run,
+  modify, validate, and finish standalone connectome scripts without a web UI.
+- **[Agent Setup for Beginners](./AGENT_SETUP.md)**: Configure an agent and
+  request completed analyses with artifact reporting.
+- **[Quick Start direct mode](../QUICK_START.md#agent-first-direct-mode-no-web-ui)**:
+  Use the repository-safe launcher.
+
+The direct-analysis skill defines a completion contract: unless the user asks
+for a plan only, the agent executes the requested operation, validates outputs,
+and reports the final artifacts in the same session.
+
 ## 🆕 Recent Updates (January 2026) - V4.4.0
 
 ### 🚀 Local FAFB/BANC Dataset Support (RECOMMENDED)

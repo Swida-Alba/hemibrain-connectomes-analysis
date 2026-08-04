@@ -9,6 +9,15 @@ description: Auto-install the DROCAT Drosophila connectome analysis toolkit (hem
 
 DROCAT v4.4.5 is the standalone-script release; it does not include the v4.5 web UI. Prefer the repository's one-click installers so manual and agent-assisted setup use exactly the same dependency and environment policy.
 
+## Completion contract
+
+Unless the user asks for instructions only, finish the requested installation
+or repair in the current agent session. Do not stop after fetching the branch,
+showing commands, or starting an installer: wait for the installer and
+verifier to finish, confirm the final environment status, and report the exact
+result. Ask only for required tokens, an unclear repository path, or an
+approval the user must provide.
+
 ## Workflow
 
 ### 1. Fetch the branch
@@ -73,6 +82,16 @@ Scripts contain editable query parameters. Avoid starting a live dataset workflo
 ```bash
 conda run -n drocat-4.4.5 python scripts/FindDirect.py
 ```
+
+## After installation: finish a direct script run
+
+Use the separate [`drocat-usage` skill](../drocat-usage/SKILL.md) when the user
+wants a completed analysis rather than setup instructions. It provides a
+repository-safe launcher and focused recipes for every standalone script.
+
+Agent handoff command:
+
+> Fetch https://raw.githubusercontent.com/Swida-Alba/Drosophila-cross-dataset-connectome-analysis/v4.4.5/skills/drocat-usage/SKILL.md and follow it to finish the requested DROCAT v4.4.5 analysis end-to-end, validate the outputs, and report the artifacts without opening a web UI.
 
 ## Key facts
 

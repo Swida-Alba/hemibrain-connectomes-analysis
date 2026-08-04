@@ -97,6 +97,17 @@ The first online query may populate `datasets/` and `cache/`. FlyWire FAFB/BANC 
 
 The [`drocat-install` skill](../skills/drocat-install/SKILL.md) invokes these same one-click installers, guides token configuration, and smoke-tests the script edition.
 
+To finish installation through an agent, paste:
+
+> Fetch https://raw.githubusercontent.com/Swida-Alba/Drosophila-cross-dataset-connectome-analysis/v4.4.5/skills/drocat-install/SKILL.md and follow it to finish installing, verifying, and preparing DROCAT v4.4.5 on this machine.
+
+After installation, use the separate
+[`drocat-usage` skill](../skills/drocat-usage/SKILL.md) to finish pathfinding,
+comparison, NeuronBridge, FlyLight, PlotPath, 3D, homolog, and profile runs
+without a web UI:
+
+> Fetch https://raw.githubusercontent.com/Swida-Alba/Drosophila-cross-dataset-connectome-analysis/v4.4.5/skills/drocat-usage/SKILL.md and follow it to finish the requested DROCAT v4.4.5 analysis end-to-end, validate the outputs, and report the artifacts without opening a web UI.
+
 ```bash
 git clone --branch v4.4.5 https://github.com/Swida-Alba/Drosophila-cross-dataset-connectome-analysis.git drocat
 cd drocat

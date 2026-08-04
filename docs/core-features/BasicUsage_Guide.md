@@ -1,6 +1,10 @@
-# Basic Usage Guide
+# Basic Usage Guide (v4.4.5)
 
 This guide demonstrates the core functionality of DROCAT using the **practical example scripts** in the [`scripts/`](../../scripts/) folder. These are the most commonly used workflows.
+
+For agent-assisted runs without a web UI, use the
+[`drocat-usage` skill](../../skills/drocat-usage/SKILL.md). It tells an agent
+to execute the focused script, validate outputs, and finish with a report.
 
 ---
 
