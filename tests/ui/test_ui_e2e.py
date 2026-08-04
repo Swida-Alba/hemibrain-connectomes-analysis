@@ -518,6 +518,37 @@ class TestComponents:
         assert parse_neuron_list("") == []
         assert parse_neuron_list(None) == []
 
+    def test_neuron_list_input_commits_pending_text_on_blur(self):
+        """Leaving a neuron chip field commits text without requiring Enter."""
+        from nicegui import Client
+        from nicegui.page import page
+        from ui.components.common import neuron_list_input
+
+        client = Client(page("/neuron-input-blur-test"))
+        with client:
+            container = neuron_list_input(label="Source Neurons")
+
+        listeners = {
+            listener.type: listener
+            for listener in container.chip_input._event_listeners.values()
+        }
+        assert listeners["input"].js_handler == "(event) => emit(event?.target?.value || '')"
+        assert listeners["focusout"].js_handler == "() => emit(null)"
+        assert "blur" in listeners
+
+        # Simulate NiceGUI's native input and blur events. The browser's
+        # QSelect editor is empty after blur, but the selected chip remains.
+        container.chip_input._handle_event({
+            "listener_id": listeners["input"].id,
+            "args": "PPL1",
+        })
+        assert container.chip_input.value == []
+        container.chip_input._handle_event({
+            "listener_id": listeners["focusout"].id,
+            "args": None,
+        })
+        assert container.get_value() == ("exact", ["PPL1"])
+
     def test_parse_neuron_upload_text_and_excel(self):
         import asyncio
         import io

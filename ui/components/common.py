@@ -276,11 +276,29 @@ def parse_neuron_upload(filename: str, content: bytes) -> List:
     return parsed
 
 
+def _normalize_neuron_value(item):
+    """Normalize body IDs to integers while preserving neuron type strings."""
+    value = str(item)
+    return int(value) if value.isdigit() else value
+
+
+def _merge_pending_neurons(current: List, pending_text: str) -> List:
+    """Merge pending editor text into a chip list without duplicating values."""
+    merged = [_normalize_neuron_value(item) for item in (current or [])]
+    existing = {str(item) for item in merged}
+    for item in parse_neuron_list(pending_text):
+        normalized = _normalize_neuron_value(item)
+        if str(normalized) not in existing:
+            merged.append(normalized)
+            existing.add(str(normalized))
+    return merged
+
+
 def neuron_list_input(
     label: str = "Neurons",
     placeholder: str = "e.g., aMe12, aMe10, DN1p (or upload CSV/TSV/Excel)",
     hint: str = (
-        "Type a neuron and press Enter to add it as a chip. "
+        "Type a neuron and press Enter or leave the field to add it as a chip. "
         "Paste comma/newline lists or upload a CSV/TSV/Excel file (first column). "
         "Supports types, bodyIds and regex patterns."
     ),
@@ -288,7 +306,8 @@ def neuron_list_input(
     """
     Create a chip-based list input for neurons.
 
-    - Type a neuron (type, bodyId or pattern) and press Enter to add a chip.
+    - Type a neuron (type, bodyId or pattern) and press Enter or leave the field
+      to add a chip.
     - Paste a comma/newline separated list via the playlist button.
     - Upload a CSV/TSV/Excel file (first column) via the upload dropdown.
     - A live count badge and a Clear button keep the list manageable.
@@ -318,7 +337,9 @@ def neuron_list_input(
 
     with ui.column().classes("w-full gap-1") as container:
         with ui.row().classes("w-full items-end gap-2"):
-            # Chip-based list input: type + Enter to add each neuron
+            # Chip-based list input. Quasar normally commits a new value only
+            # on Enter; the input event below preserves the editor text so it
+            # can also be committed when the user moves focus elsewhere.
             chip_input = ui.select(
                 options=[],
                 value=[],
@@ -408,9 +429,10 @@ def neuron_list_input(
                 icon="clear_all",
             ).props("flat dense").classes("drocat-clear-btn")
 
+    pending_input = {"value": ""}
+
     def normalize_neuron(item):
-        value = str(item)
-        return int(value) if value.isdigit() else value
+        return _normalize_neuron_value(item)
 
     def update_status():
         combined = [normalize_neuron(item) for item in uploaded_neurons]
@@ -426,7 +448,43 @@ def neuron_list_input(
         upload_label.set_visibility(False)
         update_status()
 
-    chip_input.on_value_change(lambda _e: update_status())
+    def remember_typed_text(event):
+        """Keep native editor text before Quasar clears it on popup close."""
+        value = getattr(event, "args", "")
+        pending_input["value"] = str(value or "")
+
+    def commit_pending_text(_event=None):
+        """Commit editor text when focus leaves the chip selector."""
+        text = pending_input["value"]
+        pending_input["value"] = ""
+        if not str(text).strip():
+            return
+        current = list(chip_input.value or [])
+        merged = _merge_pending_neurons(current, text)
+        if merged != current:
+            chip_input.set_value(merged)
+        update_status()
+
+    def handle_value_change(_event):
+        # Enter, chip removal, paste, and uploads all update the model value.
+        # In each case there is no longer an uncommitted editor value.
+        pending_input["value"] = ""
+        update_status()
+
+    # QSelect emits ``input-value`` for both user input and its own reset on
+    # blur.  The native input event is user-only, so it lets us distinguish a
+    # user deleting their text from Quasar clearing the editor after focusout.
+    chip_input.on(
+        "input",
+        remember_typed_text,
+        js_handler="(event) => emit(event?.target?.value || '')",
+    )
+    chip_input.on_value_change(handle_value_change)
+    # ``focusout`` is synchronous and therefore commits before a following
+    # Run-button click is handled. ``blur`` remains as a fallback for browsers
+    # or component versions which only forward Quasar's field event.
+    chip_input.on("focusout", commit_pending_text, js_handler="() => emit(null)")
+    chip_input.on("blur", commit_pending_text)
     clear_button.on_click(clear_all)
     update_status()
 
