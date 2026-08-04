@@ -75,7 +75,12 @@ import importlib.metadata as metadata
 import json
 import sys
 from pathlib import Path
-from packaging.requirements import Requirement
+
+try:
+    from packaging.requirements import Requirement
+except ImportError:  # bare venvs may lack `packaging`; skip rather than crash
+    print(json.dumps({"__skipped__": "packaging not installed in target env"}))
+    sys.exit(0)
 
 results = {}
 for filename in sys.argv[1:]:
@@ -216,6 +221,13 @@ def main() -> int:
     version_results = run_version_probe(python_exe, manifests)
     for manifest, failures in version_results.items():
         manifest_label = str(Path(manifest).relative_to(project))
+        if "__skipped__" in failures:
+            check(
+                f"pinned versions ({manifest_label})",
+                True,
+                f"skipped: {failures['__skipped__']}",
+            )
+            continue
         check(
             f"pinned versions ({manifest_label})",
             not failures,

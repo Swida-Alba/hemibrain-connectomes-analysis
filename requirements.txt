@@ -80,6 +80,7 @@ trimesh==4.12.2            # Last stable 4.x API; avoid the incompatible 5.x lin
 # -----------------------------------------------------------------------------
 psutil>=5.9.0,<8           # System monitoring utilities (memory usage tracking)
 xlsxwriter>=3.1.0,<4       # Excel file generation (.xlsx)
+packaging>=21.0            # Requirement parsing for the install verifier
 
 # Optional Dependencies (uncomment as needed)
 # -----------------------------------------------------------------------------

@@ -81,6 +81,7 @@ open3d==0.19.0             # 3D mesh processing - REQUIRED for accurate mesh sim
 # -----------------------------------------------------------------------------
 psutil>=5.9.0,<8           # System monitoring utilities (memory usage tracking)
 xlsxwriter>=3.1.0,<4       # Excel file generation (.xlsx)
+packaging>=21.0            # Requirement parsing for the install verifier
 
 # NeuronBridge API (EM↔LM Integration)
 # -----------------------------------------------------------------------------

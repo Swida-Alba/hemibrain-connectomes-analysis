@@ -120,6 +120,13 @@ class Client:
             if close is not None:
                 close()
 
+    def _get_text(self, url: str) -> str:
+        response = self._get(url)
+        try:
+            return response.text
+        finally:
+            response.close()
+
     def _get_files_url(self, files: APIObject, file_key: str) -> Optional[str]:
         path = getattr(files, file_key, None)
         if not path:
@@ -184,8 +191,10 @@ class Client:
         key = "CDMBestThumbnail" if thumbnail else "CDMBest"
         return self._get_image(self._get_match_url(match, key))
 
-    def get_swc_skeleton(self, match: APIObject) -> Image.Image:
-        return self._get_image(self._get_match_url(match, "AlignedBodySWC"))
+    def get_swc_skeleton(self, match: APIObject) -> str:
+        # SWC is a plain-text skeleton format, not an image; return the raw
+        # text so callers can parse or save it directly.
+        return self._get_text(self._get_match_url(match, "AlignedBodySWC"))
 
     def get_image_stack(self, match: APIObject) -> Image.Image:
         return self._get_image(self._get_match_url(match, "VisuallyLosslessStack"))

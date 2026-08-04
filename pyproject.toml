@@ -66,6 +66,7 @@ dependencies = [
     "trimesh==4.12.2",
     "psutil>=5.9.0,<8",
     "xlsxwriter>=3.1.0,<4",
+    "packaging>=21.0",
 ]
 
 [project.optional-dependencies]
