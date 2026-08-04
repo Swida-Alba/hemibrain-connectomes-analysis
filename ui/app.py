@@ -250,6 +250,18 @@ html, body {
 .q-btn--flat:hover { background: var(--drocat-soft) !important; }
 .q-btn--unelevated.bg-primary { background: var(--drocat-cobalt) !important; box-shadow: 0 6px 14px rgba(20, 92, 255, .20); }
 .q-btn--unelevated.bg-negative { background: #fff !important; color: var(--drocat-err) !important; border: 1px solid #fecaca; }
+/* Segmented toggles: white pill container whose inner segments nest
+   concentrically (inner radius = outer radius - padding - border), so the
+   selected segment's corners snap to the container's corners with a uniform
+   ring and no corner gap. */
+.q-btn-group {
+    background: var(--drocat-surface);
+    border: 1px solid var(--drocat-line);
+    border-radius: 999px;
+    padding: 4px;
+    box-shadow: 0 2px 8px rgba(11, 31, 58, .06);
+}
+.q-btn-group .q-btn { border-radius: 999px; }
 .drocat-run-btn { min-width: 150px; height: 44px !important; }
 .drocat-cancel-btn { height: 44px !important; }
 .drocat-upload-trigger {

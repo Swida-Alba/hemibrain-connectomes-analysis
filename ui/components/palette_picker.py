@@ -80,6 +80,13 @@ def sample_palette(colors: List[str], n: int) -> List[str]:
     return [colors[i] for i in indices]
 
 
+def assign_palette_colors(colors: List[str], n: int) -> List[str]:
+    """Assign colors in their exact displayed order, cycling only if needed."""
+    if n <= 0 or not colors:
+        return []
+    return [colors[index % len(colors)] for index in range(n)]
+
+
 def normalize_palette_range(start_pct: int, end_pct: int) -> Tuple[int, int]:
     """Clamp a palette range and guarantee at least one percentage point."""
     start = max(0, min(99, int(start_pct)))

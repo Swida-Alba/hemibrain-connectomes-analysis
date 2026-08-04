@@ -246,6 +246,7 @@ class TestRunner:
         """The bokeh catalog must include categorical/sequential/diverging
         palettes and sample them evenly for any requested count."""
         from ui.components.palette_picker import (
+            assign_palette_colors,
             get_palette_catalog,
             move_color,
             normalize_palette_range,
@@ -262,6 +263,12 @@ class TestRunner:
         assert len(sample_palette(colors, 1)) == 1
         assert len(sample_palette(colors, 5)) == 5
         assert len(sample_palette(colors, 50)) == 50
+        assert assign_palette_colors(["red", "green", "blue"], 2) == [
+            "red", "green",
+        ]
+        assert assign_palette_colors(["blue", "red", "green"], 5) == [
+            "blue", "red", "green", "blue", "red",
+        ]
         half = palette_slice(colors, 0, 50)
         assert 0 < len(half) < len(colors)
         assert palette_slice(colors, 100, 100) == colors[-1:]
@@ -269,6 +276,34 @@ class TestRunner:
         assert normalize_palette_range(-5, 200) == (0, 100)
         assert move_color(["a", "b", "c"], 1, -1) == ["b", "a", "c"]
         assert move_color(["a", "b", "c"], 0, -1) == ["a", "b", "c"]
+
+    def test_roi_mesh_traces_have_independent_legend_entries(self):
+        """Each resolved ROI stays separately toggleable in the Plotly legend."""
+        import plotly.graph_objects as go
+
+        from visualize_skeleton import VisualizeSkeleton, _configure_roi_mesh_traces
+
+        left_traces = (go.Mesh3d(), go.Scatter3d())
+        right_traces = (go.Mesh3d(),)
+        _configure_roi_mesh_traces(left_traces, "LH(L)")
+        _configure_roi_mesh_traces(right_traces, "LH(R)")
+
+        assert left_traces[0].legendgroup == "roi_mesh:LH(L)"
+        assert right_traces[0].legendgroup == "roi_mesh:LH(R)"
+        assert left_traces[0].legendgroup != right_traces[0].legendgroup
+        assert [trace.showlegend for trace in left_traces] == [True, False]
+        assert right_traces[0].showlegend is True
+        assert left_traces[0].name == "brain region [LH(L)]"
+        assert right_traces[0].name == "brain region [LH(R)]"
+
+        visualizer = object.__new__(VisualizeSkeleton)
+        expanded_rois, expanded_colors = visualizer._expand_roi_names_with_colors(
+            ["LH", "EB"],
+            ["#112233", "#abcdef"],
+            available_rois=["LH(L)", "LH(R)", "EB"],
+        )
+        assert expanded_rois == ["LH(L)", "LH(R)", "EB"]
+        assert expanded_colors == ["#112233", "#112233", "#abcdef"]
 
     def test_pick_directory_exists(self):
         from ui.runner import pick_directory, pick_file

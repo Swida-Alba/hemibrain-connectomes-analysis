@@ -102,7 +102,7 @@ vs = VisualizeSkeleton(
 
 **Note:** `mesh_color`/`mesh_alpha` apply to ROI meshes only. Brain and VNC mesh colors are set separately via `brain_mesh_color` and `vnc_mesh_color`.
 
-**ROI Expansion:** Base names like `'AME'` auto-expand to `['AME(L)', 'AME(R)']` with merged legends.
+**ROI Expansion:** Base names like `'AME'` auto-expand to `['AME(L)', 'AME(R)']`; each resolved mesh has its own legend entry.
 
 ---
 

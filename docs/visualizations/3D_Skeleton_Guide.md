@@ -672,8 +672,9 @@ Brain envelope and VNC outline meshes use separate color settings:
 **Automatic ROI Expansion:**
 When you specify a base ROI name like `'AME'`, it's automatically expanded to bilateral variants `['AME(L)', 'AME(R)']` if available:
 - Colors are expanded to match: `mesh_color='red'` → both sides get red
-- **Merged legends**: Expanded ROIs share a single legend entry (e.g., "brain regions [AME]")
-- Toggle the legend to show/hide all bilateral variants together
+- **Independent legends**: Every resolved mesh has its own legend entry (for
+  example, `brain region [AME(L)]` and `brain region [AME(R)]`)
+- Toggle either side independently without hiding the other ROI mesh
 
 ```python
 # These are equivalent:
@@ -705,7 +706,7 @@ mesh_roi=['MB.*', 'AL.*']  # Multiple patterns
 # Mixed: Combine literal names, keywords, and patterns
 mesh_roi=['EB', 'FB', 'ME.*']  # Central complex + medulla regions
 
-# Nested lists for color grouping (ROIs share same color & legend)
+# Nested lists for color grouping (ROIs share a color but remain separate traces)
 mesh_roi=['AME', ['aL', 'bL', 'gL', "a'L", "b'L"], 'EB']
 mesh_color=['red', 'green', 'blue']  # 'green' applies to all nested ROIs
 ```

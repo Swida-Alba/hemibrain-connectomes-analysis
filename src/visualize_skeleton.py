@@ -128,6 +128,22 @@ from utils.color_utils import (
     extract_rgba_tuple,
 )
 
+
+def _configure_roi_mesh_traces(mesh_traces, roi_name):
+    """Give one resolved ROI its own Plotly legend entry and trace group."""
+    legend_group = f'roi_mesh:{roi_name}'
+    display_name = f'brain region [{roi_name}]'
+
+    for trace_index, trace in enumerate(mesh_traces):
+        trace.legendgroup = legend_group
+        trace.showlegend = trace_index == 0
+        trace.name = display_name
+        trace.hovertemplate = '<b>%{fullData.name}</b><extra></extra>'
+        trace.hoverinfo = 'name'
+
+    return mesh_traces
+
+
 # Timeout exception for PNG export
 class PNGExportTimeout(Exception):
     """Raised when PNG export times out."""
@@ -2007,7 +2023,7 @@ class VisualizeSkeleton:
         - 'all': Every available ROI for the current dataset
     - **Regex patterns**: 'ME.*' matches all ROIs starting with 'ME'
     - **Nested lists for color grouping**: ['AME', ['aL', 'bL', 'gL'], 'EB']
-        ROIs in nested lists share the same color and legend entry.
+        ROIs in nested lists share the same color but keep separate legend entries.
     
     Auto-Expansion
     --------------
@@ -8276,7 +8292,7 @@ class VisualizeSkeleton:
             (flattened_rois, expanded_colors, nested_groups)
             - flattened_rois: Flat list of all ROI names
             - expanded_colors: List of colors matching flattened_rois
-            - nested_groups: Dict mapping ROI -> group label for legend grouping
+            - nested_groups: Dict recording the source color group for each ROI
             
         Examples
         --------
@@ -8319,8 +8335,8 @@ class VisualizeSkeleton:
             color = colors[i] if i < len(colors) else colors[-1]
             
             if isinstance(item, list):
-                # Nested list - all items share the same color and legend group
-                # Create a group label from the items
+                # Nested list - all items share the same color. Keep metadata
+                # about the source group without coupling their legend entries.
                 group_label = '+'.join(str(r) for r in item[:3])  # Use first 3 names
                 if len(item) > 3:
                     group_label += f'+{len(item)-3}more'
@@ -8451,8 +8467,6 @@ class VisualizeSkeleton:
         When a user specifies 'LH' with color 'red', this function will automatically expand
         to ['LH(L)', 'LH(R)'] with colors ['red', 'red']. This ensures colors match expanded ROIs.
         
-        Also builds a mapping from expanded ROI → original ROI for legend grouping.
-        
         Parameters
         ----------
         roi_list : list
@@ -8468,21 +8482,15 @@ class VisualizeSkeleton:
         tuple
             (expanded_rois, expanded_colors) - Both lists with matching lengths
             
-        Side Effects
-        -------------
-        Sets self._roi_legend_group_map: dict mapping expanded ROI → original ROI for legend grouping
-            
         Examples
         --------
         >>> _expand_roi_names_with_colors(['LH', 'EB'], ['red', 'blue'])
         (['LH(L)', 'LH(R)', 'EB'], ['red', 'red', 'blue'])
-        # Also sets _roi_legend_group_map = {'LH(L)': 'LH', 'LH(R)': 'LH', 'EB': 'EB'}
         
         >>> _expand_roi_names_with_colors(['LH'], 'green')  # Single color
         (['LH(L)', 'LH(R)'], ['green', 'green'])
         """
         if not roi_list:
-            self._roi_legend_group_map = {}
             return roi_list, color_list
         
         # Normalize color_list to a list
@@ -8511,27 +8519,18 @@ class VisualizeSkeleton:
         
         available_set = set(available_rois) if available_rois else set()
         
-        # Get pre-existing nested groups if available (from _flatten_nested_roi_groups)
-        nested_groups = getattr(self, '_nested_roi_groups', {})
-        
         expanded_rois = []
         expanded_colors = []
-        legend_group_map = {}  # expanded_roi -> original_roi (for legend grouping)
         seen = set()
         
         for i, roi in enumerate(roi_list):
             color = color_list[i] if i < len(color_list) else color_list[-1]
-            
-            # Determine the legend group for this ROI
-            # Use nested group if available, otherwise use the ROI itself
-            base_legend_group = nested_groups.get(roi, roi)
             
             # Check if ROI already has (L) or (R) suffix
             if roi.endswith('(L)') or roi.endswith('(R)'):
                 if roi not in seen:
                     expanded_rois.append(roi)
                     expanded_colors.append(color)
-                    legend_group_map[roi] = base_legend_group
                     seen.add(roi)
                 continue
             
@@ -8540,7 +8539,6 @@ class VisualizeSkeleton:
                 if roi not in seen:
                     expanded_rois.append(roi)
                     expanded_colors.append(color)
-                    legend_group_map[roi] = base_legend_group
                     seen.add(roi)
                 continue
             
@@ -8556,35 +8554,27 @@ class VisualizeSkeleton:
                 if left_variant not in seen:
                     expanded_rois.append(left_variant)
                     expanded_colors.append(color)
-                    legend_group_map[left_variant] = base_legend_group
                     seen.add(left_variant)
                 if right_variant not in seen:
                     expanded_rois.append(right_variant)
                     expanded_colors.append(color)
-                    legend_group_map[right_variant] = base_legend_group
                     seen.add(right_variant)
             elif found_left:
                 if left_variant not in seen:
                     expanded_rois.append(left_variant)
                     expanded_colors.append(color)
-                    legend_group_map[left_variant] = base_legend_group
                     seen.add(left_variant)
             elif found_right:
                 if right_variant not in seen:
                     expanded_rois.append(right_variant)
                     expanded_colors.append(color)
-                    legend_group_map[right_variant] = base_legend_group
                     seen.add(right_variant)
             else:
                 # No bilateral variants found, keep original
                 if roi not in seen:
                     expanded_rois.append(roi)
                     expanded_colors.append(color)
-                    legend_group_map[roi] = base_legend_group
                     seen.add(roi)
-        
-        # Store the legend group map as instance attribute
-        self._roi_legend_group_map = legend_group_map
         
         return expanded_rois, expanded_colors
 
@@ -9653,9 +9643,6 @@ class VisualizeSkeleton:
         if self.mesh_roi is None:
             return
         
-        # Reset the shown ROI legend groups tracker
-        self._shown_roi_legend_groups = set()
-        
         # Check if we have any work to do (ROI meshes, brain mesh, or VNC mesh)
         has_roi_meshes = len(self.mesh_roi) > 0
         has_brain_mesh = self.brain_mesh in ['template', 'whole']
@@ -10016,44 +10003,15 @@ class VisualizeSkeleton:
                         fig_mesh = navis.plot3d(roiunits[roi_i], backend='plotly', color=color_hex, alpha=alpha)
                     mesh_traces = fig_mesh.data
                     
-                    # Get the legend group for this ROI (original ROI name if expanded)
                     roi_name = roi_names[roi_i]
-                    legend_group = roi_name
-                    if hasattr(self, '_roi_legend_group_map') and self._roi_legend_group_map:
-                        legend_group = self._roi_legend_group_map.get(roi_name, roi_name)
-                    
-                    for ti, trace in enumerate(mesh_traces):
-                        if self.legend_mode == 'layer':
-                            # Group all ROI meshes under one legend entry
-                            if ti == 0 and roi_i == 0:
-                                trace.showlegend = True
-                            else:
-                                trace.showlegend = False
-                            trace.legendgroup = 'roi_mesh'
-                        else:
-                            # 'type' and 'single' modes: group expanded ROIs under original ROI name
-                            # Track which legend groups we've already shown
-                            if not hasattr(self, '_shown_roi_legend_groups'):
-                                self._shown_roi_legend_groups = set()
-                            
-                            trace.legendgroup = legend_group
-                            # Only show legend for first trace of first ROI in each legend group
-                            should_show = (ti == 0) and (legend_group not in self._shown_roi_legend_groups)
-                            trace.showlegend = should_show
-                            if ti == 0:
-                                self._shown_roi_legend_groups.add(legend_group)
-                        
-                        trace.hovertemplate = '<b>%{fullData.name}</b><extra></extra>'  # show full name in hover tooltip
-                        trace.hoverinfo = 'name'
-                        # Use original legend group name for display, but include actual ROI in hover
-                        trace.name = f'brain regions [{legend_group}]'
+                    _configure_roi_mesh_traces(mesh_traces, roi_name)
                     self.fig_3d.add_traces(mesh_traces)
                 elif self.backend == 'k3d':
                     try:
                         with self._suppress_output():
                             temp_plot = navis.plot3d(roiunits[roi_i], backend='k3d', inline=False, color=color_hex, alpha=alpha)
                         for obj in temp_plot.objects:
-                            obj.name = f'brain regions [{roi_names[roi_i]}...]'
+                            obj.name = f'brain region [{roi_names[roi_i]}]'
                             self.fig_3d += obj
                     except Exception as e:
                         self._vprint(f'⚠️  k3d mesh plotting failed: {e}', level='full')
@@ -10829,7 +10787,7 @@ class VisualizeSkeleton:
         mesh_roi_names = [r.lower() for r in self.mesh_roi] if self.mesh_roi else []
         
         # Template/mesh names to always include as background
-        mesh_keywords = ['mesh', 'brain regions', 'template', 'vnc']
+        mesh_keywords = ['mesh', 'brain region', 'template', 'vnc']
         template_names = ['JRCFIB', 'MANC', 'JRC2018', 'FLYWIRE', 'FAFB', 'jrcfib', 'flywire', 'fafb']
         
         for idx, trace in enumerate(all_traces):
@@ -10839,7 +10797,7 @@ class VisualizeSkeleton:
             trace_name_lower = trace_name.lower() if trace_name else ''
             
             # Identify mesh/roi traces (keep visible as background)
-            # Include brain regions, standard templates, and user-specified mesh_roi
+            # Include brain-region traces, standard templates, and user-specified mesh_roi
             is_background = False
             
             if trace_name:

@@ -50,7 +50,8 @@
       <h3>Appearance</h3>
       <ul>
         <li><b>Skeleton Mode</b>: tube (detailed) or line (fast).</li>
-        <li><b>Legend Mode</b>: layer, type, or single.</li>
+        <li><b>Neuron Legend Mode</b>: layer, type, or single. ROI meshes
+          always keep independent legend entries.</li>
         <li><b>Neuron Opacity</b> and <b>Neuron Colors</b> (full bokeh
           palette catalog with range/custom editing).</li>
         <li><b>Background</b>: white or black.</li>
@@ -69,8 +70,10 @@
       <ul>
         <li><b>Mesh ROIs</b>: presets or regex (<code>ME.*</code>,
           <code>all</code>, <code>primary</code>).</li>
-        <li><b>ROI Colors</b>: Auto gray, or any palette sampled per ROI so
-          each region shows independently; custom colors with reorder.</li>
+        <li><b>ROI Colors</b>: Auto gray, or any palette assigned in its exact
+          displayed order; custom and discrete-palette reordering is preserved.</li>
+        <li>Each resolved ROI mesh, including bilateral expansions, is a
+          separate trace and legend entry.</li>
         <li><b>ROI Mesh Opacity</b>.</li>
         <li><b>Brain Mesh</b>: template, whole, or none; <b>VNC Mesh</b>
           toggle for male-cns/manc.</li>

@@ -16,7 +16,7 @@ from ..components.palette_picker import (
     palette_picker,
     palette_editor,
     color_swatch_picker,
-    sample_palette,
+    assign_palette_colors,
 )
 
 
@@ -92,8 +92,9 @@ def create_visualization_tab():
                     hint="'tube': 3D tube rendering (detailed). 'line': thin line (fast, for many neurons).",
                 )
                 legend_mode = select_input(
-                    "Legend Mode", ["layer", "type", "single"], "layer",
-                    hint="'layer': one legend entry per layer. 'type': per neuron type. 'single': every neuron.",
+                    "Neuron Legend Mode", ["layer", "type", "single"], "layer",
+                    hint="'layer': one neuron legend entry per layer. 'type': per neuron type. "
+                         "'single': every neuron. ROI meshes always remain separate.",
                 )
                 neuron_alpha = number_input(
                     "Neuron Opacity", 0.2, 0, 1, 0.1,
@@ -154,6 +155,10 @@ def create_visualization_tab():
                 value="Cool",
                 include_auto=True,
             )
+            ui.label(
+                "Colors are assigned in the displayed order; every resolved ROI mesh "
+                "has its own legend entry."
+            ).classes("text-caption drocat-muted")
             with param_grid(3):
                 mesh_alpha = number_input(
                     "ROI Mesh Opacity", 0.1, 0, 1, 0.05,
@@ -340,15 +345,16 @@ def create_visualization_tab():
                 return
             rois = roi_select.value or []
 
-            # Per-layer neuron colors sampled from the chosen palette
-            neuron_colors = sample_palette(
+            # Assign the exact displayed palette order (including custom reordering).
+            neuron_colors = assign_palette_colors(
                 neuron_palette.get_colors(), len(neurons)
             )
 
-            # Per-ROI colors so brain regions render independently (Auto = gray)
-            mesh_color = (100, 100, 100)
-            if roi_palette.get_value() != "Auto (single gray)" and rois:
-                mesh_color = sample_palette(roi_palette.get_colors(), len(rois))
+            # Auto is a one-color gray palette; custom mode must not be gated by
+            # the last selected preset name.
+            mesh_color = assign_palette_colors(
+                roi_palette.get_colors(), len(rois)
+            ) if rois else (100, 100, 100)
 
             custom_names = [
                 n.strip()
