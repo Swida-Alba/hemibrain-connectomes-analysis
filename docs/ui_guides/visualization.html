@@ -3,19 +3,20 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Visualization - DROCAT Instructions</title>
+  <title>3D Skeleton + Network - DROCAT Instructions</title>
   <link rel="stylesheet" href="guide.css">
 </head>
 <body>
 <main class="guide">
   <header class="guide-top">
     <a class="back" href="README.html">&larr; Back to guides</a>
-    <span class="tag">Visualization</span>
+    <span class="tag">3D Skeleton + Network</span>
   </header>
-  <h1>Visualization</h1>
+  <h1>3D Skeleton + Network</h1>
   <p class="lede">
-    Two tools: <b>3D Skeleton (plot3dSkeleton)</b> for neuron morphology and
-    <b>Path Network (PlotPath)</b> for pathway graphs.
+    Two top-level tabs: <b>3D Skeleton (plot3dSkeleton)</b> for neuron
+    morphology and <b>Network (PlotPath)</b> for pathway graphs. Each tab has
+    its own run action, log, and output files.
   </p>
 
   <h2>Quick start - 3D skeleton</h2>
@@ -24,7 +25,7 @@
       <code>aMe12 -&gt; MBON01</code>).</li>
     <li>Pick the dataset; keep <b>Brain Mesh = template</b> and
       <b>ROIs = EB, LH, AL</b>.</li>
-    <li>Click <b>Generate Visualization</b>.</li>
+    <li>Click <b>Generate 3D Skeleton</b> in the 3D Skeleton tab.</li>
   </ol>
 
   <h2>Quick start - path network</h2>
@@ -32,7 +33,17 @@
     <li>Run <b>Find All Paths</b> first.</li>
     <li>Upload its <code>*_allpaths_type.csv</code> (or
       <code>*_allpaths_info.xlsx</code>) file.</li>
-    <li>Click <b>Generate Visualization</b>.</li>
+    <li>Click <b>Generate Network</b> in the Network tab.</li>
+  </ol>
+
+  <h2>Quick start - empty drawing canvas</h2>
+  <ol>
+    <li>Open the top-level <b>Network</b> tab.</li>
+    <li>Set <b>Canvas Source</b> to <b>Empty drawing canvas</b>; no path file is required.</li>
+    <li>Click <b>Generate Network</b> and open the generated HTML.</li>
+    <li>Enable <b>Edit Mode</b>, add nodes, and connect them directly on the canvas.</li>
+    <li>For a one-click workflow, use <b>Create Empty Canvas</b>; it generates the
+      HTML and opens it in a new browser tab automatically.</li>
   </ol>
 
   <h2>3D skeleton - inputs &amp; examples</h2>
@@ -96,6 +107,8 @@
 
   <h2>Path network - options</h2>
   <ul>
+    <li><b>Canvas Source</b>: load a Find All Paths file or create an empty
+      interactive drawing canvas.</li>
     <li><b>Color Scheme</b>: swatch-preview schemes for
       source/intermediate/target/link.</li>
     <li><b>Network Layout</b>: hierarchical, spring, circular, distributed.</li>

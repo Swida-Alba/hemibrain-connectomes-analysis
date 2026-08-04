@@ -35,7 +35,8 @@ from ui.tabs import (
     create_nb_find_lines_tab,
     create_nb_find_neuron_tab,
     create_nb_colabel_tab,
-    create_visualization_tab,
+    create_skeleton_tab,
+    create_network_tab,
     create_settings_tab,
 )
 
@@ -446,7 +447,8 @@ def main_page():
             ui.label("Connectome").classes("drocat-tab-group")
             tab_pathfinding = ui.tab("Find Path", icon="route")
             tab_direct = ui.tab("Direct", icon="arrow_forward")
-            tab_viz = ui.tab("Visualization", icon="view_in_ar")
+            tab_skeleton = ui.tab("3D Skeleton", icon="view_in_ar")
+            tab_network = ui.tab("Network", icon="account_tree")
             tab_comparison = ui.tab("Cross-Dataset", icon="sync_alt")
             tab_homologs = ui.tab("Homologs", icon="compare")
             tab_profiling = ui.tab("Profiling", icon="analytics")
@@ -462,8 +464,10 @@ def main_page():
                 create_find_path_tab()
             with ui.tab_panel(tab_direct).classes("p-0"):
                 create_find_direct_tab()
-            with ui.tab_panel(tab_viz).classes("p-0"):
-                create_visualization_tab()
+            with ui.tab_panel(tab_skeleton).classes("p-0"):
+                create_skeleton_tab()
+            with ui.tab_panel(tab_network).classes("p-0"):
+                create_network_tab()
             with ui.tab_panel(tab_comparison).classes("p-0"):
                 create_inter_dataset_tab()
             with ui.tab_panel(tab_find_lines).classes("p-0"):

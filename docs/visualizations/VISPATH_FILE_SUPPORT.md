@@ -88,6 +88,26 @@ The file picker dialog opens automatically when:
 2. `path_file=''` (empty string)
 3. File path doesn't exist
 
+When creating a blank interactive canvas, pass `generate_empty_network=True`;
+this deliberately skips the file picker and data loading.
+
+## Empty interactive network canvas
+
+Create a network HTML without path data:
+
+```python
+vp = VisualizePath(
+    path_file=None,
+    output_folder="./empty_network",
+    generate_empty_network=True,
+    showfig=True,
+)
+vp.visualize()
+```
+
+The generated Cytoscape canvas includes Edit Mode controls for adding nodes,
+drawing edges, editing properties, and exporting the resulting network.
+
 **Example:**
 ```python
 # Open file picker

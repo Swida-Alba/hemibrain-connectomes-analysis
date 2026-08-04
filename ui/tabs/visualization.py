@@ -43,32 +43,28 @@ COMMON_ROIS = [
 ]
 
 
-def create_visualization_tab():
-    runner = ScriptRunner()
-    output_panel = OutputPanel("Visualization Output")
-    path_file_path = {"path": None}
+def create_skeleton_tab():
+    skeleton_runner = ScriptRunner()
+    skeleton_output = OutputPanel("3D Skeleton Output")
 
     form_col, results_col = tool_page(
-        "Visualization",
-        "3D neuron skeleton rendering and path network plotting.",
+        "3D Skeleton",
+        "Interactive neuron morphology, synapse, and brain-region rendering.",
         icon="view_in_ar",
         doc="visualization.md",
     )
 
     with form_col:
-        with ui.card().classes("w-full drocat-card"):
-            section_header("Tool Selection", "brush")
-            tool_select = ui.select(
-                options=["3D Skeleton (plot3dSkeleton)", "Path Network (PlotPath)"],
-                value="3D Skeleton (plot3dSkeleton)",
-                label="Tool",
-            ).classes("w-full drocat-select").tooltip(
-                "3D Skeleton: render neurons in 3D with brain mesh. "
-                "Path Network: plot a connection graph from a FindAllPath result file."
-            )
+        ui.label(
+            "Configure and render neuron morphology independently from network drawings."
+        ).classes("text-caption drocat-muted")
 
-        # ================= 3D Skeleton options =================
+        # ================= 3D Skeleton panel =================
         with ui.card().classes("w-full drocat-card").props('id="card-3d"'):
+            section_header("3D Skeleton · plot3dSkeleton", "view_in_ar")
+            ui.label(
+                "Render neuron morphology, synapses, and independent brain-region meshes."
+            ).classes("text-caption drocat-muted")
             section_header("Neuron Selection (3D)", "hub")
             neuron_chips = chip_list_input(
                 label="Neurons / Layers",
@@ -247,11 +243,151 @@ def create_visualization_tab():
                     degree_per_frame = number_input("Degrees / Frame", 1.0, 0.1, 5.0, 0.1)
                     gif_scale = number_input("GIF Scale", 0.2, 0.05, 1.0, 0.05)
 
-        # ================= Path Network options =================
-        with ui.card().classes("w-full drocat-card").props('id="card-path"'):
-            section_header("Path Network (PlotPath)", "account_tree")
+    with results_col:
+        skeleton_output.create(run_label="Generate 3D Skeleton", run_icon="view_in_ar")
+
+    async def run_panel(
+        output_panel,
+        runner,
+        tool_name,
+        constructor_params,
+        output_dir_for_scan,
+        method_params=None,
+    ):
+        output_panel.clear()
+        output_panel.set_running(True)
+        result = await output_panel.run(
+            runner,
+            tool_name,
+            constructor_params,
+            "plot",
+            method_params=method_params,
+            output_dir=output_dir_for_scan,
+        )
+        output_panel.set_running(False)
+        output_panel.set_status(
+            "Completed" if result["returncode"] == 0 else "Failed",
+            "green" if result["returncode"] == 0 else "red",
+        )
+        output_panel.show_files(
+            result["files"],
+            result.get("output_folder") or output_dir_for_scan,
+        )
+
+    async def run_skeleton():
+        neurons = neuron_chips.value or []
+        if not neurons:
+            ui.notify("Please add at least one neuron", type="warning")
+            return
+        rois = roi_select.value or []
+
+        # Assign the exact displayed palette order (including custom reordering).
+        neuron_colors = assign_palette_colors(
+            neuron_palette.get_colors(), len(neurons)
+        )
+
+        # Auto is a one-color gray palette; custom mode must not be gated by
+        # the last selected preset name.
+        mesh_color = assign_palette_colors(
+            roi_palette.get_colors(), len(rois)
+        ) if rois else (100, 100, 100)
+
+        custom_names = [
+            n.strip()
+            for n in custom_layer_names.value.split(",")
+            if n.strip()
+        ] if custom_layer_names.value else []
+
+        constructor_params = {
+            "dataset": dataset.value,
+            "neuron_layers": neurons,
+            "custom_layer_names": custom_names,
+            "output_dir": output_dir.value,
+            "skeleton_mode": skeleton_mode.value,
+            "brain_mesh": brain_mesh.value,
+            "vnc_mesh": vnc_mesh.value,
+            "legend_mode": legend_mode.value,
+            "neuron_alpha": float(neuron_alpha.value),
+            "neuron_colors": neuron_colors,
+            "background_color": bg_color.value,
+            "skip_synapse": skip_synapse.value,
+            "min_synapse_num": int(min_synapse_num.value),
+            "synapse_size": synapse_size.value,
+            "synapse_alpha": float(synapse_alpha.value),
+            "synapse_mode": synapse_mode.value,
+            "mesh_roi": rois,
+            "mesh_color": mesh_color,
+            "mesh_alpha": float(mesh_alpha.value),
+            "cache_neurons": cache_neurons.value,
+            "cache_synapses": cache_synapses.value,
+            "smooth_skeleton": smooth_skeleton.value,
+            "show_soma": show_soma.value,
+            "show_connectors": show_connectors.value,
+            "export_method": export_method.value,
+            "export_scale": int(export_scale.value),
+            "export_views": export_views.value,
+            "show_fig": show_fig.value,
+            "brain_mesh_color": brain_mesh_picker.get_value(),
+        }
+        method_params = {
+            "export_individual_profiles": export_individual_profiles.value,
+            "pdf_images_per_page": (
+                int(profile_cols.value),
+                int(profile_rows.value),
+            ),
+            "views": profile_views.value or ["front"],
+            "summary_format": summary_format.value or ["pdf"],
+            "export_video": export_video.value,
+            "fps": int(fps.value),
+            "degree_per_frame": float(degree_per_frame.value),
+            "rotate": rotate.value,
+            "export_gif": export_gif.value,
+            "gif_scale": float(gif_scale.value),
+        }
+        await run_panel(
+            skeleton_output,
+            skeleton_runner,
+            "plot3d_skeleton",
+            constructor_params,
+            output_dir.value,
+            method_params,
+        )
+
+    skeleton_output.run_button.on_click(run_skeleton)
+    skeleton_output.cancel_button.on_click(skeleton_runner.cancel)
+
+
+def create_network_tab():
+    """Create the standalone PlotPath network visualization tab."""
+    network_runner = ScriptRunner()
+    network_output = OutputPanel("Network Output")
+    path_file_path = {"path": None}
+
+    form_col, results_col = tool_page(
+        "Network Visualization",
+        "Interactive pathway graphs and editable empty drawing canvases.",
+        icon="account_tree",
+        doc="visualization.md",
+    )
+
+    with form_col:
+        ui.label(
+            "Load a path result or create an empty HTML canvas for direct interactive drawing."
+        ).classes("text-caption drocat-muted")
+
+        with ui.card().classes("w-full drocat-card").props('id="card-network"'):
+            section_header("Network Visualization · PlotPath", "account_tree")
+            network_source = select_input(
+                "Canvas Source",
+                ["Path file", "Empty drawing canvas"],
+                "Path file",
+                hint=(
+                    "Path file: load Find All Paths output. Empty drawing canvas: "
+                    "add nodes and edges in the generated HTML."
+                ),
+            )
             ui.label(
-                "Load a Find All Paths file (CSV or Excel with path_type / path_bodyId sheets)."
+                "Path file mode accepts CSV or Excel with path_type / path_bodyId sheets."
             ).classes("text-caption drocat-muted")
 
             async def handle_path_upload(e):
@@ -285,34 +421,42 @@ def create_visualization_tab():
                     path_upload_label.classes(replace="text-caption drocat-err")
                 path_upload_menu.close()
 
-            with ui.row().classes("w-full items-center gap-2"):
-                with ui.button(icon="upload_file").props("flat dense round").classes(
-                    "drocat-upload-trigger"
-                ).tooltip("Upload a *_allpaths_info file (CSV/Excel)"):
-                    with ui.menu() as path_upload_menu:
-                        ui.label("Load path data from Find All Paths").classes(
-                            "text-caption drocat-muted px-3 pt-2"
-                        )
-                        ui.label("CSV / XLSX / XLS with path_type or path_bodyId sheets").classes(
-                            "text-caption drocat-muted px-3 pb-1"
-                        )
-                        ui.upload(
-                            label="Choose paths file",
-                            on_upload=handle_path_upload,
-                            auto_upload=True,
-                        ).props('accept=".csv,.xlsx,.xls" flat dense').classes("w-72")
-                        ui.link(
-                            "File format instructions",
-                            "docs/ui_guides/input_formats.html",
-                        ).classes("drocat-doc-link px-3 pb-2")
-                path_upload_label = ui.label("No path file selected.").classes(
-                    "text-caption drocat-muted drocat-truncate"
-                )
+            with ui.column().classes("w-full gap-2") as path_input_panel:
+                with ui.row().classes("w-full items-center gap-2"):
+                    with ui.button(icon="upload_file").props("flat dense round").classes(
+                        "drocat-upload-trigger"
+                    ).tooltip("Upload a *_allpaths_info file (CSV/Excel)"):
+                        with ui.menu() as path_upload_menu:
+                            ui.label("Load path data from Find All Paths").classes(
+                                "text-caption drocat-muted px-3 pt-2"
+                            )
+                            ui.label(
+                                "CSV / XLSX / XLS with path_type or path_bodyId sheets"
+                            ).classes("text-caption drocat-muted px-3 pb-1")
+                            ui.upload(
+                                label="Choose paths file",
+                                on_upload=handle_path_upload,
+                                auto_upload=True,
+                            ).props('accept=".csv,.xlsx,.xls" flat dense').classes("w-72")
+                            ui.link(
+                                "File format instructions",
+                                "docs/ui_guides/input_formats.html",
+                            ).classes("drocat-doc-link px-3 pb-2")
+                    path_upload_label = ui.label("No path file selected.").classes(
+                        "text-caption drocat-muted drocat-truncate"
+                    )
+
+            empty_canvas_hint = ui.label(
+                "Empty canvas mode creates an editable Cytoscape HTML. Open it, enable "
+                "Edit Mode, then add nodes and connect them interactively."
+            ).classes("text-caption drocat-muted")
 
             with param_grid(2):
                 path_output_dir = dir_input(label="Path Output Directory")
                 path_layout = select_input(
-                    "Network Layout", NETWORK_LAYOUTS + ["hierarchical"], "hierarchical",
+                    "Network Layout",
+                    NETWORK_LAYOUTS + ["hierarchical"],
+                    "hierarchical",
                     hint="Layout algorithm for the HTML network visualization.",
                 )
             color_preset = palette_picker(
@@ -322,128 +466,86 @@ def create_visualization_tab():
             )
             with ui.row().classes("gap-4"):
                 show_path_fig = checkbox_input(
-                    "Open in Browser", True,
+                    "Open in Browser",
+                    True,
                     hint="Open the interactive HTML network after rendering.",
                 )
-            ui.label("Interactive HTML and XLSX connection tables are always generated.").classes(
-                "text-caption drocat-muted"
-            )
+            ui.label(
+                "Path mode exports HTML and connection tables; empty mode exports an HTML canvas."
+            ).classes("text-caption drocat-muted")
+
+            empty_canvas_button = ui.button(
+                "Create Empty Canvas",
+                icon="open_in_new",
+            ).props("color=secondary outline").classes("w-full")
+
+            def update_network_source():
+                is_empty = network_source.value == "Empty drawing canvas"
+                path_input_panel.set_visibility(not is_empty)
+                empty_canvas_hint.set_visibility(is_empty)
+                if is_empty:
+                    path_upload_menu.close()
+
+            network_source.on_value_change(lambda _event: update_network_source())
+            update_network_source()
 
     with results_col:
-        output_panel.create(run_label="Generate Visualization", run_icon="play_arrow")
+        network_output.create(run_label="Generate Network", run_icon="account_tree")
 
-    async def run_visualization():
-        output_panel.clear()
-
-        is_3d = "3D Skeleton" in tool_select.value
-        colors = COLOR_PRESETS.get(color_preset.get_value(), COLOR_PRESETS["Cool"])
-
-        if is_3d:
-            neurons = neuron_chips.value or []
-            if not neurons:
-                ui.notify("Please add at least one neuron", type="warning")
-                return
-            rois = roi_select.value or []
-
-            # Assign the exact displayed palette order (including custom reordering).
-            neuron_colors = assign_palette_colors(
-                neuron_palette.get_colors(), len(neurons)
-            )
-
-            # Auto is a one-color gray palette; custom mode must not be gated by
-            # the last selected preset name.
-            mesh_color = assign_palette_colors(
-                roi_palette.get_colors(), len(rois)
-            ) if rois else (100, 100, 100)
-
-            custom_names = [
-                n.strip()
-                for n in custom_layer_names.value.split(",")
-                if n.strip()
-            ] if custom_layer_names.value else []
-
-            constructor_params = {
-                "dataset": dataset.value,
-                "neuron_layers": neurons,
-                "custom_layer_names": custom_names,
-                "output_dir": output_dir.value,
-                "skeleton_mode": skeleton_mode.value,
-                "brain_mesh": brain_mesh.value,
-                "vnc_mesh": vnc_mesh.value,
-                "legend_mode": legend_mode.value,
-                "neuron_alpha": float(neuron_alpha.value),
-                "neuron_colors": neuron_colors,
-                "background_color": bg_color.value,
-                "skip_synapse": skip_synapse.value,
-                "min_synapse_num": int(min_synapse_num.value),
-                "synapse_size": synapse_size.value,
-                "synapse_alpha": float(synapse_alpha.value),
-                "synapse_mode": synapse_mode.value,
-                "mesh_roi": rois,
-                "mesh_color": mesh_color,
-                "mesh_alpha": float(mesh_alpha.value),
-                "cache_neurons": cache_neurons.value,
-                "cache_synapses": cache_synapses.value,
-                "smooth_skeleton": smooth_skeleton.value,
-                "show_soma": show_soma.value,
-                "show_connectors": show_connectors.value,
-                "export_method": export_method.value,
-                "export_scale": int(export_scale.value),
-                "export_views": export_views.value,
-                "show_fig": show_fig.value,
-                "brain_mesh_color": brain_mesh_picker.get_value(),
-            }
-            method_params = {
-                "export_individual_profiles": export_individual_profiles.value,
-                "pdf_images_per_page": (
-                    int(profile_cols.value),
-                    int(profile_rows.value),
-                ),
-                "views": profile_views.value or ["front"],
-                "summary_format": summary_format.value or ["pdf"],
-                "export_video": export_video.value,
-                "fps": int(fps.value),
-                "degree_per_frame": float(degree_per_frame.value),
-                "rotate": rotate.value,
-                "export_gif": export_gif.value,
-                "gif_scale": float(gif_scale.value),
-            }
-            tool_name = "plot3d_skeleton"
-            output_dir_for_scan = output_dir.value
-        else:
-            if not path_file_path["path"]:
-                ui.notify("Please upload a path file first (Find All Paths output)", type="warning")
-                return
-            constructor_params = {
-                "path_file": path_file_path["path"],
-                "output_folder": path_output_dir.value,
-                "source_color": colors["source"],
-                "intermediate_color": colors["intermediate"],
-                "target_color": colors["target"],
-                "link_color": colors["link"],
-                "network_layout": path_layout.value,
-                "showfig": show_path_fig.value,
-            }
-            method_params = None
-            tool_name = "plot_path"
-            output_dir_for_scan = path_output_dir.value
-
-        output_panel.set_running(True)
-        result = await output_panel.run(
-            runner,
-            tool_name,
+    async def run_panel(constructor_params):
+        network_output.clear()
+        network_output.set_running(True)
+        result = await network_output.run(
+            network_runner,
+            "plot_path",
             constructor_params,
             "plot",
-            method_params=method_params,
-            output_dir=output_dir_for_scan,
+            output_dir=path_output_dir.value,
         )
-
-        output_panel.set_running(False)
-        output_panel.set_status(
+        network_output.set_running(False)
+        network_output.set_status(
             "Completed" if result["returncode"] == 0 else "Failed",
             "green" if result["returncode"] == 0 else "red",
         )
-        output_panel.show_files(result["files"], result.get("output_folder") or output_dir_for_scan)
+        network_output.show_files(
+            result["files"],
+            result.get("output_folder") or path_output_dir.value,
+        )
 
-    output_panel.run_button.on_click(run_visualization)
-    output_panel.cancel_button.on_click(runner.cancel)
+    async def execute_network(empty_canvas=False):
+        if not empty_canvas and not path_file_path["path"]:
+            ui.notify(
+                "Please upload a path file first (Find All Paths output)",
+                type="warning",
+            )
+            return
+
+        colors = COLOR_PRESETS.get(color_preset.get_value(), COLOR_PRESETS["Cool"])
+        constructor_params = {
+            "path_file": None if empty_canvas else path_file_path["path"],
+            "output_folder": path_output_dir.value,
+            "source_color": colors["source"],
+            "intermediate_color": colors["intermediate"],
+            "target_color": colors["target"],
+            "link_color": colors["link"],
+            "network_layout": path_layout.value,
+            "showfig": True if empty_canvas else show_path_fig.value,
+            "generate_empty_network": empty_canvas,
+        }
+        await run_panel(constructor_params)
+
+    async def run_network():
+        await execute_network(network_source.value == "Empty drawing canvas")
+
+    async def create_empty_canvas():
+        await execute_network(empty_canvas=True)
+
+    network_output.run_button.on_click(run_network)
+    network_output.cancel_button.on_click(network_runner.cancel)
+    empty_canvas_button.on_click(create_empty_canvas)
+
+
+def create_visualization_tab():
+    """Backward-compatible combined view for callers outside the main app."""
+    create_skeleton_tab()
+    create_network_tab()

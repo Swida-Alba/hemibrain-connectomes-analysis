@@ -156,6 +156,45 @@ class TestRunner:
         assert "vispath_pkg" in script
         assert "vp.visualize()" in script
 
+    def test_generated_script_supports_empty_network_canvas(self):
+        """The network panel can run PlotPath without a path input file."""
+        from ui.runner import ScriptRunner
+
+        script = ScriptRunner()._generate_script(
+            "plot_path",
+            {
+                "path_file": None,
+                "output_folder": "/tmp/drocat-empty-network",
+                "generate_empty_network": True,
+            },
+            "plot",
+            None,
+        )
+        assert "path_file=None" in script
+        assert "generate_empty_network=True" in script
+        assert "vp.visualize()" in script
+
+    def test_empty_network_opens_a_new_browser_tab(self, tmp_path, monkeypatch):
+        """A visible empty canvas opens as a fresh browser tab after export."""
+        import webbrowser
+
+        sys.path.insert(0, str(PROJECT_ROOT / "vispath-subproject" / "src"))
+        from vispath_pkg import VisualizePath
+
+        opened = []
+        monkeypatch.setattr(webbrowser, "open_new_tab", opened.append)
+        visualizer = VisualizePath(
+            path_file=None,
+            output_folder=str(tmp_path),
+            generate_empty_network=True,
+            showfig=True,
+            verbose=False,
+        )
+        output_path = Path(visualizer.generate_empty_network_html())
+
+        assert output_path.exists()
+        assert opened == [f"file://{output_path.resolve()}"]
+
     def test_generate_plot3d_script_includes_optional_exports(self):
         """Plot3D optional profile/video calls must be appended after plot_neurons."""
         from ui.runner import ScriptRunner
@@ -355,13 +394,15 @@ class TestTabs:
         from ui.tabs import (
             create_find_path_tab, create_find_direct_tab, create_connectivity_profiling_tab,
             create_find_homologs_tab, create_inter_dataset_tab, create_nb_find_lines_tab,
-            create_nb_find_neuron_tab, create_nb_colabel_tab, create_visualization_tab,
+            create_nb_find_neuron_tab, create_nb_colabel_tab, create_skeleton_tab,
+            create_network_tab, create_visualization_tab,
             create_settings_tab,
         )
         assert all(callable(f) for f in [
             create_find_path_tab, create_find_direct_tab, create_connectivity_profiling_tab,
             create_find_homologs_tab, create_inter_dataset_tab, create_nb_find_lines_tab,
-            create_nb_find_neuron_tab, create_nb_colabel_tab, create_visualization_tab,
+            create_nb_find_neuron_tab, create_nb_colabel_tab, create_skeleton_tab,
+            create_network_tab, create_visualization_tab,
             create_settings_tab,
         ])
 
@@ -425,6 +466,7 @@ class TestComponents:
         from ui.components.output_panel import OutputPanel
         panel = OutputPanel("Test")
         assert panel.title == "Test"
+        assert panel._dom_id.startswith("drocat-results-")
         assert panel._files == []
         assert panel._format_size(500) == "500 B"
         assert panel._format_size(1536) == "1.5 KB"

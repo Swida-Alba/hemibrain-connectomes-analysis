@@ -3920,7 +3920,9 @@ class VisualizePath:
         self._vprint(f"  You can populate it with custom nodes/edges via JavaScript")
         
         if self.showfig:
-            webbrowser.open('file://' + os.path.abspath(output_path))
+            # Empty canvases are a user-facing drawing surface; always open a
+            # fresh browser tab so the generated canvas is immediately ready.
+            webbrowser.open_new_tab('file://' + os.path.abspath(output_path))
         
         return output_path
     

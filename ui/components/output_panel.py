@@ -46,6 +46,7 @@ class OutputPanel:
 
     def __init__(self, title: str = "Output"):
         self.title = title
+        self._dom_id = f"drocat-results-{id(self)}"
         self.log_area: Optional[ui.log] = None
         self.files_container = None
         self.status_label: Optional[ui.badge] = None
@@ -62,7 +63,9 @@ class OutputPanel:
         run_icon: str = "play_arrow",
     ):
         """Create the output panel UI (run/cancel actions + status + log + files)."""
-        with ui.card().classes("w-full drocat-card drocat-results-card gap-0"):
+        with ui.card().classes("w-full drocat-card drocat-results-card gap-0").props(
+            f'id="{self._dom_id}"'
+        ):
             # Header: title + status pill
             with ui.row().classes("w-full items-center justify-between drocat-results-head"):
                 with ui.row().classes("items-center gap-2"):
@@ -166,7 +169,7 @@ class OutputPanel:
                 self.progress_bar.props("indeterminate")
             # Make sure the results panel (with the log) is visible
             ui.run_javascript(
-                "const card = document.querySelector('.drocat-results-card');"
+                f"const card = document.getElementById('{self._dom_id}');"
                 "if (card) card.scrollIntoView({behavior:'smooth', block:'nearest'});"
             )
         else:
