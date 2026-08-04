@@ -329,7 +329,7 @@ and [Responses API guide](https://api-docs.deepseek.com/guides/responses_api/).
    - Login → Copy Auth Token
    - Enter in UI Settings tab or save to `token_info_local.txt`
 
-2. **CAVE Token** (required for FlyWire FAFB/BANC datasets):
+2. **CAVE Token** (only for FAFB CAVE API features):
    - Visit [codex.flywire.ai/auth_token](https://codex.flywire.ai/auth_token)
    - Copy token → Enter in UI Settings tab
 
@@ -398,8 +398,8 @@ All neuron input fields support **filter modes**:
 ### Dataset Selection
 
 - **NeuPrint datasets** (hemibrain, male-cns v1.0/v0.9, optic-lobe, manc): Fetched from server automatically
-- **FlyWire FAFB v783**: Requires CAVE token + manual data download
-- **FlyWire BANC v888/v626**: Requires CAVE token + manual data download
+- **FlyWire FAFB v783**: Requires the documented local raw files; CAVE token is only needed for explicit CAVE API fetching or skeleton fallback
+- **FlyWire BANC v888/v626**: Requires the matching documented local raw files; BANC CAVE API fetching is unsupported
 
 See the **Settings** tab for detailed setup instructions.
 
@@ -418,9 +418,9 @@ All output path fields include a browse button (📁) that opens your system's n
 | `hemibrain:v1.2.1`  | NeuPrint  | Adult fly brain (central) |
 | `optic-lobe:v1.1`   | NeuPrint  | Optic lobe detailed       |
 | `manc:v1.2.1`       | NeuPrint  | Male VNC                  |
-| `flywire_FAFB_v783` | FlyWire   | Female brain (CAVE+local) |
-| `flywire_BANC_v888` | FlyWire   | Male VNC latest (CAVE+local) |
-| `flywire_BANC_v626` | FlyWire   | Male VNC (CAVE+local)     |
+| `flywire_FAFB_v783` | FlyWire   | Female brain (local; optional CAVE API) |
+| `flywire_BANC_v888` | FlyWire   | Male VNC latest (local files) |
+| `flywire_BANC_v626` | FlyWire   | Male VNC (local files)     |
 
 📖 **[FlyWire Setup Guide](docs/FLYWIRE_USAGE.md)**
 

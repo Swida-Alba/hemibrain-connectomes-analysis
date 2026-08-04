@@ -13,7 +13,7 @@ This guide provides a quick overview of how to perform common tasks using the Dr
    
    **Token Requirements:**
    - `NEUPRINT_TOKEN`: **Required** for NeuPrint datasets (hemibrain, male-cns, MANC, optic-lobe)
-   - `CAVE_TOKEN`: **Required** for FlyWire datasets (FAFB, BANC)
+   - `CAVE_TOKEN`: **Optional for local conversion**; needed when a FAFB workflow uses CAVE API fetching or skeleton fallback (BANC API is unsupported)
    - NeuronBridge API requires **no authentication**
    
    📖 **[Authentication Setup](docs/INSTALLATION.md#authentication-setup)**

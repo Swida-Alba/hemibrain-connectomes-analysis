@@ -486,14 +486,14 @@ def print_download_instructions(downloads_dir):
     
     files_info = [
         ("classification.csv.gz", "Neuron Classification"),
-        ("names.csv.gz", "Neuron Names"),
-        ("coordinates.csv.gz", "Soma Coordinates"),
-        ("neurons.csv.gz", "Neurotransmitters"),
-        ("cell_stats.csv.gz", "Cell Statistics"),
-        ("consolidated_cell_types.csv.gz", "Consolidated Cell Types"),
+        ("names.csv.gz", "Optional neuron metadata: names"),
+        ("coordinates.csv.gz", "Optional neuron metadata: soma coordinates"),
+        ("neurons.csv.gz", "Optional neuron metadata: neurotransmitters"),
+        ("cell_stats.csv.gz", "Optional neuron metadata: cell statistics"),
+        ("consolidated_cell_types.csv.gz", "Optional neuron metadata: consolidated cell types"),
         ("connections_princeton_no_threshold.csv.gz", "Connectivity Data"),
-        ("fafb_v783_princeton_synapse_table.csv.gz", "Synapse Coordinates - Required for Visualization"),
-        ("sk_lod1_783_healed.zip", "Skeletons - Required for Visualization")
+        ("fafb_v783_princeton_synapse_table.csv.gz", "Optional synapse coordinates for visualization"),
+        ("sk_lod1_783_healed.zip", "Optional skeletons for visualization")
     ]
 
     for fname, desc in files_info:
@@ -512,7 +512,7 @@ def print_download_instructions(downloads_dir):
                os.path.exists(os.path.join(downloads_dir, "connections.csv.gz")):
                 exists = True
 
-        is_optional = "Visualization" in desc
+        is_optional = desc.startswith("Optional") or "Visualization" in desc
         fname_display = f"[optional] {fname}" if is_optional else fname
 
         if exists:

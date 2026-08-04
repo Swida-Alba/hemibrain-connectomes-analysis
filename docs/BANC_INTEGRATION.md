@@ -2,6 +2,11 @@
 
 This project supports the BANC (Brain Analysis of Neuronal Connectivity) dataset from FlyWire using a local file-based approach for high performance.
 
+Use the exact dataset identifier that matches the downloaded release:
+`flywire_BANC_v626` or `flywire_BANC_v888`. Keep each release in its own
+`datasets/<dataset>/` directory; do not mix versions. BANC is local-file only
+in this toolkit and does not support CAVE API fetching.
+
 ## Data Preparation
 
 We provide a dedicated script to prepare the BANC data for analysis. This script handles file organization, format conversion (to Parquet), and data enrichment.
@@ -14,7 +19,8 @@ Download the following files from [FlyWire Codex Downloads](https://codex.flywir
 *   `neurons.csv.gz` (Neuron Metadata)
 *   `connections_princeton.csv.gz` (Connectivity)
 
-*Note: The converter script requires these files to build a complete neuron database. If any are missing, the script will stop and ask you to download them.*
+*Note: The converter requires both files to build a usable local database. If
+either is missing, it will stop and print the download location.*
 
 **Important Note on Visualization:**
 *   **Skeleton Visualization is NOT available for BANC.** The skeleton data (`sk_lod1_783_healed.zip` or similar) is not currently available for the BANC dataset on the FlyWire Codex.
@@ -31,14 +37,22 @@ You can trigger the data preparation in two ways:
 python src/BANC_file_converter.py
 ```
 
+The direct command defaults to `flywire_BANC_v626`. For v888, pass the
+dataset name through the converter function:
+
+```bash
+python -c "import sys; sys.path.insert(0, 'src'); from BANC_file_converter import ensure_banc_data; d='flywire_BANC_v888'; ensure_banc_data(d, 'datasets/' + d)"
+```
+
 **Option B: Run any analysis script**
-Simply running any script that initializes the dataset (e.g., `FindPath_flywire.py` with `dataset='flywire_BANC_v626'`) will automatically check for and convert the data if needed.
+Simply selecting the matching dataset in a tool and running it will
+automatically check for and convert the data if needed.
 
 The script will check for the required files and guide you if anything is missing.
 
 **What the script does:**
-1.  Creates the `datasets/flywire_BANC_v626` directory structure.
-2.  Checks the `datasets/flywire_BANC_v626/downloads` folder for source files.
+1.  Creates the `datasets/<dataset>` directory structure.
+2.  Checks the `datasets/<dataset>/downloads` folder for source files.
 3.  If files are missing, it prints a list of what to download and where to put them.
 4.  Converts CSVs to optimized **Parquet** files for fast loading.
 5.  Merges metadata into a single neuron dataframe.
@@ -49,10 +63,10 @@ The script will check for the required files and guide you if anything is missin
 After the script successfully completes (look for "✓ Conversion complete" messages), you can safely delete the entire `downloads` folder to save space.
 
 **Removable Folder:**
-*   `datasets/flywire_BANC_v626/downloads/` (The entire folder can be deleted)
+*   `datasets/<dataset>/downloads/` (The entire folder can be deleted)
 
 **Do NOT delete:**
-*   The generated `.parquet` files in `datasets/flywire_BANC_v626/`.
+*   The generated `.parquet` files in `datasets/<dataset>/`.
 
 ## Usage
 

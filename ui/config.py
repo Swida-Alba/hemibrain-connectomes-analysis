@@ -81,7 +81,8 @@ NEUPRINT_DATASETS = [
     "mushroombody",
 ]
 
-# FlyWire datasets (require local files + CAVE token for API access)
+# FlyWire datasets (require converted local files; CAVE token is only needed
+# when a workflow explicitly fetches data or skeletons through the CAVE API)
 FLYWIRE_DATASETS = [
     "flywire_FAFB_v783",
     "flywire_BANC_v888",

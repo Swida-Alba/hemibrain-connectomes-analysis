@@ -78,7 +78,9 @@ The web UI is repository-based because it uses the checkout's local datasets, ca
 
 ## Configure authentication
 
-NeuronBridge is public and does not require a token. NeuPrint and FlyWire do.
+NeuronBridge is public and does not require a token. NeuPrint requires a
+NeuPrint token. FlyWire analysis requires the matching local data files;
+FAFB CAVE API features additionally require a CAVE token.
 
 The recommended approach is the web UI's **Settings** tab. Alternatively:
 
@@ -95,7 +97,9 @@ CAVE_TOKEN='your_actual_cave_token'
 
 - Get a NeuPrint token at <https://neuprint.janelia.org/account>.
 - Get a CAVE token at <https://codex.flywire.ai/auth_token>.
-- FlyWire FAFB/BANC workflows also need their documented local data files.
+- FlyWire FAFB/BANC workflows also need their documented local data files;
+  the Settings guide describes the exact `datasets/<dataset>/downloads/`
+  layout. A CAVE token is only needed for explicit FAFB CAVE API features.
 
 To require a configured NeuPrint token during verification:
 

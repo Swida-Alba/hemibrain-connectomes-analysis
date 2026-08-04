@@ -371,12 +371,51 @@ class TestDatasetService:
         assert dataset_to_folder("male-cns:v0.9") == "male-cns_v0_9"
         assert dataset_to_folder("flywire_FAFB_v783") == "flywire_FAFB_v783"
 
+    def test_flywire_identifier_does_not_match_neuprint_banc(self):
+        from ui.dataset_service import is_flywire_dataset
+        assert is_flywire_dataset("flywire_BANC_v626") is True
+        assert is_flywire_dataset("flywire_FAFB_v783") is True
+        assert is_flywire_dataset("banc:v888") is False
+
     def test_service_get_token(self):
         from ui.dataset_service import get_dataset_service
         service = get_dataset_service()
         # Token may or may not be present
         token = service.get_token()
         assert token is None or isinstance(token, str)
+
+    def test_flywire_prepared_requires_neurons_and_connections(self, tmp_path):
+        from ui.dataset_service import DatasetService
+
+        service = DatasetService()
+        service._datasets_dir = tmp_path / "datasets"
+        dataset_path = service._datasets_dir / "flywire_FAFB_v783"
+        dataset_path.mkdir(parents=True)
+
+        (dataset_path / "flywire_FAFB_v783_allneurons_neuron_df.parquet").touch()
+        assert service._check_local_prepared("flywire_FAFB_v783") is False
+
+        (dataset_path / "flywire_FAFB_v783_merged_connections.parquet").touch()
+        assert service._check_local_prepared("flywire_FAFB_v783") is True
+
+        neuprint_path = service._datasets_dir / "hemibrain_v1_2_1"
+        neuprint_path.mkdir()
+        (neuprint_path / "hemibrain_v1_2_1_neuron_df.parquet").touch()
+        assert service._check_local_prepared("hemibrain:v1.2.1") is True
+
+    def test_settings_guide_matches_converter_layout(self):
+        guide = (PROJECT_ROOT / "docs" / "ui_guides" / "settings.html").read_text()
+        embedded_guide = (PROJECT_ROOT / "ui" / "tabs" / "settings.py").read_text()
+        assert "datasets/&lt;dataset&gt;/downloads/" in guide
+        assert "classification.csv.gz" in guide
+        assert "connections_princeton_no_threshold.csv.gz" in guide
+        assert "neurons.csv.gz" in guide
+        assert "connections_princeton.csv.gz" in guide
+        assert "flywire_FAFB_v783_allneurons_neuron_df.parquet" in guide
+        assert "flywire_FAFB_v783/flywire_FAFB_v783_allneurons_neuron_df.csv" not in guide
+        assert "datasets/flywire_FAFB_v783/downloads/" in embedded_guide
+        assert "connections_princeton_no_threshold.csv.gz" in embedded_guide
+        assert "flywire_BANC_v888" in embedded_guide
 
     def test_dataset_info_dataclass(self):
         from ui.dataset_service import DatasetInfo

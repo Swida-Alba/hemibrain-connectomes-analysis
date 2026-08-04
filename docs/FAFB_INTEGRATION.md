@@ -10,21 +10,25 @@ We provide a dedicated script to prepare the FAFB data for analysis. This script
 
 Download the following files from [FlyWire Codex Downloads](https://codex.flywire.ai/api/download?dataset=fafb):
 
-**Required Files:**
+**Required for local connection analysis:**
 *   `classification.csv.gz` (Neuron Classification) - **~1 MB**
 *   `connections_princeton_no_threshold.csv.gz` (Connectivity) - **~263 MB**
     *   *Note: `connections_princeton.csv.gz` or `connections.csv.gz` are also accepted as fallbacks.*
+
+**Recommended metadata enrichment (optional):**
 *   `consolidated_cell_types.csv.gz` (Consolidated Cell Types) - **~1 MB**
 *   `names.csv.gz` (Neuron Names) - **~1 MB**
 *   `coordinates.csv.gz` (Soma Coordinates) - **~5 MB**
 *   `neurons.csv.gz` (Neurotransmitters) - **~2 MB**
 *   `cell_stats.csv.gz` (Cell Statistics) - **~2.5 MB**
 
-*Note: The converter script requires ALL the above files to build a complete neuron database. If any are missing, the script will stop and ask you to download them.*
+The converter warns when enrichment files are missing and continues with
+incomplete neuron metadata. It stops only when the classification or
+connectivity input is missing.
 
 **Optional Visualization Files:**
-*   `sk_lod1_783_healed.zip` (Skeletons - Required for 3D skeleton visualization) - **~13 GB**
-*   `fafb_v783_princeton_synapse_table.csv.gz` (Synapses - Required for synapse visualization) - **~2.5 GB**
+*   `sk_lod1_783_healed.zip` (Skeletons - needed for local 3D skeleton visualization) - **~13 GB**
+*   `fafb_v783_princeton_synapse_table.csv.gz` (Synapses - needed for local synapse-table visualization) - **~2.5 GB**
 
 **Storage Summary:**
 *   **Minimal Analysis:** ~300 MB download → ~200 MB final size
@@ -43,7 +47,9 @@ python src/FAFB_file_converter.py
 ```
 
 **Option B: Run any analysis script**
-Simply running any script that initializes the dataset (e.g., `FindPath_flywire.py` or initializing `FindNeuronConnection` with `dataset='flywire_FAFB_v783'`) will automatically check for and convert the data if needed.
+Simply selecting `flywire_FAFB_v783` in a tool (or initializing
+`FindNeuronConnection` with that dataset) will automatically check for and
+convert the data if needed.
 
 The script will check for the required files and guide you if anything is missing.
 
@@ -317,7 +323,7 @@ result = VisualizeSkeleton.detect_mesh_extrusions(
 - **FindNeuronConnection**: Uses API only when `force_API_fetching=True` (for consistency with local data)
 
 **Requirements:**
-- CAVE token (obtain from https://global.daf-apis.com/auth/api/v1/create_token)
+- CAVE token for API fetching (obtain from https://codex.flywire.ai/auth_token)
 - Set token in `token_info_local.txt` or as environment variable `CAVE_TOKEN`
 
 **Note:** BANC dataset does not support `force_API_fetching` due to API access restrictions (requires community membership at brain-and-nerve-cord.org).

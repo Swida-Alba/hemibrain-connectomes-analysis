@@ -1,6 +1,11 @@
 # FlyWire/FAFB/BANC Dataset Usage Guide
 
-This toolkit supports analysis of FlyWire (FAFB) and BANC datasets using a **local file-based workflow**. Due to the complexity and size of these datasets, we do not support direct API fetching. Instead, you must download the required data files from the Codex/FlyWire portal and place them in the correct directory. The toolkit will then automatically process and convert them for analysis.
+This toolkit supports analysis of FlyWire (FAFB) and BANC datasets using a
+**local file-based workflow**. Download the raw files from the Codex/FlyWire
+portal and place them in the exact `datasets/<dataset>/downloads/` directory;
+the toolkit then converts them to Parquet for analysis. FAFB also has an
+optional CAVE API path for workflows that explicitly request remote fetching;
+BANC remains local-file only.
 
 ## 1. Data Preparation
 
@@ -10,7 +15,7 @@ You need to download the required CSV files from the Codex Download Page (or equ
 **For FAFB (flywire_FAFB_v783):**
 - See [FAFB Integration Guide](FAFB_INTEGRATION.md) for the full file list.
 
-**For BANC (flywire_BANC_v626):**
+**For BANC (`flywire_BANC_v626` or `flywire_BANC_v888`):**
 - See [BANC Integration Guide](BANC_INTEGRATION.md) for the full file list.
 - **Note:** Skeleton visualization is NOT available for BANC.
 
@@ -50,9 +55,15 @@ You can run the conversion script manually, or it will run automatically the fir
 python src/FAFB_file_converter.py
 ```
 
-**Manual Conversion (BANC):**
+**Manual Conversion (BANC v626 default):**
 ```bash
 python src/BANC_file_converter.py
+```
+
+For v888, pass the selected dataset name to the converter function:
+
+```bash
+python -c "import sys; sys.path.insert(0, 'src'); from BANC_file_converter import ensure_banc_data; d='flywire_BANC_v888'; ensure_banc_data(d, 'datasets/' + d)"
 ```
 
 This script will:
@@ -86,16 +97,9 @@ fc.FindDirectConnection()
 
 ### Example Script
 
-We provide a ready-to-use script for FlyWire/BANC pathfinding: `scripts/FindPath_flywire.py`.
-
-```bash
-python scripts/FindPath_flywire.py
-```
-
-This script demonstrates:
-- Setting up the `FindNeuronConnection` class.
-- Finding paths between neuron types.
-- Visualizing the results (Note: 3D skeletons only for FAFB).
+Select the prepared dataset in the UI or in a direct `FindNeuronConnection`
+script. The first run automatically checks the matching `downloads/` folder
+and converts the raw files if the generated tables are absent.
 
 ### Example: Visualizing Skeletons (FAFB Only)
 

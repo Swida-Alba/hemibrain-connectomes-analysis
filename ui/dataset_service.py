@@ -57,6 +57,17 @@ def dataset_to_folder(dataset: str) -> str:
     return dataset.replace(":", "_").replace(".", "_")
 
 
+def is_flywire_dataset(dataset: str) -> bool:
+    """Return whether *dataset* is a FlyWire identifier.
+
+    The NeuPrint server also exposes a dataset named ``banc:v888``.  Do not
+    classify that identifier as the local FlyWire BANC release merely because
+    it contains the word ``banc``.
+    """
+    normalized = dataset.strip().lower()
+    return normalized.startswith("flywire_") or "fafb" in normalized
+
+
 class DatasetService:
     """Service for fetching and managing dataset availability."""
 
@@ -216,7 +227,7 @@ class DatasetService:
         self._load_tokens()
 
         # Determine source
-        if "flywire" in dataset.lower() or "fafb" in dataset.lower() or "banc" in dataset.lower():
+        if is_flywire_dataset(dataset):
             info = self._check_flywire_dataset(dataset)
         else:
             info = self._probe_neuprint_dataset(dataset)
@@ -224,6 +235,13 @@ class DatasetService:
         # Check local cache/prepared status
         info.local_cache = self._check_local_cache(dataset)
         info.local_prepared = self._check_local_prepared(dataset)
+        if info.source == "flywire":
+            # FlyWire has no server-backed dataset status in this UI.  A
+            # directory (or a lone neuron table) is not enough to call it
+            # available; both converter outputs must be present.
+            info.available = info.local_prepared
+            if not info.local_prepared:
+                info.error = "Local FlyWire neuron and connection tables are not both prepared."
 
         # Set display name
         if not info.display_name:
@@ -351,7 +369,10 @@ class DatasetService:
                 except Exception:
                     pass
         else:
-            info.error = "Local data files not found. Please download from FlyWire."
+            info.error = (
+                "Local FlyWire dataset is not prepared. Put the raw Codex files "
+                "under datasets/<dataset>/downloads/ and run the converter."
+            )
 
         return info
 
@@ -376,10 +397,36 @@ class DatasetService:
         """Check if dataset has local data files ready for analysis (not just cache)."""
         dataset_path = self._get_dataset_path(dataset)
         if dataset_path and dataset_path.exists():
-            # Check for neuron data files (required for analysis)
-            for pattern in ["*_neuron_df.csv", "*_neuron_df.parquet", "*_allneurons_neuron_df.csv"]:
-                if list(dataset_path.glob(pattern)):
-                    return True
+            if not is_flywire_dataset(dataset):
+                # NeuPrint can legitimately use a local neuron table while
+                # connections remain server-backed; preserve that behavior.
+                return any(
+                    path
+                    for pattern in ("*_neuron_df.csv", "*_neuron_df.parquet")
+                    for path in dataset_path.glob(pattern)
+                )
+
+            # A FlyWire conversion is usable only when both generated tables
+            # exist.  A neuron table by itself is not enough for pathfinding:
+            # the converter also writes the merged connection table.
+            neuron_ready = any(
+                path
+                for pattern in (
+                    "*_allneurons_neuron_df.parquet",
+                    "*_allneurons_neuron_df.csv",
+                )
+                for path in dataset_path.glob(pattern)
+            )
+            connections_ready = any(
+                path
+                for pattern in (
+                    "*_merged_connections.parquet",
+                    "*_merged_connections.csv",
+                )
+                for path in dataset_path.glob(pattern)
+            )
+            if neuron_ready and connections_ready:
+                return True
         return False
 
     def _get_dataset_path(self, dataset: str) -> Optional[Path]:

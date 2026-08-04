@@ -47,9 +47,9 @@ def create_settings_tab():
             ui.separator()
 
             with ui.column().classes("w-full gap-1"):
-                ui.label("CAVE Token (Required for FlyWire FAFB / BANC datasets)").classes("text-caption font-bold drocat-warn")
+                ui.label("CAVE Token (for FlyWire CAVE API features)").classes("text-caption font-bold drocat-warn")
                 ui.html("Get it from <a href='https://codex.flywire.ai/auth_token' target='_blank' style='color:#145cff'>codex.flywire.ai/auth_token</a>").classes("text-caption drocat-muted")
-                ui.label("Note: FlyWire datasets require BOTH a CAVE token AND manually downloaded local data files.").classes("text-caption drocat-warn")
+                ui.label("Local converted FlyWire tables work without this token. A CAVE token is needed only when a workflow fetches data or skeletons through the CAVE API; it never replaces the required local files.").classes("text-caption drocat-warn")
 
             cave_token = ui.input(
                 label="CAVE Token (for FlyWire)",
@@ -115,48 +115,61 @@ def create_settings_tab():
                 </div>
                 """)
 
-            with ui.expansion("FlyWire FAFB v783 (Female Brain) - Manual Download Required", icon="download").classes("w-full"):
+            with ui.expansion("FlyWire FAFB v783 · strict local preparation", icon="download").classes("w-full"):
                 ui.html("""
                 <div style="color:#0b1f3a" class="text-sm">
-                    <p style="color:#d97706"><b>IMPORTANT: FlyWire FAFB requires manual data download AND a CAVE token.</b></p>
-                    <p>The NeuPrint token alone is NOT sufficient for FlyWire datasets.</p>
+                    <p style="color:#b45309"><b>Follow the converter layout exactly.</b> Download the raw Codex files; do not rename them to a generated <code>*_allneurons_*</code> filename and do not place raw files in the dataset root.</p>
 
-                    <p class="mt-3 font-bold" style="color:#145cff">Step 1: Get CAVE Token</p>
-                    <ol class="list-decimal ml-4">
-                        <li>Visit <a href="https://codex.flywire.ai/auth_token" target="_blank" style="color:#145cff">codex.flywire.ai/auth_token</a></li>
-                        <li>Log in and copy your auth token</li>
-                        <li>Enter it in the CAVE Token field above</li>
-                        <li>Click "Save Tokens"</li>
-                    </ol>
+                    <p class="mt-3 font-bold" style="color:#145cff">1. Create the input folder</p>
+                    <p>From the project root, create <code>datasets/flywire_FAFB_v783/downloads/</code>. Keep the original <code>.csv.gz</code> filenames in this folder.</p>
 
-                    <p class="mt-3 font-bold" style="color:#145cff">Step 2: Download Neuron Data (Manual)</p>
-                    <ol class="list-decimal ml-4">
-                        <li>Visit <a href="https://codex.flywire.ai/api/download?dataset=fafb" target="_blank" style="color:#145cff">codex.flywire.ai/api/download?dataset=fafb</a></li>
-                        <li>Download the neuron table CSV file</li>
-                        <li>Create folder: <code>datasets/flywire_FAFB_v783/</code></li>
-                        <li>Save the file as: <code>datasets/flywire_FAFB_v783/flywire_FAFB_v783_allneurons_neuron_df.csv</code></li>
-                        <li>Optionally download ROI count data as: <code>flywire_FAFB_v783_allneurons_roi_count_df.csv</code></li>
-                    </ol>
+                    <p class="mt-3 font-bold" style="color:#145cff">2. Put these raw files in <code>downloads/</code></p>
+                    <p><b>Required for local pathfinding and connection analysis:</b></p>
+                    <ul class="list-disc ml-4">
+                        <li><code>classification.csv.gz</code></li>
+                        <li><code>connections_princeton_no_threshold.csv.gz</code> (preferred), or <code>connections_princeton.csv.gz</code> / <code>connections.csv.gz</code> as the supported fallback</li>
+                    </ul>
+                    <p><b>Recommended metadata enrichment</b> (the converter can continue without these, but neuron labels and metadata will be incomplete):</p>
+                    <ul class="list-disc ml-4">
+                        <li><code>names.csv.gz</code>, <code>coordinates.csv.gz</code>, <code>neurons.csv.gz</code></li>
+                        <li><code>cell_stats.csv.gz</code>, <code>consolidated_cell_types.csv.gz</code></li>
+                    </ul>
+                    <p><b>Optional visualization inputs:</b> <code>fafb_v783_princeton_synapse_table.csv.gz</code> for a local synapse table and <code>sk_lod1_783_healed.zip</code> for local skeletons. The converter discovers matching synapse/skeleton filenames and moves the skeleton ZIP to the dataset root.</p>
 
-                    <p class="mt-3" style="color:#d97706">Without local data files, FlyWire FAFB queries will fail or timeout.</p>
+                    <p class="mt-3 font-bold" style="color:#145cff">3. Convert the files</p>
+                    <pre style="white-space:pre-wrap"><code>python src/FAFB_file_converter.py</code></pre>
+                    <p>Alternatively, select <code>flywire_FAFB_v783</code> in a tool and run it; the first run invokes the same local preparation automatically.</p>
+
+                    <p class="mt-3 font-bold" style="color:#145cff">4. Verify before running analysis</p>
+                    <p>The dataset root should contain generated files named <code>flywire_FAFB_v783_allneurons_neuron_df.parquet</code> (and CSV) and <code>flywire_FAFB_v783_merged_connections.parquet</code> (and CSV). Click <b>Refresh</b> above and look for <b>✓ local</b>.</p>
+                    <p style="color:#b45309"><b>A CAVE token is not a substitute for these local tables.</b> It is only needed for CAVE API fetching or skeleton fallback; local converted tables and a local skeleton ZIP can be used without it.</p>
                 </div>
                 """)
 
-            with ui.expansion("FlyWire BANC v888 / v626 (Male VNC) - Manual Download Required", icon="download").classes("w-full"):
+            with ui.expansion("FlyWire BANC v888 / v626 · strict local preparation", icon="download").classes("w-full"):
                 ui.html("""
                 <div style="color:#0b1f3a" class="text-sm">
-                    <p style="color:#d97706"><b>IMPORTANT: FlyWire BANC also requires manual download AND a CAVE token.</b></p>
+                    <p style="color:#b45309"><b>BANC is local-file only in this toolkit.</b> A CAVE token does not enable BANC API fetching; use the matching local dataset folder and raw files below.</p>
 
-                    <p class="mt-3 font-bold" style="color:#145cff">Step 1: Get CAVE Token (same as FAFB)</p>
-                    <p>If you already set up the CAVE token for FAFB, the same token works for BANC.</p>
+                    <p class="mt-3 font-bold" style="color:#145cff">1. Choose one exact dataset identifier</p>
+                    <p>Use either <code>flywire_BANC_v888</code> or <code>flywire_BANC_v626</code>. Never mix files from one version into the other version's folder.</p>
 
-                    <p class="mt-3 font-bold" style="color:#145cff">Step 2: Download Neuron Data (Manual)</p>
-                    <ol class="list-decimal ml-4">
-                        <li>Visit <a href="https://codex.flywire.ai/api/download?dataset=banc" target="_blank" style="color:#145cff">codex.flywire.ai/api/download?dataset=banc</a></li>
-                        <li>Download the neuron table CSV file</li>
-                        <li>Create folder: <code>datasets/flywire_BANC_v888/</code> (or <code>datasets/flywire_BANC_v626/</code>)</li>
-                        <li>Save as: <code>flywire_BANC_v888_allneurons_neuron_df.csv</code></li>
-                    </ol>
+                    <p class="mt-3 font-bold" style="color:#145cff">2. Create the input folder and copy the raw files</p>
+                    <p>For the selected identifier, create <code>datasets/&lt;dataset&gt;/downloads/</code> and keep these exact Codex filenames:</p>
+                    <ul class="list-disc ml-4">
+                        <li><code>neurons.csv.gz</code></li>
+                        <li><code>connections_princeton.csv.gz</code></li>
+                    </ul>
+                    <p>Do not save a manually renamed <code>*_allneurons_neuron_df.csv</code> in the root; that is a generated output, not an input.</p>
+
+                    <p class="mt-3 font-bold" style="color:#145cff">3. Convert the files</p>
+                    <pre style="white-space:pre-wrap"><code>python src/BANC_file_converter.py                 # v626 default
+python -c "import sys; sys.path.insert(0, 'src'); from BANC_file_converter import ensure_banc_data; d='flywire_BANC_v888'; ensure_banc_data(d, 'datasets/' + d)"</code></pre>
+                    <p>Alternatively, select the matching BANC identifier in a tool and run it; preparation is invoked automatically.</p>
+
+                    <p class="mt-3 font-bold" style="color:#145cff">4. Verify before running analysis</p>
+                    <p>The selected dataset root should contain <code>&lt;dataset&gt;_allneurons_neuron_df.parquet</code> (and CSV) and <code>&lt;dataset&gt;_merged_connections.parquet</code> (and CSV). Click <b>Refresh</b> above and look for <b>✓ local</b>.</p>
+                    <p style="color:#b45309"><b>BANC skeleton visualization and <code>force_API_fetching</code> are unsupported.</b> Pathfinding, network visualization, and tabular analysis use the converted local files.</p>
                 </div>
                 """)
 

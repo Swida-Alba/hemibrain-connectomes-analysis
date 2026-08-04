@@ -100,7 +100,7 @@ def dataset_selector(
     default: Optional[str] = None,
     datasets: Optional[List[str]] = None,
     on_change: Optional[Callable] = None,
-    hint: str = "NeuPrint: fetched from server with token. FlyWire: requires CAVE token + local files.",
+    hint: str = "NeuPrint: fetched from server with token. FlyWire: uses converted local files; CAVE token is only needed for CAVE API features.",
     allow_custom: bool = False,
     show_local_status: bool = True,
 ) -> ui.select:

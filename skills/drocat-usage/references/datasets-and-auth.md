@@ -11,13 +11,31 @@ Use the exact identifiers below. Version suffixes are significant.
 | `hemibrain:v1.2.1` | NeuPrint | adult central brain |
 | `optic-lobe:v1.1` | NeuPrint | optic-lobe dataset |
 | `manc:v1.2.1` | NeuPrint | male VNC |
-| `flywire_FAFB_v783` | FlyWire/CAVE + local files | requires CAVE token and downloaded files |
-| `flywire_BANC_v888` | FlyWire/CAVE + local files | requires CAVE token and downloaded files |
-| `flywire_BANC_v626` | FlyWire/CAVE + local files | legacy BANC files may be required |
+| `flywire_FAFB_v783` | FlyWire local files (optional CAVE API) | requires converted local files; CAVE token only for explicit remote fetch/fallback |
+| `flywire_BANC_v888` | FlyWire local files | requires matching local files; CAVE API is unsupported |
+| `flywire_BANC_v626` | FlyWire local files | legacy BANC release; requires matching local files |
 
 Validate local FlyWire/BANC file layout with the repository's integration
 guides before running a large query. Do not substitute a similarly named
 dataset silently.
+
+### Exact local input layout
+
+The raw Codex downloads belong under `datasets/<dataset>/downloads/`, not in
+the dataset root and not under generated output names.
+
+- FAFB v783 requires `classification.csv.gz` and one supported connection file:
+  `connections_princeton_no_threshold.csv.gz` (preferred),
+  `connections_princeton.csv.gz`, or `connections.csv.gz`.
+  `names.csv.gz`, `coordinates.csv.gz`, `neurons.csv.gz`, `cell_stats.csv.gz`,
+  and `consolidated_cell_types.csv.gz` enrich the neuron table but are
+  optional. Synapse and skeleton files are optional visualization inputs.
+- BANC v626/v888 requires `neurons.csv.gz` and
+  `connections_princeton.csv.gz` in the matching version's `downloads/`
+  folder. Never mix BANC versions.
+
+After conversion, require both `<dataset>_allneurons_neuron_df.parquet` and
+`<dataset>_merged_connections.parquet` before calling the dataset prepared.
 
 ## Tokens
 
