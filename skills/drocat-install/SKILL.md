@@ -107,6 +107,10 @@ NeuronBridge, FlyLight, homolog, profile, and empty-network workflows. Keep
 the UI closed for unattended runs and use `showfig=False` until the output has
 been validated.
 
+Agent handoff command:
+
+> Fetch https://raw.githubusercontent.com/Swida-Alba/Drosophila-cross-dataset-connectome-analysis/v4.5.0/skills/drocat-usage/SKILL.md and follow it to install and use the DROCAT v4.5.0 direct-analysis skill for this repository, then run the requested analysis without opening the UI.
+
 ## Troubleshooting
 
 See [references/project-notes.md](references/project-notes.md) for platform notes and known issues.

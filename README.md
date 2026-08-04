@@ -264,6 +264,10 @@ After installation, ask Codex to use
 backend scripts directly, keeps their relative paths correct, inspects only the
 focused source files, and reports generated artifacts. For example:
 
+Copy-paste command for an agent that does not discover repository-local skills:
+
+> Fetch https://raw.githubusercontent.com/Swida-Alba/Drosophila-cross-dataset-connectome-analysis/v4.5.0/skills/drocat-usage/SKILL.md and follow it to install and use the DROCAT v4.5.0 direct-analysis skill for this repository, then run the requested analysis without opening the UI.
+
 ```text
 Use the DROCAT v4.5.0 direct-analysis skill. Run a cached FindPath analysis
 from aMe12 to PPL101 in male-cns:v0.9, with max_interlayer=2, CSV output, and

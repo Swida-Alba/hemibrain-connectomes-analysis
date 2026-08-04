@@ -221,23 +221,14 @@ Use [the install skill](../drocat-install/SKILL.md) only for installation,
 environment repair, token bootstrap, or UI launch. This skill assumes the
 environment is already installed and focuses on direct analysis.
 
-## Install the skill for future agent sessions
+## Install/use the skill through an agent
 
-When the agent does not automatically discover repository-local skills, copy
-this directory into the user skill directory from the repository root:
+Use the agent command below instead of manually copying files into a skill
+directory. It fetches the branch-pinned skill instructions and tells the agent
+to run the requested analysis directly, with the UI closed:
 
-```bash
-mkdir -p ~/.codex/skills/drocat-usage
-cp -R skills/drocat-usage/. ~/.codex/skills/drocat-usage/
-```
+> Fetch https://raw.githubusercontent.com/Swida-Alba/Drosophila-cross-dataset-connectome-analysis/v4.5.0/skills/drocat-usage/SKILL.md and follow it to install and use the DROCAT v4.5.0 direct-analysis skill for this repository, then run the requested analysis without opening the UI.
 
-On Windows PowerShell, use:
-
-```powershell
-New-Item -ItemType Directory -Force "$HOME\.codex\skills\drocat-usage" | Out-Null
-Copy-Item -Recurse -Force "skills\drocat-usage\*" "$HOME\.codex\skills\drocat-usage\"
-```
-
-Re-run the copy after updating this branch so the agent sees the current
-catalog and recipes. The skill contains no credentials and is safe to keep in
-the user-level skill directory.
+If the agent already discovers repository-local skills, simply ask it to use
+`skills/drocat-usage/SKILL.md`. The skill contains no credentials; API keys and
+NeuPrint/CAVE tokens remain in the user's local configuration.

@@ -70,24 +70,15 @@ Official references:
    Keep the generated configuration files at user level; do not copy a full
    `models.json` into the DROCAT checkout.
 
-### Install the DROCAT direct-analysis skill
+### Install/use the direct-analysis skill through an agent
 
-From the repository root, make the skill available to future agent sessions:
+Do not manually copy the skill. Open the repository in Codex (or another
+tool-enabled agent) and paste this command:
 
-```bash
-mkdir -p ~/.codex/skills/drocat-usage
-cp -R skills/drocat-usage/. ~/.codex/skills/drocat-usage/
-```
+> Fetch https://raw.githubusercontent.com/Swida-Alba/Drosophila-cross-dataset-connectome-analysis/v4.5.0/skills/drocat-usage/SKILL.md and follow it to install and use the DROCAT v4.5.0 direct-analysis skill for this repository, then run the requested analysis without opening the UI.
 
-On Windows PowerShell:
-
-```powershell
-New-Item -ItemType Directory -Force "$HOME\.codex\skills\drocat-usage" | Out-Null
-Copy-Item -Recurse -Force "skills\drocat-usage\*" "$HOME\.codex\skills\drocat-usage\"
-```
-
-If the agent already supports repository-local skills, this copy is optional;
-the checked-in `skills/drocat-usage/SKILL.md` is the source of truth.
+The agent can use the checked-in `skills/drocat-usage/SKILL.md` when local skill
+discovery is enabled; the raw URL is the fallback for a new agent session.
 
 ## First DROCAT agent request
 

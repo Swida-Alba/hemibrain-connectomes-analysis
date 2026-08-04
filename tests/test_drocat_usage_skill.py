@@ -57,3 +57,15 @@ def test_readme_exposes_direct_analysis_and_beginner_setup() -> None:
     assert "skills/drocat-usage/SKILL.md" in readme
     assert "docs/AGENT_SETUP.md" in readme
     assert "deepseek-v4-flash" in readme
+    assert "raw.githubusercontent.com/Swida-Alba/Drosophila-cross-dataset-connectome-analysis/v4.5.0/skills/drocat-usage/SKILL.md" in readme
+
+
+def test_skill_installation_uses_agent_command_not_manual_copy() -> None:
+    skill = (SKILL / "SKILL.md").read_text(encoding="utf-8")
+    setup = (ROOT / "docs" / "AGENT_SETUP.md").read_text(encoding="utf-8")
+    raw_url = "raw.githubusercontent.com/Swida-Alba/Drosophila-cross-dataset-connectome-analysis/v4.5.0/skills/drocat-usage/SKILL.md"
+
+    assert raw_url in skill
+    assert raw_url in setup
+    assert "mkdir -p ~/.codex/skills/drocat-usage" not in skill
+    assert "mkdir -p ~/.codex/skills/drocat-usage" not in setup
