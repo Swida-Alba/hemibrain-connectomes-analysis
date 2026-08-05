@@ -51,3 +51,6 @@ test_output/
 *.pyc
 __pycache__/
 .backup_before_reorganization/
+
+# Build artifacts
+*.egg-info/

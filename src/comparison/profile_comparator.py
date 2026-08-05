@@ -24,7 +24,7 @@ Example:
     >>> print(f"Cosine similarity: {similarity:.3f}")
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Union, Any, TYPE_CHECKING
 from datetime import datetime
@@ -39,8 +39,24 @@ except ImportError:
     try:
         from utils.naming_utils import dataset_abbrev
     except ImportError:
+        # Last-resort fallback with the same mapping as utils.naming_utils,
+        # so run-folder names stay meaningful even if that module is missing.
+        _DATASET_ABBREVIATIONS_FALLBACK = {
+            "male-cns": "MCNS", "male_cns": "MCNS", "hemibrain": "HEMI",
+            "optic-lobe": "OL", "optic_lobe": "OL", "manc": "MANC",
+            "banc": "BANC", "fib19": "FIB", "mushroombody": "MB",
+            "flywire_fafb": "FAFB", "fafb": "FAFB", "flywire_banc": "BANC",
+        }
+
         def dataset_abbrev(dataset):
-            return "DS"
+            if not dataset:
+                return "UNKN"
+            ds = str(dataset).lower()
+            for key, abbrev in _DATASET_ABBREVIATIONS_FALLBACK.items():
+                if key in ds:
+                    return abbrev
+            letters = "".join(c for c in ds.split(":")[0] if c.isalpha())
+            return (letters[:4] or "DS").upper()
 
 import numpy as np
 import pandas as pd
@@ -2388,7 +2404,9 @@ class HomologFinder:
             )
         else:
             self.output_dir = output_dir
-        self.saveas = saveas
+        # Normalize empty strings to None so the auto-generated per-run folder
+        # (findhomologs_..._timestamp) is used when no custom name is given.
+        self.saveas = saveas or None
         
         # Visualization settings
         self.visualize_skeleton = visualize_skeleton
@@ -4009,58 +4027,6 @@ class HomologFinder:
         
         return type_map
     
-    def _verify_cache_completeness(self, conn_df: pd.DataFrame, dataset: str, 
-                                    project_root: Path, safe_name: str) -> Optional[Dict]:
-        """
-        Verify that the connection cache is complete by comparing against neuron_df.
-        
-        Returns:
-            Dict with 'expected_neurons', 'cache_neurons', 'missing_ratio'
-            or None if cannot verify
-        """
-        # Try to load neuron_df to get expected neuron count
-        neuron_df = None
-        
-        neuron_files = [
-            project_root / 'datasets' / safe_name / f'{safe_name}_allneurons_neuron_df.parquet',
-            project_root / 'datasets' / safe_name / f'{safe_name}_allneurons_neuron_df.csv',
-        ]
-        
-        for neuron_file in neuron_files:
-            if neuron_file.exists():
-                try:
-                    if str(neuron_file).endswith('.parquet'):
-                        neuron_df = pd.read_parquet(neuron_file)
-                    else:
-                        neuron_df = pd.read_csv(neuron_file, low_memory=False)
-                    break
-                except Exception:
-                    continue
-        
-        if neuron_df is None:
-            return None  # Cannot verify without neuron_df
-        
-        # Count unique neurons in cache
-        cache_neurons = set()
-        if 'bodyId_pre' in conn_df.columns:
-            cache_neurons.update(conn_df['bodyId_pre'].dropna().unique())
-        if 'bodyId_post' in conn_df.columns:
-            cache_neurons.update(conn_df['bodyId_post'].dropna().unique())
-        
-        # Expected neurons from neuron_df
-        expected_neurons = len(neuron_df)
-        cache_neuron_count = len(cache_neurons)
-        
-        # Calculate missing ratio (some neurons may have no connections, so allow some tolerance)
-        # But if significantly fewer neurons are in cache, it's likely incomplete
-        missing_ratio = max(0, (expected_neurons - cache_neuron_count) / expected_neurons) if expected_neurons > 0 else 0
-        
-        return {
-            'expected_neurons': expected_neurons,
-            'cache_neurons': cache_neuron_count,
-            'missing_ratio': missing_ratio
-        }
-    
     def _build_connection_cache_for_dataset(self, dataset: str, cache_path: Path, 
                                              project_root: Path, safe_name: str) -> bool:
         """
@@ -4238,69 +4204,6 @@ class HomologFinder:
             self._log(f"WARNING: Could not ensure connection cache: {e}")
             # Continue anyway - may work with partial data
             return False
-    
-    def _get_adjacency_candidates(
-        self,
-        conn_df: pd.DataFrame,
-        query: Union[str, int],
-        min_weight: int = 3
-    ) -> set:
-        """
-        Get candidate field via adjacency expansion.
-        
-        Algorithm:
-        1. Find upstream and downstream neurons of the source neurons
-        2. Fetch the downstream of the upstream neurons (2-hop)
-        3. Fetch the upstream of the downstream neurons (2-hop)
-        4. Return the union as candidate field
-        
-        Args:
-            conn_df: Connection DataFrame with type columns
-            query: Type name (str) or bodyId (int)
-            min_weight: Minimum synapse weight
-            
-        Returns:
-            Set of candidate type names
-        """
-        # Filter by weight
-        filtered = conn_df[conn_df['weight'] >= min_weight].copy()
-        
-        # Find 1-hop partners
-        if isinstance(query, str):
-            # Type-based query
-            upstream_mask = filtered['type_post'] == query
-            downstream_mask = filtered['type_pre'] == query
-        else:
-            # BodyId query
-            upstream_mask = filtered['bodyId_post'] == query
-            downstream_mask = filtered['bodyId_pre'] == query
-        
-        # Get 1-hop upstream types (neurons that synapse onto query)
-        upstream_1hop = set(filtered.loc[upstream_mask, 'type_pre'].dropna().unique())
-        # Get 1-hop downstream types (neurons that query synapses onto)
-        downstream_1hop = set(filtered.loc[downstream_mask, 'type_post'].dropna().unique())
-        
-        # Get 2-hop: downstream of upstream (types that also receive from same upstream)
-        downstream_of_upstream = set()
-        if upstream_1hop:
-            mask = filtered['type_pre'].isin(upstream_1hop)
-            downstream_of_upstream = set(filtered.loc[mask, 'type_post'].dropna().unique())
-        
-        # Get 2-hop: upstream of downstream (types that also send to same downstream)
-        upstream_of_downstream = set()
-        if downstream_1hop:
-            mask = filtered['type_post'].isin(downstream_1hop)
-            upstream_of_downstream = set(filtered.loc[mask, 'type_pre'].dropna().unique())
-        
-        # Candidate field = 2-hop partners (excluding empty strings)
-        candidates = downstream_of_upstream | upstream_of_downstream
-        candidates = {c for c in candidates if c and str(c).strip()}
-        
-        # Remove query itself from candidates
-        query_str = str(query)
-        candidates.discard(query_str)
-        
-        return candidates
     
     def _build_type_aggregates(
         self,
@@ -4864,136 +4767,6 @@ class HomologFinder:
         
         return ConnectivityProfile(
             neuron_id=bodyid,
-            dataset=dataset,
-            upstream_partners=upstream_partners,
-            downstream_partners=downstream_partners,
-            upstream_ranks=upstream_ranks,
-            downstream_ranks=downstream_ranks,
-            upstream_top_k=up_k_used,
-            downstream_top_k=down_k_used,
-            total_upstream_weight=up_total,
-            total_downstream_weight=down_total,
-            actual_upstream_count=len(upstream_partners),
-            actual_downstream_count=len(downstream_partners),
-            is_weak_connectivity=is_weak,
-            unique_types_upstream=len(upstream_partners),
-            unique_types_downstream=len(downstream_partners),
-            is_sparse=is_sparse,
-            top_k_bodyid_used=max(up_k_used, down_k_used),
-            top_m_type_target=top_m,
-        )
-    
-    def _build_profile_from_aggregates(
-        self,
-        neuron_type: str,
-        dataset: str,
-        upstream_by_type: Dict[str, Dict[str, float]],
-        downstream_by_type: Dict[str, Dict[str, float]],
-        top_k: Optional[int] = None,
-        top_m: Optional[int] = None
-    ) -> Optional['ConnectivityProfile']:
-        """
-        DEPRECATED: Use self.profiler.get_profile(neuron_type, dataset) instead.
-        
-        This method builds profiles from pre-aggregated data WITHOUT the 1-hop/2-hop
-        hybrid approach. All profile building should now go through ConnectivityProfiler
-        which provides proper 2-hop expansion for untyped 1-hop partners.
-        
-        The proper approach is:
-        1. Build bodyId-level profiles via ConnectivityProfiler.get_profile()
-        2. For type-level comparison, aggregate bodyId profiles
-        
-        Args:
-            neuron_type: Type name
-            dataset: Dataset name
-            upstream_by_type: Pre-aggregated upstream connections
-            downstream_by_type: Pre-aggregated downstream connections
-            top_k: Top K partners to keep per direction (uses config default if None)
-            top_m: Minimum unique types to ensure (uses config default if None)
-            
-        Returns:
-            ConnectivityProfile or None if no connections found
-            
-        .. deprecated::
-            Use `self.profiler.get_profile(neuron_type, dataset)` for proper 1-hop/2-hop
-            hybrid profile building with 2-hop expansion for untyped neurons.
-        """
-        import warnings
-        warnings.warn(
-            "_build_profile_from_aggregates is deprecated. "
-            "Use self.profiler.get_profile(neuron_type, dataset) for proper 1-hop/2-hop hybrid profiles.",
-            DeprecationWarning,
-            stacklevel=2
-        )
-        from .connectivity_profiler import ConnectivityProfile
-        
-        # Get defaults from profiler config
-        if top_k is None:
-            top_k = self.profiler.config.top_k_bodyid
-        if top_m is None:
-            top_m = self.profiler.config.top_m_type
-        
-        max_expansion_factor = self.profiler.config.max_expansion_factor
-        dynamic_expansion = self.profiler.config.dynamic_expansion
-        
-        upstream_all = upstream_by_type.get(neuron_type, {})
-        downstream_all = downstream_by_type.get(neuron_type, {})
-        
-        if not upstream_all and not downstream_all:
-            return None
-        
-        def apply_top_k_m(partners: Dict[str, float], top_k: int, top_m: int) -> Tuple[Dict[str, float], int]:
-            """Apply top-k filtering with optional top-m expansion."""
-            if not partners:
-                return {}, top_k
-            
-            # Sort by weight descending
-            sorted_partners = sorted(partners.items(), key=lambda x: -x[1])
-            
-            k_used = top_k
-            max_k = top_k * max_expansion_factor
-            
-            if dynamic_expansion and top_m > 0:
-                # Expand k until we have at least top_m unique types
-                selected = dict(sorted_partners[:k_used])
-                unique_types = len(selected)
-                
-                while unique_types < top_m and k_used < max_k and k_used < len(sorted_partners):
-                    k_used += 5  # Expand by 5
-                    selected = dict(sorted_partners[:k_used])
-                    unique_types = len(selected)
-                
-                return selected, k_used
-            else:
-                # Just take top-k
-                return dict(sorted_partners[:top_k]), top_k
-        
-        # Apply top-k/top-m to both directions
-        upstream_partners, up_k_used = apply_top_k_m(upstream_all, top_k, top_m)
-        downstream_partners, down_k_used = apply_top_k_m(downstream_all, top_k, top_m)
-        
-        # Store actual synapse weights (not normalized to proportions)
-        up_total = sum(upstream_partners.values()) if upstream_partners else 0.0
-        down_total = sum(downstream_partners.values()) if downstream_partners else 0.0
-        
-        # Create ranks from weights (higher weight = lower rank)
-        upstream_ranked = sorted(upstream_partners.items(), key=lambda x: -x[1])
-        downstream_ranked = sorted(downstream_partners.items(), key=lambda x: -x[1])
-        
-        upstream_ranks = {k: i+1 for i, (k, _) in enumerate(upstream_ranked)}
-        downstream_ranks = {k: i+1 for i, (k, _) in enumerate(downstream_ranked)}
-        
-        # Determine if weak connectivity (fewer than 5 partners in either direction)
-        is_weak = len(upstream_partners) < 5 or len(downstream_partners) < 5
-        
-        # Check if sparse (couldn't reach top_m types even after expansion)
-        is_sparse = (
-            (top_m > 0 and len(upstream_partners) < top_m) or
-            (top_m > 0 and len(downstream_partners) < top_m)
-        )
-        
-        return ConnectivityProfile(
-            neuron_id=neuron_type,
             dataset=dataset,
             upstream_partners=upstream_partners,
             downstream_partners=downstream_partners,
@@ -6097,13 +5870,16 @@ class HomologFinder:
         # Check for bodyId-level columns
         has_bodyid_cols = 'source_bodyId' in results_df.columns if not results_df.empty else False
         
-        # Generate folder name with timestamp if not provided
-        if saveas is None:
+        # Generate folder name with timestamp if not provided.
+        # Treat empty strings like None: the UI sends saveas="" when the
+        # field is blank, which must still auto-generate the per-run folder
+        # (otherwise results would be dumped straight into output_dir).
+        if not saveas:
             timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
             safe_query = str(query).replace('/', '_').replace(':', '_').replace('*', '_')
             folder_name = (
-                f"homologs_{dataset_abbrev(getattr(self, 'source_dataset', None))}"
-                f"_to_{dataset_abbrev(getattr(self, 'target_dataset', None))}"
+                f"findhomologs_{dataset_abbrev(source_dataset)}"
+                f"_to_{dataset_abbrev(target_dataset)}"
                 f"_{safe_query}_{timestamp}"
             )
         else:
@@ -6360,8 +6136,10 @@ class HomologFinder:
         # If bodyId-level comparison, also save source bodyId summary
         if has_bodyid_cols and not results_df.empty:
             # Create summary of source bodyIds with their status and connectivity
-            source_summary = results_df[['source_bodyId', 'source_type', 'source_status', 
-                                         'source_partner_count']].drop_duplicates()
+            source_cols = ['source_bodyId', 'source_type', 'source_status',
+                           'source_partner_count']
+            available_source_cols = [c for c in source_cols if c in results_df.columns]
+            source_summary = results_df[available_source_cols].drop_duplicates()
             source_summary = source_summary.sort_values('source_bodyId')
             source_summary.to_csv(query_profiles_dir / 'source_bodyids.csv', index=False)
             files_saved.append('profiles/query/source_bodyids.csv')
@@ -7135,7 +6913,6 @@ class HomologFinder:
             >>> # Compare results with shuffled vs original profile
         """
         from .connectivity_profiler import ConnectivityProfile
-        import copy
         
         if seed is not None:
             np.random.seed(seed)

@@ -3,16 +3,15 @@ Dataset Service for DROCAT UI
 Fetches available datasets from NeuPrint server dynamically.
 """
 
-import os
 import json
 import threading
 import time
 from pathlib import Path
-from typing import List, Dict, Optional, Tuple
+from typing import List, Dict, Optional
 from dataclasses import dataclass, field
 from datetime import datetime
 
-from .config import PROJECT_ROOT, TOKEN_FILE
+from .config import PROJECT_ROOT
 
 
 @dataclass

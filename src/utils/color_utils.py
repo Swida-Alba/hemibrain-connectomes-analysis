@@ -45,7 +45,7 @@ Usage Examples
 """
 
 import re
-from typing import Union, List, Tuple, Optional, Any
+from typing import Union, List, Tuple, Any
 
 
 # CSS named colors (subset of most common ones)

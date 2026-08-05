@@ -130,7 +130,7 @@ def run_comprehensive_comparison():
         # -----------------------------------------------------------------
         parallel=True,                # Enable parallel processing
         max_workers=12,               # Auto-detect optimal worker count
-        pathfinding='Bidirectional',  # 'MemoizedDFS', 'Bidirectional', 'DP', 'DFS'
+        pathfinding='MemoizedDFS',  # 'MemoizedDFS' (default, fastest), 'DFS' (backward), 'MeetInMiddle', 'DP', 'Bidirectional'
     )
     
     # =========================================================================

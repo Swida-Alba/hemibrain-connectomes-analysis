@@ -3,8 +3,8 @@
 from nicegui import ui
 from ..config import DEFAULTS, DATASETS, MATCH_ALGORITHMS
 from ..components.common import (
-    dataset_selector, advanced_neuron_input, number_input, select_input,
-    checkbox_input, dir_input, multi_select_input, parse_neuron_list,
+    dataset_selector, neuron_list_input, number_input, select_input,
+    checkbox_input, dir_input, multi_select_input,
     apply_filter_mode, section_header, param_grid, tool_page,
 )
 from ..components.output_panel import OutputPanel
@@ -26,9 +26,8 @@ def create_nb_find_lines_tab():
     with form_col:
         with ui.card().classes("w-full drocat-card"):
             section_header("Query Neurons", "search")
-            query_input = advanced_neuron_input(
+            query_input = neuron_list_input(
                 label="EM Neurons (bodyId, type, or instance)",
-                placeholder="e.g., aMe12, 720575940610453042",
                 hint="Enter EM neuron identifiers. Use filter mode for pattern matching across types.",
             )
             with param_grid(2):
@@ -122,8 +121,8 @@ def create_nb_find_lines_tab():
         output_panel.create(run_label="Find Driver Lines", run_icon="play_arrow")
 
     async def run_find_lines():
-        mode, text = query_input.get_value()
-        query = apply_filter_mode(parse_neuron_list(text), mode)
+        mode, neurons = query_input.get_value()
+        query = apply_filter_mode(neurons, mode)
         if not query:
             ui.notify("Please enter at least one neuron", type="warning")
             return

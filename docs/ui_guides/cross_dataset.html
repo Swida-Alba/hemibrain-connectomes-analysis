@@ -41,7 +41,8 @@
     <tr><th>Parameter</th><th>Default</th><th>Meaning</th></tr>
     <tr><td>Max Intermediate Layers</td><td>2</td><td>Path depth for path mode</td></tr>
     <tr><td>Top Edges</td><td>500</td><td>Edge cap per threshold</td></tr>
-    <tr><td>Pathfinding Algorithm</td><td>Bidirectional</td><td>Algorithm used per dataset</td></tr>
+    <tr><td>Pathfinding Algorithm</td><td>MemoizedDFS</td><td>Algorithm used per dataset. See the <a href="pathfinding_algorithms.html">pathfinding algorithms guide</a>: MemoizedDFS is fastest at all depths; DFS for few targets; MeetInMiddle for shallow queries.</td></tr>
+    <tr><td>Search Columns</td><td>auto</td><td>Columns searched when resolving source/target names in every dataset: <code>auto</code> = all columns (bodyId → type → instance → flywireType/hemibrainType/…), or restrict to <code>type</code> / <code>instance</code> / <code>bodyId</code>. Use <code>auto</code> when names come from a cross-dataset type column (e.g. <code>MTe07</code> in <code>flywireType</code> on male-cns v1.0).</td></tr>
     <tr><td>Min Connection Ratio</td><td>0.0</td><td>Weight/post ratio filter</td></tr>
     <tr><td>Min Traversal Prob.</td><td>0.0</td><td>Traversal probability filter</td></tr>
     <tr><td>Output Format</td><td>csv</td><td>csv or xlsx</td></tr>
@@ -58,7 +59,7 @@
   </ul>
 
   <h2>Output</h2>
-  <pre><code>{output_dir}/comp_{source}_to_{target}_{dataset_codes}_{timestamp}/
+  <pre><code>{output_dir}/interdataset_{source}_to_{target}_{dataset_codes}_{timestamp}/
   dataset_data/{dataset}/...
   comparison_results/path_count_comparison.csv
   comparison_results/edge_weight_comparison.csv

@@ -1,7 +1,6 @@
 import os
 import json
 import numpy as np
-import pandas as pd
 
 def generate_interactive_heatmap(matrices_dict, filename, title='', showfig=True, fontsize=12, verbose=True):
     """

@@ -8,7 +8,6 @@ Date: 2025-12
 """
 
 from collections import defaultdict
-import numpy as np
 
 
 class FastGraph:
@@ -39,6 +38,11 @@ class FastGraph:
         self.node_attrs = {}  # {node: {attr: value}}
         self.edge_attrs = {}  # {(u, v): {attr: value}}
         self._num_edges = 0
+        # Lazy reverse adjacency: {v: set of predecessors u with u -> v}.
+        # Built on first use (backward traversals) instead of materialising a
+        # full reversed graph copy per algorithm call; invalidated on edits.
+        self._radj = None
+        self._radj_dirty = False
 
     def add_node(self, n, **attrs):
         """
@@ -85,6 +89,8 @@ class FastGraph:
             self.adj[u][v] = 0.0
             self._num_edges += 1
         self.adj[u][v] += weight
+        # Topology may have changed; the lazy reverse index is rebuilt on demand.
+        self._radj_dirty = True
         
         # Store edge attributes
         edge_key = (u, v)
@@ -144,22 +150,32 @@ class FastGraph:
         return self.neighbors(n)
 
     def predecessors(self, n):
-        """Return iterator over predecessors of node n."""
-        for u in self.adj:
-            if n in self.adj[u]:
-                yield u
+        """Return iterator over predecessors of node n (u with u -> n)."""
+        return iter(self._ensure_radj().get(n, ()))
+
+    def _ensure_radj(self):
+        """Build the reverse adjacency index on first use / after edits.
+
+        O(V + E) once, then O(1) predecessor lookups — replaces the full
+        reversed-graph copy (``reverse()``) that pathfinding used to build
+        per call, which cost ~250 MB on a 722k-edge connectome.
+        """
+        if self._radj is None or self._radj_dirty:
+            radj = {}
+            for u, vs in self.adj.items():
+                for v in vs:
+                    radj.setdefault(v, set()).add(u)
+            self._radj = radj
+            self._radj_dirty = False
+        return self._radj
 
     def out_degree(self, n):
         """Return out-degree of node n."""
         return len(self.adj.get(n, {}))
 
     def in_degree(self, n):
-        """Return in-degree of node n."""
-        count = 0
-        for u in self.adj:
-            if n in self.adj[u]:
-                count += 1
-        return count
+        """Return in-degree of node n (O(1) via the reverse index)."""
+        return len(self._ensure_radj().get(n, ()))
 
     def get_edge_data(self, u, v, default=None):
         """
@@ -666,9 +682,8 @@ class FastGraph:
         
         source_set = set(sources)
         target_set = set(targets)
-        R = self.reverse()
         
-        def simple_dfs_paths(start_node, graph, target_depth, valid_end_nodes=None):
+        def simple_dfs_paths(start_node, target_depth, edge_iter, valid_end_nodes=None):
             # In-place backtracking: the previous implementation copied the
             # whole path list (`path + [v]`) on every edge traversal, which is
             # O(depth) allocation per step and dominates runtime on dense
@@ -682,25 +697,25 @@ class FastGraph:
                     if valid_end_nodes is None or u in valid_end_nodes:
                         yield u, list(path)
                     return
-                if u in graph.adj:
-                    for v in graph.adj[u]:
-                        if v not in visited:
-                            visited.add(v)
-                            path.append(v)
-                            yield from dfs(v, depth + 1)
-                            path.pop()
-                            visited.discard(v)
+                for v in edge_iter(u):
+                    if v not in visited:
+                        visited.add(v)
+                        path.append(v)
+                        yield from dfs(v, depth + 1)
+                        path.pop()
+                        visited.discard(v)
 
             yield from dfs(start_node, 0)
 
-        def get_reachable_set(start_nodes, graph, depth):
+        def get_reachable_set(start_nodes, depth):
+            # Nodes reachable from `start_nodes` walking predecessors
+            # (reverse of G) — no reversed-graph copy needed.
             current = set(start_nodes)
             for i in range(depth):
                 next_layer = set()
                 if not current: break
                 for u in current:
-                    if u in graph.adj:
-                        next_layer.update(graph.adj[u])
+                    next_layer.update(self.predecessors(u))
                 current = next_layer
             return current
 
@@ -713,7 +728,7 @@ class FastGraph:
             mid = length // 2
             rem = length - mid
             
-            valid_mids = get_reachable_set(target_set, R, rem)
+            valid_mids = get_reachable_set(target_set, rem)
             if not valid_mids:
                 continue
                 
@@ -724,7 +739,7 @@ class FastGraph:
             
             for s in iterator:
                 if s not in self.adj: continue
-                for end_node, path in simple_dfs_paths(s, self, mid, valid_mids):
+                for end_node, path in simple_dfs_paths(s, mid, lambda u: self.adj.get(u, ()), valid_mids):
                     fwd_paths_map[end_node].append(path)
                     
             if not fwd_paths_map:
@@ -736,8 +751,8 @@ class FastGraph:
                 iterator = tqdm(targets, desc=f"L{length} Bwd(L{rem})", leave=False)
                 
             for t in iterator:
-                if t not in R.adj: continue
-                for end_node, r_path in simple_dfs_paths(t, R, rem, valid_ends_for_backward):
+                if not list(self.predecessors(t)): continue
+                for end_node, r_path in simple_dfs_paths(t, rem, lambda u: self.predecessors(u), valid_ends_for_backward):
                     r_path_rev = r_path[::-1]
                     r_set = set(r_path_rev)
                     for f_path in fwd_paths_map[end_node]:
@@ -767,7 +782,6 @@ class FastGraph:
             Each path as a list of nodes
         """
         target_set = set(targets)
-        R = self.reverse()
         
         valid_nodes_at_dist = [set() for _ in range(cutoff + 2)]
         valid_nodes_at_dist[0] = target_set
@@ -775,9 +789,10 @@ class FastGraph:
         for k in range(1, cutoff + 1):
             prev_set = valid_nodes_at_dist[k-1]
             current_set = valid_nodes_at_dist[k]
+            # Predecessors of the previous layer = nodes that can reach a
+            # target in exactly k steps (no reversed-graph copy needed).
             for target_node in prev_set:
-                if target_node in R.adj:
-                    current_set.update(R.adj[target_node])
+                current_set.update(self.predecessors(target_node))
         
         def guided_dfs(u, depth, current_path):
             if depth == 0:
@@ -830,12 +845,24 @@ class FastGraph:
             Each path as a list of nodes
         """
         if direction == 'backward':
-            R = self.reverse()
-            for path in R.find_paths_memoized_dfs(targets, sources, cutoff, direction='forward', verbose=verbose):
+            # Walk predecessors instead of building a reversed graph copy;
+            # paths are enumerated target -> source and reversed on the way out.
+            for path in self._memoized_dfs_impl(
+                targets, set(sources), cutoff,
+                edge_iter=lambda u: self.predecessors(u),
+                verbose=verbose,
+            ):
                 yield path[::-1]
             return
+        yield from self._memoized_dfs_impl(
+            sources, set(targets), cutoff,
+            edge_iter=lambda u: self.adj.get(u, ()),
+            verbose=verbose,
+        )
 
-        target_set = set(targets)
+    def _memoized_dfs_impl(self, starts, end_set, cutoff, edge_iter, verbose=False):
+        """Shared memoized-DFS core; ``edge_iter(u)`` yields the neighbours
+        to walk (successors for forward, predecessors for backward)."""
         valid_successors = {}
         
         def find_valid_successors(u, k):
@@ -843,19 +870,18 @@ class FastGraph:
             if state in valid_successors:
                 return valid_successors[state]
             if k == 0:
-                return True if u in target_set else None
+                return True if u in end_set else None
             successors = []
-            if u in self.adj:
-                for v in self.adj[u]:
-                    if find_valid_successors(v, k-1) is not None:
-                        successors.append(v)
+            for v in edge_iter(u):
+                if find_valid_successors(v, k-1) is not None:
+                    successors.append(v)
             res = successors if successors else None
             valid_successors[state] = res
             return res
 
         def reconstruct(u, k, path):
             if k == 0:
-                if u in target_set:
+                if u in end_set:
                     yield list(path)
                 return
             succs = valid_successors.get((u, k))
@@ -872,16 +898,16 @@ class FastGraph:
             def tqdm(iterable, **kwargs): return iterable
 
         for length in range(1, cutoff + 1):
-            iterator = sources
+            iterator = starts
             if verbose:
-                iterator = tqdm(sources, desc=f"L{length} BuildMemo", leave=False)
-            valid_sources = []
+                iterator = tqdm(starts, desc=f"L{length} BuildMemo", leave=False)
+            valid_starts = []
             for s in iterator:
                 if find_valid_successors(s, length) is not None:
-                    valid_sources.append(s)
-            iterator = valid_sources
+                    valid_starts.append(s)
+            iterator = valid_starts
             if verbose:
-                iterator = tqdm(valid_sources, desc=f"L{length} Reconstruct", leave=False)
+                iterator = tqdm(valid_starts, desc=f"L{length} Reconstruct", leave=False)
             for s in iterator:
                 yield from reconstruct(s, length, [s])
 
@@ -924,18 +950,18 @@ class FastGraph:
 
         b_layers = [defaultdict(set) for _ in range(cutoff + 1)]
         target_set = set(targets)
-        R = self.reverse()
+        radj = self._ensure_radj()  # predecessor index (reverse of G)
         
         for t in targets:
-            if t in R.adj:
+            if t in radj:
                 b_layers[0][t].add(None)
                 
         for d in range(cutoff):
             current_layer = b_layers[d]
             next_layer = b_layers[d+1]
             for u in current_layer:
-                if u in R.adj:
-                    for v in R.adj[u]:
+                if u in radj:
+                    for v in radj[u]:
                         next_layer[v].add(u)
             if not next_layer: break
 

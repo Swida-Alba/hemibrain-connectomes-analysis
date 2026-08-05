@@ -1,0 +1,426 @@
+#!/usr/bin/env python
+"""
+Regression tests for path probability / connection-ratio calculations.
+
+Locks in the project-wide metric contract (see docs/core-features/ScoreCalculation_Guide.md):
+
+- bodyId level:  connection_ratio = w(A->B) / total_incoming(B)  (GLOBAL denominator
+  from ALL sources when supplied; local fallback otherwise)
+- bodyId level:  traversal_probability = min(ratio / 0.3, 1);  block = 1 - prob
+- type level:    ratio = sum(w over deduplicated bodyId pairs) / total_incoming(typeB)
+                 prob  = min(ratio / 0.3, 1)   (same model as bodyId level)
+- path level:    path_prob = product(edge probs);  min_ratio = min(edge ratios);
+                 min_weight = min(edge weights);  length = number of edges
+
+The pandas (statvis.EnrichConnectionTable) and Polars
+(statvis_polars.EnrichConnectionTablePolars) implementations must agree.
+"""
+
+import sys
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+import polars as pl
+import pytest
+
+PROJECT_ROOT = Path(__file__).parent.parent.parent
+sys.path.insert(0, str(PROJECT_ROOT))
+sys.path.insert(0, str(PROJECT_ROOT / "src"))
+
+from statvis import EnrichConnectionTable  # noqa: E402
+from statvis import build_path_dataframe_from_paths as sv_build  # noqa: E402
+from statvis_polars import EnrichConnectionTablePolars  # noqa: E402
+from statvis_polars import build_path_dataframe_from_paths as svp_build  # noqa: E402
+
+
+# ---------------------------------------------------------------------------
+# Shared synthetic fixture
+# ---------------------------------------------------------------------------
+
+def _synthetic_conn():
+    """BodyId-level table with pre-supplied GLOBAL connection ratios.
+
+    Total incoming per post type (denominator of every ratio):
+        X=30, Y=50, Z=10, W=100
+    Includes a duplicate bodyId pair (1,10) with a large bogus weight (99) that
+    must be dropped by deduplication.
+    """
+    rows = [
+        # bodyId_pre, bodyId_post, type_pre, type_post, weight, connection_ratio
+        (1, 10, 'A', 'X', 5, 5 / 30.0),
+        (1, 11, 'A', 'X', 4, 4 / 30.0),
+        (2, 10, 'A', 'X', 6, 6 / 30.0),
+        (1, 10, 'A', 'X', 99, 99 / 30.0),   # duplicate pair -> must be deduped
+        (3, 12, 'A', 'Y', 7, 7 / 50.0),
+        (4, 12, 'B', 'Y', 9, 9 / 50.0),
+        (1, 12, 'A', 'Y', 8, 8 / 50.0),
+        (6, 12, 'X', 'Y', 3, 3 / 50.0),     # X->Y edge for a 2-hop path
+        (5, 13, 'C', 'Z', 2, 2 / 10.0),
+        (7, 14, 'D', 'W', 40, 40 / 100.0),  # ratio 0.4 > 0.3 -> prob capped at 1
+    ]
+    return pd.DataFrame(rows, columns=[
+        'bodyId_pre', 'bodyId_post', 'type_pre', 'type_post', 'weight', 'connection_ratio',
+    ])
+
+
+def _global_incoming():
+    return pd.DataFrame({
+        'type_post': ['X', 'Y', 'Z', 'W'],
+        'total_incoming_weight': [30.0, 50.0, 10.0, 100.0],
+    })
+
+
+def _expected_type_metrics():
+    """Hand-computed type-level expectations (global denominators)."""
+    return {
+        ('A', 'X'): (15.0, 0.5, 1.0),          # 0.5/0.3 = 1.667 -> capped
+        ('A', 'Y'): (15.0, 0.3, 1.0),          # 0.3/0.3 = 1.0
+        ('B', 'Y'): (9.0, 0.18, 0.6),
+        ('X', 'Y'): (3.0, 0.06, 0.2),
+        ('C', 'Z'): (2.0, 0.2, 2 / 3),
+        ('D', 'W'): (40.0, 0.4, 1.0),          # capped
+    }
+
+
+# ---------------------------------------------------------------------------
+# BodyId-level metrics
+# ---------------------------------------------------------------------------
+
+class TestBodyIdLevelMetrics:
+    def test_pandas_preserves_global_ratio_and_computes_prob(self):
+        conn_df, _, _ = EnrichConnectionTable(
+            _synthetic_conn(), traversal_probability_threshold=0,
+            global_incoming_weights=_global_incoming(),
+        )
+        # bodyId_post is stringified by the enrichment; match as string
+        row = conn_df[(conn_df['bodyId_pre'] == 1) & (conn_df['bodyId_post'] == '10')].iloc[0]
+        assert row['connection_ratio'] == pytest.approx(5 / 30)
+        assert row['traversal_probability'] == pytest.approx((5 / 30) / 0.3)
+        assert row['block_probability'] == pytest.approx(1 - (5 / 30) / 0.3)
+
+    def test_probability_capped_at_1(self):
+        conn_df, _, _ = EnrichConnectionTable(
+            _synthetic_conn(), traversal_probability_threshold=0,
+            global_incoming_weights=_global_incoming(),
+        )
+        # D->W bodyId row has ratio 0.4 -> prob 1.333 -> capped to 1.0
+        row = conn_df[(conn_df['bodyId_pre'] == 7) & (conn_df['bodyId_post'] == '14')].iloc[0]
+        assert row['traversal_probability'] == pytest.approx(1.0)
+
+    def test_polars_bodyid_level_matches_pandas(self):
+        conn_df_pd, _, _ = EnrichConnectionTable(
+            _synthetic_conn(), traversal_probability_threshold=0,
+            global_incoming_weights=_global_incoming(),
+        )
+        conn_df_pl, _, _ = EnrichConnectionTablePolars(
+            _synthetic_conn(), traversal_probability_threshold=0,
+            global_incoming_weights=_global_incoming(),
+        )
+        pl_pd = conn_df_pl.to_pandas().sort_values(['bodyId_pre', 'bodyId_post']).reset_index(drop=True)
+        pd_pd = conn_df_pd.sort_values(['bodyId_pre', 'bodyId_post']).reset_index(drop=True)
+        for col in ['weight', 'connection_ratio', 'traversal_probability']:
+            pd.testing.assert_series_equal(
+                pl_pd[col], pd_pd[col], check_dtype=False,
+                obj=f'bodyId-level {col}',
+            )
+
+
+# ---------------------------------------------------------------------------
+# Type-level aggregation
+# ---------------------------------------------------------------------------
+
+class TestTypeLevelAggregation:
+    def _type_table(self, impl):
+        if impl == 'pandas':
+            _, conn_type, _ = EnrichConnectionTable(
+                _synthetic_conn(), traversal_probability_threshold=0,
+                global_incoming_weights=_global_incoming(),
+            )
+            return conn_type.rename(columns={
+                'type_pre': 't_pre', 'type_post': 't_post'})
+        _, conn_type, _ = EnrichConnectionTablePolars(
+            _synthetic_conn(), traversal_probability_threshold=0,
+            global_incoming_weights=_global_incoming(),
+        )
+        return conn_type.rename({
+            'type_pre': 't_pre', 'type_post': 't_post'}).to_pandas()
+
+    @pytest.mark.parametrize('impl', ['pandas', 'polars'])
+    def test_global_ratio_and_probability(self, impl):
+        ct = self._type_table(impl)
+        for (pre, post), (w, ratio, prob) in _expected_type_metrics().items():
+            row = ct[(ct['t_pre'] == pre) & (ct['t_post'] == post)]
+            assert len(row) == 1, f'missing type pair {pre}->{post} in {impl}'
+            row = row.iloc[0]
+            assert row['weight'] == pytest.approx(w), f'weight {pre}->{post}'
+            assert row['connection_ratio'] == pytest.approx(ratio), f'ratio {pre}->{post}'
+            assert row['traversal_probability'] == pytest.approx(prob), f'prob {pre}->{post}'
+
+    @pytest.mark.parametrize('impl', ['pandas', 'polars'])
+    def test_duplicate_bodyid_pair_is_deduplicated(self, impl):
+        # The (1,10) pair appears twice (weight 5 and bogus 99); only the
+        # first counts, so A->X weight must be 15, not 114.
+        ct = self._type_table(impl)
+        row = ct[(ct['t_pre'] == 'A') & (ct['t_post'] == 'X')].iloc[0]
+        assert row['weight'] == pytest.approx(15.0)
+
+    def test_pandas_matches_polars_with_global_weights(self):
+        ct_pd = self._type_table('pandas').sort_values(['t_pre', 't_post']).reset_index(drop=True)
+        ct_pl = self._type_table('polars').sort_values(['t_pre', 't_post']).reset_index(drop=True)
+        for col in ['weight', 'connection_ratio', 'traversal_probability']:
+            pd.testing.assert_series_equal(
+                ct_pl[col], ct_pd[col], check_dtype=False,
+                obj=f'type-level {col}',
+            )
+
+    def test_local_fallback_matches_across_implementations(self):
+        """Without global weights both implementations use the local
+        denominator (connections in this table only) and still agree."""
+        _, ct_pd, _ = EnrichConnectionTable(
+            _synthetic_conn(), traversal_probability_threshold=0)
+        _, ct_pl, _ = EnrichConnectionTablePolars(
+            _synthetic_conn(), traversal_probability_threshold=0)
+        ct_pd = ct_pd.sort_values(['type_pre', 'type_post']).reset_index(drop=True)
+        ct_pl = ct_pl.sort(['type_pre', 'type_post']).to_pandas().reset_index(drop=True)
+        for col in ['weight', 'connection_ratio', 'traversal_probability']:
+            pd.testing.assert_series_equal(
+                ct_pl[col], ct_pd[col], check_dtype=False,
+                obj=f'local-fallback {col}',
+            )
+
+    def test_missing_global_denominator_yields_zero_probability(self):
+        """A post type absent from the global incoming table -> NaN ratio and
+        traversal_probability filled to 0.0 in both implementations."""
+        conn = pd.DataFrame({
+            'bodyId_pre': [1], 'bodyId_post': [20],
+            'type_pre': ['E'], 'type_post': ['Q'],
+            'weight': [5], 'connection_ratio': [np.nan],
+        })
+        global_incoming = pd.DataFrame({'type_post': ['X'], 'total_incoming_weight': [10.0]})
+        _, ct_pd, _ = EnrichConnectionTable(
+            conn.copy(), traversal_probability_threshold=0,
+            global_incoming_weights=global_incoming)
+        _, ct_pl, _ = EnrichConnectionTablePolars(
+            conn.copy(), traversal_probability_threshold=0,
+            global_incoming_weights=global_incoming)
+        assert np.isnan(ct_pd['connection_ratio'].iloc[0])
+        assert np.isnan(ct_pl.to_pandas()['connection_ratio'].iloc[0])
+        assert ct_pd['traversal_probability'].iloc[0] == 0.0
+        assert ct_pl.to_pandas()['traversal_probability'].iloc[0] == 0.0
+
+    @pytest.mark.parametrize('impl', ['pandas', 'polars'])
+    def test_aggregate_method_param_still_accepted(self, impl):
+        """'product'/'average' are accepted for API compatibility and produce
+        the same (ratio/0.3) result."""
+        if impl == 'pandas':
+            _, ct_product, _ = EnrichConnectionTable(
+                _synthetic_conn(), traversal_probability_threshold=0,
+                aggregate_method='product', global_incoming_weights=_global_incoming())
+            _, ct_average, _ = EnrichConnectionTable(
+                _synthetic_conn(), traversal_probability_threshold=0,
+                aggregate_method='average', global_incoming_weights=_global_incoming())
+            cols = ['type_pre', 'type_post', 'weight', 'connection_ratio', 'traversal_probability']
+        else:
+            _, ct_product, _ = EnrichConnectionTablePolars(
+                _synthetic_conn(), traversal_probability_threshold=0,
+                aggregate_method='product', global_incoming_weights=_global_incoming())
+            _, ct_average, _ = EnrichConnectionTablePolars(
+                _synthetic_conn(), traversal_probability_threshold=0,
+                aggregate_method='average', global_incoming_weights=_global_incoming())
+            ct_product = ct_product.to_pandas()
+            ct_average = ct_average.to_pandas()
+            cols = ['weight', 'connection_ratio', 'traversal_probability']
+        pd.testing.assert_frame_equal(
+            ct_product[cols].sort_values(['weight', 'connection_ratio']).reset_index(drop=True),
+            ct_average[cols].sort_values(['weight', 'connection_ratio']).reset_index(drop=True),
+            check_dtype=False,
+        )
+
+
+# ---------------------------------------------------------------------------
+# EnrichConnectionTable engine parity (unified entry point)
+# ---------------------------------------------------------------------------
+
+def _parity_conn():
+    """Connection table with nt_type + custom groups and mixed NT on A->X
+    (ACH twice vs GABA once -> mode must be ACH in both engines)."""
+    rows = [
+        (1, 10, 'A', 'X', 5, 'ACH', 'G1', 'GX', 5 / 30.0),
+        (1, 11, 'A', 'X', 4, 'ACH', 'G1', 'GX', 4 / 30.0),
+        (2, 10, 'A', 'X', 6, 'GABA', 'G1', 'GX', 6 / 30.0),
+        (3, 12, 'A', 'Y', 7, 'ACH', 'G1', 'GY', 7 / 50.0),
+        (4, 12, 'B', 'Y', 9, 'GLUT', 'G2', 'GY', 9 / 50.0),
+        (5, 13, 'C', 'Z', 2, 'GABA', 'G3', 'GZ', 2 / 10.0),
+    ]
+    return pd.DataFrame(rows, columns=[
+        'bodyId_pre', 'bodyId_post', 'type_pre', 'type_post', 'weight', 'nt_type',
+        'custom_group_pre', 'custom_group_post', 'connection_ratio'])
+
+
+class TestEnrichmentEngineParity:
+    @pytest.mark.parametrize('global_weights', [False, True])
+    def test_type_level_parity(self, global_weights):
+        from statvis import EnrichConnectionTable as pd_enrich
+        from statvis_polars import EnrichConnectionTablePolars
+        conn = _parity_conn()
+        gw = _global_incoming() if global_weights else None
+        _, ct_pd, _ = pd_enrich(conn.copy(), traversal_probability_threshold=0,
+                                global_incoming_weights=gw)
+        _, ct_pl, _ = EnrichConnectionTablePolars(pl.from_pandas(conn),
+                                                  traversal_probability_threshold=0,
+                                                  global_incoming_weights=gw)
+        ct_pl = ct_pl.to_pandas().sort_values(['type_pre', 'type_post']).reset_index(drop=True)
+        ct_pd = ct_pd.sort_values(['type_pre', 'type_post']).reset_index(drop=True)
+        assert set(ct_pl.columns) == set(ct_pd.columns), (
+            f'type-level schema diverged: {sorted(ct_pl.columns)} vs {sorted(ct_pd.columns)}')
+        for col in ct_pd.columns:
+            pd.testing.assert_series_equal(ct_pl[col], ct_pd[col], check_dtype=False, obj=col)
+        # nt_type uses mode on ties (ACH twice vs GABA once)
+        row = ct_pd[(ct_pd['type_pre'] == 'A') & (ct_pd['type_post'] == 'X')].iloc[0]
+        assert row['nt_type'] == 'ACH'
+
+    def test_group_level_parity_and_naming(self):
+        from statvis import EnrichConnectionTable as pd_enrich
+        from statvis_polars import EnrichConnectionTablePolars
+        conn = _parity_conn()
+        _, _, cg_pd = pd_enrich(conn.copy(), traversal_probability_threshold=0)
+        _, _, cg_pl = EnrichConnectionTablePolars(pl.from_pandas(conn),
+                                                  traversal_probability_threshold=0)
+        assert cg_pd is not None and cg_pl is not None
+        assert set(cg_pl.columns) == set(cg_pd.columns)
+        # both engines use custom_group_pre/custom_group_post (unified schema)
+        assert 'custom_group_pre' in cg_pd.columns and 'group_pre' not in cg_pd.columns
+        cg_pl = cg_pl.to_pandas().sort_values(['custom_group_pre', 'custom_group_post']).reset_index(drop=True)
+        cg_pd = cg_pd.sort_values(['custom_group_pre', 'custom_group_post']).reset_index(drop=True)
+        for col in cg_pd.columns:
+            pd.testing.assert_series_equal(cg_pl[col], cg_pd[col], check_dtype=False, obj=f'group {col}')
+
+    def test_block_probability_null_semantics(self):
+        """Missing global denominator -> prob 0.0 and block 1.0 in BOTH engines."""
+        from statvis import EnrichConnectionTable as pd_enrich
+        from statvis_polars import EnrichConnectionTablePolars
+        conn = pd.DataFrame({
+            'bodyId_pre': [1], 'bodyId_post': [20],
+            'type_pre': ['E'], 'type_post': ['Q'],
+            'weight': [5], 'connection_ratio': [np.nan],
+        })
+        gw = pd.DataFrame({'type_post': ['X'], 'total_incoming_weight': [10.0]})
+        _, ct_pd, _ = pd_enrich(conn.copy(), traversal_probability_threshold=0,
+                                global_incoming_weights=gw)
+        _, ct_pl, _ = EnrichConnectionTablePolars(pl.from_pandas(conn),
+                                                  traversal_probability_threshold=0,
+                                                  global_incoming_weights=gw)
+        assert ct_pd['traversal_probability'].iloc[0] == 0.0
+        assert ct_pd['block_probability'].iloc[0] == 1.0
+        ct_pl = ct_pl.to_pandas()
+        assert ct_pl['traversal_probability'].iloc[0] == 0.0
+        assert ct_pl['block_probability'].iloc[0] == 1.0
+
+    def test_bodyid_level_shared_schema(self):
+        """BodyId-level outputs share every column; std_label_pre/post are
+        polars-engine internals (the pandas engine overwrites type_pre/post
+        with the mapped labels instead)."""
+        from statvis import EnrichConnectionTable as pd_enrich
+        from statvis_polars import EnrichConnectionTablePolars
+        conn = _parity_conn()
+        conn_df_pd, _, _ = pd_enrich(conn.copy(), traversal_probability_threshold=0)
+        conn_df_pl, _, _ = EnrichConnectionTablePolars(pl.from_pandas(conn),
+                                                       traversal_probability_threshold=0)
+        shared = set(conn_df_pd.columns) & set(conn_df_pl.columns)
+        assert 'std_label_pre' in conn_df_pl.columns and 'std_label_pre' not in conn_df_pd.columns
+        pl_pd = conn_df_pl.to_pandas().sort_values(['bodyId_pre', 'bodyId_post']).reset_index(drop=True)
+        pd_pd = conn_df_pd.sort_values(['bodyId_pre', 'bodyId_post']).reset_index(drop=True)
+        assert len(pl_pd) == len(pd_pd)
+        for col in sorted(shared):
+            # bodyId_pre may be int (pandas, no-local fallback) vs str (polars)
+            left = pl_pd[col].astype(str) if col == 'bodyId_pre' else pl_pd[col]
+            right = pd_pd[col].astype(str) if col == 'bodyId_pre' else pd_pd[col]
+            pd.testing.assert_series_equal(left, right, check_dtype=False, obj=col)
+
+    def test_unified_dispatcher_routes_by_input_and_engine(self):
+        from statvis import EnrichConnectionTable
+        conn = _parity_conn()
+        # polars input -> polars engine
+        _, ct, _ = EnrichConnectionTable(pl.from_pandas(conn), traversal_probability_threshold=0)
+        assert isinstance(ct, pl.DataFrame)
+        # pandas input -> pandas engine
+        _, ct, _ = EnrichConnectionTable(conn.copy(), traversal_probability_threshold=0)
+        assert isinstance(ct, pd.DataFrame)
+        # forced engines convert the input frame
+        _, ct, _ = EnrichConnectionTable(conn.copy(), traversal_probability_threshold=0, engine='polars')
+        assert isinstance(ct, pl.DataFrame)
+        _, ct, _ = EnrichConnectionTable(pl.from_pandas(conn), traversal_probability_threshold=0, engine='pandas')
+        assert isinstance(ct, pd.DataFrame)
+
+
+# ---------------------------------------------------------------------------
+# Path-level metrics
+# ---------------------------------------------------------------------------
+
+def _enriched_type_table():
+    """Type-level table from the Polars enrichment with global weights, with
+    the type_pre/type_post columns the path builders expect."""
+    _, conn_type, _ = EnrichConnectionTablePolars(
+        _synthetic_conn(), traversal_probability_threshold=0,
+        global_incoming_weights=_global_incoming(),
+    )
+    return conn_type
+
+
+class TestPathLevelMetrics:
+    def _build(self, builder, conn_data):
+        paths = [['A', 'X', 'Y'], ['B', 'Y']]
+        targets = ['Y']
+        return builder(paths, conn_data, targets, real_layer_map=None, level='type')
+
+    def test_hand_computed_path_metrics(self):
+        """path_prob = product of edge probs; min_ratio/min_weight = weakest edge."""
+        df = self._build(sv_build, _enriched_type_table().to_pandas())
+        row_2hop = df[df['path'] == 'A->X->Y'].iloc[0]
+        assert row_2hop['weights'] == pytest.approx([15.0, 3.0])
+        assert row_2hop['probabilities'] == pytest.approx([1.0, 0.2])
+        assert row_2hop['ratios'] == pytest.approx([0.5, 0.06])
+        assert row_2hop['min_weight'] == pytest.approx(3.0)
+        assert row_2hop['path_prob'] == pytest.approx(1.0 * 0.2)
+        assert row_2hop['min_ratio'] == pytest.approx(0.06)
+        assert row_2hop['length'] == 2
+        row_1hop = df[df['path'] == 'B->Y'].iloc[0]
+        assert row_1hop['path_prob'] == pytest.approx(0.6)
+        assert row_1hop['min_ratio'] == pytest.approx(0.18)
+        assert row_1hop['min_weight'] == pytest.approx(9.0)
+        assert row_1hop['length'] == 1
+
+    def test_pandas_and_polars_path_builders_agree(self):
+        df_pd = self._build(sv_build, _enriched_type_table().to_pandas())
+        df_pl = self._build(svp_build, _enriched_type_table())
+        assert len(df_pl) == len(df_pd)
+        df_pd = df_pd.sort_values('path').reset_index(drop=True)
+        df_pl = df_pl.sort('path').to_pandas().reset_index(drop=True)
+        for col in ['path', 'min_weight', 'path_prob', 'min_ratio', 'length']:
+            pd.testing.assert_series_equal(
+                df_pl[col], df_pd[col], check_dtype=False, obj=f'path {col}',
+            )
+        # List-valued columns: pandas keeps lists, polars stringifies them
+        for col in ('weights', 'probabilities', 'ratios'):
+            assert isinstance(df_pd[col].iloc[0], list)
+            assert isinstance(df_pl[col].iloc[0], str)
+
+    def test_zero_weight_edge_divergence_is_documented(self):
+        """Polars drops paths with any zero-weight edge; pandas keeps them
+        (coana filters them downstream after getAllPath - see
+        docs/core-features/PathAnalysis_ZeroWeightFilter.md)."""
+        conn_type = pd.DataFrame({
+            'type_pre': ['X', 'X'], 'type_post': ['Y', 'Z'],
+            'weight': [5, 0],
+            'connection_ratio': [0.2, 0.0],
+            'traversal_probability': [2 / 3, 0.0],
+        })
+        paths = [['X', 'Y'], ['X', 'Z']]
+        df_pd = sv_build(paths, conn_type, ['Y', 'Z'], real_layer_map=None, level='type')
+        df_pl = svp_build(paths, pl.from_pandas(conn_type), ['Y', 'Z'],
+                          real_layer_map=None, level='type')
+        assert len(df_pd) == 2                       # pandas keeps the zero-weight path
+        assert df_pd[df_pd['path'] == 'X->Z']['min_weight'].iloc[0] == 0
+        assert len(df_pl) == 1                       # polars filters it
+        assert (df_pl.to_pandas()['min_weight'] > 0).all()

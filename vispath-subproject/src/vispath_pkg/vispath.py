@@ -24,6 +24,15 @@ import ast
 import re
 
 
+def _json_default(o):
+    """JSON encoder fallback for numpy scalars in embedded visualization data."""
+    if isinstance(o, (np.integer, np.floating)):
+        return float(o)
+    if isinstance(o, np.bool_):
+        return bool(o)
+    return str(o)
+
+
 def parse_color_to_hex_opacity(color_str):
     """
     Parse a color string (hex, rgb, rgba, named) into hex color and opacity.
@@ -283,7 +292,7 @@ class VisualizePath:
         separate_hemispheres=False,  # NEW: Enable hemisphere-aware coloring/layout
         hemisphere_desaturate_side='R',  # NEW: Hemisphere to desaturate ('L' or 'R')
         hemisphere_desaturate_factor=0.4,  # NEW: Desaturation blend factor (0-1)
-        hemisphere_mirror_default=False,  # NEW: Default to mirrored hemisphere layout
+        hemisphere_mirror_default=None,  # None = auto-enable with separate_hemispheres
     ):
         """
         Initialize VisualizePath with pathway data and visualization settings.
@@ -471,7 +480,9 @@ class VisualizePath:
         
         hemisphere_mirror_default : bool, optional
             If True, mirror hemispheres by default in the network layout.
-            Default: False
+            Default: None — automatically follows separate_hemispheres
+            (mirroring is enabled whenever Separate Hemispheres is on,
+            unless explicitly set to False).
             
         Raises
         ------
@@ -503,6 +514,10 @@ class VisualizePath:
         self.separate_hemispheres = separate_hemispheres
         self.hemisphere_desaturate_side = (hemisphere_desaturate_side or 'R').upper()
         self.hemisphere_desaturate_factor = max(0.0, min(1.0, hemisphere_desaturate_factor))
+        # Mirror layout auto-enables when Separate Hemispheres (L/R) is checked,
+        # unless the caller explicitly disabled it (None = follow the checkbox).
+        if hemisphere_mirror_default is None:
+            hemisphere_mirror_default = separate_hemispheres
         self.hemisphere_mirror_default = bool(hemisphere_mirror_default)
         
         # Neurotransmitter-based edge coloring
@@ -1160,7 +1175,6 @@ class VisualizePath:
         """PyQt5 implementation - fastest and most responsive"""
         try:
             from PyQt5.QtWidgets import QApplication, QDialog, QVBoxLayout, QHBoxLayout, QListWidget, QPushButton, QLabel, QListWidgetItem
-            from PyQt5.QtCore import Qt
             import sys
             
             app = QApplication.instance()
@@ -1264,7 +1278,6 @@ class VisualizePath:
         """PyQt6 implementation - similar to PyQt5"""
         try:
             from PyQt6.QtWidgets import QApplication, QDialog, QVBoxLayout, QHBoxLayout, QListWidget, QPushButton, QLabel, QListWidgetItem  # type: ignore
-            from PyQt6.QtCore import Qt  # type: ignore
             import sys
             
             app = QApplication.instance()
@@ -1437,7 +1450,7 @@ class VisualizePath:
         """Tkinter implementation - slower but widely available fallback"""
         try:
             import tkinter as tk
-            from tkinter import simpledialog, font
+            from tkinter import simpledialog
         except ImportError:
             return False
         
@@ -3907,11 +3920,14 @@ class VisualizePath:
         
         output_path = os.path.join(self.output_folder, self.base_filename + '_network.html')
         
-        # Use the existing method with an empty graph
+        # Use the existing method with an empty graph. The canvas must open in
+        # a FRESH tab (handled below), so suppress the same-window open here —
+        # otherwise the file opens twice (once per mechanism).
         self._plot_cytoscape_network(
             G,
             output_path=output_path,
-            layout=self.network_layout
+            layout=self.network_layout,
+            open_browser=False,
         )
         
         self._vprint(f"✓ Empty network HTML generated: {output_path}")
@@ -3977,7 +3993,7 @@ class VisualizePath:
         
         return scaled.tolist()
     
-    def _plot_cytoscape_network(self, G, output_path, layout='hierarchical'):
+    def _plot_cytoscape_network(self, G, output_path, layout='hierarchical', open_browser=True):
         """
         Create Cytoscape.js network visualization (internal method).
         
@@ -4141,9 +4157,11 @@ class VisualizePath:
         # Map layout names to Cytoscape.js layout algorithms
         layout_map = {
             'hierarchical': 'dagre',        # Dagre - Best for hierarchical graphs (crossing minimization)
+            'layered': 'dagre',             # Layered (multipartite) - same dagre engine, explicit alias
             'spring': 'cose',               # CoSE - Force-directed layout
             'circular': 'circle',           # Circular layout
             'distributed': 'dagre',         # Changed to Dagre (better for pathway networks)
+            'shell': 'concentric',          # Shell - concentric rings around a center
             'dagre': 'dagre',               # Dagre (Sugiyama algorithm)
             'cose-bilkent': 'cose-bilkent', # CoSE Bilkent - Better quality force-directed
             'fcose': 'fcose',               # fCoSE - Fast CoSE with quality
@@ -4247,6 +4265,21 @@ class VisualizePath:
     
     <!-- Export Extensions -->
     <script src="https://unpkg.com/cytoscape-svg@0.4.0/cytoscape-svg.js"></script>
+    <script>
+        // CDN fallback guard: show a clear banner instead of a silent blank canvas
+        if (typeof cytoscape === 'undefined') {{
+            window.addEventListener('DOMContentLoaded', function() {{
+                const host = document.getElementById('cy');
+                if (host && !host.querySelector('.cdn-error')) {{
+                    const div = document.createElement('div');
+                    div.className = 'cdn-error';
+                    div.style.cssText = 'padding:60px;text-align:center;color:#94a3b8;font-family:sans-serif;font-size:14px;';
+                    div.textContent = '⚠️ Cytoscape.js failed to load (CDN unreachable). Check your internet connection and reload this page.';
+                    host.appendChild(div);
+                }}
+            }});
+        }}
+    </script>
     <style>
         body {{
             font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
@@ -4683,7 +4716,8 @@ class VisualizePath:
         <div class="info">
             <strong>{G.number_of_nodes()}</strong> nodes, <strong>{G.number_of_edges()}</strong> connections | 
             Press 'H' to hide nodes, 'E' to hide edges, 'L' to toggle label position | Right-click to hide | 
-            <strong>Shift+Click</strong> for multi-selection | Double-click to highlight
+            <strong>Shift+Click</strong> for multi-selection | Double-click to highlight |
+            <strong>⌘Z/⌃Z</strong> undo, <strong>⌘⇧Z/⌃Y</strong> redo | History: pick an entry in the right panel
         </div>
     </div>
     
@@ -4716,12 +4750,15 @@ class VisualizePath:
                 <!-- View Controls Section -->
                 <div class="palette-section" style="border-bottom: 2px solid #ddd; padding-bottom: 15px; margin-bottom: 15px;">
                     <h3>👁️ View Controls</h3>
-                    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-bottom: 6px;">
+                    <div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 6px; margin-bottom: 6px;">
                         <button class="btn" id="hideOrphansBtn" onclick="toggleOrphanNodes()" style="font-size: 11px; padding: 6px; background: #9c27b0;">
                             👻 Hide Orphans
                         </button>
                         <button class="btn" id="hideSelfLoopsBtn" onclick="toggleSelfLoops()" style="font-size: 11px; padding: 6px; background: #ff5722;">
                             🔁 Hide Self-Loops
+                        </button>
+                        <button class="btn" id="hideDeadEndsBtn" onclick="toggleDeadEnds()" style="font-size: 11px; padding: 6px; background: #607d8b;">
+                            💀 Hide Dead Ends
                         </button>
                     </div>
                     <div style="display: grid; grid-template-columns: 1fr; gap: 6px; margin-bottom: 6px;">
@@ -4729,11 +4766,23 @@ class VisualizePath:
                             🔄 Refresh Layout
                         </button>
                     </div>
+                    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-bottom: 6px;">
+                        <button class="btn" id="undoBtn" onclick="undo()" style="font-size: 11px; padding: 6px; background: #6b7280;">↩️ Undo</button>
+                        <button class="btn" id="redoBtn" onclick="redo()" style="font-size: 11px; padding: 6px; background: #6b7280;">↪️ Redo</button>
+                    </div>
+                    <div style="display: grid; grid-template-columns: 1fr; gap: 6px; margin-bottom: 6px;">
+                        <select id="historyList" onchange="jumpToHistory(this.selectedIndex)" title="Operation history — every action is recorded; select an entry to undo/redo to it" style="width: 100%; font-size: 11px; padding: 4px; border: 1px solid #ddd; border-radius: 3px; background: #fff; color: #333;">
+                            <option disabled>▶ Current state</option>
+                        </select>
+                    </div>
                     {hemisphere_controls_html}
                     <div style="font-size: 10px; color: #666; line-height: 1.3;">
                         • Orphans: nodes with no connections<br>
                         • Self-Loops: edges from a node to itself<br>
-                        • Refresh: re-apply layout after hiding/filtering
+                        • Dead Ends: out-only non-source / in-only non-target nodes<br>
+                        • Refresh: re-apply layout after hiding/filtering<br>
+                        • Undo/Redo: ⌘Z/⌘⇧Z (macOS) or ⌃Z/⌃Y (Windows/Linux)<br>
+                        • History: every operation is recorded — select an entry to jump
                     </div>
                 </div>
                 
@@ -4876,8 +4925,8 @@ class VisualizePath:
         }}
         
         const elements = {{
-            nodes: {nodes_data},
-            edges: {edges_data}
+            nodes: {json.dumps(nodes_data, default=_json_default)},
+            edges: {json.dumps(edges_data, default=_json_default)}
         }};
 
         const cy = cytoscape({{
@@ -4934,6 +4983,12 @@ class VisualizePath:
                     }}
                 }},
                 {{
+                    selector: 'node.deadend-hidden',
+                    style: {{
+                        'display': 'none'
+                    }}
+                }},
+                {{
                     selector: 'edge.selfloop-hidden',
                     style: {{
                         'display': 'none'
@@ -4983,6 +5038,12 @@ class VisualizePath:
                 }},
                 {{
                     selector: 'edge.filtered',
+                    style: {{
+                        'display': 'none'
+                    }}
+                }},
+                {{
+                    selector: 'edge.deadend-hidden',
                     style: {{
                         'display': 'none'
                     }}
@@ -5387,6 +5448,7 @@ class VisualizePath:
 
         function toggleHemisphereMirror() {{
             if (!hasHemisphereNodes) return;
+            pushHistory('Toggle mirror');
             hemisphereMirrorEnabled = !hemisphereMirrorEnabled;
             const btn = document.getElementById('mirrorHemiBtn');
             if (btn) {{
@@ -5529,11 +5591,13 @@ class VisualizePath:
                 deleteElement(evt.target);
             }} else {{
                 // Normal mode: hide the node
+                pushHistory('Hide node');
                 const node = evt.target;
                 node.addClass('hidden');
                 // Hide connected edges
                 node.connectedEdges().addClass('hidden');
                 document.getElementById('showAllBtn').style.display = 'inline-block';
+                reapplyDeadEndHiding();
             }}
         }});
 
@@ -5544,9 +5608,11 @@ class VisualizePath:
                 deleteElement(evt.target);
             }} else {{
                 // Normal mode: hide the edge
+                pushHistory('Hide edge');
                 const edge = evt.target;
                 edge.addClass('hidden');
                 document.getElementById('showAllBtn').style.display = 'inline-block';
+                reapplyDeadEndHiding();
             }}
         }});
 
@@ -5555,9 +5621,11 @@ class VisualizePath:
             if (e.key === 'h' || e.key === 'H') {{
                 const selected = cy.$('node:selected');
                 if (selected.length > 0) {{
+                    pushHistory('Hide nodes');
                     selected.addClass('hidden');
                     selected.connectedEdges().addClass('hidden');
                     document.getElementById('showAllBtn').style.display = 'inline-block';
+                    reapplyDeadEndHiding();
                 }}
             }}
         }});
@@ -5567,8 +5635,10 @@ class VisualizePath:
             if (e.key === 'e' || e.key === 'E') {{
                 const selected = cy.$('edge:selected');
                 if (selected.length > 0) {{
+                    pushHistory('Hide edges');
                     selected.addClass('hidden');
                     document.getElementById('showAllBtn').style.display = 'inline-block';
+                    reapplyDeadEndHiding();
                 }}
             }}
         }});
@@ -5585,6 +5655,7 @@ class VisualizePath:
         // Keyboard shortcut: L to toggle label position (center/outside)
         document.addEventListener('keydown', function(e) {{
             if (e.key === 'l' || e.key === 'L') {{
+                pushHistory('Toggle label position');
                 if (labelPosition === 'center') {{
                     cy.nodes().addClass('labels-outside');
                     labelPosition = 'outside';
@@ -5612,6 +5683,7 @@ class VisualizePath:
 
         // Layout control functions (getLayoutConfig and currentLayoutAlgorithm defined earlier)
         function resetLayout() {{
+            pushHistory('Reset layout');
             const config = getLayoutConfig(currentLayoutAlgorithm);
             // Add animation for reset
             config.animate = true;
@@ -5620,6 +5692,7 @@ class VisualizePath:
         }}
         
         function changeLayout() {{
+            pushHistory('Change layout');
             const selector = document.getElementById('layoutSelector');
             const newLayout = selector.value;
             currentLayoutAlgorithm = newLayout;
@@ -5662,7 +5735,7 @@ class VisualizePath:
             }}
             
             // Get visible (non-hidden) nodes and edges
-            const visibleElements = cy.elements().not('.hidden, .filtered, .orphan-hidden, .selfloop-hidden');
+            const visibleElements = cy.elements().not('.hidden, .filtered, .orphan-hidden, .selfloop-hidden, .deadend-hidden');
             
             if (visibleElements.length === 0) {{
                 updateHoverInfo('⚠️ No visible elements to layout');
@@ -5738,6 +5811,23 @@ class VisualizePath:
         // Layout Persistence Functions
         // Use file-specific storage key with timestamp so each HTML copy has independent saved layouts
         const LAYOUT_STORAGE_KEY = '{storage_key}';
+
+        // Evict stale saved-layout keys (keep the newest 20 per storage family)
+        try {{
+            ['cytoscape_layout_', 'heatmap_settings_'].forEach(function(prefix) {{
+                const keys = [];
+                for (let i = 0; i < localStorage.length; i++) {{
+                    const k = localStorage.key(i);
+                    if (k && k.startsWith(prefix)) keys.push(k);
+                }}
+                keys.sort(function(a, b) {{
+                    const ta = (a.match(/#(\d+)$/) || ['', '0'])[1];
+                    const tb = (b.match(/#(\d+)$/) || ['', '0'])[1];
+                    return tb.localeCompare(ta);
+                }});
+                keys.slice(20).forEach(function(k) {{ localStorage.removeItem(k); }});
+            }});
+        }} catch (e) {{ /* localStorage unavailable (privacy mode) */ }}
         
         function saveLayout() {{
             try {{
@@ -5891,9 +5981,227 @@ class VisualizePath:
         }}
 
         function showAllNodes() {{
+            pushHistory('Show all');
             cy.elements().removeClass('hidden');
             document.getElementById('showAllBtn').style.display = 'none';
+            reapplyDeadEndHiding();
         }}
+
+        // ===== UNDO / REDO =====
+        // Full-state snapshots (data + classes + positions + visibility
+        // toggles + view + edge filter) captured BEFORE each mutating
+        // operation; bounded history keeps memory predictable. Undo/redo
+        // executes strictly by walking this history: undo pops the last
+        // entry and re-applies its snapshot, redo re-applies the state
+        // that was undone.
+        let undoStack = [];
+        let redoStack = [];
+        const HISTORY_LIMIT = 50;
+        let lastFilterHistoryValue = '';  // last edge-filter value recorded in history
+
+        function captureState() {{
+            // Deep-copy data()/position(): Cytoscape returns LIVE references to
+            // its internal objects, so storing them directly would let later
+            // mutations corrupt every previously captured snapshot and break
+            // undo. Data is JSON-serializable (comes from the Python side).
+            return {{
+                nodes: cy.nodes().map(n => ({{
+                    data: JSON.parse(JSON.stringify(n.data())),
+                    classes: n.classes(),
+                    position: {{ x: n.position().x, y: n.position().y }}
+                }})),
+                edges: cy.edges().map(e => ({{
+                    data: JSON.parse(JSON.stringify(e.data())),
+                    classes: e.classes()
+                }})),
+                selected: cy.$(':selected').map(el => el.id()),
+                zoom: cy.zoom(),
+                pan: {{ x: cy.pan().x, y: cy.pan().y }},
+                // Use the last COMMITTED filter value: the input already shows
+                // the user's new text when updateIgnoredEdges runs, so reading
+                // it here would capture the post-op value instead of the
+                // pre-op state the snapshot must represent.
+                filterValue: lastFilterHistoryValue,
+                selfLoopsHidden: selfLoopsHidden,
+                orphansHidden: orphansHidden,
+                deadEndsHidden: deadEndsHidden,
+                hemisphereMirrorEnabled: hemisphereMirrorEnabled,
+                labelPosition: labelPosition
+            }};
+        }}
+
+        function restoreState(state) {{
+            cy.elements().remove();
+            cy.add(state.nodes.map(n => ({{ data: n.data, classes: n.classes, position: n.position }})));
+            cy.add(state.edges.map(e => ({{ data: e.data, classes: e.classes }})));
+            (state.selected || []).forEach(id => {{
+                const el = cy.getElementById(id);
+                if (el.length > 0) el.select();
+            }});
+
+            // Restore the visibility-toggle flags BEFORE re-applying the
+            // edge filter, so later operations (filter changes, hide
+            // toggles) stay consistent with the restored classes.
+            selfLoopsHidden = !!state.selfLoopsHidden;
+            orphansHidden = !!state.orphansHidden;
+            deadEndsHidden = !!state.deadEndsHidden;
+            hemisphereMirrorEnabled = !!state.hemisphereMirrorEnabled;
+            if (state.labelPosition !== undefined) labelPosition = state.labelPosition;
+            syncToggleButtons();
+
+            // Restore the edge-filter input; re-applying it re-derives the
+            // filtered classes exactly as captured.
+            const filterInput = document.getElementById('ignoreEdgesInput');
+            const restoredFilter = state.filterValue || '';
+            lastFilterHistoryValue = restoredFilter;
+            if (filterInput && filterInput.value !== restoredFilter) filterInput.value = restoredFilter;
+            parseEdgeFilterInput();
+            applyEdgeFilter();
+
+            // Restore view and the manual-hide indicator
+            if (state.zoom) cy.zoom(state.zoom);
+            if (state.pan) cy.pan(state.pan);
+            const showAll = document.getElementById('showAllBtn');
+            if (showAll) showAll.style.display = cy.nodes('.hidden').length > 0 ? 'inline-block' : 'none';
+
+            refreshEdgeStyles(false);
+            updateUndoRedoButtons();
+        }}
+
+        // Keep the three visibility-toggle buttons and the mirror button in
+        // sync with their flags (used by restoreState).
+        function syncToggleButtons() {{
+            const deadBtn = document.getElementById('hideDeadEndsBtn');
+            if (deadBtn) {{
+                deadBtn.textContent = deadEndsHidden ? '👁️ Show Dead Ends' : '💀 Hide Dead Ends';
+                deadBtn.style.background = deadEndsHidden ? '#e91e63' : '#607d8b';
+            }}
+            const orphanBtn = document.getElementById('hideOrphansBtn');
+            if (orphanBtn) {{
+                orphanBtn.textContent = orphansHidden ? '👁️ Show Orphans' : '👻 Hide Orphans';
+                orphanBtn.style.background = orphansHidden ? '#e91e63' : '#9c27b0';
+            }}
+            const loopBtn = document.getElementById('hideSelfLoopsBtn');
+            if (loopBtn) {{
+                loopBtn.textContent = selfLoopsHidden ? '👁️ Show Self-Loops' : '🔁 Hide Self-Loops';
+                loopBtn.style.background = selfLoopsHidden ? '#e91e63' : '#ff5722';
+            }}
+            const mirrorBtn = document.getElementById('mirrorHemiBtn');
+            if (mirrorBtn) {{
+                mirrorBtn.textContent = hemisphereMirrorEnabled ? '🪞 Mirrored' : '🪞 Mirror Hemispheres';
+                mirrorBtn.style.background = hemisphereMirrorEnabled ? '#0ea5e9' : '#64748b';
+            }}
+        }}
+
+        function pushStateHistory(label, state) {{
+            undoStack.push({{ label: label, state: state }});
+            if (undoStack.length > HISTORY_LIMIT) undoStack.shift();
+            redoStack = [];
+            updateUndoRedoButtons();
+        }}
+
+        function pushHistory(label) {{
+            pushStateHistory(label, captureState());
+        }}
+
+        // Node relocation (drag) is part of the history: the pre-drag state
+        // is stashed on dragstart and committed on dragfree, so undo
+        // restores the positions before the move. Click-without-drag and
+        // multi-node drags (dragfree can fire once per node) are deduplicated
+        // by checking that positions actually changed.
+        let pendingDragState = null;
+        cy.on('dragstart', 'node', function(evt) {{
+            pendingDragState = captureState();
+        }});
+        cy.on('dragfree', 'node', function(evt) {{
+            if (!pendingDragState) return;
+            const posById = {{}};
+            pendingDragState.nodes.forEach(n => {{ posById[n.data.id] = n.position; }});
+            let moved = false;
+            cy.nodes().forEach(n => {{
+                const p0 = posById[n.id()];
+                const p1 = n.position();
+                if (p0 && (p0.x !== p1.x || p0.y !== p1.y)) moved = true;
+            }});
+            if (moved) pushStateHistory('Move nodes', pendingDragState);
+            pendingDragState = null;
+        }});
+
+        function undo() {{
+            if (undoStack.length === 0) return;
+            const entry = undoStack[undoStack.length - 1];
+            redoStack.push({{ label: entry.label, state: captureState() }});
+            restoreState(undoStack.pop().state);
+            const last = undoStack[undoStack.length - 1];
+            updateHoverInfo('↩️ Undo' + (last ? ': ' + last.label : ''));
+        }}
+
+        function redo() {{
+            if (redoStack.length === 0) return;
+            const entry = redoStack[redoStack.length - 1];
+            undoStack.push({{ label: entry.label, state: captureState() }});
+            restoreState(redoStack.pop().state);
+            updateHoverInfo('↪️ Redo: ' + entry.label);
+        }}
+
+        function updateUndoRedoButtons() {{
+            const u = document.getElementById('undoBtn');
+            const r = document.getElementById('redoBtn');
+            if (u) u.style.opacity = undoStack.length > 0 ? '1' : '0.4';
+            if (r) r.style.opacity = redoStack.length > 0 ? '1' : '0.4';
+            updateHistoryList();
+        }}
+
+        // History dropdown: lists every recorded operation (oldest first),
+        // marks the current state, and lets the user undo/redo to any entry.
+        function updateHistoryList() {{
+            const sel = document.getElementById('historyList');
+            if (!sel) return;
+            sel.innerHTML = '';
+            undoStack.forEach((item, i) => {{
+                const opt = document.createElement('option');
+                opt.textContent = (i + 1) + '. ↩ ' + item.label;
+                sel.appendChild(opt);
+            }});
+            const cur = document.createElement('option');
+            cur.disabled = true;
+            cur.textContent = '▶ Current state';
+            sel.appendChild(cur);
+            redoStack.forEach((item, i) => {{
+                const opt = document.createElement('option');
+                opt.textContent = (undoStack.length + i + 2) + '. ↪ ' + item.label;
+                sel.appendChild(opt);
+            }});
+            sel.selectedIndex = undoStack.length;
+        }}
+
+        // Undo/redo to the history entry at the given dropdown index.
+        function jumpToHistory(index) {{
+            if (index < 0 || index === undoStack.length) return;
+            if (index < undoStack.length) {{
+                while (undoStack.length > index) undo();
+            }} else {{
+                const needed = index - undoStack.length;
+                for (let i = 0; i < needed && redoStack.length > 0; i++) redo();
+            }}
+            updateHistoryList();
+        }}
+
+        // System shortcuts: Cmd/Ctrl+Z undo, Cmd/Ctrl+Shift+Z or Cmd/Ctrl+Y redo
+        // (skipped while typing in inputs/textareas)
+        document.addEventListener('keydown', function(e) {{
+            if (!(e.metaKey || e.ctrlKey)) return;
+            const tag = (e.target.tagName || '').toLowerCase();
+            if (tag === 'input' || tag === 'textarea' || e.target.isContentEditable) return;
+            const k = e.key.toLowerCase();
+            if (k === 'z') {{
+                e.preventDefault();
+                if (e.shiftKey) {{ redo(); }} else {{ undo(); }}
+            }} else if (k === 'y') {{
+                e.preventDefault();
+                redo();
+            }}
+        }});
         
         function clearEdgeEndpointOverrides(edge) {{
             edge.removeStyle('source-endpoint');
@@ -6578,6 +6886,7 @@ class VisualizePath:
 
         // Apply color to selected group
         function applyGroupColor() {{
+            pushHistory('Color change');
             const group = document.getElementById('groupSelector').value;
             const color = document.getElementById('groupColor').value;
             const opacity = document.getElementById('groupOpacity').value / 100;
@@ -6885,6 +7194,7 @@ class VisualizePath:
 
         // Reset all colors to defaults
         function applyGlobalColors() {{
+            pushHistory('Reset colors');
             // Reset all node colors to original defaults
             cy.nodes().filter('[node_type = "source"]').forEach(node => {{
                 node.style({{ 'background-color': originalGroupDefaults.source.color, 'opacity': originalGroupDefaults.source.opacity / 100 }});
@@ -7017,6 +7327,7 @@ class VisualizePath:
                 return;
             }}
             
+            pushHistory('Color change');
             const color = document.getElementById('individualColor').value;
             const opacity = document.getElementById('individualOpacity').value / 100;
             
@@ -7192,6 +7503,7 @@ class VisualizePath:
             if (newType === null) return;  // Cancelled
             
             // Update node data
+            pushHistory('Edit node');
             node.data('label', newLabel);
             node.data('node_type', newType);
             
@@ -7248,6 +7560,7 @@ class VisualizePath:
             }}
             
             // Update edge data
+            pushHistory('Edit edge');
             edge.data('weight', Math.abs(weightNum));
             edge.data('original_weight', weightNum);
             edge.data('is_negative', weightNum < 0 ? 1 : 0);
@@ -7347,6 +7660,7 @@ class VisualizePath:
                     }}
                     
                     const edgeId = 'e' + nextEdgeId++;
+                    pushHistory('Add edge');
                     const newEdge = cy.add({{
                         group: 'edges',
                         data: {{
@@ -7409,6 +7723,7 @@ class VisualizePath:
             const centerX = (extent.x1 + extent.x2) / 2;
             const centerY = (extent.y1 + extent.y2) / 2;
             
+            pushHistory('Add node');
             cy.add({{
                 group: 'nodes',
                 data: {{
@@ -7437,6 +7752,7 @@ class VisualizePath:
             }}
             
             if (confirm('Delete ' + selected.length + ' selected element(s)?')) {{
+                pushHistory('Delete selection');
                 cy.remove(selected);
                 updateHoverInfo('Deleted ' + selected.length + ' element(s)');
             }}
@@ -7448,6 +7764,7 @@ class VisualizePath:
             const id = element.id();
             
             if (confirm('Delete ' + type + ': ' + id + '?')) {{
+                pushHistory('Delete ' + type);
                 cy.remove(element);
                 updateHoverInfo('Deleted ' + type + ': ' + id);
             }}
@@ -7465,28 +7782,30 @@ class VisualizePath:
         
         let edgeFilterGroups = [];  // Parsed filter groups for edge filtering
         
-        // Update ignored edges based on input
-        function updateIgnoredEdges() {{
+        // (Re)parse the edge-filter input into edgeFilterGroups.
+        function parseEdgeFilterInput() {{
             const input = document.getElementById('ignoreEdgesInput');
-            const filterValue = input.value.trim();
-            
-            // Clear previous filters
+            const filterValue = input ? input.value.trim() : '';
             ignoredEdges.clear();
             ignoredEdgeExpressions = [];
             edgeFilterGroups = [];
-            
-            if (!filterValue) {{
-                // No filter - show all edges
-                applyEdgeFilter();
-                return;
+            if (filterValue) {{
+                edgeFilterGroups = parseEdgeFilterExpressions(filterValue);
             }}
-            
-            // Parse using same logic as heatmap filter
-            edgeFilterGroups = parseEdgeFilterExpressions(filterValue);
-            
-            console.log('Edge filter groups:', edgeFilterGroups);
-            
-            // Apply filter to all edges
+        }}
+
+        // Update ignored edges based on input; every distinct filter value is
+        // recorded in the history so undo steps back through filter changes.
+        function updateIgnoredEdges() {{
+            const input = document.getElementById('ignoreEdgesInput');
+            const filterValue = input ? input.value.trim() : '';
+
+            if (filterValue !== lastFilterHistoryValue) {{
+                pushHistory('Edge filter');
+                lastFilterHistoryValue = filterValue;
+            }}
+
+            parseEdgeFilterInput();
             applyEdgeFilter();
         }}
         
@@ -7621,19 +7940,11 @@ class VisualizePath:
                 }}
             }});
             
-            // Re-detect orphans if orphan hiding is active
-            if (orphansHidden) {{
-                let orphanCount = 0;
-                cy.nodes().forEach(node => {{
-                    const visibleEdges = node.connectedEdges().not('.hidden, .filtered');
-                    if (visibleEdges.length === 0) {{
-                        node.addClass('orphan-hidden');
-                        orphanCount++;
-                    }} else {{
-                        node.removeClass('orphan-hidden');
-                    }}
-                }});
-            }}
+            // Re-detect dead ends and orphans if their hiding is active:
+            // dead ends first so orphan detection sees the current graph
+            // with fresh dead-end classes.
+            reapplyDeadEndHiding();
+            reapplyOrphanHiding();
             
             if (hiddenCount > 0) {{
                 updateHoverInfo(`🔍 Edge filter: ${{shownCount}} shown, ${{hiddenCount}} hidden`);
@@ -7646,9 +7957,11 @@ class VisualizePath:
         
         let orphansHidden = false;
         let selfLoopsHidden = false;
+        let deadEndsHidden = false;
         
         // Toggle self-loop edges visibility (edges where source === target)
         function toggleSelfLoops() {{
+            pushHistory('Toggle self-loops');
             const btn = document.getElementById('hideSelfLoopsBtn');
             selfLoopsHidden = !selfLoopsHidden;
             
@@ -7668,20 +7981,22 @@ class VisualizePath:
                 btn.style.background = '#ff5722';
                 updateHoverInfo(`👁️ ${{selfLoopEdges.length}} self-loop edge(s) visible`);
             }}
+            // Changing the visible graph can expose new dead ends
+            reapplyDeadEndHiding();
         }}
         
         // Toggle orphan nodes visibility (dynamically detect based on current visible edges)
         function toggleOrphanNodes() {{
+            pushHistory('Toggle orphans');
             const btn = document.getElementById('hideOrphansBtn');
             orphansHidden = !orphansHidden;
             
             if (orphansHidden) {{
                 // Hide orphan nodes (nodes with no VISIBLE connections)
-                // Check degree excluding hidden/filtered/selfloop-hidden edges
+                // Check degree over the current graph (visible edges only)
                 let hiddenCount = 0;
                 cy.nodes().forEach(node => {{
-                    // Count only visible edges (not hidden, not filtered, not selfloop-hidden)
-                    const visibleEdges = node.connectedEdges().not('.hidden, .filtered, .selfloop-hidden');
+                    const visibleEdges = node.connectedEdges().filter(e => isEdgeInCurrentGraph(e));
                     const visibleDegree = visibleEdges.length;
                     
                     if (visibleDegree === 0) {{
@@ -7703,12 +8018,131 @@ class VisualizePath:
                 btn.style.background = '#9c27b0';
                 updateHoverInfo('👁️ All nodes visible');
             }}
+            // Changing the visible graph can expose new dead ends
+            reapplyDeadEndHiding();
+        }}
+
+        // Edges that belong to the CURRENT graph: not manually hidden, not
+        // filter-hidden, not self-loop-hidden and not dead-end-hidden.
+        function isEdgeInCurrentGraph(e) {{
+            return !e.hasClass('hidden') && !e.hasClass('filtered') &&
+                   !e.hasClass('selfloop-hidden') && !e.hasClass('deadend-hidden');
+        }}
+
+        // A node is a dead end in the CURRENT graph when all its visible
+        // edges go one way and it is not declared as that endpoint type:
+        // out-only non-source, or in-only non-target. Edges to nodes that
+        // are already hidden dead ends are removed from the visible graph,
+        // so hiding propagates to newly exposed dead ends.
+        function isDeadEndNodeIn(node, deadEndSet) {{
+            const nodeType = node.data('node_type') || 'intermediate';
+            let outCount = 0;
+            let inCount = 0;
+            node.connectedEdges().forEach(e => {{
+                if (e.hasClass('hidden') || e.hasClass('filtered') || e.hasClass('selfloop-hidden')) return;
+                if (deadEndSet.has(e.source().id()) || deadEndSet.has(e.target().id())) return;
+                if (e.source().id() === e.target().id()) return;  // skip self-loops
+                if (e.source().id() === node.id()) outCount++;
+                else inCount++;
+            }});
+            if (outCount === 0 && inCount === 0) return false;  // orphan, not a dead end
+            if (nodeType !== 'source' && outCount > 0 && inCount === 0) return true;
+            if (nodeType !== 'target' && inCount > 0 && outCount === 0) return true;
+            return false;
+        }}
+
+        // Recompute dead ends on the current graph (visible edges after the
+        // hide / filter / self-loop toggles) and hide them together with
+        // their related edges. Hiding edges can create new dead ends, so
+        // the detection iterates to a fixpoint. All nodes are evaluated
+        // against the SAME dead-end set per pass and additions are applied
+        // in batch afterwards, so the result does not depend on the node
+        // iteration order (e.g. a chain A→B→C of intermediates must hide
+        // both A and C, whichever is visited first).
+        function recomputeDeadEnds() {{
+            const deadEndSet = new Set();
+            let changed = true;
+            while (changed) {{
+                changed = false;
+                const newlyDead = [];
+                cy.nodes().forEach(node => {{
+                    if (deadEndSet.has(node.id())) return;
+                    if (isDeadEndNodeIn(node, deadEndSet)) {{
+                        newlyDead.push(node.id());
+                        changed = true;
+                    }}
+                }});
+                newlyDead.forEach(id => deadEndSet.add(id));
+            }}
+            let hiddenNodes = 0;
+            let hiddenEdges = 0;
+            cy.nodes().forEach(node => {{
+                if (deadEndSet.has(node.id())) {{
+                    node.addClass('deadend-hidden');
+                    hiddenNodes++;
+                }} else {{
+                    node.removeClass('deadend-hidden');
+                }}
+            }});
+            cy.edges().forEach(edge => {{
+                if (deadEndSet.has(edge.source().id()) || deadEndSet.has(edge.target().id())) {{
+                    edge.addClass('deadend-hidden');
+                    hiddenEdges++;
+                }} else {{
+                    edge.removeClass('deadend-hidden');
+                }}
+            }});
+            return {{ nodes: hiddenNodes, edges: hiddenEdges }};
+        }}
+
+        // Toggle dead-end visibility: hides out-only non-source / in-only
+        // non-target nodes AND their related edges, following the current
+        // graph (i.e. what the hide-edges filter leaves visible).
+        function toggleDeadEnds() {{
+            pushHistory('Toggle dead-ends');
+            const btn = document.getElementById('hideDeadEndsBtn');
+            deadEndsHidden = !deadEndsHidden;
+
+            if (deadEndsHidden) {{
+                const counts = recomputeDeadEnds();
+                btn.textContent = '👁️ Show Dead Ends';
+                btn.style.background = '#e91e63';
+                updateHoverInfo(`💀 Hidden ${{counts.nodes}} dead-end node(s) and ${{counts.edges}} edge(s)`);
+            }} else {{
+                cy.elements().removeClass('deadend-hidden');
+                btn.textContent = '💀 Hide Dead Ends';
+                btn.style.background = '#607d8b';
+                updateHoverInfo('👁️ All nodes visible');
+            }}
+        }}
+
+        // Re-detect dead ends after the graph changes (edge filter or hide
+        // operations); a no-op while dead-end hiding is off.
+        function reapplyDeadEndHiding() {{
+            if (!deadEndsHidden) return;
+            recomputeDeadEnds();
+        }}
+
+        // Re-detect orphan nodes after the graph changes; a no-op while
+        // orphan hiding is off. Must run after reapplyDeadEndHiding so the
+        // current graph (including dead-end-hidden edges) is consistent.
+        function reapplyOrphanHiding() {{
+            if (!orphansHidden) return;
+            cy.nodes().forEach(node => {{
+                const visibleEdges = node.connectedEdges().filter(e => isEdgeInCurrentGraph(e));
+                if (visibleEdges.length === 0) {{
+                    node.addClass('orphan-hidden');
+                }} else {{
+                    node.removeClass('orphan-hidden');
+                }}
+            }});
         }}
         
         // Refresh layout after hiding orphans or filtering edges
         function refreshLayout() {{
+            pushHistory('Refresh layout');
             // Get visible (non-hidden) nodes and edges
-            const visibleElements = cy.elements().not('.hidden, .filtered, .orphan-hidden, .selfloop-hidden');
+            const visibleElements = cy.elements().not('.hidden, .filtered, .orphan-hidden, .selfloop-hidden, .deadend-hidden');
             
             if (visibleElements.length === 0) {{
                 updateHoverInfo('⚠️ No visible elements to layout');
@@ -7821,6 +8255,7 @@ class VisualizePath:
         function loadGraphFile(event) {{
             const file = event.target.files[0];
             if (!file) return;
+            pushHistory('Import graph');
             
             const reader = new FileReader();
             reader.onload = function(e) {{
@@ -7929,6 +8364,11 @@ class VisualizePath:
                     
                     // Fit to view
                     cy.fit(null, 50);
+                    
+                    // Re-detect orphans/dead ends on the imported graph if
+                    // their hiding toggles are active
+                    reapplyDeadEndHiding();
+                    reapplyOrphanHiding();
                     
                     // Restore settings if available
                     if (importData.settings) {{
@@ -8092,6 +8532,7 @@ class VisualizePath:
         function loadLayoutFile(event) {{
             const file = event.target.files[0];
             if (!file) return;
+            pushHistory('Import layout');
             
             const reader = new FileReader();
             reader.onload = function(e) {{
@@ -8181,7 +8622,7 @@ class VisualizePath:
         with open(output_path, 'w', encoding='utf-8') as f:
             f.write(html_content)
         
-        if self.showfig:
+        if self.showfig and open_browser:
             webbrowser.open('file://' + os.path.abspath(output_path))
     
     def _save_df_to_csv_polars(self, df, path, index=False):
@@ -9198,7 +9639,9 @@ def visualize_network(
     return vp.visualize_network()
 
 
-def VisConnMatInteractive(cmat, filename, title='', color_scale=[[0, 'rgb(255,255,255)'], [1, 'rgb(104,55,164)']], showfig=True, fontsize=12, conn_df=None, matrices_dict=None, verbose=True, zmin=None, zmax=None, init_width=None, init_height=None, init_clustered=True):
+def VisConnMatInteractive(cmat, filename, title='', color_scale=None, showfig=True, fontsize=12, conn_df=None, matrices_dict=None, verbose=True, zmin=None, zmax=None, init_width=None, init_height=None, init_clustered=True):
+    if color_scale is None:
+        color_scale = [[0, 'rgb(255,255,255)'], [1, 'rgb(104,55,164)']]
     '''Create interactive heatmap with comprehensive controls similar to network visualization
     
     Features:

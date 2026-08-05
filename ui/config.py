@@ -98,7 +98,7 @@ DEFAULTS = {
     "edgeN_limit": 500,
     "filter_by": "bodyId",
     "output_format": "csv",
-    "pathfinding": "Bidirectional",
+    "pathfinding": "MemoizedDFS",
     "network_layout": "distributed",
     "use_cache": True,
     "top_k": 15,
@@ -108,8 +108,13 @@ DEFAULTS = {
     "match_algorithm": "cds",
 }
 
-# Pathfinding algorithms
-PATHFINDING_ALGORITHMS = ["Bidirectional", "DP", "MemoizedDFS", "DFS"]
+# Pathfinding algorithms (names match the FastGraph implementations:
+# MemoizedDFS = memoized DFS forward, DFS = memoized DFS backward,
+# MeetInMiddle = meet-in-the-middle)
+PATHFINDING_ALGORITHMS = ["Bidirectional", "DP", "MemoizedDFS", "MeetInMiddle", "DFS"]
+
+# Columns searched when resolving source/target neuron names
+SEARCH_COLUMNS = ["auto", "type", "instance", "bodyId"]
 
 # Filter options
 FILTER_OPTIONS = ["bodyId", "type"]

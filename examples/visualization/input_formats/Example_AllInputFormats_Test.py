@@ -18,7 +18,6 @@ sys.path.insert(0, str(vispath_path))
 import numpy as np
 import pandas as pd
 from vispath_pkg.vispath import VisualizePath
-import os
 
 print("=" * 80)
 print("VisualizePath - Comprehensive Input Format Test")

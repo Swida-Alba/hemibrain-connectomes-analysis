@@ -48,7 +48,8 @@
     <tr><td>Edge Limit</td><td>500</td><td>Maximum edges considered per neuron</td><td>50 for very dense regions</td></tr>
     <tr><td>Min Connection Ratio</td><td>0.0</td><td>Minimum weight/post ratio</td><td>0.1 keeps only dominant outputs</td></tr>
     <tr><td>Min Traversal Prob.</td><td>0.0</td><td>ratio/0.3, capped at 1.0</td><td>0.5 = confident paths only</td></tr>
-    <tr><td>Algorithm</td><td>Bidirectional</td><td>Bidirectional (fast), DP, MemoizedDFS, DFS</td><td>MemoizedDFS for deep paths</td></tr>
+    <tr><td>Algorithm</td><td>MemoizedDFS</td><td>MemoizedDFS (fastest measured at all depths, no graph copy; the default), DFS (backward memoized, few targets), MeetInMiddle (shallow queries), DP (robust), Bidirectional (shortest-first, high memory). See the <a href="pathfinding_algorithms.html">pathfinding algorithms guide</a>.</td><td>MemoizedDFS</td></tr>
+    <tr><td>Search Columns</td><td>auto</td><td>Columns searched when resolving source/target names: <code>auto</code> = all columns (bodyId → type → instance → flywireType/hemibrainType/…), or restrict to <code>type</code> / <code>instance</code> / <code>bodyId</code>. Needed when a name lives in a cross-dataset column (e.g. <code>MTe07</code> only exists in <code>flywireType</code> on male-cns v1.0).</td><td><code>auto</code></td></tr>
     <tr><td>Filter By</td><td>bodyId</td><td>bodyId (per neuron) or type (aggregated)</td><td>type for cleaner summaries</td></tr>
     <tr><td>Output Format</td><td>csv</td><td>csv (fast) or xlsx</td><td>xlsx for Excel formatting</td></tr>
     <tr><td>Network Layout</td><td>distributed</td><td>HTML graph layout</td><td>spring for organic look</td></tr>
@@ -70,8 +71,8 @@
   </ul>
 
   <h2>Output &amp; examples</h2>
-  <p>One folder per run:</p>
-  <pre><code>{output_dir}/findpath_{DATASET}_{source}_to_{target}_{params}_{timestamp}/
+  <p>One timestamped folder per run, prefixed with the function name:</p>
+  <pre><code>{output_dir}/findallpath_{DATASET}_{source}_to_{target}_{params}_{timestamp}/
   aMe12_to_aMe10_allpaths_type.csv
   connection_type.csv
   conn_mat_type_weight.csv
@@ -80,7 +81,8 @@
   parameters.txt</code></pre>
   <div class="example">
     <div class="example-title">Example folder</div>
-    <pre><code>findpath_MCNS_aMe12_to_aMe10_L2w3r0p0_20260801_183000/</code></pre>
+    <pre><code>findallpath_MCNS_aMe12_to_aMe10_L2w3r0p0_20260801_183000/
+findpath_MCNS_aMe12_to_aMe10_L2w3r0p0_20260801_183000/  &lt;!-- Find Path (per-path) mode --&gt;</code></pre>
   </div>
 
   <h2>Common issues &amp; tips</h2>

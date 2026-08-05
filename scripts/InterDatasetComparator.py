@@ -49,7 +49,6 @@ Label Mapping:
   - Also supports separate CSV/JSON files or direct dictionary input
 """
 
-import os
 import sys
 import logging
 from pathlib import Path
@@ -144,7 +143,7 @@ def run_comprehensive_comparison():
         
         # Performance Settings (path finding algorithm)
         # -----------------------------------------------------------------
-        pathfinding='Bidirectional', # 'MemoizedDFS', 'Bidirectional', 'DP', 'DFS'
+        pathfinding='MemoizedDFS', # 'MemoizedDFS' (default, fastest), 'DFS' (backward), 'MeetInMiddle', 'DP', 'Bidirectional'
         
         # Offline/Cache Mode
         # -----------------------------------------------------------------

@@ -1,13 +1,14 @@
 """Visualization Tab - 3D skeleton and path network visualization."""
 
 import tempfile
+from datetime import datetime
 from pathlib import Path
 
 from nicegui import ui
 
 from ..config import SKELETON_MODES, BRAIN_MESH_OPTIONS, NETWORK_LAYOUTS
 from ..components.common import (
-    dataset_selector, chip_list_input, multi_select_input, number_input, select_input,
+    dataset_selector, neuron_list_input, multi_select_input, number_input, select_input,
     checkbox_input, dir_input, read_upload_event, section_header, param_grid, tool_page,
 )
 from ..components.output_panel import OutputPanel
@@ -66,16 +67,18 @@ def create_skeleton_tab():
                 "Render neuron morphology, synapses, and independent brain-region meshes."
             ).classes("text-caption drocat-muted")
             section_header("Neuron Selection (3D)", "hub")
-            neuron_chips = chip_list_input(
+            neuron_chips = neuron_list_input(
                 label="Neurons / Layers",
-                hint="Type a neuron name and press Enter to add a chip. "
+                show_filter=False,
+                show_upload=False,
+                hint="Type a neuron name and press Enter (or leave the field) to add a chip. "
                      "Each chip = one neuron/layer; use 'A -> B -> C' for connected paths.",
             )
-            custom_layer_names = ui.input(
-                label="Custom Layer Names (optional, comma-separated)",
-                placeholder="e.g., Input, Output",
-            ).classes("w-full drocat-input").tooltip(
-                "Display names for each neuron layer, in the same order as the chips."
+            custom_layer_names = neuron_list_input(
+                label="Custom Layer Names (optional)",
+                show_filter=False,
+                show_upload=False,
+                hint="Display names for each neuron layer, in the same order as the chips.",
             )
             with param_grid(2):
                 dataset = dataset_selector()
@@ -275,7 +278,7 @@ def create_skeleton_tab():
         )
 
     async def run_skeleton():
-        neurons = neuron_chips.value or []
+        neurons = neuron_chips.get_value()[1]
         if not neurons:
             ui.notify("Please add at least one neuron", type="warning")
             return
@@ -292,11 +295,7 @@ def create_skeleton_tab():
             roi_palette.get_colors(), len(rois)
         ) if rois else (100, 100, 100)
 
-        custom_names = [
-            n.strip()
-            for n in custom_layer_names.value.split(",")
-            if n.strip()
-        ] if custom_layer_names.value else []
+        custom_names = [str(n) for n in custom_layer_names.get_value()[1]]
 
         constructor_params = {
             "dataset": dataset.value,
@@ -500,7 +499,7 @@ def create_network_tab():
             "plot_path",
             constructor_params,
             "plot",
-            output_dir=path_output_dir.value,
+            output_dir=path_file_path.get("output_folder") or path_output_dir.value,
         )
         network_output.set_running(False)
         network_output.set_status(
@@ -509,8 +508,27 @@ def create_network_tab():
         )
         network_output.show_files(
             result["files"],
-            result.get("output_folder") or path_output_dir.value,
+            result.get("output_folder") or path_file_path.get("output_folder") or path_output_dir.value,
         )
+
+    def make_plotpath_folder(empty_canvas=False):
+        """Create the per-run output subfolder (plotpath_{name}_{timestamp}).
+
+        Every run gets its own timestamped folder inside the user-chosen
+        output directory, matching the naming of the other tools.
+        """
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        if empty_canvas:
+            name = "empty_network"
+        else:
+            name = Path(path_file_path["path"]).stem or "paths"
+            name = "".join(c if c.isalnum() or c in "-_" else "_" for c in name)
+            if len(name) > 60:
+                name = name[:60]
+        run_folder = Path(path_output_dir.value) / f"plotpath_{name}_{timestamp}"
+        run_folder.mkdir(parents=True, exist_ok=True)
+        path_file_path["output_folder"] = str(run_folder)
+        return str(run_folder)
 
     async def execute_network(empty_canvas=False):
         if not empty_canvas and not path_file_path["path"]:
@@ -523,7 +541,7 @@ def create_network_tab():
         colors = COLOR_PRESETS.get(color_preset.get_value(), COLOR_PRESETS["Cool"])
         constructor_params = {
             "path_file": None if empty_canvas else path_file_path["path"],
-            "output_folder": path_output_dir.value,
+            "output_folder": make_plotpath_folder(empty_canvas),
             "source_color": colors["source"],
             "intermediate_color": colors["intermediate"],
             "target_color": colors["target"],

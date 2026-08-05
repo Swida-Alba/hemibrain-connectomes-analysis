@@ -64,8 +64,24 @@ except ImportError:
     try:
         from utils.naming_utils import dataset_abbrev
     except ImportError:
+        # Last-resort fallback with the same mapping as utils.naming_utils,
+        # so run-folder names stay meaningful even if that module is missing.
+        _DATASET_ABBREVIATIONS_FALLBACK = {
+            "male-cns": "MCNS", "male_cns": "MCNS", "hemibrain": "HEMI",
+            "optic-lobe": "OL", "optic_lobe": "OL", "manc": "MANC",
+            "banc": "BANC", "fib19": "FIB", "mushroombody": "MB",
+            "flywire_fafb": "FAFB", "fafb": "FAFB", "flywire_banc": "BANC",
+        }
+
         def dataset_abbrev(dataset):
-            return "DS"
+            if not dataset:
+                return "UNKN"
+            ds = str(dataset).lower()
+            for key, abbrev in _DATASET_ABBREVIATIONS_FALLBACK.items():
+                if key in ds:
+                    return abbrev
+            letters = "".join(c for c in ds.split(":")[0] if c.isalpha())
+            return (letters[:4] or "DS").upper()
 
 # Try to import polars for faster DataFrame operations on large datasets
 try:
@@ -241,6 +257,55 @@ VALID_MATCH_TYPES = {'cds', 'pppm', 'both'}
 VALID_REGIONS = {'brain', 'vnc', 'all'}
 VALID_SIMILARITY_METHODS = {'jaccard', 'weighted_jaccard', 'rank_correlation'}
 VALID_SORT_BY = {'completeness', 'max'}
+
+
+def _extract_base_type(prefixed_type: str, merge_mapping=None) -> str:
+    """Extract the base type name from a dataset-prefixed type.
+
+    Shared by the expression-matrix visualizations: if a merge mapping is
+    available (auto type mapping), a prefixed type that maps to a merged
+    type is resolved through it first; otherwise everything after the first
+    underscore is returned ('MCNS_aMe12' -> 'aMe12').
+    """
+    if merge_mapping and prefixed_type in merge_mapping:
+        return merge_mapping[prefixed_type]
+    parts = prefixed_type.split('_', 1)
+    if len(parts) > 1:
+        return parts[1]  # Return everything after first underscore
+    return prefixed_type  # Return as-is if no underscore
+
+
+def _create_mountain_order(scores, labels):
+    """Rearrange so the highest score is in the middle, descending to both sides.
+
+    Shared by the labeling/colabeling distribution visualizations.
+    """
+    sorted_pairs = sorted(zip(scores, labels), key=lambda x: x[0], reverse=True)
+    n = len(sorted_pairs)
+    if n == 0:
+        return [], []
+
+    result_scores = [0] * n
+    result_labels = [''] * n
+
+    left = n // 2 - 1 if n % 2 == 0 else n // 2
+    right = n // 2 if n % 2 == 0 else n // 2
+
+    for i, (score, label) in enumerate(sorted_pairs):
+        if i == 0:
+            center = n // 2
+            result_scores[center] = score
+            result_labels[center] = label
+        elif i % 2 == 1:
+            result_scores[left] = score
+            result_labels[left] = label
+            left -= 1
+        else:
+            result_scores[right] = score
+            result_labels[right] = label
+            right += 1
+
+    return result_scores, result_labels
 
 
 @dataclass
@@ -575,7 +640,6 @@ class NeuronBridgeFinder:
         if not self._warning_collector:
             return
         
-        from collections import Counter
         
         # Group warnings by type
         server_unreachable = []
@@ -940,39 +1004,6 @@ class NeuronBridgeFinder:
         
         # Default to gal4_lexa for unknown prefixes
         return 'gal4_lexa'
-    
-    def _separate_lines_by_type(
-        self, 
-        lines_df: pd.DataFrame,
-        line_column: str = 'line'
-    ) -> Dict[str, pd.DataFrame]:
-        """
-        Separate a DataFrame of lines into GAL4/LexA and Split-GAL4 categories.
-        
-        Parameters
-        ----------
-        lines_df : pd.DataFrame
-            DataFrame containing line results.
-        line_column : str
-            Column name containing line names. Default: 'line'
-            
-        Returns
-        -------
-        dict
-            Dictionary with 'gal4_lexa' and 'split_gal4' keys, each containing
-            a DataFrame of lines for that category.
-        """
-        if lines_df.empty or line_column not in lines_df.columns:
-            return {'gal4_lexa': pd.DataFrame(), 'split_gal4': pd.DataFrame()}
-        
-        # Add line_type column
-        lines_df = lines_df.copy()
-        lines_df['line_type'] = lines_df[line_column].apply(self._classify_line_type)
-        
-        return {
-            'gal4_lexa': lines_df[lines_df['line_type'] == 'gal4_lexa'].copy(),
-            'split_gal4': lines_df[lines_df['line_type'] == 'split_gal4'].copy()
-        }
     
     def _aggregate_results_polars(
         self,
@@ -2251,21 +2282,15 @@ class NeuronBridgeFinder:
         if type_filter:
             # For prefixed types (e.g., 'HEMI_aMe12'), extract base type name for filtering
             # Create ranked type list with both full name and base name for filtering
-            def extract_base_type(prefixed_type: str) -> str:
-                """Extract base type name from prefixed type (e.g., 'MCNS_aMe12' -> 'aMe12')."""
-                parts = prefixed_type.split('_', 1)
-                if len(parts) > 1:
-                    return parts[1]  # Return everything after first underscore
-                return prefixed_type  # Return as-is if no underscore
             
             # Create ranked type list using BASE type names for filtering
-            ranked_types = [(i, extract_base_type(name)) for i, name in enumerate(expression_transposed.index, start=1)]
+            ranked_types = [(i, _extract_base_type(name)) for i, name in enumerate(expression_transposed.index, start=1)]
             filtered_base_types = self._apply_type_filter(ranked_types, type_filter)
             filtered_base_names = set(name for _, name in filtered_base_types)
             
             # Keep full prefixed names whose base type matches
             expression_transposed = expression_transposed.loc[
-                [idx for idx in expression_transposed.index if extract_base_type(idx) in filtered_base_names]
+                [idx for idx in expression_transposed.index if _extract_base_type(idx) in filtered_base_names]
             ]
             self._vprint(f"   🔍 Type filter applied: {len(expression_transposed)}/{total_types_before_filter} types match")
         
@@ -2448,19 +2473,11 @@ class NeuronBridgeFinder:
                 self._vprint(f"   ⚠️ Auto type mapping not available: {e}")
         
         # Fallback: simple prefix stripping if no mapper available
-        def extract_base_type(prefixed_type: str) -> str:
-            """Extract base type name from prefixed type (e.g., 'MCNS_aMe12' -> 'aMe12')."""
-            if prefixed_type in merge_mapping:
-                return merge_mapping[prefixed_type]
-            parts = prefixed_type.split('_', 1)
-            if len(parts) > 1:
-                return parts[1]  # Return everything after first underscore
-            return prefixed_type  # Return as-is if no underscore
         
         # Build mapping: base_type -> list of prefixed columns
         base_type_to_columns = {}
         for col in expression_df.columns:
-            base_type = extract_base_type(col)
+            base_type = _extract_base_type(col, merge_mapping)
             if base_type not in base_type_to_columns:
                 base_type_to_columns[base_type] = []
             base_type_to_columns[base_type].append(col)
@@ -2671,35 +2688,6 @@ class NeuronBridgeFinder:
         CATEGORY10 = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd',
                       '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf']
         
-        def create_mountain_order(scores, labels):
-            """Rearrange so highest score is in middle, descending to both sides."""
-            sorted_pairs = sorted(zip(scores, labels), key=lambda x: x[0], reverse=True)
-            n = len(sorted_pairs)
-            if n == 0:
-                return [], []
-            
-            result_scores = [0] * n
-            result_labels = [''] * n
-            
-            left = n // 2 - 1 if n % 2 == 0 else n // 2
-            right = n // 2 if n % 2 == 0 else n // 2
-            
-            for i, (score, label) in enumerate(sorted_pairs):
-                if i == 0:
-                    center = n // 2
-                    result_scores[center] = score
-                    result_labels[center] = label
-                elif i % 2 == 1:
-                    result_scores[left] = score
-                    result_labels[left] = label
-                    left -= 1
-                else:
-                    result_scores[right] = score
-                    result_labels[right] = label
-                    right += 1
-            
-            return result_scores, result_labels
-        
         full_path = os.path.join(output_path, filename)
         
         if group_by and group_by in data.columns:
@@ -2735,7 +2723,7 @@ class NeuronBridgeFinder:
                 labels = agg_data[label_column].tolist()
                 
                 if len(scores) > 0:
-                    mountain_scores, mountain_labels = create_mountain_order(scores, labels)
+                    mountain_scores, mountain_labels = _create_mountain_order(scores, labels)
                     
                     fig.add_trace(
                         go.Bar(
@@ -2794,7 +2782,7 @@ class NeuronBridgeFinder:
             if len(scores) == 0:
                 return ""
             
-            mountain_scores, mountain_labels = create_mountain_order(scores, labels)
+            mountain_scores, mountain_labels = _create_mountain_order(scores, labels)
             
             fig = go.Figure()
             
@@ -2898,35 +2886,6 @@ class NeuronBridgeFinder:
         # Category10 palette (same as bokeh.palettes.Category10)
         CATEGORY10 = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd',
                       '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf']
-        
-        def create_mountain_order(scores, labels):
-            """Rearrange so highest score is in middle, descending to both sides."""
-            sorted_pairs = sorted(zip(scores, labels), key=lambda x: x[0], reverse=True)
-            n = len(sorted_pairs)
-            if n == 0:
-                return [], []
-            
-            result_scores = [0] * n
-            result_labels = [''] * n
-            
-            left = n // 2 - 1 if n % 2 == 0 else n // 2
-            right = n // 2 if n % 2 == 0 else n // 2
-            
-            for i, (score, label) in enumerate(sorted_pairs):
-                if i == 0:
-                    center = n // 2
-                    result_scores[center] = score
-                    result_labels[center] = label
-                elif i % 2 == 1:
-                    result_scores[left] = score
-                    result_labels[left] = label
-                    left -= 1
-                else:
-                    result_scores[right] = score
-                    result_labels[right] = label
-                    right += 1
-            
-            return result_scores, result_labels
         
         def create_distribution_plot(by_type: bool, filename: str) -> str:
             """Create distribution plot (by neuron or by type).
@@ -3050,8 +3009,8 @@ class NeuronBridgeFinder:
                         else:
                             hover_texts.append(f"{type_name}<br>Score: {score:,.0f}<br>(below threshold)")
                     
-                    mountain_scores, _ = create_mountain_order(scores, type_names)
-                    _, mountain_hovers = create_mountain_order(scores, hover_texts)
+                    mountain_scores, _ = _create_mountain_order(scores, type_names)
+                    _, mountain_hovers = _create_mountain_order(scores, hover_texts)
                 else:
                     # Get all neurons for this line (sorted by score desc)
                     df_all = line_all_data.get(line, pd.DataFrame())
@@ -3076,8 +3035,8 @@ class NeuronBridgeFinder:
                         suffix = "<br>(below threshold)" if score < min_score else ""
                         hover_texts.append(f"bodyId: {body_id}<br>Type: {neuron_type}<br>Dataset: {dataset}{suffix}")
                     
-                    mountain_scores, _ = create_mountain_order(scores, labels)
-                    _, mountain_hovers = create_mountain_order(scores, hover_texts)
+                    mountain_scores, _ = _create_mountain_order(scores, labels)
+                    _, mountain_hovers = _create_mountain_order(scores, hover_texts)
                 
                 if len(mountain_scores) > 0:
                     bar_color = CATEGORY10[idx % len(CATEGORY10)]
@@ -3155,8 +3114,8 @@ class NeuronBridgeFinder:
                 combined_scores = [t[1] for t in sorted_types[:global_x_range]]
                 combined_hovers = [f"{t}<br>Avg: {s:,.0f}" for t, s in sorted_types[:global_x_range]]
                 
-                mountain_scores, _ = create_mountain_order(combined_scores, combined_labels)
-                _, mountain_hovers = create_mountain_order(combined_scores, combined_hovers)
+                mountain_scores, _ = _create_mountain_order(combined_scores, combined_labels)
+                _, mountain_hovers = _create_mountain_order(combined_scores, combined_hovers)
             else:
                 # All neurons from all lines
                 combined_scores = []
@@ -3187,8 +3146,8 @@ class NeuronBridgeFinder:
                     combined_labels = [combined_labels[i] for i in sorted_indices[:combined_target]]
                     combined_hovers = [combined_hovers[i] for i in sorted_indices[:combined_target]]
                 
-                mountain_scores, _ = create_mountain_order(combined_scores, combined_labels)
-                _, mountain_hovers = create_mountain_order(combined_scores, combined_hovers)
+                mountain_scores, _ = _create_mountain_order(combined_scores, combined_labels)
+                _, mountain_hovers = _create_mountain_order(combined_scores, combined_hovers)
             
             if mountain_scores:
                 # Combined plot y-axis: use min_score * 0.9 as base
@@ -3495,220 +3454,6 @@ class NeuronBridgeFinder:
         full_path = os.path.join(output_path, 'labeling_distribution_stacked.html')
         fig.write_html(full_path)
         return full_path
-
-    def _calculate_line_specificity(
-        self,
-        line_stats: pd.DataFrame,
-        queried_types: List[str],
-        match_type: str = 'cds',
-        top_n: int = 100,
-        max_lines: int = 100
-    ) -> pd.DataFrame:
-        """
-        Calculate comprehensive specificity metrics for driver lines.
-        
-        For each line, computes:
-        - rank_sum: Sum of ranks for queried neuron types in line_to_neuron results
-        - type_proportion: Proportion of queried types among all labeled types (top N)
-        - n_queried_types: Number of queried types labeled by this line
-        - n_total_types: Total number of distinct types labeled by this line
-        - selectivity: 1 / n_total_types (higher = more selective)
-        - expression_entropy: Shannon entropy of type distribution (lower = more specific)
-        - normalized_entropy: Entropy normalized by max possible (0-1, lower = more specific)
-        - weighted_type_proportion: Type proportion weighted by match scores
-        - mean_queried_score: Mean match score for queried types
-        - specificity_score: Composite score combining all metrics
-        
-        Parameters
-        ----------
-        line_stats : pd.DataFrame
-            DataFrame with 'line' column from find_lines_batch aggregation.
-        queried_types : list of str
-            List of queried neuron types (from the original query).
-        match_type : str
-            Match algorithm for line_to_neuron. Default: 'cds'
-        top_n : int
-            Number of top matches to consider for type proportion. Default: 100
-        max_lines : int
-            Maximum number of lines to process (top N by ranking). Default: 100
-            
-        Returns
-        -------
-        pd.DataFrame
-            Updated line_stats with specificity columns added.
-        """
-        if line_stats.empty or 'line' not in line_stats.columns:
-            return line_stats
-        
-        if not queried_types:
-            self._vprint("  ℹ️  No neuron types to calculate specificity (query was by bodyId)")
-            return line_stats
-        
-        # Normalize queried types for comparison
-        queried_types_lower = set(t.lower() for t in queried_types if t)
-        
-        # Limit to top N lines to reduce API calls
-        total_lines = len(line_stats)
-        if max_lines and total_lines > max_lines:
-            self._vprint(f"\n📊 Calculating specificity for top {max_lines} of {total_lines} lines...")
-            lines_to_process = line_stats['line'].head(max_lines).tolist()
-        else:
-            self._vprint(f"\n📊 Calculating specificity metrics for {total_lines} lines...")
-            lines_to_process = line_stats['line'].tolist()
-        
-        self._vprint(f"   Queried types: {list(queried_types)[:5]}{'...' if len(queried_types) > 5 else ''}")
-        self._vprint(f"   ⏱️  Note: Each line requires an API call to fetch neuron matches (may take time)")
-        
-        # Initialize new columns (for ALL lines, not just processed ones)
-        line_stats = line_stats.copy()
-        line_stats['rank_sum'] = float('inf')
-        line_stats['type_proportion'] = 0.0
-        line_stats['n_queried_types'] = 0
-        line_stats['n_total_types'] = 0
-        line_stats['selectivity'] = 0.0
-        # New entropy columns
-        line_stats['expression_entropy'] = 0.0
-        line_stats['normalized_entropy'] = 0.0
-        # New weighted columns
-        line_stats['weighted_type_proportion'] = 0.0
-        line_stats['mean_queried_score'] = 0.0
-        
-        # Process each line (with progress bar if available)
-        if HAS_TQDM and self.verbose:
-            from tqdm import tqdm as tqdm_progress
-            iterator = tqdm_progress(
-                lines_to_process, 
-                desc="   🔬 Analyzing specificity", 
-                unit="line",
-                bar_format='{desc}: {percentage:3.0f}%|{bar:30}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]',
-                ncols=110,
-                position=0
-            )
-        else:
-            iterator = lines_to_process
-        
-        import time
-        start_time = time.time()
-        
-        # Enable batch mode to suppress individual line_to_neuron messages
-        self._batch_mode = True
-        
-        for idx, line_name in enumerate(iterator):
-            # Update progress description with current line
-            if HAS_TQDM and self.verbose:
-                iterator.set_description(f"   🔬 [{idx+1}/{len(lines_to_process)}] {line_name}")
-            try:
-                # Check if cached before calling (use same cache key format as line_to_neuron)
-                region_key = self.region if self.region else 'all'
-                max_imgs_key = self.max_api_images_per_line if self.max_api_images_per_line > 0 else 'all'
-                cache_key = f"{line_name}_{match_type}_{region_key}_{max_imgs_key}"
-                is_cached = self._load_from_cache('line_to_neuron', cache_key) is not None
-                
-                if HAS_TQDM and self.verbose:
-                    status = "💾" if is_cached else "🌐"
-                    iterator.set_postfix_str(status)
-                
-                # Get neurons labeled by this line (use cached if available)
-                neurons_df = self.line_to_neuron(line_name, match_type=match_type)
-                
-                if neurons_df.empty:
-                    continue
-                
-                # Get top N matches
-                neurons_top = neurons_df.head(top_n)
-                
-                # Get all unique neuron types (across all datasets)
-                all_types = neurons_top['type'].dropna().unique().tolist()
-                all_types_lower = set(t.lower() for t in all_types if t)
-                
-                # Count how many queried types are labeled
-                matched_types = queried_types_lower & all_types_lower
-                n_queried = len(matched_types)
-                n_total = len(all_types_lower)
-                
-                # Calculate rank sum for queried types
-                rank_sum = 0
-                for idx, row in neurons_top.iterrows():
-                    neuron_type = str(row.get('type', '')).lower()
-                    if neuron_type in queried_types_lower:
-                        # Rank is 1-indexed position
-                        rank = neurons_top.index.get_loc(idx) + 1
-                        rank_sum += rank
-                
-                # If no matches, set rank_sum to a high value
-                if rank_sum == 0 and n_queried > 0:
-                    rank_sum = top_n * n_queried  # Penalty for not appearing in top N
-                
-                # Calculate type proportion
-                type_proportion = n_queried / n_total if n_total > 0 else 0.0
-                
-                # Calculate selectivity (inverse of diversity)
-                selectivity = 1.0 / n_total if n_total > 0 else 0.0
-                
-                # === NEW: Calculate Expression Entropy ===
-                # Count occurrences of each type
-                type_counts = neurons_top['type'].fillna('Unknown').value_counts().to_dict()
-                expression_entropy = self._calculate_expression_entropy(type_counts)
-                
-                # Normalize entropy by max possible (log2(n_types))
-                max_entropy = np.log2(n_total) if n_total > 1 else 1.0
-                normalized_entropy = expression_entropy / max_entropy if max_entropy > 0 else 0.0
-                
-                # === NEW: Calculate Weighted Specificity ===
-                weighted_metrics = self._calculate_weighted_specificity(
-                    neurons_top, queried_types_lower, score_column='score'
-                )
-                
-                # Update the row
-                mask = line_stats['line'] == line_name
-                line_stats.loc[mask, 'rank_sum'] = rank_sum
-                line_stats.loc[mask, 'type_proportion'] = type_proportion
-                line_stats.loc[mask, 'n_queried_types'] = n_queried
-                line_stats.loc[mask, 'n_total_types'] = n_total
-                line_stats.loc[mask, 'selectivity'] = selectivity
-                line_stats.loc[mask, 'expression_entropy'] = expression_entropy
-                line_stats.loc[mask, 'normalized_entropy'] = normalized_entropy
-                line_stats.loc[mask, 'weighted_type_proportion'] = weighted_metrics['weighted_type_proportion']
-                line_stats.loc[mask, 'mean_queried_score'] = weighted_metrics['mean_queried_score']
-                
-            except Exception as e:
-                if self.verbose:
-                    self._vprint(f"   ⚠️ Error calculating specificity for {line_name}: {e}")
-        
-        # Disable batch mode after processing
-        self._batch_mode = False
-        
-        # Calculate composite specificity score
-        # Combines: type_proportion, entropy (inverted), rank, and weighted proportion
-        max_rank = line_stats['rank_sum'].replace(float('inf'), 0).max()
-        
-        if max_rank > 0:
-            normalized_rank = line_stats['rank_sum'].replace(float('inf'), max_rank) / max_rank
-        else:
-            normalized_rank = 0
-        
-        # Specificity = high type_proportion + low entropy + low rank + high weighted_proportion
-        # Formula: 0.3*type_prop + 0.2*(1-norm_entropy) + 0.2*(1-norm_rank) + 0.3*weighted_prop
-        line_stats['specificity_score'] = (
-            0.30 * line_stats['type_proportion'] +
-            0.20 * (1.0 - line_stats['normalized_entropy']) +
-            0.20 * (1.0 - normalized_rank) +
-            0.30 * line_stats['weighted_type_proportion']
-        )
-        
-        # Replace inf with max + 1 for display
-        max_finite = line_stats.loc[line_stats['rank_sum'] != float('inf'), 'rank_sum'].max()
-        line_stats['rank_sum'] = line_stats['rank_sum'].replace(float('inf'), max_finite + 1 if pd.notna(max_finite) else 9999)
-        
-        # Calculate and report timing statistics
-        elapsed_time = time.time() - start_time
-        lines_processed = min(len(lines_to_process), max_lines) if max_lines else len(lines_to_process)
-        avg_time_per_line = elapsed_time / lines_processed if lines_processed > 0 else 0
-        
-        self._vprint(f"   ✓ Specificity calculated for {len(line_stats)} lines")
-        self._vprint(f"   ⏱️  Processing time: {elapsed_time:.1f}s total, ~{avg_time_per_line:.2f}s per line")
-        
-        return line_stats
 
     def _init_client(self):
         """Initialize the NeuronBridge client with retry logic."""
@@ -4560,22 +4305,6 @@ class NeuronBridgeFinder:
                 mapping["images"][image_id]["cached_types"].append(match_type)
         
         self._save_line_mapping(mapping)
-    
-    def _get_cached_types_for_image(self, image_id: str) -> List[str]:
-        """Get the list of cached match types for an image."""
-        mapping = self._load_line_mapping()
-        if image_id in mapping.get("images", {}):
-            cached = mapping["images"][image_id].get("cached_types", [])
-            if cached:
-                return cached
-        
-        # Fallback: check actual cache files
-        cached_types = []
-        for mt in ['cds', 'pppm', 'both']:
-            cache_path = self._get_image_cache_path(image_id, mt)
-            if os.path.exists(cache_path):
-                cached_types.append(mt)
-        return cached_types
     
     def sync_mapping_from_cache_files(self) -> Dict[str, int]:
         """
@@ -7835,7 +7564,7 @@ class NeuronBridgeFinder:
         lines: Union[str, List[str]],
         match_type: Optional[str] = None,
         top_n_neurons: int = -1,
-        similarity_methods: Union[str, List[str]] = ['jaccard', 'weighted_jaccard'],
+        similarity_methods: Union[str, List[str]] = None,
         output_dir: Optional[str] = None,
         generate_report: bool = True,
         visualize: bool = True,
@@ -7980,6 +7709,9 @@ class NeuronBridgeFinder:
         ... )
         >>> print(results['line_summary'])
         """
+        if similarity_methods is None:
+            similarity_methods = ['jaccard', 'weighted_jaccard']
+
         from datetime import datetime
         
         # Parse lines input
@@ -8607,10 +8339,10 @@ class NeuronBridgeFinder:
         output_dir: Optional[str] = None,
         download_images: Optional[str] = 'flylight',
         download_img_for_top_n_lines: Optional[int] = 10,
-        image_formats: Union[str, List[str]] = ['png','jpg'],
+        image_formats: Union[str, List[str]] = None,
         image_types: Union[str, List[str]] = 'all',
         max_download_images_per_line: Optional[int] = 12,
-        flylight_category: Optional[Union[str, List[str]]] = ['GAL4/LEXA', 'SplitGAL4'],
+        flylight_category: Optional[Union[str, List[str]]] = None,
         organize_by_region: bool = False,
         simple_mode: bool = False,
         pdf_images_per_page: Tuple[int, int] = (3, 2),
@@ -8768,6 +8500,11 @@ class NeuronBridgeFinder:
         >>> mapper = LabelMapper(source_mapping_file='my_mappings.json')
         >>> results = nbf.find_lines_batch(mapper, output_dir='./output')
         """
+        if image_formats is None:
+            image_formats = ['png', 'jpg']
+        if flylight_category is None:
+            flylight_category = ['GAL4/LEXA', 'SplitGAL4']
+
         # Handle LabelMapper input - expand to dataset-specific queries
         label_mapper_info = None  # Track LabelMapper for type info
         if HAS_LABELMAPPER and isinstance(queries, LabelMapper):
@@ -10356,7 +10093,6 @@ def create_image_pdf(
         from reportlab.lib.pagesizes import A4, letter, landscape as rl_landscape
         from reportlab.lib.units import inch
         from reportlab.pdfgen import canvas
-        from reportlab.lib.utils import ImageReader
         from reportlab.lib import colors
         from PIL import Image
         HAS_REPORTLAB = True
@@ -10785,8 +10521,6 @@ def create_image_pptx(
             
             # Apply background color
             if bg_rgb:
-                from pptx.oxml.ns import nsmap
-                from pptx.oxml import parse_xml
                 # Set slide background
                 background = slide.background
                 fill = background.fill

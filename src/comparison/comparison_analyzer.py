@@ -38,6 +38,13 @@ from .metrics import ComparisonMetrics
 from .interactive_heatmap import generate_interactive_heatmap
 
 
+def _escape_cypher_string_fallback(value):
+    """Inline escape fallback (only used when src.utils.api_utils is unavailable)."""
+    if not isinstance(value, str):
+        return str(value)
+    return value.replace('\\', '\\\\').replace("'", "\\'")
+
+
 class ComparisonAnalyzer:
     """
     Main orchestrator for cross-dataset comparison analysis.
@@ -618,6 +625,7 @@ class ComparisonAnalyzer:
             skip_bodyId=self.parameters.skip_bodyId,  # Skip bodyId-level processing if requested
             label_mapper=self.label_mapper,  # Pass label mapper for standardization
             pathfinding=self.parameters.pathfinding,  # Pass pathfinding algorithm
+            search_columns=self.parameters.search_columns,  # Column scope for neuron name resolution
             force_API_fetching=use_force_api,  # Use CAVE API for FAFB if enabled
             cache_only=self.parameters.cache_only,  # Use cache-only mode if enabled
             separate_hemispheres=self.parameters.separate_hemispheres,
@@ -797,10 +805,7 @@ class ComparisonAnalyzer:
             try:
                 from src.utils.api_utils import escape_cypher_string
             except ImportError:
-                def escape_cypher_string(value):
-                    if not isinstance(value, str):
-                        return str(value)
-                    return value.replace('\\', '\\\\').replace("'", "\\'")
+                escape_cypher_string = _escape_cypher_string_fallback
             
             # Build type patterns for Cypher query
             # Handle regex patterns (convert .* to Cypher regex)
@@ -1392,9 +1397,6 @@ class ComparisonAnalyzer:
         edge_df['conn_layer'] = edge_df.apply(get_conn_layer, axis=1)
         
         return edge_df
-        
-        self._log(f"Completed edge analysis for {len(dataset_names)} datasets")
-        return self.raw_results
     
     # =========================================================================
     # Dataset Metadata Collection
@@ -3853,117 +3855,6 @@ class ComparisonAnalyzer:
             if not silent:
                 self._log("Saved: edge_presence_matrix.csv (default)")
     
-    def _export_conserved_strong_connections(self, comparison_results_dir: str, threshold: int):
-        """
-        Export conserved strong connections - edges present in ALL datasets 
-        that are also high-weight (top percentile).
-        
-        Args:
-            comparison_results_dir: Directory to save output files
-            threshold: Weight threshold for analysis
-        """
-        dataset_names = self.parameters.get_dataset_names()
-        aligned = self.get_aligned_data(threshold)
-        
-        if aligned.empty:
-            return
-        
-        available = [d for d in dataset_names if d in aligned.columns]
-        num_datasets = len(available)
-        
-        if num_datasets < 2:
-            return
-        
-        # Find edges present in ALL datasets
-        all_present_mask = (aligned[available] > 0).all(axis=1)
-        common_edges = aligned[all_present_mask].copy()
-        
-        if common_edges.empty:
-            return
-        
-        # Calculate percentile threshold for each dataset (top 10%)
-        top_percentile = 0.1
-        top_n = max(1, int(len(aligned) * top_percentile))
-        
-        # Get top edges for each dataset
-        is_top_in_all = pd.Series(True, index=common_edges.index)
-        ranks = {}
-        
-        for dataset in available:
-            safe_name = self.parameters._sanitize_name(dataset)
-            # Get rank within all edges
-            aligned_sorted = aligned[dataset].sort_values(ascending=False)
-            rank_series = pd.Series(range(1, len(aligned_sorted) + 1), index=aligned_sorted.index)
-            ranks[safe_name] = rank_series
-            
-            # Check if in top percentile
-            top_edges_set = set(aligned.nlargest(top_n, dataset).index)
-            is_top_in_all &= common_edges.index.isin(top_edges_set)
-        
-        # Filter to conserved strong connections
-        conserved_strong = common_edges[is_top_in_all].copy()
-        
-        if conserved_strong.empty:
-            self._log(f"No conserved strong connections at threshold {threshold}")
-            return
-        
-        # Build output dataframe
-        rows = []
-        for edge_key, row in conserved_strong.iterrows():
-            if ' -> ' in str(edge_key):
-                parts = str(edge_key).split(' -> ')
-                source_type = parts[0]
-                target_type = parts[1] if len(parts) > 1 else ''
-            else:
-                source_type = str(edge_key)
-                target_type = ''
-            
-            edge_data = {
-                'edge_key': edge_key,
-                'source_type': source_type,
-                'target_type': target_type,
-            }
-            
-            weights = []
-            for dataset in available:
-                safe_name = self.parameters._sanitize_name(dataset)
-                weight = row[dataset]
-                edge_data[f'rank_{safe_name}'] = int(ranks[safe_name].get(edge_key, 0))
-                edge_data[f'weight_{safe_name}'] = weight
-                weights.append(weight)
-            
-            # Calculate conservation score
-            presence_ratio = 1.0  # All present by definition
-            if len(weights) > 1:
-                weight_cv = np.std(weights) / np.mean(weights)
-                weight_consistency = max(0, 1 - weight_cv)
-            else:
-                weight_consistency = 1.0
-            
-            edge_data['conservation_score'] = round(
-                (presence_ratio * 0.5) + (weight_consistency * 0.5), 3
-            )
-            edge_data['avg_weight'] = round(np.mean(weights), 2)
-            edge_data['weight_cv'] = round(weight_cv, 3) if len(weights) > 1 else ''
-            
-            rows.append(edge_data)
-        
-        if not rows:
-            return
-        
-        conserved_df = pd.DataFrame(rows)
-        conserved_df = conserved_df.sort_values('conservation_score', ascending=False)
-        
-        # Save
-        self._save_csv(conserved_df, os.path.join(comparison_results_dir, f"conserved_strong_connections_minsyn_{threshold}.csv"))
-        self._log(f"Saved: conserved_strong_connections_minsyn_{threshold}.csv ({len(conserved_df)} edges)")
-        
-        # Also save default version at middle threshold
-        mid_threshold = self.parameters.thresholds[len(self.parameters.thresholds) // 2]
-        if threshold == mid_threshold:
-            self._save_csv(conserved_df, os.path.join(comparison_results_dir, "conserved_strong_connections.csv"))
-            self._log("Saved: conserved_strong_connections.csv (default)")
-    
     def _export_path_presence_matrix(self, comparison_results_dir: str, threshold: int, silent: bool = False):
         """
         Export path presence matrix showing multi-hop path conservation across datasets.
@@ -5136,117 +5027,6 @@ class ComparisonAnalyzer:
         
         return nt_by_edge
 
-    def _get_edge_nt_consensus_for_threshold(self, threshold: int, reciprocal: bool = False) -> Dict[str, Optional[str]]:
-        """
-        Get consensus NT type per edge across datasets at a threshold.
-
-        - Ignores NaN/empty NT entries.
-        - If exactly one NT type is observed across datasets, returns that type.
-        - If multiple NT types are observed, returns None (inconsistent).
-
-        Args:
-            threshold: The threshold level
-            reciprocal: If True, use reciprocal_connection_type.csv files
-
-        Returns:
-            Dict mapping canonical edge_key ("pre -> post") to consensus NT type or None.
-        """
-        dataset_names = self.parameters.get_dataset_names()
-        nt_by_edge: Dict[str, set] = {}
-
-        for dataset_name in dataset_names:
-            safe_name = self.parameters._sanitize_name(dataset_name)
-            if reciprocal:
-                dataset_output_path = os.path.join(
-                    self.parameters.full_output_path,
-                    'dataset_data',
-                    safe_name,
-                    f'minsyn_{threshold}',
-                    'find_reciprocal'
-                )
-                conn_file = os.path.join(dataset_output_path, 'reciprocal_connection_type.csv')
-            else:
-                dataset_output_path = os.path.join(
-                    self.parameters.full_output_path,
-                    'dataset_data',
-                    safe_name,
-                    f'minsyn_{threshold}'
-                )
-                conn_file = os.path.join(dataset_output_path, 'connections_edge.csv')
-
-            df = None
-            if os.path.exists(conn_file) and os.path.getsize(conn_file) > 0:
-                try:
-                    df = self._read_csv(conn_file)
-                except Exception:
-                    df = None
-
-            if (df is None or df.empty) and not reciprocal:
-                fallback = os.path.join(dataset_output_path, 'data_details', 'connection_type.csv')
-                if os.path.exists(fallback) and os.path.getsize(fallback) > 0:
-                    try:
-                        df = self._read_csv(fallback)
-                    except Exception:
-                        df = None
-
-            if df is None or df.empty:
-                continue
-
-            if 'std_label_pre' in df.columns and 'std_label_post' in df.columns:
-                pre_col, post_col = 'std_label_pre', 'std_label_post'
-            elif 'type_pre' in df.columns and 'type_post' in df.columns:
-                pre_col, post_col = 'type_pre', 'type_post'
-            elif 'bodyId_pre' in df.columns and 'bodyId_post' in df.columns:
-                pre_col, post_col = 'bodyId_pre', 'bodyId_post'
-            else:
-                continue
-
-            if 'nt_type_pre' in df.columns:
-                nt_col = 'nt_type_pre'
-            elif 'nt_type' in df.columns:
-                nt_col = 'nt_type'
-            else:
-                continue
-
-            for _, row in df.iterrows():
-                pre_type = str(row[pre_col])
-                post_type = str(row[post_col])
-                nt_val = row.get(nt_col, None)
-                if pd.isna(nt_val):
-                    continue
-                nt_str = str(nt_val).strip()
-                if not nt_str:
-                    continue
-                
-                # Normalize NT string
-                nt_upper = nt_str.upper()
-                nt_str = self._NT_NORMALIZATION_MAP.get(nt_upper, nt_str.lower())
-
-                if self.parameters.auto_type_mapping and self.parameters._auto_type_mapper:
-                    canonical_pre = self._get_canonical_type(pre_type, dataset_name)
-                    canonical_post = self._get_canonical_type(post_type, dataset_name)
-                else:
-                    canonical_pre = pre_type
-                    canonical_post = post_type
-
-                edge_key = f"{canonical_pre} -> {canonical_post}"
-                if edge_key not in nt_by_edge:
-                    nt_by_edge[edge_key] = set()
-                nt_by_edge[edge_key].add(nt_str)
-
-        if not nt_by_edge:
-            return {}
-
-        consensus: Dict[str, Optional[str]] = {}
-        for edge_key, nt_vals in nt_by_edge.items():
-            cleaned = {nt for nt in nt_vals if nt}
-            if len(cleaned) == 1:
-                consensus[edge_key] = next(iter(cleaned))
-            else:
-                consensus[edge_key] = None
-
-        return consensus
-
     def _get_reciprocal_edge_ratio_data_for_threshold(self, threshold: int) -> pd.DataFrame:
         """
         Get edge-level connection_ratio data from reciprocal outputs for a threshold.
@@ -5308,95 +5088,6 @@ class ComparisonAnalyzer:
         # Note: _generate_vispath_heatmaps and heatmaps/ folder removed as redundant
         # All heatmap needs are served by PNG visualizations in visualizations/ folder
         pass
-
-    def _generate_combined_networks(self, vis_dir: str, dataset_names: List[str], 
-                                     VisualizePath):
-        """
-        Generate combined network visualizations.
-        
-        Creates:
-        - network_all_datasets_minsyn_{threshold}.html - All datasets side-by-side at each cutoff
-        - network_{dataset}_all_thresholds.html - All cutoffs for each dataset
-        
-        Args:
-            vis_dir: Directory to save network files
-            dataset_names: List of dataset names
-            VisualizePath: The VisualizePath class
-        """
-        network_dir = os.path.join(vis_dir, "networks")
-        os.makedirs(network_dir, exist_ok=True)
-        
-        # 1. Generate networks combining ALL datasets at each threshold
-        for threshold in self.parameters.thresholds:
-            aligned = self.get_aligned_data(threshold)
-            if aligned.empty:
-                continue
-            
-            available = [d for d in dataset_names if d in aligned.columns]
-            if not available:
-                continue
-            
-            # Build combined connection data with dataset tags
-            conn_rows = []
-            for edge_key, row in aligned.iterrows():
-                if ' -> ' not in str(edge_key):
-                    continue
-                parts = str(edge_key).split(' -> ')
-                source = parts[0]
-                target = parts[1] if len(parts) > 1 else ''
-                
-                for dataset in available:
-                    weight = row.get(dataset, 0)
-                    if weight > 0:
-                        safe_name = self.parameters._sanitize_name(dataset)
-                        conn_rows.append({
-                            'source': f"{source}",
-                            'target': f"{target}",
-                            'weight': weight,
-                            'dataset': safe_name,
-                            'path_block': f"{source} → {target} ({safe_name})"
-                        })
-            
-            if conn_rows:
-                output_file = os.path.join(network_dir, f"network_all_datasets_minsyn_{threshold}.html")
-                self._create_combined_network_html(conn_rows, available, threshold, output_file, 
-                                                   title=f"All Datasets at Threshold {threshold}")
-        
-        # 2. Generate networks combining ALL thresholds for each dataset
-        for dataset in dataset_names:
-            safe_name = self.parameters._sanitize_name(dataset)
-            conn_rows = []
-            
-            for threshold in self.parameters.thresholds:
-                aligned = self.get_aligned_data(threshold)
-                if aligned.empty or dataset not in aligned.columns:
-                    continue
-                
-                for edge_key, row in aligned.iterrows():
-                    weight = row.get(dataset, 0)
-                    if weight <= 0:
-                        continue
-                    
-                    if ' -> ' not in str(edge_key):
-                        continue
-                    parts = str(edge_key).split(' -> ')
-                    source = parts[0]
-                    target = parts[1] if len(parts) > 1 else ''
-                    
-                    conn_rows.append({
-                        'source': source,
-                        'target': target,
-                        'weight': weight,
-                        'threshold': threshold,
-                        'path_block': f"{source} → {target} (t={threshold})"
-                    })
-            
-            if conn_rows:
-                output_file = os.path.join(network_dir, f"network_{safe_name}_all_thresholds.html")
-                self._create_threshold_comparison_network_html(
-                    conn_rows, safe_name, self.parameters.thresholds, output_file,
-                    title=f"{safe_name}: All Thresholds"
-                )
 
     def _create_combined_network_html(self, conn_rows: List[Dict], datasets: List[str],
                                        threshold: int, output_path: str, title: str):
@@ -6234,206 +5925,6 @@ class ComparisonAnalyzer:
         
         return pattern == type_name
     
-    def _save_profile_verification_results(
-        self,
-        results: Dict[str, pd.DataFrame],
-        output_dir: str,
-        include_partner_details: bool,
-        verifier,
-        dataset_names: List[str],
-        direction: str
-    ):
-        """Save verification results to CSV files."""
-        # Helper to keep only id columns + requested metric columns
-        def _filter_df(df: pd.DataFrame, keep_cols: List[str]) -> pd.DataFrame:
-            present = [c for c in keep_cols if c in df.columns]
-            return df[present].copy() if present else df
-
-        metric_cols = ['jaccard', 'cosine', 'rank_corr', 'rank_union',
-                       'avg_jaccard', 'avg_cosine', 'avg_rank_corr', 'avg_rank_union']
-
-        # Save bodyId-level results when using the new core
-        if 'bodyid_results' in results and not results['bodyid_results'].empty:
-            keep = ['dataset_a', 'dataset_b', 'neuron_type', 'source_bodyId', 'target_bodyId'] + metric_cols
-            filtered = _filter_df(results['bodyid_results'], keep)
-            self._save_csv(filtered, os.path.join(output_dir, 'bodyid_results.csv'))
-            self._log("Saved: bodyid_results.csv")
-
-        if 'type_summary' in results and not results['type_summary'].empty:
-            keep = ['dataset_a', 'dataset_b', 'neuron_type', 'n_source_bodyIds', 'n_target_bodyIds'] + metric_cols
-            filtered = _filter_df(results['type_summary'], keep)
-            self._save_csv(filtered, os.path.join(output_dir, 'type_summary.csv'))
-            self._log("Saved: type_summary.csv")
-
-        # Save summary
-        if 'summary' in results and not results['summary'].empty:
-            keep = ['neuron_type', 'role', 'datasets_found'] + metric_cols
-            filtered = _filter_df(results['summary'], keep)
-            self._save_csv(filtered, os.path.join(output_dir, 'verification_summary.csv'))
-            self._log("Saved: verification_summary.csv")
-        
-        # Save by role
-        for role in ['source', 'target', 'intermediate']:
-            if role in results and not results[role].empty:
-                keep = ['neuron_type', 'role', 'datasets_found'] + metric_cols
-                filtered = _filter_df(results[role], keep)
-                self._save_csv(filtered, os.path.join(output_dir, f'verification_{role}.csv'))
-                self._log(f"Saved: verification_{role}.csv")
-        
-        # Save similarity matrix
-        if 'similarity_matrix' in results and not results['similarity_matrix'].empty:
-            self._save_csv(results['similarity_matrix'], os.path.join(output_dir, 'similarity_matrix.csv'), index=True)
-            self._log("Saved: similarity_matrix.csv")
-        
-        # Generate partner details if requested
-        if include_partner_details and verifier is not None:
-            all_types = set()  # Use set to avoid duplicates
-            for role in ['source', 'target', 'intermediate']:
-                if role in results and not results[role].empty:
-                    types = results[role]['neuron_type'].tolist()
-                    all_types.update(types[:10])  # Limit to first 10 per role
-            
-            if all_types:
-                verifier.generate_verification_report(
-                    neuron_types=list(all_types),  # Convert back to list
-                    datasets=dataset_names,
-                    output_path=output_dir,
-                    direction=direction,
-                    include_partner_details=True
-                )
-    
-    def _generate_profile_visualizations(
-        self,
-        results: Dict[str, pd.DataFrame],
-        output_dir: str,
-        profiler,
-        dataset_names: List[str]
-    ):
-        """Generate visualizations for connectivity profile verification."""
-        try:
-            from .profile_visualizations import ProfileVisualizer
-        except ImportError:
-            self._log("Warning: ProfileVisualizer not available, skipping visualizations")
-            return
-        
-        vis_dir = os.path.join(output_dir, 'visualizations')
-        os.makedirs(vis_dir, exist_ok=True)
-        
-        # Generate similarity heatmap from rank_corr matrix (primary metric)
-        if 'similarity_matrix' in results and not results['similarity_matrix'].empty:
-            try:
-                ProfileVisualizer.plot_similarity_heatmap(
-                    results['similarity_matrix'],
-                    title="Cross-Dataset Profile Similarity (Rank Correlation)",
-                    output_path=os.path.join(vis_dir, 'similarity_heatmap.png'),
-                    vmin=-1.0,  # Rank corr can be negative
-                    vmax=1.0
-                )
-                self._log("Saved: similarity_heatmap.png")
-            except Exception as e:
-                self._log(f"Warning: Could not generate similarity heatmap: {e}")
-        
-        # Generate metric-specific heatmaps if available
-        if 'metric_matrices' in results and results['metric_matrices']:
-            metric_dir = os.path.join(vis_dir, 'metric_heatmaps')
-            os.makedirs(metric_dir, exist_ok=True)
-            
-            metric_titles = {
-                'jaccard': 'Jaccard Similarity',
-                'cosine': 'Cosine Similarity',
-                'rank': 'Rank Correlation',
-                'rank_union': 'Rank Correlation (Union)'
-            }
-            
-            for metric_name, matrix in results['metric_matrices'].items():
-                if matrix is not None and not matrix.empty:
-                    try:
-                        vmin = -1.0 if metric_name.startswith('rank') else 0.0
-                        ProfileVisualizer.plot_similarity_heatmap(
-                            matrix,
-                            title=f"Cross-Dataset Profile Similarity ({metric_titles.get(metric_name, metric_name)})",
-                            output_path=os.path.join(metric_dir, f'similarity_{metric_name}.png'),
-                            vmin=vmin,
-                            vmax=1.0
-                        )
-                        self._log(f"Saved: metric_heatmaps/similarity_{metric_name}.png")
-                    except Exception as e:
-                        self._log(f"Warning: Could not generate {metric_name} heatmap: {e}")
-        
-        # Generate role comparison chart if available
-        if 'summary' in results and not results['summary'].empty and 'role' in results['summary'].columns:
-            try:
-                ProfileVisualizer.plot_role_comparison(
-                    results['summary'],
-                    title="Connectivity Profile Similarity by Role",
-                    output_path=os.path.join(vis_dir, 'role_comparison.png')
-                )
-                self._log("Saved: role_comparison.png")
-            except Exception as e:
-                self._log(f"Warning: Could not generate role comparison: {e}")
-        
-        # Generate verification summary bar chart
-        if 'summary' in results and not results['summary'].empty:
-            try:
-                ProfileVisualizer.plot_verification_summary(
-                    results['summary'],
-                    title="Neuron Type Verification Summary",
-                    output_path=os.path.join(vis_dir, 'verification_summary.png')
-                )
-                self._log("Saved: verification_summary.png")
-            except Exception as e:
-                self._log(f"Warning: Could not generate verification summary: {e}")
-        
-        # Generate profile comparisons for top types
-        if 'summary' in results and not results['summary'].empty:
-            top_types = results['summary'].head(5)['neuron_type'].tolist()
-            
-            for neuron_type in top_types:
-                try:
-                    # Get profiles for all datasets
-                    profiles = {}
-                    for ds in dataset_names:
-                        try:
-                            profile = profiler.get_profile(neuron_type, ds)
-                            profiles[ds] = profile
-                        except Exception:
-                            pass
-                    
-                    if len(profiles) >= 2:
-                        # Use the static method with correct signature
-                        ProfileVisualizer.plot_profile_comparison(
-                            profiles=profiles,
-                            neuron_type=neuron_type,
-                            direction='both',
-                            output_path=os.path.join(vis_dir, f'profile_{neuron_type}.png')
-                        )
-                        self._log(f"Saved: profile_{neuron_type}.png")
-                        
-                except Exception as e:
-                    self._log(f"Warning: Could not generate profile comparison for {neuron_type}: {e}")
-        
-        # Generate HTML report - save to parent folder (comparison_results_{timestamp})
-        try:
-            # output_dir is .../connectivity_profile_verification
-            # We want .../connectivity_profile_comparison.html
-            parent_dir = os.path.dirname(output_dir)
-            html_output_path = os.path.join(parent_dir, 'connectivity_profile_comparison.html')
-            
-            # Link back to main comparison report (if exists in same folder)
-            main_report_url = 'comparison_report.html'
-            
-            ProfileVisualizer.generate_html_report(
-                results,
-                similarity_matrix=results.get('similarity_matrix'),
-                metric_matrices=results.get('metric_matrices'),
-                output_path=html_output_path,
-                title="Connectivity Profile Comparison Report",
-                main_report_url=main_report_url
-            )
-            self._log(f"Saved: connectivity_profile_comparison.html")
-        except Exception as e:
-            self._log(f"Warning: Could not generate HTML report: {e}")
-    
     # =========================================================================
     # Conserved Path Visualization
     # =========================================================================
@@ -7188,9 +6679,7 @@ class ComparisonAnalyzer:
         
         # Try to import plotly, fall back to basic HTML if not available
         try:
-            import plotly.graph_objects as go
-            from plotly.subplots import make_subplots
-            has_plotly = True
+                                    has_plotly = True
         except ImportError:
             has_plotly = False
             self._log("Warning: Plotly not installed. Generating basic HTML report.")

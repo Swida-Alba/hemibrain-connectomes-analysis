@@ -4,7 +4,7 @@ FindPath Tab - Multi-hop pathfinding between neuron groups.
 
 from nicegui import ui
 
-from ..config import DEFAULTS, PATHFINDING_ALGORITHMS, FILTER_OPTIONS, OUTPUT_FORMATS, NETWORK_LAYOUTS
+from ..config import DEFAULTS, PATHFINDING_ALGORITHMS, FILTER_OPTIONS, OUTPUT_FORMATS, NETWORK_LAYOUTS, SEARCH_COLUMNS
 from ..components.common import (
     dataset_selector, neuron_list_input, number_input, select_input,
     checkbox_input, dir_input, apply_filter_mode, section_header, param_grid, tool_page,
@@ -74,10 +74,13 @@ def create_find_path_tab():
                         placeholder="e.g., PPL1_dopamine",
                     ).classes("w-full").tooltip("Custom label for target group in output files/plots.")
 
-                keyword_filter = ui.input(
-                    label="Keywords to Exclude from Paths (comma-separated)",
-                    placeholder="e.g., None, unknown",
-                ).classes("w-full").tooltip("Paths containing these keywords in neuron types will be removed.")
+                keyword_filter = neuron_list_input(
+                    label="Keywords to Exclude from Paths",
+                    show_filter=False,
+                    show_upload=False,
+                    hint="Paths containing these keywords in neuron types will be removed. "
+                         "Type a keyword and press Enter (or leave the field) to add it as a chip.",
+                )
 
                 with param_grid(3):
                     min_ratio = number_input(
@@ -90,8 +93,15 @@ def create_find_path_tab():
                     )
                     pathfinding_algo = select_input(
                         "Algorithm", PATHFINDING_ALGORITHMS, DEFAULTS["pathfinding"],
-                        hint="Bidirectional: fastest for short paths. DP: prunes dead ends. MemoizedDFS: best for deep paths. DFS: lowest memory.",
+                        hint="MemoizedDFS: recommended default (fastest measured at all depths, no graph copy). DFS: backward memoized, best with few targets. MeetInMiddle: shallow queries. DP: robust. Bidirectional: shortest-first but high memory.",
+                        help_doc="pathfinding_algorithms.html",
                     )
+                search_columns = select_input(
+                    "Search Columns", SEARCH_COLUMNS, "auto",
+                    hint="Which columns to search when resolving neuron names. "
+                         "'auto': all columns (bodyId -> type -> instance -> flywireType/others). "
+                         "Use 'type'/'instance'/'bodyId' to restrict the search.",
+                )
 
                 with param_grid(3):
                     filter_by = select_input(
@@ -131,7 +141,8 @@ def create_find_path_tab():
                         placeholder="e.g., aMe_clock_paths",
                     ).classes("w-full drocat-input").tooltip(
                         "Custom output folder name. Leave empty for the unified auto name "
-                        "(findpath_<dataset>_<src>_to_<tgt>_<params>_<timestamp>)."
+                        "(findallpath_<dataset>_<src>_to_<tgt>_<params>_<timestamp>; "
+                        "findpath_... in per-path mode)."
                     )
 
                 ui.separator()
@@ -183,9 +194,8 @@ def create_find_path_tab():
         output_panel.clear()
         output_panel.set_running(True)
 
-        # Parse keyword filter
-        kw_raw = keyword_filter.value.strip()
-        keywords = [k.strip() for k in kw_raw.split(",") if k.strip()] if kw_raw else ['None']
+        # Parse keyword filter (chips are already individual keywords)
+        keywords = [str(k) for k in keyword_filter.get_value()[1]] or ['None']
 
         constructor_params = {
             "dataset": dataset.value,
@@ -198,6 +208,7 @@ def create_find_path_tab():
             "max_interlayer": int(max_interlayer.value),
             "filter_by": filter_by.value,
             "pathfinding": pathfinding_algo.value,
+            "search_columns": search_columns.value,
             "network_layout": network_layout.value,
             "use_cache": use_cache.value,
             "edgeN_limit": int(edge_limit.value),

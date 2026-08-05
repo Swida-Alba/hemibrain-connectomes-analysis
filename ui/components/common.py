@@ -7,13 +7,13 @@ a focus-panel + contact-sheet workspace layout.
 """
 
 from nicegui import ui
-from typing import List, Optional, Callable, Dict
+from typing import List, Optional, Callable
 from pathlib import Path
 import inspect
 import platform
 import subprocess
 
-from ..config import DATASETS, PROJECT_ROOT, get_default_output_dir
+from ..config import PROJECT_ROOT, get_default_output_dir
 from ..runner import pick_directory
 
 
@@ -282,34 +282,31 @@ def _normalize_neuron_value(item):
     return int(value) if value.isdigit() else value
 
 
-def _merge_pending_neurons(current: List, pending_text: str) -> List:
-    """Merge pending editor text into a chip list without duplicating values."""
-    merged = [_normalize_neuron_value(item) for item in (current or [])]
-    existing = {str(item) for item in merged}
-    for item in parse_neuron_list(pending_text):
-        normalized = _normalize_neuron_value(item)
-        if str(normalized) not in existing:
-            merged.append(normalized)
-            existing.add(str(normalized))
-    return merged
-
-
 def neuron_list_input(
     label: str = "Neurons",
     placeholder: str = "e.g., aMe12, aMe10, DN1p (or upload CSV/TSV/Excel)",
     hint: str = (
-        "Type a neuron and press Enter or leave the field to add it as a chip. "
-        "Paste comma/newline lists or upload a CSV/TSV/Excel file (first column). "
-        "Supports types, bodyIds and regex patterns."
+        "Type a name and press Enter or leave the field to add it as a chip. "
+        "Commas and spaces are kept as part of the name. "
+        "Use the playlist button to paste lists, or upload a CSV/TSV/Excel "
+        "file (first column)."
     ),
+    show_filter: bool = True,
+    show_upload: bool = True,
+    max_items: Optional[int] = None,
+    initial: Optional[List] = None,
 ) -> ui.element:
     """
     Create a chip-based list input for neurons.
 
-    - Type a neuron (type, bodyId or pattern) and press Enter or leave the field
-      to add a chip.
-    - Paste a comma/newline separated list via the playlist button.
-    - Upload a CSV/TSV/Excel file (first column) via the upload dropdown.
+    - Type a name (type, bodyId or pattern) and press Enter or leave the field
+      to add it as a chip. The whole typed text becomes ONE chip — commas and
+      spaces inside names are preserved, never treated as separators.
+    - Paste a list via the playlist button (one value per line or
+      comma-separated) or upload a CSV/TSV/Excel file (first column).
+    - ``initial`` seeds the chip list with pre-existing values.
+    - ``max_items`` caps the list (used for single-input tabs); additional
+      values are rejected once the cap is reached.
     - A live count badge and a Clear button keep the list manageable.
 
     Returns container with .get_value() -> (filter_mode, neuron_list).
@@ -340,84 +337,94 @@ def neuron_list_input(
             # Chip-based list input. Quasar normally commits a new value only
             # on Enter; the input event below preserves the editor text so it
             # can also be committed when the user moves focus elsewhere.
+            # Seed values are kept in the options list: NiceGUI's QSelect only
+            # renders chips whose values exist in its options (model-value is
+            # filtered against them), so committed values must be added there.
+            initial_values = [_normalize_neuron_value(item) for item in (initial or [])]
             chip_input = ui.select(
-                options=[],
-                value=[],
+                options=list(initial_values),
+                value=list(initial_values),
                 label=label,
                 multiple=True,
             ).props(
                 'use-chips use-input new-value-mode="add-unique" '
                 'input-debounce="0"'
-            ).classes("flex-grow drocat-select").tooltip(hint)
+            ).classes("flex-grow drocat-select drocat-chip-input").tooltip(hint)
 
-            filter_mode = ui.select(
-                options={
-                    "exact": "Exact",
-                    "startswith": "Starts with",
-                    "contains": "Contains",
-                    "endswith": "Ends with",
-                    "regex": "Regex",
-                },
-                value="exact",
-                label="Filter",
-            ).classes("w-32 drocat-select").props("dense outlined").tooltip(
-                "Exact: match exactly\nStarts with: prefix match\nContains: substring\nEnds with: suffix\nRegex: pattern"
-            )
+            filter_mode = None
+            if show_filter:
+                filter_mode = ui.select(
+                    options={
+                        "exact": "Exact",
+                        "startswith": "Starts with",
+                        "contains": "Contains",
+                        "endswith": "Ends with",
+                        "regex": "Regex",
+                    },
+                    value="exact",
+                    label="Filter",
+                ).classes("w-32 drocat-select").props("dense outlined").tooltip(
+                    "Exact: match exactly\nStarts with: prefix match\nContains: substring\nEnds with: suffix\nRegex: pattern"
+                )
 
-            # Paste a whole list (comma / newline separated)
-            with ui.button(icon="playlist_add").props("flat dense round").classes(
-                "drocat-upload-trigger"
-            ).tooltip("Paste a list of neurons (comma or newline separated)"):
-                with ui.menu() as paste_menu:
-                    ui.label("Paste neuron list").classes(
-                        "text-caption drocat-muted px-3 pt-2"
-                    )
-                    ui.label(
-                        "One per line or comma-separated — e.g. aMe12, aMe10"
-                    ).classes("text-caption drocat-muted px-3 pb-1")
-                    paste_area = ui.textarea(
-                        placeholder="aMe12, aMe10\nPPL101, PPL103"
-                    ).props("autogrow").classes("w-80 drocat-input")
+            if show_upload:
+                # Paste a whole list (comma / newline separated)
+                with ui.button(icon="playlist_add").props("flat dense round").classes(
+                    "drocat-upload-trigger"
+                ).tooltip("Paste a list of neurons (comma or newline separated)"):
+                    with ui.menu() as paste_menu:
+                        ui.label("Paste neuron list").classes(
+                            "text-caption drocat-muted px-3 pt-2"
+                        )
+                        ui.label(
+                            "One per line or comma-separated — e.g. aMe12, aMe10"
+                        ).classes("text-caption drocat-muted px-3 pb-1")
+                        paste_area = ui.textarea(
+                            placeholder="aMe12, aMe10\nPPL101, PPL103"
+                        ).props("autogrow").classes("w-80 drocat-input")
 
-                    def add_pasted():
-                        items = parse_neuron_list(paste_area.value)
-                        if not items:
-                            return
-                        current = list(chip_input.value or [])
-                        existing = {str(c) for c in current}
-                        for item in items:
-                            if str(item) not in existing:
-                                current.append(item)
-                                existing.add(str(item))
-                        chip_input.value = current
-                        update_status()
-                        paste_area.value = ""
-                        paste_menu.close()
+                        def add_pasted():
+                            items = parse_neuron_list(paste_area.value)
+                            if not items:
+                                return
+                            current = list(chip_input.value or [])
+                            existing = {str(c) for c in current}
+                            for item in items:
+                                if str(item) not in existing:
+                                    current.append(item)
+                                    existing.add(str(item))
+                            if max_items is not None:
+                                current = current[:max_items]
+                            sync_options(current)
+                            chip_input.value = current
+                            update_status()
+                            paste_area.value = ""
+                            paste_menu.close()
 
-                    ui.button(
-                        "Add to list", icon="add", on_click=add_pasted
-                    ).props("flat dense color=primary")
+                        ui.button(
+                            "Add to list", icon="add", on_click=add_pasted
+                        ).props("flat dense color=primary")
 
-            # Compact upload: hidden inside a dropdown attached to the input row
-            with ui.button(icon="upload_file").props("flat dense round").classes(
-                "drocat-upload-trigger"
-            ).tooltip("Upload CSV/TSV/Excel (first column = neurons)"):
-                with ui.menu() as upload_menu:
-                    ui.label("Load neuron list from file").classes(
-                        "text-caption drocat-muted px-3 pt-2"
-                    )
-                    ui.label("CSV / TSV / XLSX / XLS · first column is read").classes(
-                        "text-caption drocat-muted px-3 pb-1"
-                    )
-                    ui.upload(
-                        label="Choose neuron file",
-                        on_upload=handle_upload,
-                        auto_upload=True,
-                    ).props('accept=".csv,.xlsx,.xls,.tsv" flat dense').classes("w-72")
-                    ui.link(
-                        "File format instructions",
-                        "docs/ui_guides/input_formats.html",
-                    ).classes("drocat-doc-link px-3 pb-2")
+                # Compact upload: hidden inside a dropdown attached to the input row
+                with ui.button(icon="upload_file").props("flat dense round").classes(
+                    "drocat-upload-trigger"
+                ).tooltip("Upload CSV/TSV/Excel (first column = neurons)"):
+                    with ui.menu() as upload_menu:
+                        ui.label("Load neuron list from file").classes(
+                            "text-caption drocat-muted px-3 pt-2"
+                        )
+                        ui.label("CSV / TSV / XLSX / XLS · first column is read").classes(
+                            "text-caption drocat-muted px-3 pb-1"
+                        )
+                        ui.upload(
+                            label="Choose neuron file",
+                            on_upload=handle_upload,
+                            auto_upload=True,
+                        ).props('accept=".csv,.xlsx,.xls,.tsv" flat dense').classes("w-72")
+                        ui.link(
+                            "File format instructions",
+                            "docs/ui_guides/input_formats.html",
+                        ).classes("drocat-doc-link px-3 pb-2")
 
         # Status row: live count + upload status + clear
         with ui.row().classes("w-full items-center gap-2"):
@@ -434,6 +441,18 @@ def neuron_list_input(
     def normalize_neuron(item):
         return _normalize_neuron_value(item)
 
+    def sync_options(values):
+        """Keep committed values in the option list so they render as chips.
+
+        NiceGUI's QSelect derives the rendered model-value from its options
+        (``Select._value_to_model_value`` skips values not in the options
+        list), so any value committed programmatically — blur, paste, seed —
+        must be added to ``options`` or the chip stays invisible.
+        """
+        for value in values:
+            if value not in chip_input.options:
+                chip_input.options.append(value)
+
     def update_status():
         combined = [normalize_neuron(item) for item in uploaded_neurons]
         combined.extend(normalize_neuron(item) for item in (chip_input.value or []))
@@ -448,20 +467,51 @@ def neuron_list_input(
         upload_label.set_visibility(False)
         update_status()
 
-    def remember_typed_text(event):
-        """Keep native editor text before Quasar clears it on popup close."""
-        value = getattr(event, "args", "")
-        pending_input["value"] = str(value or "")
+    def remember_user_input(event):
+        """Track the native editor input — user typing AND deletions.
 
-    def commit_pending_text(_event=None):
-        """Commit editor text when focus leaves the chip selector."""
-        text = pending_input["value"]
+        The native ``input`` event fires only for user edits (Quasar resets the
+        editor programmatically, which never emits it), so an empty value here
+        means the user cleared the field and the pending text must be dropped.
+        """
+        pending_input["value"] = str(getattr(event, "args", "") or "")
+
+    def remember_quasar_input(event):
+        """Track Quasar's ``input-value``, ignoring its blur-reset emission.
+
+        Quasar emits ``input-value ''`` when it clears the editor after focus
+        loss; that must not wipe the text typed just before the blur handler
+        commits it. Non-empty values always replace the pending text.
+        """
+        value = str(getattr(event, "args", "") or "")
+        if value.strip():
+            pending_input["value"] = value
+
+    def commit_pending_text(event=None):
+        """Commit editor text when focus leaves the chip selector.
+
+        The whole editor text becomes a single chip: commas and spaces are
+        legal inside names (e.g. driver line names, 'A -> B -> C' layers) and
+        are never treated as separators. Enter and focus loss are the only
+        commit triggers.
+        """
+        args = getattr(event, "args", None) if event is not None else None
+        text = str(args or "") or pending_input["value"]
         pending_input["value"] = ""
-        if not str(text).strip():
+        text = text.strip()
+        if not text:
             return
         current = list(chip_input.value or [])
-        merged = _merge_pending_neurons(current, text)
-        if merged != current:
+        # Single-item inputs reject any additional value once at capacity.
+        if max_items is not None and len(current) >= max_items:
+            update_status()
+            return
+        value = _normalize_neuron_value(text)
+        if value not in current:
+            merged = current + [value]
+            if max_items is not None:
+                merged = merged[:max_items]
+            sync_options(merged)
             chip_input.set_value(merged)
         update_status()
 
@@ -469,21 +519,31 @@ def neuron_list_input(
         # Enter, chip removal, paste, and uploads all update the model value.
         # In each case there is no longer an uncommitted editor value.
         pending_input["value"] = ""
+        current = list(chip_input.value or [])
+        # Enforce the item cap even for values Quasar added natively (Enter).
+        if max_items is not None and len(current) > max_items:
+            current = current[:max_items]
+        sync_options(current)
+        if current != list(chip_input.value or []):
+            chip_input.set_value(current)
+            return
         update_status()
 
-    # QSelect emits ``input-value`` for both user input and its own reset on
-    # blur.  The native input event is user-only, so it lets us distinguish a
-    # user deleting their text from Quasar clearing the editor after focusout.
+    # Capture the editor text while the user types. The native ``input`` event
+    # (trusted typing sets the DOM value, and the js_handler ships the text) is
+    # user-only, so it also tracks deletions; Quasar's ``input-value`` Vue event
+    # mirrors the text but re-emits an empty value on blur-reset, which must be
+    # ignored so the typed text survives until the commit handler runs.
     chip_input.on(
         "input",
-        remember_typed_text,
-        js_handler="(event) => emit(event?.target?.value || '')",
+        remember_user_input,
+        js_handler="(event) => emit(event?.target?.value ?? '')",
     )
+    chip_input.on("input-value", remember_quasar_input)
     chip_input.on_value_change(handle_value_change)
-    # ``focusout`` is synchronous and therefore commits before a following
-    # Run-button click is handled. ``blur`` remains as a fallback for browsers
-    # or component versions which only forward Quasar's field event.
-    chip_input.on("focusout", commit_pending_text, js_handler="() => emit(null)")
+    # Commit the remembered editor text when the field loses focus, so a value
+    # is added as a chip without requiring Enter. ``blur`` is a Quasar field
+    # event and fires reliably when focus moves elsewhere.
     chip_input.on("blur", commit_pending_text)
     clear_button.on_click(clear_all)
     update_status()
@@ -491,7 +551,11 @@ def neuron_list_input(
     def get_value():
         combined = [normalize_neuron(item) for item in uploaded_neurons]
         combined.extend(normalize_neuron(item) for item in (chip_input.value or []))
-        return (filter_mode.value, list(dict.fromkeys(combined)))
+        combined = list(dict.fromkeys(combined))
+        if max_items is not None:
+            combined = combined[:max_items]
+        mode = filter_mode.value if filter_mode is not None else "exact"
+        return (mode, combined)
 
     container.get_value = get_value
     container.chip_input = chip_input
@@ -530,15 +594,27 @@ def select_input(
     options: List[str],
     default: Optional[str] = None,
     hint: str = "",
+    help_doc: Optional[str] = None,
 ) -> ui.select:
-    """Create a dropdown select input with tooltip."""
-    sel = ui.select(
-        options=options,
-        value=default or options[0],
-        label=label,
-    ).classes("w-full drocat-select")
-    if hint:
-        sel.tooltip(hint)
+    """Create a dropdown select input with tooltip.
+
+    help_doc: name of a docs/ui_guides/*.html file; a small "guide" link is
+    rendered under the select so the option list can be explained in depth.
+    """
+    with ui.column().classes("gap-0 w-full"):
+        sel = ui.select(
+            options=options,
+            value=default or options[0],
+            label=label,
+        ).classes("w-full drocat-select")
+        if hint:
+            sel.tooltip(hint)
+        if help_doc:
+            ui.link(
+                "Algorithm guide",
+                f"docs/ui_guides/{help_doc}",
+                new_tab=True,
+            ).classes("text-caption drocat-doc-link")
     return sel
 
 
@@ -596,7 +672,7 @@ def chip_list_input(
         value=initial or [],
         label=label,
         multiple=True,
-    ).classes("w-full drocat-select").props('use-chips use-input new-value-mode="add-unique"').tooltip(hint)
+    ).classes("w-full drocat-select drocat-chip-input").props('use-chips use-input new-value-mode="add-unique"').tooltip(hint)
     sel.props('input-debounce="0"')
     return sel
 
@@ -677,20 +753,9 @@ def apply_filter_mode(neurons: List, mode: str) -> List:
 
 
 def open_folder(path: str):
-    """Open a folder in the system file manager."""
-    path = Path(path)
-    if not path.exists():
-        return
-    system = platform.system()
-    try:
-        if system == "Darwin":
-            subprocess.run(["open", str(path)])
-        elif system == "Windows":
-            subprocess.run(["explorer", str(path)])
-        else:
-            subprocess.run(["xdg-open", str(path)])
-    except Exception:
-        pass
+    """Open a folder in the system file manager (shared impl in ui.runner)."""
+    from ..runner import open_folder as _open_folder
+    _open_folder(path)
 
 
 # =============================================================================

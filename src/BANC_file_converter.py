@@ -1,10 +1,5 @@
 import os
-import shutil
 import pandas as pd
-import numpy as np
-import pyarrow as pa
-import pyarrow.parquet as pq
-from tqdm import tqdm
 
 def process_neurons_to_parquet(read_path, save_path, save_csv_path=None):
     """

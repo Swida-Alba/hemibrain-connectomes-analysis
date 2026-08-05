@@ -79,7 +79,7 @@ def img2pptx(
         - A list of image file paths (aggregates into PPTX)
     output_pptx : str, optional
         Path for the output PPTX file. If None, auto-generated based on input.
-    images_per_slide : tuple, default (4, 3)
+    images_per_slide : tuple, default (4, 2)
         (columns, rows) - number of images per slide when aggregating images.
         Not used for PDF conversion.
     slide_title : str, optional
@@ -92,7 +92,7 @@ def img2pptx(
         - 'a4': 11.69" x 8.27" (A4 landscape)
     margin : float, default 0.3
         Margin in inches from slide edges.
-    title_height : int, default 0
+    title_height : int, default 60
         Height reserved for title in points (pt). Set to 0 to disable title space.
         Recommended: 20-30 for visible titles.
     label_fontsize : int, default 20
@@ -103,7 +103,7 @@ def img2pptx(
         Label placement relative to image.
     label_overlay_alpha : float, default 0.7
         Opacity of label background.
-    cell_padding : float, default 0
+    cell_padding : float, default 0.05
         Padding around images.
     include_subfolders : bool, default False
         Recursively find images.

@@ -23,7 +23,6 @@ Example:
     >>> plt.show()
 """
 
-import os
 import warnings
 
 # Suppress matplotlib warnings about too many figures
@@ -36,14 +35,13 @@ matplotlib.rcParams['figure.max_open_warning'] = 100
 
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple, Union, Any
+from typing import Dict, Optional, Tuple, Any
 import numpy as np
 import pandas as pd
 
 # Import connectivity profile types
 from .connectivity_profiler import ConnectivityProfile
-from .profile_comparator import ProfileComparator, ComparisonResult
-from .cross_dataset_verifier import VerificationResult
+from .profile_comparator import ProfileComparator
 
 
 # ============================================================================

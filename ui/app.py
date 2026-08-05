@@ -150,39 +150,36 @@ html, body {
     font-weight: 650;
     letter-spacing: -.015em;
 }
-.drocat-tabs .drocat-tab-group {
-    display: flex;
-    align-items: center;
-    flex: 0 0 auto;
-    padding: 0 5px 0 7px;
-    margin: 6px 0;
-    border-left: 1px solid var(--drocat-line-strong);
-    font-size: 8px;
-    font-weight: 800;
-    letter-spacing: .1em;
-    text-transform: uppercase;
-    color: var(--drocat-faint);
-    user-select: none;
-    white-space: nowrap;
+/* Group tints: Connectome (blue) vs NeuronBridge (purple) segments */
+.drocat-tabs .drocat-connectome-tab { background: var(--drocat-cobalt-soft); }
+.drocat-tabs .drocat-connectome-tab:hover { background: #dfe9ff !important; }
+.drocat-tabs .drocat-nb-tab { background: #f6f1ff; }
+.drocat-tabs .q-tab--active.drocat-nb-tab {
+    color: #7c3aed !important;
 }
-.drocat-tabs .drocat-tab-group:first-child { border-left: 0; padding-left: 3px; }
-.drocat-tabs .drocat-tab-group-nb { color: #7c3aed; }
-.drocat-tabs .drocat-tab-group-system { display: none; }
-.drocat-nb-tab .q-tab__label::after {
+.drocat-tabs .drocat-nb-tab:hover { background: #efe6ff !important; }
+/* The NB badge sits NEXT to the tab icon (no overlap) and uses the same
+   font as the tab names, so it reads as part of the label typography. */
+.drocat-nb-tab .q-tab__icon {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+}
+.drocat-nb-tab .q-tab__icon::after {
     content: "NB";
-    margin-left: 6px;
     padding: 1px 5px;
     border-radius: 999px;
     background: #7c3aed;
     color: #fff;
-    font-size: 9px;
-    font-weight: 800;
-    letter-spacing: .06em;
+    /* The icon element uses the Material Icons font; the badge must use the
+       app font (same as tab names) instead of inheriting it. */
+    font-family: Inter, "Avenir Next", "Segoe UI", Helvetica, Arial, sans-serif;
+    font-size: 11px;
+    font-weight: 650;
+    line-height: 1.2;
+    letter-spacing: -.015em;
+    white-space: nowrap;
 }
-.drocat-tabs .q-tab--active.drocat-nb-tab {
-    color: #7c3aed !important;
-}
-.drocat-tabs .drocat-nb-tab:hover { background: #f5f0ff !important; }
 .drocat-tabs .q-tabs__arrow { display: none !important; }
 
 @media (max-width: 1100px) {
@@ -191,7 +188,7 @@ html, body {
     .drocat-tabs .q-tab { padding: 0 3px !important; min-height: 36px !important; }
     .drocat-tabs .q-tab__icon { font-size: 15px; }
     .drocat-tabs .q-tab__label { font-size: 9px; letter-spacing: -.03em; }
-    .drocat-tabs .drocat-tab-group { padding-left: 4px; padding-right: 3px; font-size: 7px; }
+    .drocat-nb-tab .q-tab__icon::after { font-size: 9px; padding: 0 4px; }
 }
 
 /* Panel tag badge (NeuronBridge etc.) */
@@ -471,21 +468,20 @@ def main_page():
 
     # Main content
     with ui.column().classes("w-full drocat-shell gap-3"):
-        # Segmented navigation
+        # Segmented navigation. Groups are distinguished by tint instead of
+        # labels: Connectome tabs get the blue segment, NeuronBridge tabs the
+        # purple segment (their tabs already carry the NB badge).
         with ui.tabs().classes("drocat-tabs w-full") as tabs:
-            ui.label("Connectome").classes("drocat-tab-group")
-            tab_pathfinding = ui.tab("Find Path", icon="route")
-            tab_direct = ui.tab("Direct", icon="arrow_forward")
-            tab_skeleton = ui.tab("3D Skeleton", icon="view_in_ar")
-            tab_network = ui.tab("Network", icon="account_tree")
-            tab_comparison = ui.tab("Cross-Dataset", icon="sync_alt")
-            tab_homologs = ui.tab("Homologs", icon="compare")
-            tab_profiling = ui.tab("Profiling", icon="analytics")
-            ui.label("NeuronBridge").classes("drocat-tab-group drocat-tab-group-nb")
+            tab_pathfinding = ui.tab("Find Path", icon="route").classes("drocat-connectome-tab")
+            tab_direct = ui.tab("Direct", icon="arrow_forward").classes("drocat-connectome-tab")
+            tab_skeleton = ui.tab("3D Skeleton", icon="view_in_ar").classes("drocat-connectome-tab")
+            tab_network = ui.tab("Network", icon="account_tree").classes("drocat-connectome-tab")
+            tab_comparison = ui.tab("Cross-Dataset", icon="sync_alt").classes("drocat-connectome-tab")
+            tab_homologs = ui.tab("Homologs", icon="compare").classes("drocat-connectome-tab")
+            tab_profiling = ui.tab("Profiling", icon="analytics").classes("drocat-connectome-tab")
             tab_find_lines = ui.tab("Find Lines", icon="biotech").classes("drocat-nb-tab")
             tab_find_neuron = ui.tab("Find Neurons", icon="search").classes("drocat-nb-tab")
             tab_colabel = ui.tab("Co-Labeling", icon="layers").classes("drocat-nb-tab")
-            ui.label("System").classes("drocat-tab-group drocat-tab-group-system")
             tab_settings = ui.tab("Settings", icon="settings")
 
         with ui.tab_panels(tabs, value=tab_pathfinding).classes("w-full bg-transparent"):

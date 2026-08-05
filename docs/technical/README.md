@@ -41,6 +41,22 @@ Complete overview of path finding algorithm optimizations.
 - Memory-efficient recursion
 - Progress tracking overhead reduction
 
+### [Pathfinding Algorithm Evaluation](./PATHFINDING_ALGORITHM_EVALUATION.md)
+Theoretical (complexity) and practical (measured time + memory) evaluation
+of the five `FastGraph` pathfinding algorithms, with measured results on a
+real hemibrain v1.2.1 connectome query and synthetic scaling graphs.
+
+**Key findings**:
+- All algorithms verified correct on 150 random graphs (750 runs, zero mismatches)
+- Algorithm names now match the implementations (MemoizedDFS runs memoized
+  DFS forward; MeetInMiddle runs meet-in-the-middle)
+- Lazy reverse-adjacency index eliminated the ~250 MB reversed-graph
+  copies: all algorithms except Bidirectional run in <10 MB at 2-4 layers
+- MemoizedDFS is the default; MeetInMiddle fastest at 2-3 layers,
+  MemoizedDFS at 4, Bidirectional at 5 (but 18.9 -> 892 MB memory)
+- Bitmask visited sets and degree-2 compression were measured and rejected
+  (not faster on real connectomes)
+
 ### [Performance Optimizations Dec 2025](./PERFORMANCE_OPTIMIZATIONS_DEC2025.md)
 Details on Polars integration and `skip_bodyId` optimization.
 

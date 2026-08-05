@@ -55,7 +55,6 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent / 'src'))
 
 from comparison.profile_comparator import ConnectivityProfileComparer
-from statvis import get_types
 
 if __name__ == "__main__":
     

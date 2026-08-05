@@ -29,7 +29,6 @@ Example:
 import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
-from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Union, Any
 import numpy as np
@@ -37,8 +36,7 @@ import pandas as pd
 
 from .connectivity_profiler import (
     ConnectivityProfile, 
-    ConnectivityProfiler, 
-    ProfilerConfig
+    ConnectivityProfiler
 )
 from .profile_comparator import (
     ProfileComparator, 

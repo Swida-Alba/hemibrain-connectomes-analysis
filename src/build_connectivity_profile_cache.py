@@ -149,7 +149,6 @@ def build_cache(
 
 def show_stats(dataset: str) -> None:
     """Show cache statistics for a dataset."""
-    import pandas as pd
     import numpy as np
     
     # Normalize dataset name

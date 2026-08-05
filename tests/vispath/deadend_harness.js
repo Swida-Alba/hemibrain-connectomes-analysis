@@ -1,0 +1,226 @@
+// Test harness: extracts isDeadEndNodeIn / recomputeDeadEnds from a
+// generated vispath network HTML and runs them against headless Cytoscape.
+// Usage: node deadend_test.js <path-to-network.html>
+const cytoscape = require(process.argv[2] + '/node_modules/cytoscape');
+const fs = require('fs');
+
+const htmlPath = process.argv[3] || '/tmp/vispath-test/network_test.html';
+const html = fs.readFileSync(htmlPath, 'utf8');
+
+// Extract a top-level function declaration with balanced braces.
+function extractFunction(name, source) {
+    const marker = 'function ' + name + '(';
+    const start = source.indexOf(marker);
+    if (start === -1) throw new Error('function not found: ' + name);
+    const open = source.indexOf('{', start);
+    let depth = 0;
+    for (let i = open; i < source.length; i++) {
+        if (source[i] === '{') depth++;
+        else if (source[i] === '}') {
+            depth--;
+            if (depth === 0) return source.slice(start, i + 1);
+        }
+    }
+    throw new Error('unbalanced braces: ' + name);
+}
+
+// NOTE: the extracted sources come from the project's own generated HTML
+// artifact (written by vispath.py in this same repo), i.e. a trusted,
+// locally-produced input — never user-supplied. new Function is used only
+// to execute those extracted functions against a headless Cytoscape core.
+function loadFunction(name, cy) {
+    const fnSrc = extractFunction(name, html);
+    return new Function('cy', fnSrc + '\nreturn ' + name + ';')(cy);
+}
+
+// Extract the Cytoscape stylesheet array from the generated HTML (the
+// `style: [...]` block inside the cytoscape() call) using a bracket-
+// balanced scanner. Quotes are honored so brackets inside strings do not
+// terminate the array early.
+function extractStyleArray(source) {
+    const marker = 'style: [';
+    const start = source.indexOf(marker);
+    if (start === -1) throw new Error('stylesheet array not found');
+    let depth = 0;
+    let inStr = null;
+    for (let i = start + marker.length - 1; i < source.length; i++) {
+        const c = source[i];
+        if (inStr) {
+            if (c === '\\') { i++; continue; }
+            if (c === inStr) inStr = null;
+            continue;
+        }
+        if (c === '\'' || c === '"') { inStr = c; continue; }
+        if (c === '[') depth++;
+        else if (c === ']') {
+            depth--;
+            if (depth === 0) return source.slice(start + marker.length - 1, i + 1);
+        }
+    }
+    throw new Error('unbalanced stylesheet array');
+}
+
+const isDeadEndNodeIn = loadFunction('isDeadEndNodeIn', null);
+
+// recomputeDeadEnds calls isDeadEndNodeIn, so both sources are compiled
+// into the same function scope.
+function makeRecompute(cy) {
+    const src = extractFunction('isDeadEndNodeIn', html) + '\n' + extractFunction('recomputeDeadEnds', html);
+    return new Function('cy', src + '\nreturn recomputeDeadEnds;')(cy);
+}
+
+// The stylesheet is embedded as a JS array literal; cytoscape accepts the
+// parsed array (a raw string would be parsed as the CSS-ish string format).
+const styleArray = new Function('return ' + extractStyleArray(html))();
+
+function buildGraph(nodes, edges) {
+    const elements = [];
+    for (const [id, ntype] of Object.entries(nodes)) {
+        elements.push({ data: { id: id, node_type: ntype } });
+    }
+    let i = 0;
+    for (const [s, t, w] of edges) {
+        elements.push({ group: 'edges', data: { id: 'e' + (i++), source: s, target: t, weight: w || 1, original_weight: w || 1 } });
+    }
+    return cytoscape({ headless: true, styleEnabled: true, elements: elements, style: styleArray });
+}
+
+function hiddenDeadEnds(cy) {
+    return cy.nodes('.deadend-hidden').map(n => n.id()).sort();
+}
+
+let failures = 0;
+function check(name, got, expected) {
+    const g = JSON.stringify(got);
+    const e = JSON.stringify([].concat(expected).sort());
+    const pass = g === e;
+    console.log((pass ? 'PASS' : 'FAIL') + ' | ' + name + ' | hidden=' + g + (pass ? '' : ' expected=' + e));
+    if (!pass) failures++;
+}
+
+// --- Scenario 1: dead-end branch off a source-anchored chain ---
+// S(source) -> A -> B (B is an in-only non-target). B is a dead end; hiding
+// B exposes A as an in-only non-target dead end. S (source) must survive.
+{
+    const cy = buildGraph({ S: 'source', A: 'intermediate', B: 'intermediate' }, [['S', 'A'], ['A', 'B']]);
+    makeRecompute(cy)();
+    check('source-anchored chain propagates', hiddenDeadEnds(cy), ['A', 'B']);
+}
+
+// --- Scenario 2: pure intermediate chain A->B->C (order independence) ---
+// A is out-only non-source, C is in-only non-target: BOTH must be hidden
+// regardless of node iteration order. B (in+out) must stay visible.
+{
+    const cy = buildGraph({ A: 'intermediate', B: 'intermediate', C: 'intermediate' }, [['A', 'B'], ['B', 'C']]);
+    makeRecompute(cy)();
+    check('chain hides both ends (order-independent)', hiddenDeadEnds(cy), ['A', 'C']);
+}
+
+// --- Scenario 3: mutual dead ends X->D ---
+// X out-only non-source, D in-only non-target: both hidden.
+{
+    const cy = buildGraph({ X: 'intermediate', D: 'intermediate' }, [['X', 'D']]);
+    makeRecompute(cy)();
+    check('mutual dead ends both hidden', hiddenDeadEnds(cy), ['X', 'D']);
+}
+
+// --- Scenario 4: complete source->target chain is NOT hidden ---
+{
+    const cy = buildGraph({ S: 'source', A: 'intermediate', B: 'intermediate', T: 'target' }, [['S', 'A'], ['A', 'B'], ['B', 'T']]);
+    makeRecompute(cy)();
+    check('source-target chain untouched', hiddenDeadEnds(cy), []);
+}
+
+// --- Scenario 5: current graph determined by the hide-edges filter ---
+// Filter hides S->A (weight 10) and B->T (weight 30) via the 'filtered'
+// class -> current graph is A->B. A becomes out-only non-source, B becomes
+// in-only non-target -> both dead ends.
+{
+    const cy = buildGraph({ S: 'source', A: 'intermediate', B: 'intermediate', T: 'target' }, [['S', 'A', 10], ['A', 'B', 20], ['B', 'T', 30]]);
+    const byWeight = {};
+    cy.edges().forEach(e => { byWeight[e.data('weight')] = e.id(); });
+    cy.getElementById(byWeight[10]).addClass('filtered');
+    cy.getElementById(byWeight[30]).addClass('filtered');
+    makeRecompute(cy)();
+    check('filter defines current graph', hiddenDeadEnds(cy), ['A', 'B']);
+}
+
+// --- Scenario 6: self-loop edges never count toward degrees ---
+{
+    const cy = buildGraph({
+        A: 'intermediate', B: 'intermediate', C: 'intermediate'
+    }, [['A', 'B'], ['B', 'A'], ['B', 'C']]);
+    cy.add({ group: 'edges', data: { id: 'loopC', source: 'C', target: 'C', weight: 1 } });
+    cy.getElementById('loopC').addClass('selfloop-hidden');
+    // C in-only non-target -> dead end; A/B mutually connected -> not dead ends
+    makeRecompute(cy)();
+    check('self-loop edges excluded', hiddenDeadEnds(cy), ['C']);
+}
+
+// --- Scenario 7: manually hidden edges do not count ---
+{
+    const cy = buildGraph({
+        S: 'source', A: 'intermediate', B: 'intermediate', C: 'intermediate'
+    }, [['S', 'A'], ['A', 'B'], ['B', 'C'], ['A', 'C']]);
+    // Hide B->C manually: current graph S->A, A->B, A->C. B and C are
+    // in-only non-target -> dead ends; hiding them propagates to A, whose
+    // only remaining visible edge is the incoming S->A (in-only non-target).
+    cy.edges().forEach(e => {
+        if (e.source().id() === 'B' && e.target().id() === 'C') e.addClass('hidden');
+    });
+    makeRecompute(cy)();
+    check('manually hidden edges excluded', hiddenDeadEnds(cy), ['A', 'B', 'C']);
+}
+
+// --- Scenario 8: propagation through a long chain to fixpoint ---
+// S -> N1 -> ... -> N6 (all intermediate). N6 (in-only) is a dead end first;
+// hiding propagates backward: N5, N4, ... all become in-only non-target.
+{
+    const nodes = { S: 'source' };
+    const edges = [];
+    for (let i = 1; i <= 6; i++) {
+        nodes['N' + i] = 'intermediate';
+        edges.push(i === 1 ? ['S', 'N1'] : ['N' + (i - 1), 'N' + i]);
+    }
+    const cy = buildGraph(nodes, edges);
+    makeRecompute(cy)();
+    check('long chain propagates to fixpoint', hiddenDeadEnds(cy), ['N1', 'N2', 'N3', 'N4', 'N5', 'N6']);
+}
+
+// --- Scenario 10: dead-end classes must actually HIDE elements ---
+// The stylesheet must contain node/edge deadend-hidden rules with
+// display:none, and a hidden dead end must compute to display:none
+// (regression: classes were assigned and counted, but no style hid them).
+{
+    const cy = buildGraph({ S: 'source', A: 'intermediate', B: 'intermediate' }, [['S', 'A'], ['A', 'B']]);
+    makeRecompute(cy)();
+    const displayOf = id => [cy.getElementById(id).numericStyle('display')];
+    check('dead-end node computes display:none', displayOf('A'), ['none']);
+    check('dead-end node computes display:none (B)', displayOf('B'), ['none']);
+    check('source stays visible', displayOf('S'), ['element']);
+    const edgeDisplays = {};
+    cy.edges().forEach(e => { edgeDisplays[e.data('id')] = [e.numericStyle('display')]; });
+    check('edge into dead end hidden (S->A)', edgeDisplays.e0, ['none']);
+    check('edge between dead ends hidden (A->B)', edgeDisplays.e1, ['none']);
+}
+
+// --- Scenario 9: re-run is idempotent and re-derives classes ---
+// Running recompute twice yields the same set; manually removing a dead-end
+// class then re-running restores it (fresh set, no stale-class reliance).
+{
+    const cy = buildGraph({ A: 'intermediate', B: 'intermediate' }, [['A', 'B']]);
+    const recompute = makeRecompute(cy);
+    recompute();
+    const first = hiddenDeadEnds(cy);
+    recompute();
+    check('recompute idempotent', hiddenDeadEnds(cy), first);
+    cy.getElementById('A').removeClass('deadend-hidden');
+    cy.getElementById('e0').removeClass('deadend-hidden');
+    recompute();
+    check('stale classes re-derived', hiddenDeadEnds(cy), ['A', 'B']);
+}
+
+console.log(failures === 0 ? 'ALL DEAD-END TESTS PASSED' : failures + ' DEAD-END TEST(S) FAILED');
+// Force exit: the style-enabled Cytoscape cores keep the event loop alive
+// even after all tests complete, which would hang the pytest subprocess.
+process.exit(failures === 0 ? 0 : 1);

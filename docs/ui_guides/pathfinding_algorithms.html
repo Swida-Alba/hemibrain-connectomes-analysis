@@ -1,0 +1,184 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Pathfinding Algorithms - DROCAT Instructions</title>
+  <link rel="stylesheet" href="guide.css">
+</head>
+<body>
+<main class="guide">
+  <header class="guide-top">
+    <a class="back" href="README.html">&larr; Back to guides</a>
+    <span class="tag">Connectome</span>
+  </header>
+  <h1>Pathfinding Algorithms</h1>
+  <p class="lede">
+    How DROCAT finds multi-hop pathways and which algorithm to pick.
+    Linked from the <b>Algorithm</b> selector in <a href="find_path.html">Find All Paths</a>
+    and the <b>Pathfinding Algorithm</b> selector in <a href="cross_dataset.html">Cross-Dataset Comparison</a>.
+  </p>
+
+  <h2>What "pathfinding" means here</h2>
+  <p>
+    Given a set of <b>source neurons</b> and a set of <b>target neurons</b>,
+    DROCAT enumerates every acyclic connection chain (path) from any source
+    to any target with at most <code>Max Intermediate Layers + 1</code> edges
+    (the <b>cutoff</b>). All four algorithms return <b>exactly the same
+    paths</b> — they only differ in how fast they run and how much memory
+    they use.
+  </p>
+  <p>
+    Path counting is exponential in the cutoff (each extra hop multiplies
+    the search by the average branching factor), so the algorithm choice
+    matters most for <b>deep</b> queries (3+ intermediate layers) on
+    <b>dense</b> connectomes.
+  </p>
+
+  <h2>The algorithms</h2>
+  <div class="grid">
+    <div class="card">
+      <h3>DP (Backward Reachability)</h3>
+      <p>First computes which nodes can reach a target within the cutoff
+        (backward DP layers), then runs a forward search that only follows
+        edges that provably lead to a target.</p>
+      <p class="small">Strongest dead-end pruning; stores only node sets.
+        <b>Default and recommended</b>: fastest at 2–3 intermediate layers
+        (the common case) with low, flat memory. Degrades on very deep
+        (5+) queries.</p>
+    </div>
+    <div class="card">
+      <h3>DFS (Backward Memoized)</h3>
+      <p>A standard depth-first traversal from the targets, remembering which
+        nodes can still reach a source at each remaining depth.</p>
+      <p class="small">Moderate memory. <b>Fastest at 4 intermediate
+        layers</b> and the best time-memory tradeoff at 5, when the target
+        group is small (the backward direction starts from the smaller
+        set).</p>
+      <p class="small"><b>Best for:</b> deep paths with few targets.</p>
+    </div>
+    <div class="card">
+      <h3>MemoizedDFS (Forward Memoized)</h3>
+      <p>A depth-first traversal from the sources that remembers which
+        successors can still reach a target at each remaining depth, so
+        each (node, depth) state is computed once.</p>
+      <p class="small">Moderate memory and no reversed-graph copy — the
+        memo is built from the sources and pruned to successors that can
+        reach a target, so the search stays inside the source-side cone.
+        <b>Fastest at 4 intermediate layers</b>; the default.</p>
+      <p class="small"><b>Best for:</b> balanced queries; deep paths with
+        many targets.</p>
+    </div>
+    <div class="card">
+      <h3>MeetInMiddle (Meet-in-the-Middle)</h3>
+      <p>Stores all half-paths up to the middle depth from the sources, then
+        walks backward from the targets and stitches matching halves.</p>
+      <p class="small">Fastest at shallow depths (2–3 layers), but its
+        half-path table is rebuilt for every length and the pairwise
+        stitching costs more than a fully-pruned shared memo on real
+        connectomes — so it is <b>not</b> the deep-path winner its design
+        suggests.</p>
+      <p class="small"><b>Best for:</b> shallow queries; a safe middle
+        ground at 4+ layers.</p>
+    </div>
+    <div class="card">
+      <h3>Bidirectional (BFS)</h3>
+      <p>Searches forward from sources and backward from targets at the same
+        time, then stitches the two half-trees at the middle layer.</p>
+      <p class="small">Shortest paths first. <b>Highest memory</b>: stores
+        the full search trees from both sides, and memory grows with the
+        cutoff (452 MB at 4 layers, 1.1 GB at 5 on a small query). The
+        extra memory buys a smaller search frontier, but not faster
+        enumeration: its path stitching copies lists at every depth and
+        builds sets per candidate pair, so it is the <b>most expensive per
+        path</b> of all four (measured 10.4 µs/path vs 1.8 for DFS/DP on a
+        controlled graph) — the classic bidirectional win only applies to
+        shortest-path search, where you can stop at the first meeting.</p>
+      <p class="small"><b>Best for:</b> shallow queries where you want
+        shortest paths first and memory is not a concern.</p>
+    </div>
+  </div>
+
+  <h2>Measured performance</h2>
+  <p>
+    Real hemibrain v1.2.1 queries, connections ≥ 5 synapses, wall time
+    (untraced) + tracemalloc peak memory. All algorithms found the identical
+    path set in every scenario.
+  </p>
+  <ul>
+    <li><b>2–3 intermediate layers</b>: LC → MBON/PPL, 10,331 neurons,
+      301,443 edges, 4 sources × 5 targets (14 / 2,874 paths).</li>
+    <li><b>4–5 intermediate layers</b>: LPLC1 → MBON01, 24,576 neurons,
+      722,143 edges, 2 sources × 2 targets (35,819 paths; 5M+ paths at
+      5 layers — runs capped after 5M paths).</li>
+  </ul>
+  <table>
+    <tr><th>Algorithm</th><th>2 layers</th><th>3 layers</th>
+        <th>4 layers</th><th>5 layers</th></tr>
+    <tr><td><b>MemoizedDFS</b> (default)</td><td>0.01 s / 0.1 MB</td>
+        <td>0.06 s / 1.7 MB</td><td><b>0.23 s</b> / 7.6 MB</td>
+        <td>4.97 s / 651 MB</td></tr>
+    <tr><td>DFS (backward)</td><td>0.02 s / 0.3 MB</td><td>0.05 s / 1.8 MB</td>
+        <td>0.42 s / 9.6 MB</td><td>5.01 s / 612 MB</td></tr>
+    <tr><td>MeetInMiddle</td><td><b>0.00 s</b> / 0.3 MB</td>
+        <td><b>0.01 s</b> / 0.6 MB</td><td>1.25 s / 4.8 MB</td>
+        <td>6.18 s / 615 MB</td></tr>
+    <tr><td>DP</td><td>0.06 s / 0.8 MB</td><td>0.02 s / 1.5 MB</td>
+        <td>0.44 s / 9.4 MB</td><td>20.2 s / 651 MB</td></tr>
+    <tr><td>Bidirectional</td><td>0.07 s / 18.9 MB†</td><td>0.18 s / 59.4 MB†</td>
+        <td>0.64 s / 194.9 MB†</td><td><b>4.54 s</b> / 892 MB†</td></tr>
+  </table>
+  <p class="small">
+    Fastest time per column in <b>bold</b>. † = highest memory in that
+    column (Bidirectional stores full layer trees from both sides).
+    <b>2026-08 optimization:</b> FastGraph now keeps a lazy reverse
+    adjacency index instead of copying the whole reversed graph per run —
+    the earlier 100–450 MB footprints were mostly those copies and are
+    gone (DP dropped from 272 MB to 9.4 MB at 4 layers). At 5 layers every
+    value includes ~610 MB of the 5 million collected paths themselves.
+    Benchmark harness: <code>examples/performance/benchmark_pathfinding.py</code>;
+    full analysis in
+    <code>docs/technical/PATHFINDING_ALGORITHM_EVALUATION.md</code>.
+  </p>
+  <div class="callout info">
+    <b>What changed in the 2026-08 audit</b>
+    The algorithm names now match the implementations (a routing bug made
+    "MemoizedDFS" run meet-in-the-middle; the forward memoized DFS was
+    never wired up — and it turns out to be the fastest of all: it makes
+    no reversed-graph copy and prunes to the source-side cone). All four
+    implementations were verified correct against a naive reference on
+    150 random graphs (750 runs, zero mismatches). The default changed
+    from DP to <b>MemoizedDFS</b>.
+  </div>
+
+  <h2>Which one should I pick?</h2>
+  <table>
+    <tr><th>Your query</th><th>Recommended algorithm</th></tr>
+    <tr><td>The common case (2–4 intermediate layers)</td><td><b>MemoizedDFS</b>
+      — fastest at 4 layers and within noise elsewhere; the default</td></tr>
+    <tr><td>Shallow queries (2–3 intermediate layers)</td><td><b>MeetInMiddle</b>
+      — fastest measured (0.00–0.01 s)</td></tr>
+    <tr><td>Few targets, many sources</td><td><b>DFS</b> — the same memoized
+      search started from the smaller (target) side</td></tr>
+    <tr><td>Deep queries (5+ intermediate layers)</td><td><b>Bidirectional</b>
+      is marginally fastest (4.54 s) but at 892 MB vs ~610 MB for the
+      pruners; <b>DFS</b>/<b>MemoizedDFS</b> are the balanced choice</td></tr>
+    <tr><td>Shortest paths first, memory to spare</td><td><b>Bidirectional</b>
+      — but it is the only algorithm with a large footprint (18.9 MB →
+      892 MB with depth)</td></tr>
+  </table>
+
+  <h2>Practical tips</h2>
+  <ul>
+    <li><b>Prefilter the graph</b>: raising <b>Min Synapse Count</b> and
+      lowering <b>Edge Limit</b> shrinks the search space far more than any
+      algorithm choice.</li>
+    <li><b>Deep + dense = expensive</b>: the number of paths grows
+      exponentially with <b>Max Intermediate Layers</b>; the output itself
+      dominates runtime and memory once path counts reach millions.</li>
+    <li><b>All algorithms are equivalent</b>: results never depend on the
+      selection — switch algorithms freely to tune speed or memory.</li>
+  </ul>
+</main>
+</body>
+</html>

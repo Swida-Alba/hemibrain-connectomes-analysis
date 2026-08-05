@@ -3,8 +3,8 @@
 from nicegui import ui
 from ..config import DATASETS
 from ..components.common import (
-    dataset_selector, neuron_input, number_input, select_input, checkbox_input,
-    dir_input, parse_neuron_list, section_header, param_grid, tool_page,
+    dataset_selector, neuron_list_input, number_input, select_input, checkbox_input,
+    dir_input, section_header, param_grid, tool_page,
 )
 from ..components.output_panel import OutputPanel
 from ..runner import ScriptRunner
@@ -25,7 +25,12 @@ def create_nb_colabel_tab():
     with form_col:
         with ui.card().classes("w-full drocat-card"):
             section_header("Driver Lines", "search")
-            line_input = neuron_input(label="Driver Line Names", placeholder="e.g., VT000770, SS00001, R10A06")
+            line_input = neuron_list_input(
+                label="Driver Line Names",
+                show_filter=False,
+                show_upload=False,
+                hint="Type a driver line name and press Enter (or leave the field) to add it as a chip.",
+            )
             with param_grid(2):
                 dataset = dataset_selector(
                     label="3D Dataset (optional)",
@@ -83,7 +88,7 @@ def create_nb_colabel_tab():
         output_panel.create(run_label="Run Co-Labeling", run_icon="play_arrow")
 
     async def run_colabel():
-        lines = parse_neuron_list(line_input.value)
+        lines = line_input.get_value()[1]
         if len(lines) < 2:
             ui.notify("Please enter at least two driver lines", type="warning")
             return

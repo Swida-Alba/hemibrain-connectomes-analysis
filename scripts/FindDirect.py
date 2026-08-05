@@ -1,7 +1,6 @@
 import sys
 from pathlib import Path
 import warnings
-import pandas as pd
 
 # Add src directory to Python path
 sys.path.insert(0, str(Path(__file__).parent.parent / 'src'))

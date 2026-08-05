@@ -6,11 +6,24 @@ live log console and output files rendered as selectable cards.
 """
 
 from nicegui import ui
-from typing import List, Optional
+from typing import List, Optional, Dict
 from pathlib import Path
 from collections import defaultdict
+import re
 
 from ..runner import open_folder, open_file
+
+
+# Label of a tqdm-style progress bar, e.g. "Building target profiles:" from
+# "Building target profiles:  45%|████▍       | 1328/2972 [00:05<00:06, ...]".
+# Used to refresh the same bar in place instead of appending a new line.
+_PROGRESS_NAME_RE = re.compile(r"^\s*([^%]*?)\s*\d+%\|")
+
+
+def _progress_bar_name(message: str) -> str:
+    """Extract the progress-bar label from a tqdm-style line ('' if none)."""
+    match = _PROGRESS_NAME_RE.match(message)
+    return match.group(1).rstrip() if match else ""
 
 
 # File type categories for organizing output
@@ -56,6 +69,12 @@ class OutputPanel:
         self.cancel_button: Optional[ui.button] = None
         self._files: List[dict] = []
         self._last_is_progress = False
+        self._last_progress_name: Optional[str] = None
+        # Streaming: polls the run's output folder while the run is active so
+        # files appear as soon as they are written. Category expansions are
+        # tracked so in-place refreshes keep the user's open/closed state.
+        self._poll_timer = None
+        self._file_categories: Dict[str, ui.expansion] = {}
 
     def create(
         self,
@@ -116,22 +135,35 @@ class OutputPanel:
         if not self.log_area:
             return
         try:
-            # Progress lines (tqdm-style \r updates) replace the previous
-            # progress line in place so long-running functions show a
-            # live-updating status.
+            # Drop trailing whitespace (tqdm clears lines with spaces) and
+            # whitespace-only residue so the log stays tidy.
+            message = message.rstrip()
+            if not message:
+                return
+            # Progress lines (tqdm-style \r updates) refresh the previous line
+            # of the SAME progress bar in place, so long-running functions
+            # show a live-updating status instead of flooding the log. A new
+            # bar (different label) starts a fresh line.
             if level == "progress":
                 children = self.log_area.default_slot.children
-                if self._last_is_progress and children:
+                name = _progress_bar_name(message)
+                if (
+                    self._last_is_progress
+                    and children
+                    and name == self._last_progress_name
+                ):
                     last = children[-1]
                     if hasattr(last, "set_text"):
                         last.set_text(message)
                         last.update()
                         return
                 self._last_is_progress = True
+                self._last_progress_name = name
                 self.log_area.push(message)
                 self.log_area.update()
                 return
             self._last_is_progress = False
+            self._last_progress_name = None
             prefix_map = {
                 "stdout": "",
                 "stderr": "[WARN] ",
@@ -173,6 +205,7 @@ class OutputPanel:
                 "if (card) card.scrollIntoView({behavior:'smooth', block:'nearest'});"
             )
         else:
+            self._stop_file_streaming()
             if self.run_button:
                 self.run_button.enable()
             if self.cancel_button:
@@ -182,6 +215,34 @@ class OutputPanel:
             if self.progress_bar:
                 self.progress_bar.props(":indeterminate='false'")
                 self.progress_bar.value = 1.0 if self._files else 0.0
+
+    def _stop_file_streaming(self):
+        """Stop the output-folder polling timer (run finished or cancelled)."""
+        if self._poll_timer is not None:
+            self._poll_timer.cancel()
+            self._poll_timer = None
+
+    def _poll_output_files(self, runner, output_dir: str):
+        """Refresh the files panel with files created so far (streaming).
+
+        Polls the current run's output folder while the subprocess is active;
+        newly written files show up within one poll interval instead of only
+        after the run completes. The panel refresh is skipped until the run
+        folder is known, so files from older runs are never shown.
+        """
+        try:
+            if not runner.is_running:
+                return
+            run_folder = runner._resolve_scan_dir(output_dir)
+            if not run_folder:
+                return
+            files = runner._scan_output_files(run_folder)
+            if files:
+                self.show_files(files, run_folder)
+        except Exception:
+            # Page may have been closed or navigated away mid-run; stop
+            # polling instead of crashing the run handler.
+            self._stop_file_streaming()
 
     async def run(
         self,
@@ -195,10 +256,19 @@ class OutputPanel:
         """
         Run a tool through the UI runner and always surface errors in the log.
 
+        While the run is active, the output folder is polled so files appear
+        in the panel as soon as they are created (streaming).
+
         Any exception is written into the execution log (instead of silently
         failing the handler and leaving an empty log with a stuck Run button).
         """
         try:
+            # Stream output files during the run: poll every 1.5s.
+            self._stop_file_streaming()
+            if output_dir:
+                self._poll_timer = ui.timer(
+                    1.5, lambda: self._poll_output_files(runner, output_dir)
+                )
             return await runner.run(
                 tool_name,
                 constructor_params,
@@ -214,15 +284,30 @@ class OutputPanel:
             )
             self.log(traceback.format_exc().rstrip(), "error")
             return {"returncode": -1, "files": [], "duration": 0, "cancelled": False}
+        finally:
+            self._stop_file_streaming()
 
     def show_files(self, files: List[dict], output_dir: Optional[str] = None):
-        """Display output files organized by category as a card grid."""
+        """Display output files organized by category as a card grid.
+
+        The panel may be refreshed repeatedly while a run is active
+        (streaming); the rebuild preserves which category expansions the user
+        has open, so newly created files appear without collapsing anything.
+        """
         self._files = files
 
         if not self.files_container:
             return
 
+        # Remember which category expansions are open so an in-place refresh
+        # during streaming does not collapse them.
+        expanded = {
+            category: expansion.value
+            for category, expansion in self._file_categories.items()
+        }
+
         self.files_container.clear()
+        self._file_categories = {}
 
         with self.files_container:
             if not files:
@@ -248,7 +333,8 @@ class OutputPanel:
                 cat_files = grouped[category]
                 with ui.expansion(
                     f"{category}  ({len(cat_files)})", icon="folder"
-                ).classes("w-full drocat-expansion"):
+                ).classes("w-full drocat-expansion") as expansion:
+                    self._file_categories[category] = expansion
                     with ui.element("div").classes("drocat-file-list"):
                         for f in cat_files:
                             with ui.row().classes(
@@ -263,6 +349,8 @@ class OutputPanel:
                                     icon="open_in_new",
                                     on_click=lambda path=f["path"]: open_file(path),
                                 ).props("flat dense round").classes("drocat-file-open")
+                if expanded.get(category):
+                    expansion.value = True
 
     def _format_size(self, size: int) -> str:
         """Format file size in human-readable format."""
@@ -276,6 +364,9 @@ class OutputPanel:
     def clear(self):
         """Clear the log and files."""
         self._last_is_progress = False
+        self._last_progress_name = None
+        self._stop_file_streaming()
+        self._file_categories = {}
         if self.log_area:
             self.log_area.clear()
         self._files = []

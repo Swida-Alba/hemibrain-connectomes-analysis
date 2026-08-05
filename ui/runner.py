@@ -5,21 +5,102 @@ Executes tools by generating proper Python scripts with user parameters.
 
 import asyncio
 import os
+import re
 import sys
 import tempfile
 import platform
 import subprocess
-import json
 from pathlib import Path
 from datetime import datetime
 from typing import Callable, Optional, List, Dict, Any
 
-from .config import PROJECT_ROOT, SCRIPTS_DIR, SRC_DIR
+from .config import PROJECT_ROOT, SRC_DIR
+
 
 # The PlotPath tool lives in the vispath subproject, imported as `vispath_pkg`.
 # It is not installed into site-packages, so generated scripts must add
 # vispath-subproject/src to sys.path themselves.
 VISPATH_DIR = PROJECT_ROOT / "vispath-subproject" / "src"
+
+
+# =============================================================================
+# Output stream sanitizer
+# =============================================================================
+
+# ANSI escape sequences: CSI (colors, cursor moves, line erases), OSC
+# (title/link), and single-character escapes. Stripped so the UI log shows
+# clean text instead of raw escape codes.
+_ANSI_ESCAPE_RE = re.compile(
+    r"\x1b\[[0-9;?]*[ -/]*[@-~]"
+    r"|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)"
+    r"|\x1b[@-Z\\-_]"
+)
+
+# tqdm-style progress bar line, e.g.
+# "Building target profiles:  45%|████▍       | 1328/2972 [00:05<00:06, 252.17it/s]"
+_PROGRESS_LINE_RE = re.compile(r"^\s*.*?\d+%\|.*\|\s*\d+/\d+\s*\[.*\]\s*$")
+
+
+class _OutputSplitter:
+    """Incremental splitter turning raw subprocess output into clean log lines.
+
+    Terminal-style output is normalized so the UI log stays readable:
+
+    - ANSI escape sequences (colors, cursor moves, line erases) are stripped.
+    - ``\r``-refreshed segments and cursor-up (``\x1b[A``) refreshes are
+      yielded as *progress* items so the output panel can update one line
+      in place instead of appending a new line per refresh.
+    - Newline-terminated tqdm-style progress bars (non-TTY output) are also
+      classified as progress.
+    - Whitespace-only fragments (tqdm's line-clearing) and trailing spaces
+      are dropped.
+
+    ``feed`` consumes decoded chunks and yields ``(text, is_progress)`` pairs
+    for every complete output segment; ``flush`` emits the final partial line.
+    """
+
+    def __init__(self):
+        self._pending = ""
+
+    def feed(self, chunk: str):
+        self._pending += chunk
+        # A cursor-up escape moves the cursor back to the previous progress
+        # line; treat it like a carriage return (refresh separator).
+        self._pending = self._pending.replace("\x1b[A", "\r")
+        self._pending = _ANSI_ESCAPE_RE.sub("", self._pending)
+        while True:
+            nl = self._pending.find("\n")
+            cr = self._pending.find("\r")
+            if nl == -1 and cr == -1:
+                break
+            if nl != -1 and (cr == -1 or nl < cr):
+                segment, self._pending = self._pending.split("\n", 1)
+                refreshed = False
+            else:
+                segment, self._pending = self._pending.split("\r", 1)
+                # A "\r\n" pair is a regular line ending (Windows), not an
+                # in-place refresh; consume the "\n" so CRLF lines stay
+                # ordinary log lines.
+                if self._pending.startswith("\n"):
+                    self._pending = self._pending[1:]
+                    refreshed = False
+                else:
+                    refreshed = True
+            yield from self._classify(segment, refreshed)
+
+    def flush(self):
+        if self._pending.strip():
+            yield from self._classify(self._pending, False)
+        self._pending = ""
+
+    @staticmethod
+    def _classify(segment, refreshed):
+        text = segment.rstrip()
+        if not text.strip():
+            # tqdm line-clearing residue (spaces) or blank lines.
+            return
+        is_progress = refreshed or bool(_PROGRESS_LINE_RE.match(text))
+        yield (text, is_progress)
 
 
 # =============================================================================
@@ -138,19 +219,8 @@ TOOL_REGISTRY: Dict[str, dict] = {
 
 
 def _format_value(value: Any) -> str:
-    """Format a Python value for code generation."""
-    if isinstance(value, str):
-        return repr(value)
-    elif isinstance(value, bool):
-        return repr(value)
-    elif value is None:
-        return "None"
-    elif isinstance(value, list):
-        return repr(value)
-    elif isinstance(value, dict):
-        return repr(value)
-    else:
-        return str(value)
+    """Format a Python value for code generation (repr round-trips exactly)."""
+    return repr(value)
 
 
 def _format_params(params: dict) -> str:
@@ -282,10 +352,11 @@ class ScriptRunner:
                     "error",
                 )
 
-            # Scan only the folder this run actually generated (not the whole
-            # storage directory, which may contain previous runs).
-            run_output_folder = self._extract_output_folder(output_dir)
-            scan_dir = run_output_folder or output_dir
+            # Scan only the folder THIS run actually generated. A run that
+            # fails before creating its per-run folder must not fall back to
+            # the shared storage root — that would list files from previous
+            # runs (e.g. an earlier BANC run while running male-cns).
+            scan_dir = self._resolve_scan_dir(output_dir)
             files = self._scan_output_files(scan_dir) if scan_dir else []
 
             return {
@@ -499,39 +570,27 @@ print("[DROCAT] Done.")
         """
         Stream stdout/stderr to the UI in real time.
 
-        Reads chunks as soon as they arrive (unbuffered subprocess), emits
-        complete lines immediately, and forwards carriage-return progress
-        (e.g. tqdm bars) as a live-updating 'progress' line so the log never
-        appears frozen while a long-running function works.
+        Reads chunks as soon as they arrive (unbuffered subprocess) and emits
+        sanitized, complete lines immediately. tqdm-style progress bars and
+        carriage-return refreshes are forwarded as 'progress' lines so the
+        output panel updates one line in place instead of spamming a new line
+        per update (see _OutputSplitter).
         """
         if not self.process:
             return
 
         async def read_stream(stream, stream_name):
-            buffer = ""
+            splitter = _OutputSplitter()
             while True:
                 chunk = await stream.read(4096)
                 if not chunk:
                     break
-                buffer += chunk.decode("utf-8", errors="replace")
-
-                # Emit every complete line immediately
-                while "\n" in buffer:
-                    line, buffer = buffer.split("\n", 1)
-                    line = line.rstrip("\r")
-                    if line:
-                        log_callback(line, stream_name)
-
-                # A trailing carriage return means an in-place progress update
-                # (e.g. tqdm). Forward the latest segment as a 'progress' line.
-                if "\r" in buffer:
-                    progress = buffer.rsplit("\r", 1)[-1].strip("\r")
-                    if progress:
-                        log_callback(progress, "progress")
-
-            # Flush any remaining partial line at EOF
-            if buffer.strip():
-                log_callback(buffer.rstrip("\r"), stream_name)
+                for text, is_progress in splitter.feed(
+                    chunk.decode("utf-8", errors="replace")
+                ):
+                    log_callback(text, "progress" if is_progress else stream_name)
+            for text, is_progress in splitter.flush():
+                log_callback(text, "progress" if is_progress else stream_name)
 
         # Read both streams concurrently
         await asyncio.gather(
@@ -577,6 +636,31 @@ print("[DROCAT] Done.")
         "Results saved to: ",
         "Output will be saved to: ",
     ]
+
+    # Per-run output folder prefixes used by every DROCAT tool
+    # (findpath_, findhomologs_, plotpath_, ...). A directory whose name does
+    # not start with one of these is a shared storage root that may contain
+    # many runs — it must never be scanned as the current run's folder.
+    _RUN_FOLDER_PREFIX_RE = re.compile(
+        r"^(findpath|findallpath|finddirect|findhomologs|profiling|interdataset|"
+        r"plot3d|plotpath|colabel|findlines|findneuron)_"
+    )
+
+    def _resolve_scan_dir(self, output_dir: Optional[str] = None) -> Optional[str]:
+        """Return the folder whose files belong to the current run.
+
+        The per-run folder announced by the backend wins. Otherwise the
+        caller-provided directory is used only when it is itself a per-run
+        folder (plot_path pre-creates its own folder before the run). A
+        shared storage root holding many runs is never scanned — its files
+        belong to previous runs.
+        """
+        run_folder = self._extract_output_folder(output_dir)
+        if run_folder:
+            return run_folder
+        if output_dir and self._RUN_FOLDER_PREFIX_RE.match(Path(output_dir).name):
+            return output_dir
+        return None
 
     def _extract_output_folder(self, output_dir: Optional[str] = None) -> Optional[str]:
         """

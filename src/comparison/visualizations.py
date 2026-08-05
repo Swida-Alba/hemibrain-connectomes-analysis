@@ -6,7 +6,7 @@ including bar charts, heatmaps, Venn diagrams, and network comparisons.
 """
 
 import os
-from typing import Dict, List, Optional, Any, Tuple
+from typing import Dict, List, Optional, Tuple
 import pandas as pd
 import numpy as np
 from tqdm import tqdm
@@ -14,7 +14,6 @@ from tqdm import tqdm
 # Check for optional dependencies
 try:
     import matplotlib.pyplot as plt
-    import matplotlib.patches as mpatches
     HAS_MATPLOTLIB = True
 except ImportError:
     HAS_MATPLOTLIB = False

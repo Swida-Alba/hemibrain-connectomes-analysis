@@ -143,7 +143,7 @@ $$\mathit{block}_{ij} = 1 - \mathit{p}_{ij}$$
 
 **Used in**:
 - [`src/statvis.py`](../../src/statvis.py#L4607-L4609) - Path probability calculations
-- Type-to-type aggregation (product method)
+- Type-level enrichment output (`block_probability = 1 - p_AB`)
 
 ---
 
@@ -195,42 +195,28 @@ mat_ratio = df.pivot(values='connection_ratio', index='type_pre',
 
 **Definition**: The aggregate probability that a signal will propagate from any neuron of type A to any neuron of type B.
 
-**Two Aggregation Methods**:
+**Formula (current model, consistent at every level)**:
 
-#### 1. Product Method (Default for Paths)
+$$p_{AB} = \min\left(1.0, \frac{\mathit{ratio}_{AB}}{0.3}\right)$$
 
-Models signal propagation as requiring ALL individual connections to transmit:
+The type-level traversal probability uses the same `ratio / 0.3` scaling as the
+bodyId level (see [Traversal Probability](#traversal-probability)), applied to
+the **global** type-to-type ratio above. This keeps the filter thresholds
+(`min_traversal_probability`), the enrichment output, and the path metrics on
+one consistent scale.
 
-$$p_{AB}^{\mathrm{product}} = 1 - \prod_{i \in A, j \in B} (1 - p_{ij})$$
+**Implementation**:
 
-**Implementation** ([`src/statvis.py`](../../src/statvis.py#L4754-L4761)):
+- [`src/coana.py`](../../src/coana.py) - `_apply_type_level_filters()` (type-level filtering)
+- [`src/statvis.py`](../../src/statvis.py) - `EnrichConnectionTable()` (with `global_incoming_weights`)
+- [`src/statvis_polars.py`](../../src/statvis_polars.py) - `EnrichConnectionTablePolars()` (with `global_incoming_weights`)
 
-```python
-# Group block probabilities and take product
-conn_traversal = conn_df.groupby([type_pre, type_post])['block_probability'].prod()
-conn_type['traversal_probability'] = 1 - conn_traversal['block_probability']
-```
-
-**Interpretation**: The probability that at least one signal path succeeds between the populations.
-
-#### 2. Average Method (for Direct Connections)
-
-Uses weighted average of individual traversal probabilities:
-
-$$p_{AB}^{\mathrm{average}} = \frac{\sum_{i \in A, j \in B} w_{ij} \cdot p_{ij}}{\sum_{i \in A, j \in B} w_{ij}}$$
-
-**Implementation** ([`src/statvis.py`](../../src/statvis.py#L4763-L4768)):
-
-```python
-# Weight-weighted average of traversal probabilities
-weighted_sum = (conn_df['weight'] * conn_df['traversal_probability']).sum()
-total_weight = conn_df['weight'].sum()
-conn_type['traversal_probability'] = weighted_sum / total_weight
-```
-
-**When to use**:
-- **Product**: Multi-hop pathways, signal cascade analysis
-- **Average**: Direct connection strength assessment
+**Note (legacy)**: Earlier versions offered 'product'
+($1 - \prod_{i \in A, j \in B}(1 - p_{ij})$) and 'average' (weight-weighted mean)
+aggregations of bodyId-level probabilities via the `aggregate_method` parameter.
+These were replaced by the uniform `min(ratio / 0.3, 1)` model so that the two
+implementations (pandas/Polars) produce identical numbers. `aggregate_method` is
+still accepted for API compatibility but no longer changes the result.
 
 ---
 

@@ -20,7 +20,7 @@ Key Features:
 import os
 import warnings
 from pathlib import Path
-from typing import Dict, List, Optional, Set, Tuple, Union
+from typing import Dict, List, Optional, Set, Tuple
 from collections import defaultdict
 import pandas as pd
 

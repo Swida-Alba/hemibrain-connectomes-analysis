@@ -30,7 +30,6 @@ Author: Hemibrain Analysis Team
 Date: December 2024
 """
 
-import os
 import sys
 import time
 import argparse

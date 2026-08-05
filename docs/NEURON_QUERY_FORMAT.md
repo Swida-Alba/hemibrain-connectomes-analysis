@@ -13,6 +13,10 @@ Both formats work with:
 - `statvis.get_types()`, `get_bodyIds()`, `get_instances()`, `get_info()`
 - `statvis.getNeurons()`
 
+Both formats accept a `search_columns` scope (see
+[Restricting the Search Columns](#restricting-the-search-columns)) that
+controls which columns are searched when resolving names.
+
 ## Legacy Format (List-based)
 
 The traditional format uses lists of neuron identifiers:
@@ -41,6 +45,45 @@ sourceNeurons = None
 # All typed neurons
 sourceNeurons = []
 ```
+
+## Restricting the Search Columns
+
+When a name is resolved (e.g. `'MTe07'`), the legacy format searches columns
+in a fixed priority: `bodyId` → `type` → `instance` → every other string
+column (such as `flywireType`, `hemibrainType`, `mancType`). The final
+"other columns" step runs for **both exact and regex** names — before the
+2026-08 fix it ran for regex patterns only, so an exact name that lived in
+a cross-dataset column (e.g. `MTe07` in `flywireType` on male-cns v1.0)
+was silently reported as "not found in any column".
+
+Use the `search_columns` parameter to control the scope:
+
+| Value | Searches | Use case |
+| --- | --- | --- |
+| `'auto'` (default) | All columns, priority `bodyId` → `type` → `instance` → other string columns | Names that may live in cross-dataset type columns (`MTe07` in `flywireType`) |
+| `'type'` | Only the `type` column | Type-only queries; avoids false hits in other columns |
+| `'instance'` | Only the `instance` column | Instance-only queries |
+| `'bodyId'` | Only the `bodyId` column | BodyId-only queries |
+
+```python
+# MTe07 exists only in flywireType on male-cns v1.0 -> found with 'auto'
+fc = FindNeuronConnection(
+    dataset='male-cns:v1.0',
+    sourceNeurons=['MTe07'],
+    search_columns='auto',   # default
+)
+
+# Restrict to the native CNS type column
+fc = FindNeuronConnection(
+    dataset='male-cns:v1.0',
+    sourceNeurons=['MBON01'],
+    search_columns='type',
+)
+```
+
+The UI exposes the same options in the **Search Columns** selector of the
+Find All Paths, Direct Connections and Cross-Dataset tabs
+(`auto` / `type` / `instance` / `bodyId`).
 
 ## Dict Filter Format (Same as type_filter)
 

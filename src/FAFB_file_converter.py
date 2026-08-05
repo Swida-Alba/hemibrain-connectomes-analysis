@@ -3,8 +3,6 @@ import shutil
 import pandas as pd
 import numpy as np
 import zipfile
-import io
-import navis
 import pyarrow as pa
 import pyarrow.parquet as pq
 from tqdm import tqdm

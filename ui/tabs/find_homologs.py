@@ -3,7 +3,7 @@
 from nicegui import ui
 from ..config import DEFAULTS, DATASETS, SIMILARITY_METRICS
 from ..components.common import (
-    dataset_selector, neuron_input, number_input, select_input,
+    dataset_selector, neuron_list_input, number_input, select_input,
     checkbox_input, dir_input, section_header, param_grid, tool_page,
 )
 from ..components.output_panel import OutputPanel
@@ -24,10 +24,12 @@ def create_find_homologs_tab():
     with form_col:
         with ui.card().classes("w-full drocat-card"):
             section_header("Source Neuron", "search")
-            source_input = neuron_input(
+            source_input = neuron_list_input(
                 label="Source Neuron (type or bodyId)",
-                placeholder="e.g., aMe12",
-                hint="Single neuron type or bodyId to find cross-dataset homologs for.",
+                show_filter=False,
+                show_upload=False,
+                max_items=1,
+                hint="Single neuron type or bodyId to find cross-dataset homologs for. Only one value is accepted.",
             )
             with param_grid(2):
                 source_dataset = dataset_selector(label="Source Dataset", hint="Dataset where the source neuron lives.")
@@ -66,7 +68,8 @@ def create_find_homologs_tab():
                     label="Save Folder Name (optional)",
                     placeholder="e.g., aMe12_homologs",
                 ).classes("w-full drocat-input").tooltip(
-                    "Custom output folder name. Leave empty for the unified auto name."
+                    "Custom output folder name. Leave empty for the unified auto name "
+                    "(findhomologs_<source_ds>_to_<target_ds>_<query>_<timestamp>)."
                 )
                 full_cache = checkbox_input(
                     "Pre-build Full Dataset Cache", False,
@@ -79,7 +82,8 @@ def create_find_homologs_tab():
         output_panel.create(run_label="Find Homologs", run_icon="play_arrow")
 
     async def run_homologs():
-        source = source_input.value.strip()
+        source_vals = source_input.get_value()[1]
+        source = str(source_vals[0]).strip() if source_vals else ""
         if not source:
             ui.notify("Please enter a source neuron", type="warning")
             return

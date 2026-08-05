@@ -1,5 +1,4 @@
 import os
-import re
 
 class TokenManager:
     """
@@ -184,7 +183,7 @@ class TokenManager:
     
     def require_both_tokens(self, direct_input=None):
         """
-        Get both tokens, raising a notice if one is missing.
+        Get both tokens, raising ValueError if one is missing.
         
         Args:
             direct_input (str, optional): Directly provided token

@@ -176,7 +176,7 @@ fc = FindNeuronConnection(
     # Pathfinding options
     max_interlayer=4,                # Maximum intermediate layers
     keyword_in_path_to_remove=['None'],  # Exclude these types from paths
-    pathfinding='Bidirectional',     # Algorithm choice
+    pathfinding='MemoizedDFS',      # Algorithm choice (fastest measured; see PATHFINDING_ALGORITHM_EVALUATION.md)
     
     # Performance options
     skip_bodyId=True,                # Skip bodyId-level for speed
@@ -193,7 +193,7 @@ fc.FindAllPath(forward_only=True)   # forward_only=True for faster search
 
 | Algorithm         | When to Use                | Speed   | Memory |
 | ----------------- | -------------------------- | ------- | ------ |
-| `'Bidirectional'` | **Shortest paths**         | Fastest | High   |
+| `'MemoizedDFS'`   | **All depths** (default)    | Fastest | Moderate |
 | `'MemoizedDFS'`   | **Deep paths (L≥5)**       | Medium  | Low    |
 | `'DP'`            | **Sparse graphs**          | Medium  | Lowest |
 | `'DFS'`           | Standard traversal         | Medium  | Medium |
@@ -515,7 +515,7 @@ min_ratio = min_traversal_probability * 0.3
 
 | Algorithm          | Best For         | Parameter Value   |
 | ------------------ | ---------------- | ----------------- |
-| Shortest paths     | Fast BFS         | `'Bidirectional'` |
+| All depths (default) | Memoized DFS   | `'MemoizedDFS'` |
 | Deep paths (L≥5)   | Meet-in-middle   | `'MemoizedDFS'`   |
 | Sparse graphs      | Backward pruning | `'DP'`            |
 | Memory constrained | Backtracking     | `'Backtracking'`  |

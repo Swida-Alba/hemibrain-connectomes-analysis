@@ -1,8 +1,6 @@
-import os
 import gzip
 import shutil
 import pandas as pd
-import numpy as np
 from pathlib import Path
 
 def extract_gz(file_path, output_path):

@@ -29,8 +29,7 @@ import hashlib
 import json
 import os
 import re
-import warnings
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 from typing import Dict, List, Optional, Union, Tuple, Any
@@ -42,6 +41,13 @@ from tqdm import tqdm
 # ============================================================================
 # Connectivity Status Classification
 # ============================================================================
+
+def _escape_cypher_string_fallback(value):
+    """Inline escape fallback (only used when src.utils.api_utils is unavailable)."""
+    if not isinstance(value, str):
+        return str(value)
+    return value.replace('\\', '\\\\').replace("'", "\\'")
+
 
 class ConnectivityStatus(Enum):
     """
@@ -2640,13 +2646,10 @@ class ConnectivityProfiler:
         
         # Import API utilities for Cypher escaping and timeout
         try:
-            from src.utils.api_utils import escape_cypher_string, api_call_with_retry, APITimeoutError, APIRetryExhaustedError
+            from src.utils.api_utils import escape_cypher_string, api_call_with_retry
         except ImportError:
             # Fallback: inline escape function
-            def escape_cypher_string(value):
-                if not isinstance(value, str):
-                    return str(value)
-                return value.replace('\\', '\\\\').replace("'", "\\'")
+            escape_cypher_string = _escape_cypher_string_fallback
             api_call_with_retry = None
         
         # Build neuron condition with proper escaping for special characters
@@ -3986,10 +3989,7 @@ class ConnectivityProfiler:
                 try:
                     from src.utils.api_utils import escape_cypher_string
                 except ImportError:
-                    def escape_cypher_string(value):
-                        if not isinstance(value, str):
-                            return str(value)
-                        return value.replace('\\', '\\\\').replace("'", "\\'")
+                    escape_cypher_string = _escape_cypher_string_fallback
                 
                 escaped_type = escape_cypher_string(neuron_type)
                 query = f"""

@@ -119,11 +119,6 @@ import bokeh.palettes
 # Import color utilities
 from utils.color_utils import (
     standardize_color,
-    standardize_color_list,
-    is_dark_color,
-    darken_color,
-    interpolate_colors,
-    color_to_rgba_string,
     color_to_hex,
     extract_rgba_tuple,
 )
@@ -145,6 +140,204 @@ def _configure_roi_mesh_traces(mesh_traces, roi_name):
 
 
 # Timeout exception for PNG export
+
+def _detect_content_bounds(img, background_color=(255, 255, 255)):
+        """
+        Detect the bounding box of content in an image.
+        
+        Parameters
+        ----------
+        img : PIL.Image
+            Input image
+        background_color : tuple
+            RGB tuple for background color
+            
+        Returns
+        -------
+        tuple or None
+            (row_min, row_max, col_min, col_max) or None if no content found
+        """
+        from PIL import Image
+        import numpy as np
+        
+        # Convert to RGB if needed
+        if img.mode == 'RGBA':
+            bg = Image.new('RGB', img.size, background_color)
+            bg.paste(img, mask=img.split()[3])
+            img_rgb = bg
+        else:
+            img_rgb = img.convert('RGB')
+        
+        arr = np.array(img_rgb)
+        
+        tolerance = 10
+        bg_r, bg_g, bg_b = background_color
+        
+        non_bg_mask = (
+            (np.abs(arr[:, :, 0].astype(int) - bg_r) > tolerance) |
+            (np.abs(arr[:, :, 1].astype(int) - bg_g) > tolerance) |
+            (np.abs(arr[:, :, 2].astype(int) - bg_b) > tolerance)
+        )
+        
+        rows = np.any(non_bg_mask, axis=1)
+        cols = np.any(non_bg_mask, axis=0)
+        
+        if not rows.any() or not cols.any():
+            return None
+        
+        row_min, row_max = np.where(rows)[0][[0, -1]]
+        col_min, col_max = np.where(cols)[0][[0, -1]]
+        
+        return (row_min, row_max, col_min, col_max)
+
+def _compute_unified_crop_bounds(image_paths, background_color=(255, 255, 255), sample_count=None):
+        """
+        Compute unified crop bounds across multiple images.
+        
+        This method finds the maximum extent (union) of content across all images
+        to ensure consistent cropping during video rotation.
+        
+        Parameters
+        ----------
+        image_paths : list
+            List of image file paths to analyze
+        background_color : tuple
+            RGB tuple for background color
+        sample_count : int, optional
+            Number of evenly-spaced frames to sample (None = all frames)
+            
+        Returns
+        -------
+        tuple or None
+            (row_min, row_max, col_min, col_max) unified bounds or None if no content
+        """
+        from PIL import Image
+        
+        if not image_paths:
+            return None
+        
+        # Determine which frames to sample
+        if sample_count is not None and sample_count < len(image_paths):
+            # Sample evenly across all frames
+            indices = [int(i * len(image_paths) / sample_count) for i in range(sample_count)]
+            sampled_paths = [image_paths[i] for i in indices]
+        else:
+            sampled_paths = image_paths
+        
+        # Initialize with None (will expand with each frame)
+        unified_row_min = None
+        unified_row_max = None
+        unified_col_min = None
+        unified_col_max = None
+        
+        for path in sampled_paths:
+            try:
+                img = Image.open(path)
+                bounds = _detect_content_bounds(img, background_color)
+                img.close()
+                
+                if bounds is None:
+                    continue
+                    
+                row_min, row_max, col_min, col_max = bounds
+                
+                # Expand unified bounds
+                if unified_row_min is None:
+                    unified_row_min = row_min
+                    unified_row_max = row_max
+                    unified_col_min = col_min
+                    unified_col_max = col_max
+                else:
+                    unified_row_min = min(unified_row_min, row_min)
+                    unified_row_max = max(unified_row_max, row_max)
+                    unified_col_min = min(unified_col_min, col_min)
+                    unified_col_max = max(unified_col_max, col_max)
+            except Exception:
+                # Skip frames that can't be read
+                continue
+        
+        if unified_row_min is None:
+            return None
+            
+        return (unified_row_min, unified_row_max, unified_col_min, unified_col_max)
+
+def _apply_consistent_crop(pic_folder, margin=20, background_color=(255, 255, 255)):
+        """
+        Apply consistent cropping to all images in a folder based on unified bounds.
+        
+        This method:
+        1. Detects content bounds across all frames
+        2. Computes the union (maximum extent) of all bounds
+        3. Crops all frames to the same unified bounds + margin
+        
+        Parameters
+        ----------
+        pic_folder : str
+            Folder containing the frame images
+        margin : int
+            Margin to preserve around content
+        background_color : tuple
+            RGB tuple for background color
+            
+        Returns
+        -------
+        tuple
+            (width, height) of the cropped images, or None if failed
+        """
+        from PIL import Image
+        import glob
+        
+        # Find all JPEG images in folder
+        image_paths = sorted(glob.glob(os.path.join(pic_folder, 'deg_*.jpeg')))
+        
+        if not image_paths:
+            return None
+        
+        # Compute unified bounds across all frames
+        # Sample 36 frames (every 10 degrees) for efficiency on long videos
+        unified_bounds = _compute_unified_crop_bounds(
+            image_paths, background_color, sample_count=min(36, len(image_paths))
+        )
+        
+        if unified_bounds is None:
+            return None
+        
+        row_min, row_max, col_min, col_max = unified_bounds
+        
+        # Get image dimensions from first image
+        with Image.open(image_paths[0]) as img:
+            img_height = img.height
+            img_width = img.width
+        
+        # Add margin to unified bounds
+        row_min = max(0, row_min - margin)
+        row_max = min(img_height - 1, row_max + margin)
+        col_min = max(0, col_min - margin)
+        col_max = min(img_width - 1, col_max + margin)
+        
+        final_width = col_max - col_min + 1
+        final_height = row_max - row_min + 1
+        
+        # Apply consistent crop to all images
+        for path in image_paths:
+            try:
+                with Image.open(path) as img:
+                    # Crop to unified bounds (no additional margin - already added)
+                    cropped = img.crop((col_min, row_min, col_max + 1, row_max + 1))
+                    # Convert to RGB for JPEG
+                    if cropped.mode == 'RGBA':
+                        rgb_img = Image.new('RGB', cropped.size, background_color)
+                        rgb_img.paste(cropped, mask=cropped.split()[3])
+                        cropped = rgb_img
+                    elif cropped.mode != 'RGB':
+                        cropped = cropped.convert('RGB')
+                    cropped.save(path, 'JPEG', quality=95)
+            except Exception:
+                # Log but continue
+                pass
+        
+        return (final_width, final_height)
+
 class PNGExportTimeout(Exception):
     """Raised when PNG export times out."""
     pass
@@ -953,232 +1146,12 @@ class WebDriverExportSession:
         return cropped
     
     def _detect_content_bounds(self, img, background_color=(255, 255, 255)):
-        """
-        Detect the bounding box of content in an image.
-        
-        Parameters
-        ----------
-        img : PIL.Image
-            Input image
-        background_color : tuple
-            RGB tuple for background color
-            
-        Returns
-        -------
-        tuple or None
-            (row_min, row_max, col_min, col_max) or None if no content found
-        """
-        from PIL import Image
-        import numpy as np
-        
-        # Convert to RGB if needed
-        if img.mode == 'RGBA':
-            bg = Image.new('RGB', img.size, background_color)
-            bg.paste(img, mask=img.split()[3])
-            img_rgb = bg
-        else:
-            img_rgb = img.convert('RGB')
-        
-        arr = np.array(img_rgb)
-        
-        tolerance = 10
-        bg_r, bg_g, bg_b = background_color
-        
-        non_bg_mask = (
-            (np.abs(arr[:, :, 0].astype(int) - bg_r) > tolerance) |
-            (np.abs(arr[:, :, 1].astype(int) - bg_g) > tolerance) |
-            (np.abs(arr[:, :, 2].astype(int) - bg_b) > tolerance)
-        )
-        
-        rows = np.any(non_bg_mask, axis=1)
-        cols = np.any(non_bg_mask, axis=0)
-        
-        if not rows.any() or not cols.any():
-            return None
-        
-        row_min, row_max = np.where(rows)[0][[0, -1]]
-        col_min, col_max = np.where(cols)[0][[0, -1]]
-        
-        return (row_min, row_max, col_min, col_max)
-    
-    def _crop_to_bounds(self, img, bounds, margin=20):
-        """
-        Crop image to specific bounds with margin.
-        
-        Parameters
-        ----------
-        img : PIL.Image
-            Input image
-        bounds : tuple
-            (row_min, row_max, col_min, col_max) - the unified bounds
-        margin : int
-            Margin to preserve around content
-            
-        Returns
-        -------
-        PIL.Image
-            Cropped image
-        """
-        row_min, row_max, col_min, col_max = bounds
-        
-        # Add margin
-        row_min = max(0, row_min - margin)
-        row_max = min(img.height - 1, row_max + margin)
-        col_min = max(0, col_min - margin)
-        col_max = min(img.width - 1, col_max + margin)
-        
-        return img.crop((col_min, row_min, col_max + 1, row_max + 1))
-    
+        return _detect_content_bounds(img, background_color)
     def _compute_unified_crop_bounds(self, image_paths, background_color=(255, 255, 255), 
                                       sample_count=None):
-        """
-        Compute unified crop bounds across multiple images.
-        
-        This method finds the maximum extent (union) of content across all images
-        to ensure consistent cropping during video rotation.
-        
-        Parameters
-        ----------
-        image_paths : list
-            List of image file paths to analyze
-        background_color : tuple
-            RGB tuple for background color
-        sample_count : int, optional
-            Number of evenly-spaced frames to sample (None = all frames)
-            
-        Returns
-        -------
-        tuple or None
-            (row_min, row_max, col_min, col_max) unified bounds or None if no content
-        """
-        from PIL import Image
-        
-        if not image_paths:
-            return None
-        
-        # Determine which frames to sample
-        if sample_count is not None and sample_count < len(image_paths):
-            # Sample evenly across all frames
-            indices = [int(i * len(image_paths) / sample_count) for i in range(sample_count)]
-            sampled_paths = [image_paths[i] for i in indices]
-        else:
-            sampled_paths = image_paths
-        
-        # Initialize with None (will expand with each frame)
-        unified_row_min = None
-        unified_row_max = None
-        unified_col_min = None
-        unified_col_max = None
-        
-        for path in sampled_paths:
-            try:
-                img = Image.open(path)
-                bounds = self._detect_content_bounds(img, background_color)
-                img.close()
-                
-                if bounds is None:
-                    continue
-                    
-                row_min, row_max, col_min, col_max = bounds
-                
-                # Expand unified bounds
-                if unified_row_min is None:
-                    unified_row_min = row_min
-                    unified_row_max = row_max
-                    unified_col_min = col_min
-                    unified_col_max = col_max
-                else:
-                    unified_row_min = min(unified_row_min, row_min)
-                    unified_row_max = max(unified_row_max, row_max)
-                    unified_col_min = min(unified_col_min, col_min)
-                    unified_col_max = max(unified_col_max, col_max)
-            except Exception as e:
-                # Skip frames that can't be read
-                continue
-        
-        if unified_row_min is None:
-            return None
-            
-        return (unified_row_min, unified_row_max, unified_col_min, unified_col_max)
-    
+        return _compute_unified_crop_bounds(image_paths, background_color, sample_count)
     def _apply_consistent_crop(self, pic_folder, margin=20, background_color=(255, 255, 255)):
-        """
-        Apply consistent cropping to all images in a folder based on unified bounds.
-        
-        This method:
-        1. Detects content bounds across all frames
-        2. Computes the union (maximum extent) of all bounds
-        3. Crops all frames to the same unified bounds + margin
-        
-        Parameters
-        ----------
-        pic_folder : str
-            Folder containing the frame images
-        margin : int
-            Margin to preserve around content
-        background_color : tuple
-            RGB tuple for background color
-            
-        Returns
-        -------
-        tuple
-            (width, height) of the cropped images, or None if failed
-        """
-        from PIL import Image
-        import glob
-        
-        # Find all JPEG images in folder
-        image_paths = sorted(glob.glob(os.path.join(pic_folder, 'deg_*.jpeg')))
-        
-        if not image_paths:
-            return None
-        
-        # Compute unified bounds across all frames
-        # Sample 36 frames (every 10 degrees) for efficiency on long videos
-        unified_bounds = self._compute_unified_crop_bounds(
-            image_paths, background_color, sample_count=min(36, len(image_paths))
-        )
-        
-        if unified_bounds is None:
-            return None
-        
-        row_min, row_max, col_min, col_max = unified_bounds
-        
-        # Get image dimensions from first image
-        with Image.open(image_paths[0]) as img:
-            img_height = img.height
-            img_width = img.width
-        
-        # Add margin to unified bounds
-        row_min = max(0, row_min - margin)
-        row_max = min(img_height - 1, row_max + margin)
-        col_min = max(0, col_min - margin)
-        col_max = min(img_width - 1, col_max + margin)
-        
-        final_bounds = (row_min, row_max, col_min, col_max)
-        final_width = col_max - col_min + 1
-        final_height = row_max - row_min + 1
-        
-        # Apply consistent crop to all images
-        for path in image_paths:
-            try:
-                with Image.open(path) as img:
-                    # Crop to unified bounds (no additional margin - already added)
-                    cropped = img.crop((col_min, row_min, col_max + 1, row_max + 1))
-                    # Convert to RGB for JPEG
-                    if cropped.mode == 'RGBA':
-                        rgb_img = Image.new('RGB', cropped.size, background_color)
-                        rgb_img.paste(cropped, mask=cropped.split()[3])
-                        cropped = rgb_img
-                    elif cropped.mode != 'RGB':
-                        cropped = cropped.convert('RGB')
-                    cropped.save(path, 'JPEG', quality=95)
-            except Exception as e:
-                # Log but continue
-                pass
-        
-        return (final_width, final_height)
-
+        return _apply_consistent_crop(pic_folder, margin, background_color)
     def set_trace_visibility(self, visible_indices: list, total_traces: int):
         """
         Set visibility of traces by index using JavaScript.
@@ -2898,53 +2871,6 @@ class VisualizeSkeleton:
             except Exception:
                 pass
 
-    def _export_png_with_webdriver(self, html_path, output_path, width=1200, height=900, scale=3, timeout=120):
-        """
-        Export PNG using Selenium WebDriver (Chrome headless) - direct call.
-        
-        This is an alternative to kaleido that works by:
-        1. Loading the saved HTML file in a headless browser
-        2. Waiting for Plotly to render the 3D scene
-        3. Taking a screenshot
-        
-        Parameters
-        ----------
-        html_path : str
-            Path to the HTML file to render.
-        output_path : str
-            Path to save the PNG file.
-        width : int
-            Image width in pixels.
-        height : int
-            Image height in pixels.
-        scale : int
-            Scale factor for resolution.
-        timeout : int
-            Timeout in seconds (default 120).
-            
-        Returns
-        -------
-        tuple
-            (success: bool, message: str, final_scale: int)
-        """
-        try:
-            # Direct WebDriver call using the session class (no multiprocessing)
-            with WebDriverExportSession(width=width, height=height, scale=scale, timeout=timeout) as session:
-                session.load_html(html_path, wait_for_render=True, render_wait=3, background_color=self.background_color)
-                session.screenshot(output_path)
-            
-            # Verify file
-            if os.path.exists(output_path):
-                size_kb = os.path.getsize(output_path) / 1024
-                if size_kb < 10:
-                    return (False, f"WebDriver produced blank image ({size_kb:.1f}KB)", scale)
-                return (True, f"{size_kb:.1f}KB (WebDriver)", scale)
-            else:
-                return (False, "WebDriver export failed - no file created", scale)
-                
-        except Exception as e:
-            return (False, f"WebDriver error: {e}", scale)
-
     def _export_views_with_webdriver_session(self, export_fig, views_to_export, view_cameras, output_folder):
         """
         Export multiple views efficiently using a single WebDriver session.
@@ -3418,203 +3344,12 @@ class VisualizeSkeleton:
         return simplified_fig
 
     def _detect_content_bounds(self, img, background_color=(255, 255, 255)):
-        """
-        Detect the bounding box of content in an image.
-        
-        Parameters
-        ----------
-        img : PIL.Image
-            Input image
-        background_color : tuple
-            RGB tuple for background color
-            
-        Returns
-        -------
-        tuple or None
-            (row_min, row_max, col_min, col_max) or None if no content found
-        """
-        from PIL import Image
-        import numpy as np
-        
-        # Convert to RGB if needed
-        if img.mode == 'RGBA':
-            bg = Image.new('RGB', img.size, background_color)
-            bg.paste(img, mask=img.split()[3])
-            img_rgb = bg
-        else:
-            img_rgb = img.convert('RGB')
-        
-        arr = np.array(img_rgb)
-        
-        tolerance = 10
-        bg_r, bg_g, bg_b = background_color
-        
-        non_bg_mask = (
-            (np.abs(arr[:, :, 0].astype(int) - bg_r) > tolerance) |
-            (np.abs(arr[:, :, 1].astype(int) - bg_g) > tolerance) |
-            (np.abs(arr[:, :, 2].astype(int) - bg_b) > tolerance)
-        )
-        
-        rows = np.any(non_bg_mask, axis=1)
-        cols = np.any(non_bg_mask, axis=0)
-        
-        if not rows.any() or not cols.any():
-            return None
-        
-        row_min, row_max = np.where(rows)[0][[0, -1]]
-        col_min, col_max = np.where(cols)[0][[0, -1]]
-        
-        return (row_min, row_max, col_min, col_max)
-
+        return _detect_content_bounds(img, background_color)
     def _compute_unified_crop_bounds(self, image_paths, background_color=(255, 255, 255), 
                                       sample_count=None):
-        """
-        Compute unified crop bounds across multiple images.
-        
-        This method finds the maximum extent (union) of content across all images
-        to ensure consistent cropping during video rotation.
-        
-        Parameters
-        ----------
-        image_paths : list
-            List of image file paths to analyze
-        background_color : tuple
-            RGB tuple for background color
-        sample_count : int, optional
-            Number of evenly-spaced frames to sample (None = all frames)
-            
-        Returns
-        -------
-        tuple or None
-            (row_min, row_max, col_min, col_max) unified bounds or None if no content
-        """
-        from PIL import Image
-        
-        if not image_paths:
-            return None
-        
-        # Determine which frames to sample
-        if sample_count is not None and sample_count < len(image_paths):
-            # Sample evenly across all frames
-            indices = [int(i * len(image_paths) / sample_count) for i in range(sample_count)]
-            sampled_paths = [image_paths[i] for i in indices]
-        else:
-            sampled_paths = image_paths
-        
-        # Initialize with None (will expand with each frame)
-        unified_row_min = None
-        unified_row_max = None
-        unified_col_min = None
-        unified_col_max = None
-        
-        for path in sampled_paths:
-            try:
-                img = Image.open(path)
-                bounds = self._detect_content_bounds(img, background_color)
-                img.close()
-                
-                if bounds is None:
-                    continue
-                    
-                row_min, row_max, col_min, col_max = bounds
-                
-                # Expand unified bounds
-                if unified_row_min is None:
-                    unified_row_min = row_min
-                    unified_row_max = row_max
-                    unified_col_min = col_min
-                    unified_col_max = col_max
-                else:
-                    unified_row_min = min(unified_row_min, row_min)
-                    unified_row_max = max(unified_row_max, row_max)
-                    unified_col_min = min(unified_col_min, col_min)
-                    unified_col_max = max(unified_col_max, col_max)
-            except Exception:
-                # Skip frames that can't be read
-                continue
-        
-        if unified_row_min is None:
-            return None
-            
-        return (unified_row_min, unified_row_max, unified_col_min, unified_col_max)
-
+        return _compute_unified_crop_bounds(image_paths, background_color, sample_count)
     def _apply_consistent_crop(self, pic_folder, margin=20, background_color=(255, 255, 255)):
-        """
-        Apply consistent cropping to all images in a folder based on unified bounds.
-        
-        This method:
-        1. Detects content bounds across all frames
-        2. Computes the union (maximum extent) of all bounds
-        3. Crops all frames to the same unified bounds + margin
-        
-        Parameters
-        ----------
-        pic_folder : str
-            Folder containing the frame images
-        margin : int
-            Margin to preserve around content
-        background_color : tuple
-            RGB tuple for background color
-            
-        Returns
-        -------
-        tuple
-            (width, height) of the cropped images, or None if failed
-        """
-        from PIL import Image
-        import glob
-        
-        # Find all JPEG images in folder
-        image_paths = sorted(glob.glob(os.path.join(pic_folder, 'deg_*.jpeg')))
-        
-        if not image_paths:
-            return None
-        
-        # Compute unified bounds across all frames
-        # Sample 36 frames (every 10 degrees) for efficiency on long videos
-        unified_bounds = self._compute_unified_crop_bounds(
-            image_paths, background_color, sample_count=min(36, len(image_paths))
-        )
-        
-        if unified_bounds is None:
-            return None
-        
-        row_min, row_max, col_min, col_max = unified_bounds
-        
-        # Get image dimensions from first image
-        with Image.open(image_paths[0]) as img:
-            img_height = img.height
-            img_width = img.width
-        
-        # Add margin to unified bounds
-        row_min = max(0, row_min - margin)
-        row_max = min(img_height - 1, row_max + margin)
-        col_min = max(0, col_min - margin)
-        col_max = min(img_width - 1, col_max + margin)
-        
-        final_width = col_max - col_min + 1
-        final_height = row_max - row_min + 1
-        
-        # Apply consistent crop to all images
-        for path in image_paths:
-            try:
-                with Image.open(path) as img:
-                    # Crop to unified bounds (no additional margin - already added)
-                    cropped = img.crop((col_min, row_min, col_max + 1, row_max + 1))
-                    # Convert to RGB for JPEG
-                    if cropped.mode == 'RGBA':
-                        rgb_img = Image.new('RGB', cropped.size, background_color)
-                        rgb_img.paste(cropped, mask=cropped.split()[3])
-                        cropped = rgb_img
-                    elif cropped.mode != 'RGB':
-                        cropped = cropped.convert('RGB')
-                    cropped.save(path, 'JPEG', quality=95)
-            except Exception:
-                # Log but continue
-                pass
-        
-        return (final_width, final_height)
-
+        return _apply_consistent_crop(pic_folder, margin, background_color)
     def _parse_layer_map_csv(self):
         """
         Parse layer_map_csv file to construct neuron_layers and custom_layer_names.
@@ -7594,36 +7329,6 @@ class VisualizeSkeleton:
         else:
             return roi_name + '.json'
     
-    def _filename_to_roi(self, filename: str) -> str:
-        """Convert a case-safe filename back to ROI name.
-        
-        Reverse of _roi_to_filename.
-        
-        Parameters
-        ----------
-        filename : str
-            The filename (e.g., 'AL(L).json', '_a_L(L).json')
-            
-        Returns
-        -------
-        str
-            Original ROI name (e.g., 'AL(L)', 'aL(L)')
-        """
-        # Remove .json extension
-        name = filename[:-5] if filename.endswith('.json') else filename
-        
-        # Decode underscore-prefixed lowercase letters
-        decoded = ''
-        i = 0
-        while i < len(name):
-            if i < len(name) - 1 and name[i] == '_' and name[i + 1].islower():
-                decoded += name[i + 1]
-                i += 2
-            else:
-                decoded += name[i]
-                i += 1
-        return decoded
-    
     def _get_mesh_file_path(self, mesh_dir: str, roi_name: str) -> str:
         """Get the mesh file path for an ROI, handling case-sensitivity.
         
@@ -8355,112 +8060,6 @@ class VisualizeSkeleton:
         
         return flattened_rois, expanded_colors, nested_groups
     
-    def _expand_roi_names(self, roi_list, available_rois=None):
-        """Expand ROI names to include bilateral (L/R) variants.
-        
-        When a user specifies 'LH', this function will automatically expand it to
-        ['LH(L)', 'LH(R)'] if both exist in the available ROIs. This makes it easier
-        to specify bilateral regions without explicitly naming both sides.
-        
-        Parameters
-        ----------
-        roi_list : list
-            List of ROI names to expand
-        available_rois : list, optional
-            List of available ROI names. If None, will be fetched from cache/API.
-            
-        Returns
-        -------
-        list
-            Expanded list of ROI names with bilateral variants
-            
-        Examples
-        --------
-        >>> _expand_roi_names(['LH', 'EB'])
-        ['LH(L)', 'LH(R)', 'EB']  # EB is not bilateral, so unchanged
-        
-        >>> _expand_roi_names(['LH(R)'])  # Already specific, no expansion
-        ['LH(R)']
-        """
-        if not roi_list:
-            return roi_list
-            
-        # Get available ROIs if not provided
-        if available_rois is None:
-            # For FAFB/FlyWire, use male-cns ROI list for expansion since ROIs are fetched from there
-            is_fafb = 'flywire' in self.dataset.lower() or 'fafb' in self.dataset.lower()
-            if is_fafb:
-                # Load male-cns ROI list for proper expansion
-                malecns_cache = os.path.join(self.script_path, 'cache', 'male-cns_v0_9', 'available_rois.json')
-                if os.path.exists(malecns_cache):
-                    import json
-                    with open(malecns_cache, 'r') as f:
-                        available_rois = json.load(f)
-                    self._vprint(f'   Using male-cns ROI list for expansion ({len(available_rois)} ROIs)', level='full')
-                else:
-                    available_rois = self._get_available_rois(use_cache=True, fetch_online=False)
-            else:
-                available_rois = self._get_available_rois(use_cache=True, fetch_online=False)
-        
-        # Create a set for faster lookup
-        available_set = set(available_rois) if available_rois else set()
-        
-        expanded = []
-        seen = set()  # Track seen ROIs to avoid duplicates
-        
-        for roi in roi_list:
-            # Check if ROI already has (L) or (R) suffix
-            if roi.endswith('(L)') or roi.endswith('(R)'):
-                if roi not in seen:
-                    expanded.append(roi)
-                    seen.add(roi)
-                continue
-            
-            # Check if the ROI exists as-is (like 'EB' which is unpaired)
-            if roi in available_set:
-                if roi not in seen:
-                    expanded.append(roi)
-                    seen.add(roi)
-                continue
-                
-            # Try to expand to bilateral variants
-            left_variant = f'{roi}(L)'
-            right_variant = f'{roi}(R)'
-            
-            found_left = left_variant in available_set
-            found_right = right_variant in available_set
-            
-            if found_left and found_right:
-                # Both sides exist, expand to both
-                if left_variant not in seen:
-                    expanded.append(left_variant)
-                    seen.add(left_variant)
-                if right_variant not in seen:
-                    expanded.append(right_variant)
-                    seen.add(right_variant)
-                self._vprint(f"   📍 Expanded '{roi}' → ['{left_variant}', '{right_variant}']", level='full')
-            elif found_left:
-                # Only left exists
-                if left_variant not in seen:
-                    expanded.append(left_variant)
-                    seen.add(left_variant)
-                self._vprint(f"   📍 Expanded '{roi}' → '{left_variant}' (only L available)", level='full')
-            elif found_right:
-                # Only right exists
-                if right_variant not in seen:
-                    expanded.append(right_variant)
-                    seen.add(right_variant)
-                self._vprint(f"   📍 Expanded '{roi}' → '{right_variant}' (only R available)", level='full')
-            else:
-                # No bilateral variants found, keep original (may still work if mesh file exists)
-                if roi not in seen:
-                    expanded.append(roi)
-                    seen.add(roi)
-                if available_set:
-                    self._vprint(f"   ⚠️  ROI '{roi}' not found in available ROIs (will try to load anyway)", level='full')
-        
-        return expanded
-
     def _expand_roi_names_with_colors(self, roi_list, color_list, available_rois=None):
         """Expand ROI names AND their corresponding colors to include bilateral (L/R) variants.
         
@@ -9054,31 +8653,6 @@ class VisualizeSkeleton:
         # - FlyWire/FAFB with template: No transform (native FLYWIRE)
         # - male-cns, manc, optic-lobe: Affine only
         return False
-    
-    def _check_elastix_available(self):
-        """Check if elastix binaries are available in PATH.
-        
-        Elastix is required for non-affine transforms between certain template spaces,
-        such as JRCFIB2022Mraw -> JRC2018F.
-        
-        Returns
-        -------
-        bool
-            True if elastix is available, False otherwise
-            
-        Notes
-        -----
-        Installation instructions:
-        - macOS (Homebrew): brew install elastix
-        - macOS (conda): conda install -c conda-forge elastix
-        - Linux: sudo apt-get install elastix (Ubuntu/Debian) or download from https://github.com/SuperElastix/elastix/releases
-        - Windows: Download from https://github.com/SuperElastix/elastix/releases and add to PATH
-        - Python package: pip install itk-elastix (alternative, may work in some cases)
-        
-        After installation, ensure the elastix binary is in your PATH.
-        """
-        import shutil
-        return shutil.which('elastix') is not None
     
     def _get_fafb_tilt_correction_matrix(self):
         """Get the affine transformation matrix to correct FAFB/FLYWIRE left-right tilt.
@@ -11711,10 +11285,6 @@ class VisualizeSkeleton:
             return True
         except Exception:
             return False
-
-    def _get_mesh_export_role(self, mesh):
-        """Return the cached export role for a mesh."""
-        return getattr(mesh, 'metadata', {}).get('export_role', 'mesh')
 
     def _get_glb_export_rgba(self, mesh):
         """Return the exact cached RGBA color for GLB export."""

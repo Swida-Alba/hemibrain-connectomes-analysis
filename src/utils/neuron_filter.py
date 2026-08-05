@@ -31,7 +31,7 @@ Example usage:
 """
 
 import re
-from typing import Union, List, Dict, Any, Optional, Set, Tuple
+from typing import Union, List, Dict, Any
 import pandas as pd
 
 
@@ -228,17 +228,64 @@ class NeuronFilter:
         # For exact match with integers (bodyIds), only search bodyId column
         if operator == 'exact' and patterns and isinstance(patterns[0], int):
             if 'bodyId' in df.columns:
-                return df['bodyId'].apply(lambda v: self._match_value(v, operator, patterns))
+                return df['bodyId'].isin(patterns)
             return pd.Series([False] * len(df), index=df.index)
         
+        str_patterns = [str(p) for p in patterns]
         # Search across columns with OR logic
         combined_mask = pd.Series([False] * len(df), index=df.index)
         
         for col in search_cols:
-            col_mask = df[col].apply(lambda v: self._match_value(v, operator, patterns))
+            col_mask = self._apply_operator_column(df[col], operator, patterns, str_patterns)
             combined_mask = combined_mask | col_mask
         
         return combined_mask
+
+    def _apply_operator_column(self, series: pd.Series, operator: str,
+                               patterns: List, str_patterns: List) -> pd.Series:
+        """Vectorized operator application over one column.
+
+        Replicates the per-cell semantics of _match_value exactly:
+        - NaN/None values never match
+        - values are compared via their str() form (like str(value))
+        - regex patterns use re.search semantics; an invalid regex falls
+          back to exact equality for that pattern
+        """
+        notna = series.notna()
+        if not patterns:
+            return pd.Series([False] * len(series), index=series.index)
+        str_series = series.astype(str)
+
+        if operator == 'exact':
+            return (series.isin(patterns) | str_series.isin(str_patterns)) & notna
+        if operator == 'contains':
+            alt = '|'.join(re.escape(p) for p in str_patterns)
+            return str_series.str.contains(alt, na=False) & notna
+        if operator == 'not_contains':
+            alt = '|'.join(re.escape(p) for p in str_patterns)
+            return notna & ~str_series.str.contains(alt, na=False)
+        if operator == 'startswith':
+            return str_series.str.startswith(tuple(str_patterns), na=False) & notna
+        if operator == 'endswith':
+            return str_series.str.endswith(tuple(str_patterns), na=False) & notna
+        if operator == 'regex':
+            mask = pd.Series([False] * len(series), index=series.index)
+            for p in str_patterns:
+                try:
+                    mask = mask | str_series.str.contains(p, regex=True, na=False)
+                except re.error:
+                    # Invalid regex: original semantics try an exact match
+                    mask = mask | (str_series == p)
+            return mask & notna
+        if operator == 'not_regex':
+            mask = pd.Series([True] * len(series), index=series.index)
+            for p in str_patterns:
+                try:
+                    mask = mask & ~str_series.str.contains(p, regex=True, na=False)
+                except re.error:
+                    mask = mask & (str_series != p)
+            return mask & notna
+        return pd.Series([False] * len(series), index=series.index)
     
     def apply(self, df: pd.DataFrame) -> pd.DataFrame:
         """

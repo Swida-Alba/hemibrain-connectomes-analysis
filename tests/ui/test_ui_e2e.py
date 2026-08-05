@@ -85,6 +85,11 @@ class TestRunner:
                 "    time.sleep(0.02)\n"
                 "print()\n"
                 "print('end-line', flush=True)\n"
+                # Raw ANSI colors and tqdm-style bars must be sanitized into
+                # clean, single progress lines (no per-refresh log spam).
+                "print('\\x1b[33mANSI-warning\\x1b[0m', flush=True)\n"
+                "sys.stdout.write('Loading data:   0%|          | 0/4 [00:00<?, ?it/s]\\n')\n"
+                "sys.stdout.write('Loading data: 100%|██████████| 4/4 [00:00<00:00,  5.22s/it]\\n')\n"
             )
             runner.process = await asyncio.create_subprocess_exec(
                 sys.executable,
@@ -106,6 +111,89 @@ class TestRunner:
         assert any("progress" in msg for _, msg in progress_events), progress_events
         first_progress = next(i for i, (lvl, _) in enumerate(events) if lvl == "progress")
         assert first_progress < events.index(("stdout", "end-line"))
+        # ANSI escapes are stripped, and the tqdm bars arrive as progress.
+        assert ("stdout", "ANSI-warning") in events, events
+        assert ("progress", "Loading data: 100%|██████████| 4/4 [00:00<00:00,  5.22s/it]") in events
+        assert ("progress", "Loading data:   0%|          | 0/4 [00:00<?, ?it/s]") in events
+        # No whitespace-only or empty log lines leak into the stream.
+        assert all(msg.strip() for _lvl, msg in events), events
+
+    def test_output_splitter_cleans_tqdm_refresh_stream(self):
+        """\\r-refreshed tqdm bars become progress segments, spaces are dropped."""
+        from ui.runner import _OutputSplitter
+
+        splitter = _OutputSplitter()
+        parts = list(splitter.feed(
+            "Loading data:   0%|          | 0/4 [00:00<?, ?it/s]   \r"
+            "Loading data:  25%|██▌       | 1/4 [00:09<00:28,  9.64s/it]  \r"
+            "\n"
+        ))
+        assert parts == [
+            ("Loading data:   0%|          | 0/4 [00:00<?, ?it/s]", True),
+            ("Loading data:  25%|██▌       | 1/4 [00:09<00:28,  9.64s/it]", True),
+        ]
+
+    def test_output_splitter_classifies_newline_tqdm_bars(self):
+        """Non-TTY tqdm writes one bar per line; each must be classified progress."""
+        from ui.runner import _OutputSplitter
+
+        splitter = _OutputSplitter()
+        parts = list(splitter.feed(
+            "Building target profiles:   0%|          | 0/2972 [00:00<?, ?it/s]\n"
+            "Building target profiles:  50%|█████     | 1488/2972 [00:06<00:05, 265.91it/s]\n"
+            "[HomologFinder] Built 2972 target profiles\n"
+        ))
+        assert parts == [
+            ("Building target profiles:   0%|          | 0/2972 [00:00<?, ?it/s]", True),
+            ("Building target profiles:  50%|█████     | 1488/2972 [00:06<00:05, 265.91it/s]", True),
+            ("[HomologFinder] Built 2972 target profiles", False),
+        ]
+
+    def test_output_splitter_strips_ansi_and_drops_blank_lines(self):
+        """ANSI codes are removed; whitespace-only lines are dropped."""
+        from ui.runner import _OutputSplitter
+
+        splitter = _OutputSplitter()
+        parts = list(splitter.feed(
+            "\x1b[33m⚠️  Warning: 19 layers but only 10 colors.\x1b[0m\n"
+            "   \n"
+            "\n"
+            "saving figure to \x1b[34m/out/plot.html\x1b[0m...Done (HTML saved)\n"
+        ))
+        assert parts == [
+            ("⚠️  Warning: 19 layers but only 10 colors.", False),
+            ("saving figure to /out/plot.html...Done (HTML saved)", False),
+        ]
+
+    def test_output_splitter_cursor_up_refreshes_progress(self):
+        """Cursor-up escapes (\\x1b[A) act as progress refresh separators."""
+        from ui.runner import _OutputSplitter
+
+        splitter = _OutputSplitter()
+        parts = list(splitter.feed(
+            "Fetching:   0%|          | 0/6 [00:00<?, ?it/s]\x1b[A\n"
+            "Fetching:  17%|█▋        | 1/6 [00:00<00:03,  1.32it/s]\x1b[A\n"
+        ))
+        assert parts == [
+            ("Fetching:   0%|          | 0/6 [00:00<?, ?it/s]", True),
+            ("Fetching:  17%|█▋        | 1/6 [00:00<00:03,  1.32it/s]", True),
+        ]
+
+    def test_output_splitter_flushes_partial_line(self):
+        """A trailing partial line is flushed at EOF."""
+        from ui.runner import _OutputSplitter
+
+        splitter = _OutputSplitter()
+        assert list(splitter.feed("partial line")) == []
+        assert list(splitter.flush()) == [("partial line", False)]
+
+    def test_output_splitter_preserves_crlf_plain_lines(self):
+        """CRLF line endings must not be mistaken for progress refreshes."""
+        from ui.runner import _OutputSplitter
+
+        splitter = _OutputSplitter()
+        parts = list(splitter.feed("[HomologFinder] Loaded cache\r\n"))
+        assert parts == [("[HomologFinder] Loaded cache", False)]
 
     def test_generate_find_path_script(self):
         from ui.runner import ScriptRunner
@@ -175,13 +263,19 @@ class TestRunner:
         assert "vp.visualize()" in script
 
     def test_empty_network_opens_a_new_browser_tab(self, tmp_path, monkeypatch):
-        """A visible empty canvas opens as a fresh browser tab after export."""
+        """A visible empty canvas opens as a fresh browser tab after export.
+
+        Both webbrowser entry points are patched: the same-window ``open`` must
+        never fire (the canvas opens exactly once, in a new tab), otherwise the
+        test would pop a real browser window.
+        """
         import webbrowser
 
         sys.path.insert(0, str(PROJECT_ROOT / "vispath-subproject" / "src"))
         from vispath_pkg import VisualizePath
 
         opened = []
+        monkeypatch.setattr(webbrowser, "open", opened.append)
         monkeypatch.setattr(webbrowser, "open_new_tab", opened.append)
         visualizer = VisualizePath(
             path_file=None,
@@ -193,6 +287,7 @@ class TestRunner:
         output_path = Path(visualizer.generate_empty_network_html())
 
         assert output_path.exists()
+        # Exactly one open: a fresh tab (not the same-window open + tab).
         assert opened == [f"file://{output_path.resolve()}"]
 
     def test_generate_plot3d_script_includes_optional_exports(self):
@@ -231,6 +326,97 @@ class TestRunner:
         params = inspect.signature(HomologFinder.__init__).parameters
         assert "include_untyped_partners" in params
         assert "expand_untyped_2hop" not in params
+
+    def test_homologs_empty_saveas_uses_auto_folder(self, tmp_path):
+        """UI sends saveas='' when blank; results must land in a per-run
+        findhomologs_ folder instead of being dumped into output_dir."""
+        import sys
+        sys.path.insert(0, str(PROJECT_ROOT / "src"))
+        import pandas as pd
+        from comparison.profile_comparator import HomologFinder
+
+        finder = HomologFinder(
+            source="aMe12",
+            source_dataset="male-cns:v1.0",
+            target_dataset="male-cns:v1.0",
+            output_dir=str(tmp_path),
+            saveas="",  # The UI passes an empty string when the field is blank
+            verbose=False,
+        )
+        results = pd.DataFrame({
+            "source_bodyId": [1, 2],
+            "target_bodyId": [3, 4],
+            "rank_union": [0.5, 0.4],
+        })
+        finder._save_homolog_results_internal(
+            results_df=results,
+            query="aMe12",
+            source_dataset="male-cns:v1.0",
+            target_dataset="male-cns:v1.0",
+            output_dir=str(tmp_path),
+            saveas="",
+            direction="both",
+            include_partner_details=False,
+            top_n_details=5,
+            params={"query": "aMe12"},
+        )
+        folders = [p for p in tmp_path.iterdir() if p.is_dir()]
+        assert len(folders) == 1, [p.name for p in tmp_path.iterdir()]
+        folder = folders[0]
+        assert folder.name.startswith("findhomologs_MCNS_to_MCNS_aMe12_"), folder.name
+        assert (folder / "README.txt").exists()
+        assert (folder / "results" / "homolog_results.csv").exists()
+        # Nothing is dumped into the output root itself
+        assert not (tmp_path / "README.txt").exists()
+        assert not (tmp_path / "results").exists()
+
+    def test_homologs_custom_saveas_respected(self, tmp_path):
+        """A non-empty saveas must still be used as the folder name."""
+        import sys
+        sys.path.insert(0, str(PROJECT_ROOT / "src"))
+        import pandas as pd
+        from comparison.profile_comparator import HomologFinder
+
+        finder = HomologFinder(
+            source="aMe12",
+            source_dataset="male-cns:v1.0",
+            target_dataset="male-cns:v1.0",
+            output_dir=str(tmp_path),
+            saveas="my_custom_run",
+            verbose=False,
+        )
+        results = pd.DataFrame({"source_bodyId": [1], "target_bodyId": [3], "rank_union": [0.5]})
+        finder._save_homolog_results_internal(
+            results_df=results,
+            query="aMe12",
+            source_dataset="male-cns:v1.0",
+            target_dataset="male-cns:v1.0",
+            output_dir=str(tmp_path),
+            saveas="my_custom_run",
+            direction="both",
+            include_partner_details=False,
+            top_n_details=5,
+            params={"query": "aMe12"},
+        )
+        assert (tmp_path / "my_custom_run" / "README.txt").exists()
+
+    def test_interdataset_output_name_prefix(self):
+        """Inter-dataset runs use the interdataset_ folder prefix."""
+        import sys
+        sys.path.insert(0, str(PROJECT_ROOT / "src"))
+        from comparison.comparison_parameters import ComparisonParameters
+
+        params = ComparisonParameters(
+            datasets=["male-cns:v0.9", "hemibrain:v1.2.1"],
+            source_neurons=["aMe12"],
+            target_neurons=["PPL101"],
+            output_folder="/tmp/drocat-test",
+        )
+        assert params.output_name.startswith("interdataset_aMe12_to_PPL101_"), params.output_name
+        assert "comp_" not in params.output_name
+        # Empty-string saveas must fall back to the auto name
+        params.saveas = ""
+        assert params.output_name.startswith("interdataset_aMe12_to_PPL101_"), params.output_name
 
     def test_scan_output_files_empty(self):
         from ui.runner import ScriptRunner
@@ -271,6 +457,39 @@ class TestRunner:
         sr2 = ScriptRunner()
         sr2._run_logs = [("stdout", "nothing here")]
         assert sr2._extract_output_folder("/tmp") is None
+
+    def test_resolve_scan_dir_failed_run_returns_none(self):
+        """A failed run that created no folder must NOT scan the shared root
+        (which would surface files from previous runs, e.g. BANC files while
+        running male-cns)."""
+        from ui.runner import ScriptRunner
+        sr = ScriptRunner()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            (Path(tmpdir) / "banc_previous_output.csv").write_text("a,b\n1,2")
+            sr._run_logs = [
+                ("stderr", "[ERROR] MTe07 not found as source in any columns"),
+            ]
+            assert sr._resolve_scan_dir(tmpdir) is None
+
+    def test_resolve_scan_dir_uses_announced_run_folder(self):
+        """The backend-announced per-run folder wins over the storage root."""
+        from ui.runner import ScriptRunner
+        sr = ScriptRunner()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            run = Path(tmpdir) / "findpath_MCNS_aMe12_to_aMe10_L2w3r0p0_20260801_120000"
+            run.mkdir()
+            sr._run_logs = [("stdout", f"  📁 Created output folder: {run}")]
+            assert sr._resolve_scan_dir(tmpdir) == str(run)
+
+    def test_resolve_scan_dir_accepts_direct_run_folder(self):
+        """plot_path passes its pre-created plotpath_ folder directly."""
+        from ui.runner import ScriptRunner
+        sr = ScriptRunner()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            run = Path(tmpdir) / "plotpath_my_paths_20260801_120000"
+            run.mkdir()
+            sr._run_logs = [("stdout", "plotting network...")]
+            assert sr._resolve_scan_dir(str(run)) == str(run)
 
     def test_generate_color_palette_small_n(self):
         """Bokeh categorical palettes have minimum sizes; small n must still work."""
@@ -532,8 +751,7 @@ class TestComponents:
             listener.type: listener
             for listener in container.chip_input._event_listeners.values()
         }
-        assert listeners["input"].js_handler == "(event) => emit(event?.target?.value || '')"
-        assert listeners["focusout"].js_handler == "() => emit(null)"
+        assert listeners["input"].js_handler == "(event) => emit(event?.target?.value ?? '')"
         assert "blur" in listeners
 
         # Simulate NiceGUI's native input and blur events. The browser's
@@ -544,10 +762,174 @@ class TestComponents:
         })
         assert container.chip_input.value == []
         container.chip_input._handle_event({
-            "listener_id": listeners["focusout"].id,
+            "listener_id": listeners["blur"].id,
             "args": None,
         })
         assert container.get_value() == ("exact", ["PPL1"])
+        # Committed values must live in the option list, otherwise the chip
+        # never renders in the browser (model-value is filtered by options).
+        assert container.chip_input.options == ["PPL1"]
+
+    def test_neuron_list_input_clearing_text_drops_pending_value(self):
+        """Deleting the editor text must not commit the previously typed text."""
+        from nicegui import Client
+        from nicegui.page import page
+        from ui.components.common import neuron_list_input
+
+        client = Client(page("/neuron-input-clear-test"))
+        with client:
+            container = neuron_list_input(label="Source Neurons")
+
+        listeners = {
+            listener.type: listener
+            for listener in container.chip_input._event_listeners.values()
+        }
+
+        # Type a value, then clear the field with Backspace (native input '').
+        container.chip_input._handle_event({
+            "listener_id": listeners["input"].id,
+            "args": "PPL1",
+        })
+        container.chip_input._handle_event({
+            "listener_id": listeners["input"].id,
+            "args": "",
+        })
+        # Quasar's blur-reset emits an empty input-value; it must be ignored.
+        container.chip_input._handle_event({
+            "listener_id": listeners["inputValue"].id,
+            "args": "",
+        })
+        container.chip_input._handle_event({
+            "listener_id": listeners["blur"].id,
+            "args": None,
+        })
+        # Nothing was committed: the field was cleared before blur.
+        assert container.get_value() == ("exact", [])
+
+    def test_neuron_list_input_max_items_rejects_second_chip(self):
+        """A chip input with max_items=1 keeps only the first value."""
+        from nicegui import Client
+        from nicegui.page import page
+        from ui.components.common import neuron_list_input
+
+        client = Client(page("/neuron-input-max-items-test"))
+        with client:
+            container = neuron_list_input(label="Source Neuron", max_items=1)
+
+        listeners = {
+            listener.type: listener
+            for listener in container.chip_input._event_listeners.values()
+        }
+
+        # The first value is committed on blur.
+        container.chip_input._handle_event({
+            "listener_id": listeners["input"].id,
+            "args": "PPL1",
+        })
+        container.chip_input._handle_event({
+            "listener_id": listeners["blur"].id,
+            "args": None,
+        })
+        assert container.get_value() == ("exact", ["PPL1"])
+
+        # A second value is rejected once the input is at capacity.
+        container.chip_input._handle_event({
+            "listener_id": listeners["input"].id,
+            "args": "PPL2",
+        })
+        container.chip_input._handle_event({
+            "listener_id": listeners["blur"].id,
+            "args": None,
+        })
+        assert container.get_value() == ("exact", ["PPL1"])
+
+        # Quasar-native additions (Enter) are truncated to the cap as well.
+        container.chip_input.value = ["PPL1", "PPL2"]
+        container.chip_input._handle_event({
+            "listener_id": listeners["update:modelValue"].id,
+            "args": ["PPL1", "PPL2"],
+        })
+        assert container.get_value() == ("exact", ["PPL1"])
+
+    def test_neuron_list_input_initial_values_survive_enter(self):
+        """Seeded chips survive get_value(); Enter keeps the whole text as ONE chip."""
+        from nicegui import Client
+        from nicegui.page import page
+        from ui.components.common import neuron_list_input
+
+        client = Client(page("/neuron-input-initial-test"))
+        with client:
+            container = neuron_list_input(
+                label="Synapse Thresholds",
+                initial=[3, 5, 10],
+                show_filter=False,
+                show_upload=False,
+            )
+        assert container.get_value() == ("exact", [3, 5, 10])
+        assert container.chip_input.options == [3, 5, 10]
+
+        listeners = {
+            listener.type: listener
+            for listener in container.chip_input._event_listeners.values()
+        }
+
+        # Quasar's add-unique adds the whole editor text as a single chip on
+        # Enter; commas are legal inside names and must NOT be split.
+        container.chip_input.value = [3, 5, 10, "3, 7"]
+        container.chip_input._handle_event({
+            "listener_id": listeners["update:modelValue"].id,
+            "args": [3, 5, 10, "3, 7"],
+        })
+        assert container.get_value() == ("exact", [3, 5, 10, "3, 7"])
+        assert container.chip_input.options == [3, 5, 10, "3, 7"]
+
+    def test_neuron_list_input_commas_and_spaces_are_not_separators(self):
+        """Blur commits the WHOLE editor text as one chip (',' and ' ' preserved)."""
+        from nicegui import Client
+        from nicegui.page import page
+        from ui.components.common import neuron_list_input
+
+        client = Client(page("/neuron-input-no-split-test"))
+        with client:
+            container = neuron_list_input(label="Source Neurons")
+
+        listeners = {
+            listener.type: listener
+            for listener in container.chip_input._event_listeners.values()
+        }
+
+        # Comma-containing names (e.g. driver lines) stay one chip.
+        container.chip_input._handle_event({
+            "listener_id": listeners["input"].id,
+            "args": "PPL1, PPL2",
+        })
+        container.chip_input._handle_event({
+            "listener_id": listeners["blur"].id,
+            "args": None,
+        })
+        assert container.get_value() == ("exact", ["PPL1, PPL2"])
+
+        # Space-containing names (e.g. 'A -> B -> C' layers) stay one chip.
+        container.chip_input._handle_event({
+            "listener_id": listeners["input"].id,
+            "args": "A -> B -> C",
+        })
+        container.chip_input._handle_event({
+            "listener_id": listeners["blur"].id,
+            "args": None,
+        })
+        assert container.get_value() == ("exact", ["PPL1, PPL2", "A -> B -> C"])
+
+        # Surrounding whitespace is trimmed; digit-only text still normalizes.
+        container.chip_input._handle_event({
+            "listener_id": listeners["input"].id,
+            "args": "  720575940610453042  ",
+        })
+        container.chip_input._handle_event({
+            "listener_id": listeners["blur"].id,
+            "args": None,
+        })
+        assert container.get_value() == ("exact", ["PPL1, PPL2", "A -> B -> C", 720575940610453042])
 
     def test_parse_neuron_upload_text_and_excel(self):
         import asyncio
@@ -589,6 +971,131 @@ class TestComponents:
         assert panel._format_size(500) == "500 B"
         assert panel._format_size(1536) == "1.5 KB"
         assert panel._format_size(1048576) == "1.0 MB"
+
+    def test_output_panel_progress_refreshes_same_bar_in_place(self):
+        """Progress lines refresh their own bar; new bars start fresh lines."""
+        from nicegui import Client
+        from nicegui.page import page
+        from ui.components.output_panel import OutputPanel
+
+        client = Client(page("/output-panel-progress-test"))
+        with client:
+            panel = OutputPanel("Test")
+            panel.create()
+
+        bar_0 = "Building target profiles:   0%|          | 0/2972 [00:00<?, ?it/s]"
+        bar_50 = "Building target profiles:  50%|█████     | 1488/2972 [00:06<00:05, 265.91it/s]"
+        bar_other = "Loading data:   0%|          | 0/4 [00:00<?, ?it/s]"
+
+        panel.log(bar_0, "progress")
+        panel.log(bar_50, "progress")
+        children = panel.log_area.default_slot.children
+        assert len(children) == 1
+        assert children[0].text == bar_50
+
+        # A different bar starts a new line instead of overwriting the first.
+        panel.log(bar_other, "progress")
+        assert len(children) == 2
+        assert children[1].text == bar_other
+
+        # A normal line ends the refresh chain; the next progress line is new.
+        panel.log("[HomologFinder] Built 2972 target profiles", "stdout")
+        panel.log("Loading data:  50%|█████     | 2/4 [00:00<00:00,  9.64s/it]", "progress")
+        assert len(children) == 4
+        assert children[3].text.startswith("Loading data:  50%")
+
+        # Trailing whitespace (tqdm line-clearing) is trimmed; blank lines drop.
+        panel.log("   ", "stdout")
+        panel.log("done   ", "stdout")
+        assert len(children) == 5
+        assert children[4].text == "done"
+
+    def _collect_panel_texts(self, container):
+        """Recursively collect all label texts inside a UI container."""
+        texts = []
+
+        def walk(element):
+            for child in element.default_slot.children:
+                if hasattr(child, "text"):
+                    texts.append(child.text)
+                walk(child)
+
+        walk(container)
+        return texts
+
+    def test_output_panel_streams_new_files_during_run(self, tmp_path):
+        """Files created while a run is active appear in the panel immediately."""
+        from nicegui import Client
+        from nicegui.page import page
+        from ui.components.output_panel import OutputPanel
+        from ui.runner import ScriptRunner
+
+        run_folder = tmp_path / "findpath_MCNS_aMe12_to_aMe10_L2w3r0p0_20260801_120000"
+        run_folder.mkdir()
+        (run_folder / "connections.csv").write_text("a,b\n1,2")
+
+        client = Client(page("/output-panel-stream-test"))
+        with client:
+            panel = OutputPanel("Test")
+            panel.create()
+            runner = ScriptRunner()
+            runner.is_running = True
+            runner._run_logs = [("stdout", f"  📁 Created output folder: {run_folder}")]
+            panel._poll_output_files(runner, str(tmp_path))
+
+        texts = self._collect_panel_texts(panel.files_container)
+        assert any("connections.csv" in text for text in texts), texts
+        assert any("Data Tables (CSV)" in text for text in texts), texts
+
+    def test_output_panel_streaming_skips_unknown_run_folder(self, tmp_path):
+        """Before the run folder is known, polling must not show stale files."""
+        from nicegui import Client
+        from nicegui.page import page
+        from ui.components.output_panel import OutputPanel
+        from ui.runner import ScriptRunner
+
+        (tmp_path / "old_run_connections.csv").write_text("a,b\n1,2")
+
+        client = Client(page("/output-panel-stream-skip-test"))
+        with client:
+            panel = OutputPanel("Test")
+            panel.create()
+            runner = ScriptRunner()
+            runner.is_running = True
+            runner._run_logs = [("stdout", "some unrelated log line")]
+            panel._poll_output_files(runner, str(tmp_path))
+
+        texts = self._collect_panel_texts(panel.files_container)
+        assert not any("old_run_connections.csv" in text for text in texts), texts
+
+    def test_output_panel_show_files_preserves_expanded_state(self, tmp_path):
+        """Streaming refreshes keep the user's expanded categories open."""
+        from nicegui import Client
+        from nicegui.page import page
+        from ui.components.output_panel import OutputPanel
+
+        client = Client(page("/output-panel-expand-test"))
+        with client:
+            panel = OutputPanel("Test")
+            panel.create()
+
+        def file_entry(name):
+            return {"name": name, "path": str(tmp_path / name), "size": 10,
+                    "modified": "2026-08-01T00:00:00"}
+
+        panel.show_files([file_entry("a.csv")], str(tmp_path))
+        assert panel._file_categories
+        for expansion in panel._file_categories.values():
+            expansion.value = True  # user expands a category
+
+        # A streaming refresh with a new file arrives.
+        panel.show_files([file_entry("a.csv"), file_entry("b.csv")], str(tmp_path))
+
+        assert panel._file_categories, "categories must be rebuilt"
+        assert all(expansion.value for expansion in panel._file_categories.values()), \
+            "expanded categories must stay open after a streaming refresh"
+        texts = self._collect_panel_texts(panel.files_container)
+        assert any("b.csv" in text for text in texts), texts
 
 
 # =============================================================================

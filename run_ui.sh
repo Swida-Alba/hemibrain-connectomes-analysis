@@ -15,6 +15,48 @@ fi
 DROCAT_VERSION="${DROCAT_VERSION:-4.5.0}"
 ENV_BASE="drocat-${DROCAT_VERSION}"
 
+# --- Port-conflict guard -------------------------------------------------
+# If the UI is already running (e.g. a previous launch is still up), open it
+# in the browser instead of crashing with "address already in use".
+APP_PORT="${DROCAT_UI_PORT:-$(sed -n 's/^APP_PORT = \([0-9][0-9]*\)/\1/p' "$SCRIPT_DIR/ui/config.py" | head -1)}"
+APP_PORT="${APP_PORT:-8080}"
+
+port_in_use() {
+    if command -v lsof >/dev/null 2>&1; then
+        lsof -ti "tcp:$APP_PORT" -sTCP:LISTEN >/dev/null 2>&1
+    elif command -v nc >/dev/null 2>&1; then
+        nc -z 127.0.0.1 "$APP_PORT" >/dev/null 2>&1
+    else
+        (exec 3<>"/dev/tcp/127.0.0.1/$APP_PORT") >/dev/null 2>&1
+    fi
+}
+
+if port_in_use; then
+    owner_pid="$(lsof -ti "tcp:$APP_PORT" -sTCP:LISTEN 2>/dev/null | head -1)"
+    owner_cmd="$(ps -p "$owner_pid" -o command= 2>/dev/null || true)"
+    # A DROCAT process owns the port (still booting or fully up).
+    if echo "$owner_cmd" | grep -qE "ui/app\.py|drocat"; then
+        printf 'DROCAT is already running at http://127.0.0.1:%s\n' "$APP_PORT"
+        printf 'Opening it in your browser...\n'
+        if command -v open >/dev/null 2>&1; then
+            open "http://127.0.0.1:$APP_PORT"
+        fi
+        exit 0
+    fi
+    # Otherwise probe the page to rule out a non-DROCAT server on the port.
+    if curl -s --max-time 2 "http://127.0.0.1:$APP_PORT/" 2>/dev/null | grep -q "drocat-cobalt"; then
+        printf 'DROCAT is already running at http://127.0.0.1:%s\n' "$APP_PORT"
+        printf 'Opening it in your browser...\n'
+        if command -v open >/dev/null 2>&1; then
+            open "http://127.0.0.1:$APP_PORT"
+        fi
+        exit 0
+    fi
+    printf 'ERROR: Port %s is already in use by another application.\n' "$APP_PORT" >&2
+    printf 'Close that application, or start the UI with DROCAT_UI_PORT=<free port>.\n' >&2
+    exit 1
+fi
+
 find_conda() {
     if command -v conda >/dev/null 2>&1; then
         command -v conda

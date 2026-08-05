@@ -5,7 +5,7 @@ Provides timeout and retry functionality for API calls to prevent hanging
 when network issues occur during batch fetching from NeuPrint or other APIs.
 
 Usage:
-    from src.utils.api_utils import api_call_with_retry, TimeoutError
+    from src.utils.api_utils import api_call_with_retry, APITimeoutError
 
     # Wrap any API call with timeout and retry
     result = api_call_with_retry(
@@ -19,7 +19,6 @@ Usage:
 import time
 import warnings
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
-from functools import wraps
 from typing import Any, Callable, Optional, TypeVar
 
 T = TypeVar('T')
@@ -93,18 +92,25 @@ def api_call_with_retry(
     
     for attempt in range(1, max_retries + 1):
         try:
-            # Use ThreadPoolExecutor to enforce timeout
-            with ThreadPoolExecutor(max_workers=1) as executor:
+            # Use ThreadPoolExecutor to enforce timeout. The executor must be
+            # shut down with wait=False: a hung API call would otherwise make
+            # the with-block's shutdown(wait=True) hang forever, defeating the
+            # whole point of the timeout.
+            executor = ThreadPoolExecutor(max_workers=1)
+            try:
                 future = executor.submit(func)
                 try:
                     result = future.result(timeout=timeout)
                     return result
                 except FuturesTimeoutError:
-                    # Cancel the future if possible (though submit doesn't support cancellation well)
+                    # Cancel the future if possible (the worker thread keeps
+                    # running until the hung call returns; it is not waited on).
                     future.cancel()
                     raise APITimeoutError(
                         f"{description} timed out after {timeout}s (attempt {attempt}/{max_retries})"
                     )
+            finally:
+                executor.shutdown(wait=False)
         except APITimeoutError as e:
             last_exception = e
             if attempt < max_retries:

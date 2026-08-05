@@ -66,7 +66,7 @@ class ComparisonParameters:
             in output files and visualizations.
             
         top_edges (int): Number of top edges to highlight in visualizations.
-            Default: 50.
+            Default: -1 (no limit; the UI passes an explicit value).
             
         comparison_mode (str): Analysis mode - 'path' or 'edge'.
             - 'path': Discover edges through source-to-target paths (may filter
@@ -83,7 +83,7 @@ class ComparisonParameters:
             NEUPRINT_APPLICATION_TOKEN environment variable.
             
         allow_single_dataset (bool): Allow single dataset mode for threshold
-            sensitivity analysis. Default: False.
+            sensitivity analysis. Default: True.
     
     Example:
         >>> # Basic comparison workflow
@@ -232,13 +232,23 @@ class ComparisonParameters:
     """
 
     pathfinding: str = 'MemoizedDFS'
-    """Pathfinding algorithm to use in FindAllPath:
-    - 'MemoizedDFS': Meet-in-the-middle DFS - optimized for deep paths (L>=5) (default)
-    - 'Bidirectional': Bidirectional BFS - optimized for shortest paths (high memory)
-    - 'DP': Backward Reachability (DP) - optimized for pruning dead ends (low memory)
-    - 'DFS': Backward Memoized DFS - standard traversal, no memoization (lowest memory, slower)
-    - 'Backtracking': Backward DFS with backtracking
+    """Pathfinding algorithm to use in FindAllPath (names match the
+    algorithms):
+    - 'MemoizedDFS': Memoized DFS (forward) - fastest measured at all
+      depths (no reversed-graph copy); the recommended default
+    - 'DFS': Memoized DFS (backward) - best when targets are few
+    - 'MeetInMiddle': Meet-in-the-middle DFS - fastest at shallow depths
+    - 'DP': Backward Reachability (DP) - robust, low memory
+    - 'Bidirectional': Bidirectional BFS - shortest paths first, but stores
+      full layer trees (highest memory)
     """
+    
+    search_columns: str = 'auto'
+    """Which columns to search when resolving source/target neuron names in
+    each dataset: 'auto' (default) searches all columns with priority
+    bodyId -> type -> instance -> other string columns (e.g. flywireType,
+    hemibrainType, mancType); 'type', 'instance' and 'bodyId' restrict the
+    search to that single column."""
     
     # Output settings
     output_folder: str = '.'
@@ -854,13 +864,13 @@ class ComparisonParameters:
     def output_name(self) -> str:
         """
         Get the output folder name.
-        
-        Format: comp_{source_abbr}_to_{target_abbr}_{dataset_codes}_{timestamp}
-        
+
+        Format: interdataset_{source_abbr}_to_{target_abbr}_{dataset_codes}_{timestamp}
+
         Examples:
-        - comp_aMe12_to_PPL101_MFB_20251120_143025
-        - comp_KC_etc_to_MBON_etc_HM_20251120_143025
-        
+        - interdataset_aMe12_to_PPL101_MFB_20251120_143025
+        - interdataset_KC_etc_to_MBON_etc_HM_20251120_143025
+
         Returns:
             saveas value if provided, otherwise auto-generated name with timestamp
         """
@@ -882,7 +892,7 @@ class ComparisonParameters:
         # Get dataset codes
         dataset_codes = self._get_dataset_short_codes()
         
-        return f"comp_{source_abbr}_to_{target_abbr}_{dataset_codes}_{self.run_timestamp}"
+        return f"interdataset_{source_abbr}_to_{target_abbr}_{dataset_codes}_{self.run_timestamp}"
     
     @property
     def full_output_path(self) -> str:

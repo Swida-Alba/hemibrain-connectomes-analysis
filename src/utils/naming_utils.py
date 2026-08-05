@@ -10,7 +10,7 @@ Examples:
     findpath_MCNS_aMe12_to_aMe10_L2w3r0p0_20260801_183000
     finddirect_MCNS_aMe12_to_aMe10_L2w3r0p0_20260801_183005
     profiling_MCNS_aMe12_aMe10_aMe9_20260801_183010
-    homologs_MCNS_to_HEMI_aMe12_20260801_183015
+    findhomologs_MCNS_to_HEMI_aMe12_20260801_183015
     findlines_MCNS_aMe12_20260801_183020
     plot3d_MCNS_aMe12_20260801_183025
 """

@@ -14,9 +14,6 @@ import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent / 'src'))
 
-import os
-import time
-from coana import VisualizeSkeleton
 
 print('='*80)
 print('VISUALIZESKELETON OPTIMIZATION DEMONSTRATIONS')
@@ -147,7 +144,6 @@ print('DEMO 4: Complete Optimization Example')
 print('='*80)
 
 example_code = '''
-from coana import VisualizeSkeleton
 
 # Optimized visualization: fast loading, small file size
 vs = VisualizeSkeleton(

@@ -1,7 +1,6 @@
 import sys
 from pathlib import Path
 import warnings
-import pandas as pd
 import time
 
 # Add project root and src directory to Python path
@@ -36,7 +35,7 @@ if __name__ == '__main__':
         use_cache=True,  # Enable caching for faster subsequent runs
         edgeN_limit=500,
         output_format='csv',  # 'xlsx' (default) or 'csv'
-        pathfinding='Bidirectional',  # 'Bidirectional' (fastest), 'DP' (backward), 'MemoizedDFS' (depends on repeats), 'DFS'
+        pathfinding='MemoizedDFS',  # 'MemoizedDFS' (default, fastest), 'DFS' (backward), 'MeetInMiddle', 'DP', 'Bidirectional'
         skip_bodyId=True,
     )
 

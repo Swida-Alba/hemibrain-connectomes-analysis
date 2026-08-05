@@ -43,6 +43,7 @@
     <tr><td>Min Connection Ratio</td><td>0.0</td><td>Minimum weight/post ratio</td></tr>
     <tr><td>Min Traversal Prob.</td><td>0.0</td><td>Traversal probability threshold</td></tr>
     <tr><td>Filter By</td><td>bodyId</td><td>bodyId or type aggregation</td></tr>
+        <tr><td>Search Columns</td><td>auto</td><td>Columns searched when resolving source/target names: <code>auto</code> = all columns (bodyId → type → instance → flywireType/hemibrainType/…), or restrict to <code>type</code> / <code>instance</code> / <code>bodyId</code>. Needed when a name lives in a cross-dataset column (e.g. <code>MTe07</code> only exists in <code>flywireType</code> on male-cns v1.0).</td></tr>
     <tr><td>Exclude Intra-type</td><td>off</td><td>Removes edges where type_pre == type_post</td></tr>
     <tr><td>Output Format</td><td>csv</td><td>csv or xlsx</td></tr>
   </table>

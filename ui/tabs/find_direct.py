@@ -1,7 +1,7 @@
 """FindDirect Tab - Direct connection analysis."""
 
 from nicegui import ui
-from ..config import DEFAULTS, FILTER_OPTIONS, OUTPUT_FORMATS, NETWORK_LAYOUTS
+from ..config import DEFAULTS, FILTER_OPTIONS, OUTPUT_FORMATS, NETWORK_LAYOUTS, SEARCH_COLUMNS
 from ..components.common import (
     dataset_selector, neuron_list_input, number_input, select_input,
     checkbox_input, dir_input, apply_filter_mode, section_header, param_grid, tool_page,
@@ -68,6 +68,12 @@ def create_find_direct_tab():
                         "Filter By", FILTER_OPTIONS, DEFAULTS["filter_by"],
                         hint="'bodyId': individual level. 'type': aggregated by type.",
                     )
+                search_columns = select_input(
+                    "Search Columns", SEARCH_COLUMNS, "auto",
+                    hint="Which columns to search when resolving neuron names. "
+                         "'auto': all columns (bodyId -> type -> instance -> flywireType/others). "
+                         "Use 'type'/'instance'/'bodyId' to restrict the search.",
+                )
                 with param_grid(3):
                     output_format = select_input(
                         "Output Format", OUTPUT_FORMATS, DEFAULTS["output_format"],
@@ -156,6 +162,7 @@ def create_find_direct_tab():
             "min_ratio": float(min_ratio.value),
             "min_traversal_probability": float(min_traversal.value),
             "filter_by": filter_by.value,
+            "search_columns": search_columns.value,
             "network_layout": network_layout.value,
             "use_cache": use_cache.value,
             "edgeN_limit": int(edge_limit.value),

@@ -21,13 +21,9 @@ import img2pdf
 import matplotlib.patches as mp
 import matplotlib.pyplot as plt
 import navis
-import navis.interfaces.neuprint as neu
-import networkx as nx
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
-import plotly
-import seaborn as sns
 from neuprint import *
 # Explicit imports for Pylance static analysis (already imported via *)
 from neuprint import Client, fetch_neurons
@@ -290,6 +286,13 @@ def _get_neuron_df(dataset: str = 'male-cns:v0.9', verbose: bool = False) -> pd.
     
     ndf, _ = _get_cached_neuron_df(dataset_normalized, dataset_path_body)
     return ndf
+
+
+def _unique_nt_types(x):
+    """Join the unique non-empty NT types of a group into a '|' string."""
+    types = x.dropna().unique().tolist()
+    valid_types = sorted([str(t) for t in types if t and str(t).lower() != 'none' and str(t).lower() != 'nan'])
+    return '|'.join(valid_types) if valid_types else 'Unknown'
 
 
 def get_types(
@@ -1057,7 +1060,7 @@ def pull_dataset(dataset, save_path=None, omitNoneType=False, client=None):
     roi_count_df.to_csv(save_path + '_roi_count_df.csv',index=True)
     print('Done!')
 
-def getNeurons(requiredNeurons, dataset='hemibrain:v1.2.1', custom_group_names=None, client=None, verbose=True):
+def getNeurons(requiredNeurons, dataset='hemibrain:v1.2.1', custom_group_names=None, client=None, verbose=True, search_columns='auto'):
     '''get neurons locally from a given dataset
     
     Parameters
@@ -1088,6 +1091,12 @@ def getNeurons(requiredNeurons, dataset='hemibrain:v1.2.1', custom_group_names=N
         Client object (NeuPrint or FlyWire) for direct fetching if local dataset missing
     verbose : bool, optional
         Whether to print progress messages (default: True)
+    search_columns : str, optional
+        Which columns to search when resolving neuron names:
+        'auto' (default) searches all columns with priority
+        bodyId -> type -> instance -> other string columns
+        (e.g. flywireType, hemibrainType, mancType); 'type', 'instance'
+        and 'bodyId' restrict the search to that single column.
         
     Returns
     -------
@@ -1234,7 +1243,7 @@ def getNeurons(requiredNeurons, dataset='hemibrain:v1.2.1', custom_group_names=N
                 bodyId_alltypes = full_neuron_df['bodyId'].astype(str).tolist()
                 
                 for item in flat_list:
-                    item_bodyIds, search_info = _process_single_neuron(item, full_neuron_df, bodyId_alltypes, verbose=verbose)
+                    item_bodyIds, search_info = _process_single_neuron(item, full_neuron_df, bodyId_alltypes, verbose=verbose, search_columns=search_columns)
                     if item_bodyIds:
                         # Get matching rows
                         item_df = full_neuron_df[full_neuron_df['bodyId'].astype(str).isin([str(b) for b in item_bodyIds])].copy()
@@ -1330,7 +1339,7 @@ def getNeurons(requiredNeurons, dataset='hemibrain:v1.2.1', custom_group_names=N
                     
                     for item in requiredNeuron:
                         group_items.append(str(item).replace('.*', ''))
-                        item_bodyIds, _ = _process_single_neuron(item, ndf_alltypes, bodyId_alltypes, verbose=verbose)
+                        item_bodyIds, _ = _process_single_neuron(item, ndf_alltypes, bodyId_alltypes, verbose=verbose, search_columns=search_columns)
                         group_bodyIds.extend(item_bodyIds)
                     
                     # Generate group name
@@ -1350,7 +1359,7 @@ def getNeurons(requiredNeurons, dataset='hemibrain:v1.2.1', custom_group_names=N
                     print(f'Custom group "{group_name}": {len(group_bodyIds)} neurons from {len(requiredNeuron)} items')
                 else:
                     # Regular item
-                    item_bodyIds, _ = _process_single_neuron(requiredNeuron, ndf_alltypes, bodyId_alltypes, verbose=verbose)
+                    item_bodyIds, _ = _process_single_neuron(requiredNeuron, ndf_alltypes, bodyId_alltypes, verbose=verbose, search_columns=search_columns)
                     bodyId_list.extend(item_bodyIds)
                     group_names.append(str(requiredNeuron).replace('.*', ''))
             
@@ -1384,7 +1393,7 @@ def getNeurons(requiredNeurons, dataset='hemibrain:v1.2.1', custom_group_names=N
                     # Get bodyIds for this custom group
                     group_bodyIds = []
                     for item in requiredNeuron:
-                        item_bodyIds, _ = _process_single_neuron(item, ndf_alltypes, bodyId_alltypes, verbose=verbose)
+                        item_bodyIds, _ = _process_single_neuron(item, ndf_alltypes, bodyId_alltypes, verbose=verbose, search_columns=search_columns)
                         group_bodyIds.extend(item_bodyIds)
                     
                     # Ensure type consistency for .isin() matching
@@ -1414,7 +1423,7 @@ def getNeurons(requiredNeurons, dataset='hemibrain:v1.2.1', custom_group_names=N
                 elif i == 1:
                     auto_name += '_etc'
                 
-                item_bodyIds, _ = _process_single_neuron(requiredNeuron, ndf_alltypes, bodyId_alltypes, verbose=verbose)
+                item_bodyIds, _ = _process_single_neuron(requiredNeuron, ndf_alltypes, bodyId_alltypes, verbose=verbose, search_columns=search_columns)
                 bodyId_list.extend(item_bodyIds)
             
             # Ensure bodyId_list type matches DataFrame's bodyId column type for .isin() to work
@@ -1437,14 +1446,20 @@ def getNeurons(requiredNeurons, dataset='hemibrain:v1.2.1', custom_group_names=N
         pass
     return neuron_df, roi_count_df, auto_name, criteria
 
-def _process_single_neuron(requiredNeuron, ndf_alltypes, bodyId_alltypes, verbose=True):
+def _process_single_neuron(requiredNeuron, ndf_alltypes, bodyId_alltypes, verbose=True, search_columns='auto'):
     '''Helper function to process a single neuron identifier and return bodyIds.
     
-    Search priority:
-    1. bodyId (numeric) - exact match first, then regex if contains .*
-    2. type - exact match first, then regex if contains .*
-    3. instance - exact match first, then regex if contains .*
-    4. Other columns - regex search as fallback
+    Search scope ('search_columns'):
+    - 'auto' (default): search ALL columns with priority
+      1. bodyId (numeric) - exact match first, then regex if contains .*
+      2. type - exact match first, then regex if contains .*
+      3. instance - exact match first, then regex if contains .*
+      4. Other string columns (e.g. flywireType, hemibrainType, mancType) -
+         exact AND regex match (exact used to stop at type/instance only,
+         which silently missed names stored in cross-dataset type columns)
+    - 'type': search only the type column
+    - 'instance': search only the instance column
+    - 'bodyId': search only the bodyId column
     
     Parameters
     ----------
@@ -1456,13 +1471,25 @@ def _process_single_neuron(requiredNeuron, ndf_alltypes, bodyId_alltypes, verbos
         List of all bodyIds for quick lookup
     verbose : bool
         Whether to print progress messages
+    search_columns : str
+        Which columns to search: 'auto' (all), 'type', 'instance', or 'bodyId'
         
     Returns
     -------
     tuple : (list of bodyIds, dict with search info)
         Search info contains: {'search_term': str, 'matched_column': str, 'match_count': int}
     '''
-    import re
+    
+    # Column scope: 'auto' searches every string column with the priority
+    # above; the named scopes restrict the search to that single column.
+    scope = str(search_columns or 'auto').strip().lower()
+    if scope not in ('auto', 'type', 'instance', 'bodyid'):
+        scope = 'auto'
+    if scope == 'auto':
+        restrict = None
+    else:
+        # Canonical case: 'bodyid' -> 'bodyId' (column name is camelCase).
+        restrict = 'bodyId' if scope == 'bodyid' else scope
     
     bodyId_list = []
     search_info = {
@@ -1523,7 +1550,7 @@ def _process_single_neuron(requiredNeuron, ndf_alltypes, bodyId_alltypes, verbos
             return pd.DataFrame()
     
     # Priority 1: bodyId (for numeric inputs or explicit bodyId patterns)
-    if is_numeric or (has_regex and search_str.replace('.*', '').replace('*', '').replace('^', '').replace('$', '').isdigit()):
+    if restrict in (None, 'bodyId') and (is_numeric or (has_regex and search_str.replace('.*', '').replace('*', '').replace('^', '').replace('$', '').isdigit())):
         if is_numeric and not has_regex:
             # Exact bodyId lookup - always use string comparison for consistency
             # Avoid float conversion for large integers (FlyWire IDs exceed float precision)
@@ -1546,7 +1573,7 @@ def _process_single_neuron(requiredNeuron, ndf_alltypes, bodyId_alltypes, verbos
             # If not found as bodyId, fall through to try other columns
     
     # Priority 2: type column
-    if 'type' in ndf_alltypes.columns:
+    if restrict in (None, 'type') and 'type' in ndf_alltypes.columns:
         if has_regex:
             find_df = try_regex_match(ndf_alltypes, 'type', search_str)
         else:
@@ -1562,7 +1589,7 @@ def _process_single_neuron(requiredNeuron, ndf_alltypes, bodyId_alltypes, verbos
             return bodyId_list, search_info
     
     # Priority 3: instance column
-    if 'instance' in ndf_alltypes.columns:
+    if restrict in (None, 'instance') and 'instance' in ndf_alltypes.columns:
         if has_regex:
             find_df = try_regex_match(ndf_alltypes, 'instance', search_str)
         else:
@@ -1578,7 +1605,7 @@ def _process_single_neuron(requiredNeuron, ndf_alltypes, bodyId_alltypes, verbos
             return bodyId_list, search_info
     
     # Priority 4: bodyId column with regex (for patterns like "7205759406.*")
-    if has_regex and 'bodyId' in ndf_alltypes.columns:
+    if restrict in (None, 'bodyId') and has_regex and 'bodyId' in ndf_alltypes.columns:
         find_df = try_regex_match(ndf_alltypes, 'bodyId', search_str)
         if len(find_df) > 0:
             bodyId_list = find_df['bodyId'].tolist()
@@ -1588,20 +1615,27 @@ def _process_single_neuron(requiredNeuron, ndf_alltypes, bodyId_alltypes, verbos
                 print(f'Found {len(find_df)} neurons with bodyId matching "{search_str}" (regex match)')
             return bodyId_list, search_info
     
-    # Priority 5: Search other string columns as fallback (only for regex patterns)
-    if has_regex:
+    # Priority 5: other string columns (auto scope only). Both exact and
+    # regex search — previously exact matches stopped at type/instance, so
+    # names stored in cross-dataset type columns (flywireType, hemibrainType,
+    # mancType, ...) were silently missed.
+    if restrict is None:
         string_columns = [col for col in ndf_alltypes.columns 
                         if col not in ['bodyId', 'type', 'instance'] 
                         and ndf_alltypes[col].dtype == 'object']
         
         for col in string_columns:
-            find_df = try_regex_match(ndf_alltypes, col, search_str)
+            if has_regex:
+                find_df = try_regex_match(ndf_alltypes, col, search_str)
+            else:
+                find_df = try_exact_match(ndf_alltypes, col, search_str)
             if len(find_df) > 0:
                 bodyId_list = find_df['bodyId'].tolist()
                 search_info['matched_column'] = col
                 search_info['match_count'] = len(bodyId_list)
                 if verbose:
-                    print(f'Found {len(find_df)} neurons matching "{search_str}" in column "{col}" (regex match)')
+                    match_type = 'regex' if has_regex else 'exact'
+                    print(f'Found {len(find_df)} neurons matching "{search_str}" in column "{col}" ({match_type} match)')
                 return bodyId_list, search_info
     
     # Not found in any column
@@ -1705,8 +1739,10 @@ def calRC(cmat,threshold=0):
     cmat_new.insert(loc=len(cmat.columns)+1,column='sum_row',value=sum_row+[0,sum(sum_row)])
     return cmat_new
 
-def filtMat(cmat,axis=0,filt_range=[0,1],by='MR'): 
+def filtMat(cmat,axis=0,filt_range=None,by='MR'): 
     '''identify columns whose maximums are in the range'''
+    if filt_range is None:
+        filt_range = [0, 1]
     if by == 'MR': # maximum ratio
         nval = cmat.shape # nval = (n_row, n_col)
         criterion = [1]*nval[1-axis]
@@ -1767,7 +1803,9 @@ def stMat(mat,axis=0):
                 matt.iat[i,j] /= matt.iat[i,-1]
     return matt.iloc[:-2,:-2]
 
-def VisConnMat(cmat,filename,title='',color_scale=[[0, 'rgb(255,255,255)'], [1, 'rgb(104,55,164)']],showfig=True,fontsize=12,scale='linear'): 
+def VisConnMat(cmat,filename,title='',color_scale=None,showfig=True,fontsize=12,scale='linear'): 
+    if color_scale is None:
+        color_scale = [[0, 'rgb(255,255,255)'], [1, 'rgb(104,55,164)']]
     '''visualize connection matrix with enhanced labels and hover information
     
     Parameters
@@ -2050,7 +2088,9 @@ def VisConnMat(cmat,filename,title='',color_scale=[[0, 'rgb(255,255,255)'], [1, 
 # to vispath_pkg if available.
 # ============================================================================
 
-def VisConnMatInteractive(cmat, filename, title='', color_scale=[[0, 'rgb(255,255,255)'], [1, 'rgb(104,55,164)']], showfig=True, fontsize=12, conn_df=None, matrices_dict=None, verbose=True, zmin=None, zmax=None, init_width=None, init_height=None):
+def VisConnMatInteractive(cmat, filename, title='', color_scale=None, showfig=True, fontsize=12, conn_df=None, matrices_dict=None, verbose=True, zmin=None, zmax=None, init_width=None, init_height=None):
+    if color_scale is None:
+        color_scale = [[0, 'rgb(255,255,255)'], [1, 'rgb(104,55,164)']]
     '''Create interactive heatmap with comprehensive controls.
     
     DEPRECATED: This function is now maintained in vispath_pkg.
@@ -4880,11 +4920,7 @@ def build_path_dataframe_from_paths(paths, conn_data, targets, real_layer_map=No
             agg_funcs['connection_ratio'] = 'mean'
         if 'nt_type' in conn_data.columns:
             # Custom aggregator for nt_type to get unique values
-            def unique_nt_types(x):
-                types = x.dropna().unique().tolist()
-                valid_types = sorted([str(t) for t in types if t and str(t).lower() != 'none' and str(t).lower() != 'nan'])
-                return '|'.join(valid_types) if valid_types else 'Unknown'
-            agg_funcs['nt_type'] = unique_nt_types
+            agg_funcs['nt_type'] = _unique_nt_types
 
         # Group and aggregate
         grouped = conn_data_str.groupby(['src_str', 'tgt_str']).agg(agg_funcs)
@@ -5021,11 +5057,7 @@ def process_paths_streaming(path_gen, conn_data, targets, output_path,
     if 'connection_ratio' in conn_data.columns:
         agg_funcs['connection_ratio'] = 'mean'
     if 'nt_type' in conn_data.columns:
-        def unique_nt_types(x):
-            types = x.dropna().unique().tolist()
-            valid_types = sorted([str(t) for t in types if t and str(t).lower() != 'none' and str(t).lower() != 'nan'])
-            return '|'.join(valid_types) if valid_types else 'Unknown'
-        agg_funcs['nt_type'] = unique_nt_types
+        agg_funcs['nt_type'] = _unique_nt_types
 
     # Group and aggregate
     grouped = conn_data_str.groupby(['src_str', 'tgt_str']).agg(agg_funcs)
@@ -5058,7 +5090,7 @@ def process_paths_streaming(path_gen, conn_data, targets, output_path,
             
             # Filter zero-weight
             if not df.empty:
-                df = df[df['weights'].apply(lambda w_list: all(w > 0 for w in w_list))]
+                df = df[[all(w > 0 for w in wl) for wl in df['weights']]]
             
             # Split path (convert to string)
             df = split_path(df)
@@ -5092,7 +5124,7 @@ def process_paths_streaming(path_gen, conn_data, targets, output_path,
                                            edge_lookup=edge_lookup)
         
         if not df.empty:
-            df = df[df['weights'].apply(lambda w_list: all(w > 0 for w in w_list))]
+            df = df[[all(w > 0 for w in wl) for wl in df['weights']]]
         
         df = split_path(df)
         df, excluded = path_filter(df, keyword_in_path_to_remove)
@@ -5111,8 +5143,16 @@ def process_paths_streaming(path_gen, conn_data, targets, output_path,
             
     return total_saved
 
-def EnrichConnectionTable(conn_table, traversal_probability_threshold=0, dataset=None, script_path=None, target_neurons_df=None, aggregate_method='product', label_mapper=None, separate_hemispheres=False):
+def EnrichConnectionTable(conn_table, traversal_probability_threshold=0, dataset=None, script_path=None, target_neurons_df=None, aggregate_method='product', label_mapper=None, global_incoming_weights=None, separate_hemispheres=False, engine='auto'):
     '''Add traversal probability, connection ratio, and layer information to the connection table
+    
+    UNIFIED ENTRY POINT: dispatches to the pandas implementation (below) or the
+    Polars implementation (``statvis_polars.EnrichConnectionTablePolars``)
+    based on ``engine`` / the input type. Both engines produce the same
+    type-level and group-level output schema (type_pre/type_post or
+    custom_group_pre/custom_group_post, weight, connection_ratio,
+    traversal_probability, block_probability, nt_type) and the same values for
+    the same input.
     
     NOTE: When separate_hemispheres=True, the caller is expected to have already applied
     hemisphere suffixes (_L/_R/_U) to type_pre/type_post columns. This function will
@@ -5122,7 +5162,8 @@ def EnrichConnectionTable(conn_table, traversal_probability_threshold=0, dataset
     Parameters
     ----------
     conn_table : DataFrame
-        Connection table to enrich
+        Connection table to enrich (pandas DataFrame, or Polars DataFrame with
+        ``engine='polars'`` / ``engine='auto'``)
     traversal_probability_threshold : float, optional
         Minimum traversal probability threshold (default: 0)
     dataset : str, optional
@@ -5134,14 +5175,27 @@ def EnrichConnectionTable(conn_table, traversal_probability_threshold=0, dataset
         Used to get correct type-level denominators. If not provided, only
         neurons appearing in connections will be used (less accurate).
     aggregate_method : str, optional
-        Method for aggregating type-level traversal probabilities from bodyId level:
-        - 'product': compound probability (product of block probs) for paths (default)
-        - 'average': weighted average for direct parallel connections
+        Accepted for API compatibility (legacy 'product'/'average' aggregation
+        of bodyId-level block probabilities). Type-level traversal probability
+        is always min(connection_ratio / 0.3, 1), matching coana's
+        _apply_type_level_filters() and the Polars implementation.
     label_mapper : LabelMapper, optional
         LabelMapper object to standardize types in the local dataset for accurate ratio calculation.
+    global_incoming_weights : DataFrame, optional
+        Pre-computed total incoming weights for each post-synaptic type.
+        Should have columns [type_post, total_incoming_weight].
+        If provided, used for calculating GLOBAL type-level ratios
+        (denominator = ALL incoming connections in the dataset, per
+        ScoreCalculation_Guide). If None, local ratios (from the provided
+        connections only) are calculated - these are inflated when the table
+        only covers a subset of the dataset.
     separate_hemispheres : bool, optional
         Whether hemisphere separation is enabled. The actual suffix application
         should be done by the caller before passing the connection table.
+    engine : str, optional
+        'auto' (default): Polars engine when conn_table is a Polars DataFrame,
+        pandas engine otherwise. 'pandas' / 'polars': force the engine
+        (the input frame is converted when needed).
     
     Returns
     -------
@@ -5152,6 +5206,24 @@ def EnrichConnectionTable(conn_table, traversal_probability_threshold=0, dataset
     conn_group : DataFrame or None
         Custom group-level aggregation (only if custom_group columns exist)
     '''
+    if engine == 'polars' or (engine == 'auto' and not isinstance(conn_table, pd.DataFrame)):
+        import polars as pl
+        from statvis_polars import EnrichConnectionTablePolars
+        if not isinstance(conn_table, pl.DataFrame):
+            conn_table = pl.from_pandas(conn_table)
+        return EnrichConnectionTablePolars(
+            conn_table,
+            traversal_probability_threshold=traversal_probability_threshold,
+            dataset=dataset,
+            script_path=script_path,
+            target_neurons_df=target_neurons_df,
+            aggregate_method=aggregate_method,
+            label_mapper=label_mapper,
+            global_incoming_weights=global_incoming_weights,
+            separate_hemispheres=separate_hemispheres,
+        )
+    if engine == 'pandas' and not isinstance(conn_table, pd.DataFrame):
+        conn_table = conn_table.to_pandas()
     conn_df = conn_table.copy()
     
     # Determine grouping columns (use custom_group if available, otherwise type)
@@ -5395,6 +5467,12 @@ def EnrichConnectionTable(conn_table, traversal_probability_threshold=0, dataset
         conn_df['post'] = conn_df['post_y'].fillna(conn_df['post_x'])
         conn_df = conn_df.drop(columns=['post_x', 'post_y'])
     
+    # Unify with the Polars engine: the no-local fallback leaves 'post'
+    # missing (NaN); fill with 0 so both engines emit the same bodyId-level
+    # schema (real runs carry real post counts and are unaffected).
+    if 'post' in conn_df.columns:
+        conn_df['post'] = conn_df['post'].fillna(0)
+    
     # Check if connection_ratio already exists and has valid values (from coana.py global calculation)
     # If so, preserve it to maintain the correct global ratio calculation
     has_valid_ratio = ('connection_ratio' in conn_df.columns and 
@@ -5483,110 +5561,26 @@ def EnrichConnectionTable(conn_table, traversal_probability_threshold=0, dataset
 
     if pbar: pbar.update(1) # Step 2: Incoming weights calculated
 
-    # Calculate total post-synaptic sites for ALL neurons of each group_post
-    # Only use target_neurons_df if we don't have a local dataset, or if we specifically need it for custom groups
-    # If use_local is True and we are using standard types, we prefer the full dataset to ensure we get counts for all intermediate types
-    if target_neurons_df is not None and (not use_local or group_post != 'type_post'):
-        # Determine which column to use for grouping in target_neurons_df
-        target_group_col = 'custom_group' if 'custom_group' in target_neurons_df.columns else 'type'
-        if target_group_col in target_neurons_df.columns and 'post' in target_neurons_df.columns:
-            all_post_neurons = target_neurons_df[[target_group_col, 'post']].copy()
-            all_post_neurons = all_post_neurons.rename(columns={target_group_col: group_post})
-            # Remove None types and empty strings
-            all_post_neurons = all_post_neurons[all_post_neurons[group_post].notnull()]
-            all_post_neurons = all_post_neurons[all_post_neurons[group_post] != '']
-            all_post_neurons = all_post_neurons[all_post_neurons[group_post] != 'None']
-            type_post_totals = all_post_neurons.groupby(group_post)['post'].sum().reset_index(name='total_post')
-        else:
-            # Fallback
-            type_post_totals = None
-    else:
-        type_post_totals = None
-    
-    # Auto-load if not provided
-    if type_post_totals is None:
-        if use_local and group_post in conn_df.columns:
-            # Get all groups that appear in connections
-            groups_in_conn = conn_df[group_post].unique().tolist()
-            
-            # Apply label mapping to ndf_complete if available
-            # This ensures that when we look up total post counts for a type,
-            # we match the standardized labels used in conn_df
-            if label_mapper and ndf_complete is not None and group_post == 'type_post':
-                # Create a copy to avoid modifying the cached dataframe
-                ndf_complete = ndf_complete.copy()
-                
-                # Map types
-                ndf_complete['std_label'] = ndf_complete.apply(
-                    lambda row: label_mapper.get_label(dataset, row['type'] if pd.notna(row['type']) else row['bodyId']),
-                    axis=1
-                )
-                
-                # Overwrite type
-                mask = ndf_complete['std_label'] != ''
-                ndf_complete.loc[mask, 'type'] = ndf_complete.loc[mask, 'std_label']
-            
-            # Need to match back to original neurons for dataset lookup
-            if group_post == 'custom_group_post' and 'bodyId_post' in conn_df.columns:
-                # Get all bodyIds that belong to each custom group from connections
-                # This gives us the mapping, but we need ALL neurons in each group, not just those in connections
-                group_to_bodyids = conn_df[['custom_group_post', 'bodyId_post']].drop_duplicates()
-                
-                # For nested groups, we need ALL neurons that belong to each group
-                # Use target_neurons_df if available (should have custom_group column)
-                if target_neurons_df is not None and 'custom_group' in target_neurons_df.columns and 'bodyId' in target_neurons_df.columns:
-                    # Get all neurons with their groups
-                    neurons_with_groups = target_neurons_df[['bodyId', 'custom_group', 'post']].copy()
-                    neurons_with_groups = neurons_with_groups[neurons_with_groups['custom_group'].notnull()]
-                    neurons_with_groups = neurons_with_groups[neurons_with_groups['custom_group'].isin(groups_in_conn)]
-                    # Sum post by custom_group
-                    type_post_totals = neurons_with_groups.groupby('custom_group')['post'].sum().reset_index()
-                    type_post_totals.columns = ['custom_group_post', 'total_post']
-                else:
-                    # Fallback: use bodyIds from connections to find their groups, then get ALL neurons of those types
-                    # Get unique bodyIds and their groups
-                    all_bodyids_in_groups = conn_df[['bodyId_post', 'custom_group_post']].drop_duplicates()
-                    # Fetch neuron data for these bodyIds to get their types
-                    if 'type_post' in conn_df.columns:
-                        # Use type information from conn_df
-                        bodyid_type_group = conn_df[['bodyId_post', 'type_post', 'custom_group_post']].drop_duplicates()
-                        # Get all types for each group
-                        group_to_types = bodyid_type_group.groupby('custom_group_post')['type_post'].apply(lambda x: x.unique().tolist()).reset_index()
-                        
-                        # For each group, get ALL neurons of its constituent types
-                        group_post_totals = []
-                        for idx in group_to_types.index:
-                            grp = group_to_types.at[idx, 'custom_group_post']
-                            types = group_to_types.at[idx, 'type_post']
-                            # Get all neurons of these types from local dataset
-                            neurons_in_group = ndf_complete[ndf_complete['type'].isin(types)][['bodyId', 'post']].copy()
-                            total_post = neurons_in_group['post'].sum()
-                            group_post_totals.append({'custom_group_post': grp, 'total_post': total_post})
-                        type_post_totals = pd.DataFrame(group_post_totals)
-                    else:
-                        # Last resort: use only neurons appearing in connections
-                        type_post_totals = conn_df[['custom_group_post', 'bodyId_post', 'post']].drop_duplicates(subset=['bodyId_post']).groupby('custom_group_post')['post'].sum().reset_index(name='total_post')
-            else:
-                # Standard type-based grouping
-                all_post_neurons = ndf_complete[ndf_complete['type'].isin(groups_in_conn)][['type', 'post']].copy()
-                all_post_neurons = all_post_neurons.rename(columns={'type': group_post})
-                all_post_neurons = all_post_neurons[all_post_neurons[group_post].notnull()]
-                all_post_neurons = all_post_neurons[all_post_neurons[group_post] != '']
-                all_post_neurons = all_post_neurons[all_post_neurons[group_post] != 'None']
-                type_post_totals = all_post_neurons.groupby(group_post)['post'].sum().reset_index(name='total_post')
-        else:
-            # Last resort: use only neurons appearing in connections
-            all_post_neurons = conn_df[[group_post, 'bodyId_post', 'post']].drop_duplicates(subset=['bodyId_post'])
-            type_post_totals = all_post_neurons.groupby(group_post)['post'].sum().reset_index(name='total_post')
-    
-    if pbar: pbar.update(1) # Step 3: Post-synaptic totals calculated (not used for dynamic ratio)
+    # (A legacy 'total_post per group' computation lived here and fed the old
+    # static-ratio formula; the dynamic ratio below uses total_incoming_per_type
+    # instead, so that block was dead code and was removed.)
 
-    # Calculate group-to-group connection_ratio using DYNAMIC method
+    # Calculate group-to-group connection_ratio
     # Ratio = weight(A→B) / total_incoming_weight(→B)
-    # Where total_incoming_weight is calculated from the threshold-filtered connections
-    conn_type = weight_sum.merge(total_incoming_per_type, on=group_post, how='left')
+    # With global_incoming_weights, the denominator covers ALL incoming
+    # connections to B in the dataset (true fraction of B's total input from A,
+    # per ScoreCalculation_Guide). Without them, the denominator is the sum
+    # over the threshold-filtered connections in this table only, which
+    # inflates ratios when the table covers a subset of the dataset.
+    if global_incoming_weights is not None and group_post in global_incoming_weights.columns:
+        conn_type = weight_sum.merge(
+            global_incoming_weights[[group_post, 'total_incoming_weight']],
+            on=group_post, how='left',
+        )
+    else:
+        conn_type = weight_sum.merge(total_incoming_per_type, on=group_post, how='left')
     
-    # Calculate ratio using dynamic denominator (total incoming weight at this threshold)
+    # Calculate ratio using the chosen denominator
     conn_type['connection_ratio'] = conn_type.apply(
         lambda row: row['weight'] / row['total_incoming_weight'] 
         if pd.notnull(row['total_incoming_weight']) and row['total_incoming_weight'] > 0 
@@ -5596,21 +5590,12 @@ def EnrichConnectionTable(conn_table, traversal_probability_threshold=0, dataset
 
     if pbar: pbar.update(1) # Step 4: Ratios calculated
 
-    # Group-to-group traversal_probability aggregation
-    if aggregate_method == 'product':
-        # Product method: compound probability for paths
-        conn_traversal = conn_df[[group_pre, group_post, 'block_probability']]
-        conn_traversal = conn_traversal.groupby([group_pre, group_post]).prod().reset_index()
-        conn_type = conn_type.merge(conn_traversal, how='left', on=[group_pre, group_post])
-        conn_type['traversal_probability'] = 1 - conn_type['block_probability']
-    else:
-        # Average method: weighted average for direct connections
-        conn_traversal = conn_df[[group_pre, group_post, 'weight', 'traversal_probability']]
-        weighted_sum = conn_traversal.groupby([group_pre, group_post]).apply(
-            lambda g: (g['weight'] * g['traversal_probability']).sum() / g['weight'].sum() if g['weight'].sum() > 0 else 0.0
-        ).reset_index(name='traversal_probability')
-        conn_type = conn_type.merge(weighted_sum, how='left', on=[group_pre, group_post])
-        conn_type['block_probability'] = 1 - conn_type['traversal_probability']
+    # Type-level traversal_probability uses the same ratio/0.3 model as the
+    # bodyId level and coana._apply_type_level_filters():
+    # prob = min(ratio / 0.3, 1).  block_probability = 1 - prob.
+    conn_type['traversal_probability'] = conn_type['connection_ratio'] / 0.3
+    conn_type.loc[conn_type['traversal_probability'] > 1, 'traversal_probability'] = 1
+    conn_type['block_probability'] = 1 - conn_type['traversal_probability']
     
     if pbar: 
         pbar.update(1) # Step 5: Traversal probabilities calculated
@@ -5625,33 +5610,58 @@ def EnrichConnectionTable(conn_table, traversal_probability_threshold=0, dataset
     conn_aggregated['block_probability'] = pd.to_numeric(conn_aggregated['block_probability'], errors='coerce').fillna(1.0)
     # conn_aggregated = conn_aggregated.infer_objects() # No longer needed as we explicitly converted
     
-    conn_aggregated = conn_aggregated[[group_pre, group_post, 'weight', 'connection_ratio', 'traversal_probability', 'block_probability']]
+    # Keep nt_type in the type-level output when the input carries it (the
+    # path builders use it to annotate edges; the Polars engine emits it too).
+    type_keep_cols = [group_pre, group_post, 'weight', 'connection_ratio',
+                      'traversal_probability', 'block_probability']
+    if 'nt_type' in conn_aggregated.columns:
+        type_keep_cols.append('nt_type')
+    conn_aggregated = conn_aggregated[type_keep_cols]
     
     # Check if we're using custom groups
     has_custom_groups = (group_pre == 'custom_group_pre' and group_post == 'custom_group_post')
     
     if has_custom_groups:
         # Compute BOTH type-based and custom group-based aggregations
-        # 1. Custom group aggregation (already computed)
-        conn_group = conn_aggregated.rename(columns={group_pre: 'group_pre', group_post: 'group_post'})
+        # 1. Custom group aggregation (already computed). Columns stay
+        #    custom_group_pre/custom_group_post (same schema as the Polars
+        #    engine; legacy 'group_pre'/'group_post' naming was removed).
+        conn_group = conn_aggregated.copy()
         
         # 2. Original type-based aggregation
         # Calculate from bodyId level for accuracy
-        bodyid_pairs_type = conn_df[['bodyId_pre', 'bodyId_post', 'type_pre', 'type_post', 'weight']].drop_duplicates(subset=['bodyId_pre', 'bodyId_post'])
+        bodyid_pairs_type_cols = ['bodyId_pre', 'bodyId_post', 'type_pre', 'type_post', 'weight']
+        if has_nt:
+            bodyid_pairs_type_cols.append(nt_col)
+        bodyid_pairs_type = conn_df[bodyid_pairs_type_cols].drop_duplicates(subset=['bodyId_pre', 'bodyId_post'])
         
         pbar_type = None
         # if len(bodyid_pairs_type) > 50000:
         #     pbar_type = tqdm(total=4, desc=f"  Enriching {len(bodyid_pairs_type):,} type-level connections", unit="step")
 
-        weight_sum_type = bodyid_pairs_type.groupby(['type_pre', 'type_post'])['weight'].sum().reset_index(name='weight')
+        if has_nt:
+            weight_sum_type = bodyid_pairs_type.groupby(['type_pre', 'type_post']).agg({
+                'weight': 'sum',
+                nt_col: lambda x: x.mode().iloc[0] if not x.mode().empty else None,
+            }).reset_index()
+            if nt_col != 'nt_type':
+                weight_sum_type = weight_sum_type.rename(columns={nt_col: 'nt_type'})
+        else:
+            weight_sum_type = bodyid_pairs_type.groupby(['type_pre', 'type_post'])['weight'].sum().reset_index(name='weight')
         total_incoming_per_type_orig = weight_sum_type.groupby('type_post')['weight'].sum().reset_index(name='total_incoming_weight')
         
         if pbar_type: pbar_type.update(1) # Step 1: Weight aggregation
 
         if pbar_type: pbar_type.update(1) # Step 2: (skipped - not using static post counts)
 
-        # Calculate type-level ratio using DYNAMIC method
-        conn_type = weight_sum_type.merge(total_incoming_per_type_orig, on='type_post', how='left')
+        # Calculate type-level ratio using GLOBAL denominator when available
+        if global_incoming_weights is not None and 'type_post' in global_incoming_weights.columns:
+            conn_type = weight_sum_type.merge(
+                global_incoming_weights[['type_post', 'total_incoming_weight']],
+                on='type_post', how='left',
+            )
+        else:
+            conn_type = weight_sum_type.merge(total_incoming_per_type_orig, on='type_post', how='left')
         conn_type['connection_ratio'] = conn_type.apply(
             lambda row: row['weight'] / row['total_incoming_weight'] 
             if pd.notnull(row['total_incoming_weight']) and row['total_incoming_weight'] > 0 
@@ -5661,26 +5671,22 @@ def EnrichConnectionTable(conn_table, traversal_probability_threshold=0, dataset
         
         if pbar_type: pbar_type.update(1) # Step 3: Ratios calculated
 
-        # Type-level traversal probability
-        if aggregate_method == 'product':
-            conn_traversal_type = conn_df[['type_pre', 'type_post', 'block_probability']]
-            conn_traversal_type = conn_traversal_type.groupby(['type_pre', 'type_post']).prod().reset_index()
-            conn_type = conn_type.merge(conn_traversal_type, how='left', on=['type_pre', 'type_post'])
-            conn_type['traversal_probability'] = 1 - conn_type['block_probability']
-        else:
-            conn_traversal_type = conn_df[['type_pre', 'type_post', 'weight', 'traversal_probability']]
-            weighted_sum_type = conn_traversal_type.groupby(['type_pre', 'type_post']).apply(
-                lambda g: (g['weight'] * g['traversal_probability']).sum() / g['weight'].sum() if g['weight'].sum() > 0 else 0.0
-            ).reset_index(name='traversal_probability')
-            conn_type = conn_type.merge(weighted_sum_type, how='left', on=['type_pre', 'type_post'])
-            conn_type['block_probability'] = 1 - conn_type['traversal_probability']
+        # Type-level traversal probability: min(ratio / 0.3, 1) - same model as
+        # the main aggregation above and coana._apply_type_level_filters().
+        conn_type['traversal_probability'] = conn_type['connection_ratio'] / 0.3
+        conn_type.loc[conn_type['traversal_probability'] > 1, 'traversal_probability'] = 1
+        conn_type['block_probability'] = 1 - conn_type['traversal_probability']
         
         if pbar_type: 
             pbar_type.update(1) # Step 4: Traversal probabilities
             pbar_type.close()
         
         conn_type = conn_type.fillna({'traversal_probability': 0.0, 'block_probability': 1.0}).infer_objects()
-        conn_type = conn_type[['type_pre', 'type_post', 'weight', 'connection_ratio', 'traversal_probability', 'block_probability']]
+        type_keep_cols = ['type_pre', 'type_post', 'weight', 'connection_ratio',
+                          'traversal_probability', 'block_probability']
+        if 'nt_type' in conn_type.columns:
+            type_keep_cols.append('nt_type')
+        conn_type = conn_type[type_keep_cols]
         
         # if len(bodyid_pairs) > 50000:
         #     print(f"  Enrichment complete. Result shape: {conn_type.shape}. Returning results...", flush=True)
@@ -5765,8 +5771,12 @@ def SankeyDirect(cmat, file_path, showfig=True, node_color='rgba(31, 119, 180, 0
     if showfig:
         fig.show()
 
-def ConcatenateIMG2PDF(folder_path,file_format=['png','jpg'],filename='PDF_sum',include_subfolder=False):
+def ConcatenateIMG2PDF(folder_path,file_format=None,filename='PDF_sum',include_subfolder=False):
     ''' Concatenate all images in a folder to a single PDF file.'''
+    if file_format is None:
+        file_format = ['png', 'jpg']
+    else:
+        file_format = list(file_format)  # never mutate the caller's list
     if 'jpg' in file_format:
         file_format.append('jpeg')
     elif 'jpeg' in file_format:
@@ -5944,16 +5954,21 @@ def Vis3S(data_df,**kwargs):
                 except Exception as e:
                     print(f"Error opening zip file: {e}")
         else:
-            # Hemibrain fetch
+            # Hemibrain fetch: fetch skeletons via the NeuPrint API and
+            # assign class colors exactly like the FAFB zip branch above.
             try:
                 from neuprint import fetch_skeletons
-                # Batch fetch might be better but let's do simple for now
-                # Or use navis.fetch_skeletons
-                # Assuming fetch_skeletons returns NeuronList
-                # We need to map colors
-                pass 
-            except ImportError:
-                pass
+                bodyids = [str(summary_df.at[ind, 'bodyId']) for ind in summary_df.index]
+                nl = fetch_skeletons(bodyids)
+                for i, n in enumerate(nl):
+                    ind = summary_df.index[i]
+                    n.name = str(summary_df.at[ind, 'bodyId'])
+                    cls = summary_df.at[ind, op.classby]
+                    cls_idx = classes.index(cls)
+                    n.color = colors[cls_idx]
+                    skeletons.append(n)
+            except Exception as e:
+                print(f"Warning: could not fetch hemibrain skeletons: {e}")
 
     for i,cla in enumerate(classes):
         df = summary_df[summary_df[op.classby] == cla]

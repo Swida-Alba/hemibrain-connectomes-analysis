@@ -345,3 +345,25 @@ inconsistency).
 **Impact**: Correct results across filter combinations; bounded cache memory;
 faster pruning; complete path-edge accounting  
 **Breaking Changes**: None
+
+---
+
+# 2026-08 Pathfinding Algorithm Evaluation
+
+The five `FastGraph` pathfinding algorithms were evaluated theoretically and
+practically (wall time + peak memory) in
+[PATHFINDING_ALGORITHM_EVALUATION.md](./PATHFINDING_ALGORITHM_EVALUATION.md).
+Measured on real hemibrain v1.2.1 queries (10,331–24,576 nodes, up to
+722k edges, cutoffs 2–5 intermediate layers): all benchmarked algorithms
+produce identical path sets. A **lazy reverse-adjacency index** now
+replaces the ~250 MB reversed-graph copies, so every algorithm except
+Bidirectional runs in <10 MB at 2–4 layers (DP: 272 → 9.4 MB;
+MeetInMiddle: 2.17 s / 272 MB → 1.25 s / 4.8 MB). **MemoizedDFS (forward)**
+remains the default (fastest at 4 layers); **MeetInMiddle** is fastest at
+2–3 layers; **Bidirectional** is fastest at 5 layers but its layer trees
+dominate memory (18.9 → 892 MB); **DP** degenerates on deep queries. The 2026-08 audit also verified all implementations correct
+(750 randomized runs, zero mismatches) and fixed the routing so names
+match the algorithms. Bitmask-visited DFS and degree-2 chain compression
+were measured and rejected (not faster on real connectomes). Backtracking
+is not benchmarked (kept only as a backend fallback).
+Benchmark harness: `examples/performance/benchmark_pathfinding.py`.

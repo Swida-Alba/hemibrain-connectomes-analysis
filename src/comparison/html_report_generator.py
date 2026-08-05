@@ -17,7 +17,61 @@ import json
 import os
 import pandas as pd
 import numpy as np
-from typing import Dict, List, Any, Optional
+from typing import Dict, List
+
+
+def _make_link(path: str, base_dir: str) -> str:
+    """Render an HTML link to a result file relative to the run's output folder."""
+    if not path or not os.path.exists(path):
+        return '-'
+    rel_path = os.path.relpath(path, base_dir).replace(os.sep, '/')
+    return f'<a href="{rel_path}" target="_blank">Open</a>'
+
+
+def get_canonical_name(display_name: str) -> str:
+    """Strip a merged-display suffix ('MBON14 (merged)') from a label."""
+    if '(' in display_name:
+        return display_name.split('(')[0].strip()
+    return display_name
+
+
+def get_base_name(name: str) -> str:
+    """Strip a hemisphere suffix ('_L'/'_R'/'_U') from a label."""
+    if name.endswith('_L') or name.endswith('_R') or name.endswith('_U'):
+        return name[:-2]
+    return name
+
+
+def matches_patterns(label: str, patterns: set) -> bool:
+    """Match a label against source/target patterns (regex, glob, or exact)."""
+    import re
+    # Get canonical name for matching (handles merged display names)
+    canonical = get_canonical_name(label)
+
+    # Get base name without hemisphere suffix (for separate_hemispheres mode)
+    base_name = get_base_name(canonical)
+
+    # Check label, canonical name, and base name (without suffix)
+    names_to_check = list(set([label, canonical, base_name]))
+
+    for name in names_to_check:
+        for pattern in patterns:
+            # Handle regex patterns (containing .* or other regex chars)
+            # vs simple glob patterns (containing just *)
+            if '.*' in pattern:
+                # Already a regex pattern (e.g., "aMe.*"), use directly
+                regex_pattern = pattern
+            elif '*' in pattern:
+                # Simple glob pattern (e.g., "aMe*"), convert * to .*
+                # Escape special regex chars except *
+                regex_pattern = re.escape(pattern).replace(r'\*', '.*')
+            else:
+                # Exact match pattern, escape for regex
+                regex_pattern = re.escape(pattern)
+
+            if re.match(f'^{regex_pattern}$', name, re.IGNORECASE):
+                return True
+    return False
 
 
 def generate_html_report(
@@ -99,6 +153,21 @@ def _generate_html_header() -> str:
     <title>Cross-Dataset Comparison Report</title>
     <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
     <script src="https://unpkg.com/vis-network/standalone/umd/vis-network.min.js"></script>
+    <script>
+        // CDN fallback guard: show a clear banner instead of a silent blank canvas
+        if (typeof vis === 'undefined') {
+            window.addEventListener('DOMContentLoaded', function() {
+                const section = document.getElementById('networks');
+                if (section && !section.querySelector('.cdn-error')) {
+                    const div = document.createElement('div');
+                    div.className = 'cdn-error';
+                    div.style.cssText = 'background:#fffbeb;border:1px solid #f59e0b;border-radius:8px;padding:12px 14px;color:#92400e;font-size:13px;margin-bottom:15px;';
+                    div.textContent = '⚠️ vis-network failed to load (CDN unreachable). Check your internet connection and reload this page.';
+                    section.prepend(div);
+                }
+            });
+        }
+    </script>
     <style>
         :root {
             --primary-color: #2563eb;
@@ -1350,7 +1419,8 @@ def _generate_networks_section(analyzer, dataset_names: List[str], thresholds: L
                     // Hemisphere mirroring toggle
                     window.hemisphereMirrorEnabled = {{}};  // Per-threshold mirror state
                     window.allThresholds.forEach(t => {{
-                        window.hemisphereMirrorEnabled[t] = false;
+                        // Mirror auto-enables when Separate Hemispheres (L/R) is checked
+                        window.hemisphereMirrorEnabled[t] = {'true' if separate_hemispheres else 'false'};
                     }});
                     
                     function toggleHemisphereMirror(threshold) {{
@@ -1516,7 +1586,6 @@ def _generate_networks_section(analyzer, dataset_names: List[str], thresholds: L
                         const nodes = netData.nodes;
                         const allEdges = netData.allEdges;
                         const allNodes = netData.allNodes;
-                        const originalDeadEndNodeIds = netData.deadEndNodeIds || new Set();
                         const conservedEdgeIds = netData.conservedEdgeIds;
                         const uniqueEdgeIds = netData.uniqueEdgeIds || new Set();
                         const nodeRoles = netData.nodeRoles || {{}};
@@ -1903,12 +1972,6 @@ def _generate_reciprocal_visualizations_section(analyzer, dataset_names: List[st
         html_parts.append("</div></div>")
         return ''.join(html_parts)
 
-    def _make_link(path: str) -> str:
-        if not path or not os.path.exists(path):
-            return '-'
-        rel_path = os.path.relpath(path, analyzer.parameters.full_output_path).replace(os.sep, '/')
-        return f'<a href="{rel_path}" target="_blank">Open</a>'
-
     for t in thresholds:
         html_parts.append(f'<div class="card"><h3>Threshold t = {t}</h3>')
         html_parts.append('<table><thead><tr>'
@@ -1935,16 +1998,16 @@ def _generate_reciprocal_visualizations_section(analyzer, dataset_names: List[st
                 'visualizations'
             )
 
-            type_network = _make_link(os.path.join(base_dir, 'reciprocal_type_network.html'))
-            type_heatmap = _make_link(os.path.join(base_dir, 'reciprocal_type_heatmap.html'))
-            group_network = _make_link(os.path.join(base_dir, 'reciprocal_groups_network.html'))
-            group_heatmap = _make_link(os.path.join(base_dir, 'reciprocal_groups_heatmap.html'))
-            body_network = _make_link(os.path.join(base_dir, 'reciprocal_bodyId_network.html'))
-            body_heatmap = _make_link(os.path.join(base_dir, 'reciprocal_bodyId_heatmap.html'))
+            type_network = _make_link(os.path.join(base_dir, 'reciprocal_type_network.html'), analyzer.parameters.full_output_path)
+            type_heatmap = _make_link(os.path.join(base_dir, 'reciprocal_type_heatmap.html'), analyzer.parameters.full_output_path)
+            group_network = _make_link(os.path.join(base_dir, 'reciprocal_groups_network.html'), analyzer.parameters.full_output_path)
+            group_heatmap = _make_link(os.path.join(base_dir, 'reciprocal_groups_heatmap.html'), analyzer.parameters.full_output_path)
+            body_network = _make_link(os.path.join(base_dir, 'reciprocal_bodyId_network.html'), analyzer.parameters.full_output_path)
+            body_heatmap = _make_link(os.path.join(base_dir, 'reciprocal_bodyId_heatmap.html'), analyzer.parameters.full_output_path)
 
-            type_csv = _make_link(os.path.join(base_dir, 'reciprocal_connection_type.csv'))
-            group_csv = _make_link(os.path.join(base_dir, 'reciprocal_connection_custom_groups.csv'))
-            body_csv = _make_link(os.path.join(base_dir, 'reciprocal_connection_bodyId.csv'))
+            type_csv = _make_link(os.path.join(base_dir, 'reciprocal_connection_type.csv'), analyzer.parameters.full_output_path)
+            group_csv = _make_link(os.path.join(base_dir, 'reciprocal_connection_custom_groups.csv'), analyzer.parameters.full_output_path)
+            body_csv = _make_link(os.path.join(base_dir, 'reciprocal_connection_bodyId.csv'), analyzer.parameters.full_output_path)
 
             html_parts.append('<tr>'
                               f'<td><strong>{nick}</strong></td>'
@@ -1991,11 +2054,6 @@ def _extract_edges_from_paths(path_data: pd.DataFrame, dataset_names: List[str],
     
     # Helper to extract canonical name from display name
     # Handles format: "GNG588(CB0038)" -> "GNG588"
-    def get_canonical_name(display_name: str) -> str:
-        if '(' in display_name:
-            return display_name.split('(')[0].strip()
-        return display_name
-    
     path_data = path_data.copy()
     path_data['_total'] = path_data[available_cols].sum(axis=1)
     
@@ -2162,11 +2220,7 @@ def _generate_conservation_network(analyzer, dataset_names: List[str], threshold
     node_roles = {}  # Track role for each node label
     node_counter = 0
     edge_data = {}  # {(source, target): {dataset: weight}}
-    
-    # Track incoming and outgoing edges for dead-end detection
-    has_outgoing = set()  # nodes that have at least one outgoing edge
-    has_incoming = set()  # nodes that have at least one incoming edge
-    
+
     # Build adjacency maps for recursive dead-end detection
     outgoing_map = {}  # label -> list of target labels
     incoming_map = {}  # label -> list of source labels
@@ -2193,8 +2247,6 @@ def _generate_conservation_network(analyzer, dataset_names: List[str], threshold
             weight = row.get(dataset, 0)
             if weight > 0:
                 edge_data[edge_tuple][dataset] = int(weight)
-                has_outgoing.add(source)
-                has_incoming.add(target)
     
     if not edge_data:
         return '<div class="card"><p>No connections at this threshold.</p></div>'
@@ -2242,8 +2294,6 @@ def _generate_conservation_network(analyzer, dataset_names: List[str], threshold
             new_edge_data = {}
             new_outgoing_map = {}
             new_incoming_map = {}
-            new_has_outgoing = set()
-            new_has_incoming = set()
             
             for (src, tgt), weights in edge_data.items():
                 new_src = display_name_map.get(src, src)
@@ -2258,64 +2308,16 @@ def _generate_conservation_network(analyzer, dataset_names: List[str], threshold
                 if new_tgt not in new_incoming_map:
                     new_incoming_map[new_tgt] = []
                 new_incoming_map[new_tgt].append(new_src)
-                
-                # Update has_outgoing/has_incoming
-                if src in has_outgoing:
-                    new_has_outgoing.add(new_src)
-                if tgt in has_incoming:
-                    new_has_incoming.add(new_tgt)
             
             edge_data = new_edge_data
             outgoing_map = new_outgoing_map
             incoming_map = new_incoming_map
-            has_outgoing = new_has_outgoing
-            has_incoming = new_has_incoming
     
     # Helper to extract canonical name from display name
     # Handles format: "MeVPaMe1(MTe46)" -> "MeVPaMe1"
-    def get_canonical_name(display_name: str) -> str:
-        if '(' in display_name:
-            return display_name.split('(')[0].strip()
-        return display_name
-    
     # Helper function to check if a node label matches any pattern
     # For merged display names like "MeVPaMe1(MTe46)", also check the canonical part
     # Also handles hemisphere suffixes (_L/_R/_U) for separate_hemispheres mode
-    def matches_patterns(label: str, patterns: set) -> bool:
-        import re
-        # Get canonical name for matching (handles merged display names)
-        canonical = get_canonical_name(label)
-        
-        # Get base name without hemisphere suffix (for separate_hemispheres mode)
-        def get_base_name(name: str) -> str:
-            if name.endswith('_L') or name.endswith('_R') or name.endswith('_U'):
-                return name[:-2]
-            return name
-        
-        base_name = get_base_name(canonical)
-        
-        # Check label, canonical name, and base name (without suffix)
-        names_to_check = list(set([label, canonical, base_name]))
-        
-        for name in names_to_check:
-            for pattern in patterns:
-                # Handle regex patterns (containing .* or other regex chars)
-                # vs simple glob patterns (containing just *)
-                if '.*' in pattern:
-                    # Already a regex pattern (e.g., "aMe.*"), use directly
-                    regex_pattern = pattern
-                elif '*' in pattern:
-                    # Simple glob pattern (e.g., "aMe*"), convert * to .*
-                    # Escape special regex chars except *
-                    regex_pattern = re.escape(pattern).replace(r'\*', '.*')
-                else:
-                    # Exact match pattern, escape for regex
-                    regex_pattern = re.escape(pattern)
-                
-                if re.match(f'^{regex_pattern}$', name, re.IGNORECASE):
-                    return True
-        return False
-    
     # First pass: collect all nodes and their initial roles (intermediate)
     all_node_labels = set()
     for (source, target) in edge_data.keys():
@@ -2759,6 +2761,11 @@ def _generate_conservation_network(analyzer, dataset_names: List[str], threshold
                     deadEndNodeIds: deadEndNodeIds,
                     nodeRoles: nodeRoles
                 }};
+                
+                // Auto-enable the mirror layout when Separate Hemispheres (L/R) is on
+                if (window.hemisphereMirrorEnabled[{threshold}]) {{
+                    applyHemisphereMirror({threshold});
+                }}
             }})();
         </script>
 '''
@@ -2860,46 +2867,6 @@ def _generate_dataset_network(analyzer, dataset: str, thresholds: List[int],
             pass
     
     # Helper to extract canonical name from display name like "MeVPaMe1(MTe46)" -> "MeVPaMe1"
-    def get_canonical_name(display_name: str) -> str:
-        if '(' in display_name:
-            return display_name.split('(')[0]
-        return display_name
-    
-    def matches_patterns(label: str, patterns: set) -> bool:
-        import re
-        # Get canonical name for matching (handles merged display names)
-        canonical = get_canonical_name(label)
-        
-        # Get base name without hemisphere suffix (for separate_hemispheres mode)
-        def get_base_name(name: str) -> str:
-            if name.endswith('_L') or name.endswith('_R') or name.endswith('_U'):
-                return name[:-2]
-            return name
-        
-        base_name = get_base_name(canonical)
-        
-        # Check label, canonical name, and base name (without suffix)
-        names_to_check = list(set([label, canonical, base_name]))
-        
-        for name in names_to_check:
-            for pattern in patterns:
-                # Handle regex patterns (containing .* or other regex chars)
-                # vs simple glob patterns (containing just *)
-                if '.*' in pattern:
-                    # Already a regex pattern (e.g., "aMe.*"), use directly
-                    regex_pattern = pattern
-                elif '*' in pattern:
-                    # Simple glob pattern (e.g., "aMe*"), convert * to .*
-                    # Escape special regex chars except *
-                    regex_pattern = re.escape(pattern).replace(r'\*', '.*')
-                else:
-                    # Exact match pattern, escape for regex
-                    regex_pattern = re.escape(pattern)
-                
-                if re.match(f'^{regex_pattern}$', name, re.IGNORECASE):
-                    return True
-        return False
-    
     # Determine node roles
     node_roles = {}
     for label in all_nodes:
@@ -4049,12 +4016,6 @@ def _generate_conservation_section(analyzer, dataset_names: List[str], threshold
 ''')
     
     # Links to conserved graph visualizations
-    def _make_link(path: str) -> str:
-        if not path or not os.path.exists(path):
-            return '-'
-        rel_path = os.path.relpath(path, analyzer.parameters.full_output_path).replace(os.sep, '/')
-        return f'<a href="{rel_path}" target="_blank">Open</a>'
-
     html_parts.append('''
                     </div>
                     <div class="card" style="margin-top: 30px;">
@@ -4083,8 +4044,8 @@ def _generate_conservation_section(analyzer, dataset_names: List[str], threshold
         )
         html_parts.append(
             f'<tr><td><strong>t={threshold}</strong></td>'
-            f'<td>{_make_link(conserved_path_file)}</td>'
-            f'<td>{_make_link(conserved_recip_file)}</td></tr>'
+            f'<td>{_make_link(conserved_path_file, analyzer.parameters.full_output_path)}</td>'
+            f'<td>{_make_link(conserved_recip_file, analyzer.parameters.full_output_path)}</td></tr>'
         )
 
     html_parts.append('''
@@ -4457,7 +4418,6 @@ def _generate_similarity_trends_2x2_plot(analyzer, dataset_names: List[str], thr
         Row 1: Jaccard (set overlap) | Edge Rank (all-edge ranking)
         Row 2: Cosine (all-edge directional) | Spearman (shared-edge ranking)
     """
-    from itertools import combinations
     from .metrics import ComparisonMetrics
     import json
     
@@ -4649,7 +4609,6 @@ def _generate_similarity_trends_2x2_plot(analyzer, dataset_names: List[str], thr
 def _generate_jaccard_similarity_plot(analyzer, dataset_names: List[str], thresholds: List[int],
                                        nickname_map: Dict[str, str]) -> str:
     """Generate a line plot showing Jaccard similarity across thresholds for all dataset pairs."""
-    from itertools import combinations
     
     # Collect Jaccard similarities for each pair at each threshold
     pair_data = {}  # {(d1, d2): {threshold: jaccard}}
@@ -4764,7 +4723,6 @@ def _generate_jaccard_similarity_plot(analyzer, dataset_names: List[str], thresh
 def _generate_edge_rank_correlation_plot(analyzer, dataset_names: List[str], thresholds: List[int],
                                           nickname_map: Dict[str, str]) -> str:
     """Generate a line plot showing Edge Rank Correlation across thresholds for all dataset pairs."""
-    from itertools import combinations
     from .metrics import ComparisonMetrics
     
     metrics = ComparisonMetrics()
@@ -4888,7 +4846,6 @@ def _generate_edge_rank_correlation_plot(analyzer, dataset_names: List[str], thr
 def _generate_cosine_similarity_trend_plot(analyzer, dataset_names: List[str], thresholds: List[int],
                                           nickname_map: Dict[str, str]) -> str:
     """Generate a line plot showing Cosine Similarity across thresholds for all dataset pairs."""
-    from itertools import combinations
     from .metrics import ComparisonMetrics
     
     metrics = ComparisonMetrics()
@@ -5016,7 +4973,6 @@ def _generate_cosine_similarity_trend_plot(analyzer, dataset_names: List[str], t
 def _generate_path_rank_correlation_plot(analyzer, dataset_names: List[str], thresholds: List[int],
                                           nickname_map: Dict[str, str]) -> str:
     """Generate a line plot showing Path Rank Correlation across thresholds for all dataset pairs."""
-    from itertools import combinations
     from .metrics import ComparisonMetrics
     
     metrics = ComparisonMetrics()

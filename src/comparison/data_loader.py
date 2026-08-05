@@ -9,7 +9,7 @@ import os
 import json
 import glob
 import pandas as pd
-from typing import Dict, List, Optional, Tuple, Any
+from typing import Dict, List, Optional, Any
 from datetime import datetime
 
 

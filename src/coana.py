@@ -9,25 +9,10 @@ import gc
 import logging
 from dataclasses import dataclass, field
 
-import cv2
-import matplotlib.patches as mp
-import matplotlib.pyplot as plt
-try:
-    import navis
-    import navis.interfaces.neuprint as neu
-    HAS_NAVIS = True
-except ImportError:
-    HAS_NAVIS = False
-# import networkx as nx
 import numpy as np
 import pandas as pd
 import polars as pl
-try:
-    import flybrains
-    HAS_FLYBRAINS = True
-except ImportError:
-    HAS_FLYBRAINS = False
-# import plotly.graph_objects as go
+
 import seaborn as sns
 from tqdm import tqdm
 from neuprint import *
@@ -46,14 +31,11 @@ if _REPO_ROOT not in sys.path:
 
 try:
     import src.statvis_polars as svp
-    from src.statvis_polars import EnrichConnectionTablePolars
 except ImportError:
     try:
         import statvis_polars as svp
-        from statvis_polars import EnrichConnectionTablePolars
     except ImportError:
         svp = None
-        EnrichConnectionTablePolars = None
 
 try:
     from .utils.naming_utils import dataset_abbrev
@@ -61,8 +43,24 @@ except ImportError:
     try:
         from utils.naming_utils import dataset_abbrev
     except ImportError:
+        # Last-resort fallback with the same mapping as utils.naming_utils,
+        # so run-folder names stay meaningful even if that module is missing.
+        _DATASET_ABBREVIATIONS_FALLBACK = {
+            "male-cns": "MCNS", "male_cns": "MCNS", "hemibrain": "HEMI",
+            "optic-lobe": "OL", "optic_lobe": "OL", "manc": "MANC",
+            "banc": "BANC", "fib19": "FIB", "mushroombody": "MB",
+            "flywire_fafb": "FAFB", "fafb": "FAFB", "flywire_banc": "BANC",
+        }
+
         def dataset_abbrev(dataset):
-            return "DS"
+            if not dataset:
+                return "UNKN"
+            ds = str(dataset).lower()
+            for key, abbrev in _DATASET_ABBREVIATIONS_FALLBACK.items():
+                if key in ds:
+                    return abbrev
+            letters = "".join(c for c in ds.split(":")[0] if c.isalpha())
+            return (letters[:4] or "DS").upper()
 
 # Add vispath-subproject to path for VisualizePath import
 vispath_src = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'vispath-subproject', 'src')
@@ -102,12 +100,8 @@ neuprint_utils.connection_table_to_matrix = _patched_connection_table_to_matrix
 connection_table_to_matrix = _patched_connection_table_to_matrix
 
 sns.set()
-from copy import copy
 from datetime import datetime
 from types import SimpleNamespace
-
-import bokeh.palettes
-import img2pdf
 
 import statvis as sv
 try:
@@ -120,14 +114,6 @@ try:
     HAS_BANC_CONVERTER = True
 except ImportError:
     HAS_BANC_CONVERTER = False
-
-try:
-    from .visualize_skeleton import VisualizeSkeleton
-except ImportError:
-    try:
-        from src.visualize_skeleton import VisualizeSkeleton
-    except ImportError:
-        from visualize_skeleton import VisualizeSkeleton
 
 # Ignore the navis warning
 logging.getLogger('navis').setLevel(logging.WARNING)
@@ -315,6 +301,21 @@ def clear_fnc_cache(dataset: str = None):
 
 
 from core.fast_graph import FastGraph
+
+
+def _format_decimal_for_folder(value):
+    """Format a decimal number as a folder-safe string: '.' -> '_' and '-' -> 'neg'.
+
+    Non-numeric values are passed through as strings. Shared by FindPath,
+    FindAllPath and FindDirectConnections so parameter suffixes in run-folder
+    names are identical across tools.
+    """
+    if isinstance(value, (int, float)):
+        if value == int(value):
+            return str(int(value))
+        str_val = f"{value:.6f}".rstrip('0').rstrip('.')
+        return str_val.replace('.', '_').replace('-', 'neg')
+    return str(value)
 
 
 @dataclass
@@ -1338,12 +1339,28 @@ class FindNeuronConnection:
     
     pathfinding: str = 'MemoizedDFS'
     '''
-    Pathfinding algorithm to use in FindAllPath:
-    - 'MemoizedDFS': Meet-in-the-middle DFS - optimized for deep paths (L>=5) (default)
-    - 'Bidirectional': Bidirectional BFS - optimized for shortest paths
-    - 'DP': Backward Reachability (DP) - optimized for pruning dead ends (lowest memory)
-    - 'DFS': Backward Memoized DFS - standard traversal
-    - 'Backtracking': Backward DFS with backtracking - no memoization (lowest memory, slower)
+    Pathfinding algorithm to use in FindAllPath (names match the algorithms):
+    - 'MemoizedDFS': Memoized DFS (forward) - fastest measured at all
+      depths (no reversed-graph copy); the recommended default
+    - 'DFS': Memoized DFS (backward) - same algorithm started from the
+      targets; best when targets are few
+    - 'MeetInMiddle': Meet-in-the-middle DFS - fastest at shallow depths,
+      competitive for deep paths
+    - 'DP': Backward Reachability (DP) - robust, low memory, no reverse copy
+    - 'Bidirectional': Bidirectional BFS - shortest paths first, but stores
+      full layer trees (highest memory)
+    '''
+    
+    search_columns: str = 'auto'
+    '''
+    Which columns to search when resolving source/target neuron names:
+    - 'auto' (default): all columns with priority bodyId -> type -> instance
+      -> other string columns (e.g. flywireType, hemibrainType, mancType);
+      exact names are matched in every column, so e.g. 'MTe07' finds the
+      flywireType entry of male-cns v1.0
+    - 'type': only the type column
+    - 'instance': only the instance column
+    - 'bodyId': only the bodyId column
     '''
     
     run_date: str = datetime.now().strftime('%Y%m%d_%H%M%S')
@@ -1410,8 +1427,12 @@ class FindNeuronConnection:
     network_layout: str = 'layered'
     '''
     layout algorithm for interactive network visualization\n
-    'layered': multipartite layout - arranges nodes in distinct layers (good for strictly hierarchical networks)\n
-    'distributed': spring layout - distributes nodes for better clarity (good for networks with cross-layer connections)\n
+    'layered': layered (dagre) layout - arranges nodes in distinct layers (good for strictly hierarchical networks)\n
+    'distributed': dagre-based distributed layout - good for networks with cross-layer connections\n
+    'spring': force-directed (cose) layout - distributes nodes for better clarity\n
+    'circular': circular layout\n
+    'shell': concentric rings around a center\n
+    Unknown values fall back to the dagre layered layout.\n
     '''
     
     simple_fetch: bool = True
@@ -2575,142 +2596,6 @@ class FindNeuronConnection:
         
         return pl.DataFrame(), uncached_upstream, []
     
-    def _try_recover_neuron_metadata(self, bodyId, conn_db, neuron_index):
-        '''
-        Attempt to recover neuron metadata from local dataset and add to neuron index.
-        Called during crash recovery when connections exist but neuron not in index.
-        
-        Parameters:
-        -----------
-        bodyId : int
-            Neuron bodyId to recover
-        conn_db : pd.DataFrame
-            Connection database (used to count existing connections)
-        neuron_index : pd.DataFrame
-            Current neuron index (will be updated and saved)
-        '''
-        # Try to get metadata from local dataset
-        dataset_safe = self.dataset.replace(':', '_').replace('.', '_')
-        dataset_path = os.path.join(
-            self.script_path,
-            'datasets',
-            dataset_safe,
-            f"{dataset_safe}_allneurons_neuron_df.csv"
-        )
-        
-        if os.path.exists(dataset_path):
-            try:
-                # Check if it's FAFB to decide on index_col (FAFB utils saves without index)
-                is_fafb = 'fafb' in self.dataset.lower() or 'flywire' in self.dataset.lower()
-                
-                if is_fafb:
-                    ndf_complete = self._read_csv(dataset_path, header=0, index_col=None, dtype={'bodyId': str}, low_memory=False)
-                else:
-                    ndf_complete = self._read_csv(dataset_path, header=0, index_col=0, low_memory=False)
-                
-                # Ensure bodyId is string
-                if 'bodyId' in ndf_complete.columns:
-                    ndf_complete['bodyId'] = ndf_complete['bodyId'].astype(str)
-                    
-                neuron_row = ndf_complete[ndf_complete['bodyId'] == str(bodyId)]
-                
-                if not neuron_row.empty:
-                    # Found neuron metadata - add to index as incomplete
-                    neuron_type = neuron_row.iloc[0]['type'] if 'type' in neuron_row.columns else ''
-                    neuron_instance = neuron_row.iloc[0]['instance'] if 'instance' in neuron_row.columns else ''
-                    neuron_post = neuron_row.iloc[0]['post'] if 'post' in neuron_row.columns else 0
-                    
-                    # Count connections from database
-                    conn_count = len(conn_db[conn_db['bodyId_pre'] == bodyId])
-                    
-                    # Add to neuron index (but not marked as complete yet)
-                    new_entry = pd.DataFrame([{
-                        'bodyId': bodyId,
-                        'type': neuron_type,
-                        'instance': neuron_instance,
-                        'post': neuron_post,
-                        'downstream_complete': False,  # Not complete yet - needs enrichment validation
-                        'last_fetched': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-                        'connection_count': conn_count
-                    }])
-                    
-                    # Update and save neuron_index immediately
-                    updated_index = pd.concat([neuron_index, new_entry], ignore_index=True)
-                    self._save_neuron_index(updated_index)
-                    
-                    return True  # Successfully recovered
-            except Exception as e:
-                # If recovery fails, just skip - will be marked as complete after enrichment
-                pass
-        
-        return False  # Recovery failed or not possible
-    
-    def _update_connection_db(self, new_connections, upstream_bodyIds, downstream_bodyIds=None):
-        '''
-        Add new connections to unified database without duplicates.
-        Updates neuron index to mark neurons as fully cached (if querying all downstream).
-        
-        Parameters:
-        -----------
-        new_connections : pd.DataFrame
-            New connections to add (must have bodyId_pre, bodyId_post, weight, optionally roi)
-        upstream_bodyIds : list
-            List of upstream neurons that were queried
-        downstream_bodyIds : list or None
-            If None, marks neurons as downstream_complete. If list, doesn't mark as complete.
-        '''
-        # Even if no new connections, still update the neuron index to mark as complete
-        if new_connections.empty:
-            # Update neuron index to mark neurons as fetched (even if they have 0 connections)
-            self._update_neuron_index_after_fetch(new_connections, upstream_bodyIds, downstream_bodyIds)
-            return
-        
-        # Load existing database
-        conn_db = self._load_connection_db()
-        if not isinstance(conn_db, pl.DataFrame):
-            conn_db = pl.from_pandas(conn_db)
-        
-        # Prepare new connections
-        new_conn = new_connections[['bodyId_pre', 'bodyId_post', 'weight']].copy()
-        
-        # Ensure bodyIds are strings
-        new_conn['bodyId_pre'] = new_conn['bodyId_pre'].astype(str)
-        new_conn['bodyId_post'] = new_conn['bodyId_post'].astype(str)
-        
-        if 'roi' in new_connections.columns:
-            new_conn['roi'] = new_connections['roi']
-        else:
-            new_conn['roi'] = ''
-        
-        new_conn['cached_date'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        
-        # Convert to Polars for consistency with conn_db
-        new_conn_pl = pl.from_pandas(new_conn)
-        
-        # Merge with existing, removing duplicates (keep existing entries)
-        conn_db_empty = conn_db.is_empty() if hasattr(conn_db, 'is_empty') else conn_db.empty
-        if not conn_db_empty:
-            self._vprint(f'  ⏳ Merging {len(new_conn_pl):,} connections with existing database...', level='full')
-            # Remove any new connections that already exist (based on bodyId_pre, bodyId_post, roi)
-            merge_cols = ['bodyId_pre', 'bodyId_post', 'roi']
-            combined = pl.concat([conn_db, new_conn_pl], how='diagonal_relaxed')
-            combined = combined.unique(subset=merge_cols, keep='first')
-        else:
-            combined = new_conn_pl
-        
-        # Save updated database
-        self._vprint(f'  ⏳ Saving connection database ({len(combined):,} connections)...', level='full')
-        self._save_connection_db(combined)
-        
-        new_count = len(combined) - len(conn_db)
-        if new_count > 0:
-            self._vprint(f'  💾 Added {new_count} new connections to database (total: {len(combined):,})', level='full')
-        else:
-            self._vprint(f'  📂 All connections already in database ({len(conn_db):,} total)', level='full')
-        
-        # Update neuron index
-        self._update_neuron_index_after_fetch(new_conn, upstream_bodyIds, downstream_bodyIds)
-    
     def _save_connections_only(self, new_connections, upstream_bodyIds):
         '''
         Save connections to database without updating neuron index.
@@ -2837,11 +2722,11 @@ class FindNeuronConnection:
             
             neuron_info = ndf_complete[ndf_complete['bodyId'].isin(upstream_bodyIds)][['bodyId', 'type', 'instance', 'post']].copy()
         else:
-            # Fallback: fetch from API
+            # Fallback: fetch from API (batched to bound query/response size)
             try:
-                ndf, _ = fetch_neurons(NeuronCriteria(bodyId=upstream_bodyIds))
+                ndf = self._fetch_neurons_batched(upstream_bodyIds)
                 neuron_info = ndf[['bodyId', 'type', 'instance', 'post']].copy()
-            except:
+            except Exception:
                 neuron_info = pd.DataFrame(columns=['bodyId', 'type', 'instance', 'post'])
         
         # Count connections per neuron
@@ -3192,6 +3077,49 @@ class FindNeuronConnection:
         self._vprint(f'  ✓ Enrichment complete', level='full')
         return conn_df
     
+    def _fetch_neurons_batched(self, bodyIds, batch_size: int = 2000) -> pd.DataFrame:
+        '''
+        Fetch neuron info from NeuPrint in chunks of ``batch_size`` bodyIds.
+        
+        The neuprint client sends ONE Cypher query per ``fetch_neurons()`` call.
+        With tens of thousands of IDs (e.g. enriching a large layer's
+        connections from a cold cache), a single query makes the server
+        evaluate a huge IN-list and returns a massive payload that the client
+        spends minutes parsing at ~100% CPU - appearing as a hang. Chunking
+        bounds both the server-side query and each response, and gives visible
+        progress for large fetches.
+        
+        Parameters:
+        -----------
+        bodyIds : list
+            List of neuron bodyIds to fetch
+        batch_size : int, optional
+            Maximum bodyIds per API call (default: 2000)
+            
+        Returns:
+        --------
+        pd.DataFrame : Concatenated neuron info for all requested bodyIds
+        '''
+        bodyIds = list(bodyIds)
+        if not bodyIds:
+            return pd.DataFrame()
+        
+        if len(bodyIds) <= batch_size:
+            neuron_df, _ = fetch_neurons(NeuronCriteria(bodyId=bodyIds))
+            return neuron_df
+        
+        n_batches = (len(bodyIds) + batch_size - 1) // batch_size
+        self._vprint(f'  ⏳ Fetching {len(bodyIds):,} neurons from API in {n_batches} batches of ≤{batch_size:,}...', level='full')
+        frames = []
+        for i in range(0, len(bodyIds), batch_size):
+            chunk = bodyIds[i:i + batch_size]
+            chunk_df, _ = fetch_neurons(NeuronCriteria(bodyId=chunk))
+            if chunk_df is not None and not chunk_df.empty:
+                frames.append(chunk_df)
+        if not frames:
+            return pd.DataFrame()
+        return pd.concat(frames, ignore_index=True)
+
     def _fetch_neurons_local_or_api(self, bodyIds, columns=None):
         '''
         Fetch neuron information from cache, local dataset, or API (in that order).
@@ -3313,7 +3241,9 @@ class FindNeuronConnection:
                  self._vprint("  Skipping API fetch to avoid timeouts/limits.", level='full')
                  return pd.DataFrame(columns=columns if columns else [])
 
-            # Slow: API call
+            # Slow: API call (batched to bound query/response size - a single
+            # fetch_neurons() with tens of thousands of IDs can hang for
+            # minutes on server evaluation + client-side payload parsing)
             if self.client_type == 'flywire':
                 if self.client_flywire:
                     # Use FlyWire adapter
@@ -3335,7 +3265,7 @@ class FindNeuronConnection:
             # Ensure client is logged in (NeuPrint) for the CORRECT dataset
             self._ensure_neuprint_client()
             
-            neuron_df, _ = fetch_neurons(NeuronCriteria(bodyId=bodyIds))
+            neuron_df = self._fetch_neurons_batched(bodyIds)
             if columns:
                 neuron_df = neuron_df[columns].copy()
             return neuron_df
@@ -3818,16 +3748,20 @@ class FindNeuronConnection:
                         # Ensure bodyIds are integers for NeuPrint
                         # NeuPrint client requires bodyIds to be integers, not strings or floats
                         # This fixes AssertionError: bodyId should be an integer or list of integers
-                        if uncached_upstream:
+                        # Converted copies are used ONLY for the NeuPrint calls; the original
+                        # string-form ids stay untouched for the cache-marking logic below.
+                        neuprint_upstream = uncached_upstream
+                        neuprint_downstream = downstream_bodyIds
+                        if neuprint_upstream:
                             try:
-                                uncached_upstream = [int(x) for x in uncached_upstream]
+                                neuprint_upstream = [int(x) for x in neuprint_upstream]
                             except (ValueError, TypeError):
                                 # If conversion fails (e.g. non-numeric IDs), keep as is and let NeuPrint handle/fail
                                 pass
                                 
-                        if downstream_bodyIds:
+                        if neuprint_downstream:
                             try:
-                                downstream_bodyIds = [int(x) for x in downstream_bodyIds]
+                                neuprint_downstream = [int(x) for x in neuprint_downstream]
                             except (ValueError, TypeError):
                                 pass
 
@@ -3851,9 +3785,14 @@ class FindNeuronConnection:
                                 last_exc = None
                                 for attempt in range(1, max_retries + 1):
                                     try:
-                                        with ThreadPoolExecutor(max_workers=1) as executor:
+                                        # shutdown(wait=False): a hung API call must not
+                                        # block the retry loop (with-block would wait forever)
+                                        executor = ThreadPoolExecutor(max_workers=1)
+                                        try:
                                             future = executor.submit(func)
                                             return future.result(timeout=timeout)
+                                        finally:
+                                            executor.shutdown(wait=False)
                                     except FuturesTimeoutError:
                                         last_exc = APITimeoutError(f"{description} timed out after {timeout}s (attempt {attempt}/{max_retries})")
                                         if attempt < max_retries:
@@ -3865,7 +3804,7 @@ class FindNeuronConnection:
                                 raise last_exc or Exception("Unknown error")
                         
                         # Create batches
-                        batches = [uncached_upstream[i:i + batch_size] for i in range(0, len(uncached_upstream), batch_size)]
+                        batches = [neuprint_upstream[i:i + batch_size] for i in range(0, len(neuprint_upstream), batch_size)]
                         
                         if len(batches) > 1:
                             self._vprint(f'     Processing {len(batches)} batches (size={batch_size})...', level='full')
@@ -3880,7 +3819,7 @@ class FindNeuronConnection:
                                 if self.simple_fetch:
                                     from neuprint import fetch_simple_connections
                                     upstream_criteria = NeuronCriteria(bodyId=b)
-                                    downstream_criteria = NeuronCriteria(bodyId=downstream_bodyIds) if downstream_bodyIds is not None else None
+                                    downstream_criteria = NeuronCriteria(bodyId=neuprint_downstream) if neuprint_downstream is not None else None
                                     return fetch_simple_connections(
                                         upstream_criteria=upstream_criteria,
                                         downstream_criteria=downstream_criteria,
@@ -3891,7 +3830,7 @@ class FindNeuronConnection:
                                     from neuprint import fetch_adjacencies
                                     neuron_df, roi_conn_df = fetch_adjacencies(
                                         sources=b,
-                                        targets=downstream_bodyIds,
+                                        targets=neuprint_downstream,
                                         min_total_weight=1,
                                         **self.kwargs_fetch
                                     )
@@ -5069,81 +5008,6 @@ class FindNeuronConnection:
             # Re-raise to let caller handle/log the error properly
             raise RuntimeError(f"NeuPrint bulk fetch error: {type(e).__name__}: {e}") from e
     
-    def _bulk_save_connections(self, connection_list, neurons_fetched):
-        """
-        Save accumulated connections to cache in bulk.
-        Much faster than saving after each batch.
-        
-        Parameters:
-        -----------
-        connection_list : list of DataFrames
-            List of connection DataFrames to save
-        neurons_fetched : list
-            List of neurons that were fetched
-        """
-        if not connection_list:
-            return
-        
-        # Combine all connections
-        all_connections = pd.concat(connection_list, ignore_index=True)
-        
-        # Ensure required columns
-        all_connections['bodyId_pre'] = all_connections['bodyId_pre'].astype(str)
-        all_connections['bodyId_post'] = all_connections['bodyId_post'].astype(str)
-        if 'roi' not in all_connections.columns:
-            all_connections['roi'] = ''
-        all_connections['cached_date'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        
-        # Load existing and merge (conn_db is Polars DataFrame)
-        conn_db = self._load_connection_db()
-        
-        # Convert all_connections to Polars
-        all_conn_pl = pl.from_pandas(all_connections)
-        
-        if not conn_db.is_empty():
-            merge_cols = ['bodyId_pre', 'bodyId_post', 'roi']
-            combined = pl.concat([conn_db, all_conn_pl], how='diagonal_relaxed')
-            combined = combined.unique(subset=merge_cols, keep='first')
-        else:
-            combined = all_conn_pl
-        
-        # Save connection database (without rebuilding index - we'll do that at the end)
-        db_path = self._get_connection_db_path()
-        combined.write_parquet(db_path, compression='gzip')
-        self._conn_df_cache = combined
-        
-        # Update neuron index for all fetched neurons
-        neurons_str = [str(x) for x in neurons_fetched]
-        neuron_index = self._load_neuron_index()
-        
-        now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        
-        # Count connections per neuron
-        conn_counts = all_connections.groupby('bodyId_pre').size().to_dict()
-        
-        # Update or add entries
-        updates = []
-        for bodyId in neurons_str:
-            count = conn_counts.get(bodyId, 0)
-            updates.append({
-                'bodyId': bodyId,
-                'downstream_complete': True,
-                'last_fetched': now,
-                'connection_count': count
-            })
-        
-        if updates:
-            updates_df = pd.DataFrame(updates)
-            if not neuron_index.empty:
-                # Merge updates
-                neuron_index = neuron_index[~neuron_index['bodyId'].isin(neurons_str)]
-                neuron_index = pd.concat([neuron_index, updates_df], ignore_index=True)
-            else:
-                neuron_index = updates_df
-            
-            # Save neuron index
-            self._save_neuron_index(neuron_index)
-
     def _get_all_dataset_bodyids(self) -> list:
         """Get all bodyIds from dataset's neuron_df file."""
         dataset_safe = self.dataset.replace(':', '_').replace('.', '_')
@@ -5179,51 +5043,6 @@ class FindNeuronConnection:
             return [str(x) for x in ndf['bodyId'].unique().tolist()]
         
         return []
-    
-    def _check_cache_completeness(self, expected_bodyIds: list) -> dict:
-        """
-        Check cache completeness against expected bodyIds.
-        
-        Returns dict with:
-        - expected: Number of expected neurons
-        - cached: Number of neurons in cache
-        - missing: Number of missing neurons
-        - ratio: Completeness ratio (0.0 to 1.0)
-        - cached_bodyids: List of cached bodyIds
-        - missing_bodyids: List of missing bodyIds
-        """
-        expected_set = set(str(x) for x in expected_bodyIds)
-        
-        # Check connection database for cached neurons
-        conn_db = self._load_connection_db()
-        cached_set = set()
-        
-        if conn_db is not None and not conn_db.is_empty():
-            if 'bodyId_pre' in conn_db.columns:
-                cached_set.update(conn_db['bodyId_pre'].cast(pl.Utf8).unique().to_list())
-        
-        # Also check neuron_index for neurons with 0 connections
-        neuron_index = self._load_neuron_index()
-        if neuron_index is not None and not neuron_index.empty:
-            if 'downstream_complete' in neuron_index.columns:
-                complete_mask = neuron_index['downstream_complete'].astype(bool)
-                indexed_bodyids = neuron_index[complete_mask]['bodyId'].astype(str).tolist()
-                cached_set.update(indexed_bodyids)
-        
-        # Calculate completeness
-        cached_in_expected = cached_set.intersection(expected_set)
-        missing_set = expected_set - cached_set
-        
-        ratio = len(cached_in_expected) / len(expected_set) if expected_set else 1.0
-        
-        return {
-            'expected': len(expected_set),
-            'cached': len(cached_in_expected),
-            'missing': len(missing_set),
-            'ratio': ratio,
-            'cached_bodyids': list(cached_in_expected),
-            'missing_bodyids': list(missing_set)
-        }
     
     def validate_and_repair_cache(self, quiet: bool = False) -> dict:
         """
@@ -5548,7 +5367,8 @@ class FindNeuronConnection:
                 dataset=self.dataset,
                 custom_group_names=self.custom_source_group_names if self.custom_source_group_names else None,
                 client=active_client,
-                verbose=neurons_verbose
+                verbose=neurons_verbose,
+                search_columns=self.search_columns
             )
             # Reuse source data for target.
             # IMPORTANT: copy() - later stages insert status columns
@@ -5563,14 +5383,16 @@ class FindNeuronConnection:
                 dataset=self.dataset,
                 custom_group_names=self.custom_source_group_names if self.custom_source_group_names else None,
                 client=active_client,
-                verbose=neurons_verbose
+                verbose=neurons_verbose,
+                search_columns=self.search_columns
             )
             self.target_df, _, target_fname_auto, self.target_criteria = sv.getNeurons(
                 self.targetNeurons, 
                 dataset=self.dataset,
                 custom_group_names=self.custom_target_group_names if self.custom_target_group_names else None,
                 client=active_client,
-                verbose=neurons_verbose
+                verbose=neurons_verbose,
+                search_columns=self.search_columns
             )
         
         # Apply label mapping if available
@@ -5838,25 +5660,25 @@ class FindNeuronConnection:
         
         # Save target neurons
         target_path = os.path.join(output_dir, f'{filename_prefix}_target_neurons.csv')
+        self._save_df_to_csv_polars(self.target_df, target_path)
         if hasattr(self, '_source_target_identical') and self._source_target_identical:
-            # When source==target, just copy the reference
-            self._save_df_to_csv_polars(self.target_df, target_path)
-            print(f'Target neurons: same as source (saved separately)')
-        else:
-            self._save_df_to_csv_polars(self.target_df, target_path)
+            self._vprint('Target neurons: same as source (saved separately)', level='always')
         
         # Save parameters
         params_path = os.path.join(output_dir, f'{filename_prefix}_parameters.csv')
         if hasattr(self, 'parameter_df'):
             self._save_df_to_csv_polars(self.parameter_df, params_path)
+        else:
+            params_path = None
         
-        print(f'\n=== SaveNeuronInfo ===')
-        print(f'Output directory: {output_dir}')
-        print(f'Source neurons saved: {source_path}')
-        print(f'Target neurons saved: {target_path}')
-        print(f'Parameters saved: {params_path}')
-        print(f'Source: {len(self.source_df)} neurons')
-        print(f'Target: {len(self.target_df)} neurons')
+        self._vprint(f'\n=== SaveNeuronInfo ===', level='always')
+        self._vprint(f'Output directory: {output_dir}', level='always')
+        self._vprint(f'Source neurons saved: {source_path}', level='always')
+        self._vprint(f'Target neurons saved: {target_path}', level='always')
+        if params_path:
+            self._vprint(f'Parameters saved: {params_path}', level='always')
+        self._vprint(f'Source: {len(self.source_df)} neurons', level='always')
+        self._vprint(f'Target: {len(self.target_df)} neurons', level='always')
         
         return output_dir
 
@@ -5874,15 +5696,6 @@ class FindNeuronConnection:
         self._reset_temp_columns()
 
         # Create direct folder with parameters and timestamp (match FindAllPath/FindPath naming)
-        def _format_decimal_for_folder(value):
-            """Format decimal numbers for folder-safe string (replace . with _ and negative sign with 'neg')"""
-            if isinstance(value, (int, float)):
-                if value == int(value):
-                    return str(int(value))
-                s = f"{value:.6f}".rstrip('0').rstrip('.')
-                return s.replace('.', '_').replace('-', 'neg')
-            return str(value)
-
         timestamp = time.strftime('%Y%m%d_%H%M%S')
         param_suffix = (
             f"L{self.max_interlayer}"
@@ -5940,7 +5753,14 @@ class FindNeuronConnection:
             return
         
         # enrich connection information (recalculate metrics for display)
-        # Type-level prob = 1 - product(bodyId-level block_prob)
+        # Global type-level denominators for accurate connection ratios
+        # (denominator = ALL incoming connections in the dataset, not just the
+        # connections fetched for this query - see ScoreCalculation_Guide).
+        post_types = self.conn_df['type_post'].dropna().unique().tolist() if 'type_post' in self.conn_df.columns else []
+        global_incoming_weights = self._fetch_total_incoming_weight_by_type(post_types, min_weight=self.min_synapse_num) if post_types else None
+        
+        # Type-level prob = min(connection_ratio / 0.3, 1) (matches
+        # _apply_type_level_filters and the Polars implementation)
         # Don't pass target_neurons_df - let EnrichConnectionTable use neurons from connections
         # This uses sum(post) of neurons that actually received connections as denominator
         self.conn_df, self.conn_type, self.conn_group = sv.EnrichConnectionTable(
@@ -5948,8 +5768,9 @@ class FindNeuronConnection:
             traversal_probability_threshold=0,
             dataset=self.dataset,
             script_path=self.script_path,
-            aggregate_method='product',  # Type-level prob = 1 - product(bodyId-level block_prob)
+            aggregate_method='product',  # accepted for API compatibility
             label_mapper=self.label_mapper,
+            global_incoming_weights=global_incoming_weights,
             separate_hemispheres=self.separate_hemispheres
         )
         
@@ -5967,8 +5788,9 @@ class FindNeuronConnection:
                     self._save_df_to_csv_polars(unconserved_types, os.path.join(unconserved_path, 'hemisphere_unconserved_edges.csv'))
             
             if self.conn_group is not None and not self.conn_group.empty:
-                group_pre_col = 'group_pre' if 'group_pre' in self.conn_group.columns else 'type_pre'
-                group_post_col = 'group_post' if 'group_post' in self.conn_group.columns else 'type_post'
+                # Both engines emit custom_group_pre/custom_group_post (unified schema)
+                group_pre_col = 'custom_group_pre' if 'custom_group_pre' in self.conn_group.columns else 'type_pre'
+                group_post_col = 'custom_group_post' if 'custom_group_post' in self.conn_group.columns else 'type_post'
                 self.conn_group, _ = self._filter_hemisphere_unconserved_edges(
                     self.conn_group, pre_col=group_pre_col, post_col=group_post_col, weight_col='weight'
                 )
@@ -6004,13 +5826,13 @@ class FindNeuronConnection:
         if self.conn_group is not None:
             # Create connection matrices for custom groups
             self.conn_matrix_group: pd.DataFrame = self.conn_group.pivot_table(
-                index='group_pre', columns='group_post', values='weight', fill_value=0
+                index='custom_group_pre', columns='custom_group_post', values='weight', fill_value=0
             )
             self.conn_matrix_group.index = self.conn_matrix_group.index.astype(str)
             self.conn_matrix_group.columns = self.conn_matrix_group.columns.astype(str)
             
             self.conn_matrix_ratio_group: pd.DataFrame = self.conn_group.pivot_table(
-                index='group_pre', columns='group_post', values='connection_ratio', fill_value=0
+                index='custom_group_pre', columns='custom_group_post', values='connection_ratio', fill_value=0
             )
             self.conn_matrix_ratio_group.index = self.conn_matrix_ratio_group.index.astype(str)
             self.conn_matrix_ratio_group.columns = self.conn_matrix_ratio_group.columns.astype(str)
@@ -6298,8 +6120,8 @@ class FindNeuronConnection:
                 self._vprint('\nCreating VisualizePath visualization for custom groups...')
                 group_path_data = []
                 for idx in self.conn_group.index:
-                    source = self.conn_group.at[idx, 'group_pre']
-                    target = self.conn_group.at[idx, 'group_post']
+                    source = self.conn_group.at[idx, 'custom_group_pre']
+                    target = self.conn_group.at[idx, 'custom_group_post']
                     weight = self.conn_group.at[idx, 'weight']
                     ratio = self.conn_group.at[idx, 'connection_ratio'] if 'connection_ratio' in self.conn_group.columns else 0.0
                     prob = self.conn_group.at[idx, 'traversal_probability'] if 'traversal_probability' in self.conn_group.columns else 0.0
@@ -6351,21 +6173,12 @@ class FindNeuronConnection:
             os.makedirs(base_folder)
         
         # Create path folder with parameters and timestamp
-        def format_decimal(value):
-            """Convert decimal to folder-safe string (replace . with _)"""
-            if isinstance(value, (int, float)):
-                if value == int(value):
-                    return str(int(value))
-                str_val = f"{value:.6f}".rstrip('0').rstrip('.')
-                return str_val.replace('.', '_').replace('-', 'neg')
-            return str(value)
-        
         timestamp = time.strftime('%Y%m%d_%H%M%S')
         param_suffix = (
             f"L{self.max_interlayer}"
             f"w{self.min_synapse_num}"
-            f"r{format_decimal(self.min_ratio)}"
-            f"p{format_decimal(self.min_traversal_probability)}"
+            f"r{_format_decimal_for_folder(self.min_ratio)}"
+            f"p{_format_decimal_for_folder(self.min_traversal_probability)}"
             f"_{timestamp}"
         )
         
@@ -6500,6 +6313,13 @@ class FindNeuronConnection:
             bodyIds_in_layer = np.unique(np.concatenate([conn_df['bodyId_pre'].unique(), conn_df['bodyId_post'].unique()]))
             neurons_in_layer_df = self._fetch_neurons_local_or_api(bodyIds_in_layer.tolist(), columns=['bodyId', 'type', 'post'])
             
+            # Global type-level denominators for accurate connection ratios.
+            # Without them the ratio denominator only covers connections that
+            # appear in paths, inflating the true fraction of B's total input
+            # that comes from A (see ScoreCalculation_Guide).
+            post_types = conn_df['type_post'].dropna().unique().tolist() if 'type_post' in conn_df.columns else []
+            global_incoming_weights = self._fetch_total_incoming_weight_by_type(post_types, min_weight=self.min_synapse_num) if post_types else None
+            
             conn_df, conn_type, conn_group = sv.EnrichConnectionTable(
                 conn_df, 
                 traversal_probability_threshold=0,
@@ -6507,6 +6327,7 @@ class FindNeuronConnection:
                 script_path=self.script_path,
                 target_neurons_df=neurons_in_layer_df,
                 label_mapper=self.label_mapper,
+                global_incoming_weights=global_incoming_weights,
                 separate_hemispheres=self.separate_hemispheres
             )
             conn_df.insert(loc=0,column='conn_layer',value=str(i)+'->'+str(i+1))
@@ -6670,7 +6491,7 @@ class FindNeuronConnection:
         if len(path_df_type) > 0:
             before_filter = len(path_df_type)
             path_df_type = path_df_type[
-                path_df_type['weights'].apply(lambda w_list: all(w > 0 for w in w_list))
+                [all(w > 0 for w in wl) for wl in path_df_type['weights']]
             ]
             after_filter = len(path_df_type)
             if before_filter > after_filter:
@@ -6799,20 +6620,22 @@ class FindNeuronConnection:
             
             print(f'  Found {len(bodyId_paths):,} bodyId-level paths')
             
-            # Create type lookup from connection data
+            # Create type lookup from connection data (vectorized)
             type_lookup = {}
             if 'type_pre' in conn_inpath.columns:
-                for _, row in conn_inpath[['bodyId_pre', 'type_pre']].drop_duplicates().iterrows():
-                    type_lookup[str(row['bodyId_pre'])] = row['type_pre']
+                dedup = conn_inpath[['bodyId_pre', 'type_pre']].drop_duplicates()
+                type_lookup.update(dict(zip(dedup['bodyId_pre'].astype(str).tolist(),
+                                            dedup['type_pre'].tolist())))
             if 'type_post' in conn_inpath.columns:
-                for _, row in conn_inpath[['bodyId_post', 'type_post']].drop_duplicates().iterrows():
-                    type_lookup[str(row['bodyId_post'])] = row['type_post']
+                dedup = conn_inpath[['bodyId_post', 'type_post']].drop_duplicates()
+                type_lookup.update(dict(zip(dedup['bodyId_post'].astype(str).tolist(),
+                                            dedup['type_post'].tolist())))
             
             # Also add source and target info
-            for _, row in self.source_df.iterrows():
-                type_lookup[str(row['bodyId'])] = row['type']
-            for _, row in self.target_df.iterrows():
-                type_lookup[str(row['bodyId'])] = row['type']
+            type_lookup.update(dict(zip(self.source_df['bodyId'].astype(str).tolist(),
+                                        self.source_df['type'].tolist())))
+            type_lookup.update(dict(zip(self.target_df['bodyId'].astype(str).tolist(),
+                                        self.target_df['type'].tolist())))
 
             # Build DataFrame from bodyId paths (no real_layer_map needed - layer-by-layer ensures forward-only)
             path_df_bodyId = sv.build_path_dataframe_from_paths(
@@ -6923,7 +6746,10 @@ class FindNeuronConnection:
                 n_df = ndf_complete[ndf_complete['bodyId'].isin(neurons_to_fetch_str)].copy()
             else:
                 # Slow: API call to neuprint (client already logged in above)
-                n_df,_ = fetch_neurons(NeuronCriteria(bodyId=neurons_to_fetch))
+                # Batched: a single fetch_neurons() with a huge bodyId list
+                # makes the server evaluate a giant IN-list and returns a
+                # massive payload (minutes of parsing at ~100% CPU).
+                n_df = self._fetch_neurons_batched(neurons_to_fetch)
             
             # Slim down to essential columns only: bodyId, type, instance
             # This significantly reduces file size for large datasets
@@ -7137,20 +6963,11 @@ class FindNeuronConnection:
         if find_reciprocal is None:
             find_reciprocal = self.find_reciprocal
         
-        # Helper function to format decimal numbers for folder names
-        def format_decimal(val):
-            """Format decimal number for folder name, replacing '.' with '_'"""
-            if val == int(val):
-                return str(int(val))
-            else:
-                formatted = f"{val:.6f}".rstrip('0').rstrip('.')
-                return formatted.replace('.', '_')
-        
         # Create allpaths folder with parameter suffix
         import datetime
         param_suffix = f"_L{self.max_interlayer}w{self.min_synapse_num}"
-        param_suffix += f"r{format_decimal(self.min_ratio)}"
-        param_suffix += f"p{format_decimal(self.min_traversal_probability)}"
+        param_suffix += f"r{_format_decimal_for_folder(self.min_ratio)}"
+        param_suffix += f"p{_format_decimal_for_folder(self.min_traversal_probability)}"
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         param_suffix += f"_{timestamp}"
         
@@ -7158,10 +6975,10 @@ class FindNeuronConnection:
             # If saveas is set, use save_folder directly
             self.allpath_folder = self.save_folder
         else:
-            # Unified per-run folder: findpath_{dataset}_{src}_to_{tgt}{params}_{ts}
+            # Unified per-run folder: findallpath_{dataset}_{src}_to_{tgt}{params}_{ts}
             self.allpath_folder = os.path.join(
                 self.output_dir,
-                f"findpath_{dataset_abbrev(self.dataset)}_{self.source_fname}"
+                f"findallpath_{dataset_abbrev(self.dataset)}_{self.source_fname}"
                 f"_to_{self.target_fname}_{param_suffix.lstrip('_')}",
             )
             
@@ -7519,7 +7336,7 @@ class FindNeuronConnection:
         
         # Select pathfinding algorithm
         algo = self.pathfinding
-        valid_algos = ['DP', 'Bidirectional', 'DFS', 'MemoizedDFS', 'Backtracking']
+        valid_algos = ['DP', 'Bidirectional', 'DFS', 'MemoizedDFS', 'MeetInMiddle', 'Backtracking']
         if algo not in valid_algos:
             self._vprint(f'Warning: Unknown pathfinding algorithm "{algo}", defaulting to "DP"', level='always')
             algo = 'DP'
@@ -7545,6 +7362,14 @@ class FindNeuronConnection:
             if self.verbose_mode == 'simple':
                 self._vprint(f'Finding path [memoized DFS]...', level='simple')
             elif self.verbose_mode == 'full':
+                self._vprint('Using memoized DFS (forward, valid-successor pruning)...', level='full')
+            
+            path_gen = G.find_paths_memoized_dfs(source_ID, targets_found, self.max_interlayer + 1, verbose=(self.verbose_mode in ['simple', 'full']))
+            
+        elif algo == 'MeetInMiddle':
+            if self.verbose_mode == 'simple':
+                self._vprint(f'Finding path [meet-in-the-middle]...', level='simple')
+            elif self.verbose_mode == 'full':
                 self._vprint('Using Bidirectional DFS (Meet-in-the-middle)...', level='full')
                 self._vprint('   ⚡ Optimized for memory: storing L/2 paths', level='full')
             
@@ -7556,7 +7381,8 @@ class FindNeuronConnection:
             elif self.verbose_mode == 'full':
                 self._vprint('Using standard DFS pathfinding (recursive)...', level='full')
             
-            # Use Backward Memoized DFS as a proxy for standard DFS behavior (finding all paths)
+            # Backward Memoized DFS (starts from the targets; best when
+            # targets are fewer than sources)
             path_gen = G.find_paths_memoized_dfs(source_ID, targets_found, self.max_interlayer + 1, direction='backward', verbose=(self.verbose_mode in ['simple', 'full']))
 
         elif algo == 'Backtracking':
@@ -7673,7 +7499,8 @@ class FindNeuronConnection:
             global_incoming_weights = self._fetch_total_incoming_weight_by_type(post_types, min_weight=self.min_synapse_num) if post_types else None
             
             # Enrich with traversal probability (use local dataset if available)
-            conn_enriched, conn_type, conn_group = EnrichConnectionTablePolars(
+            # Unified entry point: polars input -> polars engine (auto)
+            conn_enriched, conn_type, conn_group = sv.EnrichConnectionTable(
                 conn_filtered_no_layer,
                 dataset=self.dataset, 
                 script_path=self.script_path,
@@ -7998,14 +7825,15 @@ class FindNeuronConnection:
                     reciprocal_neurons_df_pd = self._fetch_neurons_local_or_api(node_ids, columns=['bodyId', 'type', 'post'])
                     reciprocal_neurons_df = pl.from_pandas(reciprocal_neurons_df_pd)
 
-                    reciprocal_df_enriched, reciprocal_types, reciprocal_groups = EnrichConnectionTablePolars(
+                    reciprocal_df_enriched, reciprocal_types, reciprocal_groups = sv.EnrichConnectionTable(
                         reciprocal_df,
                         traversal_probability_threshold=self.min_traversal_probability,
                         dataset=self.dataset,
                         script_path=self.script_path,
                         target_neurons_df=reciprocal_neurons_df,
                         label_mapper=self.label_mapper,
-                        separate_hemispheres=self.separate_hemispheres
+                        separate_hemispheres=self.separate_hemispheres,
+                        engine='polars',  # pandas input, keep the polars engine (as before)
                     )
 
                     # Cache reciprocal outputs for visualization override
@@ -8105,8 +7933,8 @@ class FindNeuronConnection:
                 post_types = layer_conn['type_post'].unique().to_list() if 'type_post' in layer_conn.columns else []
                 layer_global_incoming_weights = self._fetch_total_incoming_weight_by_type(post_types, min_weight=self.min_synapse_num) if post_types else None
                 
-                # Enrich
-                _, layer_conn_type, layer_conn_group = EnrichConnectionTablePolars(
+                # Enrich (unified entry point: polars input -> polars engine)
+                _, layer_conn_type, layer_conn_group = sv.EnrichConnectionTable(
                     layer_conn.drop('conn_layer'), 
                     dataset=self.dataset,
                     script_path=self.script_path,
@@ -8167,7 +7995,7 @@ class FindNeuronConnection:
         global_post_types = conn_inpath_global['type_post'].unique().to_list() if 'type_post' in conn_inpath_global.columns else []
         global_incoming_weights = self._fetch_total_incoming_weight_by_type(global_post_types, min_weight=self.min_synapse_num) if global_post_types else None
         
-        _, conn_types_global, _ = EnrichConnectionTablePolars(
+        _, conn_types_global, _ = sv.EnrichConnectionTable(
             conn_inpath_global, 
             traversal_probability_threshold=self.min_traversal_probability,
             dataset=self.dataset,
@@ -8219,9 +8047,9 @@ class FindNeuronConnection:
             # Filter conn_groups (custom group edges) if available
             if conn_groups is not None and not (hasattr(conn_groups, 'is_empty') and conn_groups.is_empty()) and \
                not (hasattr(conn_groups, 'empty') and conn_groups.empty):
-                # Check column names - might be group_pre/group_post or type_pre/type_post
-                group_pre_col = 'group_pre' if 'group_pre' in (conn_groups.columns if hasattr(conn_groups, 'columns') else conn_groups.collect_schema().names()) else 'type_pre'
-                group_post_col = 'group_post' if 'group_post' in (conn_groups.columns if hasattr(conn_groups, 'columns') else conn_groups.collect_schema().names()) else 'type_post'
+                # Check column names - might be custom_group_pre/custom_group_post or type_pre/type_post
+                group_pre_col = 'custom_group_pre' if 'custom_group_pre' in (conn_groups.columns if hasattr(conn_groups, 'columns') else conn_groups.collect_schema().names()) else 'type_pre'
+                group_post_col = 'custom_group_post' if 'custom_group_post' in (conn_groups.columns if hasattr(conn_groups, 'columns') else conn_groups.collect_schema().names()) else 'type_post'
                 conn_groups, unconserved_groups = self._filter_hemisphere_unconserved_edges(
                     conn_groups, pre_col=group_pre_col, post_col=group_post_col, weight_col='weight'
                 )
@@ -8657,7 +8485,7 @@ class FindNeuronConnection:
             if len(path_df_group) > 0:
                 before_filter = len(path_df_group)
                 path_df_group = path_df_group[
-                    path_df_group['weights'].apply(lambda w_list: all(w > 0 for w in w_list))
+                    [all(w > 0 for w in wl) for wl in path_df_group['weights']]
                 ]
                 after_filter = len(path_df_group)
                 if before_filter > after_filter:
@@ -8691,7 +8519,7 @@ class FindNeuronConnection:
         if len(path_df_type) > 0:
             before_filter = len(path_df_type)
             path_df_type = path_df_type[
-                path_df_type['weights'].apply(lambda w_list: all(w > 0 for w in w_list))
+                [all(w > 0 for w in wl) for wl in path_df_type['weights']]
             ]
             after_filter = len(path_df_type)
             if before_filter > after_filter:
@@ -8703,10 +8531,8 @@ class FindNeuronConnection:
             conserved_edge_set = set()
             if conn_types is not None:
                 ct_pd = conn_types.to_pandas() if isinstance(conn_types, pl.DataFrame) else conn_types
-                for _, row in ct_pd.iterrows():
-                    pre = str(row['type_pre'])
-                    post = str(row['type_post'])
-                    conserved_edge_set.add((pre, post))
+                conserved_edge_set.update(zip(ct_pd['type_pre'].astype(str),
+                                              ct_pd['type_post'].astype(str)))
             
             def path_has_unconserved_edge(path_str_val):
                 """Check if a path contains any unconserved edge."""
@@ -8841,31 +8667,33 @@ class FindNeuronConnection:
         if find_bodyId_path and not self.skip_bodyId and 'conn_inpath' in locals() and 'all_paths' in locals():
             self._vprint('\nEnriching bodyId-level paths with connection metrics...', level='full')
             
-            # Create type lookup from connection data
+            # Create type lookup from connection data (vectorized)
             type_lookup = {}
             if 'type_pre' in conn_inpath.columns:
                 if isinstance(conn_inpath, pl.DataFrame):
                     unique_pre = conn_inpath.select(['bodyId_pre', 'type_pre']).unique()
-                    for row in unique_pre.iter_rows(named=True):
-                        type_lookup[row['bodyId_pre']] = row['type_pre']
+                    type_lookup.update(dict(zip(unique_pre['bodyId_pre'].to_list(),
+                                                unique_pre['type_pre'].to_list())))
                 else:
-                    for _, row in conn_inpath[['bodyId_pre', 'type_pre']].drop_duplicates().iterrows():
-                        type_lookup[row['bodyId_pre']] = row['type_pre']
+                    dedup = conn_inpath[['bodyId_pre', 'type_pre']].drop_duplicates()
+                    type_lookup.update(dict(zip(dedup['bodyId_pre'].tolist(),
+                                                dedup['type_pre'].tolist())))
             
             if 'type_post' in conn_inpath.columns:
                 if isinstance(conn_inpath, pl.DataFrame):
                     unique_post = conn_inpath.select(['bodyId_post', 'type_post']).unique()
-                    for row in unique_post.iter_rows(named=True):
-                        type_lookup[row['bodyId_post']] = row['type_post']
+                    type_lookup.update(dict(zip(unique_post['bodyId_post'].to_list(),
+                                                unique_post['type_post'].to_list())))
                 else:
-                    for _, row in conn_inpath[['bodyId_post', 'type_post']].drop_duplicates().iterrows():
-                        type_lookup[row['bodyId_post']] = row['type_post']
+                    dedup = conn_inpath[['bodyId_post', 'type_post']].drop_duplicates()
+                    type_lookup.update(dict(zip(dedup['bodyId_post'].tolist(),
+                                                dedup['type_post'].tolist())))
             
             # Also add source and target info
-            for _, row in self.source_df.iterrows():
-                type_lookup[row['bodyId']] = row['type']
-            for _, row in self.target_df.iterrows():
-                type_lookup[row['bodyId']] = row['type']
+            type_lookup.update(dict(zip(self.source_df['bodyId'].tolist(),
+                                        self.source_df['type'].tolist())))
+            type_lookup.update(dict(zip(self.target_df['bodyId'].tolist(),
+                                        self.target_df['type'].tolist())))
 
             if isinstance(conn_inpath, pl.DataFrame):
                 path_df_bodyId = svp.build_path_dataframe_from_paths(
@@ -9487,13 +9315,11 @@ class FindNeuronConnection:
             """Get the mirror hemisphere"""
             return 'R' if hemi == 'L' else 'L'
         
-        # Build edge lookup
-        edge_keys = {}
-        for idx, row in df.iterrows():
-            pre = row[pre_col]
-            post = row[post_col]
-            key = get_edge_key(pre, post)
-            edge_keys[idx] = key
+        # Build edge lookup (dict comprehension over zipped columns)
+        edge_keys = {
+            idx: get_edge_key(pre, post)
+            for idx, pre, post in zip(df.index, df[pre_col], df[post_col])
+        }
         
         # Find which edges have a mirror counterpart
         # Mirror of (base_A, base_B, L, L) is (base_A, base_B, R, R)
@@ -9764,10 +9590,8 @@ class FindNeuronConnection:
         }
 
         # Count unique neuron types involved (by base name, excluding hemisphere suffix)
-        all_types_in_conns = set()
-        for _, row in conn_types_df.iterrows():
-            all_types_in_conns.add(str(row['type_pre']))
-            all_types_in_conns.add(str(row['type_post']))
+        all_types_in_conns = (set(conn_types_df['type_pre'].astype(str))
+                              | set(conn_types_df['type_post'].astype(str)))
         
         neuron_bases_L = set()
         neuron_bases_R = set()

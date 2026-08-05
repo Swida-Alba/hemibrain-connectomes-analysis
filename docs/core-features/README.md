@@ -17,7 +17,7 @@ This directory contains documentation for the core analytical capabilities:
 - **✨ Homolog Finding**: Find homologs across datasets using connectivity profiles
 - **✨ Cross-Dataset Comparison**: Compare connectivity across multiple datasets
 - **✨ Connectivity Profile Verification**: Verify neuron types using connectivity fingerprints
-- **[Path Finding Methods](./PathFinding_Methods.md)**: Comparison of Bidirectional, DP, and DFS algorithms
+- **[Path Finding Methods](./PathFinding_Methods.md)**: Comparison of Bidirectional, DP, and DFS algorithms (with measured time/memory evaluation; see also [technical evaluation](../technical/PATHFINDING_ALGORITHM_EVALUATION.md))
 - **Custom Groups**: Flexible neuron grouping for custom analysis
 - **Cache System**: High-performance local data storage
 - **Filtering**: Connection and neuron filtering options
@@ -138,18 +138,20 @@ User Entry Points
 Detailed comparison of the available pathfinding algorithms in `FindAllPath`.
 
 **Key Topics**:
-- **Bidirectional Search**: The default, fastest method ($O(b^{d/2})$).
-- **Optimized Backward Search (DP)**: Best for finding all paths to specific targets.
-- **Memoized DFS**: Good for dense graphs with overlapping paths.
-- **Standard DFS**: Low memory but slow for deep paths.
+- **Memoized DFS (forward)**: The default and fastest measured method (no reversed-graph copy).
+- **Optimized Backward Search (DP)**: Robust fallback; best at shallow depths.
+- **DFS (backward memoized)**: Best for deep paths with few targets.
+- **Meet-in-the-middle**: Fast at shallow depths; competitive for deep paths.
+- **Bidirectional Search**: Shortest paths first, but highest memory.
 
-**Comparison Table**:
+**Comparison Table** (2026-08 measured; see [PATHFINDING_ALGORITHM_EVALUATION.md](../technical/PATHFINDING_ALGORITHM_EVALUATION.md)):
 | Algorithm | Speed | Memory | Best Use Case |
 | :--- | :--- | :--- | :--- |
-| **Bidirectional** | ⭐⭐⭐⭐⭐ | ⭐⭐⭐ | **General purpose** |
-| **DP (Backward)** | ⭐⭐⭐⭐ | ⭐⭐ | Many sources to few targets |
-| **Memoized DFS** | ⭐⭐⭐ | ⭐⭐⭐ | Dense graphs |
-| **Standard DFS** | ⭐ | ⭐⭐⭐⭐⭐ | Low memory |
+| **Memoized DFS (forward)** | ⭐⭐⭐⭐⭐ | ⭐⭐⭐⭐⭐ | **General purpose (default)** |
+| **DFS (backward)** | ⭐⭐⭐⭐ | ⭐⭐⭐ | Few targets, deep paths |
+| **Meet-in-the-middle** | ⭐⭐⭐⭐ | ⭐⭐⭐⭐ | Shallow queries |
+| **DP (Backward)** | ⭐⭐⭐ | ⭐⭐⭐⭐ | Robust fallback, shallow |
+| **Bidirectional** | ⭐⭐⭐ | ⭐ | Shortest-first, memory to spare |
 
 ---
 
