@@ -209,7 +209,7 @@ one consistent scale.
 
 - [`src/coana.py`](../../src/coana.py) - `_apply_type_level_filters()` (type-level filtering)
 - [`src/statvis.py`](../../src/statvis.py) - `EnrichConnectionTable()` (with `global_incoming_weights`)
-- [`src/statvis_polars.py`](../../src/statvis_polars.py) - `EnrichConnectionTablePolars()` (with `global_incoming_weights`)
+- [`src/statvis.py`](../../src/statvis.py) - `EnrichConnectionTable()` (unified entry; polars engine via `engine='auto'`, with `global_incoming_weights`)
 
 **Note (legacy)**: Earlier versions offered 'product'
 ($1 - \prod_{i \in A, j \in B}(1 - p_{ij})$) and 'average' (weight-weighted mean)

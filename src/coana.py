@@ -30,14 +30,6 @@ if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
 try:
-    import src.statvis_polars as svp
-except ImportError:
-    try:
-        import statvis_polars as svp
-    except ImportError:
-        svp = None
-
-try:
     from .utils.naming_utils import dataset_abbrev
 except ImportError:
     try:
@@ -8247,7 +8239,7 @@ class FindNeuronConnection:
                 ndf_complete = pl.read_csv(ndf_path, infer_schema_length=10000)
                 if 'bodyId' in ndf_complete.columns:
                     ndf_complete = ndf_complete.with_columns(pl.col('bodyId').cast(pl.Utf8))
-                bodyid_to_label = svp.build_bodyid_label_map(self.label_mapper, self.dataset, ndf_complete)
+                bodyid_to_label = sv.build_bodyid_label_map(self.label_mapper, self.dataset, ndf_complete)
         
         # Get source and target labels (mapped or original types)
         # When label_mapper is provided, conn_types uses std_labels, so we need to match
@@ -8355,7 +8347,7 @@ class FindNeuronConnection:
             # NOTE: conn_types already uses std_labels (from EnrichConnectionTablePolars)
             # so no additional type_to_label_map transformation is needed
             self._vprint(f'  Streaming type-level paths to CSV (Polars)...', level='full')
-            total_type_paths = svp.process_paths_streaming(
+            total_type_paths = sv.process_paths_streaming(
                 path_gen,
                 conn_types_pd,
                 target_types,
@@ -8469,9 +8461,13 @@ class FindNeuronConnection:
                     self._vprint(f'  ⚠ Warning: {len(missing_groups)} groups in paths missing from real_layer_map_group', level='full')
                     self._vprint(f'    First few missing: {missing_groups[:5]}', level='full')
             
-            # Build DataFrame from group paths
-            # Rename columns to match expected format (type_pre/type_post)
-            conn_groups_for_paths = conn_groups.rename(columns={'group_pre': 'type_pre', 'group_post': 'type_post'})
+            # Build DataFrame from group paths. The group table is Polars;
+            # the downstream helpers (split_path/path_filter) are pandas-based,
+            # so convert here and let the unified builder run the pandas
+            # engine. (The legacy rename keyed on 'group_pre' renamed nothing
+            # and the group branch crashed once custom groups were present.)
+            conn_groups_for_paths = conn_groups.to_pandas().rename(
+                columns={'custom_group_pre': 'type_pre', 'custom_group_post': 'type_post'})
             
             path_df_group = sv.build_path_dataframe_from_paths(
                 paths=group_paths,
@@ -8695,26 +8691,16 @@ class FindNeuronConnection:
             type_lookup.update(dict(zip(self.target_df['bodyId'].tolist(),
                                         self.target_df['type'].tolist())))
 
-            if isinstance(conn_inpath, pl.DataFrame):
-                path_df_bodyId = svp.build_path_dataframe_from_paths(
-                    paths=all_paths,
-                    conn_data=conn_inpath,
-                    targets=self.target_df.loc[self.target_df.Checked,'bodyId'].tolist(),
-                    real_layer_map=real_layer_map_bodyId if forward_only else None,
-                    level='bodyId',
-                    type_lookup=type_lookup
-                )
-                is_polars = True
-            else:
-                path_df_bodyId = sv.build_path_dataframe_from_paths(
-                    paths=all_paths,
-                    conn_data=conn_inpath,
-                    targets=self.target_df.loc[self.target_df.Checked,'bodyId'].tolist(),
-                    real_layer_map=real_layer_map_bodyId if forward_only else None,
-                    level='bodyId',
-                    type_lookup=type_lookup
-                )
-                is_polars = False
+            path_df_bodyId = sv.build_path_dataframe_from_paths(
+                paths=all_paths,
+                conn_data=conn_inpath,
+                targets=self.target_df.loc[self.target_df.Checked,'bodyId'].tolist(),
+                real_layer_map=real_layer_map_bodyId if forward_only else None,
+                level='bodyId',
+                type_lookup=type_lookup
+            )
+            # Unified builder returns the same frame type as its input
+            is_polars = isinstance(path_df_bodyId, pl.DataFrame)
             
             # Sort path_df_bodyId - handle both Polars and pandas
             is_empty = path_df_bodyId.is_empty() if is_polars else path_df_bodyId.empty

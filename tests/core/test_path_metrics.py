@@ -13,7 +13,7 @@ Locks in the project-wide metric contract (see docs/core-features/ScoreCalculati
                  min_weight = min(edge weights);  length = number of edges
 
 The pandas (statvis.EnrichConnectionTable) and Polars
-(statvis_polars.EnrichConnectionTablePolars) implementations must agree.
+(statvis.EnrichConnectionTablePolars) implementations must agree.
 """
 
 import sys
@@ -30,8 +30,8 @@ sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
 from statvis import EnrichConnectionTable  # noqa: E402
 from statvis import build_path_dataframe_from_paths as sv_build  # noqa: E402
-from statvis_polars import EnrichConnectionTablePolars  # noqa: E402
-from statvis_polars import build_path_dataframe_from_paths as svp_build  # noqa: E402
+from statvis import EnrichConnectionTablePolars  # noqa: E402
+from statvis import build_path_dataframe_from_paths_polars as svp_build  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -262,7 +262,7 @@ class TestEnrichmentEngineParity:
     @pytest.mark.parametrize('global_weights', [False, True])
     def test_type_level_parity(self, global_weights):
         from statvis import EnrichConnectionTable as pd_enrich
-        from statvis_polars import EnrichConnectionTablePolars
+        from statvis import EnrichConnectionTablePolars
         conn = _parity_conn()
         gw = _global_incoming() if global_weights else None
         _, ct_pd, _ = pd_enrich(conn.copy(), traversal_probability_threshold=0,
@@ -280,9 +280,31 @@ class TestEnrichmentEngineParity:
         row = ct_pd[(ct_pd['type_pre'] == 'A') & (ct_pd['type_post'] == 'X')].iloc[0]
         assert row['nt_type'] == 'ACH'
 
+    def test_nt_type_tie_breaks_identically_across_engines(self):
+        """A true mode tie (ACH x2 vs GABA x2) must resolve to the same value
+        in both engines - lexicographically first (ACH) - regardless of row
+        order (regression: order-dependent mode() tie-breaking diverged on
+        ~5% of type pairs in large tables)."""
+        from statvis import EnrichConnectionTable as pd_enrich
+        from statvis import EnrichConnectionTablePolars
+        rows = [
+            (1, 10, 'A', 'X', 5, 'GABA', 5 / 30.0),
+            (1, 11, 'A', 'X', 4, 'ACH', 4 / 30.0),
+            (2, 10, 'A', 'X', 6, 'ACH', 6 / 30.0),
+            (2, 11, 'A', 'X', 3, 'GABA', 3 / 30.0),   # tie: ACH x2, GABA x2
+        ]
+        conn = pd.DataFrame(rows, columns=['bodyId_pre', 'bodyId_post', 'type_pre',
+                                           'type_post', 'weight', 'nt_type', 'connection_ratio'])
+        _, ct_pd, _ = pd_enrich(conn.copy(), traversal_probability_threshold=0)
+        _, ct_pl, _ = EnrichConnectionTablePolars(pl.from_pandas(conn),
+                                                  traversal_probability_threshold=0)
+        nt_pd = ct_pd[(ct_pd['type_pre'] == 'A') & (ct_pd['type_post'] == 'X')]['nt_type'].iloc[0]
+        nt_pl = ct_pl.filter((pl.col('type_pre') == 'A') & (pl.col('type_post') == 'X'))['nt_type'].item()
+        assert nt_pd == nt_pl == 'ACH'
+
     def test_group_level_parity_and_naming(self):
         from statvis import EnrichConnectionTable as pd_enrich
-        from statvis_polars import EnrichConnectionTablePolars
+        from statvis import EnrichConnectionTablePolars
         conn = _parity_conn()
         _, _, cg_pd = pd_enrich(conn.copy(), traversal_probability_threshold=0)
         _, _, cg_pl = EnrichConnectionTablePolars(pl.from_pandas(conn),
@@ -299,7 +321,7 @@ class TestEnrichmentEngineParity:
     def test_block_probability_null_semantics(self):
         """Missing global denominator -> prob 0.0 and block 1.0 in BOTH engines."""
         from statvis import EnrichConnectionTable as pd_enrich
-        from statvis_polars import EnrichConnectionTablePolars
+        from statvis import EnrichConnectionTablePolars
         conn = pd.DataFrame({
             'bodyId_pre': [1], 'bodyId_post': [20],
             'type_pre': ['E'], 'type_post': ['Q'],
@@ -322,7 +344,7 @@ class TestEnrichmentEngineParity:
         polars-engine internals (the pandas engine overwrites type_pre/post
         with the mapped labels instead)."""
         from statvis import EnrichConnectionTable as pd_enrich
-        from statvis_polars import EnrichConnectionTablePolars
+        from statvis import EnrichConnectionTablePolars
         conn = _parity_conn()
         conn_df_pd, _, _ = pd_enrich(conn.copy(), traversal_probability_threshold=0)
         conn_df_pl, _, _ = EnrichConnectionTablePolars(pl.from_pandas(conn),
@@ -352,6 +374,62 @@ class TestEnrichmentEngineParity:
         assert isinstance(ct, pl.DataFrame)
         _, ct, _ = EnrichConnectionTable(pl.from_pandas(conn), traversal_probability_threshold=0, engine='pandas')
         assert isinstance(ct, pd.DataFrame)
+
+
+# ---------------------------------------------------------------------------
+# Unified builders (build_path_dataframe_from_paths / process_paths_streaming)
+# ---------------------------------------------------------------------------
+
+class TestUnifiedBuilders:
+    def test_build_path_dataframe_dispatches_by_input_type(self):
+        from statvis import build_path_dataframe_from_paths as sv_build
+        conn = _enriched_type_table()          # polars
+        paths = [['A', 'X', 'Y'], ['B', 'Y']]
+        targets = ['Y']
+        df_pl = sv_build(paths, conn, targets, real_layer_map=None, level='type')
+        assert isinstance(df_pl, pl.DataFrame)
+        df_pd = sv_build(paths, conn.to_pandas(), targets, real_layer_map=None, level='type')
+        assert isinstance(df_pd, pd.DataFrame)
+        assert len(df_pl) == len(df_pd)
+        # forced engines convert the input frame
+        df_pd2 = sv_build(paths, conn, targets, real_layer_map=None, level='type', engine='pandas')
+        assert isinstance(df_pd2, pd.DataFrame)
+        df_pl2 = sv_build(paths, conn.to_pandas(), targets, real_layer_map=None, level='type', engine='polars')
+        assert isinstance(df_pl2, pl.DataFrame)
+
+    def test_pandas_builder_nt_type_join_semantics(self):
+        """The pandas engine's edge lookup aggregates nt_type as a '|'-joined
+        sorted unique set of non-empty values ('Unknown' when none) - the
+        semantics of the legacy _unique_nt_types helper, now computed with
+        Polars."""
+        from statvis import build_path_dataframe_from_paths as sv_build
+        conn = pd.DataFrame({
+            'bodyId_pre': ['1', '1', '3', '4', '5'],
+            'bodyId_post': ['10', '11', '12', '12', '13'],
+            'type_pre': ['A', 'A', 'B', 'B', 'C'],
+            'type_post': ['X', 'X', 'Y', 'Y', 'Z'],
+            'weight': [5, 4, 9, 1, 2],
+            'traversal_probability': [0.5, 0.5, 0.8, 0.8, 0.9],
+            'connection_ratio': [0.1, 0.1, 0.2, 0.2, 0.3],
+            'nt_type': ['ACH', 'GABA', 'GABA', 'None', None],
+        })
+        out = sv_build([['A', 'X'], ['B', 'Y'], ['C', 'Z']], conn, ['X', 'Y', 'Z'],
+                       real_layer_map=None, level='type')
+        # A->X: sorted unique of {ACH, GABA}; B->Y: 'None' string dropped;
+        # C->Z: only nulls -> 'Unknown' fallback
+        assert out['nt_types'].tolist() == [['ACH|GABA'], ['GABA'], ['Unknown']]
+
+    def test_process_paths_streaming_unified_delegates_to_polars(self, tmp_path):
+        from statvis import process_paths_streaming as sv_stream
+        from statvis import process_paths_streaming as svp_stream
+        conn = _enriched_type_table()
+        paths = [['A', 'X', 'Y'], ['B', 'Y']]
+        out1 = tmp_path / 'sv_stream.csv'
+        out2 = tmp_path / 'svp_stream.csv'
+        n1 = sv_stream(iter(paths), conn, ['Y'], str(out1), verbose=False)
+        n2 = svp_stream(iter(paths), conn, ['Y'], str(out2), verbose=False)
+        assert n1 == n2 == 2
+        assert out1.read_text() == out2.read_text()
 
 
 # ---------------------------------------------------------------------------

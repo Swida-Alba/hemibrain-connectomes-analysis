@@ -236,14 +236,14 @@ class TestPathBuilderSchemas:
 
     def test_both_builders_return_dataframes_with_same_columns(self):
         from statvis import build_path_dataframe_from_paths as sv_build
-        from statvis_polars import build_path_dataframe_from_paths as svp_build
+        from statvis import build_path_dataframe_from_paths_polars as svp_build
         paths, pd_conn, pl_conn, targets = self._build_inputs()
         df_pd = sv_build(paths, pd_conn, targets, real_layer_map=None, level='bodyId')
         df_pl = svp_build(paths, pl_conn, targets, real_layer_map=None, level='bodyId')
         assert isinstance(df_pd, pd.DataFrame)
         # Known, documented divergence: the polars builder ignores type_lookup
         # and omits the 'path_str' list column (see the comment in
-        # statvis_polars.build_path_dataframe_from_paths: "type_lookup is
+        # statvis.build_path_dataframe_from_paths_polars: "type_lookup is
         # currently ignored in Polars implementation for path string
         # formatting ... Path strings will contain IDs only").
         assert 'path_str' in df_pd.columns

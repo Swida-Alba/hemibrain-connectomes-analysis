@@ -30,9 +30,9 @@ sys.path.insert(0, str(PROJECT_ROOT / "src"))
 sys.path.insert(0, str(PROJECT_ROOT / "vispath-subproject" / "src"))
 
 from coana import FindNeuronConnection  # noqa: E402
-from statvis_polars import (  # noqa: E402
+from statvis import (  # noqa: E402
     EnrichConnectionTablePolars,
-    _NEURON_DF_CACHE,
+    _PL_NEURON_DF_CACHE,
     build_bodyid_label_map,
 )
 
@@ -482,13 +482,13 @@ class TestInteropEdgeCases:
         assert df3 is not df1
 
     def test_statvis_neuron_df_cache_invalidates_on_mtime(self, tmp_path):
-        _NEURON_DF_CACHE.clear()
+        _PL_NEURON_DF_CACHE.clear()
         try:
             csv_path = tmp_path / "ds_allneurons_neuron_df.csv"
             pd.DataFrame({"bodyId": ["1", "2"], "type": ["A", "B"]}).to_csv(
                 csv_path, index=False
             )
-            from statvis_polars import _load_local_neuron_df_cached
+            from statvis import _load_local_neuron_df_cached
 
             df1 = _load_local_neuron_df_cached(str(csv_path), is_fafb=False)
             df2 = _load_local_neuron_df_cached(str(csv_path), is_fafb=False)
@@ -498,4 +498,4 @@ class TestInteropEdgeCases:
             df3 = _load_local_neuron_df_cached(str(csv_path), is_fafb=False)
             assert df3 is not df1
         finally:
-            _NEURON_DF_CACHE.clear()
+            _PL_NEURON_DF_CACHE.clear()
