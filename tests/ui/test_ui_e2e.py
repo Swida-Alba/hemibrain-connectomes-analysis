@@ -1058,6 +1058,37 @@ class TestComponents:
         assert len(children) == 5
         assert children[4].text == "done"
 
+    def test_output_dir_fields_sync_and_persist(self, tmp_path, monkeypatch):
+        """Output-directory fields share one persisted default: setting one
+        field updates every other field, and the value survives as the new
+        default (permanent, not just the current run)."""
+        import ui.config as cfg
+        from nicegui import Client
+        from nicegui.page import page
+        from ui.components.common import dir_input, sync_output_dir_fields
+
+        monkeypatch.setattr(cfg, "LOCAL_CONFIG_FILE", tmp_path / "local_config.json")
+
+        client = Client(page("/dir-sync-test"))
+        with client:
+            field_a = dir_input()
+            field_b = dir_input()
+
+        # The blur/persist handler runs the same helper the test calls now.
+        target = tmp_path / "permanent_outputs"
+        saved, effective = cfg.set_default_output_dir(str(target), create=False)
+        assert saved is True
+        # sync what the handler would sync: every other field follows
+        sync_output_dir_fields(field_a, effective)
+        assert field_b.value == effective
+        assert cfg.get_default_output_dir() == effective
+
+        # A second dir_input built later picks up the persisted default.
+        client2 = Client(page("/dir-sync-test-2"))
+        with client2:
+            field_c = dir_input()
+        assert field_c.value == effective
+
     def test_output_panel_log_is_pointer_resizable(self):
         """The execution-log window must be drag-resizable: the wrapper owns
         the CSS resize handle with a definite height range, and the inner log

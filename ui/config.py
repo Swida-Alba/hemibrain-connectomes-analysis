@@ -46,6 +46,35 @@ def get_default_output_dir() -> str:
         return override
     return str(DEFAULT_OUTPUT_DIR)
 
+
+def set_default_output_dir(value: str, create: bool = True) -> tuple:
+    """Persist the UI default output directory permanently (across sessions).
+
+    Relative paths are resolved against PROJECT_ROOT; the directory is
+    created when *create* is true. Empty values clear the override so the
+    project default is used again.
+
+    Returns (saved: bool, effective_path: Optional[str]).
+    """
+    raw = (value or "").strip()
+    if not raw:
+        config = load_local_config()
+        config.pop("default_output_dir", None)
+        saved = save_local_config(config)
+        return saved, str(DEFAULT_OUTPUT_DIR) if saved else None
+    path = Path(raw).expanduser()
+    if not path.is_absolute():
+        path = (PROJECT_ROOT / path).resolve()
+    if create:
+        try:
+            path.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            return False, None
+    config = load_local_config()
+    config["default_output_dir"] = str(path)
+    saved = save_local_config(config)
+    return saved, str(path) if saved else None
+
 # Available datasets (static fallback - use dataset_service for dynamic fetching)
 DATASETS = [
     "male-cns:v1.0",

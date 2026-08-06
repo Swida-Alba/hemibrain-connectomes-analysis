@@ -1,16 +1,14 @@
 """Settings Tab - Token configuration, dataset status, and app settings."""
 
 from nicegui import run, ui
-from pathlib import Path
 
 from ..config import (
     DEFAULT_OUTPUT_DIR,
     PROJECT_ROOT,
     get_default_output_dir,
-    load_local_config,
-    save_local_config,
+    set_default_output_dir,
 )
-from ..components.common import section_header, dataset_status_card, dir_input
+from ..components.common import section_header, dataset_status_card, dir_input, sync_output_dir_fields
 
 
 def create_settings_tab():
@@ -142,33 +140,19 @@ def create_settings_tab():
                 if not raw_value:
                     ui.notify("Choose an output directory first", type="warning")
                     return
-
-                output_path = Path(raw_value).expanduser()
-                if not output_path.is_absolute():
-                    output_path = (PROJECT_ROOT / output_path).resolve()
-                try:
-                    output_path.mkdir(parents=True, exist_ok=True)
-                except OSError as exc:
-                    ui.notify(f"Cannot use output directory: {exc}", type="negative")
+                saved, effective = set_default_output_dir(raw_value, create=True)
+                if not saved or not effective:
+                    ui.notify("Cannot save output directory (check the path)", type="negative")
                     return
-
-                config = load_local_config()
-                config["default_output_dir"] = str(output_path)
-                saved = save_local_config(config)
-                if saved:
-                    default_dir.value = str(output_path)
-                    ui.notify("Default output directory saved", type="positive")
-                else:
-                    ui.notify("Failed to save default output directory", type="negative")
+                default_dir.value = effective
+                sync_output_dir_fields(default_dir, effective)
+                ui.notify("Default output directory saved", type="positive")
 
             def reset_default_dir():
+                set_default_output_dir("")
                 default_dir.value = str(DEFAULT_OUTPUT_DIR)
-                config = load_local_config()
-                config.pop("default_output_dir", None)
-                if save_local_config(config):
-                    ui.notify("Default output directory reset", type="positive")
-                else:
-                    ui.notify("Failed to reset default output directory", type="negative")
+                sync_output_dir_fields(default_dir, str(DEFAULT_OUTPUT_DIR))
+                ui.notify("Default output directory reset", type="positive")
 
             save_default_btn.on_click(save_default_dir)
             reset_default_btn.on_click(reset_default_dir)

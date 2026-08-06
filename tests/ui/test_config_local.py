@@ -39,3 +39,44 @@ class TestLocalConfig:
         monkeypatch.setattr(cfg, "LOCAL_CONFIG_FILE", tmp_path / "local_config.json")
         cfg.save_local_config({"default_output_dir": "relative/path"})
         assert cfg.get_default_output_dir() == str(cfg.DEFAULT_OUTPUT_DIR)
+
+
+class TestSetDefaultOutputDir:
+    """Permanent persistence of the UI output directory (set_default_output_dir)."""
+
+    def test_absolute_path_persists(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(cfg, "LOCAL_CONFIG_FILE", tmp_path / "local_config.json")
+        target = tmp_path / "my_outputs"
+        saved, effective = cfg.set_default_output_dir(str(target), create=False)
+        assert saved is True
+        assert effective == str(target)
+        assert cfg.get_default_output_dir() == str(target)
+
+    def test_relative_path_resolves_against_project_root(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(cfg, "LOCAL_CONFIG_FILE", tmp_path / "local_config.json")
+        saved, effective = cfg.set_default_output_dir("rel/outputs", create=False)
+        assert saved is True
+        assert effective == str((cfg.PROJECT_ROOT / "rel/outputs").resolve())
+        assert cfg.get_default_output_dir() == effective
+
+    def test_empty_value_clears_override(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(cfg, "LOCAL_CONFIG_FILE", tmp_path / "local_config.json")
+        cfg.set_default_output_dir(str(tmp_path / "out"), create=False)
+        saved, effective = cfg.set_default_output_dir("")
+        assert saved is True
+        assert effective == str(cfg.DEFAULT_OUTPUT_DIR)
+        assert cfg.get_default_output_dir() == str(cfg.DEFAULT_OUTPUT_DIR)
+
+    def test_create_flag_makes_directory(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(cfg, "LOCAL_CONFIG_FILE", tmp_path / "local_config.json")
+        target = tmp_path / "created" / "nested"
+        saved, effective = cfg.set_default_output_dir(str(target), create=True)
+        assert saved is True
+        assert target.is_dir()
+        assert effective == str(target)
+
+    def test_no_create_does_not_make_directory(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(cfg, "LOCAL_CONFIG_FILE", tmp_path / "local_config.json")
+        target = tmp_path / "not_created"
+        cfg.set_default_output_dir(str(target), create=False)
+        assert not target.exists()

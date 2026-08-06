@@ -10,11 +10,16 @@ from nicegui import ui
 from typing import List, Optional, Callable
 from pathlib import Path
 import inspect
+import json
 import platform
 import subprocess
 
-from ..config import PROJECT_ROOT, get_default_output_dir
+from ..config import PROJECT_ROOT, get_default_output_dir, set_default_output_dir
 from ..runner import pick_directory
+
+
+# Every dir_input instance (all output-directory fields stay in sync).
+_OUTPUT_DIR_INPUTS = []
 
 
 # =============================================================================
@@ -633,15 +638,29 @@ def checkbox_input(
 def dir_input(
     label: str = "Output Directory",
     default: Optional[str] = None,
-    hint: str = "Where results will be saved. Click folder icon to browse.",
+    hint: str = "Where results will be saved. Click folder icon to browse. Changes are saved permanently as the default.",
 ) -> ui.input:
-    """Create a directory input with a native browse button."""
+    """Create a directory input with a native browse button.
+
+    Changing the value (typed + blur, or picked with the browse button)
+    persists it permanently as the default output directory and synchronizes
+    every other output-directory field in the UI.
+    """
     default_path = default or get_default_output_dir()
 
     inp = ui.input(
         label=label,
         value=default_path,
-    ).classes("w-full drocat-input").tooltip(hint)
+    ).classes("w-full drocat-input drocat-output-dir").tooltip(hint)
+
+    # All output-directory fields stay in sync: changing one persists the
+    # value and updates the others (nicegui propagates the value to the DOM).
+    _OUTPUT_DIR_INPUTS.append(inp)
+
+    def _persist_output_dir():
+        saved, effective = set_default_output_dir(inp.value or "", create=False)
+        if saved and effective:
+            sync_output_dir_fields(inp, effective)
 
     with inp.add_slot("append"):
         def browse(*args):
@@ -651,9 +670,46 @@ def dir_input(
             )
             if selected:
                 inp.value = selected
+                _persist_output_dir()
         ui.button(icon="folder_open", on_click=browse).props("flat dense").tooltip("Browse")
 
+    inp.on("blur", _persist_output_dir)
+
     return inp
+
+
+def sync_output_dir_fields(source, value: str) -> None:
+    """Update every output-directory field except *source* to *value*.
+
+    Backend values are set directly; the client DOM is updated explicitly
+    because Quasar inputs can keep stale native values when the value prop
+    changes (especially in inactive tab panels). The input event keeps the
+    client model in sync with the backend.
+    """
+    for other in _OUTPUT_DIR_INPUTS:
+        if other is not source and getattr(other, "value", None) != value:
+            try:
+                other.value = value
+            except Exception:
+                # Lazy tab panels keep their elements unmounted until first
+                # activation: nicegui updates the server-side props but then
+                # raises while building the change event (no client yet), so
+                # the value is already correct when the panel mounts.
+                pass
+    try:
+        ui.run_javascript(
+            f"""
+            document.querySelectorAll('.drocat-output-dir input').forEach(inp => {{
+                if (inp.value !== {json.dumps(value)}) {{
+                    inp.value = {json.dumps(value)};
+                    inp.dispatchEvent(new Event('input', {{ bubbles: true }}));
+                }}
+            }});
+            """
+        )
+    except Exception:
+        # No client connected (e.g. unit tests): backend values are enough.
+        pass
 
 
 # =============================================================================
