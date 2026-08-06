@@ -249,7 +249,7 @@ results = finder.find_homologs(
 )
 ```
 
-**Example Script**: [`examples/comparison/Example_HomologFinding.py`](../../examples/comparison/Example_HomologFinding.py)
+**Example Script**: [`examples/comparison/Example_HomologFinding.py`](../../archive/examples/comparison/Example_HomologFinding.py)
 
 ---
 
@@ -284,7 +284,7 @@ analyzer = ComparisonAnalyzer(params, verbose=True)
 results = analyzer.run_comparison()
 ```
 
-**Example Script**: [`examples/Example_InterDatasetComparison.py`](../../examples/Example_InterDatasetComparison.py)
+**Example Script**: [`examples/Example_InterDatasetComparison.py`](../../archive/examples/comparison/Example_InterDatasetComparison.py)
 
 ---
 
@@ -487,7 +487,7 @@ Filter neurons by various criteria before analysis.
 
 ### Algorithm Improvements
 
-#### [Pathfinding Optimization Summary](./PATHFINDING_OPTIMIZATION_SUMMARY.md)
+#### [Pathfinding Optimization Summary](../technical/PATHFINDING_OPTIMIZATION_SUMMARY.md)
 Complete summary of all pathfinding optimizations.
 
 ---
@@ -519,7 +519,7 @@ exclude_intra_type_connections = True  # Remove type_pre == type_post
 - Cross-type connectivity analysis
 - Cleaner network visualizations
 - Inter-type communication studies
-- See **[Example_ExcludeIntraType.py](../../examples/Example_ExcludeIntraType.py)**
+- See **[Example_ExcludeIntraType.py](../../archive/examples/basic/Example_ExcludeIntraType.py)**
 
 ### Path Finding Commands
 
@@ -644,7 +644,7 @@ filterBy = {
 - [Visualization Documentation](../visualizations/)
 - [Technical Documentation](../technical/)
 - [Main README](../../README.md)
-- [Quick Start Guide](../QUICK_START_AFTER_REORGANIZATION.md)
+- [Quick Start Guide](../QUICK_START.md)
 
 ---
 

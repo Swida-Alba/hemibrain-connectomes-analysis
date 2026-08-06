@@ -201,19 +201,19 @@ hemibrain-connectomes-analysis-now/
 ## Quick Access
 
 ### For Users
-1. **Quick Start:** [QUICKSTART_SIMPLE_FORMAT.md](QUICKSTART_SIMPLE_FORMAT.md)
-2. **Full Guide:** [SIMPLE_INPUT_FORMAT.md](SIMPLE_INPUT_FORMAT.md)
-3. **Examples:** [Example_SimpleEdgeList.py](Example_SimpleEdgeList.py)
+1. **Quick Start:** [QUICKSTART_SIMPLE_FORMAT.md](../visualizations/SIMPLE_INPUT_FORMAT.md)
+2. **Full Guide:** [SIMPLE_INPUT_FORMAT.md](../visualizations/SIMPLE_INPUT_FORMAT.md)
+3. **Examples:** [Example_SimpleEdgeList.py](../../archive/examples/visualization/input_formats/Example_SimpleEdgeList.py)
 
 ### For Developers
-1. **Implementation:** [SIMPLE_FORMAT_IMPLEMENTATION.md](SIMPLE_FORMAT_IMPLEMENTATION.md)
+1. **Implementation:** [SIMPLE_FORMAT_IMPLEMENTATION.md](../visualizations/SIMPLE_FORMAT_IMPLEMENTATION.md)
 2. **Core Code:** vispath.py (lines ~1102-1230)
-3. **Tests:** [test_simple_format.py](test_simple_format.py)
+3. **Tests:** test_simple_format.py
 
 ### For Documentation
-1. **Main README:** [README.md](README.md#visualizepath-standalone-network-visualization)
-2. **Format Guide:** [SIMPLE_INPUT_FORMAT.md](SIMPLE_INPUT_FORMAT.md)
-3. **Quick Reference:** [QUICKSTART_SIMPLE_FORMAT.md](QUICKSTART_SIMPLE_FORMAT.md)
+1. **Main README:** [README.md](../README.md)
+2. **Format Guide:** [SIMPLE_INPUT_FORMAT.md](../visualizations/SIMPLE_INPUT_FORMAT.md)
+3. **Quick Reference:** [QUICKSTART_SIMPLE_FORMAT.md](../visualizations/SIMPLE_INPUT_FORMAT.md)
 
 ---
 
@@ -258,8 +258,8 @@ hemibrain-connectomes-analysis-now/
    ```
 
 2. **Read the documentation:**
-   - Start with: [QUICKSTART_SIMPLE_FORMAT.md](QUICKSTART_SIMPLE_FORMAT.md)
-   - Then: [SIMPLE_INPUT_FORMAT.md](SIMPLE_INPUT_FORMAT.md)
+   - Start with: [QUICKSTART_SIMPLE_FORMAT.md](../visualizations/SIMPLE_INPUT_FORMAT.md)
+   - Then: [SIMPLE_INPUT_FORMAT.md](../visualizations/SIMPLE_INPUT_FORMAT.md)
 
 3. **Try your own data:**
    - Create a CSV with source/target/weight columns

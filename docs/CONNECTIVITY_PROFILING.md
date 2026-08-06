@@ -383,7 +383,7 @@ For many profiles (>100), consider:
 
 ## Related Documentation
 
-- [Profile Comparator Module](./technical/PROFILE_COMPARATOR.md)
-- [Connectivity Profiler Module](./technical/CONNECTIVITY_PROFILER.md)
-- [FindHomologs Script](./FIND_HOMOLOGS.md)
-- [VisualizeSkeleton (similar grouping pattern)](./visualizations/VISUALIZE_SKELETON.md)
+- [Profile Comparator Module](./core-features/ConnectivityProfiler_Guide.md)
+- [Connectivity Profiler Module](./core-features/ConnectivityProfiler_Guide.md)
+- [FindHomologs Script](./core-features/HomologFinding_Guide.md)
+- [VisualizeSkeleton (similar grouping pattern)](./visualizations/3D_Skeleton_Guide.md)

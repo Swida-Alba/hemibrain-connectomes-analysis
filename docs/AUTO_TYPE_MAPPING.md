@@ -256,5 +256,5 @@ If cross-dataset similarity seems too low:
 
 ## See Also
 
-- [Cross-Dataset Comparison](./CROSS_DATASET_COMPARISON.md) - Overview of cross-dataset analysis
+- [Cross-Dataset Comparison](./core-features/CrossDatasetComparison_Guide.md) - Overview of cross-dataset analysis
 - [Connectivity Profiling](./CONNECTIVITY_PROFILING.md) - Connectivity profile computation

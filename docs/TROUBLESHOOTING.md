@@ -939,7 +939,7 @@ Clustering failed: {error}
 
 | Issue            | Solution                                                |
 | ---------------- | ------------------------------------------------------- |
-| legacy memray error | Rerun `install.bat` to remove the obsolete client   |
+| legacy memray error | Rerun `archive/install/install.bat` to remove the obsolete client   |
 | Chrome path      | `C:\Program Files\Google\Chrome\Application\chrome.exe` |
 | Long path errors | Enable long paths in Windows settings                   |
 

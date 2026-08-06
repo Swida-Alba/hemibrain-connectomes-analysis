@@ -251,7 +251,7 @@ vs.plot_neurons()
 ## Documentation
 
 - **Full Guide:** [docs/visualizations/VisualizeSkeleton_Updates_Nov2024.md](../visualizations/VisualizeSkeleton_Updates_Nov2024.md)
-- **Examples:** [examples/Example_VisualizeSkeleton_MultiDataset.py](../../examples/Example_VisualizeSkeleton_MultiDataset.py)
+- **Examples:** [examples/Example_VisualizeSkeleton_MultiDataset.py](../../archive/examples/visualization/skeleton/Example_VisualizeSkeleton_MultiDataset.py)
 - **Main README:** [README.md](../../README.md)
 
 ---

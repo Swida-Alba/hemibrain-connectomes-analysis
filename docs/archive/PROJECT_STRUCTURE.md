@@ -319,6 +319,6 @@ pytest tests/  # Run tests
 ---
 
 **See Also:**
-- [README.md](README.md) - Main documentation
+- [README.md](../README.md) - Main documentation
 - [DOCUMENTATION_STRUCTURE.md](DOCUMENTATION_STRUCTURE.md) - Documentation index
-- [docs/](docs/) - All documentation files
+- [docs/](../README.md) - All documentation files

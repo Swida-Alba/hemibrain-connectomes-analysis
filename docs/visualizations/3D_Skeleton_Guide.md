@@ -48,7 +48,7 @@ neuron_layers = ['KC.*', 'MBON03', 'DAN']
 ```
 
 **Example datasets**:
-- Sample bodyIds: See [`examples/README.md`](../../examples/README.md) for neuron lists
+- Sample bodyIds: See [`examples/README.md`](../../archive/examples/README.md) for neuron lists
 - Type-level data: `datasets/hemibrain_v1_2_1_alltypes_neuron_df.csv`
 - Path results: Output from `scripts/FindPath.py` contains bodyId information
 
@@ -1168,7 +1168,7 @@ plot_navis_3d(
 
 ## Related Documentation
 
-- [Advanced Visualization Features](../AdvancedVisualizationFeatures.md)
+- [Advanced Visualization Features](./AdvancedVisualizationFeatures.md)
 - [NAVIS Integration](https://navis.readthedocs.io/)
 - [FlyBrains Resources](https://github.com/navis-org/navis-flybrains)
 - [NeuPrint Documentation](https://neuprint.janelia.org/help)

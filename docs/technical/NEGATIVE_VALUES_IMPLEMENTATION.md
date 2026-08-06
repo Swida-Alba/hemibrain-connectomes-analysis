@@ -228,9 +228,9 @@ fd.SankeyDirect()  # Shows light blue links for negative ratios
 3. **Performance**: Color assignment done per-edge (could be optimized with vectorization)
 
 ## Related Documentation
-- [Edge Width Scaling](EDGE_WIDTH_SCALING.md)
-- [Custom Colors Guide](CUSTOM_COLORS_GUIDE.md)
-- [Enhanced EdgeList Format](Enhanced_EdgeList_Format.md)
+- [Edge Width Scaling](../visualizations/EDGE_WIDTH_SCALING.md)
+- [Custom Colors Guide](../visualizations/CUSTOM_COLORS_GUIDE.md)
+- [Enhanced EdgeList Format](../visualizations/Enhanced_EdgeList_Format.md)
 
 ## Version History
 - **v1.0** (2024): Initial implementation of negative value handling

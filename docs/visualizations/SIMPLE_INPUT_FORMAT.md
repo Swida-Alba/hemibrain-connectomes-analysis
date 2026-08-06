@@ -230,10 +230,10 @@ ValueError: Data must contain either:
 ## Complete Examples
 
 See these example files:
-- **[Example_SimpleEdgeList.py](Example_SimpleEdgeList.py)** - Comprehensive examples with all formats
-- **[example_simple_network.csv](example_simple_network.csv)** - Simple source/target/weight
-- **[example_bodyid_network.csv](example_bodyid_network.csv)** - BodyId format
-- **[example_neuron_network.csv](example_neuron_network.csv)** - Neuron format
+- **[Example_SimpleEdgeList.py](../../archive/examples/visualization/input_formats/Example_SimpleEdgeList.py)** - Comprehensive examples with all formats
+- **[example_simple_network.csv](../../archive/examples/data/example_simple_network.csv)** - Simple source/target/weight
+- **[example_bodyid_network.csv](../../archive/examples/data/example_bodyid_network.csv)** - BodyId format
+- **[example_neuron_network.csv](../../archive/examples/data/example_neuron_network.csv)** - Neuron format
 
 ## Advanced: Original Path-Based Format
 
@@ -325,6 +325,6 @@ The network graph shows:
 
 ## Related Documentation
 
-- **[VisualizePath Guide](docs/VisualizeSelectedPaths_Guide.md)** - Complete class documentation
+- **[VisualizePath Guide](VisualizeSelectedPaths_Guide.md)** - Complete class documentation
 - **[File Support](VISPATH_FILE_SUPPORT.md)** - CSV/Excel file handling
-- **[Installation Guide](INSTALLATION.md)** - Setup and requirements
+- **[Installation Guide](../INSTALLATION.md)** - Setup and requirements

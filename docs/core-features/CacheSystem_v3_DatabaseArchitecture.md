@@ -616,5 +616,5 @@ This enables flexible, efficient local caching and search without repeated API c
 
 **Related Documentation:**
 - [Cache System Quick Start](CacheSystem_QuickStart.md)
-- [Cache System v2.0 Technical Overview](CacheSystem_v2_TechnicalOverview.md)
-- [Cache System v1.0 Documentation](CacheSystem_Documentation.md)
+- Cache System v2.0 Technical Overview
+- Cache System v1.0 Documentation

@@ -474,7 +474,7 @@ Adding new cached data types:
 - [Core Features](../core-features/)
 - [Visualization Documentation](../visualizations/)
 - [Main README](../../README.md)
-- [Contributing Guide](../../CONTRIBUTING.md)
+- Contributing Guide
 
 ---
 

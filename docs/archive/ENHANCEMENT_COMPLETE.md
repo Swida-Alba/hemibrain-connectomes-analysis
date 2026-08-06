@@ -431,8 +431,8 @@ python test_layered_sankey.py      # Test Sankey layout
 ```
 
 **Documentation:**
-- [SIMPLE_INPUT_FORMAT.md](SIMPLE_INPUT_FORMAT.md)
-- [COLUMN_RECOGNITION_UPDATE.md](COLUMN_RECOGNITION_UPDATE.md)
+- [SIMPLE_INPUT_FORMAT.md](../visualizations/SIMPLE_INPUT_FORMAT.md)
+- [COLUMN_RECOGNITION_UPDATE.md](../technical/COLUMN_RECOGNITION_UPDATE.md)
 
 ---
 

@@ -28,7 +28,7 @@ Your connection dataframe should contain these columns:
 
 **From FindAllPath results** (recommended):
 - Path: `connection_data/*/direct_connections.xlsx` or `*_connections.csv`
-- Example: [`examples/sample_network_data.csv`](../../examples/sample_network_data.csv)
+- Example: [`examples/sample_network_data.csv`](../../archive/examples/data/sample_network_data.csv)
 
 **From Custom Analysis**:
 ```python
@@ -307,6 +307,6 @@ For matrices with >500 neurons:
 
 ## Related Documentation
 
-- [Custom Colors Guide](../CUSTOM_COLORS_GUIDE.md)
-- [Clustering Quick Reference](../HEATMAP_CLUSTERING_QUICKREF.md)
-- [Backend Optimization](../HEATMAP_BACKEND_OPTIMIZATION.md)
+- [Custom Colors Guide](./CUSTOM_COLORS_GUIDE.md)
+- [Clustering Quick Reference](./HEATMAP_CLUSTERING_QUICKREF.md)
+- [Backend Optimization](./HEATMAP_BACKEND_OPTIMIZATION.md)

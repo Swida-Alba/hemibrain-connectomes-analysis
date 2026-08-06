@@ -319,8 +319,8 @@ plot_navis_3d(bodyIds=[...], show_rois=True)
 - [Comparative analysis](#)
 
 ### Customization
-- [Color schemes and themes](../CUSTOM_COLORS_GUIDE.md)
-- [Layout algorithms](../AdvancedLayoutAlgorithms.md)
+- [Color schemes and themes](./CUSTOM_COLORS_GUIDE.md)
+- [Layout algorithms](./AdvancedLayoutAlgorithms.md)
 - [Export optimization](#)
 
 ### Performance
@@ -347,7 +347,7 @@ plot_navis_3d(bodyIds=[...], show_rois=True)
 
 1. Check individual visualization guides
 2. Review [troubleshooting sections](#) in each guide
-3. Examine [examples directory](../../examples/)
+3. Examine [examples directory](../../archive/examples/)
 4. Check [GitHub issues](https://github.com/Swida-Alba/hemibrain-connectomes-analysis/issues)
 
 ---
@@ -376,5 +376,5 @@ See `examples/` directory for:
 
 - [Main README](../../README.md)
 - [Installation Guide](../INSTALLATION.md)
-- [Quick Start Guide](../QUICK_START_AFTER_REORGANIZATION.md)
+- [Quick Start Guide](../QUICK_START.md)
 - [Core Features](../core-features/)

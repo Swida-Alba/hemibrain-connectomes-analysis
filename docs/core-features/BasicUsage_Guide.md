@@ -1,6 +1,6 @@
 # Basic Usage Guide (v4.5.0)
 
-This guide demonstrates the core functionality of DROCAT using the **practical example scripts** in the [`scripts/`](../../scripts/) folder. These are the most commonly used workflows.
+This guide demonstrates the core functionality of DROCAT using the **practical example scripts** in the [`scripts/`](../../scripts/FindPath.py) folder. These are the most commonly used workflows.
 
 For agent-driven execution without the web UI, use the repository's
 [`drocat-usage` skill](../../skills/drocat-usage/SKILL.md). It provides a
@@ -53,7 +53,7 @@ Or edit the `token=''` line in each script.
 
 ## Script Overview
 
-All example scripts are in the [`scripts/`](../../scripts/) folder:
+All example scripts are in the [`scripts/`](../../scripts/FindPath.py) folder:
 
 | Script                                                                   | Purpose                          | Typical Use                                 |
 | ------------------------------------------------------------------------ | -------------------------------- | ------------------------------------------- |
@@ -682,7 +682,7 @@ After mastering the basic scripts:
 
 ---
 
-*All example scripts are in the [`scripts/`](../../scripts/) folder - copy and customize them for your analyses!* Reference
+*All example scripts are in the [`scripts/`](../../scripts/FindPath.py) folder - copy and customize them for your analyses!* Reference
 
 ### Dataset Selection
 
@@ -775,4 +775,4 @@ After mastering the basics:
 
 ---
 
-*See the [examples/](../../examples/) folder for complete working examples.*
+*See the [examples/](../../archive/examples/) folder for complete working examples.*

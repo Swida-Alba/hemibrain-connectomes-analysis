@@ -329,7 +329,7 @@ All existing code works without changes - you just get better layouts automatica
 
 - [EdgeControlImprovements.md](EdgeControlImprovements.md) - Edge width scaling
 - [CUSTOM_COLORS_GUIDE.md](CUSTOM_COLORS_GUIDE.md) - Node and edge coloring
-- [FindPath_Documentation.md](FindPath_Documentation.md) - Pathway analysis
+- [FindPath_Documentation.md](../core-features/FindAllPath_Documentation.md) - Pathway analysis
 
 ---
 

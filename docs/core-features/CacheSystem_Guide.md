@@ -45,7 +45,7 @@ fc = FindNeuronConnection(
 )
 
 fc.InitializeNeuronInfo()
-fc.FindDirectConnection()  # Or FindAllPath()
+fc.FindDirectConnections()  # Or FindAllPath()
 ```
 
 ### First-Time Setup
@@ -472,13 +472,13 @@ if cache_size_mb > 1000:
 ### 5. Clear Cache When Dataset Updates
 
 ```python
-# When Neuprint releases new dataset version:
+# When Neuprint releases a new dataset version (e.g. male-cns v0.9 -> v1.0):
 # 1. Clear old cache
-fc = FindNeuronConnection(dataset='hemibrain:v1.2.1', use_cache=True)
+fc = FindNeuronConnection(dataset='male-cns:v0.9', use_cache=True)
 fc.clear_cache()
 
-# 2. Re-fetch with new version
-fc = FindNeuronConnection(dataset='hemibrain:v1.3', use_cache=True)
+# 2. Re-fetch with the new version
+fc = FindNeuronConnection(dataset='male-cns:v1.0', use_cache=True)
 ```
 
 ---

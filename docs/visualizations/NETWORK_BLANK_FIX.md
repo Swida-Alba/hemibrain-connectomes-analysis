@@ -92,5 +92,5 @@ python scripts/PlotPath_TestNegatives.py
    - `edge[field = "true"]` only matches string "true"
 
 ## Related Documentation
-- [Negative Values Implementation](NEGATIVE_VALUES_IMPLEMENTATION.md)
-- [Negative Values Quick Reference](NEGATIVE_VALUES_QUICKREF.md)
+- [Negative Values Implementation](../technical/NEGATIVE_VALUES_IMPLEMENTATION.md)
+- [Negative Values Quick Reference](../technical/NEGATIVE_VALUES_QUICKREF.md)

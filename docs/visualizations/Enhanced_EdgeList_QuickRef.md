@@ -263,6 +263,6 @@ python examples/Example_SimpleEdgeList.py
 ## See Also
 
 - [Enhanced_EdgeList_Format.md](Enhanced_EdgeList_Format.md) - Complete guide
-- [examples/Example_SimpleEdgeList.py](../examples/Example_SimpleEdgeList.py) - Working examples
-- [tests/test_enhanced_edgelist.py](../tests/test_enhanced_edgelist.py) - Test suite
-- [CacheSystem_QuickStart.md](CacheSystem_QuickStart.md) - Getting started
+- [examples/Example_SimpleEdgeList.py](../../archive/examples/visualization/input_formats/Example_SimpleEdgeList.py) - Working examples
+- tests/test_enhanced_edgelist.py - Test suite
+- [CacheSystem_QuickStart.md](../core-features/CacheSystem_Guide.md) - Getting started

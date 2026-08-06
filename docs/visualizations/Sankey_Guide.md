@@ -29,7 +29,7 @@ Your edge list should contain these columns:
 **From FindAllPath results** (recommended):
 - Path: Output from `scripts/FindPath.py`
 - File: `connection_data/*/allpaths_*/path_info.xlsx` (use sheet 'path_type')
-- Example: [`examples/example_paths.csv`](../../examples/example_paths.csv)
+- Example: [`examples/example_paths.csv`](../../archive/examples/data/example_paths.csv)
 
 **Simple edge-list format**:
 ```csv
@@ -52,8 +52,8 @@ MBON03,DAN,20,3
 ```
 
 **Example files provided**:
-- [`examples/example_neuron_network.csv`](../../examples/example_neuron_network.csv) - Multi-layer network
-- [`examples/simple_network_data.csv`](../../examples/simple_network_data.csv) - Basic format
+- [`examples/example_neuron_network.csv`](../../archive/examples/data/example_neuron_network.csv) - Multi-layer network
+- [`examples/simple_network_data.csv`](../../archive/examples/data/simple_network_data.csv) - Basic format
 - Output from [`scripts/PlotPath.py`](../../scripts/PlotPath.py)
 
 **Note**: Same input files work for both Network and Sankey visualizations.
@@ -481,6 +481,6 @@ vp = VisualizePath(
 ## Related Documentation
 
 - [Network Visualization Guide](./Network_Guide.md)
-- [Custom Colors Guide](../CUSTOM_COLORS_GUIDE.md)
-- [Sankey Interactive Controls](../SANKEY_INTERACTIVE_CONTROLS.md)
-- [Multi-Selection Colors](../MULTI_SELECTION_COLOR_FEATURE.md)
+- [Custom Colors Guide](./CUSTOM_COLORS_GUIDE.md)
+- [Sankey Interactive Controls](./SANKEY_INTERACTIVE_CONTROLS.md)
+- [Multi-Selection Colors](./MULTI_SELECTION_COLOR_FEATURE.md)

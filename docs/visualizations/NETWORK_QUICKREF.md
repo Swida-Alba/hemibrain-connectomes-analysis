@@ -288,7 +288,7 @@ Restoring settings...
 **Detailed Guides:**
 - [NETWORK_EDGE_FILTER.md](NETWORK_EDGE_FILTER.md) - Complete filter documentation
 - [NETWORK_EXPORT_IMPORT.md](NETWORK_EXPORT_IMPORT.md) - Export/import workflows
-- [NETWORK_INTERACTIVE_EDITING.md](NETWORK_INTERACTIVE_EDITING.md) - Edit mode guide
+- [NETWORK_INTERACTIVE_EDITING.md](Interactive_Network_Dragging_Guide.md) - Edit mode guide
 
 **Related:**
 - [EDGE_WIDTH_SCALING.md](EDGE_WIDTH_SCALING.md) - Scaling methods

@@ -375,11 +375,11 @@ Potential improvements:
 
 ## Related Documentation
 
-- [Enhanced_EdgeList_Format.md](docs/Enhanced_EdgeList_Format.md) - Complete guide
-- [Enhanced_EdgeList_QuickRef.md](docs/Enhanced_EdgeList_QuickRef.md) - Quick reference
-- [VisualizeSelectedPaths_Guide.md](docs/VisualizeSelectedPaths_Guide.md) - VisualizePath guide
-- [examples/Example_SimpleEdgeList.py](examples/Example_SimpleEdgeList.py) - Working examples
-- [tests/test_enhanced_edgelist.py](tests/test_enhanced_edgelist.py) - Test suite
+- [Enhanced_EdgeList_Format.md](../visualizations/Enhanced_EdgeList_Format.md) - Complete guide
+- [Enhanced_EdgeList_QuickRef.md](../visualizations/Enhanced_EdgeList_QuickRef.md) - Quick reference
+- [VisualizeSelectedPaths_Guide.md](../visualizations/VisualizeSelectedPaths_Guide.md) - VisualizePath guide
+- [examples/Example_SimpleEdgeList.py](../../archive/examples/visualization/input_formats/Example_SimpleEdgeList.py) - Working examples
+- tests/test_enhanced_edgelist.py - Test suite
 
 ---
 

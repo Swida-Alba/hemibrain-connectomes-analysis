@@ -264,9 +264,9 @@ Potential future improvements (not required, suggestions only):
 
 ### Project Documentation
 - [Main README](../README.md)
-- [Visualizations Overview](../docs/visualizations/README.md)
-- [VisualizeSkeleton Updates](../docs/visualizations/VisualizeSkeleton_Updates_Nov2024.md)
-- [VisualizePath Updates](../docs/visualizations/VisualizePath_Updates_Nov2025.md)
+- [Visualizations Overview](./README.md)
+- [VisualizeSkeleton Updates](./VisualizeSkeleton_Updates_Nov2024.md)
+- [VisualizePath Updates](./VisualizePath_Updates_Nov2025.md)
 
 ## Conclusion
 

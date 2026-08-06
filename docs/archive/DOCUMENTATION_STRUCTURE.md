@@ -71,7 +71,7 @@ hemibrain-connectomes-analysis-now/
 
 ### 🚀 Start Here
 
-**[README.md](README.md)** - Main project documentation with:
+**[README.md](../README.md)** - Main project documentation with:
 - Quick start guide
 - Basic functions (FindDirect, FindPath)
 - Installation instructions
@@ -81,7 +81,7 @@ hemibrain-connectomes-analysis-now/
 
 ### 📖 Core Guides (Consolidated)
 
-#### 1. [CacheSystem_Guide.md](docs/CacheSystem_Guide.md) 🌟
+#### 1. [CacheSystem_Guide.md](../core-features/CacheSystem_Guide.md) 🌟
 **Comprehensive guide to local caching (v3.0)**
 
 Topics covered:
@@ -94,7 +94,7 @@ Topics covered:
 
 **Consolidates:** 4 cache-related documents into one comprehensive guide
 
-#### 2. [ForwardOnly_Guide.md](docs/ForwardOnly_Guide.md) 🌟
+#### 2. [ForwardOnly_Guide.md](../core-features/ForwardOnly_Guide.md) 🌟
 **Complete guide to forward_only parameter**
 
 Topics covered:
@@ -111,63 +111,63 @@ Topics covered:
 ### 🔧 Feature Documentation
 
 #### Cache System (9 files)
-- **[CacheSystem_Guide.md](docs/CacheSystem_Guide.md)** - Complete guide
-- [CacheSystem_v3_DatabaseArchitecture.md](docs/CacheSystem_v3_DatabaseArchitecture.md) - Technical architecture
-- [CacheSystem_QuickStart.md](docs/CacheSystem_QuickStart.md) - Quick reference
-- [CacheSystem_CompleteDataset.md](docs/CacheSystem_CompleteDataset.md) - Handling type=None neurons
-- [CacheSystem_StorageOptimization.md](docs/CacheSystem_StorageOptimization.md) - Storage details
-- [CacheSystem_v4_Complete.md](docs/CacheSystem_v4_Complete.md) - Future version
-- [CacheSystem_v4_Implementation.md](docs/CacheSystem_v4_Implementation.md) - v4 implementation
-- [CacheSystem_v4_PairLevel_Proposal.md](docs/CacheSystem_v4_PairLevel_Proposal.md) - v4 proposal
+- **[CacheSystem_Guide.md](../core-features/CacheSystem_Guide.md)** - Complete guide
+- [CacheSystem_v3_DatabaseArchitecture.md](../core-features/CacheSystem_v3_DatabaseArchitecture.md) - Technical architecture
+- [CacheSystem_QuickStart.md](../core-features/CacheSystem_QuickStart.md) - Quick reference
+- [CacheSystem_CompleteDataset.md](../core-features/CacheSystem_CompleteDataset.md) - Handling type=None neurons
+- [CacheSystem_StorageOptimization.md](../core-features/CacheSystem_StorageOptimization.md) - Storage details
+- [CacheSystem_v4_Complete.md](../core-features/CacheSystem_v4_Complete.md) - Future version
+- [CacheSystem_v4_Implementation.md](../core-features/CacheSystem_v4_Implementation.md) - v4 implementation
+- [CacheSystem_v4_PairLevel_Proposal.md](../core-features/CacheSystem_v4_PairLevel_Proposal.md) - v4 proposal
 
 #### PathFinding (7 files)
-- [FindAllPath_Documentation.md](docs/FindAllPath_Documentation.md) - Main pathfinding docs
-- [FindAllPath_CachingImprovement.md](docs/FindAllPath_CachingImprovement.md) - Cache integration
-- [FindAllPath_MultipleConnections_Example.md](docs/FindAllPath_MultipleConnections_Example.md) - Examples
-- [FindPath_Optimizations_Applied.md](docs/FindPath_Optimizations_Applied.md) - Applied optimizations
-- [PathFinding_DynamicETA.md](docs/PathFinding_DynamicETA.md) - ETA calculation
-- [PathFinding_RealisticEstimation.md](docs/PathFinding_RealisticEstimation.md) - Time estimation
-- [PathFinding_Optimization.md](docs/PathFinding_Optimization.md) - General optimization
+- [FindAllPath_Documentation.md](../core-features/FindAllPath_Documentation.md) - Main pathfinding docs
+- [FindAllPath_CachingImprovement.md](../core-features/FindAllPath_CachingImprovement.md) - Cache integration
+- [FindAllPath_MultipleConnections_Example.md](../core-features/FindAllPath_MultipleConnections_Example.md) - Examples
+- [FindPath_Optimizations_Applied.md](../core-features/FindPath_Optimizations_Applied.md) - Applied optimizations
+- [PathFinding_DynamicETA.md](../core-features/PathFinding_Methods.md) - ETA calculation
+- [PathFinding_RealisticEstimation.md](../core-features/PathFinding_Methods.md) - Time estimation
+- [PathFinding_Optimization.md](../core-features/PathFinding_Methods.md) - General optimization
 
 #### Forward-Only Mode (4 files)
-- **[ForwardOnly_Guide.md](docs/ForwardOnly_Guide.md)** - Complete guide
-- [ForwardOnly_RealLayer_Implementation.md](docs/ForwardOnly_RealLayer_Implementation.md) - Real layer logic
-- [TargetRealLayer_AccurateImplementation.md](docs/TargetRealLayer_AccurateImplementation.md) - Target handling
-- [FindAllPath_ForwardOnly_Explanation.md](docs/FindAllPath_ForwardOnly_Explanation.md) - Explanation
-- [FindAllPath_TrueVsFalse_Final.md](docs/FindAllPath_TrueVsFalse_Final.md) - Comparison
+- **[ForwardOnly_Guide.md](../core-features/ForwardOnly_Guide.md)** - Complete guide
+- [ForwardOnly_RealLayer_Implementation.md](../core-features/ForwardOnly_RealLayer_Implementation.md) - Real layer logic
+- [TargetRealLayer_AccurateImplementation.md](TargetRealLayer_AccurateImplementation.md) - Target handling
+- [FindAllPath_ForwardOnly_Explanation.md](../core-features/FindAllPath_ForwardOnly_Explanation.md) - Explanation
+- [FindAllPath_TrueVsFalse_Final.md](../core-features/FindAllPath_TrueVsFalse_Final.md) - Comparison
 
 #### Parallel Processing (5 files)
-- [ParallelProcessing_Documentation.md](docs/ParallelProcessing_Documentation.md) - Main documentation
-- [ParallelProcessing_QuickReference.md](docs/ParallelProcessing_QuickReference.md) - Quick reference
-- [ParallelProcessing_Implementation_Summary.md](docs/ParallelProcessing_Implementation_Summary.md) - Implementation
-- [ParallelProcessing_ProgressTracking.md](docs/ParallelProcessing_ProgressTracking.md) - Progress tracking
-- [ParallelProcessing_ImprovedProgress_v2.md](docs/ParallelProcessing_ImprovedProgress_v2.md) - Latest progress
+- ParallelProcessing_Documentation.md - Main documentation
+- ParallelProcessing_QuickReference.md - Quick reference
+- ParallelProcessing_Implementation_Summary.md - Implementation
+- ParallelProcessing_ProgressTracking.md - Progress tracking
+- ParallelProcessing_ImprovedProgress_v2.md - Latest progress
 
 #### Filtering & Configuration (5 files)
-- [ConnectionRatio_Filter.md](docs/ConnectionRatio_Filter.md) - Connection ratio filtering
-- [TraversalProbability_EdgeLevelFilter.md](docs/TraversalProbability_EdgeLevelFilter.md) - Traversal probability
-- [FilterBy_Feature.md](docs/FilterBy_Feature.md) - Filter features
-- [FilterBy_QuickRef.md](docs/FilterBy_QuickRef.md) - Quick reference
-- [PathAnalysis_ZeroWeightFilter.md](docs/PathAnalysis_ZeroWeightFilter.md) - Zero weight handling
+- [ConnectionRatio_Filter.md](../core-features/ConnectionRatio_Filter.md) - Connection ratio filtering
+- [TraversalProbability_EdgeLevelFilter.md](../core-features/TraversalProbability_EdgeLevelFilter.md) - Traversal probability
+- [FilterBy_Feature.md](../core-features/FilterBy_Feature.md) - Filter features
+- [FilterBy_QuickRef.md](../core-features/FilterBy_QuickRef.md) - Quick reference
+- [PathAnalysis_ZeroWeightFilter.md](../core-features/PathAnalysis_ZeroWeightFilter.md) - Zero weight handling
 
 #### Visualization & Interaction (6 files) 🆕
-- **[NETWORK_QUICKREF.md](docs/NETWORK_QUICKREF.md)** - Quick reference for all network features 🌟
-- **[NETWORK_EDGE_FILTER.md](docs/NETWORK_EDGE_FILTER.md)** - Edge filtering guide (v2.0) 🆕
-- **[NETWORK_EXPORT_IMPORT.md](docs/NETWORK_EXPORT_IMPORT.md)** - Export/import with settings (v2.0) 🆕
-- [NetworkLayout_Documentation.md](docs/NetworkLayout_Documentation.md) - Network layouts
-- [Interactive_Network_Dragging_Guide.md](docs/Interactive_Network_Dragging_Guide.md) - Interactive features
-- [NETWORK_INTERACTIVE_EDITING.md](docs/NETWORK_INTERACTIVE_EDITING.md) - Edit mode guide
+- **[NETWORK_QUICKREF.md](../visualizations/NETWORK_QUICKREF.md)** - Quick reference for all network features 🌟
+- **[NETWORK_EDGE_FILTER.md](../visualizations/NETWORK_EDGE_FILTER.md)** - Edge filtering guide (v2.0) 🆕
+- **[NETWORK_EXPORT_IMPORT.md](../visualizations/NETWORK_EXPORT_IMPORT.md)** - Export/import with settings (v2.0) 🆕
+- [NetworkLayout_Documentation.md](../visualizations/NetworkLayout_Documentation.md) - Network layouts
+- [Interactive_Network_Dragging_Guide.md](../visualizations/Interactive_Network_Dragging_Guide.md) - Interactive features
+- [NETWORK_INTERACTIVE_EDITING.md](../visualizations/Interactive_Network_Dragging_Guide.md) - Edit mode guide
 
 #### Folder Naming (2 files)
-- [FolderNaming_Convention.md](docs/FolderNaming_Convention.md) - Naming convention
-- [FolderNaming_DecimalNotation_Fix.md](docs/FolderNaming_DecimalNotation_Fix.md) - Decimal notation
+- [FolderNaming_Convention.md](FolderNaming_Convention.md) - Naming convention
+- [FolderNaming_DecimalNotation_Fix.md](FolderNaming_DecimalNotation_Fix.md) - Decimal notation
 
 ---
 
 ### 📋 Project Documentation (3 files)
-- [REQUIREMENTS_CHECKLIST.md](docs/REQUIREMENTS_CHECKLIST.md) - Requirements tracking
-- [DOCUMENTATION_CONSOLIDATION_PLAN.md](docs/DOCUMENTATION_CONSOLIDATION_PLAN.md) - Consolidation plan
-- [DOCUMENTATION_REORGANIZATION_SUMMARY.md](docs/DOCUMENTATION_REORGANIZATION_SUMMARY.md) - Recent changes
+- [REQUIREMENTS_CHECKLIST.md](REQUIREMENTS_CHECKLIST.md) - Requirements tracking
+- [DOCUMENTATION_CONSOLIDATION_PLAN.md](DOCUMENTATION_CONSOLIDATION_PLAN.md) - Consolidation plan
+- [DOCUMENTATION_REORGANIZATION_SUMMARY.md](DOCUMENTATION_REORGANIZATION_SUMMARY.md) - Recent changes
 
 ---
 
@@ -176,48 +176,48 @@ Topics covered:
 Located in `docs/archive/` - preserved for reference:
 
 **Bug Fixes:**
-- [BUGFIX_TypeColumn_Merge.md](docs/archive/BUGFIX_TypeColumn_Merge.md)
-- [CRITICAL_FIX_Multiprocessing.md](docs/archive/CRITICAL_FIX_Multiprocessing.md)
-- [CRITICAL_FIX_TargetRealLayer.md](docs/archive/CRITICAL_FIX_TargetRealLayer.md)
-- [CacheSystem_InstanceColumn_Fix.md](docs/archive/CacheSystem_InstanceColumn_Fix.md)
+- [BUGFIX_TypeColumn_Merge.md](BUGFIX_TypeColumn_Merge.md)
+- [CRITICAL_FIX_Multiprocessing.md](CRITICAL_FIX_Multiprocessing.md)
+- [CRITICAL_FIX_TargetRealLayer.md](CRITICAL_FIX_TargetRealLayer.md)
+- [CacheSystem_InstanceColumn_Fix.md](CacheSystem_InstanceColumn_Fix.md)
 
 **Implementation Details:**
-- [CORRECTIONS_SUMMARY.md](docs/archive/CORRECTIONS_SUMMARY.md)
-- [FindAllPath_CutoffBugFix.md](docs/archive/FindAllPath_CutoffBugFix.md)
-- [FindAllPath_EdgeHandling_Analysis.md](docs/archive/FindAllPath_EdgeHandling_Analysis.md)
-- [FindAllPath_FolderStructure_Update.md](docs/archive/FindAllPath_FolderStructure_Update.md)
-- [FindAllPath_SankeyFromPaths_Fix.md](docs/archive/FindAllPath_SankeyFromPaths_Fix.md)
-- [FindAllPath_Updated_Logic.md](docs/archive/FindAllPath_Updated_Logic.md)
+- [CORRECTIONS_SUMMARY.md](CORRECTIONS_SUMMARY.md)
+- [FindAllPath_CutoffBugFix.md](FindAllPath_CutoffBugFix.md)
+- [FindAllPath_EdgeHandling_Analysis.md](FindAllPath_EdgeHandling_Analysis.md)
+- [FindAllPath_FolderStructure_Update.md](FindAllPath_FolderStructure_Update.md)
+- [FindAllPath_SankeyFromPaths_Fix.md](FindAllPath_SankeyFromPaths_Fix.md)
+- [FindAllPath_Updated_Logic.md](FindAllPath_Updated_Logic.md)
 
 ---
 
 ## Quick Links by Topic
 
 ### Getting Started
-1. [README.md](README.md) - Start here
-2. [CacheSystem_Guide.md](docs/CacheSystem_Guide.md) - Enable caching for speed
-3. [FindAllPath_Documentation.md](docs/FindAllPath_Documentation.md) - Find paths
+1. [README.md](../README.md) - Start here
+2. [CacheSystem_Guide.md](../core-features/CacheSystem_Guide.md) - Enable caching for speed
+3. [FindAllPath_Documentation.md](../core-features/FindAllPath_Documentation.md) - Find paths
 
 ### Performance
-- [CacheSystem_Guide.md](docs/CacheSystem_Guide.md) - 10-100x speedup
-- [ParallelProcessing_Documentation.md](docs/ParallelProcessing_Documentation.md) - Multi-core acceleration
+- [CacheSystem_Guide.md](../core-features/CacheSystem_Guide.md) - 10-100x speedup
+- ParallelProcessing_Documentation.md - Multi-core acceleration
 
 ### Path Analysis
-- [ForwardOnly_Guide.md](docs/ForwardOnly_Guide.md) - Path validation
-- [FindAllPath_Documentation.md](docs/FindAllPath_Documentation.md) - Pathfinding
+- [ForwardOnly_Guide.md](../core-features/ForwardOnly_Guide.md) - Path validation
+- [FindAllPath_Documentation.md](../core-features/FindAllPath_Documentation.md) - Pathfinding
 
 ### Filtering
-- [ConnectionRatio_Filter.md](docs/ConnectionRatio_Filter.md) - Connection ratio
-- [TraversalProbability_EdgeLevelFilter.md](docs/TraversalProbability_EdgeLevelFilter.md) - Probability
-- [FilterBy_Feature.md](docs/FilterBy_Feature.md) - Filter features
+- [ConnectionRatio_Filter.md](../core-features/ConnectionRatio_Filter.md) - Connection ratio
+- [TraversalProbability_EdgeLevelFilter.md](../core-features/TraversalProbability_EdgeLevelFilter.md) - Probability
+- [FilterBy_Feature.md](../core-features/FilterBy_Feature.md) - Filter features
 
 ### Visualization & Interaction 🆕
-- **[NETWORK_QUICKREF.md](docs/NETWORK_QUICKREF.md)** - Quick reference for all features
-- **[NETWORK_EDGE_FILTER.md](docs/NETWORK_EDGE_FILTER.md)** - Hide edges by weight
-- **[NETWORK_EXPORT_IMPORT.md](docs/NETWORK_EXPORT_IMPORT.md)** - Save/restore with settings
-- [NetworkLayout_Documentation.md](docs/NetworkLayout_Documentation.md) - Layout algorithms
-- [Interactive_Network_Dragging_Guide.md](docs/Interactive_Network_Dragging_Guide.md) - Interactive controls
-- [NETWORK_INTERACTIVE_EDITING.md](docs/NETWORK_INTERACTIVE_EDITING.md) - Edit mode
+- **[NETWORK_QUICKREF.md](../visualizations/NETWORK_QUICKREF.md)** - Quick reference for all features
+- **[NETWORK_EDGE_FILTER.md](../visualizations/NETWORK_EDGE_FILTER.md)** - Hide edges by weight
+- **[NETWORK_EXPORT_IMPORT.md](../visualizations/NETWORK_EXPORT_IMPORT.md)** - Save/restore with settings
+- [NetworkLayout_Documentation.md](../visualizations/NetworkLayout_Documentation.md) - Layout algorithms
+- [Interactive_Network_Dragging_Guide.md](../visualizations/Interactive_Network_Dragging_Guide.md) - Interactive controls
+- [NETWORK_INTERACTIVE_EDITING.md](../visualizations/Interactive_Network_Dragging_Guide.md) - Edit mode
 
 ---
 
@@ -237,7 +237,7 @@ Located in `docs/archive/` - preserved for reference:
 
 **All operators:** `<`, `>`, `<=`, `>=`, `==`, `!=`
 
-**Documentation:** [NETWORK_EDGE_FILTER.md](docs/NETWORK_EDGE_FILTER.md)
+**Documentation:** [NETWORK_EDGE_FILTER.md](../visualizations/NETWORK_EDGE_FILTER.md)
 
 ### Enhanced Export/Import (v2.0)
 
@@ -257,11 +257,11 @@ Located in `docs/archive/` - preserved for reference:
 4. [Later] Import → Everything restored!
 ```
 
-**Documentation:** [NETWORK_EXPORT_IMPORT.md](docs/NETWORK_EXPORT_IMPORT.md)
+**Documentation:** [NETWORK_EXPORT_IMPORT.md](../visualizations/NETWORK_EXPORT_IMPORT.md)
 
 ### Complete Quick Reference
 
-**All features in one place:** [NETWORK_QUICKREF.md](docs/NETWORK_QUICKREF.md)
+**All features in one place:** [NETWORK_QUICKREF.md](../visualizations/NETWORK_QUICKREF.md)
 
 ---
 
@@ -332,5 +332,5 @@ Located in `docs/archive/` - preserved for reference:
 ---
 
 **For questions or suggestions about documentation organization, see:**
-- [DOCUMENTATION_CONSOLIDATION_PLAN.md](docs/DOCUMENTATION_CONSOLIDATION_PLAN.md)
-- [DOCUMENTATION_REORGANIZATION_SUMMARY.md](docs/DOCUMENTATION_REORGANIZATION_SUMMARY.md)
+- [DOCUMENTATION_CONSOLIDATION_PLAN.md](DOCUMENTATION_CONSOLIDATION_PLAN.md)
+- [DOCUMENTATION_REORGANIZATION_SUMMARY.md](DOCUMENTATION_REORGANIZATION_SUMMARY.md)

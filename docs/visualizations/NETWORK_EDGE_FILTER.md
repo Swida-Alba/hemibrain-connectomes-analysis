@@ -374,7 +374,7 @@ Applies the current filter to all edges in the network.
 ## Related Documentation
 
 - [NETWORK_EXPORT_IMPORT.md](NETWORK_EXPORT_IMPORT.md) - Saving and loading graphs with settings
-- [NETWORK_INTERACTIVE_EDITING.md](NETWORK_INTERACTIVE_EDITING.md) - Edit mode and manual edge manipulation
+- [NETWORK_INTERACTIVE_EDITING.md](Interactive_Network_Dragging_Guide.md) - Edit mode and manual edge manipulation
 - [EDGE_WIDTH_SCALING.md](EDGE_WIDTH_SCALING.md) - Edge width visualization methods
 - [VisualizePath Guide](../README.md) - Main visualization documentation
 

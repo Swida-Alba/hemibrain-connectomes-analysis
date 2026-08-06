@@ -284,11 +284,11 @@ Potential improvements:
 
 ## See Also
 
-- [CacheSystem_QuickStart.md](CacheSystem_QuickStart.md) - Getting started with VisualizePath
-- [FilterBy_Feature.md](FilterBy_Feature.md) - Filtering pathway data
+- [CacheSystem_QuickStart.md](../core-features/CacheSystem_Guide.md) - Getting started with VisualizePath
+- [FilterBy_Feature.md](../core-features/FilterBy_Feature.md) - Filtering pathway data
 - [EDGE_WIDTH_SCALING.md](EDGE_WIDTH_SCALING.md) - Edge visualization controls
-- [examples/Example_SimpleEdgeList.py](../examples/Example_SimpleEdgeList.py) - Complete examples
-- [tests/test_enhanced_edgelist.py](../tests/test_enhanced_edgelist.py) - Test suite
+- [examples/Example_SimpleEdgeList.py](../../archive/examples/visualization/input_formats/Example_SimpleEdgeList.py) - Complete examples
+- tests/test_enhanced_edgelist.py - Test suite
 
 ## Version History
 

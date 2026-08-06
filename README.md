@@ -1,573 +1,140 @@
 # *Drosophila* Connectome Analysis Toolkit (DROCAT) v4.5.0
 
-A comprehensive Python toolkit for analyzing and visualizing connectome data from **all NeuPrint databases and FlyWire datasets**. Features type-based pathfinding algorithms, interactive network visualizations with NT grouping, 3D neuron morphology rendering, and EM↔LM driver line mapping.
+A Python toolkit for analyzing and visualizing connectome data from **all NeuPrint databases and FlyWire datasets**: type-based pathfinding, interactive network visualizations with NT grouping, 3D neuron morphology rendering, cross-dataset comparison, and EM↔LM driver line mapping (NeuronBridge).
 
 > [!TIP]
-> 🤖 **Agent-assisted installation:** ask your AI agent (e.g., Codex) to run the bundled
-> [`drocat-install`](skills/drocat-install/SKILL.md) skill — it fetches this repository from
-> GitHub, installs all dependencies, configures tokens, verifies the installation, and
-> launches the web UI for you.
-> See [Option 3: Agent-Assisted Install](#option-3-agent-assisted-install-codex).
+> 🤖 **Agent-assisted:** ask your AI agent to run the bundled
+> [`drocat-install`](skills/drocat-install/SKILL.md) skill — it fetches this repository,
+> installs all dependencies, configures tokens, verifies the installation, and launches
+> the web UI for you. For script analysis without the UI, use the
+> [`drocat-usage`](skills/drocat-usage/SKILL.md) skill. New to agents? Start with
+> [docs/AGENT_SETUP.md](docs/AGENT_SETUP.md).
 >
-> 🧪 **Agent-assisted analysis without the UI:** use the
-> [`drocat-usage`](skills/drocat-usage/SKILL.md) skill to run and inspect the
-> v4.5.0 scripts directly. New to agents? Start with the
-> [beginner agent setup](docs/AGENT_SETUP.md).
+> **One-line agent handoff (no local repo needed):**
+>
+> > Fetch https://raw.githubusercontent.com/Swida-Alba/Drosophila-cross-dataset-connectome-analysis/v4.5.0/skills/drocat-usage/SKILL.md and follow it to install and use the DROCAT v4.5.0 direct-analysis skill for this repository, then finish the requested analysis end-to-end without opening the UI.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 ---
 
-## ✨ Key Features
+## Key Features
 
-| Category              | Features                                                                   |
-| --------------------- | -------------------------------------------------------------------------- |
-| **🗄️ Dataset Support** | Inter-dataset analysis and comprehensive dataset support                   |
-| **🔬 EM↔LM Mapping**   | NeuronBridge integration for GAL4/Split-GAL4 driver line discovery         |
-| **🎨 Visualization**   | 3D skeletons, interactive networks, Sankey diagrams, heatmaps              |
-| **📊 Analysis**        | Multi-hop pathfinding, cross-dataset comparison, hemisphere-aware analysis |
-| **⚡ Performance**     | 10-100x speedup with local caching, Polars acceleration                    |
-
----
-
-## 📚 Quick Navigation
-
-### 🚀 Getting Started
-
-| Guide                                                           | Description                         |
-| --------------------------------------------------------------- | ----------------------------------- |
-| **[Quick Start](QUICK_START.md)**                               | First-time setup and basic examples |
-| **[Installation](docs/INSTALLATION.md)**                        | Detailed installation instructions  |
-| **[Authentication](docs/INSTALLATION.md#authentication-setup)** | **Set up NeuPrint and CAVE tokens** |
-| **[Troubleshooting](docs/TROUBLESHOOTING.md)**                  | Common issues and solutions         |
-| **[UI Guides](docs/ui_guides/README.html)**                      | **Per-panel instructions & quick starts** |
-| **[Agent Install (Codex)](skills/drocat-install/SKILL.md)**     | **Let Codex install, verify & launch DROCAT** |
-| **[Direct Analysis Skill](skills/drocat-usage/SKILL.md)**        | **Run backend scripts without the UI** |
-| **[Agent Setup](docs/AGENT_SETUP.md)**                           | **Beginner guide to Codex + DeepSeek** |
-| **[Basic Usage](#basic-usage)**                                 | Core script tutorials               |
-
-### 📖 Feature Documentation
-
-| Feature                | Guide                                                                       | Script                         |
-| ---------------------- | --------------------------------------------------------------------------- | ------------------------------ |
-| **Basic Usage**        | [Basic Usage Guide](docs/core-features/BasicUsage_Guide.md)                 | `FindDirect.py`, `FindPath.py` |
-| **Score Calculations** | [Score Calculation Guide](docs/core-features/ScoreCalculation_Guide.md)     | All pathfinding scripts        |
-| **EM↔LM Mapping**      | [NeuronBridge Guide](docs/core-features/NeuronBridge_Guide.md)              | `NeuronBridge_FindLines.py`    |
-| **Line Analysis**      | [Workflow Guide](docs/core-features/NeuronBridge_Workflow.md)               | `NeuronBridge_Colabel.py`      |
-| **UI Guides**          | [docs/ui_guides/README.html](docs/ui_guides/README.html)                    | All web UI panels              |
-| **FlyLight Images**    | [FlyLight Guide](docs/core-features/FlyLight_Guide.md)                      | `FlyLight_fetcher.py`          |
-| **Cross-Dataset**      | [Comparison Guide](docs/core-features/CrossDatasetComparison_Guide.md)      | `InterDatasetComparator.py`    |
-| **Auto Type Mapping**  | [Type Mapping Guide](docs/AUTO_TYPE_MAPPING.md)                             | Cross-dataset comparisons      |
-| **Homolog Finding**    | [Homolog Guide](docs/core-features/HomologFinding_Guide.md)                 | `FindHomologs.py`              |
-| **3D Visualization**   | [3D Skeleton Guide](docs/visualizations/3D_Skeleton_Guide.md)               | `plot3dSkeleton.py`            |
-| **Path Visualization** | [Interaction Guide](docs/visualizations/VisualizePath_Interaction_Guide.md) | `PlotPath.py`                  |
-
-### 📂 Full Documentation Index
-
-- **[Documentation Hub](docs/README.md)** - Complete documentation index
-- **[Core Features](docs/core-features/README.md)** - All feature guides
-- **[Visualizations](docs/visualizations/README.md)** - Visualization options
-- **[Output Files](docs/OUTPUT_FILES.md)** - File format reference
-- **[Available ROI Meshes](docs/AVAILABLE_ROIS.md)** - ROI mesh reference for 3D visualizations
+| Category | Features |
+| --- | --- |
+| **🗄️ Dataset Support** | NeuPrint (hemibrain, male-cns, optic-lobe, manc) + FlyWire (FAFB, BANC), inter-dataset analysis |
+| **🔬 EM↔LM Mapping** | NeuronBridge integration for GAL4/Split-GAL4 driver line discovery |
+| **🎨 Visualization** | 3D skeletons, interactive networks, Sankey diagrams, heatmaps |
+| **📊 Analysis** | Multi-hop pathfinding, cross-dataset comparison, hemisphere-aware analysis |
+| **⚡ Performance** | 10-100x speedup with local caching, Polars acceleration |
 
 ---
 
-## 🔬 NeuronBridge Integration (NEW!)
+## Getting Started
 
-Find GAL4/Split-GAL4 driver lines matching your EM neurons:
+| Guide | Description |
+| --- | --- |
+| **[Quick Start](docs/QUICK_START.md)** | First-time setup and basic examples |
+| **[Installation](docs/INSTALLATION.md)** | One-click, manual, and agent-assisted install + token setup |
+| **[Script Examples](docs/core-features/ScriptExamples_Guide.md)** | Copy-paste code for pathfinding, comparison, NeuronBridge |
+| **[Troubleshooting](docs/TROUBLESHOOTING.md)** | Common issues and solutions |
+| **[Documentation Hub](docs/README.md)** | Full documentation index |
 
-```python
-from src.neuronbridge_finder import NeuronBridgeFinder
+## Feature Documentation
 
-finder = NeuronBridgeFinder(
-    verbose=True,
-    separate_splitgal4=True  # Separate GAL4 from Split-GAL4
-)
-
-# Find lines for a neuron type across multiple datasets
-results = finder.find_lines_batch(
-    queries='aMe12',
-    dataset=['hemibrain:v1.2.1', 'male-cns:v0.9'],
-    output_dir='./results',
-    download_img_for_top_n_lines=20
-)
-```
-
-### Key Features
-
-- **Weighted Score Ranking**: Lines are ranked by `weighted_score = avg_score × coverage_ratio`
-- **Multi-Dataset Search**: Search across hemibrain, male-cns, FlyWire FAFB/BANC
-- **Co-Labeling Analysis**: Analyze specificity and overlap between driver lines
-- **Automatic Image Download**: Download FlyLight imagery for top candidates
-
-📖 **[Full NeuronBridge Workflow Guide](docs/core-features/NeuronBridge_Workflow.md)**
-
----
-
-## Basic Usage
-
-### Quick Example
-
-```python
-from coana import FindNeuronConnection
-
-fc = FindNeuronConnection(
-    dataset='hemibrain:v1.2.1',
-    sourceNeurons=['KC.*'],       # Regex patterns supported
-    targetNeurons=['MBON03'],     # Searches: bodyId → type → instance
-    min_synapse_num=10,
-)
-
-fc.InitializeNeuronInfo()
-fc.FindDirectConnection()  # Direct connections
-# or
-fc.FindAllPath()           # Multi-hop pathways
-```
-
-### Hemisphere-Aware Cross-Dataset Comparison
-
-Enable hemisphere-aware aggregation and symmetry analysis in cross-dataset comparisons:
-
-```python
-from comparison import ComparisonParameters, ComparisonAnalyzer
-
-params = ComparisonParameters(
-    datasets=['male-cns:v0.9', 'flywire_FAFB_v783'],
-    source_neurons=['aMe12'],
-    target_neurons=['PPL101'],
-    thresholds=[1, 3, 5],
-    output_folder='/path/to/output',
-    separate_hemispheres=True,  # Adds _L/_R/_U suffixes at type/group level
-    keep_only_hemisphere_conserved_connections=True,  # Keep only L/R-conserved edges
-    symmetry_analysis=True,     # Auto-enabled when separate_hemispheres=True
-    find_reciprocal=True,       # Build reciprocal graphs and reports
-)
-
-analyzer = ComparisonAnalyzer(params, verbose=True)
-analyzer.run_comparison()
-analyzer.generate_report()
-```
-
-### Available Methods
-
-| Method                   | Description                 | Use Case         |
-| ------------------------ | --------------------------- | ---------------- |
-| `FindDirectConnection()` | Direct synaptic connections | One-hop analysis |
-| `FindAllPath()`          | Multi-hop pathways          | Circuit tracing  |
-| `FetchNeuronsOnly()`     | Get neuron metadata only    | Data exploration |
-
-📖 **[Full Basic Usage Guide](docs/core-features/BasicUsage_Guide.md)** - Detailed examples and parameters
-
-📖 **[Score Calculation Guide](docs/core-features/ScoreCalculation_Guide.md)** - Understanding `connection_ratio`, `traversal_probability`, and path metrics
-
-📖 **[Pathfinding Methods](docs/core-features/PathFinding_Methods.md)** - Algorithm selection for `FindAllPath`
+| Feature | Guide | Script |
+| --- | --- | --- |
+| **Basic Usage** | [Basic Usage Guide](docs/core-features/BasicUsage_Guide.md) | `FindDirect.py`, `FindPath.py` |
+| **Score Calculations** | [Score Calculation Guide](docs/core-features/ScoreCalculation_Guide.md) | All pathfinding scripts |
+| **EM↔LM Mapping** | [NeuronBridge Guide](docs/core-features/NeuronBridge_Guide.md) | `NeuronBridge_FindLines.py` |
+| **Cross-Dataset** | [Comparison Guide](docs/core-features/CrossDatasetComparison_Guide.md) | `InterDatasetComparator.py` |
+| **Homolog Finding** | [Homolog Guide](docs/core-features/HomologFinding_Guide.md) | `FindHomologs.py` |
+| **3D Visualization** | [3D Skeleton Guide](docs/visualizations/3D_Skeleton_Guide.md) | `plot3dSkeleton.py` |
+| **Path Visualization** | [Interaction Guide](docs/visualizations/VisualizePath_Interaction_Guide.md) | `PlotPath.py` |
+| **UI Guides** | [docs/ui_guides/README.html](docs/ui_guides/README.html) | All web UI panels |
+| **Output Files** | [Output Files Reference](docs/OUTPUT_FILES.md) | File formats |
 
 ---
 
 ## Installation
 
-### Option 1: One-Click Install (Recommended)
+**Recommended:** one-click launcher — double-click `run_DROCAT.command` (macOS) / `run_DROCAT.bat` (Windows). It creates the versioned `drocat-4.5.0` conda environment on first run (calling the bundled installer from `archive/install/`), installs the pinned dependencies, runs `pip check`, verifies the install, and asks for NeuPrint/CAVE tokens in interactive terminals.
 
-**macOS** — Double-click `DROCAT.command` in Finder (or run in Terminal):
-```bash
-chmod +x DROCAT.command
-./DROCAT.command
-```
+Agents: use the [`drocat-install`](skills/drocat-install/SKILL.md) skill.
 
-**macOS/Linux** — Run the installer script:
-```bash
-chmod +x install.sh
-./install.sh
-```
-
-**Windows** — Double-click `install.bat` or run in PowerShell:
-```powershell
-powershell -ExecutionPolicy Bypass -File install.ps1
-```
-
-These scripts automatically:
-1. Install Miniconda (if not present)
-2. Create or reuse the versioned `drocat-4.5.0` environment with Python 3.11
-3. Install the pinned, cross-platform dependency set
-4. Reject dependency conflicts with `pip check` and verify the installation
-
-### Option 2: Manual Install
-
-Set `PYTHONNOUSERSITE=1` first (`export PYTHONNOUSERSITE=1` in bash/zsh, or
-`$env:PYTHONNOUSERSITE = "1"` in PowerShell).
-
-```bash
-# Create environment
-conda create -n drocat-4.5.0 python=3.11 -y
-conda activate drocat-4.5.0
-
-# Install dependencies
-pip install -r requirements.txt -r ui/requirements.txt  # Linux/macOS
-pip install -e . --no-deps
-python -m pip check
-
-# Windows users:
-pip install -r requirements-windows.txt -r ui/requirements.txt
-pip install -e . --no-deps
-python -m pip check
-```
-
-### Option 3: Agent-Assisted Install (Codex)
-
-DROCAT ships a Codex skill that lets an AI agent install, verify, and launch the toolkit for you:
-
-- **Skill source (repo):** [`skills/drocat-install/`](skills/drocat-install/SKILL.md)
-- **Global copy (auto-discovered):** `~/.codex/skills/drocat-install/`
-
-**Usage** — open Codex in this repository and ask:
-
-> Install DROCAT on this machine, verify it works, and finish by reporting the final environment and UI status.
-
-**One-line command for Codex / any agent** — copy and paste this anywhere (no local repo needed):
-
-> Fetch https://raw.githubusercontent.com/Swida-Alba/Drosophila-cross-dataset-connectome-analysis/v4.5.0/skills/drocat-install/SKILL.md and follow it to finish installing, verifying, and launching DROCAT on this machine.
-
-Equivalent manual fetch (what the agent runs):
-
-```bash
-git clone --branch v4.5.0 https://github.com/Swida-Alba/Drosophila-cross-dataset-connectome-analysis.git drocat
-cd drocat
-```
-
-The agent will:
-
-1. Fetch the repository from [GitHub](https://github.com/Swida-Alba/Drosophila-cross-dataset-connectome-analysis) (branch `v4.5.0`) if it is not already present
-2. Run the OS-appropriate installer (`install.sh` / `install.ps1` / `install.bat`)
-3. Create/reuse `drocat-4.5.0` (Python 3.11) and install the pinned dependencies
-4. Ask you for NeuPrint / CAVE tokens and write them to `token_info_local.txt`
-5. Verify Python, imports, dependency consistency, project layout, and the UI with [`verify_install.py`](skills/drocat-install/scripts/verify_install.py)
-6. Launch the web UI and confirm it responds at <http://127.0.0.1:8080>
-
-Manual verification (or to re-check an existing install):
-
-```bash
-conda activate drocat-4.5.0
-python skills/drocat-install/scripts/verify_install.py --project .
-```
-
-To install/refresh the global skill copy after updating the repo version:
-
-```bash
-mkdir -p ~/.codex/skills/drocat-install
-cp -R skills/drocat-install/. ~/.codex/skills/drocat-install/
-```
-
-### Direct script analysis with an agent (no UI)
-
-After installation, ask Codex to use
-[`skills/drocat-usage/SKILL.md`](skills/drocat-usage/SKILL.md). It runs the
-backend scripts directly, keeps their relative paths correct, inspects only the
-focused source files, and reports generated artifacts. For example:
-
-Copy-paste command for an agent that does not discover repository-local skills:
-
-> Fetch https://raw.githubusercontent.com/Swida-Alba/Drosophila-cross-dataset-connectome-analysis/v4.5.0/skills/drocat-usage/SKILL.md and follow it to install and use the DROCAT v4.5.0 direct-analysis skill for this repository, then finish the requested analysis end-to-end without opening the UI.
-
-```text
-Use the DROCAT v4.5.0 direct-analysis skill. Run a cached FindPath analysis
-from aMe12 to PPL101 in male-cns:v0.9, with max_interlayer=2, CSV output, and
-save everything under local_data/agent_runs/aMe12_to_PPL101. Inspect the files,
-summarize row counts and warnings, and finish by reporting the validated
-artifacts. Do not open the UI or stop at a plan.
-```
-
-The bundled launcher can also be used directly:
-
-```bash
-python skills/drocat-usage/scripts/run_direct.py \
-  --conda-env drocat-4.5.0 \
-  --script scripts/FindPath.py \
-  --dry-run
-```
-
-Remove `--dry-run` to execute. Use `scripts/FindDirect.py` for one-hop edges,
-`scripts/PlotPath.py` for path HTML, `scripts/plot3dSkeleton.py` for morphology,
-and `scripts/InterDatasetComparator.py` for cross-dataset comparisons. The
-skill includes recipes for NeuronBridge, FlyLight, homologs, profiles, and the
-empty editable network canvas.
-
-## Agent setup for beginners
-
-An agent is a coding assistant that can run terminal commands, edit focused
-files, and explain results. You do not need to paste the full repository into a
-chat: open this checkout as the agent's project and use the direct-analysis
-skill above.
-
-For a reliable, low-cost setup, DeepSeek's official Codex integration currently
-documents `deepseek-v4-flash` for Codex and the Responses API. Configure it once
-for Codex CLI, the Codex desktop app, or the VS Code extension with the official
-setup script:
-
-```bash
-# macOS/Linux
-bash <(curl -fsSL https://cdn.deepseek.com/api-docs/codex-deepseek-setup-en.sh)
-```
-
-```powershell
-# Windows PowerShell
-irm https://cdn.deepseek.com/api-docs/codex-deepseek-setup-en.ps1 | iex
-```
-
-The script backs up `~/.codex/config.toml`, writes the model catalog, preserves
-compatible project/MCP settings, and validates the configuration. Create the
-DeepSeek API key at [platform.deepseek.com](https://platform.deepseek.com/) and
-never put it in this repository. Use Flash with low reasoning for routine runs;
-reserve high/max reasoning for difficult backend changes. See the full
-[beginner setup guide](docs/AGENT_SETUP.md) and DeepSeek's
-[Codex integration documentation](https://api-docs.deepseek.com/quick_start/agent_integrations/codex/)
-and [Responses API guide](https://api-docs.deepseek.com/guides/responses_api/).
-
-### Authentication Setup
-
-1. **NeuPrint Token** (required for NeuPrint datasets):
-   - Visit [neuprint.janelia.org/account](https://neuprint.janelia.org/account)
-   - Login → Copy Auth Token
-   - Enter in UI Settings tab or save to `token_info_local.txt`
-
-2. **CAVE Token** (only for FAFB CAVE API features):
-   - Visit [codex.flywire.ai/auth_token](https://codex.flywire.ai/auth_token)
-   - Copy token → Enter in UI Settings tab
-
-📖 **[Full Installation Guide](docs/INSTALLATION.md)**
+📖 **[Full Installation Guide](docs/INSTALLATION.md)** — manual steps and token setup (NeuPrint / CAVE).
 
 ---
 
-## 🖥️ Web UI (v4.5.0)
+## Launch the Web UI
 
-DROCAT includes a local web interface (light theme, photo-selector-inspired design) for all analysis tools.
-Every panel links to its own local instruction guide - see the
-[UI Guides index](docs/ui_guides/README.html).
+| Platform | Command |
+| --- | --- |
+| macOS | Double-click `run_DROCAT.command`, or `./run_DROCAT.command` |
+| Linux | `./run_DROCAT.command` |
+| Windows | Double-click `run_DROCAT.bat`, or `run_DROCAT.bat` |
+| Manual | `conda activate drocat-4.5.0 && python ui/app.py` |
 
-### Launch the UI
-
-**macOS** — Double-click `DROCAT.command` in Finder, or:
-```bash
-./DROCAT.command
-```
-
-**macOS/Linux:**
-```bash
-./run_ui.sh
-```
-
-**Windows:**
-```
-run_ui.bat
-```
-
-**Manual:**
-```bash
-conda activate drocat-4.5.0
-python ui/app.py
-```
-
-The UI opens at **http://127.0.0.1:8080**
-
-### UI Features
-
-| Tab | Tool | Description |
-|-----|------|-------------|
-| **Pathfinding** | FindPath | Multi-hop path analysis between neuron groups |
-| **Direct** | FindDirect | Direct synaptic connection analysis |
-| **Profiling** | ConnectivityProfiling | Intra-dataset connectivity profile comparison |
-| **Homologs** | FindHomologs | Cross-dataset homolog finding |
-| **Cross-Dataset** | InterDatasetComparator | Compare connectivity across datasets |
-| **Find Lines** | NeuronBridge_FindLines | EM→LM driver line search |
-| **Find Neurons** | NeuronBridge_FindNeuron | LM→EM neuron search |
-| **Co-Labeling** | NeuronBridge_Colabel | Driver line co-labeling analysis |
-| **Visualization** | plot3dSkeleton/PlotPath | 3D neuron visualization |
-| **Settings** | - | Token configuration and dataset status |
-
-### Advanced Neuron Search
-
-All neuron input fields support **filter modes**:
-
-| Mode | Behavior | Example |
-|------|----------|--------|
-| Exact | Match type/bodyId exactly | `aMe12` → only aMe12 |
-| Starts with | Types beginning with text | `DN` → DN1p, DN2, DNa01... |
-| Contains | Types containing text | `PN` → adPN, lPN, vPN... |
-| Ends with | Types ending with text | `_R` → all right-hemisphere types |
-| Regex | Full regex pattern | `KC.*` → all KC types |
-
-### Dataset Selection
-
-- **NeuPrint datasets** (hemibrain, male-cns v1.0/v0.9, optic-lobe, manc): Fetched from server automatically
-- **FlyWire FAFB v783**: Requires the documented local raw files; CAVE token is only needed for explicit CAVE API fetching or skeleton fallback
-- **FlyWire BANC v888/v626**: Requires the matching documented local raw files; BANC CAVE API fetching is unsupported
-
-See the **Settings** tab for detailed setup instructions.
-
-### Directory Selection
-
-All output path fields include a browse button (📁) that opens your system's native file picker dialog.
+The UI opens at **http://127.0.0.1:8080** — every panel links to its own instruction guide (see [docs/ui_guides/README.html](docs/ui_guides/README.html)).
 
 ---
 
 ## Supported Datasets
 
-| Dataset             | Type      | Description               |
-| ------------------- | --------- | ------------------------- |
-| `male-cns:v1.0`     | NeuPrint  | Full male CNS (latest)    |
-| `male-cns:v0.9`     | NeuPrint  | Full male CNS             |
-| `hemibrain:v1.2.1`  | NeuPrint  | Adult fly brain (central) |
-| `optic-lobe:v1.1`   | NeuPrint  | Optic lobe detailed       |
-| `manc:v1.2.1`       | NeuPrint  | Male VNC                  |
-| `flywire_FAFB_v783` | FlyWire   | Female brain (local; optional CAVE API) |
-| `flywire_BANC_v888` | FlyWire   | Male VNC latest (local files) |
-| `flywire_BANC_v626` | FlyWire   | Male VNC (local files)     |
+All NeuPrint server datasets are supported (verified against `api.neuprint.janelia.org`), plus the FlyWire/Codex datasets. NeuPrint datasets are fetched automatically; FlyWire datasets use local files (see the Settings tab).
 
-📖 **[FlyWire Setup Guide](docs/FLYWIRE_USAGE.md)**
+### NeuPrint (11)
 
----
+| Dataset | Description (from NeuPrint server) |
+| --- | --- |
+| `male-cns:v1.0` | Complete MaleCNS connectome (Janelia FlyEM + Cambridge) — latest |
+| `male-cns:v0.9` | Complete MaleCNS connectome |
+| `hemibrain:v1.2.1` | Adult female brain reconstruction (central complex + surrounding neuropils) |
+| `hemibrain:v1.1` | Older hemibrain release |
+| `optic-lobe:v1.1` | Drosophila optic lobe (right lobe, ~50k neurons, subset of MaleCNS) |
+| `optic-lobe:v1.0.1` | Fly optic lobe reconstruction (~50k neurons) |
+| `manc:v1.2.3` | MANC connectome — latest |
+| `manc:v1.2.1` | MANC connectome |
+| `manc:v1.0` | MANC connectome (original) |
+| `fib19:v1.0` | Partial reconstruction of the fly medulla / lobula / lobula plate |
+| `mushroombody` | Fly alpha lobe in the mushroom body (983 neurons) |
 
-## Output Examples
+### FlyWire / Codex (3, local files required)
 
-### NeuronBridge FindLines Output
+| Dataset | Description |
+| --- | --- |
+| `flywire_FAFB_v783` | Female Adult Fly Brain (FAFB v783, 139,255 neurons) |
+| `flywire_BANC_v888` | Brain and Nerve Cord (BANC v888, 158,262 neurons) |
+| `flywire_BANC_v626` | Brain and Nerve Cord, older (BANC v626, 115,151 neurons) |
 
-```
-findlines_aMe12_20241230/
-├── line_summary.csv           # Ranked by weighted_score
-├── gal4_lexa_summary.csv      # GAL4/LexA lines
-├── split_gal4_summary.csv     # Split-GAL4 lines
-├── all_lines.csv              # All matches
-└── images/                    # Downloaded FlyLight images
-```
+> BANC (Brain And Nerve Cord) is served via FlyWire/Codex as `flywire_BANC_v888` (local data files). The NeuPrint server metadata also lists a hidden `banc:v888` entry, but it is not queryable through the NeuPrint API and is therefore not supported.
 
-### Pathfinding Output
-
-```
-connection_data/
-├── network.html               # Interactive network
-├── sankey.html                # Flow diagram
-├── heatmap.html               # Connection matrix
-└── paths.csv                  # Path data
-```
-
-📖 **[Output Files Reference](docs/OUTPUT_FILES.md)**
-
----
-
-## Performance Features
-
-| Feature         | Speedup | Description                      |
-| --------------- | ------- | -------------------------------- |
-| **Local Cache** | 10-100x | Automatic caching of API results |
-| **Polars**      | 5-50x   | Fast CSV/matrix operations       |
-| **Batch Mode**  | 2-10x   | Optimized batch processing       |
-
-```python
-# Enable caching
-fc = FindNeuronConnection(
-    use_cache=True,  # Automatic local caching
-    # ...
-)
-```
-
-📖 **[Cache System Guide](docs/core-features/CacheSystem_Guide.md)**
+📖 **[FlyWire Setup Guide](docs/FLYWIRE_USAGE.md)** | **[Available ROI Meshes](docs/AVAILABLE_ROIS.md)**
 
 ---
 
 ## What's New in v4.5.0
 
-### 🤖 Script-first analysis with coding agents
-- **Direct backend workflow**: Run pathfinding, comparison, NeuronBridge,
-  FlyLight, homolog, profile, PlotPath, and 3D skeleton scripts without
-  starting the NiceGUI UI.
-- **Focused context**: The [`drocat-usage` skill](skills/drocat-usage/SKILL.md)
-  gives an agent a tool catalog, safe launcher, output recipes, and guardrails
-  for targeted source edits.
-- **Beginner setup**: Configure a low-cost DeepSeek V4 Flash Codex provider
-  with the [agent setup guide](docs/AGENT_SETUP.md).
+- **Script-first analysis with coding agents** — run pathfinding, comparison, NeuronBridge, FlyLight, homolog, profile, PlotPath, and 3D skeleton scripts without the UI, via the [`drocat-usage`](skills/drocat-usage/SKILL.md) skill and its `run_direct.py` launcher.
+- **Local FAFB/BANC dataset support** — local-first caching for 10-100x faster FlyWire access ([FAFB Integration](docs/FAFB_INTEGRATION.md)).
+- **NT visualization & grouping** — neurotransmitter edge groups, custom groups, export/import ([Network Features](docs/visualizations/VisualizePath_Network_Features.md)).
 
-## What's New in v4.4.0
-
-### 🚀 Local FAFB/BANC Dataset Support (RECOMMENDED)
-- **Local-first architecture**: Store FlyWire datasets locally for 10-100x faster access
-- **Mixed mode**: Seamlessly combines local cache + API fallback
-- **Zero API latency**: Instant queries for cached neurons
-- **Automatic caching**: Build your cache once, reuse forever
-
-📖 **[FAFB Integration Guide](docs/FAFB_INTEGRATION.md)** | **[Cache System](docs/core-features/CacheSystem_Guide.md)**
-
-### 🔍 Priority-Based Neuron Search
-- **Smart search order**: bodyId → type → instance with automatic fallback
-- **Flexible input**: Accept both int and string bodyIds: `[123456789]` or `['123456789']`
-- **Regex support**: Use patterns like `['KC.*']`, `['.*PN.*']` across all columns
-- **Consistent matching**: String-based comparison internally for reliability
-
-### 🎨 NT Visualization & Grouping
-- **NT edge groups**: ACH, GABA, GLUT, DA, SER, OCT - select and style by neurotransmitter
-- **Custom groups**: Create and save custom element groups for batch editing
-- **Hover labels**: NT type displayed in edge tooltips with color coding
-- **Export/Import**: Save complete graph states including custom groups and NT settings
-- **Default opacity**: 50% for edges (vs 20%), 100% for nodes (vs 50%) - better visibility
-
-📖 **[Network Features Guide](docs/visualizations/VisualizePath_Network_Features.md)** | **[Interaction Guide](docs/visualizations/VisualizePath_Interaction_Guide.md)**
-
-### 🔐 Authentication Improvements
-- **token_info.txt recommended**: Store all API tokens in one file (NeuPrint, CAVE, NeuronBridge)
-- **Automatic loading**: No need to pass tokens manually in scripts
-- **Secure storage**: Keep credentials out of version control
-
-📖 **[Authentication Setup](docs/INSTALLATION.md#authentication-setup)**
-
-### Previous Updates (v4.3)
-- Weighted Score Ranking for NeuronBridge
-- HomologFinder with hierarchical ConnectivityStatus
-- Polars integration for 10-100x faster operations
-
-📖 **[Full Changelog](docs/README.md#recent-updates-december-2025---v43)**
-
----
-
-## Examples
-
-See the `examples/` folder for complete working examples:
-
-| Example          | Description                         |
-| ---------------- | ----------------------------------- |
-| `basic/`         | Basic pathfinding and visualization |
-| `comparison/`    | Cross-dataset comparison            |
-| `visualization/` | Advanced visualization options      |
+📖 **[Full changelog](docs/README.md#recent-updates)** | **[Agent setup](docs/AGENT_SETUP.md)** — including the low-cost DeepSeek (`deepseek-v4-flash`) Codex configuration
 
 ---
 
 ## Contributing
 
-Contributions are welcome! Please read the contribution guidelines before submitting PRs.
+Contributions are welcome — please open an issue or PR on [GitHub](https://github.com/Swida-Alba/Drosophila-cross-dataset-connectome-analysis).
 
 ## License
 
-MIT License - see [LICENSE](LICENSE) for details.
-
-## Citation
-
-If you use this toolkit in your research, please cite the relevant connectome datasets and this repository.
-
----
+MIT License — see [LICENSE](LICENSE).
 
 ## Support
 
-- **[Documentation](docs/README.md)** - Full documentation
-- **[Examples](examples/)** - Working code examples
-- **[Troubleshooting](docs/TROUBLESHOOTING.md)** - Common issues and solutions
-- **[Issues](https://github.com/Swida-Alba/Drosophila-cross-dataset-connectome-analysis/issues)** - Bug reports and feature requests
+- **[Documentation](docs/README.md)** — full index
+- **[Troubleshooting](docs/TROUBLESHOOTING.md)** — common issues
+- **[Issues](https://github.com/Swida-Alba/Drosophila-cross-dataset-connectome-analysis/issues)** — bug reports and feature requests
 
-## Report an Issue
-
-If you encounter bugs or have feature requests:
-
-1. **Check [Troubleshooting Guide](docs/TROUBLESHOOTING.md)** for common solutions
-2. **Search [existing issues](https://github.com/Swida-Alba/Drosophila-cross-dataset-connectome-analysis/issues)**
-3. **Email the author:** krleng(a*t)pku.edu.cn (replace `(a*t)` with `@`)
-
-When reporting, please include:
-- Python version and OS
-- Full error traceback
-- Minimal code to reproduce the issue
+When reporting an issue, include: Python version and OS, the full error traceback, and minimal code to reproduce.

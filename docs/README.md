@@ -10,7 +10,7 @@ Welcome to the Drosophila Connectome Analysis Toolkit (DROCAT) documentation!
   repository into an agent context.
 - **[Agent Setup for Beginners](./AGENT_SETUP.md)**: Configure Codex with a
   low-cost DeepSeek V4 Flash provider and run the first cached analysis.
-- **[Quick Start](../QUICK_START.md#agent-first-direct-mode-no-ui)**: Use the
+- **[Quick Start](./QUICK_START.md#agent-first-direct-mode-no-ui)**: Use the
   repository-safe direct launcher.
 
 Agent requests should be completion-oriented: ask the agent to run the
@@ -46,7 +46,7 @@ defines this completion contract.
 - **token_info.txt recommended**: Store all API tokens in one file (NeuPrint, CAVE, NeuronBridge)
 - **Automatic loading**: No need to pass tokens manually in scripts
 - **Secure storage**: Keep credentials out of version control
-- **📖 [Authentication Setup](./INSTALLATION.md#authentication-setup)**
+- **📖 [Authentication Setup](./INSTALLATION.md#4-authentication)**
 
 ## 🆕 Recent Updates (December 2025) - V4.3
 
@@ -145,7 +145,7 @@ Advanced technical documentation:
 
 ### For New Users
 1. Start with [Installation Guide](./INSTALLATION.md)
-2. Read [Quick Start Guide](../QUICK_START.md)
+2. Read [Quick Start Guide](./QUICK_START.md)
 3. Explore [Visualization Overview](./visualizations/README.md)
 4. Check [Troubleshooting Guide](./TROUBLESHOOTING.md) if you encounter issues
 
@@ -164,7 +164,7 @@ Advanced technical documentation:
 ### For Developers
 - [Technical Documentation](./technical/README.md) - System architecture
 - [Core Features](./core-features/README.md) - API and algorithms
-- [Archive](./archive/) - Historical changes and fixes
+- [Archive](./archive/DOCUMENTATION_STRUCTURE.md) - Historical changes and fixes
 
 ---
 
@@ -172,7 +172,7 @@ Advanced technical documentation:
 
 ### Getting Started
 - **[Installation](./INSTALLATION.md)**: Setup instructions and requirements
-- **[Quick Start](../QUICK_START.md)**: Get running in 5 minutes
+- **[Quick Start](./QUICK_START.md)**: Get running in 5 minutes
 - **[Troubleshooting](./TROUBLESHOOTING.md)**: Common issues and solutions
 - **[Output Files Reference](./OUTPUT_FILES.md)**: Detailed explanation of all generated files
 - **[FlyWire-FAFB Integration](./FAFB_INTEGRATION.md)**: Setup guide for FAFB dataset
@@ -202,7 +202,7 @@ Advanced technical documentation:
 ### Finding Connections
 | Task                        | Documentation                                                                        |
 | --------------------------- | ------------------------------------------------------------------------------------ |
-| Direct connections          | [Main README](../README.md#finddirectpy)                                             |
+| Direct connections          | [Main README](./core-features/BasicUsage_Guide.md)                                             |
 | Multi-hop paths             | [FindAllPath](./core-features/FindAllPath_Documentation.md)                          |
 | **Compare across datasets** | **[Cross-Dataset Comparison](./core-features/CrossDatasetComparison_Guide.md)**      |
 | **Verify neuron types**     | **[Profile Verification](./core-features/ConnectivityProfileVerification_Guide.md)** |
@@ -244,7 +244,7 @@ Advanced technical documentation:
 2. Visualize as heatmap
 3. Export results
 ```
-**Documentation**: [README](../README.md#basic-functions) → [Heatmap Guide](./visualizations/Heatmap_Guide.md)
+**Documentation**: [README](./core-features/BasicUsage_Guide.md) → [Heatmap Guide](./visualizations/Heatmap_Guide.md)
 
 ### Workflow 2: Pathway Discovery
 ```
@@ -292,7 +292,7 @@ Advanced technical documentation:
 
 ## Archive
 
-Historical documentation and fixes are in the [archive](./archive/) directory:
+Historical documentation and fixes are in the [archive](./archive/DOCUMENTATION_STRUCTURE.md) directory:
 - Bug fixes and corrections
 - Implementation summaries
 - Reorganization history
@@ -324,7 +324,7 @@ Historical documentation and fixes are in the [archive](./archive/) directory:
 ### Documentation Issues
 - Check the specific guide for your task
 - Look in [troubleshooting sections](#)
-- Review [examples directory](../examples/)
+- Review [examples directory](../archive/examples/)
 
 ### Technical Support
 - [GitHub Issues](https://github.com/Swida-Alba/hemibrain-connectomes-analysis/issues)
@@ -357,7 +357,7 @@ Documentation feedback welcome via GitHub Issues or pull requests.
 
 **Essential Reading**:
 - [Installation](./INSTALLATION.md)
-- [Quick Start](../QUICK_START.md)
+- [Quick Start](./QUICK_START.md)
 - [Visualization Overview](./visualizations/README.md)
 
 **Visualization Guides**:

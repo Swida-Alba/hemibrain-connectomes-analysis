@@ -75,7 +75,7 @@ Cross-dataset comparison analyzes the same neural circuit query across multiple 
 
 ### Datasets Supported
 
-- **NeuPrint datasets**: `hemibrain:v1.2.1`, `male-cns:v0.9`, `optic-lobe:v1.0`, etc.
+- **NeuPrint datasets**: `hemibrain:v1.2.1`, `male-cns:v0.9`, `optic-lobe:v1.0.1`, etc.
 - **FlyWire datasets**: `flywire_FAFB_v783`, `flywire_BANC_v626` (local parquet files)
 
 ---
@@ -866,4 +866,4 @@ text_report = analyzer.generate_report()
 - [Cache System Guide](CacheSystem_Guide.md) - Improve query performance
 - [Path Finding Documentation](FindAllPath_Documentation.md) - Understand path algorithms
 - [FlyWire Integration](../FAFB_INTEGRATION.md) - Set up FlyWire datasets
-- [Example Script](../../examples/Example_InterDatasetComparison.py) - Full working example
+- [Example Script](../../archive/examples/comparison/Example_InterDatasetComparison.py) - Full working example

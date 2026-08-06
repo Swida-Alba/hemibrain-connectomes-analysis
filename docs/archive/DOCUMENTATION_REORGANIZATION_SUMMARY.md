@@ -218,21 +218,21 @@ Add clear navigation section:
 ## Documentation
 
 ### Quick Start
-- [README](README.md) - This file
+- [README](../README.md) - This file
 - [Installation Guide](#installation)
 
 ### Core Guides
-- [Cache System Guide](docs/CacheSystem_Guide.md)
-- [PathFinding Guide](docs/PathFinding_Guide.md)
-- [Forward-Only Mode Guide](docs/ForwardOnly_Guide.md)
-- [Configuration Guide](docs/Configuration_Guide.md)
+- [Cache System Guide](../core-features/CacheSystem_Guide.md)
+- [PathFinding Guide](../core-features/PathFinding_Methods.md)
+- [Forward-Only Mode Guide](../core-features/ForwardOnly_Guide.md)
+- Configuration Guide
 
 ### Advanced Topics
-- [Parallel Processing](docs/ParallelProcessing_Guide.md)
-- [Visualization](docs/Visualization_Guide.md)
+- Parallel Processing
+- [Visualization](../visualizations/README.md)
 
 ### Reference
-- [Historical Fixes](docs/archive/) - Bug fixes and corrections
+- [Historical Fixes](DOCUMENTATION_STRUCTURE.md) - Bug fixes and corrections
 ```
 
 ### Phase 4: Final Cleanup

@@ -60,9 +60,9 @@ package requirements are in the setup.py (pandas should be 1.5.1)
    - Import errors
 
 7. **Documentation Links**
-   - [INSTALLATION.md](INSTALLATION.md) - Detailed guide
-   - [DIALOG_PERFORMANCE_GUIDE.md](DIALOG_PERFORMANCE_GUIDE.md) - GUI optimization
-   - [DEPENDENCY_SUMMARY.md](DEPENDENCY_SUMMARY.md) - Dependencies overview
+   - [INSTALLATION.md](../INSTALLATION.md) - Detailed guide
+   - [DIALOG_PERFORMANCE_GUIDE.md](../technical/DIALOG_PERFORMANCE_GUIDE.md) - GUI optimization
+   - [DEPENDENCY_SUMMARY.md](../technical/DEPENDENCY_SUMMARY.md) - Dependencies overview
 
 ### Benefits
 

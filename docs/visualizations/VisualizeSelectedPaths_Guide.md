@@ -30,7 +30,7 @@ Your path data should be an edge list with these columns:
 - Sheets:
   - `path_type` - Type-level connections (neuron types)
   - `path_bodyId` - BodyId-level connections (individual neurons)
-- Example: [`examples/example_paths.csv`](../../examples/example_paths.csv)
+- Example: [`examples/example_paths.csv`](../../archive/examples/data/example_paths.csv)
 
 **Simple edge-list files**:
 ```csv
@@ -50,10 +50,10 @@ MBON03,DAN_a,50,0.4,0.7
 ```
 
 **Example files provided**:
-- [`examples/example_neuron_network.csv`](../../examples/example_neuron_network.csv) - Multi-layer pathways
-- [`examples/example_bodyid_network.csv`](../../examples/example_bodyid_network.csv) - BodyId-level network
-- [`examples/simple_network_data.csv`](../../examples/simple_network_data.csv) - Minimal format
-- [`examples/example_paths.csv`](../../examples/example_paths.csv) - Path analysis results
+- [`examples/example_neuron_network.csv`](../../archive/examples/data/example_neuron_network.csv) - Multi-layer pathways
+- [`examples/example_bodyid_network.csv`](../../archive/examples/data/example_bodyid_network.csv) - BodyId-level network
+- [`examples/simple_network_data.csv`](../../archive/examples/data/simple_network_data.csv) - Minimal format
+- [`examples/example_paths.csv`](../../archive/examples/data/example_paths.csv) - Path analysis results
 
 **Filtered subset example**:
 ```python
@@ -685,6 +685,6 @@ print(df[['path_block', 'weights']].head())
 
 ## See Also
 
-- [FindAllPath Documentation](./FindAllPath_Documentation.md)
-- [Network Visualization Guide](./Network_Visualization_Guide.md)
-- [Example Scripts](../Example_VisualizeSelectedPaths.py)
+- [FindAllPath Documentation](../core-features/FindAllPath_Documentation.md)
+- [Network Visualization Guide](Network_Guide.md)
+- [Example Scripts](../../archive/examples/basic/Example_VisualizeSelectedPaths.py)

@@ -147,7 +147,7 @@ The gallery reference (`gallery.html`) provides: light canvas `#f7f8fa`, white s
 | B6 | Medium | `ui/tabs/settings.py` | "Default Output Directory" field was decorative (value never read or saved) | Misleading setting | Persisted to `ui/local_config.json`; `dir_input()` reads it; Save/Reset buttons wired |
 | B7 | Medium | `ui/runner.py` `_scan_output_files` | Only reports files modified in the last 60 minutes | Long runs (>1h) show "no output files" | Window widened to 24h |
 | B8 | Low | `tests/ui/test_ui_e2e.py` | Asserted `"dark" in html` | Test would fail after the light-theme redesign | Now asserts the new theme marker (`drocat-cobalt`) |
-| B9 | Low | `run_ui.sh` / `DROCAT.command` | If the `drocat` conda env was missing, launcher silently fell back to system Python → `ModuleNotFoundError` | Broken first-run experience | `run_ui.sh` now creates/activates the env and installs requirements automatically; `.command` exits with a clear install instruction when conda is absent |
+| B9 | Low | `run_DROCAT.command` | If the `drocat` conda env was missing, launcher silently fell back to system Python → `ModuleNotFoundError` | Broken first-run experience | `run_DROCAT.command` now creates/activates the env and installs requirements automatically; `.command` exits with a clear install instruction when conda is absent |
 | B10 | Medium | `ui/runner.py` | Child Python inherited block-buffered stdout on pipes | Execution log appeared in large delayed chunks instead of live | Subprocess now runs with `python -u` and `PYTHONUNBUFFERED=1` |
 | B11 | **Critical** | `src/comparison/profile_comparator.py` | Profiling & homolog tools unconditionally called `build_connection_cache()` for the WHOLE dataset before doing their work | First real run on a partially-cached dataset tried to fetch connections for ~120k neurons (multi-hour job); both tools timed out at 20 min in E2E | Added opt-in `ensure_cache_complete` (default `False`) to `ConnectivityProfileComparer` and `HomologFinder`; all 5 full-cache call sites guarded; UI exposes a "Pre-build Full Dataset Cache" checkbox. Profiling went from >1200s to 15s, homologs from >1200s to 59s |
 | B12 | High | `vispath-subproject/src/vispath_pkg/vispath.py` + `src/coana.py` | FindAllPath saves the path column as `path`, but `VisualizePath` requires `path_block`; `coana` only renamed it in-memory for its own plots | PlotPath tool failed with "Invalid data format" on real FindAllPath CSVs | `VisualizePath` now accepts `path`/`path_str` as aliases for `path_block` on load |
@@ -200,7 +200,7 @@ Requirement: "integrated scripts (also implemented in the UI) must work independ
 - All 33 backend modules import under the `drocat` conda env.
 - Token bootstrap: `token_info.txt` template + `token_info_local.txt` override; `TokenManager` and `DatasetService` both honor it.
 - First-use dataset download: `FindNeuronConnection._ensure_complete_dataset()` downloads the full neuron table once (needs token + network), then everything else runs from cache.
-- `DROCAT.command` and `install.*` create the `drocat` conda env and install requirements + editable package.
+- `run_DROCAT.command` and `archive/install/install.*` create the `drocat` conda env and install requirements + editable package.
 
 ### 7.2 Fixed in this pass
 
@@ -209,8 +209,8 @@ Requirement: "integrated scripts (also implemented in the UI) must work independ
 | UI PlotPath tool couldn't import `vispath_pkg` in the generated subprocess | Runner now inserts `vispath-subproject/src` into `sys.path` |
 | UI PlotPath sent invalid constructor params and called a non-existent method | Tab rewritten (file upload + valid params), registry calls `vp.visualize()` |
 | Homologs tab sent a nonexistent constructor kwarg | Param renamed |
-| `run_ui.sh` fell back to system Python when env missing | Self-healing launcher (creates env + installs deps) |
-| `DROCAT.command` proceeded with system Python when conda missing | Clear error + exit with install instructions |
+| `run_DROCAT.command` fell back to system Python when env missing | Self-healing launcher (creates env + installs deps) |
+| `run_DROCAT.command` proceeded with system Python when conda missing | Clear error + exit with install instructions |
 | Cache-disabled runs crashed on `pl.DataFrame.empty` | `_is_empty_df()` helper |
 
 ### 7.3 Remaining first-run caveats (by design)
@@ -300,4 +300,4 @@ Results (outputs in `/tmp/drocat_e2e/`, machine-readable `results.json`):
 
 **UI redesign:** `ui/app.py`, `ui/config.py`, `ui/runner.py`, `ui/dataset_service.py`, `ui/components/common.py`, `ui/components/output_panel.py`, `ui/tabs/*.py` (all 10), `tests/ui/test_ui_e2e.py`
 
-**Bug fixes (backend/first-run):** `src/coana.py` (empty-frame helper), `run_ui.sh`, `DROCAT.command`, `.gitignore`
+**Bug fixes (backend/first-run):** `src/coana.py` (empty-frame helper), `run_DROCAT.command`, `.gitignore`

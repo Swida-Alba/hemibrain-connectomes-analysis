@@ -111,7 +111,7 @@ Outputs are saved in a timestamped folder named after the query:
 #### Results Subfolder (`results/`)
 *   **`bodyid_results.csv`**: The primary results file. Contains pairwise comparison scores between source neurons and candidate target neurons.
     *   Columns: `source_bodyId`, `target_bodyId`, `source_type`, `target_type`
-    *   Similarity metrics: `jaccard`, `cosine`, `rank_corr`, `rank_corr_union` (see [ScoreCalculation_Guide](core-features/ScoreCalculation_Guide.md#similarity-metrics))
+    *   Similarity metrics: `jaccard`, `cosine`, `rank_corr`, `rank_corr_union` (see [ScoreCalculation_Guide](core-features/ScoreCalculation_Guide.md#neuronbridge-matching-scores))
     *   `combined_score`, `confidence`, `rank`
 *   **`type_summary.csv`**: Aggregated results at the neuron type level. Shows the best candidate type for each source type.
 *   **`top_candidates.csv`**: Top N candidates for quick reference.
@@ -323,7 +323,7 @@ Outputs are saved in a timestamped folder: `profiling_{dataset}_{query_name}_{ti
 #### Type-Level Results (`type_level/`)
 *   **`{direction}_jaccard.csv`**: Jaccard similarity matrix between types.
 *   **`{direction}_cosine.csv`**: Cosine similarity matrix.
-*   **`{direction}_rank_corr.csv`**: Spearman rank correlation matrix (see [ScoreCalculation_Guide](core-features/ScoreCalculation_Guide.md#similarity-metrics)).
+*   **`{direction}_rank_corr.csv`**: Spearman rank correlation matrix (see [ScoreCalculation_Guide](core-features/ScoreCalculation_Guide.md#neuronbridge-matching-scores)).
 *   **`{direction}_rank_corr_union.csv`**: Normalized rank correlation using union of partners.
 *   **`{direction}_*_heatmap.png`**: Corresponding heatmap visualizations.
 *   Direction options: `upstream`, `downstream`, `combined`.

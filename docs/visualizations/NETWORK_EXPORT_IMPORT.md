@@ -580,7 +580,7 @@ Note: These save the HTML page, not the JSON export. Use export buttons for prop
 ## Related Documentation
 
 - [NETWORK_EDGE_FILTER.md](NETWORK_EDGE_FILTER.md) - Edge filtering system (saved in exports)
-- [NETWORK_INTERACTIVE_EDITING.md](NETWORK_INTERACTIVE_EDITING.md) - Manual graph editing
+- [NETWORK_INTERACTIVE_EDITING.md](Interactive_Network_Dragging_Guide.md) - Manual graph editing
 - [CUSTOM_HEATMAP_ORDERING.md](CUSTOM_HEATMAP_ORDERING.md) - Similar ordering concepts
 - [VisualizePath Guide](../README.md) - Main documentation
 

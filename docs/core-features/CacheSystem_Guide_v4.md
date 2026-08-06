@@ -34,7 +34,7 @@ fc = FindNeuronConnection(
 )
 
 fc.InitializeNeuronInfo()
-fc.FindDirectConnection()  # Or FindAllPath()
+fc.FindDirectConnections()  # Or FindAllPath()
 ```
 
 ### Performance Results
@@ -405,7 +405,7 @@ The module-level `_FNC_CACHE` is shared within a Python session:
 ```python
 # Script 1 loads cache
 fc1 = FindNeuronConnection(dataset='hemibrain:v1.2.1', use_cache=True)
-fc1.FindDirectConnection()  # Loads from disk
+fc1.FindDirectConnections()  # Loads from disk
 
 # Script 2 (same session) reuses cache
 fc2 = FindNeuronConnection(dataset='hemibrain:v1.2.1', use_cache=True)
@@ -430,7 +430,7 @@ fc2.FindAllPath()  # Instant from memory
 
 ## See Also
 
-- [Cache Enhancements (v4.1.7)](../CACHE_ENHANCEMENTS.md) - In-memory caching details
+- [Cache Enhancements (v4.1.7)](CacheSystem_Guide.md) - In-memory caching details
 - [Cache v4 Complete](./CacheSystem_v4_Complete.md) - Full v4.0 implementation
 - [Build Scripts](../../src/build_connection_cache.py) - Cache building utilities
 

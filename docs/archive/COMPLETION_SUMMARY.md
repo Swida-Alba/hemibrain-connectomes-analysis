@@ -261,9 +261,9 @@ python Example_SimpleEdgeList.py
 ```
 
 ### 2. Read Documentation
-- Start: [QUICKSTART_SIMPLE_FORMAT.md](QUICKSTART_SIMPLE_FORMAT.md)
-- Details: [SIMPLE_INPUT_FORMAT.md](SIMPLE_INPUT_FORMAT.md)
-- Examples: [Example_SimpleEdgeList.py](Example_SimpleEdgeList.py)
+- Start: [QUICKSTART_SIMPLE_FORMAT.md](../visualizations/SIMPLE_INPUT_FORMAT.md)
+- Details: [SIMPLE_INPUT_FORMAT.md](../visualizations/SIMPLE_INPUT_FORMAT.md)
+- Examples: [Example_SimpleEdgeList.py](../../archive/examples/visualization/input_formats/Example_SimpleEdgeList.py)
 
 ### 3. Use With Your Data
 ```python
@@ -335,9 +335,9 @@ ls -R output_example*/
 ```
 
 ### Documentation Links
-- [Quick Start](QUICKSTART_SIMPLE_FORMAT.md)
-- [Format Guide](SIMPLE_INPUT_FORMAT.md)
-- [Implementation](SIMPLE_FORMAT_IMPLEMENTATION.md)
+- [Quick Start](../visualizations/SIMPLE_INPUT_FORMAT.md)
+- [Format Guide](../visualizations/SIMPLE_INPUT_FORMAT.md)
+- [Implementation](../visualizations/SIMPLE_FORMAT_IMPLEMENTATION.md)
 - [Files Summary](FILES_SUMMARY.md)
 
 ---

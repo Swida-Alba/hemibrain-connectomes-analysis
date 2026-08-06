@@ -29,7 +29,7 @@ Your edge list should contain these columns:
 **From FindAllPath results**:
 - Path: Output from `scripts/FindPath.py`
 - Excel: `connection_data/*/allpaths_*/path_info.xlsx` (sheets: 'path_type' or 'path_bodyId')
-- Example: [`examples/example_paths.csv`](../../examples/example_paths.csv)
+- Example: [`examples/example_paths.csv`](../../archive/examples/data/example_paths.csv)
 
 **Simple edge-list formats**:
 ```csv
@@ -51,9 +51,9 @@ KC_beta,MBON03,12
 ```
 
 **Example files provided**:
-- [`examples/example_neuron_network.csv`](../../examples/example_neuron_network.csv) - Simple neuron network
-- [`examples/example_bodyid_network.csv`](../../examples/example_bodyid_network.csv) - BodyId-level network
-- [`examples/simple_network_data.csv`](../../examples/simple_network_data.csv) - Minimal 3-column format
+- [`examples/example_neuron_network.csv`](../../archive/examples/data/example_neuron_network.csv) - Simple neuron network
+- [`examples/example_bodyid_network.csv`](../../archive/examples/data/example_bodyid_network.csv) - BodyId-level network
+- [`examples/simple_network_data.csv`](../../archive/examples/data/simple_network_data.csv) - Minimal 3-column format
 
 **From Custom Analysis**:
 ```python
@@ -554,10 +554,10 @@ vp = VisualizePath(
 
 ## Related Documentation
 
-- [VisualizePath Quick Reference](../VisualizePath_QuickRef.md)
-- [Custom Colors Guide](../CUSTOM_COLORS_GUIDE.md)
-- [Enhanced Edge-List Format](../Enhanced_EdgeList_Format.md)
-- [Layout Persistence](../LAYOUT_PERSISTENCE_FEATURE.md)
+- [VisualizePath Quick Reference](./VisualizePath_QuickRef.md)
+- [Custom Colors Guide](./CUSTOM_COLORS_GUIDE.md)
+- [Enhanced Edge-List Format](./Enhanced_EdgeList_Format.md)
+- [Layout Persistence](./LAYOUT_PERSISTENCE_FEATURE.md)
 
 ## New Feature: Reciprocal Edge Offset & Mode Toggle (Nov 2025)
 

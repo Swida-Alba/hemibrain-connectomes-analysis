@@ -92,7 +92,7 @@ fc = FindNeuronConnection(
 
 # Run analysis
 fc.InitializeNeuronInfo()
-fc.FindDirectConnection()
+fc.FindDirectConnections()
 ```
 
 ### Example Script
