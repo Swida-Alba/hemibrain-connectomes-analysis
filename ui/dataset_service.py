@@ -59,9 +59,10 @@ def dataset_to_folder(dataset: str) -> str:
 def is_flywire_dataset(dataset: str) -> bool:
     """Return whether *dataset* is a FlyWire identifier.
 
-    The NeuPrint server also exposes a dataset named ``banc:v888``.  Do not
-    classify that identifier as the local FlyWire BANC release merely because
-    it contains the word ``banc``.
+    The NeuPrint server metadata lists a hidden dataset named ``banc:v888``
+    that is not queryable through the API (BANC is served via FlyWire/
+    Codex).  Do not classify that identifier as the local FlyWire BANC
+    release merely because it contains the word ``banc``.
     """
     normalized = dataset.strip().lower()
     return normalized.startswith("flywire_") or "fafb" in normalized
@@ -81,7 +82,6 @@ class DatasetService:
         "manc:v1.2.3",
         "manc:v1.2.1",
         "manc:v1.0",
-        "banc:v888",
         "fib19:v1.0",
         "mushroombody",
     ]
@@ -196,9 +196,15 @@ class DatasetService:
             if r.status_code == 200:
                 data = r.json()
                 if isinstance(data, dict):
-                    # Store full server metadata
+                    # Store full server metadata, excluding datasets the
+                    # server marks as hidden (e.g. banc:v888): they are
+                    # listed but not queryable through the API.
                     self._server_datasets = data
-                    available = sorted(data.keys())
+                    available = sorted(
+                        name for name, meta in data.items()
+                        if not (isinstance(meta, dict)
+                                and str(meta.get("hidden", "")).lower() == "true")
+                    )
                     self._available_neuprint = available
                     self._last_fetch_time = time.time()
                     return available

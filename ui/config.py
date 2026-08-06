@@ -57,7 +57,6 @@ DATASETS = [
     "manc:v1.2.3",
     "manc:v1.2.1",
     "manc:v1.0",
-    "banc:v888",
     "fib19:v1.0",
     "mushroombody",
     "flywire_FAFB_v783",
@@ -76,7 +75,6 @@ NEUPRINT_DATASETS = [
     "manc:v1.2.3",
     "manc:v1.2.1",
     "manc:v1.0",
-    "banc:v888",
     "fib19:v1.0",
     "mushroombody",
 ]
