@@ -5212,6 +5212,9 @@ def EnrichConnectionTable(conn_table, traversal_probability_threshold=0, dataset
     if engine == 'polars' or (engine == 'auto' and not isinstance(conn_table, pd.DataFrame)):
         if not isinstance(conn_table, pl.DataFrame):
             conn_table = pl.from_pandas(conn_table)
+        # Empty input: return engine-typed empty outputs (see the pandas guard below)
+        if conn_table.is_empty() or conn_table.width == 0:
+            return pl.DataFrame(), pl.DataFrame(), None
         return EnrichConnectionTablePolars(
             conn_table,
             traversal_probability_threshold=traversal_probability_threshold,
@@ -5225,6 +5228,11 @@ def EnrichConnectionTable(conn_table, traversal_probability_threshold=0, dataset
         )
     if engine == 'pandas' and not isinstance(conn_table, pd.DataFrame):
         conn_table = conn_table.to_pandas()
+    # Empty input: return engine-typed empty outputs instead of crashing on
+    # missing columns / dtype-driven operations (both engines used to raise
+    # KeyError/ColumnNotFound/InvalidOperation for empty or column-less tables).
+    if conn_table.shape[0] == 0 or conn_table.shape[1] == 0:
+        return pd.DataFrame(), pd.DataFrame(), None
     conn_df = conn_table.copy()
     
     # Determine grouping columns (use custom_group if available, otherwise type)
@@ -5269,7 +5277,16 @@ def EnrichConnectionTable(conn_table, traversal_probability_threshold=0, dataset
             if 'flywire' in dataset.lower() or 'fafb' in dataset.lower():
                 ndf_complete = pd.read_csv(dataset_path, header=0, index_col=None, dtype={'bodyId': str}, low_memory=False)
             else:
-                ndf_complete = pd.read_csv(dataset_path, header=0, index_col=0, low_memory=False)
+                # Read robustly instead of hard-coding index_col=0: the
+                # coana-saved CSVs carry a leading unnamed index column, but
+                # standard CSVs (bodyId as the first data column) must work
+                # too - and so must legacy files written with bodyId as the
+                # index (the Polars engine reads all of these fine).
+                ndf_complete = pd.read_csv(dataset_path, header=0, index_col=None, low_memory=False)
+                if len(ndf_complete.columns) and ndf_complete.columns[0].startswith('Unnamed:'):
+                    ndf_complete = ndf_complete.drop(columns=[ndf_complete.columns[0]])
+                if 'bodyId' not in ndf_complete.columns and ndf_complete.index.name == 'bodyId':
+                    ndf_complete = ndf_complete.reset_index()
             
             # Ensure bodyId column is string for comparison
             if 'bodyId' in ndf_complete.columns:
@@ -5331,7 +5348,13 @@ def EnrichConnectionTable(conn_table, traversal_probability_threshold=0, dataset
                 #      print(f"DEBUG: custom_group sample: {ndf_complete['custom_group'].unique()[:5]}")
                 
             bodyIds_needed = conn_df.bodyId_post.astype(str).unique().tolist()
-            df_post = ndf_complete[ndf_complete['bodyId'].isin(bodyIds_needed)][['bodyId', 'post']].copy()
+            if 'post' in ndf_complete.columns:
+                df_post = ndf_complete[ndf_complete['bodyId'].isin(bodyIds_needed)][['bodyId', 'post']].copy()
+            else:
+                # No post counts in the local table: leave post missing so the
+                # merge below produces NaN -> filled with 0, matching the
+                # Polars engine's graceful handling.
+                df_post = pd.DataFrame(columns=['bodyId', 'post'])
     
     if not use_local:
         # Fallback to API call
@@ -5376,6 +5399,12 @@ def EnrichConnectionTable(conn_table, traversal_probability_threshold=0, dataset
     post_info.columns = ['bodyId_post','post'];
     
     # Handle case where type_pre/type_post columns already exist (from cache enrichment)
+    # null/empty types are temporarily marked 'Unknown' for the type_map
+    # lookup below; the original null-ness is remembered so that untyped
+    # neurons can be grouped per-bodyId at the end (Polars std_label
+    # semantics) instead of lumping them into one mixed 'Unknown' group.
+    was_null_pre = conn_df['type_pre'].isnull() | (conn_df['type_pre'] == '') if 'type_pre' in conn_df.columns else pd.Series(True, index=conn_df.index)
+    was_null_post = conn_df['type_post'].isnull() | (conn_df['type_post'] == '') if 'type_post' in conn_df.columns else pd.Series(True, index=conn_df.index)
     if 'type_pre' in conn_df.columns:
         conn_df.loc[conn_df.type_pre.isnull(),'type_pre'] = 'Unknown';
     else:
@@ -5455,6 +5484,18 @@ def EnrichConnectionTable(conn_table, traversal_probability_threshold=0, dataset
         conn_df.loc[conn_df.custom_group_pre.isnull(),'custom_group_pre'] = conn_df.loc[conn_df.custom_group_pre.isnull(),'type_pre']
     if 'custom_group_post' in conn_df.columns:
         conn_df.loc[conn_df.custom_group_post.isnull(),'custom_group_post'] = conn_df.loc[conn_df.custom_group_post.isnull(),'type_post']
+
+    # Untyped neurons group by their bodyId (Polars std_label semantics): a
+    # null/empty type that stayed 'Unknown' after the type_map lookup is
+    # replaced by the bodyId, so untyped neurons form per-bodyId groups
+    # instead of one mixed 'Unknown' group. Pre-existing 'Unknown' values in
+    # the input are left alone (the Polars engine keeps them as a type).
+    if was_null_pre.any():
+        mask_pre = was_null_pre & conn_df['type_pre'].isin(['Unknown', ''])
+        conn_df.loc[mask_pre, 'type_pre'] = conn_df.loc[mask_pre, 'bodyId_pre'].astype(str)
+    if was_null_post.any():
+        mask_post = was_null_post & conn_df['type_post'].isin(['Unknown', ''])
+        conn_df.loc[mask_post, 'type_post'] = conn_df.loc[mask_post, 'bodyId_post'].astype(str)
     
     # Ensure bodyId columns are strings for merging to avoid warnings
     conn_df['bodyId_post'] = conn_df['bodyId_post'].astype(str)

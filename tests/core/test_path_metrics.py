@@ -375,6 +375,108 @@ class TestEnrichmentEngineParity:
         _, ct, _ = EnrichConnectionTable(pl.from_pandas(conn), traversal_probability_threshold=0, engine='pandas')
         assert isinstance(ct, pd.DataFrame)
 
+    def test_empty_inputs_return_typed_empty_outputs(self):
+        """Regression: both engines used to raise KeyError/ColumnNotFound/
+        InvalidOperation for empty or column-less tables."""
+        from statvis import EnrichConnectionTable
+        for frame in (pd.DataFrame(),
+                      pl.DataFrame(),
+                      pd.DataFrame(columns=['bodyId_pre', 'bodyId_post', 'type_pre', 'type_post', 'weight']),
+                      pl.DataFrame(schema={'bodyId_pre': pl.Utf8, 'bodyId_post': pl.Utf8, 'weight': pl.Int64})):
+            conn_df, conn_type, conn_group = EnrichConnectionTable(frame, traversal_probability_threshold=0)
+            assert len(conn_df) == 0 and len(conn_type) == 0 and conn_group is None
+
+    def test_local_csv_reads_are_robust(self, tmp_path):
+        """Regression: the pandas engine hard-coded index_col=0 and crashed on
+        standard (bodyId-first) CSVs with KeyError 'bodyId', and on CSVs
+        without a 'post' column. All three formats must work like Polars."""
+        from statvis import EnrichConnectionTable
+        neurons = pd.DataFrame({'bodyId': ['1', '2', '10', '11'],
+                                'type': ['A', 'A', 'X', 'X'], 'post': [100, 90, 300, 280]})
+        conn = pd.DataFrame({'bodyId_pre': [1, 2], 'bodyId_post': [10, 11],
+                             'type_pre': ['A', 'A'], 'type_post': ['X', 'X'],
+                             'weight': [5, 4], 'connection_ratio': [5 / 30, 4 / 30]})
+        for name, write in [('ds_std', lambda p: neurons.to_csv(p, index=False)),
+                            ('ds_legacy', lambda p: neurons.set_index('bodyId').to_csv(p)),
+                            ('ds_nopost', lambda p: neurons.drop(columns=['post']).to_csv(p, index=False))]:
+            d = tmp_path / 'datasets' / name
+            d.mkdir(parents=True, exist_ok=True)
+            write(d / f'{name}_allneurons_neuron_df.csv')
+            conn_df, _, _ = EnrichConnectionTable(conn.copy(), traversal_probability_threshold=0,
+                                                  dataset=f'{name.replace("_", ":")}', script_path=str(tmp_path))
+            # post: real value for std/legacy, 0 for nopost (polars parity)
+            expected = 0 if name == 'ds_nopost' else 300
+            assert conn_df['post'].iloc[0] == expected, name
+
+    def test_untyped_neurons_group_by_bodyid_in_both_engines(self):
+        """Untyped neurons (null/empty type) must group per-bodyId in BOTH
+        engines (Polars std_label semantics) - never lumped into one mixed
+        'Unknown' group (regression of the pandas engine's old behavior)."""
+        from statvis import EnrichConnectionTable as pd_enrich
+        from statvis import EnrichConnectionTablePolars
+        conn = pd.DataFrame({'bodyId_pre': [1, 2], 'bodyId_post': [10, 11],
+                             'type_pre': [None, None], 'type_post': ['X', 'X'],
+                             'weight': [5, 4], 'connection_ratio': [5 / 30, 4 / 30]})
+        _, ct_pd, _ = pd_enrich(conn.copy(), traversal_probability_threshold=0)
+        _, ct_pl, _ = EnrichConnectionTablePolars(pl.from_pandas(conn), traversal_probability_threshold=0)
+        pairs_pd = sorted(zip(list(ct_pd['type_pre']), list(ct_pd['type_post'])))
+        pairs_pl = sorted(zip(list(ct_pl['type_pre']), list(ct_pl['type_post'])))
+        assert pairs_pd == pairs_pl == [('1', 'X'), ('2', 'X')]
+        assert 'Unknown' not in list(ct_pd['type_pre'])
+
+    def test_pre_existing_unknown_type_is_preserved(self):
+        """A literal 'Unknown' type in the input is a real type value and is
+        preserved by both engines (only null/empty cells become per-bodyId
+        groups)."""
+        from statvis import EnrichConnectionTable as pd_enrich
+        from statvis import EnrichConnectionTablePolars
+        conn = pd.DataFrame({'bodyId_pre': [1, 2], 'bodyId_post': [10, 11],
+                             'type_pre': ['Unknown', 'Unknown'], 'type_post': ['X', 'X'],
+                             'weight': [5, 4], 'connection_ratio': [5 / 30, 4 / 30]})
+        _, ct_pd, _ = pd_enrich(conn.copy(), traversal_probability_threshold=0)
+        _, ct_pl, _ = EnrichConnectionTablePolars(pl.from_pandas(conn), traversal_probability_threshold=0)
+        pairs_pd = sorted(zip(list(ct_pd['type_pre']), list(ct_pd['type_post'])))
+        pairs_pl = sorted(zip(list(ct_pl['type_pre']), list(ct_pl['type_post'])))
+        assert pairs_pd == pairs_pl == [('Unknown', 'X')]
+
+    def test_mixed_typed_and_untyped_parity(self):
+        from statvis import EnrichConnectionTable as pd_enrich
+        from statvis import EnrichConnectionTablePolars
+        conn = pd.DataFrame({'bodyId_pre': [1, 2, 3], 'bodyId_post': [10, 11, 12],
+                             'type_pre': [None, 'A', 'A'], 'type_post': ['X', 'X', 'Y'],
+                             'weight': [5, 4, 9], 'connection_ratio': [5 / 30, 4 / 30, 9 / 50]})
+        _, ct_pd, _ = pd_enrich(conn.copy(), traversal_probability_threshold=0)
+        _, ct_pl, _ = EnrichConnectionTablePolars(pl.from_pandas(conn), traversal_probability_threshold=0)
+        pairs_pd = sorted(zip(list(ct_pd['type_pre']), list(ct_pd['type_post'])))
+        pairs_pl = sorted(zip(list(ct_pl['type_pre']), list(ct_pl['type_post'])))
+        assert pairs_pd == pairs_pl == [('1', 'X'), ('A', 'X'), ('A', 'Y')]
+
+    def test_label_mapper_parity(self, tmp_path):
+        """With a real LabelMapper + local dataset, both engines must produce
+        the same mapped type-level output."""
+        from statvis import EnrichConnectionTable as pd_enrich
+        from statvis import EnrichConnectionTablePolars
+        from comparison.label_mapper import LabelMapper
+        d = tmp_path / 'datasets' / 'ds_map'
+        d.mkdir(parents=True, exist_ok=True)
+        pd.DataFrame({'bodyId': [1, 2, 10, 11, 20], 'type': ['A', 'A', 'X', 'X', 'M'],
+                      'post': [100, 90, 300, 280, 500]}).to_csv(
+            d / 'ds_map_allneurons_neuron_df.csv', index=False)
+        lm = LabelMapper(source_mapping_dict={'ds:map': [[1, 2]]},
+                         target_mapping_dict={'ds:map': [[10, 11]]},
+                         intermediate_mapping_dict={'ds:map': [[20]]},
+                         source_labels=['SRC'], target_labels=['TGT'], intermediate_labels=['MID'])
+        conn = pd.DataFrame({'bodyId_pre': [1, 2, 20], 'bodyId_post': [10, 11, 10],
+                             'type_pre': ['A', 'A', 'M'], 'type_post': ['X', 'X', 'X'],
+                             'weight': [5, 4, 7], 'connection_ratio': [5 / 30, 4 / 30, 7 / 30]})
+        _, ct_pd, _ = pd_enrich(conn.copy(), traversal_probability_threshold=0,
+                                dataset='ds:map', script_path=str(tmp_path), label_mapper=lm)
+        _, ct_pl, _ = EnrichConnectionTablePolars(pl.from_pandas(conn), traversal_probability_threshold=0,
+                                                  dataset='ds:map', script_path=str(tmp_path), label_mapper=lm)
+        pairs_pd = sorted(zip(ct_pd['type_pre'], ct_pd['type_post']))
+        pairs_pl = sorted(zip(ct_pl['type_pre'].to_list(), ct_pl['type_post'].to_list()))
+        assert pairs_pd == pairs_pl == [('MID', 'TGT'), ('SRC', 'TGT')]
+
 
 # ---------------------------------------------------------------------------
 # Unified builders (build_path_dataframe_from_paths / process_paths_streaming)
