@@ -115,15 +115,18 @@ class OutputPanel:
 
             # Log console
             ui.label("Execution Log").classes("drocat-mini-label")
-            # Keep the log as a plain, light console (pre-redesign styling that
-            # streams reliably); only the max height is capped.
-            with ui.element("div").classes("w-full").style(
-                "resize: vertical; overflow: hidden; min-height: 100px; max-height: 600px;"
-            ):
+            # The log window is pointer-resizable (drag the bottom edge): the
+            # wrapper owns the CSS resize handle and carries a definite
+            # initial height, while the inner log fills it (h-full) so it
+            # tracks every drag. Kept as a plain, light console that streams
+            # reliably; only the height range is capped.
+            self.log_wrapper = ui.element("div").classes("w-full").style(
+                "resize: vertical; overflow: hidden; height: 200px; min-height: 100px; max-height: 600px;"
+            )
+            with self.log_wrapper:
                 self.log_area = ui.log(max_lines=500).classes(
-                    "w-full font-mono text-xs"
-                ).style("height: 200px;")
-
+                    "w-full h-full font-mono text-xs"
+                ).style("overflow-y: auto; word-break: break-word;")
             ui.separator()
             ui.label("Output Files").classes("drocat-mini-label")
             self.files_container = ui.column().classes("w-full gap-2")

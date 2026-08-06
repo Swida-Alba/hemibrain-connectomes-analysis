@@ -1010,6 +1010,36 @@ class TestComponents:
         assert len(children) == 5
         assert children[4].text == "done"
 
+    def test_output_panel_log_is_pointer_resizable(self):
+        """The execution-log window must be drag-resizable: the wrapper owns
+        the CSS resize handle with a definite height range, and the inner log
+        fills the wrapper (h-full) plus scrolls, so dragging actually resizes
+        the visible console instead of leaving a dead handle."""
+        from nicegui import Client
+        from nicegui.page import page
+        from ui.components.output_panel import OutputPanel
+
+        client = Client(page("/output-panel-resize-test"))
+        with client:
+            panel = OutputPanel("Test")
+            panel.create()
+
+        wrapper_style = panel.log_wrapper._style
+        assert wrapper_style.get("resize") == "vertical"
+        assert wrapper_style.get("overflow") == "hidden"  # required for resize
+        assert wrapper_style.get("height") == "200px"     # definite start height
+        assert wrapper_style.get("min-height") == "100px"
+        assert wrapper_style.get("max-height") == "600px"
+
+        # The log tracks the wrapper so every drag changes the console size.
+        assert "h-full" in panel.log_area._classes
+        log_style = panel.log_area._style
+        assert log_style.get("overflow-y") == "auto"
+
+        # Streaming still works after the change (sanity for the console).
+        panel.log("resizable log line", "stdout")
+        assert panel.log_area.default_slot.children[0].text == "resizable log line"
+
     def _collect_panel_texts(self, container):
         """Recursively collect all label texts inside a UI container."""
         texts = []
