@@ -4,20 +4,20 @@
 
 ### macOS
 
-- Conda: Miniconda at `~/miniconda3` or Anaconda at `~/anaconda3`; both are auto-detected by `install.sh` and `DROCAT.command`.
-- `DROCAT.command` (double-click) repairs/creates the versioned environment through the same installer used by the terminal launcher, then launches the UI.
+- Conda: Miniconda at `~/miniconda3` or Anaconda at `~/anaconda3`; both are auto-detected by `archive/install/install.sh` and `run_DROCAT.command`.
+- `run_DROCAT.command` (double-click) repairs/creates the versioned environment through the same installer used by the terminal launcher, then launches the UI.
 - Matplotlib "font cache" warnings on first import are benign.
 - Opening the UI uses `python ui/app.py`; set `DROCAT_UI_SHOW=0` for a headless launch.
 
 ### Windows
 
-- Use `install.ps1` (PowerShell, `-ExecutionPolicy Bypass`) or `install.bat`.
+- Use `archive/install/install.ps1` (PowerShell, `-ExecutionPolicy Bypass`) or `archive/install/install.bat`.
 - Do not install the upstream `neuronbridge-python` distribution. DROCAT ships its own API client so the Windows install has no `memray`, Ray, or conflicting Pydantic requirement.
 - Installers and launchers use `conda run`; shell initialization is not required.
 
 ### Linux
 
-- Same flow as macOS (`bash install.sh`, `./run_ui.sh`).
+- Same flow as macOS (`bash archive/install/install.sh`, `./run_DROCAT.command`).
 - `xdg-open` is used to open output folders; install `xdg-utils` if missing.
 - If `tkinter` is unavailable, native folder pickers in the UI fall back to typing paths (the UI still works).
 
@@ -28,7 +28,7 @@
 - **Token placeholders**: `token_info.txt` contains `YOUR_...` placeholders; the real tokens must live in the gitignored `token_info_local.txt`.
 - **Missing datasets**: `datasets/` and `cache/` are created automatically; the first query downloads the full neuron table for the selected dataset (needs token + network, can take minutes). FlyWire FAFB/BANC require manual downloads (see the Settings tab guide in the UI).
 - **UI port 8080 busy**: set `DROCAT_UI_PORT` to a free port (for example,
-  `DROCAT_UI_PORT=8081 ./run_ui.sh`) or stop the other process.
+  `DROCAT_UI_PORT=8081 ./run_DROCAT.command`) or stop the other process.
 - **3D export requires Chrome**: PNG/video exports in `plot3dSkeleton` use Chrome + WebDriver (or the slower Kaleido fallback). Install Chrome if exports fail.
 - **Sandboxed agents**: dependency downloads, token checks, and dataset fetches need network; request escalation when running inside a restricted sandbox.
 

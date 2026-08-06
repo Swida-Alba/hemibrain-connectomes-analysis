@@ -11,13 +11,15 @@ BLUE='\033[0;34m'
 NC='\033[0m'
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# The installer lives in archive/install; the repository root is two levels up.
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 PYTHON_VERSION="3.11"
 DROCAT_VERSION=""
-if [[ -f "$SCRIPT_DIR/ui/config.py" ]]; then
-    DROCAT_VERSION="$(sed -n 's/^APP_VERSION = "\([^"]*\)"/\1/p' "$SCRIPT_DIR/ui/config.py" | head -1)"
+if [[ -f "$PROJECT_ROOT/ui/config.py" ]]; then
+    DROCAT_VERSION="$(sed -n 's/^APP_VERSION = "\([^"]*\)"/\1/p' "$PROJECT_ROOT/ui/config.py" | head -1)"
 fi
 if [[ -z "$DROCAT_VERSION" ]]; then
-    DROCAT_VERSION="$(sed -n 's/^version = "\([^"]*\)"/\1/p' "$SCRIPT_DIR/pyproject.toml" | head -1)"
+    DROCAT_VERSION="$(sed -n 's/^version = "\([^"]*\)"/\1/p' "$PROJECT_ROOT/pyproject.toml" | head -1)"
 fi
 DROCAT_VERSION="${DROCAT_VERSION:-4.5.0}"
 ENV_BASE="drocat-${DROCAT_VERSION}"
@@ -138,7 +140,7 @@ run_in_env() {
 }
 
 printf "\n%b[3/5] Installing pinned dependencies...%b\n" "$BLUE" "$NC"
-cd "$SCRIPT_DIR"
+cd "$PROJECT_ROOT"
 run_in_env python -m pip install --upgrade pip setuptools wheel
 
 # Releases before this one installed the upstream client with an incompatible
@@ -155,9 +157,58 @@ run_in_env python -m pip install -e . --no-deps
 
 printf "\n%b[5/5] Verifying the environment...%b\n" "$BLUE" "$NC"
 run_in_env python -m pip check
-run_in_env python skills/drocat-install/scripts/verify_install.py --project "$SCRIPT_DIR"
+run_in_env python skills/drocat-install/scripts/verify_install.py --project "$PROJECT_ROOT"
 
 printf "\n%bInstallation complete.%b\n" "$GREEN" "$NC"
 printf 'Environment: %s\n' "$ENV_NAME"
-printf '%s\n' 'Launch with: ./run_ui.sh'
-printf '%s\n' 'Then configure NeuPrint/CAVE tokens in the Settings tab.'
+printf '%s\n' 'Launch with: ./run_DROCAT.command'
+
+# --- Token configuration (interactive only) ---
+printf '\n%b[Token setup]%b\n' "$BLUE" "$NC"
+configure_tokens() {
+    local token_file="$PROJECT_ROOT/token_info_local.txt"
+    local neuprint_now="" cave_now="" neuprint_new="" cave_new="" saved=0
+    # DROCAT reads tokens from token_info_local.txt at runtime and the UI
+    # Settings tab writes that same file, so tokens can be provided now in
+    # the terminal, or later in the UI, or by editing the file - skipping
+    # the terminal prompt never blocks the other two ways.
+    printf '%s\n' "API tokens can be provided in any of these ways (all use token_info_local.txt):"
+    printf '%s\n' "  1. Paste them here in the terminal now"
+    printf '%s\n' "  2. Set them later in the UI Settings tab"
+    printf '%s\n' "  3. Edit token_info_local.txt manually (format: NEUPRINT_TOKEN='...', CAVE_TOKEN='...')"
+    printf '%s\n' "The UI Settings tab and the file write the same location, so you can switch freely."
+    if [[ ! -t 0 ]]; then
+        printf '%s\n' "Non-interactive: skipping the token prompt. Set tokens later via the UI Settings tab or token_info_local.txt."
+        return 0
+    fi
+    # Keep existing non-placeholder tokens; Enter alone skips the prompt.
+    neuprint_now="$(sed -n "s/^NEUPRINT_TOKEN='\([^']*\)'/\1/p" "$token_file" 2>/dev/null | head -1)"
+    cave_now="$(sed -n "s/^CAVE_TOKEN='\([^']*\)'/\1/p" "$token_file" 2>/dev/null | head -1)"
+    if [[ -n "$neuprint_now" && "$neuprint_now" != "YOUR_NEUPRINT_TOKEN_HERE" ]]; then
+        printf '%s\n' "✓ NeuPrint token already configured in token_info_local.txt (kept as-is)."
+    else
+        read -r -p "NeuPrint token (https://neuprint.janelia.org/account) [Enter to skip - set it later in the UI Settings tab or token_info_local.txt]: " neuprint_new
+    fi
+    if [[ -n "$cave_now" && "$cave_now" != "YOUR_CAVE_TOKEN_HERE" ]]; then
+        printf '%s\n' "✓ CAVE token already configured in token_info_local.txt (kept as-is)."
+    else
+        read -r -p "CAVE token - FlyWire only (https://codex.flywire.ai/auth_token) [Enter to skip - set it later in the UI Settings tab or token_info_local.txt]: " cave_new
+    fi
+    if [[ -n "$neuprint_new" || -n "$cave_new" ]]; then
+        # Only write when something was entered: a full skip must not create
+        # a half-configured file that would shadow the UI/template values.
+        [[ -f "$token_file" ]] || cp "$PROJECT_ROOT/token_info.txt" "$token_file"
+        neuprint_now="${neuprint_new:-$neuprint_now}"
+        cave_now="${cave_new:-$cave_now}"
+        printf "NEUPRINT_TOKEN='%s'\nCAVE_TOKEN='%s'\n" "$neuprint_now" "$cave_now" > "$token_file"
+        saved=1
+    fi
+    if [[ "$saved" -eq 1 ]]; then
+        printf '%s\n' "✓ Saved to token_info_local.txt - you can change the tokens anytime in the UI Settings tab or by editing the file."
+    elif [[ ( -n "$neuprint_now" && "$neuprint_now" != "YOUR_NEUPRINT_TOKEN_HERE" ) || ( -n "$cave_now" && "$cave_now" != "YOUR_CAVE_TOKEN_HERE" ) ]]; then
+        printf '%s\n' "Nothing to write: tokens are already configured. Change them anytime via the UI Settings tab or token_info_local.txt."
+    else
+        printf '%s\n' "Skipped: no tokens written. Set them later via the UI Settings tab or by editing token_info_local.txt - both are read automatically on the next run."
+    fi
+}
+configure_tokens

@@ -37,7 +37,7 @@ git checkout v4.5.0
 ```
 
 - If the user already has the repository locally, reuse it (ask if the path is not obvious) and skip the clone.
-- Confirm the required files exist: `install.sh` (macOS/Linux), `install.ps1` / `install.bat` (Windows), `ui/app.py`, `src/coana.py`, `requirements.txt`.
+- Confirm the required files exist: `run_DROCAT.command` / `run_DROCAT.bat` (launchers), `archive/install/install.sh` (macOS/Linux), `archive/install/install.ps1` / `archive/install/install.bat` (Windows), `ui/app.py`, `src/coana.py`, `requirements.txt`.
 
 ### 2. Check prerequisites
 
@@ -45,7 +45,7 @@ git checkout v4.5.0
   3.10.0 requires >=3.10, and this release is validated through 3.11). The installers
   create a Python 3.11 environment, so the system Python version does not
   matter.
-- If conda is missing, install Miniconda from <https://docs.conda.io/miniconda.html> after user approval (install.sh / install.ps1 / install.bat do this automatically).
+- If conda is missing, install Miniconda from <https://docs.conda.io/miniconda.html> after user approval (archive/install/install.sh / install.ps1 / install.bat do this automatically).
 - Export `PYTHONNOUSERSITE=1` before running pip (the installers do this
   automatically): otherwise pip treats packages in the user's
   `~/.local/lib/python3.11/site-packages` as already installed and never
@@ -57,10 +57,10 @@ git checkout v4.5.0
 
 ### 3. Run the installer
 
-- **macOS / Linux:** `bash install.sh` - creates/reuses a Python 3.11 environment named for the release, installs both pinned requirement files, installs DROCAT in editable mode, runs `pip check`, and runs the bundled verifier.
-- **Windows:** run `install.ps1` in PowerShell (`powershell -ExecutionPolicy Bypass -File install.ps1`) or `install.bat`.
-- **macOS alternative:** `DROCAT.command` (double-click) creates/activates the env and launches the UI.
-- The launchers are self-healing: `run_ui.sh`, `run_ui.bat`, and `DROCAT.command` invoke the one-click installer when the environment is missing or inconsistent.
+- **macOS / Linux:** `bash archive/install/install.sh` - creates/reuses a Python 3.11 environment named for the release, installs both pinned requirement files, installs DROCAT in editable mode, runs `pip check`, runs the bundled verifier, and (interactive terminals only) asks for NeuPrint/CAVE tokens.
+- **Windows:** run `archive/install/install.ps1` in PowerShell (`powershell -ExecutionPolicy Bypass -File archive/install/install.ps1`) or `archive/install/install.bat`.
+- **macOS alternative:** `run_DROCAT.command` (double-click) creates/activates the env and launches the UI.
+- The launchers are self-healing: `run_DROCAT.command` / `run_DROCAT.bat` invoke the one-click installer when the environment is missing or inconsistent.
 - **Environment naming:** DROCAT uses a versioned env name read from `ui/config.py` (`drocat-4.5.0`). If that name already exists with Python 3.11, the installers reuse it and update dependencies in place (this is the env the launchers prefer, so re-runs actually update the env in use). If it exists with a different Python, never modify or delete it - warn the user and create the next free name instead (`drocat-4.5.0-2`, `drocat-4.5.0-3`, ...). The launchers resolve the same way (first usable env wins). Legacy unversioned `drocat` envs are left untouched.
 - DROCAT v4.5.0 bundles a lightweight NeuronBridge API client. Do **not** install `neuronbridge-python`: its Pydantic 2.9 constraint conflicts with the current NiceGUI stack. The installer removes that legacy distribution when repairing an older versioned environment.
 - Treat a failed dependency installation or `pip check` as an installation failure. Do not continue with a partially inconsistent environment.
@@ -93,7 +93,7 @@ Required checks: Python 3.10-3.11, project layout, every installed version again
 
 ### 6. Launch the UI
 
-- `./run_ui.sh` (macOS/Linux) or `run_ui.bat` (Windows), or `conda activate drocat-4.5.0 && python ui/app.py`.
+- `./run_DROCAT.command` (macOS/Linux) or `run_DROCAT.bat` (Windows), or `conda activate drocat-4.5.0 && python ui/app.py`.
 - Confirm the server responds: `curl -s http://127.0.0.1:8080/` should contain `DROCAT`.
 - First run: datasets auto-download on first query (requires token + network). FlyWire FAFB/BANC additionally require manually downloaded data files (the Settings tab has the guide).
 

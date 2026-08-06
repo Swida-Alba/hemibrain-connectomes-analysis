@@ -1185,12 +1185,14 @@ class TestApp:
 # =============================================================================
 class TestInstallerScripts:
     def test_all_scripts_exist(self):
-        for f in ["install.sh", "install.bat", "install.ps1", "run_ui.sh", "run_ui.bat"]:
+        for f in ["run_DROCAT.command", "run_DROCAT.bat",
+                  "archive/install/install.sh", "archive/install/install.bat",
+                  "archive/install/install.ps1"]:
             assert (PROJECT_ROOT / f).exists(), f"Missing: {f}"
 
     def test_shell_scripts_executable(self):
-        assert os.access(PROJECT_ROOT / "install.sh", os.X_OK)
-        assert os.access(PROJECT_ROOT / "run_ui.sh", os.X_OK)
+        assert os.access(PROJECT_ROOT / "run_DROCAT.command", os.X_OK)
+        assert os.access(PROJECT_ROOT / "archive/install/install.sh", os.X_OK)
 
 
 # =============================================================================
