@@ -42,6 +42,46 @@ def create_settings_tab():
                 "cave": existing_tokens.get("cave", ""),
             }
 
+            # Reminder when tokens are missing: the NeuPrint token is
+            # required for NeuPrint datasets; the CAVE token is optional and
+            # only needed for FlyWire FAFB online fetching. Refreshed
+            # whenever the saved tokens change.
+            token_reminder = ui.element("div").props('id="drocat-token-reminder"').classes("w-full").style(
+                "border: 1px solid #e6a23c; background: #fdf6ec; border-radius: 8px; padding: 10px 12px;"
+            )
+            with token_reminder:
+                token_reminder_text = ui.label("").classes("text-sm drocat-warn")
+
+            def _refresh_token_reminder():
+                missing = []
+                if not token_state.get("neuprint"):
+                    missing.append("neuprint")
+                if not token_state.get("cave"):
+                    missing.append("cave")
+                if not missing:
+                    token_reminder.set_visibility(False)
+                    return
+                token_reminder.set_visibility(True)
+                if missing == ["neuprint"]:
+                    token_reminder_text.text = (
+                        "⚠️ NeuPrint token not configured - it is required for NeuPrint datasets. "
+                        "Set it below or in token_info_local.txt."
+                    )
+                elif missing == ["cave"]:
+                    token_reminder_text.text = (
+                        "ℹ️ CAVE token not configured - optional; it is only needed for "
+                        "FlyWire FAFB online fetching."
+                    )
+                else:
+                    token_reminder_text.text = (
+                        "⚠️ No API tokens configured. The NeuPrint token is required for NeuPrint "
+                        "datasets; the CAVE token is optional (only needed for FlyWire FAFB online "
+                        "fetching). Set them below or in token_info_local.txt."
+                    )
+                token_reminder_text.update()
+
+            _refresh_token_reminder()
+
             with ui.column().classes("w-full gap-1"):
                 with ui.row().classes("items-center gap-2"):
                     ui.label("NeuPrint Token (Required for all NeuPrint datasets)").classes("text-caption font-bold")
@@ -229,6 +269,7 @@ python -c "import sys; sys.path.insert(0, 'src'); from BANC_file_converter impor
     def _update_token_status():
         neuprint_status.text = _token_status(token_state["neuprint"])
         cave_status.text = _token_status(token_state["cave"])
+        _refresh_token_reminder()
 
     def save_tokens():
         local_file = PROJECT_ROOT / "token_info_local.txt"

@@ -60,7 +60,7 @@ set "HINT=0"
 if not defined NP_TOKEN set "HINT=1"
 if defined NP_TOKEN echo !NP_TOKEN! | findstr /C:"YOUR_NEUPRINT_TOKEN_HERE" >nul && set "HINT=1"
 if defined NP_TOKEN echo !NP_TOKEN! | findstr /C:"NEUPRINT_TOKEN=''" >nul && set "HINT=1"
-if "!HINT!"=="1" echo Tip: NeuPrint/CAVE tokens are not configured yet - set them in the Settings tab or token_info_local.txt.
+if "!HINT!"=="1" echo Tip: the NeuPrint token is not configured yet - set it in the Settings tab or token_info_local.txt (the CAVE token is optional; only needed for FlyWire FAFB online fetching).
 goto launch
 
 :repair

@@ -49,16 +49,14 @@ python skills/drocat-install/scripts/verify_install.py --project .
 
 ## 4. Authentication
 
-NeuPrint datasets need a NeuPrint token; FlyWire FAFB CAVE features need a
-CAVE token. Three equivalent ways — all read/write the same gitignored
-`token_info_local.txt`, so you can switch freely (skipping the terminal
-prompt never blocks the other two):
+NeuPrint datasets need a **NeuPrint token** (required). The **CAVE token is
+optional** — it is only needed for FlyWire FAFB *online* fetching; local
+converted FlyWire tables work without it. Two equivalent ways — both
+read/write the same gitignored `token_info_local.txt`:
 
-1. **Installer prompt (terminal)** — the first `run_DROCAT.command` /
-   `run_DROCAT.bat` run asks for the tokens; press Enter to skip and use
-   option 2 or 3 later.
-2. **UI Settings tab** — paste the tokens there after launching.
-3. **Token file** — copy the template and edit it:
+1. **UI Settings tab** — paste the tokens there after launching; the tab
+   reminds you when tokens are missing.
+2. **Token file** — copy the template and edit it:
 
 ```bash
 cp token_info.txt token_info_local.txt        # gitignored, takes precedence
@@ -66,7 +64,7 @@ cp token_info.txt token_info_local.txt        # gitignored, takes precedence
 
 ```text
 NEUPRINT_TOKEN='your_actual_neuprint_token'
-CAVE_TOKEN='your_actual_cave_token'
+CAVE_TOKEN='your_actual_cave_token'           # optional
 ```
 
 - NeuPrint token: <https://neuprint.janelia.org/account>

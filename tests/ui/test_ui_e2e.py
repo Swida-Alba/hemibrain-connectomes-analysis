@@ -629,6 +629,54 @@ class TestDatasetService:
         assert "secret-token" not in _token_status("secret-token")
         assert _token_status("") == "not configured"
 
+    def test_settings_tab_reminds_when_tokens_missing(self, tmp_path, monkeypatch):
+        """The Settings tab raises a visible reminder when tokens are missing:
+        NeuPrint is required, CAVE is explicitly optional (only FlyWire FAFB
+        online fetching), and the banner disappears once both are set."""
+        from nicegui import Client
+        from nicegui.page import page
+        from ui.tabs import settings as settings_module
+
+        built = []
+
+        def build(neuprint: str, cave: str):
+            (tmp_path / "token_info_local.txt").write_text(
+                f"NEUPRINT_TOKEN='{neuprint}'\nCAVE_TOKEN='{cave}'\n",
+                encoding="utf-8",
+            )
+            monkeypatch.setattr(settings_module, "PROJECT_ROOT", tmp_path)
+            client = Client(page(f"/settings-reminder-{len(built)}"))
+            with client:
+                settings_module.create_settings_tab()
+            built.append(client)
+            reminder = next(
+                el for el in client.elements.values()
+                if getattr(el, "_props", {}).get("id") == "drocat-token-reminder"
+            )
+            return reminder, reminder.default_slot.children[0]
+
+        # both missing -> prominent reminder
+        reminder, text = build("", "")
+        assert reminder.visible is True
+        assert "No API tokens configured" in text.text
+        assert "required for NeuPrint datasets" in text.text
+        assert "only needed for FlyWire FAFB online fetching" in text.text
+
+        # only CAVE missing -> soft reminder marking it optional
+        reminder, text = build("real-neuprint-token", "")
+        assert reminder.visible is True
+        assert "CAVE token not configured - optional" in text.text
+        assert "FlyWire FAFB online fetching" in text.text
+
+        # only NeuPrint missing -> required-token reminder
+        reminder, text = build("", "real-cave-token")
+        assert reminder.visible is True
+        assert "NeuPrint token not configured - it is required" in text.text
+
+        # both set -> no reminder
+        reminder, text = build("real-neuprint-token", "real-cave-token")
+        assert reminder.visible is False
+
     def test_local_dataset_listing_requires_complete_flywire_conversion(self, tmp_path):
         from ui.dataset_service import DatasetService
 

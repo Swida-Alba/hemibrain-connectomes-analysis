@@ -18,7 +18,8 @@ class TestRunDrocatLaunchers:
         assert "is not DROCAT" in text
         # token reminder for users who skipped the installer prompt
         assert "token_info_local.txt" in text
-        assert "tokens are not configured yet" in text
+        assert "NeuPrint token is not configured yet" in text
+        assert "CAVE token is optional" in text
         # double-click UX: keep the window open on failure
         assert "Press Return to close" in text
 
@@ -28,7 +29,8 @@ class TestRunDrocatLaunchers:
         assert "Your choice [1-3]" in text
         assert "taskkill /PID" in text
         assert "netstat -ano" in text
-        assert "tokens are not configured yet" in text
+        assert "NeuPrint token is not configured yet" in text
+        assert "CAVE token is optional" in text
         assert "pause" in text
 
 
@@ -40,24 +42,28 @@ class TestInstallers:
         assert 'cd "$PROJECT_ROOT"' in text
         assert "run_DROCAT.command" in text
 
-    def test_install_sh_token_menu_lists_three_ways(self):
+    def test_install_sh_token_notice_has_no_terminal_prompt(self):
+        """Tokens are NOT collected in the terminal: the installer only prints
+        a status notice pointing to the UI Settings tab / token_info_local.txt,
+        with the CAVE token marked optional."""
         text = (ROOT / "archive/install/install.sh").read_text(encoding="utf-8")
-        assert "1. Paste them here in the terminal now" in text
-        assert "2. Set them later in the UI Settings tab" in text
-        assert "3. Edit token_info_local.txt manually" in text
-        assert "Non-interactive: skipping the token prompt" in text
-        assert "Skipped: no tokens written" in text
-        assert "Nothing to write: tokens are already configured" in text
-        # a full skip must not create a half-configured file
-        assert "Only write when something was entered" in text
+        assert "UI Settings tab" in text
+        assert "token_info_local.txt" in text
+        assert "required for NeuPrint datasets" in text
+        assert "only needed for FlyWire FAFB online fetching" in text
+        # no interactive paste prompt remains
+        assert "read -r -p" not in text
+        assert "Paste them here in the terminal" not in text
+        assert "Non-interactive: skipping" not in text
 
-    def test_install_ps1_mirrors_token_menu(self):
+    def test_install_ps1_token_notice_has_no_terminal_prompt(self):
         text = (ROOT / "archive/install/install.ps1").read_text(encoding="utf-8")
-        assert "[Console]::IsInputRedirected" in text
-        assert "Paste them here in the terminal now" in text
-        assert "Skipped: no tokens written" in text
-        assert "Nothing to write: tokens are already configured" in text
-        assert "run_DROCAT.bat" in text
+        assert "UI Settings tab" in text
+        assert "required for NeuPrint datasets" in text
+        assert "only needed for FlyWire FAFB online fetching" in text
+        assert "Read-Host" not in text
+        assert "IsInputRedirected" not in text
+        assert "Paste them here in the terminal" not in text
 
     def test_install_bat_wraps_ps1(self):
         text = (ROOT / "archive/install/install.bat").read_text(encoding="utf-8")

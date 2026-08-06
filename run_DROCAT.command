@@ -95,7 +95,7 @@ main() {
     [[ -f "$SCRIPT_DIR/token_info_local.txt" ]] && \
         neuprint_token="$(sed -n "s/^NEUPRINT_TOKEN='\([^']*\)'/\1/p" "$SCRIPT_DIR/token_info_local.txt" | head -1)"
     if [[ -z "$neuprint_token" || "$neuprint_token" == "YOUR_NEUPRINT_TOKEN_HERE" ]]; then
-        printf '%s\n' "Tip: NeuPrint/CAVE tokens are not configured yet - set them in the UI Settings tab or in token_info_local.txt."
+        printf '%s\n' "Tip: the NeuPrint token is not configured yet - set it in the UI Settings tab or in token_info_local.txt (the CAVE token is optional; only needed for FlyWire FAFB online fetching)."
     fi
 
     # --- Port-conflict guard ---------------------------------------------

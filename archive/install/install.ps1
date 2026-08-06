@@ -142,51 +142,30 @@ Write-Host "Installation complete." -ForegroundColor Green
 Write-Host "Environment: $script:EnvName"
 Write-Host "Launch with: run_DROCAT.bat"
 
-# --- Token configuration (interactive only) ---
+# --- Token configuration notice ---
+# Tokens are NOT collected in the terminal: they are set in the UI Settings
+# tab after launch, or by editing token_info_local.txt at the repository
+# root. The NeuPrint token is required for NeuPrint datasets; the CAVE token
+# is optional and only needed for FlyWire FAFB online fetching.
 Write-Host ""
 Write-Host "[Token setup]" -ForegroundColor Cyan
-# DROCAT reads tokens from token_info_local.txt at runtime and the UI
-# Settings tab writes that same file, so tokens can be provided now in
-# the terminal, or later in the UI, or by editing the file - skipping
-# the terminal prompt never blocks the other two ways.
-Write-Host "API tokens can be provided in any of these ways (all use token_info_local.txt):"
-Write-Host "  1. Paste them here in the terminal now"
-Write-Host "  2. Set them later in the UI Settings tab"
-Write-Host "  3. Edit token_info_local.txt manually (format: NEUPRINT_TOKEN='...', CAVE_TOKEN='...')"
-Write-Host "The UI Settings tab and the file write the same location, so you can switch freely."
-if ([Console]::IsInputRedirected) {
-    Write-Host "Non-interactive: skipping the token prompt. Set tokens later via the UI Settings tab or token_info_local.txt."
-} else {
-    $TokenFile = Join-Path $ProjectRoot "token_info_local.txt"
-    $NeuprintNow = ""
-    $CaveNow = ""
-    if (Test-Path $TokenFile) {
-        $Content = Get-Content $TokenFile -Raw -ErrorAction SilentlyContinue
-        if ($Content -match "NEUPRINT_TOKEN='([^']*)'") { $NeuprintNow = $Matches[1] }
-        if ($Content -match "CAVE_TOKEN='([^']*)'") { $CaveNow = $Matches[1] }
-    }
-    # Keep existing non-placeholder tokens; Enter alone skips the prompt.
-    if ($NeuprintNow -and $NeuprintNow -ne "YOUR_NEUPRINT_TOKEN_HERE") {
-        Write-Host "NeuPrint token already configured in token_info_local.txt (kept as-is)."
-    } else {
-        $NeuprintNew = Read-Host "NeuPrint token (https://neuprint.janelia.org/account) [Enter to skip - set it later in the UI Settings tab or token_info_local.txt]"
-    }
-    if ($CaveNow -and $CaveNow -ne "YOUR_CAVE_TOKEN_HERE") {
-        Write-Host "CAVE token already configured in token_info_local.txt (kept as-is)."
-    } else {
-        $CaveNew = Read-Host "CAVE token - FlyWire only (https://codex.flywire.ai/auth_token) [Enter to skip - set it later in the UI Settings tab or token_info_local.txt]"
-    }
-    if ($NeuprintNew -or $CaveNew) {
-        # Only write when something was entered: a full skip must not create
-        # a half-configured file that would shadow the UI/template values.
-        if (-not (Test-Path $TokenFile)) { Copy-Item (Join-Path $ProjectRoot "token_info.txt") $TokenFile }
-        if ($NeuprintNew) { $NeuprintNow = $NeuprintNew }
-        if ($CaveNew) { $CaveNow = $CaveNew }
-        Set-Content -Path $TokenFile -Value ("NEUPRINT_TOKEN='{0}'`nCAVE_TOKEN='{1}'" -f $NeuprintNow, $CaveNow)
-        Write-Host "Saved to token_info_local.txt - you can change the tokens anytime in the UI Settings tab or by editing the file."
-    } elseif (($NeuprintNow -and $NeuprintNow -ne "YOUR_NEUPRINT_TOKEN_HERE") -or ($CaveNow -and $CaveNow -ne "YOUR_CAVE_TOKEN_HERE")) {
-        Write-Host "Nothing to write: tokens are already configured. Change them anytime via the UI Settings tab or token_info_local.txt."
-    } else {
-        Write-Host "Skipped: no tokens written. Set them later via the UI Settings tab or by editing token_info_local.txt - both are read automatically on the next run."
-    }
+$TokenFile = Join-Path $ProjectRoot "token_info_local.txt"
+$NeuprintNow = ""
+$CaveNow = ""
+if (Test-Path $TokenFile) {
+    $Content = Get-Content $TokenFile -Raw -ErrorAction SilentlyContinue
+    if ($Content -match "NEUPRINT_TOKEN='([^']*)'") { $NeuprintNow = $Matches[1] }
+    if ($Content -match "CAVE_TOKEN='([^']*)'") { $CaveNow = $Matches[1] }
 }
+if ($NeuprintNow -and $NeuprintNow -ne "YOUR_NEUPRINT_TOKEN_HERE") {
+    Write-Host "NeuPrint token already configured in token_info_local.txt."
+} else {
+    Write-Host "NeuPrint token not configured - required for NeuPrint datasets."
+}
+if ($CaveNow -and $CaveNow -ne "YOUR_CAVE_TOKEN_HERE") {
+    Write-Host "CAVE token already configured in token_info_local.txt."
+} else {
+    Write-Host "CAVE token optional - only needed for FlyWire FAFB online fetching."
+}
+Write-Host "Set tokens in the UI Settings tab after launching, or edit token_info_local.txt"
+Write-Host "(repository root, format: NEUPRINT_TOKEN='...' / CAVE_TOKEN='...')."

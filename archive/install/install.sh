@@ -163,52 +163,28 @@ printf "\n%bInstallation complete.%b\n" "$GREEN" "$NC"
 printf 'Environment: %s\n' "$ENV_NAME"
 printf '%s\n' 'Launch with: ./run_DROCAT.command'
 
-# --- Token configuration (interactive only) ---
+# --- Token configuration notice ---
+# Tokens are NOT collected in the terminal: they are set in the UI Settings
+# tab after launch, or by editing token_info_local.txt at the repository
+# root. The NeuPrint token is required for NeuPrint datasets; the CAVE token
+# is optional and only needed for FlyWire FAFB online fetching.
 printf '\n%b[Token setup]%b\n' "$BLUE" "$NC"
 configure_tokens() {
     local token_file="$PROJECT_ROOT/token_info_local.txt"
-    local neuprint_now="" cave_now="" neuprint_new="" cave_new="" saved=0
-    # DROCAT reads tokens from token_info_local.txt at runtime and the UI
-    # Settings tab writes that same file, so tokens can be provided now in
-    # the terminal, or later in the UI, or by editing the file - skipping
-    # the terminal prompt never blocks the other two ways.
-    printf '%s\n' "API tokens can be provided in any of these ways (all use token_info_local.txt):"
-    printf '%s\n' "  1. Paste them here in the terminal now"
-    printf '%s\n' "  2. Set them later in the UI Settings tab"
-    printf '%s\n' "  3. Edit token_info_local.txt manually (format: NEUPRINT_TOKEN='...', CAVE_TOKEN='...')"
-    printf '%s\n' "The UI Settings tab and the file write the same location, so you can switch freely."
-    if [[ ! -t 0 ]]; then
-        printf '%s\n' "Non-interactive: skipping the token prompt. Set tokens later via the UI Settings tab or token_info_local.txt."
-        return 0
-    fi
-    # Keep existing non-placeholder tokens; Enter alone skips the prompt.
+    local neuprint_now="" cave_now=""
     neuprint_now="$(sed -n "s/^NEUPRINT_TOKEN='\([^']*\)'/\1/p" "$token_file" 2>/dev/null | head -1)"
     cave_now="$(sed -n "s/^CAVE_TOKEN='\([^']*\)'/\1/p" "$token_file" 2>/dev/null | head -1)"
     if [[ -n "$neuprint_now" && "$neuprint_now" != "YOUR_NEUPRINT_TOKEN_HERE" ]]; then
-        printf '%s\n' "✓ NeuPrint token already configured in token_info_local.txt (kept as-is)."
+        printf '%s\n' "✓ NeuPrint token already configured in token_info_local.txt."
     else
-        read -r -p "NeuPrint token (https://neuprint.janelia.org/account) [Enter to skip - set it later in the UI Settings tab or token_info_local.txt]: " neuprint_new
+        printf '%s\n' "⚠ NeuPrint token not configured - required for NeuPrint datasets."
     fi
     if [[ -n "$cave_now" && "$cave_now" != "YOUR_CAVE_TOKEN_HERE" ]]; then
-        printf '%s\n' "✓ CAVE token already configured in token_info_local.txt (kept as-is)."
+        printf '%s\n' "✓ CAVE token already configured in token_info_local.txt."
     else
-        read -r -p "CAVE token - FlyWire only (https://codex.flywire.ai/auth_token) [Enter to skip - set it later in the UI Settings tab or token_info_local.txt]: " cave_new
+        printf '%s\n' "ℹ CAVE token optional - only needed for FlyWire FAFB online fetching."
     fi
-    if [[ -n "$neuprint_new" || -n "$cave_new" ]]; then
-        # Only write when something was entered: a full skip must not create
-        # a half-configured file that would shadow the UI/template values.
-        [[ -f "$token_file" ]] || cp "$PROJECT_ROOT/token_info.txt" "$token_file"
-        neuprint_now="${neuprint_new:-$neuprint_now}"
-        cave_now="${cave_new:-$cave_now}"
-        printf "NEUPRINT_TOKEN='%s'\nCAVE_TOKEN='%s'\n" "$neuprint_now" "$cave_now" > "$token_file"
-        saved=1
-    fi
-    if [[ "$saved" -eq 1 ]]; then
-        printf '%s\n' "✓ Saved to token_info_local.txt - you can change the tokens anytime in the UI Settings tab or by editing the file."
-    elif [[ ( -n "$neuprint_now" && "$neuprint_now" != "YOUR_NEUPRINT_TOKEN_HERE" ) || ( -n "$cave_now" && "$cave_now" != "YOUR_CAVE_TOKEN_HERE" ) ]]; then
-        printf '%s\n' "Nothing to write: tokens are already configured. Change them anytime via the UI Settings tab or token_info_local.txt."
-    else
-        printf '%s\n' "Skipped: no tokens written. Set them later via the UI Settings tab or by editing token_info_local.txt - both are read automatically on the next run."
-    fi
+    printf '%s\n' "Set tokens in the UI Settings tab after launching, or edit token_info_local.txt"
+    printf '%s\n' "(repository root, format: NEUPRINT_TOKEN='...' / CAVE_TOKEN='...')."
 }
 configure_tokens
