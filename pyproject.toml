@@ -186,7 +186,7 @@ omit = [
     "setup.py",
     "*/__pycache__/*",
     "scripts/*",
-    "examples/*",
+    "archive/examples/*",
     "dev/*",
 ]
 

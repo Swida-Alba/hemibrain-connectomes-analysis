@@ -3,8 +3,8 @@
         "src",
         "vispath-subproject/src",
         "scripts",
-        "scripts_local",
-        "examples"
+        "archive/scripts_local",
+        "archive/examples"
     ],
     "exclude": [
         "**/node_modules",

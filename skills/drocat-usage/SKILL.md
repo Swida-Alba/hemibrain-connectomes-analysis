@@ -61,7 +61,7 @@ If a real blocker remains, state the exact blocker and the last completed step.
 
    The files under `scripts/` are configuration templates, not a stable CLI;
    never assume their sample dataset, neurons, or output folder match the
-   user's request. Copy a template into `scripts_local/` (or patch an
+   user's request. Copy a template into `archive/scripts_local/` (or patch an
    explicitly requested source file) before a real scientific run.
 
 4. Never print, commit, or paste `token_info_local.txt`, API keys, cookies, or
@@ -71,7 +71,7 @@ If a real blocker remains, state the exact blocker and the last completed step.
 
 5. Preserve the example templates. Before a substantial edit, copy the script
    to a run-specific file (for example,
-   `scripts_local/agent_FindPath_2026-08-04.py`) or create a new script in an
+   `archive/scripts_local/agent_FindPath_2026-08-04.py`) or create a new script in an
    explicitly named output directory. Use `apply_patch` for code changes, then
    compile the changed file and run the smallest relevant test.
 
@@ -177,7 +177,7 @@ Run the script through `run_direct.py` or from its directory:
 ```bash
 python skills/drocat-usage/scripts/run_direct.py \
   --conda-env drocat-4.5.0 \
-  --script scripts_local/agent_FindPath_2026-08-04.py
+  --script archive/scripts_local/agent_FindPath_2026-08-04.py
 ```
 
 Capture the exit code and last meaningful log lines. A zero exit code is not
