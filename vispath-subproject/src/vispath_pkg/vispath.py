@@ -5211,18 +5211,31 @@ class VisualizePath:
             layoutSelector.value = currentLayoutAlgorithm;
         }}
         
+        // Elements in the CURRENT view: not hidden by any hide/filter class.
+        // Class-based (deterministic within a synchronous block; :visible /
+        // el.visible() depend on style recalculation timing right after
+        // addClass). Keep in sync with isEdgeInCurrentGraph.
+        function isVisibleElement(el) {{
+            return !el.hasClass('hidden') && !el.hasClass('filtered') &&
+                   !el.hasClass('selfloop-hidden') && !el.hasClass('orphan-hidden') &&
+                   !el.hasClass('deadend-hidden');
+        }}
+
         function cacheHemispherePositions() {{
             if (!hasHemisphereNodes) return;
             originalHemispherePositions = {{}};
-            cy.nodes().forEach(n => {{
+            cy.nodes().filter(isVisibleElement).forEach(n => {{
                 originalHemispherePositions[n.id()] = n.position();
             }});
         }}
 
         function getHemisphereTemplateSide() {{
             if (!hasHemisphereNodes) return null;
-            const hasL = cy.nodes().some(n => n.data('hemisphere') === 'L');
-            const hasR = cy.nodes().some(n => n.data('hemisphere') === 'R');
+            // Only VISIBLE nodes decide the template side (hidden nodes must
+            // not influence the mirrored layout).
+            const visibleNodes = cy.nodes().filter(isVisibleElement);
+            const hasL = visibleNodes.some(n => n.data('hemisphere') === 'L');
+            const hasR = visibleNodes.some(n => n.data('hemisphere') === 'R');
             if (hasL) return 'L';
             if (hasR) return 'R';
             return null;
@@ -5233,7 +5246,9 @@ class VisualizePath:
 
         // Build unique placeholder set as union of all base names (without _L/_R suffix)
         function buildPlaceholderSet() {{
-            const nodes = cy.nodes();
+            // Only VISIBLE nodes participate: the mirror layout must ignore
+            // hidden nodes and edges (dead-end/orphan/filter/manual hides).
+            const nodes = cy.nodes().filter(isVisibleElement);
             const baseNames = new Set();
             nodes.forEach(n => {{
                 const base = n.data('base_name');
@@ -5247,7 +5262,7 @@ class VisualizePath:
             hemispherePlaceholderIds = [];
             hemispherePlaceholderEdgeIds = [];
             const baseNames = buildPlaceholderSet();
-            const nodes = cy.nodes();
+            const nodes = cy.nodes().filter(isVisibleElement);
             
             // Map base -> node info for copying type/color
             const baseInfo = {{}};
@@ -5280,9 +5295,10 @@ class VisualizePath:
                 hemispherePlaceholderIds.push(placeholderId);
             }});
             
-            // Create placeholder edges mirroring real edges (by base name)
+            // Create placeholder edges mirroring real edges (by base name),
+            // using only VISIBLE real edges.
             const edgeSet = new Set();
-            cy.edges().forEach(e => {{
+            cy.edges().filter(isVisibleElement).forEach(e => {{
                 const srcBase = e.source().data('base_name');
                 const tgtBase = e.target().data('base_name');
                 if (srcBase && tgtBase) {{
@@ -5393,8 +5409,10 @@ class VisualizePath:
                 removePlaceholders();
                 
                 // Position real nodes based on placeholder layout
+                // (only VISIBLE nodes - hidden nodes keep their positions
+                // and must not be moved by the mirrored layout)
                 cy.batch(() => {{
-                    cy.nodes().forEach(n => {{
+                    cy.nodes().filter(isVisibleElement).forEach(n => {{
                         const base = n.data('base_name');
                         const hemi = n.data('hemisphere');
                         if (!base || !phPositions[base]) return;
@@ -5734,8 +5752,9 @@ class VisualizePath:
                 return;
             }}
             
-            // Get visible (non-hidden) nodes and edges
-            const visibleElements = cy.elements().not('.hidden, .filtered, .orphan-hidden, .selfloop-hidden, .deadend-hidden');
+            // Get visible (non-hidden) nodes and edges (class-based - see
+            // isVisibleElement)
+            const visibleElements = cy.elements().filter(isVisibleElement);
             
             if (visibleElements.length === 0) {{
                 updateHoverInfo('⚠️ No visible elements to layout');
@@ -5753,8 +5772,11 @@ class VisualizePath:
         }}
 
         function fitGraph() {{
-            // Fit with extra padding to account for control panel height
-            cy.fit(null, 80);
+            // Fit with extra padding to account for control panel height;
+            // only VISIBLE elements participate (hidden nodes still have
+            // positions and would otherwise inflate the bounding box).
+            const visible = cy.elements().filter(isVisibleElement);
+            if (visible.length > 0) cy.fit(visible, 80);
         }}
 
         function exportPNG() {{
@@ -7985,21 +8007,20 @@ class VisualizePath:
             reapplyDeadEndHiding();
         }}
         
-        // Toggle orphan nodes visibility (dynamically detect based on current visible edges)
+        // Toggle orphan nodes visibility (dynamically detect based on current
+        // visible edges). Orphans are also dead ends: when dead-end hiding is
+        // active they get covered there, and this toggle re-checks after any
+        // graph change. Nodes with only self-loop edges are orphans.
         function toggleOrphanNodes() {{
             pushHistory('Toggle orphans');
             const btn = document.getElementById('hideOrphansBtn');
             orphansHidden = !orphansHidden;
             
             if (orphansHidden) {{
-                // Hide orphan nodes (nodes with no VISIBLE connections)
-                // Check degree over the current graph (visible edges only)
+                // Hide orphan nodes (nodes with no VISIBLE non-self-loop connections)
                 let hiddenCount = 0;
                 cy.nodes().forEach(node => {{
-                    const visibleEdges = node.connectedEdges().filter(e => isEdgeInCurrentGraph(e));
-                    const visibleDegree = visibleEdges.length;
-                    
-                    if (visibleDegree === 0) {{
+                    if (isOrphanNode(node)) {{
                         node.addClass('orphan-hidden');
                         hiddenCount++;
                     }} else {{
@@ -8018,7 +8039,8 @@ class VisualizePath:
                 btn.style.background = '#9c27b0';
                 updateHoverInfo('👁️ All nodes visible');
             }}
-            // Changing the visible graph can expose new dead ends
+            // Changing the visible graph can expose new dead ends (orphans are
+            // dead ends too, so the dead-end pass re-runs as well)
             reapplyDeadEndHiding();
         }}
 
@@ -8029,11 +8051,22 @@ class VisualizePath:
                    !e.hasClass('selfloop-hidden') && !e.hasClass('deadend-hidden');
         }}
 
+        // A node is an orphan when it has NO connections in the current
+        // graph. Self-loop edges do not count as connections (a node whose
+        // only edges are self-loops is an orphan).
+        function isOrphanNode(node) {{
+            const visibleEdges = node.connectedEdges().filter(e => {{
+                return isEdgeInCurrentGraph(e) && e.source().id() !== e.target().id();
+            }});
+            return visibleEdges.length === 0;
+        }}
+
         // A node is a dead end in the CURRENT graph when all its visible
         // edges go one way and it is not declared as that endpoint type:
-        // out-only non-source, or in-only non-target. Edges to nodes that
-        // are already hidden dead ends are removed from the visible graph,
-        // so hiding propagates to newly exposed dead ends.
+        // out-only non-source, in-only non-target, OR an orphan (a node with
+        // no visible connections - orphans are a kind of dead end). Edges to
+        // nodes that are already hidden dead ends are removed from the
+        // visible graph, so hiding propagates to newly exposed dead ends.
         function isDeadEndNodeIn(node, deadEndSet) {{
             const nodeType = node.data('node_type') || 'intermediate';
             let outCount = 0;
@@ -8045,7 +8078,7 @@ class VisualizePath:
                 if (e.source().id() === node.id()) outCount++;
                 else inCount++;
             }});
-            if (outCount === 0 && inCount === 0) return false;  // orphan, not a dead end
+            if (outCount === 0 && inCount === 0) return true;  // orphan: no connections in the current graph
             if (nodeType !== 'source' && outCount > 0 && inCount === 0) return true;
             if (nodeType !== 'target' && inCount > 0 && outCount === 0) return true;
             return false;
@@ -8113,6 +8146,9 @@ class VisualizePath:
                 btn.textContent = '💀 Hide Dead Ends';
                 btn.style.background = '#607d8b';
                 updateHoverInfo('👁️ All nodes visible');
+                // Turning dead-end hiding off reveals orphan nodes that were
+                // covered by it; re-apply the orphan toggle if it is active.
+                reapplyOrphanHiding();
             }}
         }}
 
@@ -8126,11 +8162,13 @@ class VisualizePath:
         // Re-detect orphan nodes after the graph changes; a no-op while
         // orphan hiding is off. Must run after reapplyDeadEndHiding so the
         // current graph (including dead-end-hidden edges) is consistent.
+        // Orphans are also dead ends: nodes already deadend-hidden are left
+        // to the dead-end pass (avoids redundant class churn).
         function reapplyOrphanHiding() {{
             if (!orphansHidden) return;
             cy.nodes().forEach(node => {{
-                const visibleEdges = node.connectedEdges().filter(e => isEdgeInCurrentGraph(e));
-                if (visibleEdges.length === 0) {{
+                if (node.hasClass('deadend-hidden')) return;
+                if (isOrphanNode(node)) {{
                     node.addClass('orphan-hidden');
                 }} else {{
                     node.removeClass('orphan-hidden');
@@ -8138,11 +8176,11 @@ class VisualizePath:
             }});
         }}
         
-        // Refresh layout after hiding orphans or filtering edges
+        // Refresh layout after hiding orphans or filtering edges. Only
+        // VISIBLE elements participate (class-based - see isVisibleElement).
         function refreshLayout() {{
             pushHistory('Refresh layout');
-            // Get visible (non-hidden) nodes and edges
-            const visibleElements = cy.elements().not('.hidden, .filtered, .orphan-hidden, .selfloop-hidden, .deadend-hidden');
+            const visibleElements = cy.elements().filter(isVisibleElement);
             
             if (visibleElements.length === 0) {{
                 updateHoverInfo('⚠️ No visible elements to layout');

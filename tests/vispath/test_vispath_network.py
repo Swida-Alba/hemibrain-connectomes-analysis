@@ -198,6 +198,21 @@ class TestGeneratedHtmlStructure:
         assert node_block, 'missing node.deadend-hidden { display: none } rule'
         assert edge_block, 'missing edge.deadend-hidden { display: none } rule'
 
+    def test_layout_and_orphan_helpers_ignore_hidden_elements(self, network_html):
+        """Layout algorithms must ignore hidden nodes/edges: the mirror
+        placeholder builder and the layout/fit entry points filter through
+        the class-based isVisibleElement, and orphans are recognized as dead
+        ends (isOrphanNode, incl. self-loop-only nodes)."""
+        js = _script_text(network_html)
+        assert "function isVisibleElement" in js
+        assert "function isOrphanNode" in js
+        # mirror placeholders / positioning / fit / layout all use it
+        assert js.count("filter(isVisibleElement)") >= 5
+        # orphans are dead ends (isDeadEndNodeIn returns true on 0 in/out)
+        assert "orphan: no connections in the current graph" in js
+        # self-loops never count toward orphan connectivity
+        assert "e.source().id() !== e.target().id()" in js
+
 
 # =============================================================================
 # Node-based logic tests (real functions extracted from the generated HTML)
