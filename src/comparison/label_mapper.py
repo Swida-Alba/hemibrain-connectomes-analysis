@@ -545,7 +545,12 @@ class LabelMapper:
         
         key = f'{role}_mapping'
         if key not in data:
-            raise ValueError(f"JSON must have '{key}' key. Found: {list(data.keys())}")
+            # A unified file (overall_mapping_json) may legitimately omit a
+            # role (e.g. source-only mappings); skip it. Files without ANY
+            # mapping key are still rejected as malformed.
+            if not any(k in data for k in ('source_mapping', 'target_mapping', 'intermediate_mapping')):
+                raise ValueError(f"JSON must have '{key}' key. Found: {list(data.keys())}")
+            return
         
         mapping_data = data[key]
         

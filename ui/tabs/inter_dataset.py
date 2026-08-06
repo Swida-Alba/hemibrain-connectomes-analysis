@@ -7,6 +7,7 @@ from ..components.common import (
     checkbox_input, dir_input, section_header, param_grid, tool_page,
     apply_filter_mode,
 )
+from ..components.mapping_editor import mapping_selector, selected_mapping_file_path
 from ..components.output_panel import OutputPanel
 from ..runner import ScriptRunner
 
@@ -49,6 +50,7 @@ def create_inter_dataset_tab():
                 hint="Target neurons for pathfinding. Upload a CSV/TSV/Excel file (first column) or type comma-separated.",
             )
             output_dir = dir_input()
+            mapping_select = mapping_selector()
 
         with ui.card().classes("w-full drocat-card"):
             section_header("Core Parameters", "tune")
@@ -213,6 +215,9 @@ def create_inter_dataset_tab():
         }
         if nicknames:
             constructor_params["datasets_nickname"] = nicknames
+        mapping_path = selected_mapping_file_path(mapping_select.value)
+        if mapping_path:
+            constructor_params["overall_mapping_json"] = mapping_path
 
         result = await output_panel.run(runner, "inter_dataset", constructor_params, "run",
                                         output_dir=output_dir.value)

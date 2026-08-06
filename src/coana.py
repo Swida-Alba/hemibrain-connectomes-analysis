@@ -1514,6 +1514,13 @@ class FindNeuronConnection:
     and connection DataFrames with standardized labels.
     '''
 
+    custom_mapping_file: str | None = None
+    '''
+    Optional path to a LabelMapper JSON file (overall_mapping_json format).
+    Convenient for UI runs: the file path is serializable, unlike a LabelMapper
+    object. Ignored when label_mapper is provided directly.
+    '''
+
     verbose: bool | None = None
     '''
     Backward-compatible verbose flag. If provided, it overrides verbose_mode:
@@ -1523,6 +1530,16 @@ class FindNeuronConnection:
     def __post_init__(self):
         if self.verbose is not None:
             self.verbose_mode = 'full' if self.verbose else 'silent'
+        # Load the custom mapping file into a LabelMapper (UI runs pass a
+        # serializable path; the object form takes precedence when given).
+        if self.custom_mapping_file and self.label_mapper is None:
+            try:
+                from comparison.label_mapper import LabelMapper
+                self.label_mapper = LabelMapper(overall_mapping_json=self.custom_mapping_file)
+            except Exception as exc:  # noqa: BLE001 - surface as a clear init error
+                raise ValueError(
+                    f"Could not load custom mapping file '{self.custom_mapping_file}': {exc}"
+                ) from exc
         # Flag to use tqdm.write instead of print when inside progress bar
         self._in_progress_bar = False
         

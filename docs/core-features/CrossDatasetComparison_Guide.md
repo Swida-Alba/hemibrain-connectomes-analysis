@@ -276,6 +276,13 @@ results = analyzer.run_comparison()
 
 See the [LabelMapper Guide](./LabelMapper_Guide.md) for more details on mapping configuration.
 
+> **UI:** the web UI manages the same mappings as reusable presets —
+> **Settings tab → Custom Type Mappings** (table-grid editor, saved in
+> `cache/user_mappings.json`) and **Cross-Dataset tab → Custom Type Mapping**
+> selector. The chosen preset is passed to the run as `overall_mapping_json`
+> and acts as an overlay: explicit source/target queries stay, only matching
+> neurons are renamed to their custom groups.
+
 ### Example 4: Accessing Results Programmatically
 
 ```python

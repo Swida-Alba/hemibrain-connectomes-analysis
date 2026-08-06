@@ -155,3 +155,26 @@ params = ComparisonParameters(
 *   **Simplicity**: Your analysis code only deals with standard labels (e.g., `aMe12`), not dataset-specific IDs (e.g., `720575940610453042`).
 *   **Scalability**: Easily add new datasets by just updating the CSV mapping file, without changing your analysis code.
 
+
+## UI Workflow (v4.5.0)
+
+The web UI manages custom mappings as **reusable presets** — no scripting needed:
+
+1. **Settings tab → Custom Type Mappings**: create/edit presets in the table grid
+   (one row per custom group, one column per dataset, cells hold comma-separated
+   neuron types; Source / Target / Intermediate sides). Save → the preset is
+   stored permanently in `cache/user_mappings.json` (gitignored) and exported to
+   `cache/user_mappings/<name>.json` for runs.
+2. **Set Active**: marks a preset as the default; every tool tab pre-selects it.
+3. **Cross-Dataset tab → Custom Type Mapping**: the chosen preset is passed to
+   the comparison as `overall_mapping_json`. It acts as a mapping **overlay**:
+   your explicit source/target neuron queries stay, and only neurons matching
+   the mapping are renamed to their custom groups (unmapped neurons keep their
+   identifiers).
+4. **FindPath / FindDirect tabs → Custom Grouping**: the same preset is passed
+   as `custom_mapping_file`; mapped neurons are grouped at type level via
+   `EnrichConnectionTable` (custom_group columns).
+
+Presets can be renamed, deleted, and re-saved at any time; runs always consume
+the exported file, so results stay reproducible (`label_map.json` /
+`parameters.json` record the mapping used).

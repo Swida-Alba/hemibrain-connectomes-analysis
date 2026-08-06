@@ -171,6 +171,19 @@ class ComparisonParameters:
     
     overall_label_mapper: Optional[Any] = None
     """LabelMapper object or configuration for defining source, target, and intermediate neuron labels."""
+
+    overall_mapping_json: Optional[str] = None
+    """Path to a JSON file with source/target/intermediate mappings (LabelMapper format).
+    Convenient for UI runs: the file path is serializable, unlike a LabelMapper object."""
+
+    source_mapping_file: Optional[str] = None
+    """Path to a CSV/JSON source-mapping file (LabelMapper format)."""
+
+    target_mapping_file: Optional[str] = None
+    """Path to a CSV/JSON target-mapping file (LabelMapper format)."""
+
+    intermediate_mapping_file: Optional[str] = None
+    """Path to a CSV/JSON intermediate-mapping file (LabelMapper format)."""
     
     verbose: bool = True
     """Whether to print initialization summary and progress updates."""
@@ -357,6 +370,34 @@ class ComparisonParameters:
         is_source_mapper = isinstance(self.source_neurons, LabelMapper)
         is_target_mapper = isinstance(self.target_neurons, LabelMapper)
 
+        # File-based mappings (UI runs pass serializable paths): build the
+        # LabelMapper here so the analyzer only ever sees overall_label_mapper.
+        # These act as a mapping OVERLAY: explicit source/target neuron
+        # queries stay (the mapper only renames matching neurons), unlike
+        # overall_label_mapper which fully defines the neuron sets.
+        self._mapping_overlay = False
+        self._source_mapper = None
+        self._target_mapper = None
+        has_mapping_files = any([
+            self.overall_mapping_json,
+            self.source_mapping_file,
+            self.target_mapping_file,
+            self.intermediate_mapping_file,
+        ])
+        if has_mapping_files:
+            if has_overall or is_source_mapper or is_target_mapper:
+                raise ValueError(
+                    "Ambiguous LabelMapper configuration: mapping file parameters "
+                    "(overall_mapping_json / source_mapping_file / target_mapping_file / "
+                    "intermediate_mapping_file) cannot be combined with an explicit mapper."
+                )
+            self.overall_label_mapper = LabelMapper(
+                overall_mapping_json=self.overall_mapping_json,
+                source_mapping_file=self.source_mapping_file,
+                target_mapping_file=self.target_mapping_file,
+                intermediate_mapping_file=self.intermediate_mapping_file,
+            )
+            self._mapping_overlay = True
         if has_overall and (is_source_mapper or is_target_mapper):
             raise ValueError(
                 "Ambiguous LabelMapper configuration: 'overall_label_mapper' cannot be used "
@@ -364,8 +405,10 @@ class ComparisonParameters:
                 "Please provide either a single overall mapper OR specific source/target mappers."
             )
         
-        # 2. Handle overall_label_mapper logic
-        if has_overall:
+        # 2. Handle overall_label_mapper logic (skipped in overlay mode,
+        # where the mapper renames matching neurons on top of explicit
+        # source/target queries instead of defining them)
+        if has_overall and not self._mapping_overlay:
             # If source_neurons provided alongside overall_label_mapper, raise error
             if self.source_neurons:
                 raise ValueError(
@@ -589,8 +632,10 @@ class ComparisonParameters:
         # Cache the timestamp for consistent output_name
         self._cached_timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
 
-        # 5. Verify LabelMapper consistency (if used)
-        if self.overall_label_mapper and not self.overall_label_mapper.is_empty:
+        # 5. Verify LabelMapper consistency (if used). Skipped in overlay
+        # mode: a mapping overlay may legitimately cover only some datasets
+        # and never defines the source/target sets.
+        if self.overall_label_mapper and not self._mapping_overlay and not self.overall_label_mapper.is_empty:
             # Get dataset names from parameters
             param_datasets = set()
             for ds in self.datasets:

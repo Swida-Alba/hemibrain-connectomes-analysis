@@ -9,6 +9,7 @@ from ..components.common import (
     dataset_selector, neuron_list_input, number_input, select_input,
     checkbox_input, dir_input, apply_filter_mode, section_header, param_grid, tool_page,
 )
+from ..components.mapping_editor import mapping_selector, selected_mapping_file_path
 from ..components.output_panel import OutputPanel
 from ..runner import ScriptRunner
 
@@ -45,6 +46,7 @@ def create_find_path_tab():
                     allow_custom=True,
                 )
                 output_dir = dir_input()
+                mapping_select = mapping_selector(label="Custom Grouping")
 
         with ui.card().classes("w-full drocat-card"):
             section_header("Core Parameters", "tune")
@@ -225,6 +227,9 @@ def create_find_path_tab():
             "symmetry_analysis": symmetry_analysis.value,
             "find_reciprocal": find_reciprocal.value,
         }
+        mapping_path = selected_mapping_file_path(mapping_select.value)
+        if mapping_path:
+            constructor_params["custom_mapping_file"] = mapping_path
 
         result = await output_panel.run(runner, "find_path", constructor_params, "find_all_path",
                                         output_dir=output_dir.value)

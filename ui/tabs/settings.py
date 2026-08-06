@@ -3,12 +3,15 @@
 from nicegui import run, ui
 
 from ..config import (
+    DATASETS,
     DEFAULT_OUTPUT_DIR,
     PROJECT_ROOT,
     get_default_output_dir,
     set_default_output_dir,
 )
 from ..components.common import section_header, dataset_status_card, dir_input, sync_output_dir_fields
+from ..components.mapping_editor import MappingGridEditor
+from .. import mapping_store
 
 
 def create_settings_tab():
@@ -156,6 +159,131 @@ def create_settings_tab():
 
             save_default_btn.on_click(save_default_dir)
             reset_default_btn.on_click(reset_default_dir)
+
+        # Custom type mappings (LabelMapper presets, reusable across runs)
+        with ui.card().classes("w-full drocat-card"):
+            section_header("Custom Type Mappings", "hub")
+            ui.label(
+                "Define custom neuron groups across datasets for cross-dataset comparison and "
+                "pathfinding (LabelMapper format). Presets are saved permanently in "
+                "cache/user_mappings.json and exported to cache/user_mappings/ for runs."
+            ).classes("text-caption drocat-muted")
+
+            preset_select = ui.select(
+                options=mapping_store.list_mappings(),
+                value=mapping_store.get_active_mapping(),
+                label="Saved mappings",
+            ).classes("w-full drocat-select")
+            with ui.row().classes("items-center gap-2 w-full"):
+                name_input = ui.input(
+                    label="Mapping name", placeholder="e.g. aMe12 orthologs"
+                ).classes("drocat-input").style("width: 300px")
+                desc_input = ui.input(label="Description (optional)").classes("drocat-input")
+
+            side_tabs = ui.tabs().classes("w-full")
+            with side_tabs:
+                ui.tab("Source")
+                ui.tab("Target")
+                ui.tab("Intermediate")
+            with ui.tab_panels(side_tabs, value="Source").classes("w-full bg-transparent"):
+                with ui.tab_panel("Source").classes("p-0"):
+                    source_container = ui.column().classes("w-full gap-2")
+                with ui.tab_panel("Target").classes("p-0"):
+                    target_container = ui.column().classes("w-full gap-2")
+                with ui.tab_panel("Intermediate").classes("p-0"):
+                    inter_container = ui.column().classes("w-full gap-2")
+
+            editors = {
+                "source_mapping": MappingGridEditor("source_mapping"),
+                "target_mapping": MappingGridEditor("target_mapping"),
+                "intermediate_mapping": MappingGridEditor("intermediate_mapping"),
+            }
+            editors["source_mapping"].create(source_container, list(DATASETS))
+            editors["target_mapping"].create(target_container, list(DATASETS))
+            editors["intermediate_mapping"].create(inter_container, list(DATASETS))
+
+            def _refresh_preset_select(value=None):
+                preset_select.options = mapping_store.list_mappings()
+                preset_select.value = value
+
+            def _load_preset(name):
+                preset = mapping_store.get_mapping(name)
+                if not preset:
+                    return
+                name_input.value = preset["name"]
+                desc_input.value = preset.get("description", "")
+                for side in mapping_store.MAPPING_SIDES:
+                    editors[side].set_data(preset.get(side) or {})
+
+            def _new_preset():
+                name_input.value = ""
+                desc_input.value = ""
+                for side in mapping_store.MAPPING_SIDES:
+                    editors[side].set_data({})
+                preset_select.value = None
+
+            def _save_preset():
+                name = (name_input.value or "").strip()
+                if not name:
+                    ui.notify("Enter a mapping name first", type="warning")
+                    return
+                sides = {}
+                for side in mapping_store.MAPPING_SIDES:
+                    if not editors[side].is_empty():
+                        sides[side] = editors[side].get_data()
+                if not sides:
+                    ui.notify("Add at least one group with neurons first", type="warning")
+                    return
+                errors = mapping_store.validate_mapping(sides)
+                if errors:
+                    for err in errors:
+                        ui.notify(err, type="negative")
+                    return
+                if not mapping_store.save_mapping(name, sides, desc_input.value or ""):
+                    ui.notify("Failed to save mapping", type="negative")
+                    return
+                _refresh_preset_select(name)
+                ui.notify(f"Mapping '{name}' saved", type="positive")
+
+            def _rename_preset():
+                old = preset_select.value
+                new = (name_input.value or "").strip()
+                if not old or not new:
+                    ui.notify("Select a preset and enter the new name", type="warning")
+                    return
+                if not mapping_store.rename_mapping(old, new):
+                    ui.notify("Rename failed (name taken or missing)", type="negative")
+                    return
+                _refresh_preset_select(new)
+                name_input.value = new
+                ui.notify(f"Renamed to '{new}'", type="positive")
+
+            def _delete_preset():
+                name = preset_select.value
+                if not name:
+                    ui.notify("Select a preset to delete", type="warning")
+                    return
+                if not mapping_store.delete_mapping(name):
+                    ui.notify("Delete failed", type="negative")
+                    return
+                _refresh_preset_select(None)
+                _new_preset()
+                ui.notify(f"Deleted '{name}'", type="positive")
+
+            def _set_active():
+                name = preset_select.value
+                if not name:
+                    ui.notify("Select a preset to set active", type="warning")
+                    return
+                mapping_store.set_active_mapping(name)
+                ui.notify(f"'{name}' is now the active mapping", type="positive")
+
+            preset_select.on_value_change(lambda e: _load_preset(e.value) if e.value else None)
+            ui.button("Save Mapping", icon="save", color="primary").on_click(_save_preset)
+            ui.button("New", icon="add").on_click(_new_preset)
+            ui.button("Rename", icon="edit").on_click(_rename_preset)
+            ui.button("Delete", icon="delete", color="negative").on_click(_delete_preset)
+            ui.button("Set Active", icon="star").on_click(_set_active)
 
         # Dataset Preparation Guide
         with ui.card().classes("w-full drocat-card"):
