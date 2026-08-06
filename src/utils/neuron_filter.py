@@ -232,7 +232,10 @@ class NeuronFilter:
             return pd.Series([False] * len(df), index=df.index)
         
         str_patterns = [str(p) for p in patterns]
-        # Search across columns with OR logic
+        # Search across columns with OR logic (per-column matches union).
+        # This matches the original per-cell semantics pinned by
+        # tests/core/test_audit_fixes.py, including for the negative
+        # operators not_contains / not_regex.
         combined_mask = pd.Series([False] * len(df), index=df.index)
         
         for col in search_cols:
@@ -310,7 +313,9 @@ class NeuronFilter:
         if not self.filter_spec:
             return df.copy()
         
-        # Apply each operator (AND logic across operators)
+        # Apply each operator (AND logic across operators; legacy lists with
+        # mixed exact+regex groups keep this original semantics too - see
+        # tests/core/test_audit_fixes.py::test_legacy_list_semantics_preserved)
         mask = pd.Series([True] * len(df), index=df.index)
         
         for operator, patterns in self.filter_spec.items():
