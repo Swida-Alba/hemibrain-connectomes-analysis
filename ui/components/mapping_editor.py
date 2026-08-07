@@ -20,8 +20,10 @@ _LABEL_KEYS = ("custom_label", "std_label")
 NONE_MAPPING = "(No custom mapping)"
 
 # Local documentation served by the app (ui/app.py registers /docs).
-# The guide's "UI Workflow" section explains the preset workflow.
-MAPPING_GUIDE_URL = "docs/core-features/LabelMapper_Guide.md"
+# The guide's "UI workflow" section explains the preset workflow; it is an
+# HTML page (like the other ui_guides) so it renders in the browser instead
+# of downloading as a markdown file.
+MAPPING_GUIDE_URL = "docs/ui_guides/label_mapper.html"
 
 
 def mapping_selector(

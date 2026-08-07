@@ -10,7 +10,7 @@ from ..config import (
     set_default_output_dir,
 )
 from ..components.common import section_header, dataset_status_card, dir_input, sync_output_dir_fields
-from ..components.mapping_editor import MappingGridEditor
+from ..components.mapping_editor import MappingGridEditor, MAPPING_GUIDE_URL
 from .. import mapping_store
 
 
@@ -298,7 +298,7 @@ def create_settings_tab():
             with ui.row().classes("items-center gap-2"):
                 ui.link(
                     "📖 Grouping instructions (LabelMapper guide)",
-                    "docs/core-features/LabelMapper_Guide.md",
+                    MAPPING_GUIDE_URL,
                     new_tab=True,
                 ).classes("text-caption text-primary")
 

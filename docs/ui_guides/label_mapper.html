@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Custom Type Mappings - DROCAT Instructions</title>
+  <link rel="stylesheet" href="guide.css">
+</head>
+<body>
+<main class="guide">
+  <header class="guide-top">
+    <a class="back" href="README.html">&larr; Back to guides</a>
+    <span class="tag sys">Settings</span>
+  </header>
+  <h1>Custom Type Mappings</h1>
+  <p class="lede">
+    Group neuron types across datasets into reusable presets for
+    cross-dataset comparison and pathfinding (LabelMapper format).
+  </p>
+
+  <h2>UI workflow</h2>
+  <p>Mappings are managed as <b>reusable presets</b> — no scripting needed:</p>
+  <ol>
+    <li><b>Settings tab &rarr; Custom Type Mappings</b>: create/edit presets in
+      the table grid — one row per custom group, one column per dataset, cells
+      hold comma-separated neuron types or regex patterns (Source / Target /
+      Intermediate sides). Save stores the preset permanently in
+      <code>cache/user_mappings.json</code> (gitignored) and exports it to
+      <code>cache/user_mappings/&lt;name&gt;.json</code> for runs.</li>
+    <li><b>Set Active</b>: marks a preset as the default; every tool tab
+      pre-selects it.</li>
+    <li><b>Cross-Dataset tab &rarr; Custom Type Mapping</b>: the chosen preset
+      is passed to the comparison as <code>overall_mapping_json</code>. It acts
+      as a mapping <b>overlay</b>: your explicit source/target neuron queries
+      stay, and only neurons matching the mapping are renamed to their custom
+      groups (unmapped neurons keep their identifiers).</li>
+    <li><b>FindPath / FindDirect tabs &rarr; Custom Grouping</b>: the same
+      preset is passed as <code>custom_mapping_file</code>; mapped neurons are
+      grouped at type level via <code>EnrichConnectionTable</code>
+      (custom_group columns).</li>
+  </ol>
+  <p>Presets can be renamed, deleted, and re-saved at any time; runs always
+    consume the exported file, so results stay reproducible
+    (<code>label_map.json</code> / <code>parameters.json</code> record the
+    mapping used).</p>
+
+  <h2>Preset file format (JSON)</h2>
+  <p>The exported preset uses LabelMapper's native JSON schema — one mapping
+    per role, a <code>custom_label</code> list of group names, and one list of
+    group lists per dataset:</p>
+  <pre>{
+  "source_mapping": {
+    "custom_label": ["aMe12"],
+    "hemibrain:v1.2.1": [["aMe12"]],
+    "male-cns:v0.9": [["aMe12"]],
+    "flywire_FAFB_v783": [["720575940610453042"]]
+  },
+  "target_mapping": {
+    "custom_label": ["KCg-s1"],
+    "hemibrain:v1.2.1": [["KCg-s1"]],
+    "male-cns:v0.9": [["KCg-s1"]],
+    "flywire_FAFB_v783": [["KCg-s1"]]
+  }
+}</pre>
+  <div class="callout info">
+    <b>Only JSON</b> is supported for <code>overall_mapping_json</code>. A role
+    may be omitted (e.g. source-only mappings); at least one mapping key must
+    be present.
+  </div>
+
+  <h2>CSV format (script use)</h2>
+  <p>The CSV format is the most straightforward way to define mappings
+    manually: a <code>custom_label</code> column plus one column per dataset.
+    Cell values are specific neuron IDs or regex patterns (e.g.
+    <code>MBON14.*_R</code> matches multiple neurons).</p>
+  <table>
+    <tr><th>custom_label</th><th>hemibrain:v1.2.1</th><th>male-cns:v0.9</th><th>flywire_FAFB_v783</th></tr>
+    <tr><td>aMe12</td><td>aMe12</td><td>aMe12</td><td>720575940610453042</td></tr>
+    <tr><td>MBON14</td><td>MBON14.*_R</td><td>MBON14.*_R</td><td>MBON14</td></tr>
+    <tr><td>PPL101</td><td>PPL101</td><td>PPL101</td><td>720575940621886666</td></tr>
+  </table>
+
+  <h2>Why use custom groupings?</h2>
+  <ul>
+    <li><b>Consistency</b>: compare "apples to apples" across datasets whose
+      naming conventions differ (e.g. <code>aMe12</code> in hemibrain vs
+      <code>aMe12-like</code> in male-cns).</li>
+    <li><b>Simplicity</b>: analysis code deals only with standard labels, not
+      dataset-specific IDs (e.g. <code>720575940610453042</code>).</li>
+    <li><b>Scalability</b>: add new datasets by extending the mapping, without
+      changing analysis code.</li>
+  </ul>
+
+  <div class="callout tip">
+    <b>Reproducibility</b>: each run records the mapping file it consumed
+    (<code>label_map.json</code> / <code>parameters.json</code>), so a preset
+    can be edited later without invalidating past results.
+  </div>
+</main>
+</body>
+</html>
