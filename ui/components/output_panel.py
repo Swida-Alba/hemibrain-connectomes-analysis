@@ -8,7 +8,6 @@ live log console and output files rendered as selectable cards.
 from nicegui import ui
 from typing import List, Optional, Dict
 from pathlib import Path
-from collections import defaultdict
 import re
 
 from ..runner import open_folder, open_file
@@ -20,21 +19,15 @@ from ..runner import open_folder, open_file
 _PROGRESS_NAME_RE = re.compile(r"^\s*([^%]*?)\s*\d+%\|")
 
 
+# Sentinel key for the file list inside a folder-tree node.
+_FILES_KEY = "__files__"
+
+
 def _progress_bar_name(message: str) -> str:
     """Extract the progress-bar label from a tqdm-style line ('' if none)."""
     match = _PROGRESS_NAME_RE.match(message)
     return match.group(1).rstrip() if match else ""
 
-
-# File type categories for organizing output
-FILE_CATEGORIES = {
-    "Visualizations (HTML)": [".html", ".htm"],
-    "Data Tables (CSV)": [".csv", ".tsv"],
-    "Data Tables (Excel)": [".xlsx", ".xls"],
-    "Images": [".png", ".jpg", ".jpeg", ".svg", ".pdf"],
-    "Configuration": [".json", ".txt", ".yaml", ".yml"],
-    "Other": [],
-}
 
 _STATUS_COLORS = {
     "idle": "grey-5",
@@ -45,13 +38,34 @@ _STATUS_COLORS = {
 }
 
 
-def _categorize_file(filename: str) -> str:
-    """Determine the category for a file based on extension."""
-    ext = Path(filename).suffix.lower()
-    for category, extensions in FILE_CATEGORIES.items():
-        if ext in extensions:
-            return category
-    return "Other"
+def _build_file_tree(files: List[dict], output_dir: Optional[str]) -> dict:
+    """Nest files by their relative path under *output_dir*.
+
+    Returns a nested dict mirroring the output folder structure:
+    subdirectory name -> child dict, plus ``_FILES_KEY`` -> list of file
+    entries at that level.
+    """
+    tree = {}
+    root = Path(output_dir).resolve() if output_dir else None
+    for f in files:
+        rel = Path(f["name"])
+        if root is not None:
+            try:
+                rel = Path(f["path"]).resolve().relative_to(root)
+            except ValueError:
+                rel = Path(f["name"])
+        node = tree
+        for part in rel.parts[:-1]:
+            node = node.setdefault(part, {})
+        node.setdefault(_FILES_KEY, []).append(f)
+    return tree
+
+
+def _count_tree_files(tree: dict) -> int:
+    """Total number of files in a (sub)tree."""
+    return len(tree.get(_FILES_KEY, [])) + sum(
+        _count_tree_files(v) for k, v in tree.items() if k != _FILES_KEY
+    )
 
 
 class OutputPanel:
@@ -71,10 +85,11 @@ class OutputPanel:
         self._last_is_progress = False
         self._last_progress_name: Optional[str] = None
         # Streaming: polls the run's output folder while the run is active so
-        # files appear as soon as they are written. Category expansions are
-        # tracked so in-place refreshes keep the user's open/closed state.
+        # files appear as soon as they are written. Folder expansions are
+        # tracked (by relative path) so in-place refreshes keep the user's
+        # open/closed state.
         self._poll_timer = None
-        self._file_categories: Dict[str, ui.expansion] = {}
+        self._file_expansions: Dict[str, ui.expansion] = {}
 
     def create(
         self,
@@ -291,26 +306,29 @@ class OutputPanel:
             self._stop_file_streaming()
 
     def show_files(self, files: List[dict], output_dir: Optional[str] = None):
-        """Display output files organized by category as a card grid.
+        """Display output files mirroring the output folder structure.
 
-        The panel may be refreshed repeatedly while a run is active
-        (streaming); the rebuild preserves which category expansions the user
-        has open, so newly created files appear without collapsing anything.
+        Files directly in the run folder are listed first; subfolders render
+        as nested expansions (data_details/, images/, bodyId_visualization/,
+        ...) exactly like the folder on disk. The panel may be refreshed
+        repeatedly while a run is active (streaming); the rebuild preserves
+        which folder expansions the user has open, so newly created files
+        appear without collapsing anything.
         """
         self._files = files
 
         if not self.files_container:
             return
 
-        # Remember which category expansions are open so an in-place refresh
+        # Remember which folder expansions are open so an in-place refresh
         # during streaming does not collapse them.
         expanded = {
-            category: expansion.value
-            for category, expansion in self._file_categories.items()
+            rel_path: expansion.value
+            for rel_path, expansion in self._file_expansions.items()
         }
 
         self.files_container.clear()
-        self._file_categories = {}
+        self._file_expansions = {}
 
         with self.files_container:
             if not files:
@@ -326,34 +344,39 @@ class OutputPanel:
                     ).props("flat dense color=primary")
                     ui.label(str(Path(output_dir))).classes("text-caption drocat-muted drocat-truncate")
 
-            grouped = defaultdict(list)
-            for f in files:
-                grouped[_categorize_file(f["name"])].append(f)
+            tree = _build_file_tree(files, output_dir)
+            self._render_file_tree(tree, expanded)
 
-            for category in FILE_CATEGORIES.keys():
-                if category not in grouped:
-                    continue
-                cat_files = grouped[category]
-                with ui.expansion(
-                    f"{category}  ({len(cat_files)})", icon="folder"
-                ).classes("w-full drocat-expansion") as expansion:
-                    self._file_categories[category] = expansion
-                    with ui.element("div").classes("drocat-file-list"):
-                        for f in cat_files:
-                            with ui.row().classes(
-                                "drocat-file-row items-center gap-2"
-                            ).on("click", lambda path=f["path"]: open_file(path)):
-                                ui.icon("insert_drive_file").classes("drocat-file-icon")
-                                ui.label(f["name"]).classes("drocat-file-name flex-grow")
-                                ui.label(self._format_size(f.get("size", 0))).classes(
-                                    "text-caption drocat-muted drocat-file-size"
-                                )
-                                ui.button(
-                                    icon="open_in_new",
-                                    on_click=lambda path=f["path"]: open_file(path),
-                                ).props("flat dense round").classes("drocat-file-open")
-                if expanded.get(category):
-                    expansion.value = True
+    def _render_file_tree(self, tree: dict, expanded: Dict[str, bool], prefix: str = ""):
+        """Render one level of the folder tree: files first, then subfolders."""
+        with ui.element("div").classes("drocat-file-list"):
+            for f in sorted(tree.get(_FILES_KEY, []), key=lambda x: x["name"].lower()):
+                self._render_file_row(f)
+        for subdir in sorted(k for k in tree if k != _FILES_KEY):
+            rel_path = f"{prefix}/{subdir}" if prefix else subdir
+            subtree = tree[subdir]
+            with ui.expansion(
+                f"{subdir}  ({_count_tree_files(subtree)})", icon="folder"
+            ).classes("w-full drocat-expansion") as expansion:
+                self._file_expansions[rel_path] = expansion
+                self._render_file_tree(subtree, expanded, rel_path)
+            if expanded.get(rel_path):
+                expansion.value = True
+
+    def _render_file_row(self, f: dict):
+        """One clickable file row (icon + name + size + open button)."""
+        with ui.row().classes(
+            "drocat-file-row items-center gap-2"
+        ).on("click", lambda path=f["path"]: open_file(path)):
+            ui.icon("insert_drive_file").classes("drocat-file-icon")
+            ui.label(f["name"]).classes("drocat-file-name flex-grow")
+            ui.label(self._format_size(f.get("size", 0))).classes(
+                "text-caption drocat-muted drocat-file-size"
+            )
+            ui.button(
+                icon="open_in_new",
+                on_click=lambda path=f["path"]: open_file(path),
+            ).props("flat dense round").classes("drocat-file-open")
 
     def _format_size(self, size: int) -> str:
         """Format file size in human-readable format."""
@@ -369,7 +392,7 @@ class OutputPanel:
         self._last_is_progress = False
         self._last_progress_name = None
         self._stop_file_streaming()
-        self._file_categories = {}
+        self._file_expansions = {}
         if self.log_area:
             self.log_area.clear()
         self._files = []

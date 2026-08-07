@@ -599,13 +599,20 @@ print("[DROCAT] Done.")
         )
 
     def _scan_output_files(self, output_dir: str) -> List[dict]:
-        """Scan output directory for recently created files."""
+        """Scan output directory for recently created files.
+
+        Returns EVERY file in the run folder (no count cap): the panel
+        mirrors the folder structure, and a cap would make files silently
+        disappear from the UI while a run keeps writing (e.g. hundreds of
+        downloaded images). The 24h recency filter only guards against
+        re-showing files from an older run in the same folder.
+        """
         files = []
         output_path = Path(output_dir)
         if not output_path.exists():
             return files
 
-        # Get files modified in the last hour
+        # Get files modified in the last 24h
         import time
         cutoff = time.time() - 24 * 3600
 
@@ -623,7 +630,7 @@ print("[DROCAT] Done.")
 
         # Sort by modification time (newest first)
         files.sort(key=lambda x: x["modified"], reverse=True)
-        return files[:50]
+        return files
 
     OUTPUT_FOLDER_MARKERS = [
         "Created output folder: ",

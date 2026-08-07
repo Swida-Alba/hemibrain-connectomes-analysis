@@ -431,6 +431,19 @@ class TestRunner:
             files = sr._scan_output_files(tmpdir)
             assert len(files) >= 1
 
+    def test_scan_output_files_returns_all_files_no_cap(self):
+        """The panel mirrors the run folder - no 50-file cap may hide files
+        (hundreds of images are written by the NB find-lines workflow)."""
+        from ui.runner import ScriptRunner
+        sr = ScriptRunner()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            for i in range(60):
+                (Path(tmpdir) / f"file_{i:03d}.csv").write_text("a,b\n1,2")
+            (Path(tmpdir) / "sub" / "nested.txt").parent.mkdir()
+            (Path(tmpdir) / "sub" / "nested.txt").write_text("x")
+            files = sr._scan_output_files(tmpdir)
+            assert len(files) == 61  # every file, nested included
+
     def test_extract_output_folder_picks_current_run(self):
         """The results panel must link to THIS run's folder, not older ones."""
         from ui.runner import ScriptRunner
@@ -1235,7 +1248,8 @@ class TestComponents:
 
         texts = self._collect_panel_texts(panel.files_container)
         assert any("connections.csv" in text for text in texts), texts
-        assert any("Data Tables (CSV)" in text for text in texts), texts
+        # the folder-structure display shows the run folder, not type categories
+        assert not any("Data Tables (CSV)" in text for text in texts), texts
 
     def test_output_panel_streaming_skips_unknown_run_folder(self, tmp_path):
         """Before the run folder is known, polling must not show stale files."""
@@ -1258,8 +1272,43 @@ class TestComponents:
         texts = self._collect_panel_texts(panel.files_container)
         assert not any("old_run_connections.csv" in text for text in texts), texts
 
+    def test_output_panel_show_files_mirrors_folder_structure(self, tmp_path):
+        """Output files are grouped by their folder in the run directory
+        (root files first, subfolders as nested expansions) - not by file
+        type."""
+        from nicegui import Client
+        from nicegui.page import page
+        from ui.components.output_panel import OutputPanel
+
+        client = Client(page("/output-panel-tree-test"))
+        with client:
+            panel = OutputPanel("Test")
+            panel.create()
+
+        def file_entry(rel):
+            return {"name": Path(rel).name, "path": str(tmp_path / rel), "size": 10,
+                    "modified": "2026-08-01T00:00:00"}
+
+        panel.show_files([
+            file_entry("summary.csv"),
+            file_entry("data_details/params.json"),
+            file_entry("data_details/layer_1.csv"),
+            file_entry("images/a.png"),
+            file_entry("images/nested/b.png"),
+        ], str(tmp_path))
+
+        texts = self._collect_panel_texts(panel.files_container)
+        # root file is listed directly
+        assert any("summary.csv" in text for text in texts), texts
+        # subfolders appear as expansions with their file counts
+        assert any("data_details  (2)" in text for text in texts), texts
+        assert any("images  (2)" in text for text in texts), texts
+        # no type-category headers
+        assert not any("Data Tables (CSV)" in text for text in texts), texts
+        assert not any("Images" in text for text in texts), texts
+
     def test_output_panel_show_files_preserves_expanded_state(self, tmp_path):
-        """Streaming refreshes keep the user's expanded categories open."""
+        """Streaming refreshes keep the user's expanded folders open."""
         from nicegui import Client
         from nicegui.page import page
         from ui.components.output_panel import OutputPanel
@@ -1269,21 +1318,24 @@ class TestComponents:
             panel = OutputPanel("Test")
             panel.create()
 
-        def file_entry(name):
-            return {"name": name, "path": str(tmp_path / name), "size": 10,
+        def file_entry(rel):
+            return {"name": Path(rel).name, "path": str(tmp_path / rel), "size": 10,
                     "modified": "2026-08-01T00:00:00"}
 
-        panel.show_files([file_entry("a.csv")], str(tmp_path))
-        assert panel._file_categories
-        for expansion in panel._file_categories.values():
-            expansion.value = True  # user expands a category
+        panel.show_files([file_entry("data_details/a.csv")], str(tmp_path))
+        assert panel._file_expansions
+        for expansion in panel._file_expansions.values():
+            expansion.value = True  # user expands a folder
 
         # A streaming refresh with a new file arrives.
-        panel.show_files([file_entry("a.csv"), file_entry("b.csv")], str(tmp_path))
+        panel.show_files([
+            file_entry("data_details/a.csv"),
+            file_entry("data_details/b.csv"),
+        ], str(tmp_path))
 
-        assert panel._file_categories, "categories must be rebuilt"
-        assert all(expansion.value for expansion in panel._file_categories.values()), \
-            "expanded categories must stay open after a streaming refresh"
+        assert panel._file_expansions, "folders must be rebuilt"
+        assert all(expansion.value for expansion in panel._file_expansions.values()), \
+            "expanded folders must stay open after a streaming refresh"
         texts = self._collect_panel_texts(panel.files_container)
         assert any("b.csv" in text for text in texts), texts
 
