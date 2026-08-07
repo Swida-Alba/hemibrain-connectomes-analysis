@@ -407,3 +407,59 @@ class TestBuildConnectionCacheCancel:
         assert summary["newly_cached"] == 2
         conn_path = tmp_path / "cache" / "fake_v2" / "connections.parquet"
         assert conn_path.exists()
+
+
+class TestRepeatPullCacheStatus:
+    def test_repeat_pull_reads_disk_truth_not_stale_module_cache(self, tmp_path, monkeypatch):
+        """Regression (one-pull-lag report): after a completed pull, the NEXT
+        pull must report 'already cached'. The long-lived UI process shares
+        the module-level _FNC_CACHE across FindNeuronConnection instances, so
+        a stale index snapshot (e.g. loaded by another tab before the pull)
+        must never make the puller refetch everything."""
+        import coana
+        import neuprint
+        import pandas as pd
+
+        class FakeClient:
+            def __init__(self, *a, **k):
+                pass
+
+        monkeypatch.setattr(neuprint, "Client", FakeClient)
+
+        def make_fc():
+            fc = coana.FindNeuronConnection(
+                dataset="fake:v5",
+                use_cache=True,
+                cache_only=False,
+                verbose=False,
+                script_path=str(tmp_path),
+                cache_folder=str(tmp_path / "cache" / "fake_v5"),
+            )
+            fc._fetch_connections_bulk = lambda upstream_bodyIds, downstream_bodyIds=None: pd.DataFrame({
+                "bodyId_pre": upstream_bodyIds,
+                "bodyId_post": [str(int(b) + 1000) for b in upstream_bodyIds],
+                "weight": [5] * len(upstream_bodyIds),
+                "roi": ["fake"] * len(upstream_bodyIds),
+            })
+            return fc
+
+        ids = [str(i) for i in range(20)]
+        try:
+            s1 = make_fc().build_connection_cache(neuron_bodyIds=ids, batch_size=5, quiet=True)
+            assert s1["newly_cached"] == 20
+
+            # Simulate another UI operation loading a STALE index (all
+            # downstream_complete=False) into the shared module cache.
+            stale = pd.DataFrame({
+                "bodyId": ids, "type": ["T"] * 20, "instance": [""] * 20,
+                "post": [3] * 20, "downstream_complete": [False] * 20,
+                "last_fetched": ["2026-01-01"] * 20, "connection_count": [0] * 20,
+            })
+            coana._FNC_CACHE["fake_v5"]["neuron_index"] = stale
+            coana._FNC_CACHE["fake_v5"]["neuron_dict"] = {}
+
+            s2 = make_fc().build_connection_cache(neuron_bodyIds=ids, batch_size=5, quiet=True)
+            assert s2["already_cached"] == 20, "second pull must see the persisted cache"
+            assert s2["newly_cached"] == 0
+        finally:
+            coana._FNC_CACHE.pop("fake_v5", None)

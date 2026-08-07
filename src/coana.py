@@ -2510,12 +2510,17 @@ class FindNeuronConnection:
         try:
             index_df.to_parquet(index_path, index=False, compression='gzip')
             self._vprint(f'  ✓ Neuron index saved successfully', level='full')
-            
-            # Update in-memory cache
+        except Exception as e:
+            # Never let a disk failure freeze the in-memory state: the module
+            # cache must still see the updated index so the next run in this
+            # process does not refetch everything (the warning is printed
+            # unconditionally so the UI log surfaces it even in quiet mode).
+            print(f'  ⚠️ Warning: Failed to save neuron index to {index_path}: {e}')
+            print('     Continuing with the in-memory index (next run may re-check from disk).')
+        finally:
+            # Update in-memory cache and module-level shared cache
             self._neuron_index_cache = index_df
             self._build_neuron_index_dict()
-        except Exception as e:
-            self._vprint(f'  ⚠️ Warning: Failed to save neuron index: {e}', level='full')
     
     # ============================================================================
     # Query Resolution Logic
@@ -4830,8 +4835,12 @@ class FindNeuronConnection:
                         'failed_neurons': [], 'total_connections': 0, 'elapsed_time': 0}
         
         # Check which neurons are already cached using neuron_index
-        # This uses O(1) dict lookup after warm-up
-        neuron_index = self._load_neuron_index()
+        # This uses O(1) dict lookup after warm-up.
+        # NOTE: force_reload=True reads the PERSISTED index, never a stale
+        # in-memory/module-level snapshot (the long-lived UI process shares
+        # _FNC_CACHE across instances; a stale copy would make a completed
+        # pull look uncached on the next run).
+        neuron_index = self._load_neuron_index(force_reload=True)
         already_cached_set = set()
         
         if not neuron_index.empty:

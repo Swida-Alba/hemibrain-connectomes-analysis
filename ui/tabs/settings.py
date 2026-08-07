@@ -107,10 +107,12 @@ def create_settings_tab():
                 parallel_input.set_enabled(not st["running"])
                 if st["running"]:
                     total = st["total"] or 1
-                    progress.set_value(min(st["current"] / total, 1.0))
+                    frac = min(st["current"] / total, 1.0)
+                    progress.set_value(frac)
                     status_label.text = (
                         f"Pulling {st['dataset']}: {st['info']} "
-                        f"({st['current']:,}/{st['total']:,} neurons) | {_format_eta(st)}"
+                        f"({st['current']:,}/{st['total']:,} neurons, "
+                        f"{frac * 100:.2f}%) | {_format_eta(st)}"
                     )
                     return
                 if not st["done"]:
