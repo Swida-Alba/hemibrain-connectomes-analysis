@@ -66,9 +66,47 @@
       pre-built cache.</li>
     <li><b>Save Folder Name</b>: custom output folder instead of the auto
       name.</li>
-    <li><b>Hemisphere analysis</b>: separate L/R labels, symmetry outputs,
-      keep only hemisphere-conserved edges, find reciprocal connections.</li>
+    <li><b>Hemisphere analysis</b>: separate L/R labels, a left/right filter,
+      symmetry outputs, keep only hemisphere-conserved edges, find reciprocal
+      connections. See <a href="#hemisphere-analysis">Hemisphere analysis</a>
+      below.</li>
   </ul>
+
+  <h2 id="hemisphere-analysis">Hemisphere analysis</h2>
+  <p>Both Find All Paths and Find Direct can restrict or split the analysis
+    by brain hemisphere. Hemisphere assignment is done automatically per
+    neuron:</p>
+  <ol>
+    <li>The <b>Soma side</b> / <b>hemisphere</b> column is used when present
+      (NeuPrint neuron tables).</li>
+    <li>Otherwise the <b>instance</b> suffix is used: <code>_R</code> →
+      right, <code>_L</code> → left.</li>
+    <li>Neurons with neither are unclassified (<code>U</code>) — they are
+      <b>always included</b> in every option (both / left / right), so data
+      without hemisphere notation is never silently dropped.</li>
+  </ol>
+
+  <h3>Separate Hemispheres (L/R)</h3>
+  <p>Splits type/group aggregation into <code>_L</code> / <code>_R</code> /
+    <code>U</code> labels so ipsilateral and contralateral edges can be told
+    apart (e.g. <code>KCg-m_L → MBON01_L</code> vs
+    <code>KCg-m_R → MBON01_R</code>). Enables <b>Symmetry Analysis</b> and
+    <b>Keep Only Hemisphere-Conserved Edges</b>.</p>
+
+  <h3>Hemisphere filter — only left / only right / both</h3>
+  <p>Restricts the query to one hemisphere: <b>both</b> (default) keeps
+    everything; <b>left</b> keeps left + unclassified neurons; <b>right</b>
+    keeps right + unclassified neurons. At the edge level, a connection is
+    kept only when <b>both</b> endpoints belong to the selected hemisphere
+    (unclassified endpoints are always kept). This works for every dataset —
+    unlike the manual <code>.*_R</code> instance search, which only finds
+    neurons that carry a hemisphere suffix in their instance name.</p>
+  <div class="callout tip">
+    <b>Manual suffix search still works</b> — typing <code>aMe12_R</code> or
+    <code>.*_R</code> as a source/target pattern selects one side per type;
+    the Hemisphere selector applies the same rule to every neuron
+    automatically, including those without a suffix.
+  </div>
 
   <h2>Output &amp; examples</h2>
   <p>One timestamped folder per run, prefixed with the function name:</p>

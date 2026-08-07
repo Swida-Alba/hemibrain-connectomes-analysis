@@ -124,6 +124,12 @@ def create_find_direct_tab():
                         "Separate Hemispheres (L/R)", False,
                         hint="Split type/group aggregation into _L/_R/_U hemisphere labels.",
                     )
+                    hemi_filter = select_input(
+                        "Hemisphere", ["both", "left", "right"], "both",
+                        hint="'both': all neurons. 'left'/'right': restrict to that hemisphere. "
+                             "Neurons WITHOUT an explicit hemisphere (no _L/_R instance suffix "
+                             "or Soma side) are always included in every option.",
+                    )
                     keep_hemi_conserved = checkbox_input(
                         "Keep Only Hemisphere-Conserved Edges", False,
                         hint="Keep only edges conserved between hemispheres (requires Separate Hemispheres).",
@@ -136,9 +142,11 @@ def create_find_direct_tab():
                     if separate_hemi.value:
                         keep_hemi_conserved.enable()
                         symmetry_analysis.enable()
+                        hemi_filter.set_enabled(True)
                     else:
                         keep_hemi_conserved.disable()
                         symmetry_analysis.disable()
+                        hemi_filter.set_enabled(False)
                 separate_hemi.on_value_change(lambda _e: _sync_hemisphere_options())
                 _sync_hemisphere_options()
 
@@ -175,6 +183,7 @@ def create_find_direct_tab():
             "saveas": saveas.value.strip() or "",
             "cache_only": cache_only.value,
             "separate_hemispheres": separate_hemi.value,
+            "hemisphere_filter": hemi_filter.value,
             "keep_only_hemisphere_conserved_connections": keep_hemi_conserved.value,
             "symmetry_analysis": symmetry_analysis.value,
         }

@@ -446,12 +446,28 @@ class FindNeuronConnection:
             return 'L'
         return 'U'
 
+    @staticmethod
+    def _find_hemisphere_column(df: pd.DataFrame) -> str | None:
+        """Locate the side/hemisphere column regardless of naming variant.
+
+        Dataset tables vary: 'Soma side' (Codex/FlyWire conversions),
+        'somaSide' / 'rootSide' (male-cns CSVs), or an explicit 'hemisphere'
+        column.  Preference: hemisphere > somaSide > rootSide.
+        """
+        lowered = {str(c).strip().lower(): c for c in df.columns}
+        for candidate in ('hemisphere', 'soma side', 'somaside', 'rootside'):
+            if candidate in lowered:
+                return lowered[candidate]
+        return None
+
     def _ensure_hemisphere_columns(self, df: pd.DataFrame) -> pd.DataFrame:
         if df is None or df.empty:
             return df
         df = df.copy()
-        if 'hemisphere' not in df.columns and 'Soma side' in df.columns:
-            df['hemisphere'] = df['Soma side']
+        if 'hemisphere' not in df.columns:
+            side_col = self._find_hemisphere_column(df)
+            if side_col is not None:
+                df['hemisphere'] = df[side_col]
         if 'hemisphere' not in df.columns:
             # Derive from instance if available
             if 'instance' in df.columns:
@@ -534,8 +550,19 @@ class FindNeuronConnection:
         if df is None or df.empty:
             return df
         df = self._ensure_hemisphere_columns(df)
+        codes = self._hemi_code_series(df, '')
+        # Optional hemisphere filtering ('left' / 'right').  Neurons without
+        # an explicit hemisphere ('U') are kept in EVERY option, so data
+        # without hemisphere notation is never silently dropped.
+        if self.hemisphere_filter == 'left':
+            keep = codes.isin(['L', 'U'])
+            df = df[keep].copy()
+            codes = codes[keep]
+        elif self.hemisphere_filter == 'right':
+            keep = codes.isin(['R', 'U'])
+            df = df[keep].copy()
+            codes = codes[keep]
         if self.separate_hemispheres:
-            codes = self._hemi_code_series(df, '')
             if 'type' in df.columns:
                 df['type'] = self._append_hemi_suffix_series(df['type'], codes)
             if 'custom_group' in df.columns:
@@ -617,12 +644,30 @@ class FindNeuronConnection:
         return df
 
     def _apply_hemisphere_suffix_to_conn_df(self, conn_df: pd.DataFrame) -> pd.DataFrame:
-        if conn_df is None or conn_df.empty or not self.separate_hemispheres:
+        if conn_df is None or conn_df.empty:
             return conn_df
 
         conn_df = conn_df.copy()
         codes_pre = self._hemi_code_series(conn_df, 'pre')
         codes_post = self._hemi_code_series(conn_df, 'post')
+        # Optional hemisphere filtering ('left' / 'right') at the EDGE level:
+        # an edge is kept only when BOTH endpoints belong to the selected
+        # hemisphere.  Endpoints without an explicit hemisphere ('U') are
+        # kept in every option.
+        if self.hemisphere_filter == 'left':
+            keep = codes_pre.isin(['L', 'U']) & codes_post.isin(['L', 'U'])
+            conn_df = conn_df[keep].copy()
+            codes_pre = codes_pre[keep]
+            codes_post = codes_post[keep]
+        elif self.hemisphere_filter == 'right':
+            keep = codes_pre.isin(['R', 'U']) & codes_post.isin(['R', 'U'])
+            conn_df = conn_df[keep].copy()
+            codes_pre = codes_pre[keep]
+            codes_post = codes_post[keep]
+
+        if not self.separate_hemispheres:
+            return conn_df
+
         if 'type_pre' in conn_df.columns:
             conn_df['type_pre'] = self._append_hemi_suffix_series(
                 conn_df['type_pre'], codes_pre
@@ -1340,6 +1385,20 @@ class FindNeuronConnection:
     type labels with _L/_R/_U suffixes - edges without hemisphere info are kept as-is.
     '''
 
+    hemisphere_filter: str = 'both'
+    '''
+    Restrict the analysis to one hemisphere (only meaningful together with
+    separate_hemispheres, but it also filters when separate_hemispheres=False):
+      - 'both' (default): no filtering.
+      - 'left': keep only left-hemisphere neurons/edges.
+      - 'right': keep only right-hemisphere neurons/edges.
+    Hemisphere assignment comes from the 'Soma side' / 'hemisphere' columns or
+    the instance suffix (_L/_R). Neurons WITHOUT an explicit hemisphere are
+    marked 'U' (unclassified) and are ALWAYS included - in 'left', 'right'
+    AND 'both' - so data that lacks hemisphere notation is never silently
+    dropped.
+    '''
+
     max_interlayer: int = 1
     '''
     Maximum number of interlayers to be considered in connection.
@@ -1550,6 +1609,18 @@ class FindNeuronConnection:
     def __post_init__(self):
         if self.verbose is not None:
             self.verbose_mode = 'full' if self.verbose else 'silent'
+        # Normalize hemisphere_filter ('left'/'right'/'both'; accept aliases).
+        _hf = str(self.hemisphere_filter or 'both').strip().lower()
+        if _hf in ('l', 'left', 'lhs', 'left hemisphere'):
+            self.hemisphere_filter = 'left'
+        elif _hf in ('r', 'right', 'rhs', 'right hemisphere'):
+            self.hemisphere_filter = 'right'
+        elif _hf in ('b', 'both', 'all', ''):
+            self.hemisphere_filter = 'both'
+        else:
+            raise ValueError(
+                f"hemisphere_filter must be 'left', 'right' or 'both', got '{self.hemisphere_filter}'"
+            )
         # Load the custom mapping file into a LabelMapper (UI runs pass a
         # serializable path; the object form takes precedence when given).
         if self.custom_mapping_file and self.label_mapper is None:
@@ -5573,7 +5644,7 @@ class FindNeuronConnection:
 
         # Ensure hemisphere columns and apply suffixes if requested
         # (This must be OUTSIDE the label_mapper block to apply even when no mapper is used)
-        if self.separate_hemispheres:
+        if self.separate_hemispheres or self.hemisphere_filter != 'both':
             self.source_df = self._apply_hemisphere_suffix_to_neuron_df(self.source_df)
             self.target_df = self._apply_hemisphere_suffix_to_neuron_df(self.target_df)
         
@@ -5638,6 +5709,7 @@ class FindNeuronConnection:
             'exclude intra-type connections': str(self.exclude_intra_type_connections),
             'max interlayer': str(self.max_interlayer),
             'separate hemispheres': str(self.separate_hemispheres),
+            'hemisphere filter': self.hemisphere_filter,
             'find reciprocal': str(self.find_reciprocal),
             'keyword in path to remove': self.keyword_in_path_to_remove,
             'server': self.server,

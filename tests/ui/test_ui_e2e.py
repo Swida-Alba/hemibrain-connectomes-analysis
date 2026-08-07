@@ -939,6 +939,34 @@ class TestTabs:
             create_settings_tab,
         ])
 
+    def test_pathfinding_tabs_have_hemisphere_filter_select(self):
+        """Find All Paths and Find Direct expose the 'Hemisphere' selector
+        (both / left / right) next to 'Separate Hemispheres'."""
+        from nicegui import Client
+        from nicegui.page import page
+        from ui.tabs.find_path import create_find_path_tab
+        from ui.tabs.find_direct import create_find_direct_tab
+
+        for name, builder in [
+            ("/hemi-filter-findpath", create_find_path_tab),
+            ("/hemi-filter-finddirect", create_find_direct_tab),
+        ]:
+            client = Client(page(name))
+            with client:
+                builder()
+            labels = [
+                getattr(el, "_props", {}).get("label")
+                for el in client.elements.values()
+                if getattr(el, "_props", {}).get("label")
+            ]
+            texts = [
+                getattr(el, "text", "")
+                for el in client.elements.values()
+                if getattr(el, "text", "")
+            ]
+            assert "Separate Hemispheres (L/R)" in texts
+            assert "Hemisphere" in labels
+
 
 # =============================================================================
 # Test Components
