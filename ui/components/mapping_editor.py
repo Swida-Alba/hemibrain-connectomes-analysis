@@ -19,15 +19,23 @@ _LABEL_KEYS = ("custom_label", "std_label")
 
 NONE_MAPPING = "(No custom mapping)"
 
+# Local documentation served by the app (ui/app.py registers /docs).
+# The guide's "UI Workflow" section explains the preset workflow.
+MAPPING_GUIDE_URL = "docs/core-features/LabelMapper_Guide.md"
+
 
 def mapping_selector(
     label: str = "Custom Type Mapping",
     hint: str = "Reuse a saved custom type mapping (manage them in the Settings tab).",
+    show_instructions: bool = True,
 ) -> ui.select:
     """Dropdown of saved mapping presets; defaults to the active one.
 
     Options refresh when the dropdown is opened, so presets created after
-    the tab was built still appear."""
+    the tab was built still appear. When *show_instructions* is true a small
+    link to the LabelMapper guide (custom-grouping instructions) is rendered
+    right below the dropdown.
+    """
     options = [NONE_MAPPING] + mapping_store.list_mappings()
     active = mapping_store.get_active_mapping() or NONE_MAPPING
     sel = ui.select(
@@ -44,6 +52,14 @@ def mapping_selector(
         sel.options = available
 
     sel.on("click", _refresh_options)
+
+    if show_instructions:
+        with ui.row().classes("items-center w-full"):
+            ui.link(
+                "📖 Custom grouping instructions",
+                MAPPING_GUIDE_URL,
+                new_tab=True,
+            ).classes("text-caption text-primary")
     return sel
 
 

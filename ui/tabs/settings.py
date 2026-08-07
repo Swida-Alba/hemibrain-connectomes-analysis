@@ -293,6 +293,12 @@ def create_settings_tab():
                 "pathfinding (LabelMapper format). Presets are saved permanently in "
                 "cache/user_mappings.json and exported to cache/user_mappings/ for runs."
             ).classes("text-caption drocat-muted")
+            with ui.row().classes("items-center gap-2"):
+                ui.link(
+                    "📖 Grouping instructions (LabelMapper guide)",
+                    "docs/core-features/LabelMapper_Guide.md",
+                    new_tab=True,
+                ).classes("text-caption text-primary")
 
             preset_select = ui.select(
                 options=mapping_store.list_mappings(),

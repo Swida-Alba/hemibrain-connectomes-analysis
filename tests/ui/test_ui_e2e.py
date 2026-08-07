@@ -673,6 +673,43 @@ class TestDatasetService:
         assert "secret-token" not in _token_status("secret-token")
         assert _token_status("") == "not configured"
 
+    def test_custom_grouping_instruction_link_present(self):
+        """Every custom-grouping UI surface links to the LabelMapper guide:
+        the Settings 'Custom Type Mappings' card and the mapping selector in
+        the tool tabs (Cross-Dataset / Find Path / Find Direct)."""
+        from nicegui import Client
+        from nicegui.page import page
+        from ui.components.mapping_editor import MAPPING_GUIDE_URL, mapping_selector
+
+        def guide_links(client):
+            return [
+                el for el in client.elements.values()
+                if getattr(el, "_props", {}).get("href") == MAPPING_GUIDE_URL
+            ]
+
+        # Settings card
+        client = Client(page("/guide-link-settings"))
+        with client:
+            from ui.tabs.settings import create_settings_tab
+            create_settings_tab()
+        links = guide_links(client)
+        assert len(links) == 1
+        assert links[0]._props.get("target") == "_blank"  # opens in a new tab
+
+        # Selector component (used by Cross-Dataset / Find Path / Find Direct)
+        client = Client(page("/guide-link-selector"))
+        with client:
+            mapping_selector()
+        links = guide_links(client)
+        assert len(links) == 1
+        assert links[0]._props.get("target") == "_blank"
+
+        # Opt-out keeps the layout clean for callers that add their own link
+        client = Client(page("/guide-link-selector-off"))
+        with client:
+            mapping_selector(show_instructions=False)
+        assert guide_links(client) == []
+
     def test_settings_tab_reminds_when_tokens_missing(self, tmp_path, monkeypatch):
         """The Settings tab raises a visible reminder when tokens are missing:
         NeuPrint is required, CAVE is explicitly optional (only FlyWire FAFB
