@@ -9006,55 +9006,83 @@ class NeuronBridgeFinder:
                                 self._vprint(f"\n⚠️  Note: No FlyLight images found for {len(lines_without_flylight)} line(s):")
                                 self._vprint(f"   {', '.join(lines_without_flylight)}")
                                 self._vprint("   (tried all categories including MCFO fallback)")
-                            
-                            # Generate PDF/PPTX summary if images were downloaded
-                            images_dir = os.path.join(output_path, 'images')
-                            if os.path.exists(images_dir):
-                                # Normalize summary_format
-                                formats = summary_format if isinstance(summary_format, list) else [summary_format]
-                                formats = [f.lower() for f in formats]
-                                
-                                if 'pdf' in formats:
-                                    self._vprint(f"\n📄 Generating PDF summary...")
-                                    pdf_path = create_image_pdf(
-                                        images_dir=images_dir,
-                                        output_pdf=os.path.join(output_path, 'images_summary.pdf'),
-                                        images_per_page=pdf_images_per_page,
-                                        landscape=pdf_landscape,
-                                        line_order=download_lines,
-                                        verbose=self.verbose,
-                                        background_color=summary_background_color
-                                    )
-                                    if pdf_path:
-                                        self._vprint(f"   ✅ PDF saved: {pdf_path}")
-                                
-                                if 'pptx' in formats:
-                                    self._vprint(f"\n📊 Generating PPTX summary...")
-                                    # img2pptx auto-detects font color from background
-                                    pptx_path = img2pptx(
-                                        input_path=images_dir,
-                                        output_pptx=os.path.join(output_path, 'images_summary.pptx'),
-                                        images_per_slide=pdf_images_per_page,
-                                        slide_title='{subfolder}',
-                                        include_subfolders=True,
-                                        group_by_subfolder=True,
-                                        label_position='below',
-                                        background_color=summary_background_color
-                                    ) if HAS_IMG2PPTX else create_image_pptx(
-                                        images_dir=images_dir,
-                                        output_pptx=os.path.join(output_path, 'images_summary.pptx'),
-                                        images_per_slide=pdf_images_per_page,
-                                        line_order=download_lines,
-                                        verbose=self.verbose,
-                                        background_color=summary_background_color
-                                    )
-                                    if pptx_path:
-                                        self._vprint(f"   ✅ PPTX saved: {pptx_path}")
+                        
+                        # Generate PDF/PPTX summary if images were downloaded
+                        # from EITHER source. (Previously nested in the FlyLight
+                        # branch, so neuronbridge-only runs downloaded images but
+                        # never produced the requested summary.)
+                        self._generate_image_summaries(
+                            images_dir=images_dir,
+                            output_path=output_path,
+                            download_lines=download_lines,
+                            summary_format=summary_format,
+                            pdf_images_per_page=pdf_images_per_page,
+                            pdf_landscape=pdf_landscape,
+                            summary_background_color=summary_background_color,
+                        )
             
             return combined_df
         
         return pd.DataFrame()
     
+    def _generate_image_summaries(
+        self,
+        images_dir: str,
+        output_path: str,
+        download_lines: List[str],
+        summary_format: Union[str, List[str]],
+        pdf_images_per_page: tuple = (3, 2),
+        pdf_landscape: bool = False,
+        summary_background_color: str = 'black',
+    ):
+        """Generate PDF/PPTX contact sheets from the downloaded images.
+
+        Runs whenever the images directory exists, regardless of whether the
+        images came from NeuronBridge, FlyLight, or both.
+        """
+        if not os.path.exists(images_dir):
+            return
+        formats = summary_format if isinstance(summary_format, list) else [summary_format]
+        # None/'' mean "no summary" (the UI passes None when unchecked)
+        formats = [f.lower() for f in formats if f]
+
+        if 'pdf' in formats:
+            self._vprint(f"\n📄 Generating PDF summary...")
+            pdf_path = create_image_pdf(
+                images_dir=images_dir,
+                output_pdf=os.path.join(output_path, 'images_summary.pdf'),
+                images_per_page=pdf_images_per_page,
+                landscape=pdf_landscape,
+                line_order=download_lines,
+                verbose=self.verbose,
+                background_color=summary_background_color
+            )
+            if pdf_path:
+                self._vprint(f"   ✅ PDF saved: {pdf_path}")
+
+        if 'pptx' in formats:
+            self._vprint(f"\n📊 Generating PPTX summary...")
+            # img2pptx auto-detects font color from background
+            pptx_path = img2pptx(
+                input_path=images_dir,
+                output_pptx=os.path.join(output_path, 'images_summary.pptx'),
+                images_per_slide=pdf_images_per_page,
+                slide_title='{subfolder}',
+                include_subfolders=True,
+                group_by_subfolder=True,
+                label_position='below',
+                background_color=summary_background_color
+            ) if HAS_IMG2PPTX else create_image_pptx(
+                images_dir=images_dir,
+                output_pptx=os.path.join(output_path, 'images_summary.pptx'),
+                images_per_slide=pdf_images_per_page,
+                line_order=download_lines,
+                verbose=self.verbose,
+                background_color=summary_background_color
+            )
+            if pptx_path:
+                self._vprint(f"   ✅ PPTX saved: {pptx_path}")
+
     def clear_cache(self, cache_type: Optional[str] = None):
         """
         Clear cached results.

@@ -197,3 +197,109 @@ class TestNeuronBridgeDownloaderParallelism:
         # One bar for the scan phase, one for the download phase
         assert any("Scanning" in d for d in captured), f"no scan bar: {captured}"
         assert any("Downloading" in d for d in captured), f"no download bar: {captured}"
+
+
+# ---------------------------------------------------------------------------
+# _generate_image_summaries: runs for ANY download source (the reported bug:
+# the summary block was nested in the FlyLight branch, so neuronbridge-only
+# runs downloaded images but never produced the requested PDF)
+# ---------------------------------------------------------------------------
+
+class TestGenerateImageSummaries:
+    def _make_finder(self):
+        finder = object.__new__(NeuronBridgeFinder)
+        finder.verbose = False
+        return finder
+
+    def test_pdf_generated_from_neuronbridge_layout(self, tmp_path, monkeypatch):
+        """Regression: summary_format='pdf' must work when images came from
+        NeuronBridge only (download_source='neuronbridge')."""
+        images = tmp_path / "images"
+        _make_image(images / "VT001" / "cdm.png")
+        _make_image(images / "VT001" / "mip.png")
+        _make_image(images / "SS002" / "cdm.png")
+
+        calls = {}
+
+        def fake_pdf(images_dir, output_pdf, **kwargs):
+            calls["images_dir"] = images_dir
+            calls["output_pdf"] = output_pdf
+            calls["line_order"] = kwargs.get("line_order")
+            Path(output_pdf).write_bytes(b"fake pdf")
+            return output_pdf
+
+        monkeypatch.setattr("neuronbridge_finder.create_image_pdf", fake_pdf)
+
+        finder = self._make_finder()
+        finder._generate_image_summaries(
+            images_dir=str(images),
+            output_path=str(tmp_path),
+            download_lines=["VT001", "SS002"],
+            summary_format="pdf",
+        )
+        assert calls["images_dir"] == str(images)
+        assert calls["output_pdf"] == str(tmp_path / "images_summary.pdf")
+        assert calls["line_order"] == ["VT001", "SS002"]
+        assert (tmp_path / "images_summary.pdf").exists()
+
+    def test_no_summary_without_images_dir(self, tmp_path, monkeypatch):
+        called = []
+
+        def fake_pdf(*args, **kwargs):
+            called.append(args)
+            return None
+
+        monkeypatch.setattr("neuronbridge_finder.create_image_pdf", fake_pdf)
+        finder = self._make_finder()
+        finder._generate_image_summaries(
+            images_dir=str(tmp_path / "nope"),
+            output_path=str(tmp_path),
+            download_lines=["VT001"],
+            summary_format="pdf",
+        )
+        assert called == []
+
+    def test_none_format_is_noop(self, tmp_path, monkeypatch):
+        """The UI passes summary_format=None when the PDF box is unchecked."""
+        _make_image(tmp_path / "images" / "VT001" / "cdm.png")
+        called = []
+
+        def fake_pdf(*args, **kwargs):
+            called.append(args)
+            return None
+
+        monkeypatch.setattr("neuronbridge_finder.create_image_pdf", fake_pdf)
+        finder = self._make_finder()
+        finder._generate_image_summaries(
+            images_dir=str(tmp_path / "images"),
+            output_path=str(tmp_path),
+            download_lines=["VT001"],
+            summary_format=None,  # must not crash on None.lower()
+        )
+        assert called == []
+
+    def test_pptx_generated_when_requested(self, tmp_path, monkeypatch):
+        _make_image(tmp_path / "images" / "VT001" / "cdm.png")
+        calls = {}
+
+        def fake_pdf(*args, **kwargs):
+            return None
+
+        def fake_pptx(images_dir, output_pptx, **kwargs):
+            calls["output_pptx"] = output_pptx
+            Path(output_pptx).write_bytes(b"fake pptx")
+            return output_pptx
+
+        monkeypatch.setattr("neuronbridge_finder.create_image_pdf", fake_pdf)
+        monkeypatch.setattr("neuronbridge_finder.create_image_pptx", fake_pptx)
+        monkeypatch.setattr("neuronbridge_finder.HAS_IMG2PPTX", False)
+
+        finder = self._make_finder()
+        finder._generate_image_summaries(
+            images_dir=str(tmp_path / "images"),
+            output_path=str(tmp_path),
+            download_lines=["VT001"],
+            summary_format=["pdf", "pptx"],
+        )
+        assert calls["output_pptx"] == str(tmp_path / "images_summary.pptx")
+        assert (tmp_path / "images_summary.pptx").exists()
