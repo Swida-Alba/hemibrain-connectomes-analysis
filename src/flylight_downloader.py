@@ -1850,27 +1850,26 @@ class FlyLightDownloader:
     def search_lines(self, pattern: str) -> List[str]:
         """
         Search for driver lines matching a pattern.
-        
+
         Args:
             pattern: Regex pattern to match line names
-            
+
         Returns:
             List of matching line names
         """
         self._log(f"🔍 Searching for lines matching '{pattern}'...")
-        
+
         matching_lines = set()
         regex = re.compile(pattern, re.IGNORECASE)
-        
-        # Search each collection
         collections_to_search = self._resolved_collections or FLYLIGHT_COLLECTIONS
-        
-        for collection in collections_to_search:
-            self._log(f"   Searching {collection}...")
-            
-            # List top-level folders (line names)
-            prefix = f"{collection}/"
-            
+
+        # Efficient path: line-name folders live at {collection}/{line}/ or
+        # {collection}/CDM/{line}/ (Gen1 R-lines). Asking for CommonPrefixes
+        # with the pattern as the path prefix returns every matching line
+        # folder in ONE request (S3 prefix matching is literal, so this covers
+        # the common prefix-style patterns such as 'R10A0' or 'SS01').
+        def _collect(prefix: str) -> int:
+            found = 0
             if self._s3_client:
                 try:
                     result = self._s3_client.list_objects_v2(
@@ -1879,21 +1878,51 @@ class FlyLightDownloader:
                         Delimiter='/'
                     )
                     for prefix_obj in result.get('CommonPrefixes', []):
-                        line_name = prefix_obj['Prefix'].rstrip('/').split('/')[-1]
-                        if regex.search(line_name):
-                            matching_lines.add(line_name)
+                        leaf = prefix_obj['Prefix'].rstrip('/').split('/')[-1]
+                        if regex.search(leaf):
+                            matching_lines.add(leaf)
+                            found += 1
                 except Exception as e:
                     self._log(f"   ⚠️  Error: {e}")
             else:
-                # Use HTTP - less efficient
-                files = self._list_bucket_http(prefix)
-                for f in files:
+                # HTTP fallback: walk the prefix and match parsed line names
+                for f in self._list_bucket_http(prefix):
                     if f.line_name and regex.search(f.line_name):
                         matching_lines.add(f.line_name)
-        
+                        found += 1
+            return found
+
+        for collection in collections_to_search:
+            self._log(f"   Searching {collection}...")
+            _collect(f"{collection}/{pattern}")
+            _collect(f"{collection}/CDM/{pattern}")
+
+        # Regex patterns (e.g. 'R10A0[0-9]') cannot use the literal prefix
+        # trick. Fall back to a bounded two-level walk for collections with a
+        # small number of subfolders (e.g. Gen1 -> CDM -> line names); flat
+        # collections with hundreds of level-1 folders are skipped to keep
+        # the search cheap.
+        if not matching_lines:
+            self._log("   No prefix matches; walking shallow collections...")
+            for collection in collections_to_search:
+                if self._s3_client is None:
+                    continue
+                try:
+                    level1 = self._s3_client.list_objects_v2(
+                        Bucket=FLYLIGHT_BUCKET,
+                        Prefix=f"{collection}/",
+                        Delimiter='/'
+                    ).get('CommonPrefixes', [])
+                except Exception as e:
+                    self._log(f"   ⚠️  Error: {e}")
+                    continue
+                if len(level1) > 30:
+                    continue  # flat collection - lines live at level 1
+                for sub in level1:
+                    _collect(sub['Prefix'])
+
         result = sorted(matching_lines)
         self._log(f"   Found {len(result)} matching lines")
-        
         return result
 
 

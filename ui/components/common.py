@@ -31,6 +31,7 @@ def tool_page(
     subtitle: str = "",
     icon: str = "science",
     tag: Optional[str] = None,
+    tag_color: str = "purple",
     doc: Optional[str] = None,
 ) -> tuple:
     """
@@ -48,7 +49,7 @@ def tool_page(
                 with ui.row().classes("items-center gap-2"):
                     ui.label(title).classes("drocat-page-title")
                     if tag:
-                        ui.badge(tag, color="purple").classes("drocat-tag-badge")
+                        ui.badge(tag, color=tag_color).classes("drocat-tag-badge")
                     if doc:
                         ui.link(
                             "Instructions",

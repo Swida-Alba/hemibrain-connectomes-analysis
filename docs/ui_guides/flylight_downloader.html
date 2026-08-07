@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>FlyLight Downloader - DROCAT Instructions</title>
+  <link rel="stylesheet" href="guide.css">
+</head>
+<body>
+<main class="guide">
+  <header class="guide-top">
+    <a class="back" href="README.html">&larr; Back to guides</a>
+    <span class="tag nb">FlyLight</span>
+  </header>
+  <h1>FlyLight Downloader</h1>
+  <p class="lede">
+    Download FlyLight driver-line imagery directly from the Janelia S3 bucket
+    (<code>janelia-flylight-imagery</code>) and the HTTP CDN
+    (<code>flimg.janelia.org</code>). The line type is detected
+    automatically: R-lines (Gen1 GAL4) and SS-lines (Split-GAL4) come from
+    S3, VT lines from the CDN.
+  </p>
+
+  <h2>Quick start</h2>
+  <ol>
+    <li>Enter one or more driver lines (comma-separated), e.g.
+      <code>R10A06, VT037867, SS00731</code>.</li>
+    <li>Pick an output directory (defaults to your saved default).</li>
+    <li>Click <b>Download Images</b>. Progress streams below; files appear
+      in <b>Output Files</b> when the run finishes.</li>
+  </ol>
+
+  <h2>Preview tools</h2>
+  <table>
+    <tr><th>Action</th><th>Behavior</th></tr>
+    <tr><td><b>Search Lines</b></td><td>Find driver lines matching a pattern
+      (e.g. <code>R10A0</code>, <code>VT037</code>, <code>SS01</code>).
+      Click a result chip to add it to the line list.</td></tr>
+    <tr><td><b>List Files</b></td><td>Show the exact files the current
+      filters would download, without downloading. Click a file name to
+      open its URL.</td></tr>
+  </table>
+
+  <h2>File filters</h2>
+  <table>
+    <tr><th>Parameter</th><th>Default</th><th>Meaning</th></tr>
+    <tr><td><b>Formats</b></td><td><code>png, jpg</code></td><td>File
+      formats: <code>png</code>, <code>jpg</code>, <code>h5j</code> (3D
+      stacks), <code>lsm</code> (raw confocal), <code>mp4</code> (videos),
+      <code>json</code> (metadata). VT lines primarily have jpg/mp4.</td></tr>
+    <tr><td><b>Image Types</b></td><td><code>mip, cdm</code></td><td>MIP /
+      CDM projections, aligned stacks, metadata, translation videos.</td></tr>
+    <tr><td><b>Region</b></td><td><code>Brain</code></td><td>Restrict to
+      brain imagery, VNC, or keep all regions.</td></tr>
+    <tr><td><b>Collections</b></td><td><code>GAL4/LEXA, SplitGAL4</code></td>
+      <td>Collection categories searched in priority order (MCFO is the
+      fallback for lines not found in the first categories).</td></tr>
+  </table>
+
+  <h2>Download options</h2>
+  <table>
+    <tr><th>Parameter</th><th>Default</th><th>Meaning</th></tr>
+    <tr><td><b>Simple Mode</b></td><td>on</td><td>Download only
+      representative files: 20x + multichannel for Split-GAL4 (excluding
+      image1/image2 duplicates), <code>total</code> for GAL4/LexA. A small
+      fallback keeps at least a few files when nothing matches.</td></tr>
+    <tr><td><b>Max Files / Line</b></td><td><code>6</code></td><td>Cap per
+      line (applied after filtering). Blank = no limit.</td></tr>
+    <tr><td><b>Max Workers</b></td><td><code>4</code></td><td>Parallel
+      download threads.</td></tr>
+    <tr><td><b>Flat Structure</b></td><td>off</td><td>Save files directly
+      instead of preserving the S3 key structure.</td></tr>
+    <tr><td><b>Timestamp Folder</b></td><td>on</td><td>Append a timestamp to
+      the output folder so re-runs never overwrite.</td></tr>
+    <tr><td><b>Image Summary</b></td><td><code>none</code></td><td>Generate
+      a PDF / PPTX contact sheet of the downloaded images.</td></tr>
+  </table>
+
+  <h2>Notes</h2>
+  <ul>
+    <li>Downloads need internet access to
+      <code>s3.amazonaws.com</code> and <code>flimg.janelia.org</code>; no
+      API token is required (public data).</li>
+    <li>Large files (h5j stacks, lsm raw data) can be hundreds of MB — the
+      log streams the total size before downloading.</li>
+    <li>Backend: <code>src/flylight_downloader.py</code> (same engine used
+      by the NeuronBridge <b>Find Lines</b> image download).</li>
+  </ul>
+</main>
+</body>
+</html>

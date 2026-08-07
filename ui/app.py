@@ -35,6 +35,7 @@ from ui.tabs import (
     create_nb_find_lines_tab,
     create_nb_find_neuron_tab,
     create_nb_colabel_tab,
+    create_flylight_tab,
     create_skeleton_tab,
     create_network_tab,
     create_settings_tab,
@@ -158,6 +159,12 @@ html, body {
     color: #7c3aed !important;
 }
 .drocat-tabs .drocat-nb-tab:hover { background: #efe6ff !important; }
+/* FlyLight imagery download: its own light-green tint (not NB purple) */
+.drocat-tabs .drocat-flylight-tab { background: #edf9f0; }
+.drocat-tabs .q-tab--active.drocat-flylight-tab {
+    color: #15803d !important;
+}
+.drocat-tabs .drocat-flylight-tab:hover { background: #dff4e6 !important; }
 /* The NB badge sits NEXT to the tab icon (no overlap) and uses the same
    font as the tab names, so it reads as part of the label typography. */
 .drocat-nb-tab .q-tab__icon {
@@ -482,6 +489,7 @@ def main_page():
             tab_find_lines = ui.tab("Find Lines", icon="biotech").classes("drocat-nb-tab")
             tab_find_neuron = ui.tab("Find Neurons", icon="search").classes("drocat-nb-tab")
             tab_colabel = ui.tab("Co-Labeling", icon="layers").classes("drocat-nb-tab")
+            tab_flylight = ui.tab("FlyLight", icon="download").classes("drocat-flylight-tab")
             tab_settings = ui.tab("Settings", icon="settings")
 
         with ui.tab_panels(tabs, value=tab_pathfinding).classes("w-full bg-transparent"):
@@ -501,6 +509,8 @@ def main_page():
                 create_nb_find_neuron_tab()
             with ui.tab_panel(tab_colabel).classes("p-0"):
                 create_nb_colabel_tab()
+            with ui.tab_panel(tab_flylight).classes("p-0"):
+                create_flylight_tab()
             with ui.tab_panel(tab_homologs).classes("p-0"):
                 create_find_homologs_tab()
             with ui.tab_panel(tab_profiling).classes("p-0"):

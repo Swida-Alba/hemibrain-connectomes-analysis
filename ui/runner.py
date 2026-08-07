@@ -195,6 +195,16 @@ TOOL_REGISTRY: Dict[str, dict] = {
             "colabel": "finder.analyze_colabeling(**method_params)",
         },
     },
+    "flylight_download": {
+        "label": "FlyLight Image Download",
+        "import": "from flylight_downloader import FlyLightDownloader",
+        "class": "FlyLightDownloader",
+        "var": "downloader",
+        "init_method": None,
+        "methods": {
+            "download": "downloader.download(**method_params)",
+        },
+    },
     "plot3d_skeleton": {
         "label": "3D Skeleton Visualization",
         "import": "from visualize_skeleton import VisualizeSkeleton",
@@ -405,6 +415,8 @@ class ScriptRunner:
             return self._generate_inter_dataset_script(constructor_params, method_params)
         elif tool_name in ("nb_find_lines", "nb_find_neuron", "nb_colabel"):
             return self._generate_neuronbridge_script(tool_name, constructor_params, method_params)
+        elif tool_name == "flylight_download":
+            return self._generate_flylight_script(constructor_params, method_params)
         elif tool_name == "plot3d_skeleton":
             return self._generate_plot3d_script(constructor_params, method_params)
 
@@ -524,6 +536,39 @@ params = ComparisonParameters(
 analyzer = ComparisonAnalyzer(params, verbose=True)
 analyzer.run_comparison()
 analyzer.generate_report()
+
+print("[DROCAT] Done.")
+'''
+        return script
+
+    def _generate_flylight_script(
+        self, constructor_params: dict, method_params: Optional[dict]
+    ) -> str:
+        """Generate script for the FlyLight downloader."""
+        init_params_str = _format_params(constructor_params)
+        method_params_str = _format_params(method_params or {})
+
+        script = f'''#!/usr/bin/env python
+"""Auto-generated DROCAT runner script for flylight_download."""
+import sys
+import warnings
+from pathlib import Path
+
+sys.path.insert(0, r"{SRC_DIR}")
+sys.path.insert(0, r"{PROJECT_ROOT}")
+sys.path.insert(0, r"{VISPATH_DIR}")
+
+warnings.filterwarnings("ignore")
+
+from flylight_downloader import FlyLightDownloader
+
+downloader = FlyLightDownloader(
+{init_params_str}
+)
+
+downloader.download(
+{method_params_str}
+)
 
 print("[DROCAT] Done.")
 '''
