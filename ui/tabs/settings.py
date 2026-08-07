@@ -33,6 +33,131 @@ def create_settings_tab():
         # two different availability controls.
         dataset_status_card()
 
+        # Dataset cache (pull full dataset to local)
+        from ..dataset_pull import DatasetPuller
+
+        with ui.card().classes("w-full drocat-card"):
+            section_header("Dataset Cache", "download")
+            ui.label(
+                "Pull a full dataset to local and build the indexed connection cache "
+                "(cache/<dataset>/connections.parquet + neuron_index.parquet). Re-running "
+                "resumes interrupted builds from their checkpoint; 'Force rebuild' clears "
+                "a broken cache first and rebuilds it completely."
+            ).classes("text-caption drocat-muted")
+
+            puller = DatasetPuller()
+
+            def _format_eta(st) -> str:
+                """Human-readable remaining-time estimate from fetch progress."""
+                fetch_started = st.get("fetch_started_at")
+                current, total = st.get("current", 0), st.get("total", 0)
+                if not fetch_started or current <= 0 or total <= 0 or current >= total:
+                    return "ETA --"
+                import time as _time
+                elapsed = max(_time.time() - fetch_started, 1e-3)
+                rate = current / elapsed  # neurons per second
+                remaining = (total - current) / rate
+                m, s = divmod(int(remaining), 60)
+                h, m = divmod(m, 60)
+                if h:
+                    return f"ETA ~{h}h {m:02d}m"
+                return f"ETA ~{m}m {s:02d}s"
+
+            with ui.row().classes("items-center gap-3 w-full").style("flex-wrap: wrap"):
+                ds_select = ui.select(
+                    options=DATASETS, value=DATASETS[0], label="Dataset"
+                ).classes("drocat-select").style("min-width: 260px")
+                force_rebuild = ui.checkbox(
+                    "Force rebuild (clear broken cache first)"
+                ).tooltip(
+                    "Deletes the existing connections.parquet / neuron_index.parquet "
+                    "before fetching, rebuilding the cache from scratch. Unchecked, the "
+                    "pull only fetches the neurons missing from the cache (resume)."
+                )
+                batch_input = ui.number(
+                    label="Batch size", value=100, min=10, max=5000, step=10
+                ).classes("drocat-input").style("width: 150px").tooltip(
+                    "Neurons fetched per batch (default 100)."
+                )
+                parallel_input = ui.number(
+                    label="Parallel workers", value=4, min=1, max=32, step=1
+                ).classes("drocat-input").style("width: 150px").tooltip(
+                    "Batches fetched concurrently (1 = sequential). Only raise if the "
+                    "NeuPrint/FlyLight server tolerates parallel requests."
+                )
+
+            with ui.row().classes("items-center gap-2"):
+                run_btn = ui.button("Pull Full Dataset", icon="download", color="primary")
+                cancel_btn = ui.button("Cancel", icon="stop", color="negative").props("outline")
+                cancel_btn.set_enabled(False)
+
+            progress = ui.linear_progress(value=0).props("instant-feedback").classes("w-full")
+            status_label = ui.label("Idle").classes("text-caption drocat-muted")
+            result_label = ui.label("").classes("text-caption")
+
+            def refresh_pull_state():
+                st = puller.state
+                if not st["running"] and run_btn.enabled:
+                    return
+                run_btn.set_enabled(not st["running"])
+                cancel_btn.set_enabled(st["running"])
+                ds_select.set_enabled(not st["running"])
+                force_rebuild.set_enabled(not st["running"])
+                batch_input.set_enabled(not st["running"])
+                parallel_input.set_enabled(not st["running"])
+                if st["running"]:
+                    total = st["total"] or 1
+                    progress.set_value(min(st["current"] / total, 1.0))
+                    status_label.text = (
+                        f"Pulling {st['dataset']}: {st['info']} "
+                        f"({st['current']:,}/{st['total']:,} neurons) | {_format_eta(st)}"
+                    )
+                    return
+                if not st["done"]:
+                    return
+                if st["error"]:
+                    status_label.text = "Failed"
+                    result_label.text = f"❌ {st['error']}"
+                else:
+                    s = st["summary"] or {}
+                    head = (
+                        "⏹ Cancelled - fetched batches consolidated; re-run to resume."
+                        if st["cancelled"]
+                        else "✅ Pull complete."
+                    )
+                    result_label.text = (
+                        f"{head} Target: {s.get('total_neurons', 0):,} | "
+                        f"newly cached: {s.get('newly_cached', 0):,} | "
+                        f"already cached: {s.get('already_cached', 0):,} | "
+                        f"failed: {len(s.get('failed_neurons', [])):,} | "
+                        f"connections: {s.get('total_connections', 0):,} | "
+                        f"{s.get('elapsed_time', 0):.1f}s"
+                    )
+                    status_label.text = "Idle"
+
+            def start_pull():
+                ok = puller.start(
+                    str(ds_select.value),
+                    force_rebuild=force_rebuild.value,
+                    batch_size=int(batch_input.value or 100),
+                    max_workers=int(parallel_input.value or 1),
+                )
+                if ok:
+                    run_btn.set_enabled(False)
+                    cancel_btn.set_enabled(True)
+                    result_label.text = ""
+                    progress.set_value(0)
+                else:
+                    ui.notify("A dataset pull is already running", type="warning")
+
+            def stop_pull():
+                puller.cancel()
+                status_label.text = "Cancelling after the current batch..."
+
+            run_btn.on_click(start_pull)
+            cancel_btn.on_click(stop_pull)
+            ui.timer(0.5, refresh_pull_state)
+
         # Tokens
         with ui.card().classes("w-full drocat-card"):
             section_header("API Tokens", "key")

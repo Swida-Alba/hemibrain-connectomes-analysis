@@ -622,6 +622,50 @@ class TestDatasetService:
             "cave": "local-cave",
         }
 
+    def test_settings_dataset_cache_card(self):
+        """The Settings tab exposes the 'Pull Full Dataset' operation: a
+        dataset selector, a force-rebuild option, run/cancel buttons, and a
+        progress element - all wired to a DatasetPuller."""
+        from nicegui import Client
+        from nicegui.page import page
+        from ui.tabs.settings import create_settings_tab
+
+        client = Client(page("/settings-dataset-cache"))
+        with client:
+            create_settings_tab()
+
+        labels = {}
+        for el in client.elements.values():
+            props = getattr(el, "_props", {})
+            label = props.get("label")
+            text = getattr(el, "text", None)
+            if label:
+                labels[label] = el
+            if text == "Dataset Cache":
+                labels["card_title"] = el
+
+        assert "card_title" in labels
+        assert "Dataset" in labels  # dataset selector
+        assert "Batch size" in labels
+        assert "Parallel workers" in labels
+        assert any(
+            getattr(el, "text", None) == "Pull Full Dataset"
+            for el in client.elements.values()
+        )
+        assert any(
+            getattr(el, "text", None) == "Cancel"
+            for el in client.elements.values()
+        )
+        assert any(
+            getattr(el, "text", None) == "Force rebuild (clear broken cache first)"
+            for el in client.elements.values()
+        )
+        # progress element + status label
+        assert any(
+            getattr(el, "text", None) == "Idle"
+            for el in client.elements.values()
+        )
+
     def test_settings_token_status_is_non_sensitive(self):
         from ui.tabs.settings import _token_status
 
