@@ -46,6 +46,7 @@ import warnings
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union, TYPE_CHECKING
 
 # Make the project root importable regardless of how this module was loaded
@@ -9184,19 +9185,25 @@ class NeuronBridgeFinder:
         # CDM files are at: https://s3.amazonaws.com/janelia-flylight-color-depth/{path}
         cdm_base_url = "https://s3.amazonaws.com/janelia-flylight-color-depth/"
         
-        # Phase 1: Scan all lines to count total files
+        # Phase 1: Scan all lines to count total files. Every
+        # get_lm_images() is a network call, so the scan runs in parallel
+        # with a streamed progress bar (previously sequential + silent).
         if verbose:
             print(f"📊 Scanning {len(lines)} lines for NeuronBridge images...")
         
         line_files_map = {}  # line_name -> list of (file_type, file_path)
         total_file_count = 0
+        import threading
+        from concurrent.futures import ThreadPoolExecutor, as_completed
         
-        for line_name in lines:
+        scan_lock = threading.Lock()
+        
+        def scan_single_line(line_name: str):
+            """Scan one line and return (line_name, filtered (type, path) pairs)."""
             try:
                 lm_images = self._client.get_lm_images(line_name)
                 if not lm_images:
-                    line_files_map[line_name] = []
-                    continue
+                    return (line_name, [])
                 
                 if not isinstance(lm_images, list):
                     lm_images = list(lm_images)
@@ -9236,11 +9243,30 @@ class NeuronBridgeFinder:
                 if max_files:
                     filtered_paths = filtered_paths[:max_files]
                 
-                line_files_map[line_name] = filtered_paths
-                total_file_count += len(filtered_paths)
-                
+                return (line_name, filtered_paths)
             except Exception:
-                line_files_map[line_name] = []
+                return (line_name, [])
+        
+        scan_pbar = None
+        if HAS_TQDM and verbose:
+            scan_pbar = tqdm(total=len(lines), desc="  Scanning", unit="line", leave=False)
+        
+        scan_workers = min(self.max_workers or os.cpu_count() or 8, max(1, len(lines)))
+        with ThreadPoolExecutor(max_workers=scan_workers) as executor:
+            future_to_line = {executor.submit(scan_single_line, line): line for line in lines}
+            
+            for future in as_completed(future_to_line):
+                line_name, filtered_paths = future.result()
+                with scan_lock:
+                    line_files_map[line_name] = filtered_paths
+                    total_file_count += len(filtered_paths)
+                    scanned_files = total_file_count
+                if scan_pbar:
+                    scan_pbar.set_postfix(files=scanned_files, refresh=False)
+                    scan_pbar.update(1)
+        
+        if scan_pbar:
+            scan_pbar.close()
         
         if total_file_count == 0:
             if verbose:
@@ -9286,7 +9312,7 @@ class NeuronBridgeFinder:
         
         # Use ThreadPoolExecutor for parallel downloads
         # Use all available CPU cores for maximum throughput
-        max_workers = min(os.cpu_count() or 8, len(download_tasks))
+        max_workers = min(self.max_workers or os.cpu_count() or 8, len(download_tasks))
         files_downloaded = 0
         
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -9804,8 +9830,8 @@ class NeuronBridgeFinder:
             scan_pbar = tqdm(total=len(lines), desc="  Scanning", unit="line", leave=False)
         
         # Use ThreadPoolExecutor for parallel scanning
-        # Use all available CPU cores for maximum throughput
-        max_workers = min(os.cpu_count() or 8, len(lines))
+        # Use the finder's max_workers (capped by the number of lines)
+        max_workers = min(self.max_workers or os.cpu_count() or 8, max(1, len(lines)))
         
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             # Submit all lines for scanning
@@ -10027,6 +10053,73 @@ class NeuronBridgeFinder:
         )
 
 
+def _collect_line_images(images_path: Path) -> dict:
+    """Collect ``line_name -> [image files]`` from an images directory.
+
+    Handles the three layouts produced by the downloaders:
+
+    - ``images/<LineName>/*.png`` - per-line subdirectories (NeuronBridge)
+    - ``images/*.png`` - flat files, grouped by the prefix before ``-``
+    - ``images/<source>/...`` - source subfolders (``neuronbridge/``,
+      ``flylight/``, created when ``download_images='both'``), scanned one
+      level deep and merged into the same map
+
+    Returns a dict of line name -> sorted, de-duplicated list of file paths.
+    """
+    image_extensions = {'.png', '.jpg', '.jpeg'}
+    # Known source subfolders created by download_source='both'.
+    source_subdirs = ('neuronbridge', 'flylight')
+
+    def scan_dir(directory: Path, line_images: dict) -> None:
+        """Scan one directory: line subdirs whose children are images + flat files."""
+        for item in sorted(directory.iterdir()):
+            if item.is_dir():
+                images = [
+                    f for f in item.iterdir() if f.suffix.lower() in image_extensions
+                ]
+                if images:
+                    line_images.setdefault(item.name, []).extend(images)
+            elif item.suffix.lower() in image_extensions:
+                # Flat files are grouped by the prefix before the first '-'
+                # (e.g. VT017647-20x-multichannel.png -> VT017647)
+                line_name = item.stem.split('-')[0] if '-' in item.stem else 'Unknown'
+                line_images.setdefault(line_name, []).append(item)
+
+    line_images = {}
+    for item in sorted(images_path.iterdir()):
+        if item.is_dir():
+            if item.name in source_subdirs:
+                continue  # scanned explicitly below
+            direct_images = [
+                f for f in item.iterdir() if f.suffix.lower() in image_extensions
+            ]
+            if direct_images:
+                line_images.setdefault(item.name, []).extend(direct_images)
+            else:
+                # Subfolder that itself contains line dirs (custom layout)
+                scan_dir(item, line_images)
+        elif item.suffix.lower() in image_extensions:
+            line_name = item.stem.split('-')[0] if '-' in item.stem else 'Unknown'
+            line_images.setdefault(line_name, []).append(item)
+
+    # Source subfolders from download_source='both'
+    for name in source_subdirs:
+        sub = images_path / name
+        if sub.is_dir():
+            scan_dir(sub, line_images)
+
+    # De-duplicate (a file can be reachable through multiple scans) and sort
+    for line_name in line_images:
+        seen = set()
+        unique = []
+        for p in line_images[line_name]:
+            if p not in seen:
+                seen.add(p)
+                unique.append(p)
+        line_images[line_name] = sorted(unique)
+    return line_images
+
+
 def create_image_pdf(
     images_dir: str,
     output_pdf: Optional[str] = None,
@@ -10113,27 +10206,11 @@ def create_image_pdf(
             print(f"⚠️  Images directory not found: {images_dir}")
         return None
     
-    # Find all line directories with images
-    line_images = {}
-    image_extensions = {'.png', '.jpg', '.jpeg'}
-    
-    for item in sorted(images_path.iterdir()):
-        if item.is_dir():
-            # Line name subdirectory
-            line_name = item.name
-            images = sorted([
-                f for f in item.iterdir()
-                if f.suffix.lower() in image_extensions
-            ])
-            if images:
-                line_images[line_name] = images
-        elif item.suffix.lower() in image_extensions:
-            # Images directly in the images folder (no subdirectory)
-            # Group by line name prefix (before first '-')
-            line_name = item.stem.split('-')[0] if '-' in item.stem else 'Unknown'
-            if line_name not in line_images:
-                line_images[line_name] = []
-            line_images[line_name].append(item)
+    # Find all line directories with images. The helper also scans the
+    # source subfolders (neuronbridge/, flylight/) created by
+    # download_source='both', so the summary never reports "No images"
+    # when the images are nested one level deeper.
+    line_images = _collect_line_images(images_path)
     
     if not line_images:
         if verbose:
@@ -10399,24 +10476,11 @@ def create_image_pptx(
             print(f"⚠️  Images directory not found: {images_dir}")
         return None
     
-    # Find all line directories with images
-    line_images = {}
-    image_extensions = {'.png', '.jpg', '.jpeg'}
-    
-    for item in sorted(images_path.iterdir()):
-        if item.is_dir():
-            line_name = item.name
-            images = sorted([
-                f for f in item.iterdir()
-                if f.suffix.lower() in image_extensions
-            ])
-            if images:
-                line_images[line_name] = images
-        elif item.suffix.lower() in image_extensions:
-            line_name = item.stem.split('-')[0] if '-' in item.stem else 'Unknown'
-            if line_name not in line_images:
-                line_images[line_name] = []
-            line_images[line_name].append(item)
+    # Find all line directories with images. The helper also scans the
+    # source subfolders (neuronbridge/, flylight/) created by
+    # download_source='both', so the summary never reports "No images"
+    # when the images are nested one level deeper.
+    line_images = _collect_line_images(images_path)
     
     if not line_images:
         if verbose:
