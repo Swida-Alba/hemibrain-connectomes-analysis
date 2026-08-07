@@ -571,7 +571,12 @@ class FindNeuronConnection:
                 if ratio_missing or prob_missing:
                     totals = df.group_by(post_col).agg(pl.col('weight').sum().alias('_total_weight'))
                     df = df.join(totals, on=post_col, how='left')
-                    df = df.with_columns((pl.col('weight') / pl.col('_total_weight')).alias('connection_ratio'))
+                    df = df.with_columns(
+                        pl.when(pl.col('_total_weight') > 0)
+                        .then(pl.col('weight') / pl.col('_total_weight'))
+                        .otherwise(None)
+                        .alias('connection_ratio')
+                    )
                     df = df.with_columns((pl.col('connection_ratio') / 0.3).clip(upper_bound=1.0).alias('traversal_probability'))
                     df = df.drop('_total_weight')
                 return df
@@ -4917,7 +4922,8 @@ class FindNeuronConnection:
             'newly_cached': len(newly_cached),
             'failed_neurons': failed_neurons,
             'total_connections': total_connections,
-            'elapsed_time': elapsed
+            'elapsed_time': elapsed,
+            'cancelled': cancelled,
         }
     
     def _fetch_connections_bulk(self, upstream_bodyIds, downstream_bodyIds=None):
@@ -5768,6 +5774,12 @@ class FindNeuronConnection:
         post_types = self.conn_df['type_post'].dropna().unique().tolist() if 'type_post' in self.conn_df.columns else []
         global_incoming_weights = self._fetch_total_incoming_weight_by_type(post_types, min_weight=self.min_synapse_num) if post_types else None
         
+        # Global bodyId-level denominators for accurate bodyId-level ratios
+        # (post neurons missing from the global table fall back to local totals
+        # inside EnrichConnectionTable, so ratios never collapse to 0)
+        post_bodyIds = self.conn_df['bodyId_post'].dropna().unique().tolist()
+        global_incoming_body_weights = self._fetch_total_incoming_weight(post_bodyIds, min_weight=self.min_synapse_num) if post_bodyIds else None
+        
         # Type-level prob = min(connection_ratio / 0.3, 1) (matches
         # _apply_type_level_filters and the Polars implementation)
         # Don't pass target_neurons_df - let EnrichConnectionTable use neurons from connections
@@ -5780,7 +5792,8 @@ class FindNeuronConnection:
             aggregate_method='product',  # accepted for API compatibility
             label_mapper=self.label_mapper,
             global_incoming_weights=global_incoming_weights,
-            separate_hemispheres=self.separate_hemispheres
+            separate_hemispheres=self.separate_hemispheres,
+            global_incoming_body_weights=global_incoming_body_weights
         )
         
         # Filter hemisphere-unconserved edges if requested
@@ -6328,6 +6341,12 @@ class FindNeuronConnection:
             # that comes from A (see ScoreCalculation_Guide).
             post_types = conn_df['type_post'].dropna().unique().tolist() if 'type_post' in conn_df.columns else []
             global_incoming_weights = self._fetch_total_incoming_weight_by_type(post_types, min_weight=self.min_synapse_num) if post_types else None
+            
+            # Global bodyId-level denominators for accurate bodyId-level ratios
+            # (post neurons missing from the global table fall back to local totals
+            # inside EnrichConnectionTable, so ratios never collapse to 0)
+            post_bodyIds = conn_df['bodyId_post'].dropna().unique().tolist()
+            global_incoming_body_weights = self._fetch_total_incoming_weight(post_bodyIds, min_weight=self.min_synapse_num) if post_bodyIds else None
             
             conn_df, conn_type, conn_group = sv.EnrichConnectionTable(
                 conn_df, 
@@ -7507,6 +7526,12 @@ class FindNeuronConnection:
             post_types = conn_filtered_no_layer['type_post'].unique().to_list() if 'type_post' in conn_filtered_no_layer.columns else []
             global_incoming_weights = self._fetch_total_incoming_weight_by_type(post_types, min_weight=self.min_synapse_num) if post_types else None
             
+            # Global bodyId-level denominators for accurate bodyId-level ratios
+            # (post neurons missing from the global table fall back to local totals
+            # inside EnrichConnectionTable, so ratios never collapse to 0)
+            post_bodyIds = conn_filtered_no_layer['bodyId_post'].unique().to_list()
+            global_incoming_body_weights = self._fetch_total_incoming_weight(post_bodyIds, min_weight=self.min_synapse_num) if post_bodyIds else None
+            
             # Enrich with traversal probability (use local dataset if available)
             # Unified entry point: polars input -> polars engine (auto)
             conn_enriched, conn_type, conn_group = sv.EnrichConnectionTable(
@@ -7516,7 +7541,8 @@ class FindNeuronConnection:
                 target_neurons_df=neurons_in_layer_df,
                 label_mapper=self.label_mapper,
                 global_incoming_weights=global_incoming_weights,
-                separate_hemispheres=self.separate_hemispheres
+                separate_hemispheres=self.separate_hemispheres,
+                global_incoming_body_weights=global_incoming_body_weights
             )
             
             # Add conn_layer column AFTER enrichment
@@ -7942,6 +7968,11 @@ class FindNeuronConnection:
                 post_types = layer_conn['type_post'].unique().to_list() if 'type_post' in layer_conn.columns else []
                 layer_global_incoming_weights = self._fetch_total_incoming_weight_by_type(post_types, min_weight=self.min_synapse_num) if post_types else None
                 
+                # Global bodyId-level denominators (local fallback inside
+                # EnrichConnectionTable prevents 0 ratios for untyped posts)
+                post_bodyIds = layer_conn['bodyId_post'].unique().to_list()
+                layer_global_incoming_body_weights = self._fetch_total_incoming_weight(post_bodyIds, min_weight=self.min_synapse_num) if post_bodyIds else None
+                
                 # Enrich (unified entry point: polars input -> polars engine)
                 _, layer_conn_type, layer_conn_group = sv.EnrichConnectionTable(
                     layer_conn.drop('conn_layer'), 
@@ -7950,7 +7981,8 @@ class FindNeuronConnection:
                     target_neurons_df=neurons_in_layer_df,
                     label_mapper=self.label_mapper,
                     global_incoming_weights=layer_global_incoming_weights,
-                    separate_hemispheres=self.separate_hemispheres
+                    separate_hemispheres=self.separate_hemispheres,
+                    global_incoming_body_weights=layer_global_incoming_body_weights
                 )
                 
                 # Add conn_layer back
@@ -8004,6 +8036,11 @@ class FindNeuronConnection:
         global_post_types = conn_inpath_global['type_post'].unique().to_list() if 'type_post' in conn_inpath_global.columns else []
         global_incoming_weights = self._fetch_total_incoming_weight_by_type(global_post_types, min_weight=self.min_synapse_num) if global_post_types else None
         
+        # Global bodyId-level denominators (local fallback inside
+        # EnrichConnectionTable prevents 0 ratios for untyped posts)
+        global_post_bodyIds = conn_inpath_global['bodyId_post'].unique().to_list()
+        global_incoming_body_weights = self._fetch_total_incoming_weight(global_post_bodyIds, min_weight=self.min_synapse_num) if global_post_bodyIds else None
+        
         _, conn_types_global, _ = sv.EnrichConnectionTable(
             conn_inpath_global, 
             traversal_probability_threshold=self.min_traversal_probability,
@@ -8013,7 +8050,8 @@ class FindNeuronConnection:
             aggregate_method='product',
             label_mapper=self.label_mapper,
             global_incoming_weights=global_incoming_weights,
-            separate_hemispheres=self.separate_hemispheres
+            separate_hemispheres=self.separate_hemispheres,
+            global_incoming_body_weights=global_incoming_body_weights
         )
 
         # print("  Enrichment returned. Proceeding to save...", flush=True)
