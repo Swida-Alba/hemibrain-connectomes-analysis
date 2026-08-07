@@ -79,7 +79,17 @@ The ratio is calculated using the **entire connection cache**, not just the neur
 **Interpretation**:
 - Value of `0.01` means 1% of neuron $j$'s **total input** comes from neuron $i$
 - Higher values indicate stronger relative input influence
-- Range: 0.0 to 1.0 (NaN if no incoming connections)
+- Range: 0.0 to 1.0
+
+**Missing global denominator (fallback)**:
+- Post neurons/types **absent from the global incoming table** (e.g. untyped
+  neurons, which are grouped by their bodyId, or types the connection cache
+  has no entry for) fall back to the **local total** over the connections in
+  the current table instead of becoming 0/NaN.
+- The local fallback keeps every edge's ratio in (0.0, 1.0] so path
+  probabilities never collapse to 0, but it is **inflated** compared with the
+  true global fraction - a fresh/complete connection cache or an API-fetched
+  incoming table restores exact global ratios.
 
 **Example**:
 ```

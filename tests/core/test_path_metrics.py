@@ -189,9 +189,11 @@ class TestTypeLevelAggregation:
                 obj=f'local-fallback {col}',
             )
 
-    def test_missing_global_denominator_yields_zero_probability(self):
-        """A post type absent from the global incoming table -> NaN ratio and
-        traversal_probability filled to 0.0 in both implementations."""
+    def test_missing_global_denominator_falls_back_to_local(self):
+        """A post type absent from the global incoming table falls back to the
+        LOCAL total over this table (never NaN/0) in both implementations, so
+        paths through untyped/unlisted post neurons keep a positive ratio and
+        probability."""
         conn = pd.DataFrame({
             'bodyId_pre': [1], 'bodyId_post': [20],
             'type_pre': ['E'], 'type_post': ['Q'],
@@ -204,10 +206,11 @@ class TestTypeLevelAggregation:
         _, ct_pl, _ = EnrichConnectionTablePolars(
             conn.copy(), traversal_probability_threshold=0,
             global_incoming_weights=global_incoming)
-        assert np.isnan(ct_pd['connection_ratio'].iloc[0])
-        assert np.isnan(ct_pl.to_pandas()['connection_ratio'].iloc[0])
-        assert ct_pd['traversal_probability'].iloc[0] == 0.0
-        assert ct_pl.to_pandas()['traversal_probability'].iloc[0] == 0.0
+        # Local fallback: the table's own total incoming to Q is 5 -> ratio 1.0
+        assert ct_pd['connection_ratio'].iloc[0] == pytest.approx(1.0)
+        assert ct_pl.to_pandas()['connection_ratio'].iloc[0] == pytest.approx(1.0)
+        assert ct_pd['traversal_probability'].iloc[0] == pytest.approx(1.0)
+        assert ct_pl.to_pandas()['traversal_probability'].iloc[0] == pytest.approx(1.0)
 
     @pytest.mark.parametrize('impl', ['pandas', 'polars'])
     def test_aggregate_method_param_still_accepted(self, impl):
@@ -318,8 +321,9 @@ class TestEnrichmentEngineParity:
         for col in cg_pd.columns:
             pd.testing.assert_series_equal(cg_pl[col], cg_pd[col], check_dtype=False, obj=f'group {col}')
 
-    def test_block_probability_null_semantics(self):
-        """Missing global denominator -> prob 0.0 and block 1.0 in BOTH engines."""
+    def test_block_probability_missing_denominator_fallback(self):
+        """Missing global denominator -> LOCAL fallback ratio (1.0 here),
+        prob 1.0 and block 0.0 in BOTH engines (no more NaN/0 collapse)."""
         from statvis import EnrichConnectionTable as pd_enrich
         from statvis import EnrichConnectionTablePolars
         conn = pd.DataFrame({
@@ -333,11 +337,11 @@ class TestEnrichmentEngineParity:
         _, ct_pl, _ = EnrichConnectionTablePolars(pl.from_pandas(conn),
                                                   traversal_probability_threshold=0,
                                                   global_incoming_weights=gw)
-        assert ct_pd['traversal_probability'].iloc[0] == 0.0
-        assert ct_pd['block_probability'].iloc[0] == 1.0
+        assert ct_pd['traversal_probability'].iloc[0] == pytest.approx(1.0)
+        assert ct_pd['block_probability'].iloc[0] == pytest.approx(0.0)
         ct_pl = ct_pl.to_pandas()
-        assert ct_pl['traversal_probability'].iloc[0] == 0.0
-        assert ct_pl['block_probability'].iloc[0] == 1.0
+        assert ct_pl['traversal_probability'].iloc[0] == pytest.approx(1.0)
+        assert ct_pl['block_probability'].iloc[0] == pytest.approx(0.0)
 
     def test_bodyid_level_shared_schema(self):
         """BodyId-level outputs share every column; std_label_pre/post are

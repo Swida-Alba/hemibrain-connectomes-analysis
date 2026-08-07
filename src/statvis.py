@@ -5146,7 +5146,7 @@ def process_paths_streaming(path_gen, conn_data, targets, output_path,
             
     return total_saved
 
-def EnrichConnectionTable(conn_table, traversal_probability_threshold=0, dataset=None, script_path=None, target_neurons_df=None, aggregate_method='product', label_mapper=None, global_incoming_weights=None, separate_hemispheres=False, engine='auto'):
+def EnrichConnectionTable(conn_table, traversal_probability_threshold=0, dataset=None, script_path=None, target_neurons_df=None, aggregate_method='product', label_mapper=None, global_incoming_weights=None, separate_hemispheres=False, engine='auto', global_incoming_body_weights=None):
     '''Add traversal probability, connection ratio, and layer information to the connection table
     
     UNIFIED ENTRY POINT: dispatches to the pandas implementation (below) or the
@@ -5192,6 +5192,13 @@ def EnrichConnectionTable(conn_table, traversal_probability_threshold=0, dataset
         ScoreCalculation_Guide). If None, local ratios (from the provided
         connections only) are calculated - these are inflated when the table
         only covers a subset of the dataset.
+    global_incoming_body_weights : DataFrame, optional
+        Pre-computed total incoming weights for each post-synaptic bodyId.
+        Should have columns [bodyId_post, total_incoming_weight].
+        If provided, used for calculating GLOBAL bodyId-level ratios.
+        Post neurons missing from this table (and all untyped neurons, which
+        are grouped by bodyId at type level) fall back to LOCAL totals so
+        ratios/probabilities never collapse to 0.
     separate_hemispheres : bool, optional
         Whether hemisphere separation is enabled. The actual suffix application
         should be done by the caller before passing the connection table.
@@ -5225,6 +5232,7 @@ def EnrichConnectionTable(conn_table, traversal_probability_threshold=0, dataset
             label_mapper=label_mapper,
             global_incoming_weights=global_incoming_weights,
             separate_hemispheres=separate_hemispheres,
+            global_incoming_body_weights=global_incoming_body_weights,
         )
     if engine == 'pandas' and not isinstance(conn_table, pd.DataFrame):
         conn_table = conn_table.to_pandas()
@@ -5522,13 +5530,26 @@ def EnrichConnectionTable(conn_table, traversal_probability_threshold=0, dataset
                        (conn_df['connection_ratio'] > 0).any())
     
     if not has_valid_ratio:
-        # Only recalculate if ratio doesn't exist or has no valid values
-        # NOTE: This local calculation only considers connections in this table,
-        # NOT all incoming connections. For accurate global ratios, use coana.py
-        total_incoming = conn_df.groupby('bodyId_post')['weight'].sum().reset_index(name='total_incoming_weight')
-        conn_df = conn_df.merge(total_incoming, how='left', on='bodyId_post')
+        # Only recalculate if ratio doesn't exist or has no valid values.
+        # GLOBAL bodyId denominators (total incoming to each post neuron from
+        # ALL sources) are used when supplied; post neurons missing from the
+        # global table fall back to the LOCAL total over this table so ratios
+        # never collapse to 0/undefined.
+        if global_incoming_body_weights is not None and 'bodyId_post' in global_incoming_body_weights.columns:
+            total_incoming = global_incoming_body_weights[['bodyId_post', 'total_incoming_weight']].copy()
+            total_incoming['bodyId_post'] = total_incoming['bodyId_post'].astype(str)
+            local_total = conn_df.groupby('bodyId_post')['weight'].sum().reset_index(name='local_total_incoming')
+            total_incoming = total_incoming.merge(local_total, on='bodyId_post', how='left')
+            total_incoming['total_incoming_weight'] = total_incoming['total_incoming_weight'].fillna(
+                total_incoming['local_total_incoming']
+            )
+            total_incoming = total_incoming.drop(columns=['local_total_incoming'])
+            conn_df = conn_df.merge(total_incoming, how='left', on='bodyId_post')
+        else:
+            total_incoming = conn_df.groupby('bodyId_post')['weight'].sum().reset_index(name='total_incoming_weight')
+            conn_df = conn_df.merge(total_incoming, how='left', on='bodyId_post')
         
-        # Calculate connection_ratio using local method: weight / local_incoming_weight
+        # Calculate connection_ratio using the (global if available, else local) denominator
         weight_arr = conn_df['weight'].to_numpy(dtype=float)
         total_arr = conn_df['total_incoming_weight'].to_numpy(dtype=float)
         valid_mask = ~np.isnan(total_arr) & (total_arr > 0)
@@ -5629,6 +5650,17 @@ def EnrichConnectionTable(conn_table, traversal_probability_threshold=0, dataset
     else:
         conn_type = weight_sum.merge(total_incoming_per_type, on=group_post, how='left')
     
+    # Fall back to LOCAL totals for groups missing from the global table
+    # (untyped neurons grouped by bodyId, std_labels absent from the global
+    # type table, ...). Without this the ratio would be NaN and the
+    # traversal_probability would be filled with 0, zeroing every path
+    # through such an edge.
+    conn_type['total_incoming_weight'] = conn_type['total_incoming_weight'].fillna(
+        conn_type[group_post].map(
+            total_incoming_per_type.set_index(group_post)['total_incoming_weight']
+        )
+    )
+    
     # Calculate ratio using the chosen denominator
     conn_type['connection_ratio'] = conn_type.apply(
         lambda row: row['weight'] / row['total_incoming_weight'] 
@@ -5717,6 +5749,13 @@ def EnrichConnectionTable(conn_table, traversal_probability_threshold=0, dataset
             )
         else:
             conn_type = weight_sum_type.merge(total_incoming_per_type_orig, on='type_post', how='left')
+        # Local-total fallback for types missing from the global table (same
+        # rationale as the main aggregation above - no 0/NaN ratios).
+        conn_type['total_incoming_weight'] = conn_type['total_incoming_weight'].fillna(
+            conn_type['type_post'].map(
+                total_incoming_per_type_orig.set_index('type_post')['total_incoming_weight']
+            )
+        )
         conn_type['connection_ratio'] = conn_type.apply(
             lambda row: row['weight'] / row['total_incoming_weight'] 
             if pd.notnull(row['total_incoming_weight']) and row['total_incoming_weight'] > 0 
@@ -6674,7 +6713,7 @@ def _write_buffer_to_csv(buffer_list, output_path, append=False):
         df_combined.write_csv(output_path)
 
 
-def EnrichConnectionTablePolars(conn_table, traversal_probability_threshold=0, dataset=None, script_path=None, target_neurons_df=None, aggregate_method='product', label_mapper=None, global_incoming_weights=None, separate_hemispheres=False):
+def EnrichConnectionTablePolars(conn_table, traversal_probability_threshold=0, dataset=None, script_path=None, target_neurons_df=None, aggregate_method='product', label_mapper=None, global_incoming_weights=None, separate_hemispheres=False, global_incoming_body_weights=None):
     '''Add traversal probability, connection ratio, and layer information to the connection table using Polars
     
     NOTE: When separate_hemispheres=True, the caller is expected to have already applied
@@ -6717,6 +6756,13 @@ def EnrichConnectionTablePolars(conn_table, traversal_probability_threshold=0, d
         Should have columns [type_post, total_incoming_weight].
         If provided, used for calculating GLOBAL type-level ratios.
         If None, local ratios (from provided connections only) are calculated.
+    global_incoming_body_weights : DataFrame, optional
+        Pre-computed total incoming weights for each post-synaptic bodyId.
+        Should have columns [bodyId_post, total_incoming_weight].
+        If provided, used for calculating GLOBAL bodyId-level ratios.
+        Post neurons missing from this table (and all untyped neurons, which
+        are grouped by bodyId at type level) fall back to LOCAL totals so
+        ratios/probabilities never collapse to 0.
     
     Returns
     -------
@@ -6939,17 +6985,42 @@ def EnrichConnectionTablePolars(conn_table, traversal_probability_threshold=0, d
             (pl.col('connection_ratio') > 0).any().alias('has_positive')
         ]).to_dicts()[0]
         has_valid_ratio = ratio_stats['has_any'] and ratio_stats['has_positive']
+
+    # Convert global_incoming_body_weights to Polars if provided
+    # (bodyId keys are normalized to strings to match conn_df's bodyId_post)
+    global_incoming_body_pl = None
+    if global_incoming_body_weights is not None:
+        if isinstance(global_incoming_body_weights, pd.DataFrame):
+            global_incoming_body_pl = pl.from_pandas(global_incoming_body_weights)
+        else:
+            global_incoming_body_pl = global_incoming_body_weights
+        if 'bodyId_post' in global_incoming_body_pl.columns:
+            global_incoming_body_pl = global_incoming_body_pl.with_columns(
+                pl.col('bodyId_post').cast(pl.Utf8)
+            )
     
     if not has_valid_ratio:
-        # Only recalculate if ratio doesn't exist or has no valid values
-        # NOTE: This local calculation only considers connections in this table,
-        # NOT all incoming connections. For accurate global ratios, use coana.py
-        total_incoming = conn_df.group_by('bodyId_post').agg(
-            pl.col('weight').sum().alias('total_incoming_weight')
+        # Only recalculate if ratio doesn't exist or has no valid values.
+        # GLOBAL bodyId denominators (total incoming to each post neuron from
+        # ALL sources) are used when supplied; post neurons missing from the
+        # global table fall back to the LOCAL total over this table so ratios
+        # never collapse to 0/undefined.
+        if global_incoming_body_pl is not None:
+            conn_df = conn_df.join(global_incoming_body_pl, on='bodyId_post', how='left')
+        else:
+            conn_df = conn_df.with_columns(
+                pl.lit(None, dtype=pl.Float64).alias('total_incoming_weight')
+            )
+        local_totals = conn_df.group_by('bodyId_post').agg(
+            pl.col('weight').sum().alias('_local_total')
         )
-        conn_df = conn_df.join(total_incoming, on='bodyId_post', how='left')
-            
-        # Calculate metrics using LOCAL ratio (not global)
+        conn_df = conn_df.join(local_totals, on='bodyId_post', how='left')
+        conn_df = conn_df.with_columns(
+            pl.coalesce([pl.col('total_incoming_weight'), pl.col('_local_total')])
+            .alias('total_incoming_weight')
+        ).drop('_local_total')
+        
+        # Calculate connection_ratio using the (global if available, else local) denominator
         conn_df = conn_df.with_columns(
             pl.when(pl.col('total_incoming_weight') > 0)
             .then(pl.col('weight') / pl.col('total_incoming_weight'))
@@ -7044,7 +7115,15 @@ def EnrichConnectionTablePolars(conn_table, traversal_probability_threshold=0, d
         # probabilities was removed - it was unconditionally overwritten here.)
 
         # Calculate Connection Ratio (Type Level)
-        # Use GLOBAL incoming weights if provided, otherwise fall back to LOCAL calculation
+        # Use GLOBAL incoming weights if provided, otherwise fall back to LOCAL calculation.
+        # LOCAL totals are also used as a fallback for groups MISSING from the
+        # global table - without it every group whose post type is absent (e.g.
+        # untyped neurons grouped by bodyId, or std_labels that map to no known
+        # raw type) would get a null ratio and a traversal_probability of 0.
+        local_totals = agg_df.group_by(group_post_col).agg(
+            pl.col('weight').sum().alias('_local_total')
+        )
+        
         if global_incoming_pl is not None and group_post_col in ['type_post', 'std_label_post']:
             # Use global incoming weights from the full dataset
             # global_incoming_weights has 'type_post' and 'total_incoming_weight' columns
@@ -7062,20 +7141,31 @@ def EnrichConnectionTablePolars(conn_table, traversal_probability_threshold=0, d
                     
                     # Add global incoming weight for each type_post (vectorized
                     # join instead of row-wise map_elements with a Python dict)
+                    # NOTE: type_post stays NULL for untyped post neurons (their
+                    # std_label is the bodyId), so those rows never match the
+                    # global type table and are handled by the local fallback.
                     std_label_type_map = std_label_type_map.join(
                         global_incoming_pl.select(['type_post', 'total_incoming_weight']),
                         on='type_post',
                         how='left',
                     ).with_columns(
                         pl.col('total_incoming_weight')
-                        .fill_null(0.0)
                         .alias('type_incoming')
                     )
                     
-                    # Sum by std_label_post (in case one std_label maps to multiple types)
+                    # Sum by std_label_post (in case one std_label maps to multiple types).
+                    # If ANY of a group's types is missing from the global table the
+                    # sum would undercount, so the whole group falls back to local.
                     global_incoming_by_std_label = std_label_type_map.group_by('std_label_post').agg(
-                        pl.col('type_incoming').sum().alias('total_incoming_weight')
+                        pl.col('type_incoming').sum().alias('_global_sum'),
+                        pl.col('type_incoming').is_null().any().alias('_any_missing'),
                     )
+                    global_incoming_by_std_label = global_incoming_by_std_label.with_columns(
+                        pl.when(~pl.col('_any_missing'))
+                        .then(pl.col('_global_sum'))
+                        .otherwise(None)
+                        .alias('total_incoming_weight')
+                    ).drop(['_global_sum', '_any_missing'])
                     
                     # Join with agg_df
                     agg_df = agg_df.join(global_incoming_by_std_label, on='std_label_post', how='left')
@@ -7086,46 +7176,34 @@ def EnrichConnectionTablePolars(conn_table, traversal_probability_threshold=0, d
             else:
                 # Direct join for type_post grouping
                 agg_df = agg_df.join(global_incoming_pl, on='type_post', how='left')
-            
-            # Calculate ratio using GLOBAL denominator
-            agg_df = agg_df.with_columns(
-                pl.when(pl.col('total_incoming_weight') > 0)
-                .then(pl.col('weight') / pl.col('total_incoming_weight'))
-                .otherwise(None)
-                .alias('connection_ratio')
-            )
-            if 'total_incoming_weight' in agg_df.columns:
-                agg_df = agg_df.drop('total_incoming_weight')
-            
-            # Recalculate traversal_probability from GLOBAL connection_ratio
-            # This ensures type-level traversal_prob matches the global ratio
-            # (fill_null(0.0) matches the pandas fillna(0.0) semantics for
-            # types with no known incoming connections)
-            agg_df = agg_df.with_columns(
-                (pl.col('connection_ratio') / 0.3).clip(0.0, 1.0).fill_null(0.0).alias('traversal_probability')
-            )
         else:
-            # Fall back to LOCAL calculation (only connections in this table)
-            total_incoming_df = agg_df.group_by(group_post_col).agg(
-                pl.col('weight').sum().alias('total_incoming_weight')
-            )
-            
-            # Join total incoming weight
-            agg_df = agg_df.join(total_incoming_df, on=group_post_col, how='left')
-            
-            # Calculate ratio using LOCAL denominator
             agg_df = agg_df.with_columns(
-                pl.when(pl.col('total_incoming_weight') > 0)
-                .then(pl.col('weight') / pl.col('total_incoming_weight'))
-                .otherwise(None)
-                .alias('connection_ratio')
+                pl.lit(None, dtype=pl.Float64).alias('total_incoming_weight')
             )
-            agg_df = agg_df.drop('total_incoming_weight')
-            
-            # Recalculate traversal_probability from LOCAL connection_ratio
-            agg_df = agg_df.with_columns(
-                (pl.col('connection_ratio') / 0.3).clip(0.0, 1.0).fill_null(0.0).alias('traversal_probability')
-            )
+        
+        # LOCAL-total fallback for groups missing from the global table (see
+        # the comment above the global branch).
+        agg_df = agg_df.join(local_totals, on=group_post_col, how='left')
+        agg_df = agg_df.with_columns(
+            pl.coalesce([pl.col('total_incoming_weight'), pl.col('_local_total')])
+            .alias('total_incoming_weight')
+        ).drop('_local_total')
+        
+        # Calculate ratio using the (global if available, else local) denominator
+        agg_df = agg_df.with_columns(
+            pl.when(pl.col('total_incoming_weight') > 0)
+            .then(pl.col('weight') / pl.col('total_incoming_weight'))
+            .otherwise(None)
+            .alias('connection_ratio')
+        )
+        agg_df = agg_df.drop('total_incoming_weight')
+        
+        # Recalculate traversal_probability from connection_ratio
+        # (fill_null(0.0) matches the pandas fillna(0.0) semantics for
+        # types with no known incoming connections)
+        agg_df = agg_df.with_columns(
+            (pl.col('connection_ratio') / 0.3).clip(0.0, 1.0).fill_null(0.0).alias('traversal_probability')
+        )
         
         # block_probability = 1 - traversal_probability (null -> 1.0, matching
         # the pandas fillna(1.0) semantics so both engines emit the same schema)
