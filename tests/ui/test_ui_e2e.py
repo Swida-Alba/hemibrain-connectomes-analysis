@@ -548,6 +548,40 @@ class TestRunner:
         assert move_color(["a", "b", "c"], 1, -1) == ["b", "a", "c"]
         assert move_color(["a", "b", "c"], 0, -1) == ["a", "b", "c"]
 
+    def test_palette_editor_set_palette_and_on_change(self):
+        """palette_editor exposes set_palette() (programmatic, no callback)
+        and fires on_change only when the user picks a palette card."""
+        from nicegui import Client
+        from nicegui.page import page
+        from ui.components.palette_picker import palette_editor
+
+        changes = []
+        client = Client(page("/palette-editor-api"))
+        with client:
+            editor = palette_editor(
+                "Neuron Colors", value="Category10",
+                on_change=lambda: changes.append("manual"),
+            )
+        assert editor.get_value() == "Category10"
+        assert editor.get_colors()[0] == "#1f77b4"  # Category10 blue
+
+        # Programmatic switch must not fire on_change
+        editor.set_palette("Set3")
+        assert editor.get_value() == "Set3"
+        assert editor.get_colors()[0] == "#8dd3c7"  # Set3 teal
+        assert changes == []
+
+        # A user card click fires on_change
+        label = next(
+            el for el in client.elements.values()
+            if getattr(el, "text", "") == "Dark2"
+        )
+        card = label.parent_slot.parent
+        click_listener = next(iter(card._event_listeners.values()))
+        click_listener.handler()
+        assert editor.get_value() == "Dark2"
+        assert changes == ["manual"]
+
     def test_roi_mesh_traces_have_independent_legend_entries(self):
         """Each resolved ROI stays separately toggleable in the Plotly legend."""
         import plotly.graph_objects as go
@@ -938,6 +972,63 @@ class TestTabs:
             create_network_tab, create_visualization_tab,
             create_settings_tab,
         ])
+
+    def test_skeleton_tab_shares_pathfinding_search_controls(self):
+        """The 3D Skeleton tab must expose the same neuron-search controls as
+        pathfinding: a filter-mode select (exact/starts-with/contains/...)
+        on the neuron input, a Search Columns scope selector, and a
+        Hemisphere selector (both / left / right)."""
+        from nicegui import Client
+        from nicegui.page import page
+        from ui.tabs.visualization import create_skeleton_tab
+
+        client = Client(page("/skeleton-search-controls"))
+        with client:
+            create_skeleton_tab()
+
+        labels = [
+            getattr(el, "_props", {}).get("label")
+            for el in client.elements.values()
+            if getattr(el, "_props", {}).get("label")
+        ]
+        assert "Search Columns" in labels
+        assert "Hemisphere" in labels
+        assert "Filter" in labels  # neuron_list_input filter mode dropdown
+
+        # The form is split into four visually independent blocks.
+        texts = [
+            getattr(el, "text", "")
+            for el in client.elements.values()
+            if getattr(el, "text", "")
+        ]
+        for header in (
+            "General Appearance",
+            "Neuron Colors",
+            "Synapse Colors",
+            "Brain Region ROIs (independent)",
+        ):
+            assert header in texts, f"missing block header: {header}"
+
+        ids = [
+            getattr(el, "_props", {}).get("id", "")
+            for el in client.elements.values()
+        ]
+        for block_id in (
+            "card-skeleton-appearance",
+            "card-skeleton-neuron-colors",
+            "card-skeleton-synapse-colors",
+            "card-skeleton-roi-colors",
+        ):
+            assert block_id in ids, f"missing block card: {block_id}"
+
+        # Neuron palette defaults to Category10 (background is white);
+        # the synapse palette defaults to Dark2.
+        editors = [
+            el for el in client.elements.values()
+            if callable(getattr(el, "get_colors", None))
+        ]
+        assert any(el.get_value() == "Category10" for el in editors)
+        assert any(el.get_value() == "Dark2" for el in editors)
 
     def test_pathfinding_tabs_have_hemisphere_filter_select(self):
         """Find All Paths and Find Direct expose the 'Hemisphere' selector

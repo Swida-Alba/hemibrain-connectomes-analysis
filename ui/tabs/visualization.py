@@ -6,10 +6,11 @@ from pathlib import Path
 
 from nicegui import ui
 
-from ..config import SKELETON_MODES, BRAIN_MESH_OPTIONS, NETWORK_LAYOUTS
+from ..config import SKELETON_MODES, BRAIN_MESH_OPTIONS, NETWORK_LAYOUTS, SEARCH_COLUMNS
 from ..components.common import (
     dataset_selector, neuron_list_input, multi_select_input, number_input, select_input,
     checkbox_input, dir_input, read_upload_event, section_header, param_grid, tool_page,
+    apply_filter_mode,
 )
 from ..components.output_panel import OutputPanel
 from ..runner import ScriptRunner
@@ -69,10 +70,11 @@ def create_skeleton_tab():
             section_header("Neuron Selection (3D)", "hub")
             neuron_chips = neuron_list_input(
                 label="Neurons / Layers",
-                show_filter=False,
                 show_upload=False,
                 hint="Type a neuron name and press Enter (or leave the field) to add a chip. "
-                     "Each chip = one neuron/layer; use 'A -> B -> C' for connected paths.",
+                     "Each chip = one neuron/layer; use 'A -> B -> C' for connected paths. "
+                     "The filter mode (exact / starts with / contains / ends with / regex) "
+                     "applies to every chip, matching the pathfinding search backend.",
             )
             custom_layer_names = neuron_list_input(
                 label="Custom Layer Names (optional)",
@@ -83,87 +85,148 @@ def create_skeleton_tab():
             with param_grid(2):
                 dataset = dataset_selector()
                 output_dir = dir_input()
-
-            section_header("Appearance", "palette")
-            with param_grid(2):
-                skeleton_mode = select_input(
-                    "Skeleton Mode", SKELETON_MODES, "tube",
-                    hint="'tube': 3D tube rendering (detailed). 'line': thin line (fast, for many neurons).",
-                )
-                legend_mode = select_input(
-                    "Neuron Legend Mode", ["layer", "type", "single"], "layer",
-                    hint="'layer': one neuron legend entry per layer. 'type': per neuron type. "
-                         "'single': every neuron. ROI meshes always remain separate.",
-                )
-                neuron_alpha = number_input(
-                    "Neuron Opacity", 0.2, 0, 1, 0.1,
-                    hint="Transparency of neuron tubes (0=invisible, 1=solid).",
-                )
-                bg_color = select_input(
-                    "Background", ["white", "black"], "white",
-                    hint="Background color for the 3D scene and exports.",
-                )
-                brain_mesh = select_input(
-                    "Brain Mesh", BRAIN_MESH_OPTIONS, "template",
-                    hint="'template': brain outline. 'whole': full brain surface. 'none': no mesh.",
-                )
-                vnc_mesh = checkbox_input(
-                    "VNC Mesh", False,
-                    hint="Show the ventral nerve cord mesh (male-cns / manc datasets).",
-                )
-            neuron_palette = palette_editor(
-                "Neuron Colors",
-                value="Category20",
-                include_auto=False,
+            search_columns = select_input(
+                "Search Columns", SEARCH_COLUMNS, "auto",
+                hint="Which columns to search when resolving neuron names (same as "
+                     "pathfinding). 'auto': all columns (bodyId -> type -> instance -> "
+                     "flywireType/others). Use 'type'/'instance'/'bodyId' to restrict.",
+            )
+            hemisphere = select_input(
+                "Hemisphere", ["both", "left", "right"], "both",
+                hint="'both': plot all neurons. 'left'/'right': plot only that hemisphere. "
+                     "Neurons WITHOUT an explicit hemisphere (no _L/_R instance suffix "
+                     "or Soma side) are always included in every option.",
             )
 
-            section_header("Synapses", "bubble_chart")
-            with param_grid(3):
-                skip_synapse = checkbox_input(
-                    "Skip Synapses", True,
-                    hint="Hide synapse markers for a cleaner view.",
-                )
-                min_synapse_num = number_input(
-                    "Min Synapse Count", 3, 1, 100,
-                    hint="Minimum synapses for a connection marker to be shown.",
-                )
-                synapse_size = select_input(
-                    "Synapse Size", ["real", "1", "2", "3"], "real",
-                    hint="'real': scale by synapse count. 1-3: fixed marker size.",
-                )
-                synapse_alpha = number_input(
-                    "Synapse Opacity", 0.6, 0, 1, 0.1,
-                    hint="Transparency of synapse markers.",
-                )
-                synapse_mode = select_input(
-                    "Synapse Mode", ["cone", "scatter"], "cone",
-                    hint="'cone': directional cone markers. 'scatter': simple points.",
+            # ------------------------------------------------------------------
+            # General Appearance (independent block)
+            # ------------------------------------------------------------------
+            with ui.card().classes("w-full drocat-card").props('id="card-skeleton-appearance"'):
+                section_header("General Appearance", "palette")
+                with param_grid(2):
+                    skeleton_mode = select_input(
+                        "Skeleton Mode", SKELETON_MODES, "tube",
+                        hint="'tube': 3D tube rendering (detailed). 'line': thin line (fast, for many neurons).",
+                    )
+                    legend_mode = select_input(
+                        "Neuron Legend Mode", ["layer", "type", "single"], "layer",
+                        hint="'layer': one neuron legend entry per layer. 'type': per neuron type. "
+                             "'single': every neuron. ROI meshes always remain separate.",
+                    )
+                    neuron_alpha = number_input(
+                        "Neuron Opacity", 0.2, 0, 1, 0.1,
+                        hint="Transparency of neuron tubes (0=invisible, 1=solid).",
+                    )
+                    bg_color = select_input(
+                        "Background", ["white", "black"], "white",
+                        hint="Background color for the 3D scene and exports. "
+                             "The default neuron palette follows it: Category10 on "
+                             "white, Set3 on black (until a palette is picked manually).",
+                    )
+                    brain_mesh = select_input(
+                        "Brain Mesh", BRAIN_MESH_OPTIONS, "template",
+                        hint="'template': brain outline. 'whole': full brain surface. 'none': no mesh.",
+                    )
+                    vnc_mesh = checkbox_input(
+                        "VNC Mesh", False,
+                        hint="Show the ventral nerve cord mesh (male-cns / manc datasets).",
+                    )
+
+            # ------------------------------------------------------------------
+            # Neuron Colors (independent block)
+            # ------------------------------------------------------------------
+            # Default neuron palette follows the background color: Category10
+            # on white, Set3 on black.  Once the user picks a palette card
+            # manually (on_change), the background stops switching it.
+            palette_locked = {"locked": False}
+
+            def _sync_palette_to_background():
+                if palette_locked["locked"]:
+                    return
+                neuron_palette.set_palette(
+                    "Set3" if bg_color.value == "black" else "Category10"
                 )
 
-            section_header("Brain Region ROIs (independent)", "view_in_ar")
-            roi_select = multi_select_input(
-                "Mesh ROIs",
-                COMMON_ROIS,
-                default=["EB", "LH", "AL"],
-                hint="Select brain regions to show as meshes. Type any ROI name or regex "
-                     "(e.g. ME.*, all, primary) and press Enter to add it.",
-            )
-            roi_select.props('new-value-mode="add-unique"')
-            roi_palette = palette_editor(
-                "ROI Colors",
-                value="Cool",
-                include_auto=True,
-            )
-            ui.label(
-                "Colors are assigned in the displayed order; every resolved ROI mesh "
-                "has its own legend entry."
-            ).classes("text-caption drocat-muted")
-            with param_grid(3):
-                mesh_alpha = number_input(
-                    "ROI Mesh Opacity", 0.1, 0, 1, 0.05,
-                    hint="Transparency applied to all ROI meshes (per-ROI alpha can be "
-                         "embedded in custom colors instead).",
+            bg_color.on_value_change(lambda _e: _sync_palette_to_background())
+
+            with ui.card().classes("w-full drocat-card").props('id="card-skeleton-neuron-colors"'):
+                section_header("Neuron Colors", "palette")
+                neuron_palette = palette_editor(
+                    "Neuron Colors",
+                    value="Category10",
+                    include_auto=False,
+                    on_change=lambda: palette_locked.__setitem__("locked", True),
                 )
+                ui.label(
+                    "The default follows the background (Category10 on white, "
+                    "Set3 on black) until a palette is picked manually."
+                ).classes("text-caption drocat-muted")
+
+            # ------------------------------------------------------------------
+            # Synapse Colors + synapse options (independent block)
+            # ------------------------------------------------------------------
+            with ui.card().classes("w-full drocat-card").props('id="card-skeleton-synapse-colors"'):
+                section_header("Synapse Colors", "bubble_chart")
+                synapse_palette = palette_editor(
+                    "Synapse Colors",
+                    value="Dark2",
+                    include_auto=False,
+                )
+                ui.label(
+                    "Colors are assigned per connection between consecutive layers "
+                    "(one fewer than the number of neuron layers)."
+                ).classes("text-caption drocat-muted")
+                ui.label("Synapse options").classes("drocat-mini-label")
+                with param_grid(3):
+                    skip_synapse = checkbox_input(
+                        "Skip Synapses", True,
+                        hint="Hide synapse markers for a cleaner view.",
+                    )
+                    min_synapse_num = number_input(
+                        "Min Synapse Count", 3, 1, 100,
+                        hint="Minimum synapses for a connection marker to be shown.",
+                    )
+                    synapse_size = select_input(
+                        "Synapse Size", ["real", "1", "2", "3"], "real",
+                        hint="'real': scale by synapse count. 1-3: fixed marker size.",
+                    )
+                    synapse_alpha = number_input(
+                        "Synapse Opacity", 0.6, 0, 1, 0.1,
+                        hint="Transparency of synapse markers.",
+                    )
+                    synapse_mode = select_input(
+                        "Synapse Mode", ["cone", "scatter"], "cone",
+                        hint="'cone': directional cone markers. 'scatter': simple points.",
+                    )
+
+            # ------------------------------------------------------------------
+            # Brain Region ROIs + ROI Colors (independent block)
+            # ------------------------------------------------------------------
+            with ui.card().classes("w-full drocat-card").props('id="card-skeleton-roi-colors"'):
+                section_header("Brain Region ROIs (independent)", "view_in_ar")
+                roi_select = multi_select_input(
+                    "Mesh ROIs",
+                    COMMON_ROIS,
+                    default=["EB", "LH", "AL"],
+                    hint="Select brain regions to show as meshes. Type any ROI name or regex "
+                         "(e.g. ME.*, all, primary) and press Enter to add it.",
+                )
+                roi_select.props('new-value-mode="add-unique"')
+                roi_palette = palette_editor(
+                    "ROI Colors",
+                    value="Cool",
+                    include_auto=True,
+                )
+                ui.label(
+                    "Colors are assigned in the displayed order; every resolved ROI mesh "
+                    "has its own legend entry."
+                ).classes("text-caption drocat-muted")
+                with param_grid(3):
+                    mesh_alpha = number_input(
+                        "ROI Mesh Opacity", 0.1, 0, 1, 0.05,
+                        hint="Transparency applied to all ROI meshes (per-ROI alpha can be "
+                             "embedded in custom colors instead).",
+                    )
 
             with ui.expansion("Advanced Settings", icon="settings_suggest").classes("w-full"):
                 ui.label("Data & Rendering").classes("drocat-mini-label")
@@ -278,15 +341,23 @@ def create_skeleton_tab():
         )
 
     async def run_skeleton():
-        neurons = neuron_chips.get_value()[1]
+        mode, neurons = neuron_chips.get_value()
         if not neurons:
             ui.notify("Please add at least one neuron", type="warning")
             return
+        # Same search semantics as pathfinding: the filter mode (exact /
+        # starts with / contains / ends with / regex) converts every chip
+        # into the regex pattern resolved by statvis.getNeurons.
+        neurons = apply_filter_mode(neurons, mode)
         rois = roi_select.value or []
 
         # Assign the exact displayed palette order (including custom reordering).
         neuron_colors = assign_palette_colors(
             neuron_palette.get_colors(), len(neurons)
+        )
+        # One color per connection between consecutive layers (n_layers - 1).
+        synapse_colors = assign_palette_colors(
+            synapse_palette.get_colors(), max(0, len(neurons) - 1)
         )
 
         # Auto is a one-color gray palette; custom mode must not be gated by
@@ -300,6 +371,8 @@ def create_skeleton_tab():
         constructor_params = {
             "dataset": dataset.value,
             "neuron_layers": neurons,
+            "search_columns": search_columns.value,
+            "hemisphere": hemisphere.value,
             "custom_layer_names": custom_names,
             "output_dir": output_dir.value,
             "skeleton_mode": skeleton_mode.value,
@@ -308,6 +381,7 @@ def create_skeleton_tab():
             "legend_mode": legend_mode.value,
             "neuron_alpha": float(neuron_alpha.value),
             "neuron_colors": neuron_colors,
+            "synapse_colors": synapse_colors,
             "background_color": bg_color.value,
             "skip_synapse": skip_synapse.value,
             "min_synapse_num": int(min_synapse_num.value),

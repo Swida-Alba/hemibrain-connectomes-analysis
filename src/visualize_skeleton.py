@@ -1665,6 +1665,29 @@ class VisualizeSkeleton:
     e.g. [['L1_0','L1_1'], ['L2_0','L2_1'], ['L3_0','L3_1']]
     '''
 
+    search_columns: str = 'auto'
+    '''
+    Which columns to search when resolving neuron names (same backend as
+    pathfinding, statvis.getNeurons):
+        'auto' (default): search all columns with priority
+        bodyId -> type -> instance -> other string columns
+        (e.g. flywireType, hemibrainType, mancType); 'type', 'instance'
+        and 'bodyId' restrict the search to that single column.
+    '''
+
+    hemisphere: str = 'both'
+    '''
+    Restrict the plotted neurons to one hemisphere:
+        'both' (default): all neurons.
+        'left': only left-hemisphere neurons.
+        'right': only right-hemisphere neurons.
+    Hemisphere assignment comes from the 'Soma side' / 'hemisphere' columns
+    or the instance suffix (_L/_R).  Neurons WITHOUT an explicit hemisphere
+    are treated as unclassified ('U') and are ALWAYS included - in 'left',
+    'right' AND 'both' - so data that lacks hemisphere notation is never
+    silently dropped.
+    '''
+
     custom_layer_names: list = field(default_factory=list)
     '''
     Optional custom names for layers. If empty, auto-generates smart names from neuron types.
@@ -1866,10 +1889,13 @@ class VisualizeSkeleton:
     - Video frames
     '''
 
-    neuron_colors: tuple | list | str = bokeh.palettes.Category10[10]
+    neuron_colors: tuple | list | str = None
     '''
     Colors for neuron layers. Supports multiple input formats that are automatically
     standardized to rgba format internally.
+    
+    None (default): auto-pick a categorical palette from the background -
+    bokeh Category10 on a white background, bokeh Set3 on a black background.
     
     Supported Formats
     -----------------
@@ -3350,6 +3376,47 @@ class VisualizeSkeleton:
         return _compute_unified_crop_bounds(image_paths, background_color, sample_count)
     def _apply_consistent_crop(self, pic_folder, margin=20, background_color=(255, 255, 255)):
         return _apply_consistent_crop(pic_folder, margin, background_color)
+    def _filter_neuron_df_by_hemisphere(self, ndf, rdf=None):
+        """Keep only neurons of the selected hemisphere (self.hemisphere).
+
+        Hemisphere assignment mirrors the pathfinding backend: the
+        'Soma side' / 'hemisphere' column wins, then the instance suffix
+        (_L/_R).  Neurons WITHOUT an explicit hemisphere are treated as
+        unclassified ('U') and are ALWAYS kept - in 'left', 'right' AND
+        'both' - so data that lacks hemisphere notation is never silently
+        dropped.  Returns (filtered_ndf, filtered_rdf).
+        """
+        df = ndf.copy()
+        code = pd.Series('U', index=df.index, dtype=object)
+
+        # Locate the side column regardless of naming variant ('Soma side',
+        # 'somaSide', 'rootSide', 'hemisphere') - male-cns CSVs use camelCase.
+        side_col = None
+        lowered = {str(c).strip().lower(): c for c in df.columns}
+        for candidate in ('hemisphere', 'soma side', 'somaside', 'rootside'):
+            if candidate in lowered:
+                side_col = lowered[candidate]
+                break
+        if side_col is not None:
+            side = df[side_col].fillna('').astype(str).str.strip().str.lower()
+            code[side.isin(['l', 'left', 'lhs', 'left hemisphere'])] = 'L'
+            code[side.isin(['r', 'right', 'rhs', 'right hemisphere'])] = 'R'
+
+        if 'instance' in df.columns:
+            inst = df['instance'].fillna('').astype(str)
+            unassigned = code == 'U'
+            code[unassigned & inst.str.endswith('_R')] = 'R'
+            code[unassigned & inst.str.endswith('_L')] = 'L'
+
+        if self.hemisphere == 'left':
+            df = df[code.isin(['L', 'U'])].copy()
+        elif self.hemisphere == 'right':
+            df = df[code.isin(['R', 'U'])].copy()
+
+        if rdf is not None and not rdf.empty and 'bodyId' in df.columns:
+            rdf = rdf[rdf.index.isin(df['bodyId'].astype(str))].copy() if rdf.index.name == 'bodyId' else rdf
+        return df, rdf
+
     def _parse_layer_map_csv(self):
         """
         Parse layer_map_csv file to construct neuron_layers and custom_layer_names.
@@ -3556,6 +3623,21 @@ class VisualizeSkeleton:
             errors.append(f"client_type must be a string, got {type(self.client_type).__name__}")
         elif self.client_type not in ('neuprint', 'flywire'):
             errors.append(f"client_type must be 'neuprint' or 'flywire', got '{self.client_type}'")
+
+        if not isinstance(self.search_columns, str):
+            errors.append(f"search_columns must be a string, got {type(self.search_columns).__name__}")
+        elif self.search_columns not in ('auto', 'type', 'instance', 'bodyId'):
+            errors.append(
+                f"search_columns must be 'auto', 'type', 'instance' or 'bodyId', "
+                f"got '{self.search_columns}'"
+            )
+
+        if not isinstance(self.hemisphere, str):
+            errors.append(f"hemisphere must be a string, got {type(self.hemisphere).__name__}")
+        elif self.hemisphere not in ('both', 'left', 'right'):
+            errors.append(
+                f"hemisphere must be 'both', 'left' or 'right', got '{self.hemisphere}'"
+            )
             
         if not isinstance(self.server, str):
             errors.append(f"server must be a string, got {type(self.server).__name__}")
@@ -3825,6 +3907,15 @@ class VisualizeSkeleton:
             raise ValueError(error_msg)
 
     def __post_init__(self):
+        # Default neuron palette follows the background color: bokeh
+        # Category10 on white, bokeh Set3 on black (resolved before the
+        # color validation below runs).
+        if self.neuron_colors is None:
+            if str(self.background_color).strip().lower() == 'black':
+                self.neuron_colors = bokeh.palettes.Set3[12]
+            else:
+                self.neuron_colors = bokeh.palettes.Category10[10]
+
         # Apply dataset-specific defaults BEFORE validation
         if self.dataset and 'manc' in self.dataset.lower():
             # For MANC, enable VNC mesh by default if not explicitly disabled
@@ -4219,7 +4310,15 @@ class VisualizeSkeleton:
             layer_desc = str(layer_input[0])[:20] if layer_input else f"layer_{i}"
             layer_iter.set_description(f"Layer {i}: {layer_desc}")
             
-            ndf, rdf, auto_name, cri = sv.getNeurons(layer_input, dataset=self.dataset, client=self.client, verbose=False)
+            ndf, rdf, auto_name, cri = sv.getNeurons(
+                layer_input,
+                dataset=self.dataset,
+                client=self.client,
+                verbose=False,
+                search_columns=self.search_columns,
+            )
+            if self.hemisphere != 'both' and ndf is not None and not ndf.empty:
+                ndf, rdf = self._filter_neuron_df_by_hemisphere(ndf, rdf)
             self.neuron_dfs.append(ndf)
             self.roi_dfs.append(rdf)
             self.layer_criteria.append(cri)

@@ -54,23 +54,66 @@
     <tr><td><code>aMe12 -&gt; aMe10 -&gt; MBON01</code></td><td>Chain rendered as one connected path</td></tr>
     <tr><td>Custom layer names</td><td>Display names, one per chip in order</td></tr>
   </table>
+  <p>The neuron input also has a <b>Filter</b> mode (exact / starts with /
+    contains / ends with / regex) that converts every chip into a regex
+    pattern, and a <b>Search Columns</b> selector (<code>auto</code> /
+    <code>type</code> / <code>instance</code> / <code>bodyId</code>) — the
+    same neuron-search backend as Find All Paths.</p>
+
+  <h2 id="hemisphere-analysis">3D skeleton - hemisphere analysis</h2>
+  <p>The <b>Hemisphere</b> selector (next to Search Columns) restricts the
+    plotted neurons to one side:</p>
+  <ul>
+    <li><b>both</b> (default): all neurons.</li>
+    <li><b>left</b>: only left-hemisphere neurons.</li>
+    <li><b>right</b>: only right-hemisphere neurons.</li>
+  </ul>
+  <p>Hemisphere assignment is automatic per neuron: the <b>Soma side</b> /
+    <b>hemisphere</b> column wins when present, otherwise the <b>instance</b>
+    suffix (<code>_R</code> → right, <code>_L</code> → left). Neurons with
+    neither are unclassified (<code>U</code>) and are <b>always included</b>
+    in every option — so datasets whose neurons lack hemisphere notation
+    (e.g. some non-NeuPrint tables) are never silently dropped.</p>
+  <div class="callout tip">
+    <b>Manual suffix search still works</b> — a chip like
+    <code>aMe12_R</code> or <code>.*_R</code> selects one side per type; the
+    Hemisphere selector applies the same rule to every neuron automatically,
+    including those without a suffix.
+  </div>
 
   <h2>3D skeleton - options</h2>
+  <p>The form is organized into four independent blocks, each with its own
+    card: <b>General Appearance</b>, <b>Neuron Colors</b>, <b>Synapse
+    Colors</b> and <b>Brain Region ROIs</b>.</p>
   <div class="grid">
     <div class="card">
-      <h3>Appearance</h3>
+      <h3>General Appearance</h3>
       <ul>
         <li><b>Skeleton Mode</b>: tube (detailed) or line (fast).</li>
         <li><b>Neuron Legend Mode</b>: layer, type, or single. ROI meshes
           always keep independent legend entries.</li>
-        <li><b>Neuron Opacity</b> and <b>Neuron Colors</b> (full bokeh
-          palette catalog with range/custom editing).</li>
-        <li><b>Background</b>: white or black.</li>
+        <li><b>Neuron Opacity</b>.</li>
+        <li><b>Background</b>: white or black. The default neuron palette
+          follows it — <b>Category10</b> on white, <b>Set3</b> on black —
+          until you pick a palette manually.</li>
+        <li><b>Brain Mesh</b>: template, whole, or none; <b>VNC Mesh</b>
+          toggle for male-cns/manc.</li>
       </ul>
     </div>
     <div class="card">
-      <h3>Synapses</h3>
+      <h3>Neuron Colors</h3>
       <ul>
+        <li>Full bokeh palette catalog with range/custom editing, reorder and
+          per-color assignment.</li>
+        <li>Default follows the background (Category10 / Set3) until a palette
+          is picked manually.</li>
+      </ul>
+    </div>
+    <div class="card">
+      <h3>Synapse Colors</h3>
+      <ul>
+        <li><b>Synapse Colors</b>: palette for the connection markers between
+          layers (one color per consecutive-layer pair).</li>
         <li><b>Skip Synapses</b>: hide markers for a clean view.</li>
         <li><b>Min Synapse Count</b>, <b>Synapse Size</b> (real or fixed),
           <b>Opacity</b>, <b>Mode</b> (cone or scatter).</li>
@@ -86,8 +129,6 @@
         <li>Each resolved ROI mesh, including bilateral expansions, is a
           separate trace and legend entry.</li>
         <li><b>ROI Mesh Opacity</b>.</li>
-        <li><b>Brain Mesh</b>: template, whole, or none; <b>VNC Mesh</b>
-          toggle for male-cns/manc.</li>
       </ul>
     </div>
   </div>

@@ -8,7 +8,7 @@ Visual color palette tools for DROCAT.
 - ``color_swatch_picker``: single-color swatches with a custom color input.
 """
 
-from typing import List, Optional, Tuple
+from typing import Callable, List, Optional, Tuple
 
 from nicegui import ui
 
@@ -218,6 +218,7 @@ def palette_editor(
     value: Optional[str] = None,
     include_auto: bool = False,
     max_height: int = 220,
+    on_change: Optional[Callable] = None,
 ) -> ui.element:
     """
     Full palette editor with direct previews.
@@ -229,6 +230,11 @@ def palette_editor(
     - Custom colors: add single colors via a native color picker, click the
       selected palette strip to append colors, reorder (move left/right,
       reverse) and remove entries
+
+    ``on_change`` fires when the user manually picks a preset palette card
+    (callers use it to stop auto-following e.g. the background color). The
+    returned container also gains ``set_palette(name)`` for programmatic
+    palette switching, which does NOT fire ``on_change``.
     """
     catalog = list(get_palette_catalog())
     if include_auto:
@@ -505,7 +511,7 @@ def palette_editor(
             render_custom_list()
             render_custom_source_strip()
 
-        def select_preset(name: str):
+        def apply_palette(name: str, notify: bool = False):
             state["palette"] = name
             container.value = name
             for element, card_name in cards:
@@ -517,6 +523,11 @@ def palette_editor(
             render_discrete_editor()
             render_custom_source_strip()
             render_preview()
+            if notify and on_change:
+                on_change()
+
+        def select_preset(name: str):
+            apply_palette(name, notify=True)
 
         def on_mode_change():
             state["mode"] = "custom" if mode_toggle.value == "Custom colors" else "preset"
@@ -537,6 +548,7 @@ def palette_editor(
     container.get_palette_order = lambda: list(palette_colors())
     container.get_range = lambda: (state["start"], state["end"])
     container.get_colors = effective_colors
+    container.set_palette = lambda name: apply_palette(name, notify=False)
     return container
 
 
