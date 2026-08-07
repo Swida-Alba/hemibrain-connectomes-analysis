@@ -1,5 +1,6 @@
 # connectome analysis module -- coana
 import os
+import threading
 from typing import List
 import sys
 import json
@@ -4616,7 +4617,9 @@ class FindNeuronConnection:
         batch_size: int = 100,
         force_rebuild: bool = False,
         quiet: bool = False,
-        progress_callback: callable = None
+        progress_callback: callable = None,
+        cancel_event: threading.Event = None,
+        max_workers: int = None
     ) -> dict:
         """
         Build connection cache incrementally for specified or all neurons.
@@ -4652,6 +4655,16 @@ class FindNeuronConnection:
             If True, suppress progress messages (default: False)
         progress_callback : callable, optional
             Callback function(current, total, neuron_info) for progress updates
+        cancel_event : threading.Event, optional
+            When set, the build stops after the current batch. Already-fetched
+            batches are consolidated first so a later run resumes from the
+            checkpoint (interrupted builds behave exactly like a crashed run).
+        max_workers : int, optional
+            Number of batches fetched in parallel (bounded in-flight). Use
+            when the NeuPrint/FlyLight server tolerates concurrent requests;
+            None or 1 keeps the sequential fetch. Appends to the cache stay
+            serialized (batch-file numbering and the neuron index are not
+            thread-safe), so results are identical to a sequential run.
         
         Returns:
         --------
@@ -4662,6 +4675,7 @@ class FindNeuronConnection:
             - 'failed_neurons': List of neurons that failed to cache
             - 'total_connections': Total connections in cache after build
             - 'elapsed_time': Time taken in seconds
+            - 'cancelled': True when the build was stopped by cancel_event
         """
         import time
         import os
@@ -4801,6 +4815,7 @@ class FindNeuronConnection:
         total = len(uncached)
         newly_cached = []
         failed_neurons = []
+        cancelled = False
         batch_connections = 0
         total_batches = (total + batch_size - 1) // batch_size
         
@@ -4836,56 +4851,106 @@ class FindNeuronConnection:
             process = None
 
         try:
-            for i in batch_iter:
+            # Shared per-batch processing (fetch -> append -> mark cached).
+            # In the parallel path appends still run in this single (main)
+            # thread: batch-file numbering and the neuron index are not
+            # thread-safe, while the network fetches parallelize fine.
+            def process_batch(i: int, connections=None, fetch_failed: bool = False) -> None:
+                nonlocal batch_connections, cancelled
                 batch = uncached[i:i + batch_size]
                 batch_num = i // batch_size + 1
-                
-                # Progress callback
-                if progress_callback:
-                    progress_callback(i, total, f"Batch {batch_num}/{total_batches}")
-                
                 try:
-                    # Fetch connections for this batch (upstream=batch, downstream=None for ALL)
-                    connections = self._fetch_connections_bulk(
-                        upstream_bodyIds=batch,
-                        downstream_bodyIds=None
-                    )
-                    
+                    if fetch_failed:
+                        raise RuntimeError("batch fetch failed in worker thread")
+                    if connections is None:
+                        connections = self._fetch_connections_bulk(
+                            upstream_bodyIds=batch,
+                            downstream_bodyIds=None
+                        )
                     if connections is not None and not connections.empty:
                         batch_connections += len(connections)
-                        
-                        # MEMORY-EFFICIENT: Save this batch directly to cache
-                        # No accumulation in memory
                         self._append_connections_to_cache(connections, batch)
-                        
-                        # Mark neurons as fetched
                         newly_cached.extend(batch)
                     else:
-                        # Empty connections returned - these neurons genuinely have 0 downstream
-                        # FIXED: Still mark as cached so we don't refetch, but with connection_count=0
+                        # Empty connections: mark as cached (connection_count=0)
                         self._update_neuron_index_batch(batch)
                         newly_cached.extend(batch)
-                    
-                    # Force GC every batch
                     gc.collect()
-                    
-                    # Update progress bar postfix
                     if not quiet and hasattr(batch_iter, 'set_postfix_str'):
                         mem_usage = f"{process.memory_info().rss / 1024 / 1024:.0f}MB" if process else "?"
                         batch_iter.set_postfix_str(f'neurons={len(newly_cached):,}, conns={batch_connections:,} Mem:{mem_usage}')
-                        
                 except Exception as e:
                     failed_neurons.extend(batch)
                     if not quiet:
-                        # Log the actual error for debugging
                         _print(f"\n  ⚠️ Batch {batch_num} error: {type(e).__name__}: {e}")
                         if hasattr(batch_iter, 'set_postfix_str'):
                             batch_iter.set_postfix_str(f'neurons={len(newly_cached):,}, failed={len(failed_neurons)}')
-            
+
+            def finish_cancelled() -> None:
+                nonlocal cancelled
+                cancelled = True
+                if not quiet:
+                    _print("\n  ⏹ Cancelled - consolidating fetched batches...")
+                if newly_cached:
+                    self._consolidate_batch_files(deduplicate=True)
+
+            if max_workers and max_workers > 1:
+                # Parallel fetch: keep at most max_workers fetches in flight
+                # (bounded memory); each completed fetch is appended in this
+                # thread. Cancellation stops new submissions; in-flight
+                # fetches finish in the background and their results are
+                # discarded.
+                from concurrent.futures import (
+                    ThreadPoolExecutor, wait, FIRST_COMPLETED,
+                )
+                batch_indices = iter(range(0, total, batch_size))
+                with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                    pending = {}
+                    for _ in range(max_workers):
+                        i = next(batch_indices, None)
+                        if i is None:
+                            break
+                        pending[executor.submit(self._fetch_connections_bulk, uncached[i:i + batch_size], None)] = i
+                    while pending:
+                        if cancel_event is not None and cancel_event.is_set():
+                            finish_cancelled()
+                            break
+                        done, _ = wait(pending, timeout=0.5, return_when=FIRST_COMPLETED)
+                        if not done:
+                            continue
+                        for fut in done:
+                            i = pending.pop(fut)
+                            try:
+                                conns = fut.result()
+                                process_batch(i, connections=conns)
+                            except Exception:
+                                process_batch(i, fetch_failed=True)
+                            if not quiet and hasattr(batch_iter, 'update'):
+                                batch_iter.update(1)
+                            if progress_callback:
+                                progress_callback(i, total, f"Batch {i // batch_size + 1}/{total_batches}")
+                            next_i = next(batch_indices, None)
+                            if next_i is not None:
+                                pending[executor.submit(self._fetch_connections_bulk, uncached[next_i:next_i + batch_size], None)] = next_i
+            else:
+                for i in batch_iter:
+                    # Cooperative cancellation: stop after the current batch
+                    # and consolidate what was fetched so a re-run resumes
+                    # cleanly.
+                    if cancel_event is not None and cancel_event.is_set():
+                        finish_cancelled()
+                        break
+                    if progress_callback:
+                        progress_callback(i, total, f"Batch {i // batch_size + 1}/{total_batches}")
+                    process_batch(i)
+
             # Consolidate batch files into main cache file
-            # This is where merging happens, but only once at the end
-            if newly_cached and not quiet:
-                _print(f"\n  ✓ All batches fetched. Consolidating batch files...")
+            # This is where merging happens, but only once at the end.
+            # (Consolidation must run even in quiet mode - the UI calls with
+            # quiet=True and still needs the final connections.parquet.)
+            if newly_cached:
+                if not quiet:
+                    _print(f"\n  ✓ All batches fetched. Consolidating batch files...")
                 self._consolidate_batch_files(deduplicate=True)
                 
         finally:
