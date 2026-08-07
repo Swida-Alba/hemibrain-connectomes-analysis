@@ -5146,6 +5146,30 @@ def process_paths_streaming(path_gen, conn_data, targets, output_path,
             
     return total_saved
 
+def _type_probability_series(pairs_df, group_pre: str, group_post: str, aggregate_method: str):
+    """Type-level traversal_probability from the deduplicated bodyId pairs.
+
+    Returns a Series indexed by (group_pre, group_post), or None when
+    *aggregate_method* is 'ratio' (the caller derives it from the type-level
+    connection_ratio instead). The pairs frame must carry 'weight',
+    'block_probability' and 'traversal_probability' columns.
+
+    - 'product' (default): ``1 - prod(1 - p_pair)`` - the type edge is a
+      bundle of parallel channels, so it transmits if ANY pair transmits
+      (reliability/OR model; recommended for path analysis).
+    - 'average': weight-weighted mean of the pair probabilities.
+    - 'ratio': input-share model (``min(ratio / 0.3, 1)``).
+    """
+    if aggregate_method == 'product':
+        blocks = pairs_df.groupby([group_pre, group_post])['block_probability'].prod()
+        return (1.0 - blocks).rename('traversal_probability')
+    if aggregate_method == 'average':
+        tmp = pairs_df.assign(_wt=pairs_df['weight'] * pairs_df['traversal_probability'])
+        grouped = tmp.groupby([group_pre, group_post])[['_wt', 'weight']].sum()
+        return (grouped['_wt'] / grouped['weight'].replace(0, np.nan)).fillna(0.0).rename('traversal_probability')
+    return None
+
+
 def EnrichConnectionTable(conn_table, traversal_probability_threshold=0, dataset=None, script_path=None, target_neurons_df=None, aggregate_method='product', label_mapper=None, global_incoming_weights=None, separate_hemispheres=False, engine='auto', global_incoming_body_weights=None):
     '''Add traversal probability, connection ratio, and layer information to the connection table
     
@@ -5178,10 +5202,15 @@ def EnrichConnectionTable(conn_table, traversal_probability_threshold=0, dataset
         Used to get correct type-level denominators. If not provided, only
         neurons appearing in connections will be used (less accurate).
     aggregate_method : str, optional
-        Accepted for API compatibility (legacy 'product'/'average' aggregation
-        of bodyId-level block probabilities). Type-level traversal probability
-        is always min(connection_ratio / 0.3, 1), matching coana's
-        _apply_type_level_filters() and the Polars implementation.
+        How the type-level traversal_probability is derived from the
+        bodyId-level pairs (default 'product'):
+        - 'product': ``1 - prod(1 - p_pair)`` over the deduplicated pairs -
+          the type edge is a bundle of parallel channels, so it transmits if
+          ANY pair transmits (reliability/OR model; recommended for path
+          analysis).
+        - 'average': weight-weighted mean of the pair probabilities.
+        - 'ratio': ``min(connection_ratio / 0.3, 1)`` (input-share model).
+        Same semantics as the Polars engine and coana._apply_type_level_filters.
     label_mapper : LabelMapper, optional
         LabelMapper object to standardize types in the local dataset for accurate ratio calculation.
     global_incoming_weights : DataFrame, optional
@@ -5586,6 +5615,11 @@ def EnrichConnectionTable(conn_table, traversal_probability_threshold=0, dataset
     # Calculate from bodyId level to ensure accuracy (neurons in connections, not types in connections)
     # First deduplicate by bodyId pairs to avoid counting same connection multiple times
     cols_to_keep = ['bodyId_pre', 'bodyId_post', group_pre, group_post, 'weight']
+    # Per-pair probability columns feed the type-level aggregate method
+    # ('product' compound / 'average' weighted mean).
+    for col in ('block_probability', 'traversal_probability'):
+        if col in conn_df.columns and col not in cols_to_keep:
+            cols_to_keep.append(col)
     
     # Check for NT type column - prefer nt_type_pre (presynaptic NT), fallback to nt_type
     nt_col = None
@@ -5671,11 +5705,20 @@ def EnrichConnectionTable(conn_table, traversal_probability_threshold=0, dataset
 
     if pbar: pbar.update(1) # Step 4: Ratios calculated
 
-    # Type-level traversal_probability uses the same ratio/0.3 model as the
-    # bodyId level and coana._apply_type_level_filters():
-    # prob = min(ratio / 0.3, 1).  block_probability = 1 - prob.
-    conn_type['traversal_probability'] = conn_type['connection_ratio'] / 0.3
-    conn_type.loc[conn_type['traversal_probability'] > 1, 'traversal_probability'] = 1
+    # Type-level traversal_probability from the aggregate method. 'product'
+    # (default) compounds the per-pair block probabilities over the deduped
+    # pairs (reliability/OR model); 'average' takes the weight-weighted mean;
+    # 'ratio' uses min(connection_ratio / 0.3, 1) (input-share model).
+    prob_series = _type_probability_series(
+        bodyid_pairs, group_pre, group_post, aggregate_method
+    )
+    if prob_series is None:
+        conn_type['traversal_probability'] = conn_type['connection_ratio'] / 0.3
+        conn_type.loc[conn_type['traversal_probability'] > 1, 'traversal_probability'] = 1
+    else:
+        conn_type = conn_type.merge(
+            prob_series.reset_index(), how='left', on=[group_pre, group_post]
+        )
     conn_type['block_probability'] = 1 - conn_type['traversal_probability']
     
     if pbar: 
@@ -5712,6 +5755,9 @@ def EnrichConnectionTable(conn_table, traversal_probability_threshold=0, dataset
         # 2. Original type-based aggregation
         # Calculate from bodyId level for accuracy
         bodyid_pairs_type_cols = ['bodyId_pre', 'bodyId_post', 'type_pre', 'type_post', 'weight']
+        for col in ('block_probability', 'traversal_probability'):
+            if col in conn_df.columns and col not in bodyid_pairs_type_cols:
+                bodyid_pairs_type_cols.append(col)
         if has_nt:
             bodyid_pairs_type_cols.append(nt_col)
         bodyid_pairs_type = conn_df[bodyid_pairs_type_cols].drop_duplicates(subset=['bodyId_pre', 'bodyId_post'])
@@ -5765,10 +5811,18 @@ def EnrichConnectionTable(conn_table, traversal_probability_threshold=0, dataset
         
         if pbar_type: pbar_type.update(1) # Step 3: Ratios calculated
 
-        # Type-level traversal probability: min(ratio / 0.3, 1) - same model as
-        # the main aggregation above and coana._apply_type_level_filters().
-        conn_type['traversal_probability'] = conn_type['connection_ratio'] / 0.3
-        conn_type.loc[conn_type['traversal_probability'] > 1, 'traversal_probability'] = 1
+        # Type-level traversal probability from the aggregate method (same
+        # semantics as the main aggregation above).
+        prob_series = _type_probability_series(
+            bodyid_pairs_type, 'type_pre', 'type_post', aggregate_method
+        )
+        if prob_series is None:
+            conn_type['traversal_probability'] = conn_type['connection_ratio'] / 0.3
+            conn_type.loc[conn_type['traversal_probability'] > 1, 'traversal_probability'] = 1
+        else:
+            conn_type = conn_type.merge(
+                prob_series.reset_index(), how='left', on=['type_pre', 'type_post']
+            )
         conn_type['block_probability'] = 1 - conn_type['traversal_probability']
         
         if pbar_type: 
@@ -6744,10 +6798,15 @@ def EnrichConnectionTablePolars(conn_table, traversal_probability_threshold=0, d
         Used to get correct type-level denominators. If not provided, only
         neurons appearing in connections will be used (less accurate).
     aggregate_method : str, optional
-        Accepted for API compatibility (legacy 'product'/'average' aggregation
-        of bodyId-level block probabilities). Type-level traversal probability
-        is always min(connection_ratio / 0.3, 1), matching coana's
-        _apply_type_level_filters() and the pandas EnrichConnectionTable.
+        How the type-level traversal_probability is derived from the
+        bodyId-level pairs (default 'product'):
+        - 'product': ``1 - prod(1 - p_pair)`` over the deduplicated pairs -
+          the type edge is a bundle of parallel channels, so it transmits if
+          ANY pair transmits (reliability/OR model; recommended for path
+          analysis).
+        - 'average': weight-weighted mean of the pair probabilities.
+        - 'ratio': ``min(connection_ratio / 0.3, 1)`` (input-share model).
+        Same semantics as the pandas engine and coana._apply_type_level_filters.
     label_mapper : LabelMapper, optional
         LabelMapper object for cross-dataset comparison.
         When provided, aggregation uses std_label for mapped neurons and type for unmapped.
@@ -7108,11 +7167,11 @@ def EnrichConnectionTablePolars(conn_table, traversal_probability_threshold=0, d
         
         agg_df = bodyid_pairs.group_by([group_pre_col, group_post_col]).agg(agg_list)
         
-        # Type-level traversal_probability is computed below from the type-level
-        # connection_ratio (min(ratio / 0.3, 1)), matching coana's
-        # _apply_type_level_filters() and the pandas EnrichConnectionTable.
-        # (Legacy product/average aggregation of bodyId-level block
-        # probabilities was removed - it was unconditionally overwritten here.)
+        # Type-level traversal_probability follows *aggregate_method* (same
+        # semantics as the pandas engine, see the parameter docstring):
+        # 'product' (default) compounds the per-pair block probabilities over
+        # the deduplicated bodyId pairs, 'average' takes the weight-weighted
+        # mean, 'ratio' uses min(connection_ratio / 0.3, 1).
 
         # Calculate Connection Ratio (Type Level)
         # Use GLOBAL incoming weights if provided, otherwise fall back to LOCAL calculation.
@@ -7198,12 +7257,58 @@ def EnrichConnectionTablePolars(conn_table, traversal_probability_threshold=0, d
         )
         agg_df = agg_df.drop('total_incoming_weight')
         
-        # Recalculate traversal_probability from connection_ratio
-        # (fill_null(0.0) matches the pandas fillna(0.0) semantics for
-        # types with no known incoming connections)
-        agg_df = agg_df.with_columns(
-            (pl.col('connection_ratio') / 0.3).clip(0.0, 1.0).fill_null(0.0).alias('traversal_probability')
-        )
+        # Type-level traversal_probability from the aggregate method (see the
+        # parameter docstring). 'product' (default) compounds the per-pair
+        # block probabilities over the deduplicated bodyId pairs
+        # (reliability/OR model); 'average' takes the weight-weighted mean;
+        # 'ratio' uses min(connection_ratio / 0.3, 1) (input-share model).
+        # fill_null(0.0) matches the pandas fillna(0.0) semantics for groups
+        # with no computable probability; nulls_equal=True keeps parity with
+        # pandas merge for null group labels (e.g. unassigned custom groups).
+        if aggregate_method == 'product':
+            pair_probs = (
+                bodyid_pairs.group_by([group_pre_col, group_post_col])
+                .agg(
+                    (1.0 - pl.col('traversal_probability'))
+                    .product()
+                    .alias('_block_prod')
+                )
+                .with_columns(
+                    (1.0 - pl.col('_block_prod'))
+                    .fill_null(0.0)
+                    .alias('traversal_probability')
+                )
+                .drop('_block_prod')
+            )
+            agg_df = agg_df.join(
+                pair_probs, on=[group_pre_col, group_post_col], how='left', nulls_equal=True
+            )
+        elif aggregate_method == 'average':
+            pair_probs = (
+                bodyid_pairs.group_by([group_pre_col, group_post_col])
+                .agg(
+                    (pl.col('weight') * pl.col('traversal_probability'))
+                    .sum()
+                    .alias('_wt'),
+                    pl.col('weight').sum().alias('_wsum'),
+                )
+                .with_columns(
+                    (pl.col('_wt') / pl.col('_wsum'))
+                    .fill_null(0.0)
+                    .alias('traversal_probability')
+                )
+                .drop(['_wt', '_wsum'])
+            )
+            agg_df = agg_df.join(
+                pair_probs, on=[group_pre_col, group_post_col], how='left', nulls_equal=True
+            )
+        else:
+            # 'ratio' model (input-share). fill_null(0.0) matches the pandas
+            # fillna(0.0) semantics for types with no known incoming
+            # connections.
+            agg_df = agg_df.with_columns(
+                (pl.col('connection_ratio') / 0.3).clip(0.0, 1.0).fill_null(0.0).alias('traversal_probability')
+            )
         
         # block_probability = 1 - traversal_probability (null -> 1.0, matching
         # the pandas fillna(1.0) semantics so both engines emit the same schema)

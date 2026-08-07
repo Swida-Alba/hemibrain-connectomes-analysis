@@ -9,6 +9,9 @@ This document provides comprehensive explanations of all score and probability c
 - [Score and Probability Calculation Guide](#score-and-probability-calculation-guide)
   - [Table of Contents](#table-of-contents)
   - [Overview](#overview)
+  - [The Dₜ Graph Model](#the-dₜ-graph-model)
+    - [Threshold Semantics](#threshold-semantics)
+    - [Per-Cutoff Aggregates (ThresholdedConnectionMap)](#per-cutoff-aggregates-thresholdedconnectionmap)
   - [Connection-Level Metrics](#connection-level-metrics)
     - [Connection Ratio](#connection-ratio)
     - [Traversal Probability](#traversal-probability)
@@ -16,8 +19,10 @@ This document provides comprehensive explanations of all score and probability c
   - [Population-Level Aggregation](#population-level-aggregation)
     - [Type-to-Type Connection Ratio](#type-to-type-connection-ratio)
     - [Type-to-Type Traversal Probability](#type-to-type-traversal-probability)
-      - [1. Product Method (Default for Paths)](#1-product-method-default-for-paths)
-      - [2. Average Method (for Direct Connections)](#2-average-method-for-direct-connections)
+      - [1. Product Method (Default)](#1-product-method-default)
+      - [2. Average Method](#2-average-method)
+      - [3. Ratio Method (Legacy)](#3-ratio-method-legacy)
+      - [Method Comparison](#method-comparison)
   - [Path-Level Metrics](#path-level-metrics)
     - [Path Probability](#path-probability)
     - [Minimum Edge Weight](#minimum-edge-weight)
@@ -46,10 +51,70 @@ The toolkit uses several metrics to quantify connection strength and signal prop
 
 | Metric                    | Formula                      | Range     | Level |
 | ------------------------- | ---------------------------- | --------- | ----- |
-| **Connection Ratio**      | `weight / post`              | 0.0 - 1.0 | Edge  |
+| **Connection Ratio**      | `weight / total_incoming`    | 0.0 - 1.0 | Edge  |
 | **Traversal Probability** | `min(1.0, ratio / 0.3)`      | 0.0 - 1.0 | Edge  |
+| **Type Traversal Prob**   | `1 - ∏(1 - p_pair)` (default)| 0.0 - 1.0 | Type  |
 | **Path Probability**      | `∏(edge probabilities)`      | 0.0 - 1.0 | Path  |
 | **Weighted Score**        | `avg_score × coverage_ratio` | 0.0 - ∞   | Line  |
+
+All ratios and probabilities are computed on the **thresholded graph Dₜ**
+defined below, so every metric at every level refers to one consistent
+definition of "the network" for a given `min_synapse_num = t`.
+
+---
+
+## The Dₜ Graph Model
+
+The connection cache stores the **complete graph** (every edge with weight ≥ 1).
+A query with `min_synapse_num = t` works on the derived graph
+
+$$D_t = \{ \text{edges with } w_{ij} \ge t \}$$
+
+which is treated as an **independent dataset**:
+
+- The **numerator** of every ratio is the weight of an edge (or the sum over a
+  set of edges) **inside Dₜ**.
+- The **denominator** (`total_incoming`) is computed **from Dₜ alone** — never
+  from the full cache and never from a different threshold.
+- Ratios at different thresholds are therefore never mixed: `ratio(A→B)` at
+  `t=1` and at `t=3` describe two different graphs and are not comparable.
+
+**Why edge-thresholding matters (type level).** When aggregating bodyId-level
+connections to type pairs, the cutoff is applied to **edges first**:
+
+```
+D_t consistency:
+  correct:   keep edges with weight >= t, THEN sum weights per type pair
+  incorrect: sum weights per type pair first, THEN keep pairs with sum >= t
+```
+
+The second form mixes two definitions of the cutoff — an edge-thresholded
+denominator (computed from Dₜ) with a pair-thresholded numerator (computed
+from a different graph) — and lets weak edges "ride along" inside a strong
+pair. All type-level aggregation in this toolkit follows the first form.
+
+### Per-Cutoff Aggregates (ThresholdedConnectionMap)
+
+[`src/connection_map.py`](../../src/connection_map.py) —
+`ThresholdedConnectionMap` implements Dₜ as a first-class object:
+
+- **One map per cutoff `t`.** Each map owns *both* aggregate tables —
+  `bodyId_post → total_incoming_weight` and `type_post → total_incoming_weight`
+  — plus the neuron-index lookup, so the bodyId-level and type-level
+  denominators always come from the **same** thresholded graph.
+- **Computed once, reused everywhere.** Aggregates are computed lazily with
+  vectorized Polars and cached for the lifetime of the map; every per-layer
+  call of a FindPath/FindAllPath run, every FindDirect enrichment, and every
+  type-level filter shares the same cached tables (previously each call
+  re-scanned the whole connections parquet).
+- **Auto-invalidation.** Maps are keyed by a source signature (in-memory frame
+  identity, or disk paths + mtimes). When the cache is rebuilt or replaced,
+  stale maps are discarded and rebuilt on the next access.
+
+In `FindNeuronConnection`, `_connection_map(min_weight)` returns the Dₜ map
+for a cutoff (capped at 16 live maps, oldest evicted), and
+`_get_total_incoming_by_{bodyid,type}_table(min_weight)` are thin wrappers over
+it.
 
 ---
 
@@ -66,8 +131,8 @@ These metrics are calculated for each individual synaptic connection (edge) in t
 $$\mathit{ratio}_{ij}^{(t)} = \frac{w_{ij}^{(t)}}{\sum_{\forall k \in \text{dataset}} w_{kj}^{(t)}}$$
 
 Where:
-- $w_{ij}^{(t)}$ = Number of synapses from neuron $i$ to neuron $j$ passing threshold $t$
-- $\sum_{\forall k \in \text{dataset}} w_{kj}^{(t)}$ = Total incoming synapses to neuron $j$ from **ALL neurons in the dataset** at threshold $t$
+- $w_{ij}^{(t)}$ = Number of synapses from neuron $i$ to neuron $j$ passing threshold $t$ (an edge of Dₜ)
+- $\sum_{\forall k \in \text{dataset}} w_{kj}^{(t)}$ = Total incoming synapses to neuron $j$ from **ALL neurons in the dataset** at threshold $t$ (computed from Dₜ by the `ThresholdedConnectionMap`)
 
 **Why Global Ratio?**
 
@@ -96,7 +161,7 @@ The ratio is calculated using the **entire connection cache**, not just the neur
 Query: aMe12 → KCg-d at threshold = 3 synapses
 
 aMe12 → KCg-d: 49 synapses (the connection we're analyzing)
-All other neurons → KCg-d: 4951 synapses (from connection cache)
+All other neurons → KCg-d: 4951 synapses (from connection cache, at t=3)
 Total incoming to KCg-d: 49 + 4951 = 5000
 
 connection_ratio(aMe12→KCg-d) = 49 / 5000 = 0.0098 (0.98%)
@@ -136,8 +201,8 @@ The 0.3 scaling factor represents a **30% input threshold**—connections provid
 | Very Strong | 100    | 200  | 50%   | 100% (capped)  |
 
 **Used in**:
-- [`src/coana.py`](../../src/coana.py#L2737-L2738) - Calculation and capping
-- [`src/statvis.py`](../../src/statvis.py#L4601-L4603) - `EnrichConnectionTable()`
+- [`src/coana.py`](../../src/coana.py) - `_apply_bodyid_level_filters()`, `_pair_level_probabilities()`
+- [`src/statvis.py`](../../src/statvis.py) - `EnrichConnectionTable()`
 - Edge filtering via `min_traversal_probability` parameter
 - Sankey diagrams and network visualizations
 
@@ -152,7 +217,7 @@ The 0.3 scaling factor represents a **30% input threshold**—connections provid
 $$\mathit{block}_{ij} = 1 - \mathit{p}_{ij}$$
 
 **Used in**:
-- [`src/statvis.py`](../../src/statvis.py#L4607-L4609) - Path probability calculations
+- [`src/statvis.py`](../../src/statvis.py) - Path probability calculations
 - Type-level enrichment output (`block_probability = 1 - p_AB`)
 
 ---
@@ -172,20 +237,23 @@ $$\mathit{ratio}_{AB}^{(t)} = \frac{\sum_{i \in A, j \in B} w_{ij}^{(t)}}{\sum_{
 Where:
 - $A$ = Set of neurons of type A (presynaptic population)
 - $B$ = Set of neurons of type B (postsynaptic population)
-- Numerator = Total synapses from type A to type B at threshold $t$
-- Denominator = Total incoming synapses to type B from **ALL neuron types in the dataset** at threshold $t$
+- Numerator = Total synapses from type A to type B **over the edges of Dₜ** (the
+  cutoff is applied to edges first, then pairs are summed — see
+  [The Dₜ Graph Model](#the-dₜ-graph-model))
+- Denominator = Total incoming synapses to type B from **ALL neuron types in the dataset** at threshold $t$ (from the same Dₜ, cached by `ThresholdedConnectionMap`)
 
-**Key Point**: The denominator includes ALL incoming connections to type B from any neuron type in the entire dataset (not just the source types in your query), giving the true fraction of type B's total input that comes from type A.
+**Key Point**: The denominator includes ALL incoming connections to type B from any neuron type in the entire dataset (not just the source types in your query), giving the true fraction of type B's total input that comes from type A. Both terms come from the same Dₜ.
 
 **Implementation** ([`src/coana.py`](../../src/coana.py)):
 
 ```python
-# Step 1: Sum weights for each type pair
-weight_sum = conn_df.groupby([type_pre, type_post])['weight'].sum()
+# Step 1: Apply the cutoff to EDGES first (D_t), then sum weights per type pair
+conn = conn[conn['weight'] >= min_weight]
+weight_sum = conn.groupby([type_pre, type_post])['weight'].sum()
 
-# Step 2: Get total incoming weight for each target type from ENTIRE CACHE
-# This queries the connection database, not just the current connections
-total_incoming_per_type = self._fetch_total_incoming_weight_by_type(post_types, min_weight)
+# Step 2: Get total incoming weight per type from the SAME D_t
+# (ThresholdedConnectionMap caches this per cutoff - no re-scan)
+total_incoming_per_type = self._get_total_incoming_by_type_table(min_weight)
 
 # Step 3: Calculate global ratio
 conn_type['connection_ratio'] = weight_sum / total_incoming_per_type
@@ -205,28 +273,80 @@ mat_ratio = df.pivot(values='connection_ratio', index='type_pre',
 
 **Definition**: The aggregate probability that a signal will propagate from any neuron of type A to any neuron of type B.
 
-**Formula (current model, consistent at every level)**:
+The type-level probability is derived from the **deduplicated bodyId-level
+pairs** of Dₜ (each pair appears once, with its per-pair traversal
+probability `p_ij = min(ratio_ij / 0.3, 1)`). How the pairs are combined is
+controlled by `aggregate_method` — **identical in all three places** that
+compute type-level probabilities:
 
-$$p_{AB} = \min\left(1.0, \frac{\mathit{ratio}_{AB}}{0.3}\right)$$
+1. `statvis.EnrichConnectionTable` (pandas engine)
+2. `statvis.EnrichConnectionTablePolars` (Polars engine)
+3. `coana._apply_type_level_filters` (type-level filtering, via the
+   `FindNeuronConnection.aggregate_method` field, default `'product'`)
 
-The type-level traversal probability uses the same `ratio / 0.3` scaling as the
-bodyId level (see [Traversal Probability](#traversal-probability)), applied to
-the **global** type-to-type ratio above. This keeps the filter thresholds
-(`min_traversal_probability`), the enrichment output, and the path metrics on
-one consistent scale.
+so the filter threshold, the enrichment output, and the path metrics always
+use the same definition.
+
+#### 1. Product Method (Default)
+
+**Formula**:
+
+$$p_{AB} = 1 - \prod_{i \in A, j \in B}\left(1 - p_{ij}^{(t)}\right)$$
+
+**Rationale**: The type edge A→B is a **bundle of parallel channels** (the
+individual neuron pairs). A signal can take any channel, so the edge
+"transmits" if **at least one** pair transmits — a reliability/OR model.
+The more pairs (or the stronger each pair), the closer the type probability
+gets to 1, even when no single pair exceeds the 30% threshold.
+
+**Why this is the default**: it is the only model that composes correctly
+with path analysis. A 2-hop path A→X→Y through type edges is only as good as
+the weakest *type* edge, and the product model reflects that parallel
+channels make type edges more reliable than their individual pairs.
+
+**Example**:
+```
+Type edge A→B with 3 bodyId pairs (t=3):
+  pair p: 0.50, 0.33, 0.67   (each capped at 1.0)
+
+p_AB = 1 - (1-0.50)(1-0.33)(1-0.67)
+     = 1 - (0.50)(0.67)(0.33)
+     = 1 - 0.110 = 0.89
+```
+
+#### 2. Average Method
+
+**Formula**:
+
+$$p_{AB} = \frac{\sum_{i \in A, j \in B} w_{ij}^{(t)} \cdot p_{ij}^{(t)}}{\sum_{i \in A, j \in B} w_{ij}^{(t)}}$$
+
+The **weight-weighted mean** of the pair probabilities: pairs with more
+synapses dominate the type value. A descriptive average — useful when you
+want one number per type pair for display, but it does not model parallel
+reliability.
+
+#### 3. Ratio Method (Legacy)
+
+**Formula**:
+
+$$p_{AB} = \min\left(1.0, \frac{\mathit{ratio}_{AB}^{(t)}}{0.3}\right)$$
+
+The old uniform model: the type-level ratio scaled by 0.3, exactly like the
+bodyId level. Kept for backward compatibility (`aggregate_method='ratio'`).
+
+#### Method Comparison
+
+| Method    | Typical value vs pairs | Use case                              |
+| --------- | ---------------------- | ------------------------------------- |
+| `product` | ≥ any single pair     | Path analysis, filtering (default)    |
+| `average` | between pair values   | Descriptive type-level summaries      |
+| `ratio`   | same as bodyId scale  | Legacy behavior, API compatibility    |
 
 **Implementation**:
 
-- [`src/coana.py`](../../src/coana.py) - `_apply_type_level_filters()` (type-level filtering)
-- [`src/statvis.py`](../../src/statvis.py) - `EnrichConnectionTable()` (with `global_incoming_weights`)
-- [`src/statvis.py`](../../src/statvis.py) - `EnrichConnectionTable()` (unified entry; polars engine via `engine='auto'`, with `global_incoming_weights`)
-
-**Note (legacy)**: Earlier versions offered 'product'
-($1 - \prod_{i \in A, j \in B}(1 - p_{ij})$) and 'average' (weight-weighted mean)
-aggregations of bodyId-level probabilities via the `aggregate_method` parameter.
-These were replaced by the uniform `min(ratio / 0.3, 1)` model so that the two
-implementations (pandas/Polars) produce identical numbers. `aggregate_method` is
-still accepted for API compatibility but no longer changes the result.
+- [`src/coana.py`](../../src/coana.py) - `_apply_type_level_filters()` (type-level filtering, `aggregate_method` field), `_pair_level_probabilities()`
+- [`src/statvis.py`](../../src/statvis.py) - `_type_probability_series()`, `EnrichConnectionTable()` (pandas engine)
+- [`src/statvis.py`](../../src/statvis.py) - `EnrichConnectionTablePolars()` (Polars engine, `aggregate_connections()`)
 
 ---
 
@@ -243,6 +363,10 @@ For multi-hop pathways (A → B → C → D), path-level metrics aggregate edge 
 $$P_\mathrm{path} = \prod_{k=1}^{n} p_{k,k+1}$$
 
 Where the path has $n$ edges with individual traversal probabilities $p_{k,k+1}$.
+For type-level paths the edge probabilities come from the type-level table
+(`conn_type`), which uses the compound product aggregation by default — so a
+multi-pair type edge is *stronger* than any of its pairs, and the path
+probability composes accordingly.
 
 **Example**:
 ```
@@ -251,7 +375,7 @@ Edge probabilities: [0.8, 0.6, 0.9]
 Path probability: 0.8 × 0.6 × 0.9 = 0.432 (43.2%)
 ```
 
-**Implementation** ([`src/statvis.py`](../../src/statvis.py#L4199)):
+**Implementation** ([`src/statvis.py`](../../src/statvis.py#L4881)):
 
 ```python
 row = {
@@ -284,7 +408,7 @@ $$w_\mathrm{min} = \min_{k=1}^{n} w_{k,k+1}$$
 
 Paths are ranked by `path_prob` (descending) for output files and visualizations:
 
-**Implementation** ([`src/coana.py`](../../src/coana.py#L6581-L6585)):
+**Implementation** ([`src/coana.py`](../../src/coana.py)):
 
 ```python
 if 'path_prob' in df_paths.columns:
@@ -420,24 +544,31 @@ else:  # sort_by == 'max'
 
 ## Filter Parameters Summary
 
-| Parameter                   | Level | Formula Check           | Description                     |
-| --------------------------- | ----- | ----------------------- | ------------------------------- |
-| `min_synapse_num`           | Edge  | `weight >= X`           | Minimum synapse count           |
-| `min_ratio`                 | Edge  | `connection_ratio >= X` | Minimum input fraction          |
-| `min_traversal_probability` | Edge  | `traversal_prob >= X`   | Minimum propagation probability |
+| Parameter                   | Level        | Formula Check           | Description                     |
+| --------------------------- | ------------ | ----------------------- | ------------------------------- |
+| `min_synapse_num`           | Edge (Dₜ)    | `weight >= t`           | Minimum synapse count (defines Dₜ) |
+| `min_ratio`                 | Edge/Type    | `connection_ratio >= X` | Minimum input fraction          |
+| `min_traversal_probability` | Edge/Type    | `traversal_prob >= X`   | Minimum propagation probability |
 
 **Filtering Order** ([`src/coana.py`](../../src/coana.py)):
 
 ```python
 # Applied BEFORE pathfinding (edge-level pre-filtering)
 1. Fetch connections (weight ≥ 1)
-2. Calculate connection_ratio, traversal_probability
-3. Filter: weight >= min_synapse_num
-4. Filter: connection_ratio >= min_ratio
-5. Filter: traversal_probability >= min_traversal_probability
-6. Build graph with filtered edges
-7. Find paths
+2. Calculate connection_ratio, traversal_probability (global D_t denominators)
+3. BodyId level: filter weight >= min_synapse_num, ratio, probability
+   Type level:   threshold EDGES to D_t first, aggregate pairs, then filter
+                 type ratio / compound probability
+4. Build graph with filtered edges
+5. Find paths
 ```
+
+**Type-level consistency**: when `filter_by='type'`, the synapse cutoff
+(`min_synapse_num`) is applied to **edges before** the type-pair aggregation,
+and the type-level probability filter uses the **same `aggregate_method`**
+(`'product'` by default) as the enrichment output — so the set of connections
+that pass the filter is exactly the set whose type pairs satisfy the
+displayed probabilities.
 
 ---
 
@@ -456,6 +587,12 @@ else:  # sort_by == 'max'
 
 ### Traversal Probability (`min_traversal_probability`)
 
+The conversion table applies to the **edge-level** model. At the **type
+level**, the default product aggregation makes probabilities larger than any
+single pair (parallel channels), so a type-level threshold tends to keep more
+edges than the same threshold at the bodyId level — choose the threshold
+according to the level you filter on.
+
 | Threshold | Equiv. Ratio | Recommendation            |
 | --------- | ------------ | ------------------------- |
 | 0.001     | 0.03%        | Conservative (most paths) |
@@ -466,10 +603,10 @@ else:  # sort_by == 'max'
 ### Conversion Formulas
 
 ```python
-# ratio → probability
+# ratio → probability (edge level)
 min_traversal_probability = min_ratio / 0.3
 
-# probability → ratio
+# probability → ratio (edge level)
 min_ratio = min_traversal_probability * 0.3
 ```
 
@@ -481,19 +618,25 @@ min_ratio = min_traversal_probability * 0.3
 
 | Metric                  | File                         | Function/Line                                                        |
 | ----------------------- | ---------------------------- | -------------------------------------------------------------------- |
-| `connection_ratio`      | `src/coana.py`               | [`_fetch_connections_with_cache()`](../../src/coana.py#L2736)        |
-| `traversal_probability` | `src/coana.py`               | [`_fetch_connections_with_cache()`](../../src/coana.py#L2737-L2738)  |
-| `path_prob`             | `src/statvis.py`             | [`process_paths()`](../../src/statvis.py#L4199)                      |
-| Type aggregation        | `src/statvis.py`             | [`EnrichConnectionTable()`](../../src/statvis.py#L4754-L4780)        |
+| Dₜ aggregates           | `src/connection_map.py`      | [`ThresholdedConnectionMap`](../../src/connection_map.py#L28)        |
+| Dₜ map (per cutoff)     | `src/coana.py`               | [`_connection_map()`](../../src/coana.py#L4005)                      |
+| `connection_ratio`      | `src/coana.py`               | [`_fetch_connections_with_cache()`](../../src/coana.py#L3621)        |
+| Type-level filters      | `src/coana.py`               | [`_apply_type_level_filters()`](../../src/coana.py#L4363)            |
+| Pair-level probabilities| `src/coana.py`               | [`_pair_level_probabilities()`](../../src/coana.py#L4324)            |
+| Type prob aggregation   | `src/statvis.py`             | [`_type_probability_series()`](../../src/statvis.py#L5149)           |
+| Enrichment (pandas)     | `src/statvis.py`             | [`EnrichConnectionTable()`](../../src/statvis.py#L5173)              |
+| Enrichment (Polars)     | `src/statvis.py`             | [`EnrichConnectionTablePolars()`](../../src/statvis.py#L6770)         |
+| `path_prob`             | `src/statvis.py`             | [`build_path_dataframe_from_paths()`](../../src/statvis.py#L4881)    |
 | `weighted_score`        | `src/neuronbridge_finder.py` | [`find_lines_batch()`](../../src/neuronbridge_finder.py#L7191-L7193) |
 
 ### Parameter Definitions
 
-| Parameter                   | File           | Line                                      |
-| --------------------------- | -------------- | ----------------------------------------- |
-| `min_ratio`                 | `src/coana.py` | [L528-L533](../../src/coana.py#L528-L533) |
-| `min_traversal_probability` | `src/coana.py` | [L535-L541](../../src/coana.py#L535-L541) |
-| `filter_by`                 | `src/coana.py` | [L543-L550](../../src/coana.py#L543-L550) |
+| Parameter                    | File           | Line                                        |
+| ---------------------------- | -------------- | ------------------------------------------- |
+| `min_ratio`                  | `src/coana.py` | [L1268](../../src/coana.py#L1268)           |
+| `min_traversal_probability`  | `src/coana.py` | [L1276](../../src/coana.py#L1276)           |
+| `filter_by`                  | `src/coana.py` | [L1284](../../src/coana.py#L1284)           |
+| `aggregate_method`           | `src/coana.py` | [L1293](../../src/coana.py#L1293)           |
 
 ### Related Documentation
 
@@ -506,14 +649,15 @@ min_ratio = min_traversal_probability * 0.3
 
 ## Summary
 
-| Context               | Primary Metric          | Formula                   |
-| --------------------- | ----------------------- | ------------------------- |
-| **Single connection** | `traversal_probability` | `min(1, weight/post/0.3)` |
-| **Type→Type direct**  | `connection_ratio`      | `Σweights / Σposts`       |
-| **Type→Type path**    | `traversal_probability` | `1 - Π(1-p_edge)`         |
-| **Multi-hop path**    | `path_prob`             | `Π(p_edge)`               |
-| **Driver line rank**  | `weighted_score`        | `avg_score × coverage`    |
+| Context               | Primary Metric          | Formula                                |
+| --------------------- | ----------------------- | -------------------------------------- |
+| **Graph definition**  | Dₜ                      | edges with `weight >= t` (per-cutoff aggregates cached) |
+| **Single connection** | `traversal_probability` | `min(1, weight/total_incoming/0.3)`    |
+| **Type→Type direct**  | `connection_ratio`      | `Σweights(Dₜ) / Σtotal_incoming(Dₜ)`   |
+| **Type→Type prob**    | `traversal_probability` | `1 - Π(1-p_pair)` (product, default)   |
+| **Multi-hop path**    | `path_prob`             | `Π(p_edge)`                            |
+| **Driver line rank**  | `weighted_score`        | `avg_score × coverage`                 |
 
 ---
 
-*Last updated: January 2026*
+*Last updated: August 2026*

@@ -7,8 +7,10 @@ Locks in the project-wide metric contract (see docs/core-features/ScoreCalculati
 - bodyId level:  connection_ratio = w(A->B) / total_incoming(B)  (GLOBAL denominator
   from ALL sources when supplied; local fallback otherwise)
 - bodyId level:  traversal_probability = min(ratio / 0.3, 1);  block = 1 - prob
-- type level:    ratio = sum(w over deduplicated bodyId pairs) / total_incoming(typeB)
-                 prob  = min(ratio / 0.3, 1)   (same model as bodyId level)
+- type level:    ratio = sum(w over deduplicated bodyId pairs) / total_incoming(typeB);
+                 prob  = aggregate_method over the deduplicated pairs (default 'product':
+                 1 - prod(1 - p_pair), the reliability/OR model; 'average': weight-weighted
+                 mean; 'ratio': min(ratio / 0.3, 1))
 - path level:    path_prob = product(edge probs);  min_ratio = min(edge ratios);
                  min_weight = min(edge weights);  length = number of edges
 
@@ -72,14 +74,21 @@ def _global_incoming():
 
 
 def _expected_type_metrics():
-    """Hand-computed type-level expectations (global denominators)."""
+    """Hand-computed type-level expectations (global denominators).
+
+    prob = product model: 1 - prod(1 - p_pair) over the deduplicated pairs,
+    with p_pair = min(ratio_pair / 0.3, 1) from the supplied per-pair ratios:
+      A->X: 1 - (4/9)(5/9)(1/3) = 223/243        A->Y: 1 - (8/15)(7/15) = 169/225
+      B->Y: 1 - (1 - 0.6) = 0.6                 X->Y: 0.2
+      C->Z: 2/3                                 D->W: 1.0 (pair capped)
+    """
     return {
-        ('A', 'X'): (15.0, 0.5, 1.0),          # 0.5/0.3 = 1.667 -> capped
-        ('A', 'Y'): (15.0, 0.3, 1.0),          # 0.3/0.3 = 1.0
+        ('A', 'X'): (15.0, 0.5, 223 / 243),
+        ('A', 'Y'): (15.0, 0.3, 169 / 225),
         ('B', 'Y'): (9.0, 0.18, 0.6),
         ('X', 'Y'): (3.0, 0.06, 0.2),
         ('C', 'Z'): (2.0, 0.2, 2 / 3),
-        ('D', 'W'): (40.0, 0.4, 1.0),          # capped
+        ('D', 'W'): (40.0, 0.4, 1.0),          # pair capped at 1
     }
 
 
@@ -214,31 +223,34 @@ class TestTypeLevelAggregation:
 
     @pytest.mark.parametrize('impl', ['pandas', 'polars'])
     def test_aggregate_method_param_still_accepted(self, impl):
-        """'product'/'average' are accepted for API compatibility and produce
-        the same (ratio/0.3) result."""
+        """'product'/'average'/'ratio' are accepted and each takes effect;
+        'ratio' reproduces the legacy min(ratio / 0.3, 1) model."""
         if impl == 'pandas':
             _, ct_product, _ = EnrichConnectionTable(
                 _synthetic_conn(), traversal_probability_threshold=0,
                 aggregate_method='product', global_incoming_weights=_global_incoming())
-            _, ct_average, _ = EnrichConnectionTable(
+            _, ct_ratio, _ = EnrichConnectionTable(
                 _synthetic_conn(), traversal_probability_threshold=0,
-                aggregate_method='average', global_incoming_weights=_global_incoming())
+                aggregate_method='ratio', global_incoming_weights=_global_incoming())
             cols = ['type_pre', 'type_post', 'weight', 'connection_ratio', 'traversal_probability']
         else:
             _, ct_product, _ = EnrichConnectionTablePolars(
                 _synthetic_conn(), traversal_probability_threshold=0,
                 aggregate_method='product', global_incoming_weights=_global_incoming())
-            _, ct_average, _ = EnrichConnectionTablePolars(
+            _, ct_ratio, _ = EnrichConnectionTablePolars(
                 _synthetic_conn(), traversal_probability_threshold=0,
-                aggregate_method='average', global_incoming_weights=_global_incoming())
+                aggregate_method='ratio', global_incoming_weights=_global_incoming())
             ct_product = ct_product.to_pandas()
-            ct_average = ct_average.to_pandas()
+            ct_ratio = ct_ratio.to_pandas()
             cols = ['weight', 'connection_ratio', 'traversal_probability']
-        pd.testing.assert_frame_equal(
-            ct_product[cols].sort_values(['weight', 'connection_ratio']).reset_index(drop=True),
-            ct_average[cols].sort_values(['weight', 'connection_ratio']).reset_index(drop=True),
-            check_dtype=False,
-        )
+        ax = ct_product[ct_product['type_post'] == 'X'].iloc[0]
+        assert ax['traversal_probability'] == pytest.approx(223 / 243)  # product compounds
+        rx = ct_ratio[ct_ratio['type_post'] == 'X'].iloc[0]
+        # legacy model: min((15/30) / 0.3, 1) = 1.0 (capped)
+        assert rx['traversal_probability'] == pytest.approx(1.0)
+        # Both methods still emit the same schema
+        for col in cols:
+            assert col in ct_product.columns
 
 
 # ---------------------------------------------------------------------------
@@ -559,14 +571,16 @@ class TestPathLevelMetrics:
         return builder(paths, conn_data, targets, real_layer_map=None, level='type')
 
     def test_hand_computed_path_metrics(self):
-        """path_prob = product of edge probs; min_ratio/min_weight = weakest edge."""
+        """path_prob = product of edge probs; min_ratio/min_weight = weakest edge.
+        Edge probs come from the product-aggregated conn_type (default):
+        A->X = 223/243, X->Y = 0.2, B->Y = 0.6."""
         df = self._build(sv_build, _enriched_type_table().to_pandas())
         row_2hop = df[df['path'] == 'A->X->Y'].iloc[0]
         assert row_2hop['weights'] == pytest.approx([15.0, 3.0])
-        assert row_2hop['probabilities'] == pytest.approx([1.0, 0.2])
+        assert row_2hop['probabilities'] == pytest.approx([223 / 243, 0.2])
         assert row_2hop['ratios'] == pytest.approx([0.5, 0.06])
         assert row_2hop['min_weight'] == pytest.approx(3.0)
-        assert row_2hop['path_prob'] == pytest.approx(1.0 * 0.2)
+        assert row_2hop['path_prob'] == pytest.approx((223 / 243) * 0.2)
         assert row_2hop['min_ratio'] == pytest.approx(0.06)
         assert row_2hop['length'] == 2
         row_1hop = df[df['path'] == 'B->Y'].iloc[0]

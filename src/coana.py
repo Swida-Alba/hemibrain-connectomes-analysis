@@ -61,6 +61,8 @@ if vispath_src not in sys.path:
     sys.path.insert(0, vispath_src)
 from vispath_pkg import VisualizePath
 
+from connection_map import ThresholdedConnectionMap
+
 # Monkey-patch for pandas 2.x compatibility
 import neuprint.utils as neuprint_utils
 _original_connection_table_to_matrix = connection_table_to_matrix
@@ -1288,6 +1290,18 @@ class FindNeuronConnection:
     then filters are applied to the aggregated weights
     '''
     
+    aggregate_method: str = 'product'
+    '''
+    How the TYPE-level traversal_probability is derived from the bodyId-level pairs\n
+    (used by filter_by='type' filtering and the enriched conn_type output):\n
+    - 'product' (default): 1 - prod(1 - p_pair) over the deduplicated bodyId pairs -\n
+      the type edge is a bundle of parallel channels, so it transmits if ANY pair\n
+      transmits (reliability/OR model; recommended for path analysis).\n
+    - 'average': weight-weighted mean of the pair probabilities.\n
+    - 'ratio': min(connection_ratio / 0.3, 1) (input-share model).\n
+    See docs/core-features/ScoreCalculation_Guide.md for the full model.
+    '''
+    
     exclude_intra_type_connections: bool = False
     '''
     whether to exclude connections within the same neuron type (type_pre == type_post)\n
@@ -1560,8 +1574,9 @@ class FindNeuronConnection:
         #   same regardless of which post neurons/types a caller asks for, so
         #   one vectorized computation serves all per-layer calls.
         self._local_neuron_df_cache = {}
-        self._total_incoming_by_type_cache = {}
-        self._total_incoming_by_bodyid_cache = {}
+        # ThresholdedConnectionMap per cutoff: one object owns D_t's
+        # bodyId-level and type-level totals (see src/connection_map.py).
+        self._connection_maps = {}
         # Set of bodyId_pre values present in the connection DB, keyed by the
         # id() of the loaded frame. Rebuilt only when the frame changes -
         # _query_connection_db previously recomputed it (cast + unique over
@@ -3952,8 +3967,9 @@ class FindNeuronConnection:
         self._vprint(f'  ⏳ Applying filters to {len(combined):,} connections...', level='full')
         if self.filter_by == 'type':
             # Type-level filtering: aggregate first, then filter
-            # Weight filter applied at type level (sum of all weights per type pair)
-            combined = self._apply_type_level_filters(combined, min_weight, min_conn_ratio, min_traversal_prob, total_before_filter)
+            # The synapse cutoff is applied to EDGES first (D_t), so the
+            # numerator and the global denominator come from the same graph
+            combined = self._apply_type_level_filters(combined, min_weight, min_conn_ratio, min_traversal_prob, total_before_filter, aggregate_method=self.aggregate_method)
         else:
             # BodyId-level filtering: filter individual connections by weight first
             if min_weight > 1:
@@ -3970,124 +3986,73 @@ class FindNeuronConnection:
         
         return combined
     
-    def _incoming_weight_source_key(self, min_weight: int):
-        """
-        Return a stable cache key for the full-dataset incoming-weight tables.
+    def _connection_source_signature(self):
+        """Identity of the current data source (in-memory frame or disk files).
 
-        The key covers the data source (in-memory cache identity or disk
-        paths + mtimes) and the weight threshold, so a rebuilt/updated cache
-        invalidates old aggregates automatically.
+        Used to invalidate ThresholdedConnectionMap instances when the
+        underlying cache is rebuilt or reloaded.
         """
         db_path = self._get_connection_db_path()
         index_path = os.path.join(os.path.dirname(db_path), 'neuron_index.parquet')
         if self._conn_df_cache is not None and not self._is_empty_df(self._conn_df_cache):
-            return ('mem', id(self._conn_df_cache), min_weight)
+            return ('mem', id(self._conn_df_cache))
         try:
-            db_mtime = os.path.getmtime(db_path)
-            idx_mtime = os.path.getmtime(index_path)
+            return ('disk', db_path, index_path,
+                    os.path.getmtime(db_path), os.path.getmtime(index_path))
         except OSError:
-            db_mtime = idx_mtime = None
-        return ('disk', db_path, index_path, db_mtime, idx_mtime, min_weight)
+            return ('disk', db_path, index_path, None, None)
+
+    def _connection_map(self, min_weight: int = 1) -> 'ThresholdedConnectionMap':
+        """Return the D_t map for cutoff *min_weight* (lazily built, cached).
+
+        The map is rebuilt when the data source changes (cache rebuilt or
+        replaced by an in-memory frame). Each map owns both aggregate tables,
+        so the bodyId- and type-level denominators always come from the same
+        thresholded graph.
+        """
+        cm = self._connection_maps.get(min_weight)
+        signature = self._connection_source_signature()
+        if cm is None or cm.source_signature != signature:
+            cm = ThresholdedConnectionMap(
+                db_path=self._get_connection_db_path(),
+                neuron_index_path=os.path.join(
+                    os.path.dirname(self._get_connection_db_path()),
+                    'neuron_index.parquet',
+                ),
+                min_weight=min_weight,
+                conn_frame=(
+                    None if self._conn_df_cache is None
+                    or self._is_empty_df(self._conn_df_cache)
+                    else self._conn_df_cache
+                ),
+                source_signature=signature,
+            )
+            if len(self._connection_maps) > 16:
+                self._connection_maps.pop(next(iter(self._connection_maps)))
+            self._connection_maps[min_weight] = cm
+        return cm
 
     def _get_total_incoming_by_type_table(self, min_weight: int = 1):
         """
         Full-dataset aggregate ``type_post -> total_incoming_weight``.
 
-        The aggregate is independent of which post types a caller asks for,
-        so it is computed once per (data source, min_weight) with fully
-        vectorized Polars operations and reused by every per-layer call.
-        Previously every call re-read the whole connections parquet in
-        row-group chunks and aggregated with a Python loop over every row.
+        The aggregate is computed once per (data source, min_weight) with
+        fully vectorized Polars operations (ThresholdedConnectionMap) and
+        reused by every per-layer call. Previously every call re-read the
+        whole connections parquet in row-group chunks and aggregated with a
+        Python loop over every row.
         """
-        key = self._incoming_weight_source_key(min_weight)
-        cached = self._total_incoming_by_type_cache.get(key)
-        if cached is not None:
-            return cached
-
-        db_path = self._get_connection_db_path()
-        index_path = os.path.join(os.path.dirname(db_path), 'neuron_index.parquet')
-
-        neuron_index = pl.read_parquet(index_path, columns=['bodyId', 'type'])
-        # Preserve the old dict semantics: the LAST entry wins for duplicates.
-        neuron_index = neuron_index.unique(subset=['bodyId'], keep='last')
-        if 'type' in neuron_index.columns:
-            neuron_index = neuron_index.filter(
-                pl.col('type').is_not_null() & (pl.col('type') != '')
-            )
-
-        if self._conn_df_cache is not None and not self._is_empty_df(self._conn_df_cache):
-            conn = self._conn_df_cache
-            # The module-level shared cache may hand us pandas (other modules
-            # expect pandas); convert once here so vectorized ops always work.
-            if isinstance(conn, pd.DataFrame):
-                conn = pl.from_pandas(conn)
-            if min_weight > 1:
-                conn = conn.filter(pl.col('weight') >= min_weight)
-            result = (
-                conn.join(
-                    neuron_index,
-                    left_on='bodyId_post',
-                    right_on='bodyId',
-                    how='inner',
-                )
-                .group_by('type')
-                .agg(pl.col('weight').sum().alias('total_incoming_weight'))
-                .rename({'type': 'type_post'})
-            )
-        else:
-            scan = pl.scan_parquet(db_path)
-            if min_weight > 1:
-                scan = scan.filter(pl.col('weight') >= min_weight)
-            result = (
-                scan.join(
-                    neuron_index.lazy(),
-                    left_on='bodyId_post',
-                    right_on='bodyId',
-                    how='inner',
-                )
-                .group_by('type')
-                .agg(pl.col('weight').sum().alias('total_incoming_weight'))
-                .rename({'type': 'type_post'})
-                .collect()
-            )
-
-        self._total_incoming_by_type_cache[key] = result
-        return result
+        return self._connection_map(min_weight).total_incoming_by_type()
 
     def _get_total_incoming_by_bodyid_table(self, min_weight: int = 1):
         """
         Full-dataset aggregate ``bodyId_post -> total_incoming_weight``.
 
-        Cached and vectorized like the type-level table; each caller then
-        filters the cached table down to the post neurons it needs.
+        Cached and vectorized like the type-level table (owned by the same
+        ThresholdedConnectionMap); each caller then filters the cached table
+        down to the post neurons it needs.
         """
-        key = self._incoming_weight_source_key(min_weight)
-        cached = self._total_incoming_by_bodyid_cache.get(key)
-        if cached is not None:
-            return cached
-
-        db_path = self._get_connection_db_path()
-        if self._conn_df_cache is not None and not self._is_empty_df(self._conn_df_cache):
-            conn = self._conn_df_cache
-            if isinstance(conn, pd.DataFrame):
-                conn = pl.from_pandas(conn)
-            if min_weight > 1:
-                conn = conn.filter(pl.col('weight') >= min_weight)
-            result = conn.group_by('bodyId_post').agg(
-                pl.col('weight').sum().alias('total_incoming_weight')
-            )
-        else:
-            scan = pl.scan_parquet(db_path)
-            if min_weight > 1:
-                scan = scan.filter(pl.col('weight') >= min_weight)
-            result = (
-                scan.group_by('bodyId_post')
-                .agg(pl.col('weight').sum().alias('total_incoming_weight'))
-                .collect()
-            )
-
-        self._total_incoming_by_bodyid_cache[key] = result
-        return result
+        return self._connection_map(min_weight).total_incoming_by_bodyid()
 
     def _fetch_total_incoming_weight(self, post_bodyIds: list, min_weight: int = 1, auto_build_cache: bool = True) -> pd.DataFrame:
         """
@@ -4356,7 +4321,46 @@ class FindNeuronConnection:
         self._vprint(f'     ⚠️ Ratios will be calculated locally (may give inflated values)', level='simple')
         return pd.DataFrame(columns=['type_post', 'total_incoming_weight'])
     
-    def _apply_type_level_filters(self, combined, min_weight, min_conn_ratio, min_traversal_prob, total_before_filter):
+    def _pair_level_probabilities(self, conn_df, min_weight):
+        """Per-bodyId-pair connection_ratio / traversal_probability (D_t model).
+
+        Uses the full-dataset bodyId-level denominators from the same
+        ThresholdedConnectionMap as the type-level table (so numerator and
+        denominator come from the same thresholded graph), with a LOCAL
+        fallback when the global table is unavailable (inflated ratios,
+        same semantics as the other fallbacks). Returns a frame with
+        'connection_ratio', 'traversal_probability' and 'block_probability'
+        per deduplicated bodyId pair.
+        """
+        if conn_df is None or len(conn_df) == 0:
+            return pd.DataFrame(columns=['bodyId_pre', 'bodyId_post', 'weight'])
+        post_bodyIds = conn_df['bodyId_post'].unique().tolist()
+        fetch_total = getattr(self, '_fetch_total_incoming_weight', None)
+        total_incoming = (
+            fetch_total(post_bodyIds, min_weight)
+            if fetch_total is not None
+            else None
+        )
+        if total_incoming is None or len(total_incoming) == 0:
+            # Local fallback: sum over the provided frame only
+            total_incoming = conn_df.groupby('bodyId_post')['weight'].sum().reset_index(name='total_incoming_weight')
+        pairs = conn_df[['bodyId_pre', 'bodyId_post', 'type_pre', 'type_post', 'weight']].copy()
+        pairs['bodyId_post'] = pairs['bodyId_post'].astype(str)
+        total_incoming['bodyId_post'] = total_incoming['bodyId_post'].astype(str)
+        pairs = pairs.merge(total_incoming, on='bodyId_post', how='left')
+        weight_arr = pairs['weight'].to_numpy(dtype=float)
+        total_arr = pairs['total_incoming_weight'].to_numpy(dtype=float)
+        valid_mask = ~np.isnan(total_arr) & (total_arr > 0)
+        pairs['connection_ratio'] = np.divide(
+            weight_arr, total_arr,
+            out=np.full(len(pairs), np.nan, dtype=float),
+            where=valid_mask,
+        )
+        pairs['traversal_probability'] = (pairs['connection_ratio'] / 0.3).clip(upper=1.0)
+        pairs['block_probability'] = 1 - pairs['traversal_probability']
+        return pairs
+
+    def _apply_type_level_filters(self, combined, min_weight, min_conn_ratio, min_traversal_prob, total_before_filter, aggregate_method='product'):
         """
         Apply filters at aggregated type-to-type level.
         
@@ -4366,24 +4370,50 @@ class FindNeuronConnection:
         Where total_incoming_weight(→typeB) is the sum of ALL incoming weights to type B
         from ALL source types in the dataset (not just provided source types). This gives
         the true fraction of typeB's total input that comes from typeA.
+        
+        The synapse cutoff is applied to EDGES first (same D_t graph the global
+        denominator is computed from), then pairs are aggregated per type pair.
+        The type-level traversal_probability used by the prob filter follows
+        *aggregate_method* (default 'product': 1 - prod(1 - p_pair) over the
+        deduplicated pairs; 'average': weight-weighted mean; 'ratio':
+        min(connection_ratio / 0.3, 1)) - matching the enriched conn_type
+        output and the statvis engines.
         """
         # Separate connections with null types (preserve them always)
         null_type_mask = combined['type_pre'].isna() | combined['type_post'].isna()
         connections_with_null_types = combined[null_type_mask].copy()
         connections_with_types = combined[~null_type_mask].copy()
-        
+
+        # D_t consistency: apply the synapse cutoff to EDGES first - the same
+        # thresholded graph the global denominator is computed from - then
+        # aggregate pairs. (Aggregating first and thresholding the pair SUM
+        # mixed two definitions of the cutoff: an edge-thresholded denominator
+        # with a pair-thresholded numerator.)
+        if min_weight > 1:
+            connections_with_types = connections_with_types[
+                connections_with_types['weight'] >= min_weight
+            ].copy()
+
+        # Per-pair traversal probabilities feed the compound type-level
+        # aggregate ('product'/'average'); only needed when the prob filter is
+        # active, otherwise the ratio model below is display-only.
+        pair_probs = None
+        if (
+            aggregate_method in ('product', 'average')
+            and min_traversal_prob > 0
+            and len(connections_with_types) > 0
+        ):
+            pair_probs = self._pair_level_probabilities(
+                connections_with_types, min_weight
+            )
+
         # Group by type pairs and aggregate (only for connections with valid types)
         if len(connections_with_types) > 0:
             type_grouped = connections_with_types.groupby(['type_pre', 'type_post'], as_index=False).agg({
-                'weight': 'sum',  # Sum of all synapses for this type pair
+                'weight': 'sum',  # Sum of all synapses for this type pair in D_t
             })
         else:
             type_grouped = pd.DataFrame(columns=['type_pre', 'type_post', 'weight'])
-        
-        # Apply weight filter at type level (total synapses per type pair)
-        type_grouped_before_weight = len(type_grouped)
-        if min_weight > 1:
-            type_grouped = type_grouped[type_grouped['weight'] >= min_weight].copy()
         
         # Get unique post types
         post_types = type_grouped['type_post'].unique().tolist()
@@ -4408,8 +4438,28 @@ class FindNeuronConnection:
             out=np.full(len(type_grouped), np.nan, dtype=float),
             where=valid_mask,
         )
-        type_grouped['traversal_probability'] = type_grouped['connection_ratio'] / 0.3
-        type_grouped.loc[type_grouped['traversal_probability'] > 1, 'traversal_probability'] = 1
+
+        # Type-level traversal_probability from the aggregate method (same
+        # semantics as the enriched conn_type output and the statvis engines):
+        # 'product' compounds the per-pair block probabilities (reliability/OR
+        # model), 'average' takes the weight-weighted mean, 'ratio' uses
+        # min(connection_ratio / 0.3, 1) (input-share model).
+        if pair_probs is not None:
+            if aggregate_method == 'product':
+                blocks = pair_probs.groupby(['type_pre', 'type_post'])['block_probability'].prod()
+                prob_series = (1.0 - blocks).rename('traversal_probability')
+            else:  # 'average'
+                tmp = pair_probs.assign(
+                    _wt=pair_probs['weight'] * pair_probs['traversal_probability']
+                )
+                grouped = tmp.groupby(['type_pre', 'type_post'])[['_wt', 'weight']].sum()
+                prob_series = (grouped['_wt'] / grouped['weight'].replace(0, np.nan)).fillna(0.0).rename('traversal_probability')
+            type_grouped = type_grouped.merge(
+                prob_series.reset_index(), how='left', on=['type_pre', 'type_post']
+            )
+        else:
+            type_grouped['traversal_probability'] = type_grouped['connection_ratio'] / 0.3
+            type_grouped.loc[type_grouped['traversal_probability'] > 1, 'traversal_probability'] = 1
         
         # Apply ratio/prob filters at type level
         if len(type_grouped) > 0:
@@ -4440,7 +4490,7 @@ class FindNeuronConnection:
         # Print filter summary
         filter_msg = []
         if min_weight > 1:
-            filter_msg.append(f'type-weight ≥ {min_weight}')
+            filter_msg.append(f'edge-weight ≥ {min_weight}')
         if min_conn_ratio > 0:
             filter_msg.append(f'type-ratio ≥ {min_conn_ratio}')
         if min_traversal_prob > 0:
@@ -4448,7 +4498,7 @@ class FindNeuronConnection:
         
         type_pairs_after = len(filtered_type_pairs)
         null_conn_count = len(connections_with_null_types)
-        self._vprint(f'     Filtered (type level): {type_grouped_before_weight} → {type_pairs_after} type pairs, {total_before_filter} → {len(combined)} connections ({", ".join(filter_msg)})', level='full')
+        self._vprint(f'     Filtered (type level): {total_before_filter} → {len(combined)} connections, {type_pairs_after} type pairs ({", ".join(filter_msg)})', level='full')
         if null_conn_count > 0:
             self._vprint(f'     Note: {null_conn_count} connections with null types preserved (not filtered)', level='full')
         self._vprint(f'     Note: Ratio = weight / total_incoming_from_ALL_sources', level='full')
@@ -5574,6 +5624,7 @@ class FindNeuronConnection:
             'min synapse number': str(self.min_synapse_num),
             'min connection ratio': str(self.min_ratio),
             'min traversal probability': str(self.min_traversal_probability),
+            'aggregate method': self.aggregate_method,
             'filter by': self.filter_by,
             'exclude intra-type connections': str(self.exclude_intra_type_connections),
             'max interlayer': str(self.max_interlayer),
@@ -5845,8 +5896,10 @@ class FindNeuronConnection:
         post_bodyIds = self.conn_df['bodyId_post'].dropna().unique().tolist()
         global_incoming_body_weights = self._fetch_total_incoming_weight(post_bodyIds, min_weight=self.min_synapse_num) if post_bodyIds else None
         
-        # Type-level prob = min(connection_ratio / 0.3, 1) (matches
-        # _apply_type_level_filters and the Polars implementation)
+        # Type-level prob follows the aggregate method (default 'product':
+        # 1 - prod(1 - p_pair) over the deduplicated pairs; 'average':
+        # weight-weighted mean; 'ratio': min(connection_ratio / 0.3, 1)) -
+        # same semantics as _apply_type_level_filters and the statvis engines.
         # Don't pass target_neurons_df - let EnrichConnectionTable use neurons from connections
         # This uses sum(post) of neurons that actually received connections as denominator
         self.conn_df, self.conn_type, self.conn_group = sv.EnrichConnectionTable(
@@ -5854,7 +5907,7 @@ class FindNeuronConnection:
             traversal_probability_threshold=0,
             dataset=self.dataset,
             script_path=self.script_path,
-            aggregate_method='product',  # accepted for API compatibility
+            aggregate_method=self.aggregate_method,
             label_mapper=self.label_mapper,
             global_incoming_weights=global_incoming_weights,
             separate_hemispheres=self.separate_hemispheres,

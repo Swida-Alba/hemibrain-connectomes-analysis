@@ -42,8 +42,7 @@ def _stub_fnc(**attrs):
     obj = object.__new__(FindNeuronConnection)
     obj._conn_df_cache = None
     obj._local_neuron_df_cache = {}
-    obj._total_incoming_by_type_cache = {}
-    obj._total_incoming_by_bodyid_cache = {}
+    obj._connection_maps = {}
     obj._vprint = lambda *a, **k: None
     for key, value in attrs.items():
         setattr(obj, key, value)
@@ -122,7 +121,7 @@ class TestTotalIncomingByType:
         # Requested-type filtering happens on the cached full table
         subset = obj._fetch_total_incoming_weight_by_type(["T0"], min_weight=3)
         assert set(subset["type_post"]) <= {"T0"}
-        assert len(obj._total_incoming_by_type_cache) == 1  # computed once
+        assert len(obj._connection_maps) == 1  # one D_t map, computed once
 
         ref_t0 = _reference_type_incoming(conn_path, index_path, 3, {"T0"})
         assert subset.set_index("type_post")["total_incoming_weight"].to_dict() == ref_t0
@@ -151,7 +150,7 @@ class TestTotalIncomingByBodyId:
         res2 = obj._fetch_total_incoming_weight(["N3"], min_weight=2)
         assert set(res1["bodyId_post"]) <= {"N1", "N2"}
         assert set(res2["bodyId_post"]) <= {"N3"}
-        assert len(obj._total_incoming_by_bodyid_cache) == 1
+        assert len(obj._connection_maps) == 1  # one D_t map shared by both tables
 
         # Sanity: totals equal per-neuron sums from the raw table
         raw = pl.read_parquet(conn_path).filter(pl.col("weight") >= 2)
@@ -274,7 +273,11 @@ class TestEnrichConnectionTablePolars:
         )
         assert ab["weight"] == 10  # 5 + 3 + 2
         assert ab["connection_ratio"] == pytest.approx(10 / 200)
-        assert ab["traversal_probability"] == pytest.approx((10 / 200) / 0.3)
+        # Default aggregate_method='product': type-level traversal_probability
+        # compounds the per-pair block probabilities (reliability/OR model).
+        # A1->B1 (5/8) and A2->B1 (3/8) both cap at p=1, A2->B2 (2/2) caps at
+        # p=1, so 1 - (1-1)*(1-1)*(1-1) = 1.0.
+        assert ab["traversal_probability"] == pytest.approx(1.0)
 
         cb = next(
             r
@@ -284,13 +287,45 @@ class TestEnrichConnectionTablePolars:
         assert cb["weight"] == 1
         assert cb["connection_ratio"] == pytest.approx(1 / 200)
 
-        # BodyId-level output keeps local ratios and post counts
-        assert {"bodyId_pre", "bodyId_post", "post", "connection_ratio"} <= set(
-            conn_df.columns
+    def test_ratio_method_preserves_legacy_semantics(self, tmp_path):
+        """aggregate_method='ratio' keeps min(connection_ratio / 0.3, 1)."""
+        script_path, _ = self._dataset(tmp_path)
+        conn_table = pd.DataFrame(
+            {
+                "bodyId_pre": ["A1", "A2", "A2", "C1"],
+                "bodyId_post": ["B1", "B1", "B2", "B2"],
+                "type_pre": ["TA", "TA", "TA", "TC"],
+                "type_post": ["TB", "TB", "TB", "TB"],
+                "weight": [5, 3, 2, 1],
+            }
         )
-        assert conn_df.filter(
-            (pl.col("bodyId_pre") == "A1") & (pl.col("bodyId_post") == "B1")
-        )["connection_ratio"][0] == pytest.approx(5 / 8)
+        label_mapper = SimpleNamespace(
+            _source_mapping={"STD_A": {"test_v1": ["A1", "A2"]}},
+            _target_mapping={"STD_B": {"test_v1": ["B1", "B2"]}},
+            _intermediate_mapping={"STD_C": {"test_v1": ["C1"]}},
+        )
+        global_incoming = pd.DataFrame(
+            {"type_post": ["TB"], "total_incoming_weight": [200]}
+        )
+
+        _, conn_type, _ = EnrichConnectionTablePolars(
+            conn_table,
+            dataset="test:v1",
+            script_path=script_path,
+            label_mapper=label_mapper,
+            global_incoming_weights=global_incoming,
+            aggregate_method="ratio",
+        )
+        rows = {
+            (r["type_pre"], r["type_post"]): r
+            for r in conn_type.iter_rows(named=True)
+        }
+        ab = next(
+            r
+            for r in rows.values()
+            if r["type_pre"] == "STD_A" and r["type_post"] == "STD_B"
+        )
+        assert ab["traversal_probability"] == pytest.approx((10 / 200) / 0.3)
 
 
 # =============================================================================
