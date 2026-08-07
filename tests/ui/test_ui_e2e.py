@@ -812,6 +812,91 @@ class TestDatasetService:
         (neuprint_path / "hemibrain_v1_2_1_neuron_df.parquet").touch()
         assert service._check_local_prepared("hemibrain:v1.2.1") is True
 
+    def test_local_neuron_counts_correct_without_metadata(self, tmp_path):
+        """Regression: counting a neuron table without a metadata file must
+        return the real row count.  The old `pl.len()` + frame-level `.sum()`
+        query corrupted the total (158262 rows reported as 3572024164)."""
+        pytest.importorskip("polars")
+        import polars as pl
+
+        from ui.dataset_service import DatasetService
+
+        service = DatasetService()
+        service._datasets_dir = tmp_path / "datasets"
+        dataset_path = service._datasets_dir / "flywire_BANC_v888"
+        dataset_path.mkdir(parents=True)
+        pl.DataFrame(
+            {
+                "bodyId": list(range(7)),
+                "type": ["a", "b", None, "", "c", "d", "e"],
+            }
+        ).write_parquet(dataset_path / "flywire_BANC_v888_allneurons_neuron_df.parquet")
+
+        total, typed = service._load_local_neuron_counts("flywire_BANC_v888")
+        assert total == 7
+        assert typed == 5
+
+    def test_local_neuron_counts_accepts_plain_neuron_df_table(self, tmp_path):
+        """NeuPrint conversions name their table *_neuron_df.* - it must be
+        counted too, otherwise a prepared dataset shows no neuron count."""
+        pytest.importorskip("polars")
+        import polars as pl
+
+        from ui.dataset_service import DatasetService
+
+        service = DatasetService()
+        service._datasets_dir = tmp_path / "datasets"
+        dataset_path = service._datasets_dir / "male-cns_v0_9"
+        dataset_path.mkdir(parents=True)
+        pl.DataFrame({"bodyId": [1, 2, 3, 4]}).write_parquet(
+            dataset_path / "male-cns_v0_9_neuron_df.parquet"
+        )
+
+        total, typed = service._load_local_neuron_counts("male-cns:v0.9")
+        assert total == 4
+
+    def test_flywire_codex_fallback_count(self, tmp_path):
+        """A FlyWire dataset without local files still reports its known
+        Codex release size instead of showing no neuron number."""
+        from ui.dataset_service import DatasetService
+
+        service = DatasetService()
+        service._datasets_dir = tmp_path / "datasets"
+        service._cache_dir = tmp_path / "cache"
+
+        info = service.check_dataset_availability("flywire_FAFB_v783")
+        assert info.available is False
+        assert info.neuron_count == service.CODEX_DATASETS["flywire_FAFB_v783"]["neurons"]
+
+    def test_cache_index_fallback_count(self, tmp_path):
+        """A dataset that only exists in the pull cache reports the number
+        of cached neurons from cache/<dataset>/neuron_index.parquet."""
+        pytest.importorskip("polars")
+        import polars as pl
+
+        from ui.dataset_service import DatasetService
+
+        service = DatasetService()
+        service._datasets_dir = tmp_path / "datasets"
+        service._cache_dir = tmp_path / "cache"
+        cache_path = service._cache_dir / "hemibrain_v1_2_1"
+        cache_path.mkdir(parents=True)
+        pl.DataFrame({"bodyId": [1, 2, 3]}).write_parquet(
+            cache_path / "neuron_index.parquet"
+        )
+
+        total, typed = service._load_cache_neuron_counts("hemibrain:v1.2.1")
+        assert total == 3
+
+    def test_fetch_neuprint_counts_without_token(self, tmp_path):
+        """Without a NeuPrint token the count query must short-circuit to
+        (0, 0) instead of hitting the network."""
+        from ui.dataset_service import DatasetService
+
+        service = DatasetService()
+        assert service._token is None
+        assert service._fetch_neuprint_counts("hemibrain:v1.2.1") == (0, 0)
+
     def test_settings_guide_matches_converter_layout(self):
         guide = (PROJECT_ROOT / "docs" / "ui_guides" / "settings.html").read_text()
         embedded_guide = (PROJECT_ROOT / "ui" / "tabs" / "settings.py").read_text()

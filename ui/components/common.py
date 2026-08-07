@@ -855,6 +855,11 @@ def dataset_status_card() -> ui.card:
                         "FlyWire status needs the converted local tables."
                     ).classes("text-caption drocat-warn")
                     return
+
+                def count_badge(info, color):
+                    text = f"{info.neuron_count:,}" if info.neuron_count else "n/a"
+                    ui.badge(text, color=color).props("outline")
+
                 for name, info in results.items():
                     is_flywire = name.startswith("flywire_")
                     src_badge_text = "FlyWire" if is_flywire else "NeuPrint"
@@ -866,25 +871,25 @@ def dataset_status_card() -> ui.card:
                             ui.label(info.display_name or name).classes("font-medium flex-grow")
                             ui.badge(src_badge_text, color=src_badge_color).props("outline")
                             ui.badge("local", color="green").props("outline")
-                            if info.neuron_count:
-                                ui.badge(f"{info.neuron_count:,}", color="green").props("outline")
+                            count_badge(info, "green")
                         elif info.available:
                             ui.icon("cloud_done", color="blue")
                             ui.label(info.display_name or name).classes("font-medium flex-grow")
                             ui.badge(src_badge_text, color=src_badge_color).props("outline")
                             ui.badge("server", color="blue").props("outline")
-                            if info.neuron_count:
-                                ui.badge(f"{info.neuron_count:,}", color="blue").props("outline")
+                            count_badge(info, "blue")
                         elif info.local_cache:
                             ui.icon("cached", color="orange")
                             ui.label(info.display_name or name).classes("font-medium flex-grow")
                             ui.badge(src_badge_text, color=src_badge_color).props("outline")
                             ui.badge("cached", color="orange").props("outline")
+                            count_badge(info, "orange")
                         else:
                             ui.icon("cloud_off", color="grey")
                             ui.label(info.display_name or name).classes("font-medium flex-grow drocat-muted")
                             ui.badge(src_badge_text, color=src_badge_color).props("outline")
                             ui.badge("not ready", color="grey").props("outline")
+                            count_badge(info, "grey")
 
         # Local status is useful even when the user has not configured a
         # NeuPrint token or is working offline.  Avoid any network call here.

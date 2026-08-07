@@ -262,6 +262,12 @@ class DatasetService:
         # Check local cache/prepared status
         info.local_cache = self._check_local_cache(dataset)
         info.local_prepared = self._check_local_prepared(dataset)
+        # Backfill the neuron count from local files when the server path
+        # could not provide one (datasets without metadata files).
+        if info.neuron_count == 0:
+            total, typed = self._load_local_neuron_counts(dataset)
+            info.neuron_count = total
+            info.typed_count = typed
         if info.source == "flywire":
             # FlyWire has no server-backed dataset status in this UI.  A
             # directory (or a lone neuron table) is not enough to call it
@@ -269,6 +275,22 @@ class DatasetService:
             info.available = info.local_prepared
             if not info.local_prepared:
                 info.error = "Local FlyWire neuron and connection tables are not both prepared."
+
+        # Last resorts so every listed dataset still reports a count:
+        # known FlyWire release sizes, a live NeuPrint count query, and
+        # finally the local pull-cache index.
+        if info.neuron_count == 0 and info.source == "flywire":
+            codex = self.CODEX_DATASETS.get(dataset) or {}
+            if codex.get("neurons"):
+                info.neuron_count = int(codex["neurons"])
+        if info.neuron_count == 0 and info.available and info.source == "neuprint":
+            total, typed = self._fetch_neuprint_counts(dataset)
+            info.neuron_count = total
+            info.typed_count = typed
+        if info.neuron_count == 0 and info.local_cache:
+            total, typed = self._load_cache_neuron_counts(dataset)
+            info.neuron_count = total
+            info.typed_count = typed
 
         # Set display name
         if not info.display_name:
@@ -349,32 +371,42 @@ class DatasetService:
             return info
 
         # Slow path: individual query (only for datasets not in server list)
+        total, typed = self._fetch_neuprint_counts(dataset)
+        if total:
+            info.available = True
+            info.neuron_count = total
+            info.typed_count = typed
+            info.metadata = {
+                "server": self.NEUPRINT_SERVER,
+                "checked_at": datetime.now().isoformat(),
+            }
+        else:
+            info.error = "Empty response from server"
+
+        return info
+
+    def _fetch_neuprint_counts(self, dataset: str) -> tuple:
+        """Query the NeuPrint server for a dataset's total/typed neuron count.
+
+        Returns (0, 0) when the dataset cannot be queried (no token, network
+        failure, or an empty response).  Used both by the slow availability
+        probe and as a last resort for server datasets without local files.
+        """
+        if not self._token:
+            return 0, 0
         try:
             from neuprint import Client
 
             client = Client(self.NEUPRINT_SERVER, dataset, self._token)
-
-            # Query neuron count
             result = client.fetch_custom(
                 "MATCH (n:Neuron) RETURN count(n) as total, "
                 "sum(CASE WHEN n.type IS NOT NULL AND n.type <> '' THEN 1 ELSE 0 END) as typed"
             )
-
             if not result.empty:
-                info.available = True
-                info.neuron_count = int(result["total"].iloc[0])
-                info.typed_count = int(result["typed"].iloc[0])
-                info.metadata = {
-                    "server": self.NEUPRINT_SERVER,
-                    "checked_at": datetime.now().isoformat(),
-                }
-            else:
-                info.error = "Empty response from server"
-
-        except Exception as e:
-            info.error = str(e)
-
-        return info
+                return int(result["total"].iloc[0]), int(result["typed"].iloc[0])
+        except Exception:
+            pass
+        return 0, 0
 
     def _check_flywire_dataset(self, dataset: str) -> DatasetInfo:
         """Check FlyWire dataset availability."""
@@ -385,14 +417,15 @@ class DatasetService:
             info.available = True
             info.local_cache = True
 
+            # Counts: metadata file first, local neuron table fallback
+            total, typed = self._load_local_neuron_counts(dataset)
+            info.neuron_count = total
+            info.typed_count = typed
             metadata_file = self._find_metadata_file(dataset)
             if metadata_file and metadata_file.exists():
                 try:
                     with open(metadata_file, "r") as f:
-                        meta = json.load(f)
-                        info.neuron_count = meta.get("neuron_counts", {}).get("total", 0)
-                        info.typed_count = meta.get("neuron_counts", {}).get("typed", 0)
-                        info.metadata = meta
+                        info.metadata = json.load(f)
                 except Exception:
                     pass
         else:
@@ -477,6 +510,142 @@ class DatasetService:
 
         return None
 
+    # neuron-count memoization: (dataset, mtime_ns) -> (total, typed).
+    # Counting a large neuron CSV on every page load is wasteful; the count is
+    # re-read only when the local table changes.
+    _neuron_counts_cache: Dict[tuple, tuple] = {}
+
+    def _load_local_neuron_counts(self, dataset: str) -> tuple:
+        """
+        Total / typed neuron counts for a locally prepared dataset.
+
+        Priority:
+          1. ``*_metadata.json`` (``neuron_counts.total`` / ``typed``)
+          2. local neuron table (``*_allneurons_neuron_df.parquet`` or
+             ``.csv``, or a plain ``*_neuron_df.parquet``/``.csv`` from a
+             NeuPrint conversion) counted via a streaming Polars scan - this
+             covers datasets that were pulled/downloaded without a metadata
+             file.
+
+        The result is memoized per (dataset, table mtime); falls back to
+        (0, 0) when neither source is available.
+        """
+        dataset_path = self._get_dataset_path(dataset)
+        if not dataset_path or not dataset_path.exists():
+            return 0, 0
+
+        # 1. Metadata file wins when present (it is authoritative and cheap).
+        metadata_file = self._find_metadata_file(dataset)
+        if metadata_file and metadata_file.exists():
+            try:
+                with open(metadata_file, "r") as f:
+                    meta = json.load(f)
+                counts = meta.get("neuron_counts", {}) or {}
+                if counts.get("total"):
+                    return int(counts["total"]), int(counts.get("typed", 0) or 0)
+            except Exception:
+                pass
+
+        # 2. Fall back to counting the local neuron table.  Prefer the full
+        #    ``*_allneurons_neuron_df.*`` table; the plain ``*_neuron_df.*``
+        #    names must match too, or prepared datasets would show no count.
+        table = None
+        for pattern in (
+            "*_allneurons_neuron_df.parquet",
+            "*_allneurons_neuron_df.csv",
+            "*_neuron_df.parquet",
+            "*_neuron_df.csv",
+        ):
+            matches = sorted(dataset_path.glob(pattern))
+            if matches:
+                table = matches[0]
+                break
+        if table is None:
+            return 0, 0
+
+        key = (dataset, table.stat().st_mtime_ns)
+        if key in self._neuron_counts_cache:
+            return self._neuron_counts_cache[key]
+
+        total = typed = 0
+        try:
+            import polars as pl
+
+            lazy = pl.scan_parquet(table) if table.suffix == ".parquet" else pl.scan_csv(
+                table, infer_schema_length=0, ignore_errors=True
+            )
+            if "type" in lazy.collect_schema().names():
+                # NOTE: do not apply a frame-level `.sum()` to `pl.len()` -
+                # that corrupts the total (e.g. 158262 rows -> 3572024164).
+                row = lazy.select(
+                    pl.len().alias("total"),
+                    (
+                        pl.col("type").is_not_null()
+                        & (pl.col("type") != "")
+                        & (pl.col("type").cast(pl.Utf8) != "nan")
+                    ).sum().alias("typed"),
+                ).collect().row(0)
+                total, typed = int(row[0]), int(row[1])
+            else:
+                total = int(lazy.select(pl.len()).collect().item())
+        except Exception:
+            # Last resort: plain pandas row count
+            try:
+                import pandas as pd
+
+                if table.suffix == ".parquet":
+                    df = pd.read_parquet(table)
+                else:
+                    df = pd.read_csv(table, index_col=0, low_memory=False)
+                total = len(df)
+                typed = int(df["type"].notna().sum()) if "type" in df.columns else 0
+            except Exception:
+                return 0, 0
+
+        self._neuron_counts_cache[key] = (total, typed)
+        return total, typed
+
+    def _load_cache_neuron_counts(self, dataset: str) -> tuple:
+        """
+        Total / typed neuron counts from the local pull-cache index.
+
+        ``cache/<dataset>/neuron_index.parquet`` is written by the
+        DatasetPuller with one row per cached neuron.  The count may be
+        partial (only what has been pulled so far), so it is used only as a
+        last resort behind the dataset tables and the server query.
+        """
+        cache_path = self._cache_dir / dataset_to_folder(dataset)
+        index = cache_path / "neuron_index.parquet"
+        if not index.exists():
+            return 0, 0
+
+        key = ("cache", dataset, index.stat().st_mtime_ns)
+        if key in self._neuron_counts_cache:
+            return self._neuron_counts_cache[key]
+
+        total = typed = 0
+        try:
+            import polars as pl
+
+            lazy = pl.scan_parquet(index)
+            if "type" in lazy.collect_schema().names():
+                row = lazy.select(
+                    pl.len().alias("total"),
+                    (
+                        pl.col("type").is_not_null()
+                        & (pl.col("type") != "")
+                        & (pl.col("type").cast(pl.Utf8) != "nan")
+                    ).sum().alias("typed"),
+                ).collect().row(0)
+                total, typed = int(row[0]), int(row[1])
+            else:
+                total = int(lazy.select(pl.len()).collect().item())
+        except Exception:
+            return 0, 0
+
+        self._neuron_counts_cache[key] = (total, typed)
+        return total, typed
+
     def get_local_datasets(self) -> List[DatasetInfo]:
         """Get information about locally available datasets."""
         datasets = []
@@ -501,14 +670,16 @@ class DatasetService:
                 info.local_prepared = self._check_local_prepared(name)
                 info.available = info.local_prepared
 
+                # Counts: metadata file first, local neuron table fallback
+                # (datasets pulled without a metadata file still show counts).
+                total, typed = self._load_local_neuron_counts(name)
+                info.neuron_count = total
+                info.typed_count = typed
                 metadata_file = self._find_metadata_file(name)
                 if metadata_file and metadata_file.exists():
                     try:
                         with open(metadata_file, "r") as f:
-                            meta = json.load(f)
-                            info.neuron_count = meta.get("neuron_counts", {}).get("total", 0)
-                            info.typed_count = meta.get("neuron_counts", {}).get("typed", 0)
-                            info.metadata = meta
+                            info.metadata = json.load(f)
                     except Exception:
                         pass
 
