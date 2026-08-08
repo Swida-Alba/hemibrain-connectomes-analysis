@@ -383,6 +383,8 @@ class TestRunner:
         }
         assert by_label["Top N Results"].value == DEFAULTS["morph_top_n"]
         assert by_label["Top N Candidates"].value == DEFAULTS["top_n"]
+        # level auto-follows the query kind (type -> type, bodyId -> bodyId)
+        assert by_label["Level"].value == DEFAULTS["morph_level"] == "auto"
         # 3D visualization defaults: enabled with 6 top types, grouped by type
         assert by_label["Visualize Top-N Types"].value == DEFAULTS["morph_visualize_top_n"]
         assert by_label["Visualize By"].value == DEFAULTS["morph_visualize_by"]

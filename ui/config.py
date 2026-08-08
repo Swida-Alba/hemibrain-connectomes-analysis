@@ -134,7 +134,7 @@ DEFAULTS = {
     "top_n": 30,
     "match_algorithm": "cds",
     # Find Similar Neurons (morphological mode)
-    "morph_level": "bodyid",
+    "morph_level": "auto",
     "morph_method": "vector",
     "morph_metric": "cosine",
     "morph_top_n": 20,

@@ -36,6 +36,11 @@
   </table>
 
   <h2>Candidate source</h2>
+  <p><b>Level</b> controls the result granularity. <b>auto</b> (default)
+    follows the query kind: a <b>type query returns type-to-type</b> rows
+    (each row = one target type), a <b>bodyId query returns
+    bodyId-to-bodyId</b> rows. <code>bodyid</code>/<code>type</code> force a
+    level for multi-neuron or mixed queries.</p>
   <p><b>Candidate Source</b> selects how candidates are discovered before
     morphological scoring:</p>
   <ul>
@@ -135,8 +140,15 @@
   <h2>Output</h2>
   <p>Each run is saved in its own timestamped folder:</p>
   <pre><code>morphological: {output_dir}/findsimilar_{DATASET}_{query}_{timestamp}/
-                 results.csv, README.txt
+                 results.csv, type_summary.csv, README.txt
 profile:       {output_dir}/findhomologs_{SRC}_to_{TGT}_{query}_{timestamp}/</code></pre>
+  <p><code>results.csv</code> holds the ranked rows (type-to-type for type
+    queries, bodyId-to-bodyId for bodyId queries). <code>type_summary.csv</code>
+    is the per-target-type summary, mirroring the homolog finding output:
+    bodyId runs aggregate each target type's
+    <code>avg/max/min/std_similarity</code>, <code>n_bodyids</code>,
+    <code>avg_profile_similarity</code> and an <code>is_query_type</code>
+    flag; type runs carry the type rows directly.</p>
 </main>
 </body>
 </html>

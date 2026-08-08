@@ -491,6 +491,85 @@ class TestMorphologyComparer:
                                      project_root=str(tmp_path), verbose=False)
 
 
+    def test_auto_level_resolution(self, tmp_path, monkeypatch):
+        """level='auto': type queries -> type-to-type, bodyId queries ->
+        bodyId-to-bodyId, mixed/multi-type lists -> bodyId."""
+        root = self._setup(tmp_path, monkeypatch)
+        comparer = self._make_comparer(root, query=101, level="auto")
+
+        comparer.query = "LINE"
+        qdf = pd.DataFrame({"bodyId": [101, 102], "type": ["LINE", "LINE"],
+                            "instance": ["L1", "L2"]})
+        assert comparer._resolve_level(qdf) == "type"
+
+        comparer.query = 101
+        qdf1 = pd.DataFrame({"bodyId": [101], "type": ["LINE"], "instance": ["L1"]})
+        assert comparer._resolve_level(qdf1) == "bodyid"
+
+        comparer.query = [101, 102]
+        assert comparer._resolve_level(qdf) == "bodyid"  # all-numeric list
+
+        comparer.query = "SMP"  # single-member type still a type query
+        qdf2 = pd.DataFrame({"bodyId": [999], "type": ["SMP"], "instance": ["S"]})
+        assert comparer._resolve_level(qdf2) == "type"
+
+        comparer.query = ["LINE", "Y"]  # multi-type list -> bodyId rows
+        qdf3 = pd.DataFrame({"bodyId": [101, 103], "type": ["LINE", "Y"],
+                             "instance": ["L1", "Y1"]})
+        assert comparer._resolve_level(qdf3) == "bodyid"
+
+    def test_auto_level_end_to_end(self, tmp_path, monkeypatch):
+        root = self._setup(tmp_path, monkeypatch)
+
+        def fake_getNeurons(required, dataset_name, **kwargs):
+            rows = {101: ("LINE", "L1"), 102: ("LINE", "L2"), 103: ("Y", "Y1")}
+            if isinstance(required, str) and not required.isdigit():
+                b = [bid for bid, (t, _) in rows.items() if t == required]
+            else:
+                b = [int(r) for r in (required if isinstance(required, (list, tuple))
+                                      else [required])]
+            df = pd.DataFrame({"bodyId": b, "type": [rows[x][0] for x in b],
+                               "instance": [rows[x][1] for x in b]})
+            return df, pd.DataFrame(), "auto", None
+
+        monkeypatch.setattr(morph, "getNeurons", fake_getNeurons)
+        # type query -> type-to-type rows with the intra reference
+        comparer = self._make_comparer(root, query="LINE", level="auto")
+        res = comparer.find_similar()
+        assert "is_intra_type" in res.columns
+        assert res.iloc[0]["target_type"] == "LINE"
+        # bodyId query -> bodyId-to-bodyId rows
+        comparer2 = self._make_comparer(root, query=101, level="auto")
+        res2 = comparer2.find_similar()
+        assert "target_bodyId" in res2.columns
+        assert "is_same_type" in res2.columns
+
+    def test_type_summary_written_for_bodyid_level(self, tmp_path, monkeypatch):
+        root = self._setup(tmp_path, monkeypatch)
+        comparer = self._make_comparer(root, query=101, level="bodyid")
+        comparer.find_similar()
+        run_dir = Path(comparer.output_folder)
+        summary = pd.read_csv(run_dir / "type_summary.csv")
+        assert {"target_type", "avg_similarity", "max_similarity", "min_similarity",
+                "std_similarity", "n_bodyids", "is_query_type"}.issubset(summary.columns)
+        # identical-morphology LINE partner ranks first; flagged as query type
+        assert summary.iloc[0]["target_type"] == "LINE"
+        assert summary.iloc[0]["is_query_type"] == True  # noqa: E712
+        assert summary.iloc[0]["n_bodyids"] == 1
+        assert summary.iloc[1]["target_type"] == "Y"
+        assert summary.iloc[1]["is_query_type"] == False  # noqa: E712
+
+    def test_type_summary_written_for_type_level(self, tmp_path, monkeypatch):
+        root = self._setup(tmp_path, monkeypatch)
+        comparer = self._make_comparer(root, query=101, level="type")
+        comparer.find_similar()
+        run_dir = Path(comparer.output_folder)
+        summary = pd.read_csv(run_dir / "type_summary.csv")
+        assert {"target_type", "similarity", "n_bodyids", "is_intra_type"}.issubset(summary.columns)
+        assert summary.iloc[0]["target_type"] == "LINE"
+        assert summary.iloc[0]["is_intra_type"] == True  # noqa: E712
+
+
 class TestVisualizeTopResults:
     """3D skeleton visualization of the top-N found types (NB-style)."""
 

@@ -13,7 +13,7 @@ from ..runner import ScriptRunner
 
 MORPH_METHODS = ["vector", "nblast"]
 MORPH_METRICS = ["cosine", "pearson"]
-MORPH_LEVELS = ["bodyid", "type"]
+MORPH_LEVELS = ["auto", "bodyid", "type"]
 
 
 def create_find_similar_tab():
@@ -54,8 +54,11 @@ def create_find_similar_tab():
                 with param_grid(3):
                     level = select_input(
                         "Level", MORPH_LEVELS, DEFAULTS["morph_level"],
-                        hint="'bodyid': rank individual neurons. 'type': aggregate "
-                             "candidates by neuron type.",
+                        hint="'auto' (recommended): a type query returns "
+                             "type-to-type results, a bodyId query returns "
+                             "bodyId-to-bodyId results. 'bodyid': rank "
+                             "individual neurons. 'type': aggregate candidates "
+                             "by neuron type.",
                     )
                     method = select_input(
                         "Method", MORPH_METHODS, DEFAULTS["morph_method"],

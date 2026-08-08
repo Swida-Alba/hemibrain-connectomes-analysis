@@ -325,6 +325,56 @@ class TestProfileFirstPath:
         )
 
 
+class TestOutputsAndAutoLevel:
+    def test_auto_level_follows_query_kind(self, tmp_path_factory):
+        """level='auto': a type query yields type-to-type rows; a bodyId
+        query yields bodyId-to-bodyId rows."""
+        out = tmp_path_factory.mktemp("e2e_out")
+        c_type = morph.MorphologyComparer(
+            query="aMe12", dataset=DATASET, level="auto", method="vector",
+            metric="cosine", top_n=12, output_dir=str(out),
+            project_root=str(PROJECT_ROOT), candidate_source="cache",
+            verbose=False,
+        )
+        res = c_type.find_similar()
+        assert "is_intra_type" in res.columns
+        assert res.iloc[0]["target_type"] == "aMe12"
+        assert res.iloc[0]["is_intra_type"] == True  # noqa: E712
+
+        out2 = tmp_path_factory.mktemp("e2e_out")
+        c_bid = morph.MorphologyComparer(
+            query=911332304, dataset=DATASET, level="auto", method="vector",
+            metric="cosine", top_n=10, output_dir=str(out2),
+            project_root=str(PROJECT_ROOT), candidate_source="cache",
+            verbose=False,
+        )
+        res2 = c_bid.find_similar()
+        assert "target_bodyId" in res2.columns
+        assert "is_same_type" in res2.columns
+
+    def test_run_saves_type_summary_like_homologs(self, tmp_path_factory):
+        """Every run writes results.csv + type_summary.csv; bodyId runs get
+        per-type avg/best/std aggregation, type runs get the type rows."""
+        out = tmp_path_factory.mktemp("e2e_out")
+        comparer = morph.MorphologyComparer(
+            query=5813058431, dataset=DATASET, level="bodyid", method="vector",
+            metric="cosine", top_n=30, output_dir=str(out),
+            project_root=str(PROJECT_ROOT), candidate_source="cache",
+            verbose=False,
+        )
+        res = comparer.find_similar()
+        assert not res.empty
+        run_dir = Path(comparer.output_folder)
+        assert (run_dir / "results.csv").exists()
+        summary = pd.read_csv(run_dir / "type_summary.csv")
+        assert {"target_type", "avg_similarity", "max_similarity",
+                "std_similarity", "n_bodyids", "is_query_type"}.issubset(summary.columns)
+        # the query type (aMe12) is present and flagged
+        row = summary[summary["target_type"] == "aMe12"]
+        assert len(row) == 1
+        assert row.iloc[0]["is_query_type"] == True  # noqa: E712
+
+
 class TestVisualization:
     def test_type_level_renders_top_types_html(self, tmp_path_factory):
         """visualize_top_n renders one layer per top found type (the intra

@@ -782,7 +782,7 @@ class MorphologyComparer:
         self,
         query: Optional[Union[str, int]] = None,
         dataset: Optional[str] = None,
-        level: str = "bodyid",
+        level: str = "auto",
         method: str = "vector",
         metric: str = "cosine",
         top_n: int = 20,
@@ -818,8 +818,8 @@ class MorphologyComparer:
         self.use_cache = use_cache
         self.project_root = Path(project_root) if project_root else Path(__file__).parent.parent
 
-        if self.level not in ("bodyid", "type"):
-            raise ValueError(f"Invalid level: {self.level} (bodyid|type)")
+        if self.level not in ("auto", "bodyid", "type"):
+            raise ValueError(f"Invalid level: {self.level} (auto|bodyid|type)")
         if self.method not in ("vector", "nblast"):
             raise ValueError(f"Invalid method: {self.method} (vector|nblast)")
         if self.metric not in ("cosine", "pearson"):
@@ -858,6 +858,24 @@ class MorphologyComparer:
         return "profile" if not self._is_flywire() else "cache"
 
     # ------------------------------------------------------------------ query
+    def _resolve_level(self, query_df: pd.DataFrame) -> str:
+        """Resolve the result level for ``level='auto'``.
+
+        A bodyId query (all-numeric input) yields bodyId-to-bodyId rows; a
+        type query (type/pattern input resolving to one common type) yields
+        type-to-type rows; mixed or multi-type lists fall back to bodyId."""
+        if self.level != "auto":
+            return self.level
+        q = self.query
+        if isinstance(q, (list, tuple)):
+            all_digits = all(str(x).strip().isdigit() for x in q)
+        else:
+            all_digits = str(q).strip().isdigit()
+        if all_digits:
+            return "bodyid"
+        types = {str(t) for t in query_df["type"].tolist() if str(t)}
+        return "type" if len(types) == 1 else "bodyid"
+
     def _resolve_query(self) -> pd.DataFrame:
         if self.query is None:
             raise ValueError("No query neuron specified.")
@@ -902,6 +920,10 @@ class MorphologyComparer:
             )
 
         query_df = self._resolve_query()
+        if self.level == "auto":
+            self.level = self._resolve_level(query_df)
+            self._log(f"Level auto-resolved to: {self.level} "
+                      f"({'type-to-type' if self.level == 'type' else 'bodyId-to-bodyId'})")
         cache = SkeletonVectorCache(
             self.dataset, project_root=str(self.project_root),
             n_workers=self.n_workers, verbose=self.verbose,
@@ -1475,6 +1497,9 @@ class MorphologyComparer:
         run_dir.mkdir(parents=True, exist_ok=True)
 
         results.to_csv(run_dir / "results.csv", index=False)
+        summary = self._build_type_summary(results)
+        if summary is not None:
+            summary.to_csv(run_dir / "type_summary.csv", index=False)
         params = {
             "query": str(self.query),
             "dataset": self.dataset,
@@ -1498,6 +1523,59 @@ class MorphologyComparer:
         (run_dir / "README.txt").write_text("\n".join(readme))
         self._log(f"Results saved to: {run_dir}")
         self.output_folder = str(run_dir)
+
+    def _build_type_summary(self, results: pd.DataFrame) -> Optional[pd.DataFrame]:
+        """Per-target-type summary of the results (like homolog finding's
+        type_summary.csv).
+
+        bodyId-level runs are aggregated per target type (avg/best/std
+        similarity, profile mean, counts, query-type flag); type-level runs
+        are already aggregated, so their rows are written as-is. Returns None
+        when the results carry no type information."""
+        if results is None or results.empty or "target_type" not in results.columns:
+            return None
+        if self.level == "type" or "is_intra_type" in results.columns:
+            cols = [c for c in ("target_type", "similarity", "n_bodyids",
+                                "profile_similarity", "is_intra_type")
+                    if c in results.columns]
+            out = results[cols].copy()
+            out = out.sort_values("similarity", ascending=False).reset_index(drop=True)
+            return out
+        if "target_bodyId" not in results.columns:
+            return None
+
+        def _flag_query_type(rows: pd.DataFrame) -> bool:
+            if "is_same_type" in rows.columns:
+                return bool((rows["is_same_type"] == True).any())  # noqa: E712
+            return False
+
+        rows = []
+        for t, sub in results.groupby("target_type", sort=False):
+            if not str(t):
+                continue
+            sim = sub["similarity"].astype(float)
+            row = {
+                "target_type": str(t),
+                "avg_similarity": float(sim.mean()),
+                "max_similarity": float(sim.max()),
+                "min_similarity": float(sim.min()),
+                "std_similarity": float(sim.std()) if len(sim) > 1 else 0.0,
+                "n_bodyids": int(len(sub)),
+                "is_query_type": _flag_query_type(sub),
+            }
+            if "profile_similarity" in sub.columns:
+                prof = pd.to_numeric(sub["profile_similarity"], errors="coerce")
+                row["avg_profile_similarity"] = float(prof.mean()) \
+                    if prof.notna().any() else float("nan")
+            if "source_bodyId" in sub.columns:
+                row["n_source_bodyIds"] = int(sub["source_bodyId"].nunique())
+            rows.append(row)
+        if not rows:
+            return None
+        out = pd.DataFrame(rows).sort_values(
+            "avg_similarity", ascending=False
+        ).reset_index(drop=True)
+        return out
 
     # ------------------------------------------------------------------ viz
     def _visualize_top_results(self, results: pd.DataFrame):
