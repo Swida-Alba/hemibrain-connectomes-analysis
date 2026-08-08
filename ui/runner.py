@@ -225,6 +225,27 @@ TOOL_REGISTRY: Dict[str, dict] = {
             "plot": "vp.visualize()",
         },
     },
+    "find_similar_morphology": {
+        "label": "Morphological Similarity",
+        "import": "from morphology import MorphologyComparer",
+        "class": "MorphologyComparer",
+        "var": "comparer",
+        "init_method": None,
+        "methods": {
+            "find_similar": "comparer.find_similar()",
+        },
+    },
+    "find_similar_profile": {
+        "label": "Connection Profile Similarity",
+        "import": "from comparison.profile_comparator import HomologFinder",
+        "class": "HomologFinder",
+        "var": "finder",
+        "init_method": None,
+        "methods": {
+            "find_homologs_fast": "finder.find_homologs_fast()",
+            "find_novel_homologs": "finder.find_novel_homologs()",
+        },
+    },
 }
 
 
@@ -695,7 +716,7 @@ print("[DROCAT] Done.")
     # many runs — it must never be scanned as the current run's folder.
     _RUN_FOLDER_PREFIX_RE = re.compile(
         r"^(findpath|findallpath|finddirect|findhomologs|profiling|interdataset|"
-        r"plot3d|plotpath|colabel|findlines|findneuron)_"
+        r"plot3d|plotpath|colabel|findlines|findneuron|findsimilar)_"
     )
 
     def _resolve_scan_dir(self, output_dir: Optional[str] = None) -> Optional[str]:

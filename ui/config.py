@@ -133,6 +133,17 @@ DEFAULTS = {
     "similarity_metric": "rank_union",
     "top_n": 30,
     "match_algorithm": "cds",
+    # Find Similar Neurons (morphological mode)
+    "morph_level": "bodyid",
+    "morph_method": "vector",
+    "morph_metric": "cosine",
+    "morph_top_n": 20,
+    "nblast_prefilter": 100,
+    "n_per_type": 5,
+    "candidate_source": "auto",
+    "fetch_top_n": 20,
+    "morph_visualize_top_n": 6,
+    "morph_visualize_by": "type",
 }
 
 # Pathfinding algorithms (names match the FastGraph implementations:

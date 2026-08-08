@@ -327,6 +327,116 @@ class TestRunner:
         assert "include_untyped_partners" in params
         assert "expand_untyped_2hop" not in params
 
+    def test_homologs_tab_no_longer_has_loose_search_controls(self):
+        """The loose-search knobs (Min Shared Partners, Candidate Prune %)
+        were relocated to the Similar tab; the Find Homologs tab must not
+        expose them anymore."""
+        from nicegui import Client
+        from nicegui.page import page
+        from ui.tabs.find_homologs import create_find_homologs_tab
+
+        client = Client(page("/homologs-no-loose-controls"))
+        with client:
+            create_find_homologs_tab()
+        labels = [
+            getattr(el, "_props", {}).get("label")
+            for el in client.elements.values()
+            if getattr(el, "_props", {}).get("label")
+        ]
+        assert "Min Shared Partners" not in labels
+        assert "Candidate Prune %" not in labels
+
+    def test_similar_tab_has_both_modes_and_loose_knobs(self):
+        """The Similar tab renders both modes (morphological similarity and
+        connection profile similarity) and hosts the relocated loose knobs."""
+        from nicegui import Client
+        from nicegui.page import page
+        from ui.config import DEFAULTS
+        from ui.tabs.find_similar import create_find_similar_tab
+
+        client = Client(page("/similar-tab-structure"))
+        with client:
+            create_find_similar_tab()
+
+        labels = [
+            getattr(el, "_props", {}).get("label")
+            for el in client.elements.values()
+            if getattr(el, "_props", {}).get("label")
+        ]
+        # morphological mode controls
+        for label in ("Query Neuron(s)", "Level", "Method", "Metric",
+                      "NBLAST Prefilter", "Candidate Source", "Fetch Top-N Skeletons",
+                      "Visualize Top-N Types", "Visualize By"):
+            assert label in labels, f"missing morphological control: {label}"
+        # connection-profile mode controls (relocated loose knobs)
+        for label in ("Query Neuron (type or bodyId)", "Min Shared Partners",
+                      "Candidate Prune %", "Top K Partners"):
+            assert label in labels, f"missing profile control: {label}"
+
+        # The two top-N inputs must keep distinct defaults (regression: the
+        # profile panel used to shadow the morphological one via a shared
+        # closure variable, so "Top N Results" was always ignored).
+        by_label = {
+            getattr(el, "_props", {}).get("label"): el
+            for el in client.elements.values()
+            if getattr(el, "_props", {}).get("label")
+        }
+        assert by_label["Top N Results"].value == DEFAULTS["morph_top_n"]
+        assert by_label["Top N Candidates"].value == DEFAULTS["top_n"]
+        # 3D visualization defaults: enabled with 6 top types, grouped by type
+        assert by_label["Visualize Top-N Types"].value == DEFAULTS["morph_visualize_top_n"]
+        assert by_label["Visualize By"].value == DEFAULTS["morph_visualize_by"]
+
+        # mode toggle exists and exposes both modes
+        toggles = [
+            el for el in client.elements.values()
+            if getattr(el, "tag", "") == "q-btn-toggle"
+        ]
+        assert len(toggles) == 1
+        toggle_options = [
+            o.get("label") for o in toggles[0]._props.get("options", [])
+        ]
+        assert "Morphological similarity" in toggle_options
+        assert "Connection profile similarity" in toggle_options
+        # vector-cache action row
+        assert any(
+            getattr(el, "text", "") == "Build Vector Cache"
+            for el in client.elements.values()
+        )
+
+    def test_similar_tools_generate_runner_scripts(self):
+        """The runner generates scripts for both Similar tools."""
+        from ui.runner import ScriptRunner, TOOL_REGISTRY
+
+        assert "find_similar_morphology" in TOOL_REGISTRY
+        assert "find_similar_profile" in TOOL_REGISTRY
+
+        sr = ScriptRunner()
+        morph_script = sr._generate_script(
+            "find_similar_morphology",
+            {"query": "aMe12", "dataset": "male-cns:v1.0", "method": "vector",
+             "visualize_top_n": 6, "visualize_by": "type"},
+            "find_similar",
+            None,
+        )
+        assert "from morphology import MorphologyComparer" in morph_script
+        assert "comparer.find_similar()" in morph_script
+        assert "method='vector'" in morph_script
+        assert "visualize_top_n=6" in morph_script
+        assert "visualize_by='type'" in morph_script
+
+        profile_script = sr._generate_script(
+            "find_similar_profile",
+            {"source": "aMe12", "source_dataset": "male-cns:v1.0",
+             "target_dataset": "male-cns:v1.0",
+             "min_shared_partners": 1, "vector_prune_fraction": 1.0},
+            "find_homologs_fast",
+            None,
+        )
+        assert "from comparison.profile_comparator import HomologFinder" in profile_script
+        assert "finder.find_homologs_fast()" in profile_script
+        assert "min_shared_partners=1" in profile_script
+
     def test_homologs_empty_saveas_uses_auto_folder(self, tmp_path):
         """UI sends saveas='' when blank; results must land in a per-run
         findhomologs_ folder instead of being dumped into output_dir."""
@@ -399,6 +509,102 @@ class TestRunner:
             params={"query": "aMe12"},
         )
         assert (tmp_path / "my_custom_run" / "README.txt").exists()
+
+    def test_homologs_loose_search_params(self):
+        """HomologFinder exposes loose-search knobs: min_shared_partners and
+        vector_prune_fraction flow from the constructor into the searches."""
+        import inspect
+        import sys
+        sys.path.insert(0, str(PROJECT_ROOT / "src"))
+        from comparison.profile_comparator import HomologFinder
+
+        init_params = inspect.signature(HomologFinder.__init__).parameters
+        assert "min_shared_partners" in init_params
+        assert "vector_prune_fraction" in init_params
+        for method in ("find_homologs", "find_homologs_fast"):
+            params = inspect.signature(getattr(HomologFinder, method)).parameters
+            assert "vector_prune_fraction" in params
+        fast_params = inspect.signature(HomologFinder.find_homologs_fast).parameters
+        # None default = falls back to the constructor-level setting
+        assert fast_params["min_shared_partners"].default is None
+
+        finder = HomologFinder(
+            source="aMe12",
+            source_dataset="male-cns:v1.0",
+            target_dataset="male-cns:v1.0",
+            verbose=False,
+            min_shared_partners=1,
+            vector_prune_fraction=1.0,
+        )
+        assert finder.min_shared_partners == 1
+        assert finder.vector_prune_fraction == 1.0
+
+    def test_homologs_prune_fraction_controls_candidate_pool(self, monkeypatch):
+        """_compare_candidates_core keeps only the top-5% of candidates by
+        default, but every cosine-positive candidate when
+        vector_prune_fraction is 1.0 (loose search)."""
+        import sys
+        sys.path.insert(0, str(PROJECT_ROOT / "src"))
+        from comparison import profile_comparator as pc
+        from comparison.profile_comparator import HomologFinder
+        from comparison.connectivity_profiler import ConnectivityStatus
+
+        class FakeProfile:
+            def __init__(self, partners):
+                self.upstream_partners = dict(partners)
+                self.downstream_partners = {}
+                self.untyped_upstream_bodyids = {}
+                self.untyped_downstream_bodyids = {}
+                self.untyped_upstream_2hop = {}
+                self.untyped_downstream_2hop = {}
+                self.connectivity_status = ConnectivityStatus.COMPLETE
+
+        finder = object.__new__(HomologFinder)
+        finder.verbose = False
+        finder._in_progress_bar = False
+
+        monkeypatch.setattr(
+            pc.ProfileComparator, "weighted_cosine_similarity",
+            staticmethod(lambda a, b, direction: 0.5),  # every candidate positive
+        )
+        seen = {"bids": None}
+
+        def fake_batch(source_profile, target_profiles_cache, candidate_map, direction,
+                       type_mapper=None):
+            seen["bids"] = sorted(candidate_map.keys())
+            return []
+
+        monkeypatch.setattr(
+            pc.ProfileComparator, "batch_compare_cross_dataset",
+            staticmethod(fake_batch),
+        )
+
+        target_profiles = {bid: FakeProfile({"A": 5}) for bid in range(2, 22)}
+        common = dict(
+            source_bodyids=[1],
+            source_profiles_cache={1: FakeProfile({"A": 5, "B": 5})},
+            source_status_map={1: ConnectivityStatus.COMPLETE},
+            target_profiles_cache=target_profiles,
+            target_type_lookup={bid: f"T{bid}" for bid in range(2, 22)},
+            source_type_lookup={1: "SRC"},
+            candidate_map={1: {bid: 1 for bid in range(2, 22)}},  # 20 candidates
+            is_cross_dataset=True,
+            target_dataset="male-cns:v1.0",
+            show_progress=False,
+            similarity_metric="rank_union",
+            top_n=20,
+            include_intra_type=False,
+            vector_prefiltering=True,
+            type_mapper=None,
+        )
+
+        # Default prune: top 5% of 20 = 1 candidate reaches full scoring.
+        finder._compare_candidates_core(**common, vector_prune_fraction=0.05)
+        assert seen["bids"] == [2]
+
+        # Loose: every cosine-positive candidate reaches full scoring.
+        finder._compare_candidates_core(**common, vector_prune_fraction=1.0)
+        assert seen["bids"] == list(range(2, 22))
 
     def test_interdataset_output_name_prefix(self):
         """Inter-dataset runs use the interdataset_ folder prefix."""
@@ -960,16 +1166,16 @@ class TestTabs:
     def test_all_tab_functions_exist(self):
         from ui.tabs import (
             create_find_path_tab, create_find_direct_tab, create_connectivity_profiling_tab,
-            create_find_homologs_tab, create_inter_dataset_tab, create_nb_find_lines_tab,
-            create_nb_find_neuron_tab, create_nb_colabel_tab, create_skeleton_tab,
-            create_network_tab, create_visualization_tab,
+            create_find_homologs_tab, create_find_similar_tab, create_inter_dataset_tab,
+            create_nb_find_lines_tab, create_nb_find_neuron_tab, create_nb_colabel_tab,
+            create_skeleton_tab, create_network_tab, create_visualization_tab,
             create_settings_tab,
         )
         assert all(callable(f) for f in [
             create_find_path_tab, create_find_direct_tab, create_connectivity_profiling_tab,
-            create_find_homologs_tab, create_inter_dataset_tab, create_nb_find_lines_tab,
-            create_nb_find_neuron_tab, create_nb_colabel_tab, create_skeleton_tab,
-            create_network_tab, create_visualization_tab,
+            create_find_homologs_tab, create_find_similar_tab, create_inter_dataset_tab,
+            create_nb_find_lines_tab, create_nb_find_neuron_tab, create_nb_colabel_tab,
+            create_skeleton_tab, create_network_tab, create_visualization_tab,
             create_settings_tab,
         ])
 

@@ -1,0 +1,142 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Find Similar Neurons - DROCAT Instructions</title>
+  <link rel="stylesheet" href="guide.css">
+</head>
+<body>
+<main class="guide">
+  <header class="guide-top">
+    <a class="back" href="README.html">&larr; Back to guides</a>
+    <span class="tag">Connectome</span>
+  </header>
+  <h1>Find Similar Neurons</h1>
+  <p>Search for neurons similar to a query by <b>morphology</b> (skeleton
+    shape) or by <b>connection profile</b> (synaptic partner structure).
+    A mode toggle switches between the two search families.</p>
+
+  <h2>Morphological similarity</h2>
+  <p>Two methods are available. Both reuse the skeleton/mesh data cached
+    under <code>cache/{dataset}/skeletons/</code> (including nested bulk
+    folders); the query neuron's skeleton is fetched on demand if missing.</p>
+  <table>
+    <tr><th>Method</th><th>Cost</th><th>Notes</th></tr>
+    <tr><td><b>Vector</b> (recommended)</td><td>&lt;10 ms per query</td>
+      <td>Each neuron is reduced to ~24 morphometrics plus a 100-dim shape
+        block: a persistence vector for skeletons, a spatial histogram for
+        meshes (FlyWire bulk caches). Scores are cosine / Pearson on
+        z-scored vectors. Requires the skeleton vector cache (auto-built on
+        first query, or use the <b>Build Vector Cache</b> button).</td></tr>
+    <tr><td><b>NBLAST</b></td><td>~5–15 s for 100 prefiltered candidates</td>
+      <td>Canonical Costa et al. 2016 pairwise score via navis, on skeletons
+        only (FlyWire mesh caches do not support NBLAST — use the vector
+        method there). Dotprops are rebuilt per query and never cached.</td></tr>
+  </table>
+
+  <h2>Candidate source</h2>
+  <p><b>Candidate Source</b> selects how candidates are discovered before
+    morphological scoring:</p>
+  <ul>
+    <li><b>auto</b> (default): NeuPrint datasets (hemibrain, male-cns, ...)
+      use <b>connection-profile-first</b>: a connectivity similarity search
+      (HomologFinder) ranks candidates, then skeletons are fetched only for
+      the <b>top-N</b> of them — bounding the skeleton fetch to an acceptable
+      scale. FlyWire datasets (which have bulk mesh caches) search the vector
+      cache directly.</li>
+    <li><b>profile</b>: always connection-first (all datasets).</li>
+    <li><b>cache</b>: always direct vector-cache search.</li>
+  </ul>
+  <p><b>Fetch Top-N Skeletons</b> (default 20) is the fetch bound: in
+    profile-first mode it is the number of top connection-similarity
+    candidates whose skeletons are fetched. Fetched skeletons are
+    <b>transient</b> — used for the current comparison only and never written
+    to the skeleton cache; already-cached skeletons are still reused. 0 = only
+    use already-cached skeletons. The query neuron is always fetched if
+    missing. Results carry both <code>profile_similarity</code>
+    (connectivity) and <code>similarity</code> (morphology) scores. If the
+    connection search finds no candidates (sparse connectivity), the search
+    falls back to the vector cache when available.</p>
+
+  <h2>Skeleton vector cache</h2>
+  <p>One parquet file per dataset:
+    <code>cache/{dataset}/morphology/skeleton_vectors.parquet</code>
+    (~1 KB/neuron, ~30–50x smaller than the raw skeletons). It builds
+    incrementally from already-cached skeletons (~15–85 ms/neuron), is
+    auto-triggered on the first query, and can be extended by
+    <b>Fetch Missing Skeletons</b> (fetches up to N neurons on demand and
+    persists them to the skeleton cache for reuse).</p>
+  <div class="callout">
+    <b>Coverage:</b> the cache only covers skeletons already downloaded. With
+    partial coverage, missing candidates simply do not appear in the results.
+  </div>
+
+  <h2>Connection profile similarity</h2>
+  <p>The relocated "find similar" search from Homolog Finding: query-vs-all
+    within one dataset (default) or across datasets, ranked by connectivity
+    profile similarity. Same backend (<code>HomologFinder</code>) and the same
+    loose-search knobs:</p>
+  <ul>
+    <li><b>Min Shared Partners</b> (default 2): shared partners required for a
+      candidate; 1 = loosest discovery.</li>
+    <li><b>Candidate Prune %</b> (default 5): top N% of cosine-positive
+      candidates kept after vector pre-filtering; 100 = keep all (loosest).</li>
+    <li><b>Fast Search</b> (default on): adjacency expansion; switch off for
+      the comprehensive query-vs-all search.</li>
+  </ul>
+  <p>Results are additionally enriched with vector-based morphological
+    similarity columns (<code>morph_cosine</code>, <code>morph_pearson</code>)
+    computed from the final ranked rows only.</p>
+
+  <h2>Intra-type reference data</h2>
+  <p>Every search reports the query's intra-type similarity alongside the
+    inter-type rows, so results are always comparable against a same-type
+    baseline:</p>
+  <ul>
+    <li><b>Type queries</b> return the query type itself as the first row
+      (<code>is_intra_type=True</code>). Its <code>similarity</code> is the
+      type's cohesion (mean score of its members against the query vector)
+      and <code>intra_type_similarity</code> is the mean pairwise similarity
+      of the type's members — the intra-type reference every other row is
+      ranked against. <code>n_bodyids</code> gives the member count.</li>
+    <li><b>bodyId queries</b> tag same-type hits with
+      <code>is_same_type=True</code> and carry the query type's
+      <code>intra_type_similarity</code> on every result row.</li>
+  </ul>
+  <p>In practice (hemibrain v1.2.1, verified 2026-08): aMe12's two members
+    are each other's top hit (0.90 = the intra-type similarity), aMe5 bodyId
+    queries return 10+ same-type members before any inter-type row, and
+    sim(aMe12, aMe10) &gt; sim(aMe12, aMe5) in both directions. Note that
+    single-cell types (e.g. SMP581) can tie or exceed the cohesion of
+    morphologically diffuse types (aMe10, aMe5) — the intra row is a
+    reference, not a guaranteed winner.</p>
+
+  <h2>3D visualization of the found neurons</h2>
+  <p>After a morphological run, the <b>top-N types</b> of the found similar
+    neurons can be rendered as an interactive 3D skeleton view (same engine
+    as the 3D Skeleton tab and the NeuronBridge FindNeuron visualization):</p>
+  <ul>
+    <li><b>Visualize Top-N Types</b> (default 6; 0 = disabled): number of
+      top result types/rows to render.</li>
+    <li><b>Visualize By</b> (default <code>type</code>):
+      <code>type</code> renders one layer per top type, containing all of
+      its member skeletons found in the results (type-level queries resolve
+      members from the vector cache, bounded by <b>BodyIds / Type</b>);
+      <code>bodyId</code> renders one layer per top result neuron.</li>
+  </ul>
+  <p>Each layer is colored per type and labeled
+    <code>r{rank}_{type}_x{N}</code> (rank = similarity rank of the type,
+    N = member count). The intra-type reference row is never rendered. The
+    interactive HTML is saved next to the results in
+    <code>{run_folder}/plot3d_{dataset}/</code> and listed in the output
+    panel; a visualization failure never discards the search results.</p>
+
+  <h2>Output</h2>
+  <p>Each run is saved in its own timestamped folder:</p>
+  <pre><code>morphological: {output_dir}/findsimilar_{DATASET}_{query}_{timestamp}/
+                 results.csv, README.txt
+profile:       {output_dir}/findhomologs_{SRC}_to_{TGT}_{query}_{timestamp}/</code></pre>
+</main>
+</body>
+</html>

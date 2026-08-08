@@ -57,6 +57,16 @@
       what it needs.</li>
   </ul>
 
+  <h2>Loose search (more candidates)</h2>
+  <p>The loose-search knobs (<b>Min Shared Partners</b>, <b>Candidate
+    Prune %</b>) now live on the <a href="find_similar.html">Similar
+    tab</a> (connection-profile mode). The backend parameters
+    (<code>min_shared_partners</code>, <code>vector_prune_fraction</code>)
+    remain supported programmatically: lower the shared-partner threshold
+    (1 = any shared partner) and raise the prune fraction (1.0 = keep all
+    cosine-positive candidates) to widen the candidate pool while keeping the
+    same adjacency-expansion hops.</p>
+
   <h2>Output</h2>
   <p>Each run is saved in its own timestamped folder named after the query
   (the <b>Save Folder Name</b> field overrides this):</p>

@@ -31,6 +31,7 @@ from ui.tabs import (
     create_find_direct_tab,
     create_connectivity_profiling_tab,
     create_find_homologs_tab,
+    create_find_similar_tab,
     create_inter_dataset_tab,
     create_nb_find_lines_tab,
     create_nb_find_neuron_tab,
@@ -485,6 +486,7 @@ def main_page():
             tab_network = ui.tab("Network", icon="account_tree").classes("drocat-connectome-tab")
             tab_comparison = ui.tab("Cross-Dataset", icon="sync_alt").classes("drocat-connectome-tab")
             tab_homologs = ui.tab("Homologs", icon="compare").classes("drocat-connectome-tab")
+            tab_similar = ui.tab("Similar", icon="science").classes("drocat-connectome-tab")
             tab_profiling = ui.tab("Profiling", icon="analytics").classes("drocat-connectome-tab")
             tab_find_lines = ui.tab("Find Lines", icon="biotech").classes("drocat-nb-tab")
             tab_find_neuron = ui.tab("Find Neurons", icon="search").classes("drocat-nb-tab")
@@ -513,6 +515,8 @@ def main_page():
                 create_flylight_tab()
             with ui.tab_panel(tab_homologs).classes("p-0"):
                 create_find_homologs_tab()
+            with ui.tab_panel(tab_similar).classes("p-0"):
+                create_find_similar_tab()
             with ui.tab_panel(tab_profiling).classes("p-0"):
                 create_connectivity_profiling_tab()
             with ui.tab_panel(tab_settings).classes("p-0"):

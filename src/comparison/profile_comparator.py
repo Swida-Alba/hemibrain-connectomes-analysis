@@ -2312,6 +2312,9 @@ class HomologFinder:
         verbose: bool = True,
         token: str = '',
         vector_prefiltering: bool = False,
+        min_shared_partners: int = 2,
+        vector_prune_fraction: float = 0.05,
+        morphological_enrichment: bool = True,
         use_auto_type_mapping: bool = True,
         ensure_cache_complete: bool = False,
     ):
@@ -2359,6 +2362,12 @@ class HomologFinder:
                 Custom weights for combined score: {'jaccard': 0.5, 'rank': 0.5}
             verbose: Print progress messages
             token: API token for NeuPrint (if empty, FNC auto-handles from env vars)
+            min_shared_partners: Minimum shared partners for adjacency-expansion
+                candidate discovery (default: 2). Lower = looser search
+                (1 = any single shared partner makes a candidate).
+            vector_prune_fraction: Fraction of cosine-positive candidates kept by
+                vector pre-filtering (default: 0.05 = top 5% by adjacency score).
+                1.0 keeps ALL cosine-positive candidates (loosest search).
             use_auto_type_mapping: Enable automatic type mapping for cross-dataset
                 comparison (default: True). When enabled, partner types are
                 standardized to their canonical (male-cns) names before comparison.
@@ -2412,6 +2421,18 @@ class HomologFinder:
         self.visualize_skeleton = visualize_skeleton
         self.visualize_top_n = visualize_top_n
         self.vector_prefiltering = vector_prefiltering
+
+        # Loose-search knobs: candidate discovery requires at least
+        # min_shared_partners shared partners; vector pre-filtering keeps the
+        # top vector_prune_fraction of candidates by adjacency score among
+        # the cosine-positive set (0.05 = 5%, 1.0 = keep all / loosest).
+        self.min_shared_partners = min_shared_partners
+        self.vector_prune_fraction = vector_prune_fraction
+
+        # After ranking, attach vector-based morphological similarity
+        # (morph_cosine / morph_pearson) to the final result rows. This runs
+        # post-search only and never affects ranking or search speed.
+        self.morphological_enrichment = morphological_enrichment
         
         # Auto type mapping for cross-dataset comparison
         # When enabled, partner types are standardized to canonical (male-cns) names
@@ -3469,7 +3490,8 @@ class HomologFinder:
         n_shuffles: int = 100,
         shuffle_seed: Optional[int] = None,
         visualize_skeleton: Optional[bool] = None,
-        visualize_top_n: Optional[int] = None
+        visualize_top_n: Optional[int] = None,
+        vector_prune_fraction: Optional[float] = None
     ) -> pd.DataFrame:
         """
         Comprehensive homolog discovery - searches the ENTIRE target dataset.
@@ -3542,6 +3564,7 @@ class HomologFinder:
         visualize_skeleton = visualize_skeleton if visualize_skeleton is not None else self.visualize_skeleton
         visualize_top_n = visualize_top_n if visualize_top_n is not None else self.visualize_top_n
         top_n = top_n if top_n is not None else self.top_n
+        vector_prune_fraction = vector_prune_fraction if vector_prune_fraction is not None else self.vector_prune_fraction
         
         # Validate required parameters
         if query is None:
@@ -3664,6 +3687,7 @@ class HomologFinder:
             min_score=min_score,
             include_intra_type=not is_cross_dataset,
             vector_prefiltering=self.vector_prefiltering,
+            vector_prune_fraction=vector_prune_fraction,
             type_mapper=type_mapper
         )
 
@@ -3701,6 +3725,9 @@ class HomologFinder:
                 results_df['shuffle_significant'] = shuffle_stats['is_significant']
                 self._log(shuffle_stats.get('summary', ''))
         
+        # Attach vector-based morphological similarity (post-search only).
+        results_df = self._enrich_with_morphology(results_df, source_dataset, target_dataset)
+
         # Save results if output_dir is provided
         if output_dir is not None:
             save_result = self._save_homolog_results_internal(
@@ -4377,6 +4404,7 @@ class HomologFinder:
         min_score: Optional[float] = None,
         include_intra_type: bool = True,
         vector_prefiltering: bool = False,
+        vector_prune_fraction: float = 0.05,
         type_mapper: Optional[CrossDatasetTypeMapper] = None
     ) -> Tuple[pd.DataFrame, pd.DataFrame, Dict[str, List[int]], Dict[str, List[int]], Dict[int, 'ConnectivityStatus'], Dict[int, 'ConnectivityStatus'], Dict[str, int]]: # 
         """
@@ -4402,7 +4430,14 @@ class HomologFinder:
         warned_sources: Dict[str, List[int]] = {'rare_or_uni': []}
 
         if vector_prefiltering and self.verbose:
-            self._log("Vector prefiltering enabled: keep top 5% by adjacency, then cosine>0 before full scoring")
+            prune_label = (
+                f"top {vector_prune_fraction * 100:.0f}% by adjacency"
+                if vector_prune_fraction < 1.0
+                else "all cosine-positive"
+            )
+            self._log(
+                f"Vector prefiltering enabled: keep {prune_label}, then cosine>0 before full scoring"
+            )
 
         # Set progress bar flag so _log uses tqdm.write
         was_in_progress = self._in_progress_bar
@@ -4449,17 +4484,27 @@ class HomologFinder:
 
                 cos_kept = len(cos_filtered)
 
-                # Then keep top 5% of TOTAL candidates by adjacency score among cosine-positive set
-                if cos_kept > 0:
-                    top_k = max(1, math.ceil(total_candidates * 0.05))
+                # Then keep the top fraction of TOTAL candidates by adjacency
+                # score among the cosine-positive set. vector_prune_fraction
+                # >= 1.0 disables the prune (loosest search): every
+                # cosine-positive candidate is kept.
+                if cos_kept > 0 and vector_prune_fraction < 1.0:
+                    top_k = max(1, math.ceil(total_candidates * vector_prune_fraction))
                     top_candidates = dict(heapq.nlargest(top_k, cos_filtered.items(), key=lambda x: x[1][0]))
                     source_candidates = {bid: shared for bid, (shared, _) in top_candidates.items()}
+                elif cos_kept > 0:
+                    source_candidates = {bid: shared for bid, (shared, _) in cos_filtered.items()}
                 else:
                     source_candidates = {}
 
                 if self.verbose and show_progress:
+                    keep_label = (
+                        f"top {vector_prune_fraction * 100:.0f}% of total"
+                        if vector_prune_fraction < 1.0
+                        else "all"
+                    )
                     self._log(
-                        f"Prefiltered {total_candidates}→{cos_kept} (cos>0) →{len(source_candidates)} (top 5% of total) for source {source_bid}"
+                        f"Prefiltered {total_candidates}→{cos_kept} (cos>0) →{len(source_candidates)} ({keep_label}) for source {source_bid}"
                     )
 
             if not source_candidates:
@@ -4792,7 +4837,8 @@ class HomologFinder:
         source_dataset: Optional[str] = None,
         target_dataset: Optional[str] = None,
         top_n: Optional[int] = None,
-        min_shared_partners: int = 2,
+        min_shared_partners: Optional[int] = None,
+        vector_prune_fraction: Optional[float] = None,
         min_weight: int = 3,
         show_progress: bool = True,
         output_dir: Optional[str] = None,
@@ -4841,7 +4887,11 @@ class HomologFinder:
             source_dataset: Source dataset. Uses self.source_dataset if not provided.
             target_dataset: Target dataset to search. Uses self.target_dataset if not provided.
             top_n: Maximum candidates to return per source neuron (default: 20)
-            min_shared_partners: Minimum shared partners to be a candidate (default: 2)
+            min_shared_partners: Minimum shared partners to be a candidate
+                (default: 2). Lower = looser search (1 = any shared partner).
+            vector_prune_fraction: Fraction of cosine-positive candidates kept by
+                vector pre-filtering (default: 0.05 = top 5% by adjacency score).
+                1.0 keeps ALL cosine-positive candidates (loosest search).
             min_weight: Minimum synapse weight for candidate discovery (default: 3)
             show_progress: Show progress bar
             output_dir: Directory to save results. Uses self.output_dir if not provided.
@@ -4909,6 +4959,8 @@ class HomologFinder:
         visualize_top_n = visualize_top_n if visualize_top_n is not None else self.visualize_top_n
         similarity_metric = similarity_metric if similarity_metric is not None else self.similarity_metric
         top_n = top_n if top_n is not None else self.top_n
+        min_shared_partners = min_shared_partners if min_shared_partners is not None else self.min_shared_partners
+        vector_prune_fraction = vector_prune_fraction if vector_prune_fraction is not None else self.vector_prune_fraction
         
         # Validate required parameters
         if query is None:
@@ -5380,6 +5432,7 @@ class HomologFinder:
                 min_score=None,
                 include_intra_type=not is_cross_dataset,
                 vector_prefiltering=self.vector_prefiltering,
+            vector_prune_fraction=vector_prune_fraction,
                 type_mapper=type_mapper,
             )
 
@@ -5425,6 +5478,8 @@ class HomologFinder:
             
             # Save results - always save (use default output_dir if not specified)
             save_output_dir = output_dir if output_dir is not None else self.output_dir
+            # Attach vector-based morphological similarity (post-search only).
+            results_df = self._enrich_with_morphology(results_df, source_dataset, target_dataset)
             self._save_homolog_results_internal(
                 results_df=results_df,
                 query=query,
@@ -5459,300 +5514,304 @@ class HomologFinder:
         # BodyId query: single neuron comparison (also used for single-bodyId type)
         # =====================================================================
         
-            from .connectivity_profiler import ConnectivityStatus
+        from .connectivity_profiler import ConnectivityStatus
 
-            # Build source profile using ConnectivityProfiler (1-hop/2-hop hybrid)
-            self._log("Building source profile via ConnectivityProfiler (1-hop/2-hop hybrid)")
-            source_profile = self.profiler.get_profile(query, source_dataset)
-            if source_profile is None:
-                self._log(f"ERROR: No connections found for {query_label}")
-                return pd.DataFrame()
+        # Build source profile using ConnectivityProfiler (1-hop/2-hop hybrid)
+        self._log("Building source profile via ConnectivityProfiler (1-hop/2-hop hybrid)")
+        source_profile = self.profiler.get_profile(query, source_dataset)
+        if source_profile is None:
+            self._log(f"ERROR: No connections found for {query_label}")
+            return pd.DataFrame()
 
-            source_bid = int(query)
-            source_bodyids = [source_bid]
+        source_bid = int(query)
+        source_bodyids = [source_bid]
 
-            upstream_types = set(source_profile.upstream_partners.keys())
-            downstream_types = set(source_profile.downstream_partners.keys())
+        upstream_types = set(source_profile.upstream_partners.keys())
+        downstream_types = set(source_profile.downstream_partners.keys())
 
-            self._log(f"Source profile: {len(upstream_types)} upstream, {len(downstream_types)} downstream types")
+        self._log(f"Source profile: {len(upstream_types)} upstream, {len(downstream_types)} downstream types")
 
-            # Build source caches for shared comparison core
-            source_profiles_cache: Dict[int, 'ConnectivityProfile'] = {source_bid: source_profile}
-            source_status_map: Dict[int, ConnectivityStatus] = {source_bid: source_profile.connectivity_status}
-            source_status_counts: Dict[str, int] = {s.value: 0 for s in ConnectivityStatus}
-            source_status_counts[source_profile.connectivity_status.value] += 1
-            source_type_lookup_single = {
-                source_bid: source_type_lookup.get(source_bid, source_profile.neuron_type or str(query))
-            }
+        # Build source caches for shared comparison core
+        source_profiles_cache: Dict[int, 'ConnectivityProfile'] = {source_bid: source_profile}
+        source_status_map: Dict[int, ConnectivityStatus] = {source_bid: source_profile.connectivity_status}
+        source_status_counts: Dict[str, int] = {s.value: 0 for s in ConnectivityStatus}
+        source_status_counts[source_profile.connectivity_status.value] += 1
+        source_type_lookup_single = {
+            source_bid: source_type_lookup.get(source_bid, source_profile.neuron_type or str(query))
+        }
 
-            # Step 3: Find candidates via adjacency expansion (2-hop neighbors, bodyId-level)
-            self._log("Finding candidate field via adjacency expansion (bodyId-level)...")
+        # Step 3: Find candidates via adjacency expansion (2-hop neighbors, bodyId-level)
+        self._log("Finding candidate field via adjacency expansion (bodyId-level)...")
 
-            candidate_map: Dict[int, Dict[int, int]] = {}
-            all_candidate_bodyids: set = set()
+        candidate_map: Dict[int, Dict[int, int]] = {}
+        all_candidate_bodyids: set = set()
 
-            if is_cross_dataset:
-                # Cross-dataset: use partner TYPE overlap to expand candidates, then map to bodyIds
-                self._log("Collecting source partner types for cross-dataset expansion...")
-                all_upstream_types = {t for t in upstream_types if t and not pd.isna(t) and t != ''}
-                all_downstream_types = {t for t in downstream_types if t and not pd.isna(t) and t != ''}
+        if is_cross_dataset:
+            # Cross-dataset: use partner TYPE overlap to expand candidates, then map to bodyIds
+            self._log("Collecting source partner types for cross-dataset expansion...")
+            all_upstream_types = {t for t in upstream_types if t and not pd.isna(t) and t != ''}
+            all_downstream_types = {t for t in downstream_types if t and not pd.isna(t) and t != ''}
 
-                self._log(f"Source partner types: {len(all_upstream_types)} upstream, {len(all_downstream_types)} downstream")
+            self._log(f"Source partner types: {len(all_upstream_types)} upstream, {len(all_downstream_types)} downstream")
 
-                # Build reverse lookup: type -> bodyIds in target dataset (typed neurons only)
-                self._log("Building type-to-bodyId lookup for target dataset...")
-                target_type_to_bodyids: Dict[str, set] = {}
-                for bid, t in target_type_lookup.items():
-                    if t and not pd.isna(t) and t != '':
-                        target_type_to_bodyids.setdefault(t, set()).add(bid)
+            # Build reverse lookup: type -> bodyIds in target dataset (typed neurons only)
+            self._log("Building type-to-bodyId lookup for target dataset...")
+            target_type_to_bodyids: Dict[str, set] = {}
+            for bid, t in target_type_lookup.items():
+                if t and not pd.isna(t) and t != '':
+                    target_type_to_bodyids.setdefault(t, set()).add(bid)
 
-                # Get all bodyIds in target dataset (for including untyped in C and D)
-                all_target_bodyids = set(target_bodyid_up.keys()) | set(target_bodyid_down.keys())
-                self._log(f"Target dataset: {len(all_target_bodyids)} total bodyIds")
+            # Get all bodyIds in target dataset (for including untyped in C and D)
+            all_target_bodyids = set(target_bodyid_up.keys()) | set(target_bodyid_down.keys())
+            self._log(f"Target dataset: {len(all_target_bodyids)} total bodyIds")
 
-                # Set A': Target bodyIds with types matching source's upstream partners
-                self._log("Computing Set A' (type-matched upstream)...")
-                set_a_prime: set = set()
-                for up_type in all_upstream_types:
-                    set_a_prime.update(target_type_to_bodyids.get(up_type, set()))
+            # Set A': Target bodyIds with types matching source's upstream partners
+            self._log("Computing Set A' (type-matched upstream)...")
+            set_a_prime: set = set()
+            for up_type in all_upstream_types:
+                set_a_prime.update(target_type_to_bodyids.get(up_type, set()))
 
-                # Set B': Target bodyIds with types matching source's downstream partners
-                self._log("Computing Set B' (type-matched downstream)...")
-                set_b_prime: set = set()
-                for down_type in all_downstream_types:
-                    set_b_prime.update(target_type_to_bodyids.get(down_type, set()))
+            # Set B': Target bodyIds with types matching source's downstream partners
+            self._log("Computing Set B' (type-matched downstream)...")
+            set_b_prime: set = set()
+            for down_type in all_downstream_types:
+                set_b_prime.update(target_type_to_bodyids.get(down_type, set()))
 
-                # Precompute partner type sets per bodyId for fast union
-                downstream_sets_by_bodyid = {bid: set(partners.keys()) for bid, partners in target_bodyid_down.items()}
-                upstream_sets_by_bodyid = {bid: set(partners.keys()) for bid, partners in target_bodyid_up.items()}
+            # Precompute partner type sets per bodyId for fast union
+            downstream_sets_by_bodyid = {bid: set(partners.keys()) for bid, partners in target_bodyid_down.items()}
+            upstream_sets_by_bodyid = {bid: set(partners.keys()) for bid, partners in target_bodyid_up.items()}
 
-                # Set C: Downstream of A' (upstream's downstream)
-                self._log("Computing Set C (downstream of A') via type unions...")
-                downstream_types_c: set = set()
-                for bid in set_a_prime:
-                    downstream_types_c.update(downstream_sets_by_bodyid.get(bid, set()))
-                set_c: set = set()
-                for partner_type in downstream_types_c:
-                    if partner_type and not pd.isna(partner_type) and partner_type != '':
-                        set_c.update(target_type_to_bodyids.get(partner_type, set()))
+            # Set C: Downstream of A' (upstream's downstream)
+            self._log("Computing Set C (downstream of A') via type unions...")
+            downstream_types_c: set = set()
+            for bid in set_a_prime:
+                downstream_types_c.update(downstream_sets_by_bodyid.get(bid, set()))
+            set_c: set = set()
+            for partner_type in downstream_types_c:
+                if partner_type and not pd.isna(partner_type) and partner_type != '':
+                    set_c.update(target_type_to_bodyids.get(partner_type, set()))
 
-                # Set D: Upstream of B' (downstream's upstream)
-                self._log("Computing Set D (upstream of B') via type unions...")
-                upstream_types_d: set = set()
-                for bid in set_b_prime:
-                    upstream_types_d.update(upstream_sets_by_bodyid.get(bid, set()))
-                set_d: set = set()
-                for partner_type in upstream_types_d:
-                    if partner_type and not pd.isna(partner_type) and partner_type != '':
-                        set_d.update(target_type_to_bodyids.get(partner_type, set()))
+            # Set D: Upstream of B' (downstream's upstream)
+            self._log("Computing Set D (upstream of B') via type unions...")
+            upstream_types_d: set = set()
+            for bid in set_b_prime:
+                upstream_types_d.update(upstream_sets_by_bodyid.get(bid, set()))
+            set_d: set = set()
+            for partner_type in upstream_types_d:
+                if partner_type and not pd.isna(partner_type) and partner_type != '':
+                    set_d.update(target_type_to_bodyids.get(partner_type, set()))
 
-                # Candidate set = A' ∪ B' ∪ C ∪ D (includes both typed and untyped)
-                all_candidate_bodyids = set_a_prime | set_b_prime | set_c | set_d
+            # Candidate set = A' ∪ B' ∪ C ∪ D (includes both typed and untyped)
+            all_candidate_bodyids = set_a_prime | set_b_prime | set_c | set_d
 
-                # Count typed vs untyped
-                typed_candidates = {bid for bid in all_candidate_bodyids 
-                                   if target_type_lookup.get(bid, '') and 
-                                   not pd.isna(target_type_lookup.get(bid, '')) and
-                                   target_type_lookup.get(bid, '') != ''}
-                untyped_candidates = all_candidate_bodyids - typed_candidates
+            # Count typed vs untyped
+            typed_candidates = {bid for bid in all_candidate_bodyids 
+                               if target_type_lookup.get(bid, '') and 
+                               not pd.isna(target_type_lookup.get(bid, '')) and
+                               target_type_lookup.get(bid, '') != ''}
+            untyped_candidates = all_candidate_bodyids - typed_candidates
 
-                self._log(f"Cross-dataset candidates: A'={len(set_a_prime)}, B'={len(set_b_prime)}, C={len(set_c)}, D={len(set_d)} → {len(all_candidate_bodyids)} unique ({len(typed_candidates)} typed, {len(untyped_candidates)} untyped)")
+            self._log(f"Cross-dataset candidates: A'={len(set_a_prime)}, B'={len(set_b_prime)}, C={len(set_c)}, D={len(set_d)} → {len(all_candidate_bodyids)} unique ({len(typed_candidates)} typed, {len(untyped_candidates)} untyped)")
 
-                candidate_scores: Dict[int, int] = {}
-                for bid in all_candidate_bodyids:
-                    shared_downstream = len(downstream_sets_by_bodyid.get(bid, set()) & all_upstream_types)
-                    shared_upstream = len(upstream_sets_by_bodyid.get(bid, set()) & all_downstream_types)
-                    candidate_scores[bid] = shared_downstream + shared_upstream
-                candidate_map[source_bid] = candidate_scores
+            candidate_scores: Dict[int, int] = {}
+            for bid in all_candidate_bodyids:
+                shared_downstream = len(downstream_sets_by_bodyid.get(bid, set()) & all_upstream_types)
+                shared_upstream = len(upstream_sets_by_bodyid.get(bid, set()) & all_downstream_types)
+                candidate_scores[bid] = shared_downstream + shared_upstream
+            candidate_map[source_bid] = candidate_scores
+        else:
+            # Same-dataset: adjacency expansion using shared partner types
+            from collections import defaultdict
+            upstream_partner_to_bodyids: Dict[str, set] = defaultdict(set)
+            downstream_partner_to_bodyids: Dict[str, set] = defaultdict(set)
+            for bid, partners in target_bodyid_up.items():
+                for ptype in partners.keys():
+                    if ptype and not pd.isna(ptype) and ptype != '':
+                        upstream_partner_to_bodyids[ptype].add(bid)
+            for bid, partners in target_bodyid_down.items():
+                for ptype in partners.keys():
+                    if ptype and not pd.isna(ptype) and ptype != '':
+                        downstream_partner_to_bodyids[ptype].add(bid)
+
+            candidate_bodyids: Dict[int, int] = {}
+
+            # Get bodyIds receiving from same upstream types
+            for up_type in upstream_types:
+                for target_bid in upstream_partner_to_bodyids.get(up_type, set()):
+                    if target_bid == source_bid:
+                        continue
+                    candidate_bodyids[target_bid] = candidate_bodyids.get(target_bid, 0) + 1
+
+            # Get bodyIds sending to same downstream types
+            for down_type in downstream_types:
+                for target_bid in downstream_partner_to_bodyids.get(down_type, set()):
+                    if target_bid == source_bid:
+                        continue
+                    candidate_bodyids[target_bid] = candidate_bodyids.get(target_bid, 0) + 1
+
+            # Filter by minimum shared partners
+            candidate_bodyids = {k: v for k, v in candidate_bodyids.items() if v >= min_shared_partners}
+
+            candidate_map[source_bid] = candidate_bodyids
+            all_candidate_bodyids.update(candidate_bodyids.keys())
+
+        if not all_candidate_bodyids:
+            self._log("No candidates found after adjacency expansion")
+            return pd.DataFrame()
+
+        # Step 4: Build profiles for all candidates using ConnectivityProfiler (1-hop/2-hop hybrid)
+        target_profiles_cache: Dict[int, 'ConnectivityProfile'] = {}
+        target_status_counts: Dict[str, int] = {s.value: 0 for s in ConnectivityStatus}
+        target_status_map: Dict[int, ConnectivityStatus] = {}
+
+        target_profiles_cache = self._build_profiles_batch(
+            list(all_candidate_bodyids),
+            target_dataset,
+            show_progress=show_progress,
+            label="target"
+        )
+        for bid, profile in target_profiles_cache.items():
+            status = profile.connectivity_status
+            target_status_counts[status.value] += 1
+            target_status_map[bid] = status
+
+        if target_status_counts:
+            status_summary = ", ".join([f"{k.upper()}: {v}" for k, v in target_status_counts.items() if v > 0])
+            self._log(f"Target connectivity status breakdown: {status_summary}")
+
+        # Get type mapper for cross-dataset comparison
+        type_mapper = self._get_type_mapper_for_comparison(is_cross_dataset)
+        
+        # Step 5: Compare via shared core
+        results_df, intra_type_df, skipped_sources, warned_sources, source_status_map, target_status_map, target_status_counts = self._compare_candidates_core(
+            source_bodyids=source_bodyids,
+            source_profiles_cache=source_profiles_cache,
+            source_status_map=source_status_map,
+            target_profiles_cache=target_profiles_cache,
+            target_type_lookup=target_type_lookup,
+            source_type_lookup=source_type_lookup_single,
+            candidate_map=candidate_map,
+            is_cross_dataset=is_cross_dataset,
+            target_dataset=target_dataset,
+            show_progress=show_progress,
+            similarity_metric=similarity_metric,
+            top_n=top_n,
+            min_score=None,
+            include_intra_type=False,
+            vector_prefiltering=self.vector_prefiltering,
+        vector_prune_fraction=vector_prune_fraction,
+            type_mapper=type_mapper,
+        )
+
+        # Log skipped and warned sources by status
+        total_skipped = len(skipped_sources['none'])
+        total_warned = len(warned_sources['rare_or_uni'])
+        if total_skipped > 0:
+            self._log(f"Skipped {total_skipped} source neurons with no partners (NONE/ORPHAN):")
+            self._log(f"  - {skipped_sources['none'][:5]}{'...' if len(skipped_sources['none']) > 5 else ''}")
+        if total_warned > 0:
+            self._log(f"WARNING: {total_warned} source neurons are sparse/unidirectional (RARE/UNIDIRECTIONAL) - results may be unreliable:")
+            self._log(f"  - {warned_sources['rare_or_uni'][:5]}{'...' if len(warned_sources['rare_or_uni']) > 5 else ''}")
+
+        if results_df.empty:
+            self._log("No valid candidates after profile comparison")
+            return pd.DataFrame()
+
+        self._log(f"Found {len(results_df)} bodyId-level matches")
+
+        # Run shuffle test if requested (before saving so we include results)
+        shuffle_stats = None
+        if run_shuffle_test:
+            self._log(f"Running shuffle control test with {n_shuffles} iterations...")
+
+            query_profile = self.profiler.get_profile(
+                query,
+                source_dataset
+            )
+
+            if query_profile is None:
+                self._log("Warning: Could not get query profile for shuffle test")
             else:
-                # Same-dataset: adjacency expansion using shared partner types
-                from collections import defaultdict
-                upstream_partner_to_bodyids: Dict[str, set] = defaultdict(set)
-                downstream_partner_to_bodyids: Dict[str, set] = defaultdict(set)
-                for bid, partners in target_bodyid_up.items():
-                    for ptype in partners.keys():
-                        if ptype and not pd.isna(ptype) and ptype != '':
-                            upstream_partner_to_bodyids[ptype].add(bid)
-                for bid, partners in target_bodyid_down.items():
-                    for ptype in partners.keys():
-                        if ptype and not pd.isna(ptype) and ptype != '':
-                            downstream_partner_to_bodyids[ptype].add(bid)
-
-                candidate_bodyids: Dict[int, int] = {}
-
-                # Get bodyIds receiving from same upstream types
-                for up_type in upstream_types:
-                    for target_bid in upstream_partner_to_bodyids.get(up_type, set()):
-                        if target_bid == source_bid:
-                            continue
-                        candidate_bodyids[target_bid] = candidate_bodyids.get(target_bid, 0) + 1
-
-                # Get bodyIds sending to same downstream types
-                for down_type in downstream_types:
-                    for target_bid in downstream_partner_to_bodyids.get(down_type, set()):
-                        if target_bid == source_bid:
-                            continue
-                        candidate_bodyids[target_bid] = candidate_bodyids.get(target_bid, 0) + 1
-
-                # Filter by minimum shared partners
-                candidate_bodyids = {k: v for k, v in candidate_bodyids.items() if v >= min_shared_partners}
-
-                candidate_map[source_bid] = candidate_bodyids
-                all_candidate_bodyids.update(candidate_bodyids.keys())
-
-            if not all_candidate_bodyids:
-                self._log("No candidates found after adjacency expansion")
-                return pd.DataFrame()
-
-            # Step 4: Build profiles for all candidates using ConnectivityProfiler (1-hop/2-hop hybrid)
-            target_profiles_cache: Dict[int, 'ConnectivityProfile'] = {}
-            target_status_counts: Dict[str, int] = {s.value: 0 for s in ConnectivityStatus}
-            target_status_map: Dict[int, ConnectivityStatus] = {}
-
-            target_profiles_cache = self._build_profiles_batch(
-                list(all_candidate_bodyids),
-                target_dataset,
-                show_progress=show_progress,
-                label="target"
-            )
-            for bid, profile in target_profiles_cache.items():
-                status = profile.connectivity_status
-                target_status_counts[status.value] += 1
-                target_status_map[bid] = status
-
-            if target_status_counts:
-                status_summary = ", ".join([f"{k.upper()}: {v}" for k, v in target_status_counts.items() if v > 0])
-                self._log(f"Target connectivity status breakdown: {status_summary}")
-
-            # Get type mapper for cross-dataset comparison
-            type_mapper = self._get_type_mapper_for_comparison(is_cross_dataset)
-            
-            # Step 5: Compare via shared core
-            results_df, intra_type_df, skipped_sources, warned_sources, source_status_map, target_status_map, target_status_counts = self._compare_candidates_core(
-                source_bodyids=source_bodyids,
-                source_profiles_cache=source_profiles_cache,
-                source_status_map=source_status_map,
-                target_profiles_cache=target_profiles_cache,
-                target_type_lookup=target_type_lookup,
-                source_type_lookup=source_type_lookup_single,
-                candidate_map=candidate_map,
-                is_cross_dataset=is_cross_dataset,
-                target_dataset=target_dataset,
-                show_progress=show_progress,
-                similarity_metric=similarity_metric,
-                top_n=top_n,
-                min_score=None,
-                include_intra_type=False,
-                vector_prefiltering=self.vector_prefiltering,
-                type_mapper=type_mapper,
-            )
-
-            # Log skipped and warned sources by status
-            total_skipped = len(skipped_sources['none'])
-            total_warned = len(warned_sources['rare_or_uni'])
-            if total_skipped > 0:
-                self._log(f"Skipped {total_skipped} source neurons with no partners (NONE/ORPHAN):")
-                self._log(f"  - {skipped_sources['none'][:5]}{'...' if len(skipped_sources['none']) > 5 else ''}")
-            if total_warned > 0:
-                self._log(f"WARNING: {total_warned} source neurons are sparse/unidirectional (RARE/UNIDIRECTIONAL) - results may be unreliable:")
-                self._log(f"  - {warned_sources['rare_or_uni'][:5]}{'...' if len(warned_sources['rare_or_uni']) > 5 else ''}")
-
-            if results_df.empty:
-                self._log("No valid candidates after profile comparison")
-                return pd.DataFrame()
-
-            self._log(f"Found {len(results_df)} bodyId-level matches")
-
-            # Run shuffle test if requested (before saving so we include results)
-            shuffle_stats = None
-            if run_shuffle_test:
-                self._log(f"Running shuffle control test with {n_shuffles} iterations...")
-
-                query_profile = self.profiler.get_profile(
-                    query,
-                    source_dataset
+                shuffle_stats = self.run_random_control_test(
+                    source=query,
+                    source_dataset=source_dataset,
+                    target_dataset=target_dataset,
+                    n_shuffles=n_shuffles,
+                    top_n=top_n,
+                    seed=shuffle_seed,
+                    show_progress=show_progress
                 )
 
-                if query_profile is None:
-                    self._log("Warning: Could not get query profile for shuffle test")
-                else:
-                    shuffle_stats = self.run_random_control_test(
-                        source=query,
-                        source_dataset=source_dataset,
-                        target_dataset=target_dataset,
-                        n_shuffles=n_shuffles,
-                        top_n=top_n,
-                        seed=shuffle_seed,
-                        show_progress=show_progress
-                    )
+                if shuffle_stats and 'p_value' in shuffle_stats:
+                    results_df['shuffle_p_value'] = shuffle_stats['p_value']
+                    results_df['shuffle_z_score'] = shuffle_stats['z_score']
+                    results_df['shuffle_effect_size'] = shuffle_stats['effect_size']
+                    results_df['shuffle_significant'] = shuffle_stats.get('is_significant', 
+                                                                         shuffle_stats['p_value'] < 0.05)
 
-                    if shuffle_stats and 'p_value' in shuffle_stats:
-                        results_df['shuffle_p_value'] = shuffle_stats['p_value']
-                        results_df['shuffle_z_score'] = shuffle_stats['z_score']
-                        results_df['shuffle_effect_size'] = shuffle_stats['effect_size']
-                        results_df['shuffle_significant'] = shuffle_stats.get('is_significant', 
-                                                                             shuffle_stats['p_value'] < 0.05)
+                self._log(f"Shuffle test: p={shuffle_stats['p_value']:.4f}, "
+                         f"z={shuffle_stats['z_score']:.2f}, d={shuffle_stats['effect_size']:.2f}")
 
-                    self._log(f"Shuffle test: p={shuffle_stats['p_value']:.4f}, "
-                             f"z={shuffle_stats['z_score']:.2f}, d={shuffle_stats['effect_size']:.2f}")
+        # Save results - always save (use default output_dir if not specified)
+        save_output_dir = output_dir if output_dir is not None else self.output_dir
 
-            # Save results - always save (use default output_dir if not specified)
-            save_output_dir = output_dir if output_dir is not None else self.output_dir
+        # Attach vector-based morphological similarity (post-search only).
+        results_df = self._enrich_with_morphology(results_df, source_dataset, target_dataset)
 
-            # Build source status summary for JSON export
-            source_status_summary = {
-                'query': str(query),
-                'source_dataset': source_dataset,
-                'total_source_neurons': len(source_bodyids),
-                'status_breakdown': source_status_counts,
-                'skipped_sources': {
-                    'none': skipped_sources['none'],
-                    'total': len(skipped_sources['none'])
-                },
-                'warned_sources': {
-                    'rare_or_uni': warned_sources['rare_or_uni'],
-                    'total': len(warned_sources['rare_or_uni'])
-                },
-                'included_for_comparison': len(source_bodyids) - len(skipped_sources['none']),
-                'status_hierarchy': {
-                    'none': 'No connections (0 partners) - SKIPPED entirely',
-                    'rare_or_uni': 'Rare (<5 partners) or unidirectional - INCLUDED with WARNING',
-                    'incomplete': 'Fewer than top_k partners - included with Warning',
-                    'incomplete_expansion': 'Fewer than top_m unique types - included with Warning',
-                    'complete': 'Full profile meeting all criteria'
-                }
+        # Build source status summary for JSON export
+        source_status_summary = {
+            'query': str(query),
+            'source_dataset': source_dataset,
+            'total_source_neurons': len(source_bodyids),
+            'status_breakdown': source_status_counts,
+            'skipped_sources': {
+                'none': skipped_sources['none'],
+                'total': len(skipped_sources['none'])
+            },
+            'warned_sources': {
+                'rare_or_uni': warned_sources['rare_or_uni'],
+                'total': len(warned_sources['rare_or_uni'])
+            },
+            'included_for_comparison': len(source_bodyids) - len(skipped_sources['none']),
+            'status_hierarchy': {
+                'none': 'No connections (0 partners) - SKIPPED entirely',
+                'rare_or_uni': 'Rare (<5 partners) or unidirectional - INCLUDED with WARNING',
+                'incomplete': 'Fewer than top_k partners - included with Warning',
+                'incomplete_expansion': 'Fewer than top_m unique types - included with Warning',
+                'complete': 'Full profile meeting all criteria'
             }
+        }
 
-            self._save_homolog_results_internal(
-                results_df=results_df,
-                query=query,
-                source_dataset=source_dataset,
-                target_dataset=target_dataset,
-                output_dir=save_output_dir,
-                saveas=saveas,
-                direction='both',
-                include_partner_details=include_partner_details,
-                top_n_details=top_n_details,
-                params={
-                    'query': query,
-                    'source_dataset': source_dataset,
-                    'target_dataset': target_dataset,
-                    'top_n': top_n,
-                    'min_shared_partners': min_shared_partners,
-                    'min_weight': min_weight,
-                    'method': 'find_homologs_fast',
-                    'source_bodyids_count': len(source_bodyids),
-                    'profile_method': '1-hop/2-hop hybrid via ConnectivityProfiler'
-                },
-                shuffle_stats=shuffle_stats,
-                visualize_skeleton=visualize_skeleton,
-                visualize_top_n=visualize_top_n,
-                similarity_metric=self.similarity_metric,
-                intra_type_df=intra_type_df,
-                source_status_summary=source_status_summary
-            )
+        self._save_homolog_results_internal(
+            results_df=results_df,
+            query=query,
+            source_dataset=source_dataset,
+            target_dataset=target_dataset,
+            output_dir=save_output_dir,
+            saveas=saveas,
+            direction='both',
+            include_partner_details=include_partner_details,
+            top_n_details=top_n_details,
+            params={
+                'query': query,
+                'source_dataset': source_dataset,
+                'target_dataset': target_dataset,
+                'top_n': top_n,
+                'min_shared_partners': min_shared_partners,
+                'min_weight': min_weight,
+                'method': 'find_homologs_fast',
+                'source_bodyids_count': len(source_bodyids),
+                'profile_method': '1-hop/2-hop hybrid via ConnectivityProfiler'
+            },
+            shuffle_stats=shuffle_stats,
+            visualize_skeleton=visualize_skeleton,
+            visualize_top_n=visualize_top_n,
+            similarity_metric=self.similarity_metric,
+            intra_type_df=intra_type_df,
+            source_status_summary=source_status_summary
+        )
 
-            return results_df
+        return results_df
     
     def find_homologs_intra_dataset(
         self,
@@ -5790,6 +5849,32 @@ class HomologFinder:
             top_n=top_n,
             show_progress=show_progress
         )
+
+    def _enrich_with_morphology(
+        self,
+        results_df: pd.DataFrame,
+        source_dataset: str,
+        target_dataset: str,
+    ) -> pd.DataFrame:
+        """Attach vector-based morphological similarity to final results.
+
+        Post-search only: runs on the already-ranked result rows and never
+        affects candidate selection, scoring, or ranking. Adds
+        ``morph_cosine`` / ``morph_pearson`` columns (NaN where skeletons are
+        unavailable) and never drops rows.
+        """
+        if not self.morphological_enrichment or results_df is None or results_df.empty:
+            return results_df
+        try:
+            from morphology import enrich_homolog_results
+            return enrich_homolog_results(
+                results_df, source_dataset, target_dataset,
+                project_root=getattr(self, "project_root", None),
+                verbose=self.verbose,
+            )
+        except Exception as e:
+            self._log(f"⚠ Morphological enrichment skipped: {e}")
+            return results_df
 
     def _save_homolog_results_internal(
         self,
