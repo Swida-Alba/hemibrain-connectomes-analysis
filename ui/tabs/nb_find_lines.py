@@ -62,12 +62,6 @@ def create_nb_find_lines_tab():
                     "Separate Split-GAL4 Results", True,
                     hint="Generate separate summary CSVs for GAL4/LexA vs Split-GAL4 lines.",
                 )
-                ui.separator()
-                ui.label("Image Download").classes("text-caption font-bold")
-                with ui.row().classes("gap-4"):
-                    download_images = checkbox_input("Download Images", False, hint="Download matched images from NeuronBridge.")
-                    download_flylight = checkbox_input("From FlyLight", False, hint="Download from FlyLight S3/CDN.")
-                    generate_pdf = checkbox_input("PDF Summary", True, hint="Create a PDF with downloaded images ordered by score.")
                 with param_grid(3):
                     region = select_input(
                         "Region", ["Brain", "VNC", "All"], "Brain",
@@ -81,41 +75,48 @@ def create_nb_find_lines_tab():
                         "Sort By", ["max", "completeness"], "max",
                         hint="'max': highest match score. 'completeness': best coverage of all queries.",
                     )
-                with param_grid(2):
-                    image_formats = multi_select_input(
-                        "Image Formats", ["png", "jpg"], ["png", "jpg"],
-                        hint="File formats to download (neuronbridge: png/jpg; flylight adds h5j/mp4/json).",
-                    )
-                    image_types = multi_select_input(
-                        "Image Types", ["cdm", "mip", "aligned", "translation", "metadata"], ["cdm", "mip"],
-                        hint="Image types to download (cdm/mip for NeuronBridge).",
-                    )
-                with param_grid(3):
-                    max_download_images = number_input(
-                        "Max Images / Line", 12, 1, 100,
-                        hint="Maximum number of images downloaded per driver line.",
-                    )
-                    flylight_category = multi_select_input(
-                        "FlyLight Collections", ["GAL4/LEXA", "SplitGAL4", "MCFO", "RawImages"],
-                        ["GAL4/LEXA", "SplitGAL4"],
-                        hint="FlyLight collections searched in priority order (MCFO is the fallback).",
-                    )
-                    simple_mode = checkbox_input(
-                        "Simple Mode (fewer files)", True,
-                        hint="Download only representative files (20x/multichannel for Split-GAL4, "
-                             "total for GAL4/LexA).",
-                    )
-                with param_grid(3):
-                    pdf_cols = number_input("PDF Images Per Page (cols)", 3, 1, 6)
-                    pdf_rows = number_input("PDF Images Per Page (rows)", 2, 1, 6)
-                    summary_background = select_input(
-                        "Summary Background", ["black", "white"], "black",
-                        hint="Background color for the PDF/PPTX image summary.",
-                    )
-                    organize_by_region = checkbox_input(
-                        "Organize by Region", False,
-                        hint="Group downloaded FlyLight images into Brain/VNC subfolders.",
-                    )
+
+        with ui.card().classes("w-full drocat-card").props('id="card-nb-image-download"'):
+            section_header("Image Download", "image")
+            with ui.row().classes("gap-4"):
+                download_images = checkbox_input("Download Images", False, hint="Download matched images from NeuronBridge.")
+                download_flylight = checkbox_input("From FlyLight", False, hint="Download from FlyLight S3/CDN.")
+                generate_pdf = checkbox_input("PDF Summary", True, hint="Create a PDF with downloaded images ordered by score.")
+            with param_grid(2):
+                image_formats = multi_select_input(
+                    "Image Formats", ["png", "jpg"], ["png", "jpg"],
+                    hint="File formats to download (neuronbridge: png/jpg; flylight adds h5j/mp4/json).",
+                )
+                image_types = multi_select_input(
+                    "Image Types", ["cdm", "mip", "aligned", "translation", "metadata"], ["cdm", "mip"],
+                    hint="Image types to download (cdm/mip for NeuronBridge).",
+                )
+            with param_grid(3):
+                max_download_images = number_input(
+                    "Max Images / Line", 12, 1, 100,
+                    hint="Maximum number of images downloaded per driver line.",
+                )
+                flylight_category = multi_select_input(
+                    "FlyLight Collections", ["GAL4/LEXA", "SplitGAL4", "MCFO", "RawImages"],
+                    ["GAL4/LEXA", "SplitGAL4"],
+                    hint="FlyLight collections searched in priority order (MCFO is the fallback).",
+                )
+                simple_mode = checkbox_input(
+                    "Simple Mode (fewer files)", True,
+                    hint="Download only representative files (20x/multichannel for Split-GAL4, "
+                         "total for GAL4/LexA).",
+                )
+            with param_grid(3):
+                pdf_cols = number_input("PDF Images Per Page (cols)", 3, 1, 6)
+                pdf_rows = number_input("PDF Images Per Page (rows)", 2, 1, 6)
+                summary_background = select_input(
+                    "Summary Background", ["black", "white"], "black",
+                    hint="Background color for the PDF/PPTX image summary.",
+                )
+                organize_by_region = checkbox_input(
+                    "Organize by Region", False,
+                    hint="Group downloaded FlyLight images into Brain/VNC subfolders.",
+                )
 
     with results_col:
         output_panel.create(run_label="Find Driver Lines", run_icon="play_arrow")

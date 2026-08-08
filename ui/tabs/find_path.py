@@ -48,7 +48,7 @@ def create_find_path_tab():
                 output_dir = dir_input()
                 mapping_select = mapping_selector(label="Custom Grouping")
 
-        with ui.card().classes("w-full drocat-card"):
+        with ui.card().classes("w-full drocat-card").props('id="card-findpath-core"'):
             section_header("Core Parameters", "tune")
             with param_grid(3):
                 max_interlayer = number_input(
@@ -66,16 +66,6 @@ def create_find_path_tab():
 
             # --- Advanced Settings (collapsed) ---
             with ui.expansion("Advanced Settings", icon="settings_suggest").classes("w-full"):
-                with param_grid(2):
-                    custom_source_name = ui.input(
-                        label="Custom Source Name (optional)",
-                        placeholder="e.g., aMe_clock",
-                    ).classes("w-full").tooltip("Custom label for source group in output files/plots.")
-                    custom_target_name = ui.input(
-                        label="Custom Target Name (optional)",
-                        placeholder="e.g., PPL1_dopamine",
-                    ).classes("w-full").tooltip("Custom label for target group in output files/plots.")
-
                 keyword_filter = neuron_list_input(
                     label="Keywords to Exclude from Paths",
                     show_filter=False,
@@ -104,84 +94,96 @@ def create_find_path_tab():
                          "'auto': all columns (bodyId -> type -> instance -> flywireType/others). "
                          "Use 'type'/'instance'/'bodyId' to restrict the search.",
                 )
-
-                with param_grid(3):
-                    filter_by = select_input(
-                        "Filter By", FILTER_OPTIONS, DEFAULTS["filter_by"],
-                        hint="'bodyId': filter at individual neuron level. 'type': aggregate by neuron type.",
-                    )
-                    output_format = select_input(
-                        "Output Format", OUTPUT_FORMATS, DEFAULTS["output_format"],
-                        hint="'csv': faster, smaller. 'xlsx': Excel format with formatting.",
-                    )
-                    network_layout = select_input(
-                        "Network Layout", NETWORK_LAYOUTS, DEFAULTS["network_layout"],
-                        hint="Layout algorithm for the HTML network visualization.",
-                    )
+                filter_by = select_input(
+                    "Filter By", FILTER_OPTIONS, DEFAULTS["filter_by"],
+                    hint="'bodyId': filter at individual neuron level. 'type': aggregate by neuron type.",
+                )
 
                 with ui.row().classes("gap-4"):
                     use_cache = checkbox_input(
                         "Use Cache", DEFAULTS["use_cache"],
                         hint="Cache neuron data locally for 10-100x speedup on repeated runs.",
                     )
-                    skip_bodyid = checkbox_input(
-                        "Skip BodyId in Output", True,
-                        hint="Exclude individual bodyId-level results. Only show type-level aggregation.",
-                    )
-                    show_fig = checkbox_input(
-                        "Show Figure", False,
-                        hint="Open the interactive HTML visualization automatically after completion.",
-                    )
                     cache_only = checkbox_input(
                         "Cache Only (Offline)", False,
                         hint="Use only local cache and never contact the server. "
                              "Requires the cache to be pre-built.",
                     )
-                with param_grid(2):
-                    saveas = ui.input(
-                        label="Save Folder Name (optional)",
-                        placeholder="e.g., aMe_clock_paths",
-                    ).classes("w-full drocat-input").tooltip(
-                        "Custom output folder name. Leave empty for the unified auto name "
-                        "(findallpath_<dataset>_<src>_to_<tgt>_<params>_<timestamp>; "
-                        "findpath_... in per-path mode)."
-                    )
 
-                ui.separator()
-                with ui.row().classes("gap-4"):
-                    separate_hemi = checkbox_input(
-                        "Separate Hemispheres (L/R)", False,
-                        hint="Split type/group aggregation into _L/_R/_U hemisphere labels.",
-                    )
-                    hemi_filter = select_input(
-                        "Hemisphere", ["both", "left", "right"], "both",
-                        hint="'both': all neurons. 'left'/'right': restrict to that hemisphere. "
-                             "Neurons WITHOUT an explicit hemisphere (no _L/_R instance suffix "
-                             "or Soma side) are always included in every option.",
-                    )
-                    keep_hemi_conserved = checkbox_input(
-                        "Keep Only Hemisphere-Conserved Edges", False,
-                        hint="Keep only edges conserved between hemispheres (requires Separate Hemispheres).",
-                    )
-                    symmetry_analysis = checkbox_input(
-                        "Symmetry Analysis", False,
-                        hint="Generate ipsilateral vs contralateral symmetry outputs.",
-                    )
-                    find_reciprocal = checkbox_input(
-                        "Find Reciprocal Connections", False,
-                        hint="Enrich the path graph with reciprocal direct connections.",
-                    )
-                def _sync_hemisphere_options():
-                    if separate_hemi.value:
-                        keep_hemi_conserved.enable()
-                        symmetry_analysis.enable()
-                        hemi_filter.set_enabled(True)
-                    else:
-                        keep_hemi_conserved.disable()
-                        symmetry_analysis.disable()
-                        hemi_filter.set_enabled(False)
-                separate_hemi.on_value_change(lambda _e: _sync_hemisphere_options())
-                _sync_hemisphere_options()
+        with ui.card().classes("w-full drocat-card").props('id="card-findpath-output"'):
+            section_header("Output Options", "output")
+            with param_grid(2):
+                custom_source_name = ui.input(
+                    label="Custom Source Name (optional)",
+                    placeholder="e.g., aMe_clock",
+                ).classes("w-full").tooltip("Custom label for source group in output files/plots.")
+                custom_target_name = ui.input(
+                    label="Custom Target Name (optional)",
+                    placeholder="e.g., PPL1_dopamine",
+                ).classes("w-full").tooltip("Custom label for target group in output files/plots.")
+            with param_grid(3):
+                output_format = select_input(
+                    "Output Format", OUTPUT_FORMATS, DEFAULTS["output_format"],
+                    hint="'csv': faster, smaller. 'xlsx': Excel format with formatting.",
+                )
+                network_layout = select_input(
+                    "Network Layout", NETWORK_LAYOUTS, DEFAULTS["network_layout"],
+                    hint="Layout algorithm for the HTML network visualization.",
+                )
+                saveas = ui.input(
+                    label="Save Folder Name (optional)",
+                    placeholder="e.g., aMe_clock_paths",
+                ).classes("w-full drocat-input").tooltip(
+                    "Custom output folder name. Leave empty for the unified auto name "
+                    "(findallpath_<dataset>_<src>_to_<tgt>_<params>_<timestamp>; "
+                    "findpath_... in per-path mode)."
+                )
+            with ui.row().classes("gap-4"):
+                skip_bodyid = checkbox_input(
+                    "Skip BodyId in Output", True,
+                    hint="Exclude individual bodyId-level results. Only show type-level aggregation.",
+                )
+                show_fig = checkbox_input(
+                    "Show Figure", False,
+                    hint="Open the interactive HTML visualization automatically after completion.",
+                )
+
+        with ui.card().classes("w-full drocat-card").props('id="card-findpath-hemisphere"'):
+            section_header("Hemisphere Analysis", "sync_alt")
+            with ui.row().classes("gap-4"):
+                separate_hemi = checkbox_input(
+                    "Separate Hemispheres (L/R)", False,
+                    hint="Split type/group aggregation into _L/_R/_U hemisphere labels.",
+                )
+                hemi_filter = select_input(
+                    "Hemisphere", ["both", "left", "right"], "both",
+                    hint="'both': all neurons. 'left'/'right': restrict to that hemisphere. "
+                         "Neurons WITHOUT an explicit hemisphere (no _L/_R instance suffix "
+                         "or Soma side) are always included in every option.",
+                )
+                keep_hemi_conserved = checkbox_input(
+                    "Keep Only Hemisphere-Conserved Edges", False,
+                    hint="Keep only edges conserved between hemispheres (requires Separate Hemispheres).",
+                )
+                symmetry_analysis = checkbox_input(
+                    "Symmetry Analysis", False,
+                    hint="Generate ipsilateral vs contralateral symmetry outputs.",
+                )
+                find_reciprocal = checkbox_input(
+                    "Find Reciprocal Connections", False,
+                    hint="Enrich the path graph with reciprocal direct connections.",
+                )
+            def _sync_hemisphere_options():
+                if separate_hemi.value:
+                    keep_hemi_conserved.enable()
+                    symmetry_analysis.enable()
+                    hemi_filter.set_enabled(True)
+                else:
+                    keep_hemi_conserved.disable()
+                    symmetry_analysis.disable()
+                    hemi_filter.set_enabled(False)
+            separate_hemi.on_value_change(lambda _e: _sync_hemisphere_options())
+            _sync_hemisphere_options()
 
     with results_col:
         output_panel.create(run_label="Find All Paths", run_icon="account_tree")

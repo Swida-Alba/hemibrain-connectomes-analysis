@@ -788,6 +788,195 @@ class TestRunner:
         assert editor.get_value() == "Dark2"
         assert changes == ["manual"]
 
+    def test_palette_editor_drag_reorder_reset_and_range(self):
+        """palette_editor exposes ONE interactive preview row: drag & drop
+        reorders discrete colors, the range slider slices the palette live,
+        and the reset button (beside the preview) restores the original
+        order and the full range."""
+        from nicegui import Client
+        from nicegui.page import page
+        from ui.components.palette_picker import palette_editor, palette_slice
+
+        changes = []
+        client = Client(page("/palette-editor-interactive"))
+        with client:
+            editor = palette_editor(
+                "Neuron Colors", value="Category10",
+                on_change=lambda: changes.append("edit"),
+            )
+        original = list(editor.get_palette_order())
+        assert len(original) == 10  # Category10 is discrete
+
+        # ---- drag & drop: move color #0 before color #2 ----
+        drop_rows = [
+            el for el in client.elements.values()
+            if any(
+                l.type == "drop" and "clientX" in (l.js_handler or "")
+                for l in el._event_listeners.values()
+            )
+        ]
+        assert len(drop_rows) == 1, "expected exactly one horizontal drag target row"
+        swatch_area = drop_rows[0]
+        drop_listener = next(
+            l for l in swatch_area._event_listeners.values() if l.type == "drop"
+        )
+        swatch_area._handle_event({
+            "listener_id": drop_listener.id,
+            "args": {"from": 0, "to": 2},
+        })
+        reordered = editor.get_palette_order()
+        assert reordered[0:3] == [original[1], original[0], original[2]]
+        assert editor.get_colors() == reordered  # full range = current state
+        assert changes == ["edit"]  # manual edit locks the palette
+
+        # ---- range slider: slice the palette live ----
+        range_el = next(
+            el for el in client.elements.values()
+            if getattr(el, "tag", "") == "q-range"
+        )
+        range_listener = next(
+            l for l in range_el._event_listeners.values()
+            if l.type == "update:modelValue" and l.args is None
+        )
+        range_el._handle_event({
+            "listener_id": range_listener.id,
+            "args": {"min": 20, "max": 60},
+        })
+        assert editor.get_range() == (20, 60)
+        assert editor.get_colors() == palette_slice(reordered, 20, 60)
+        assert len(changes) == 2
+
+        # Thumb-position bubbles are replaced by lateral end labels aligned
+        # with the track ends; they update live with the range values.
+        mono_labels = [
+            el for el in client.elements.values()
+            if "font-mono" in getattr(el, "_classes", [])
+        ]
+        assert len(mono_labels) == 2
+        assert sorted(el.text for el in mono_labels) == ["20", "60"]
+        assert "label-always" not in range_el._props
+
+        # ---- reset restores the original order and the full range ----
+        reset_button = next(
+            el for el in client.elements.values()
+            if getattr(el, "_props", {}).get("aria-label") == "Reset palette"
+        )
+        click_listener = next(iter(reset_button._event_listeners.values()))
+        click_listener.handler(None)  # ui.button on_click wraps with an event arg
+        assert editor.get_palette_order() == original
+        assert editor.get_range() == (0, 100)
+        assert editor.get_colors() == original
+        assert len(changes) == 3
+        assert sorted(el.text for el in mono_labels) == ["0", "100"]
+
+        # ---- the old full-palette preview and reorder editor are gone ----
+        texts = [
+            getattr(el, "text", "")
+            for el in client.elements.values()
+            if getattr(el, "text", "")
+        ]
+        assert "Reorder discrete colors" not in texts
+        assert not any("Full palette preview" in text for text in texts)
+
+    def test_palette_editor_custom_colors_drag_reorder(self):
+        """Custom colors are added via the color input/picker and reordered
+        by dragging the list rows (no template palette strip, no arrows)."""
+        from nicegui import Client
+        from nicegui.page import page
+        from ui.components.palette_picker import palette_editor
+
+        client = Client(page("/palette-editor-custom-drag"))
+        with client:
+            editor = palette_editor("Neuron Colors", value="Category10")
+
+        # Switch to the custom-colors mode (setting .value fires the change
+        # handlers exactly like the client-side model-value update)
+        toggle = next(
+            el for el in client.elements.values()
+            if getattr(el, "tag", "") == "q-btn-toggle"
+        )
+        toggle.value = "Custom colors"
+
+        # Add three colors via the input + Add button
+        color_input = next(
+            el for el in client.elements.values()
+            if getattr(el, "tag", "") == "q-input"
+        )
+        add_button = next(
+            el for el in client.elements.values()
+            if getattr(el, "text", "") == "Add color"
+        )
+        click_listener = next(iter(add_button._event_listeners.values()))
+        for hex_color in ("#ff0000", "#00ff00", "#0000ff"):
+            color_input.value = hex_color
+            click_listener.handler(None)
+        assert editor.get_custom_colors() == ["#ff0000", "#00ff00", "#0000ff"]
+        assert editor.get_colors() == editor.get_custom_colors()  # preview = current state
+
+        # Drag the first row to the third row's position (vertical list)
+        drop_lists = [
+            el for el in client.elements.values()
+            if any(
+                l.type == "drop" and "clientY" in (l.js_handler or "")
+                for l in el._event_listeners.values()
+            )
+        ]
+        assert len(drop_lists) == 1, "expected exactly one vertical drag target list"
+        drop_list = drop_lists[0]
+        drop_listener = next(
+            l for l in drop_list._event_listeners.values()
+            if l.type == "drop" and "clientY" in (l.js_handler or "")
+        )
+        drop_list._handle_event({
+            "listener_id": drop_listener.id,
+            "args": {"from": 0, "to": 2},
+        })
+        assert editor.get_custom_colors() == ["#00ff00", "#ff0000", "#0000ff"]
+
+        # The template palette strip and arrow/reverse controls are gone
+        texts = [
+            getattr(el, "text", "")
+            for el in client.elements.values()
+            if getattr(el, "text", "")
+        ]
+        assert "Reverse list" not in texts
+        assert not any("Click the selected palette strip" in t for t in texts)
+        # Removal still works per row
+        assert any(
+            getattr(el, "_props", {}).get("aria-label") == "Remove custom color"
+            for el in client.elements.values()
+        )
+
+    def test_palette_editor_long_palette_uses_gradient_preview(self):
+        """Long (sequential) palettes render as a gradient strip without
+        drag targets; the range slider still slices them."""
+        from nicegui import Client
+        from nicegui.page import page
+        from ui.components.palette_picker import palette_editor
+
+        client = Client(page("/palette-editor-gradient"))
+        with client:
+            editor = palette_editor("Neuron Colors", value="Blues")
+        assert len(editor.get_palette_order()) > 20
+        # no horizontal drag target: the preview is a plain gradient strip
+        drop_rows = [
+            el for el in client.elements.values()
+            if any(
+                l.type == "drop" and "clientX" in (l.js_handler or "")
+                for l in el._event_listeners.values()
+            )
+        ]
+        assert drop_rows == []
+        # a long palette still exposes the range + reset controls
+        assert any(
+            getattr(el, "tag", "") == "q-range"
+            for el in client.elements.values()
+        )
+        assert any(
+            getattr(el, "_props", {}).get("aria-label") == "Reset palette"
+            for el in client.elements.values()
+        )
+
     def test_roi_mesh_traces_have_independent_legend_entries(self):
         """Each resolved ROI stays separately toggleable in the Plotly legend."""
         import plotly.graph_objects as go
@@ -1263,6 +1452,71 @@ class TestTabs:
             ]
             assert "Separate Hemispheres (L/R)" in texts
             assert "Hemisphere" in labels
+
+    def test_restructured_tabs_have_independent_block_cards(self):
+        """Tabs reviewed for card separation must expose their logical
+        groups as independent cards (source / output / hemisphere /
+        image-download / rendering), not one merged card."""
+        from nicegui import Client
+        from nicegui.page import page
+        from ui.tabs.find_path import create_find_path_tab
+        from ui.tabs.find_direct import create_find_direct_tab
+        from ui.tabs.inter_dataset import create_inter_dataset_tab
+        from ui.tabs.nb_find_lines import create_nb_find_lines_tab
+        from ui.tabs.visualization import create_network_tab
+
+        expected_blocks = [
+            ("/blocks-findpath", create_find_path_tab, (
+                "card-findpath-core", "card-findpath-output",
+                "card-findpath-hemisphere",
+            )),
+            ("/blocks-finddirect", create_find_direct_tab, (
+                "card-finddirect-core", "card-finddirect-output",
+                "card-finddirect-hemisphere",
+            )),
+            ("/blocks-interdataset", create_inter_dataset_tab, (
+                "card-interdataset-hemisphere",
+            )),
+            ("/blocks-nbfindlines", create_nb_find_lines_tab, (
+                "card-nb-image-download",
+            )),
+            ("/blocks-network", create_network_tab, (
+                "card-network-source", "card-network-rendering",
+            )),
+        ]
+        for name, builder, blocks in expected_blocks:
+            client = Client(page(name))
+            with client:
+                builder()
+            ids = [
+                getattr(el, "_props", {}).get("id", "")
+                for el in client.elements.values()
+            ]
+            for block_id in blocks:
+                assert block_id in ids, f"{name}: missing block card {block_id}"
+
+        # The restructured cards surface their headers without expansion.
+        client = Client(page("/blocks-findpath-headers"))
+        with client:
+            create_find_path_tab()
+        texts = [
+            getattr(el, "text", "")
+            for el in client.elements.values()
+            if getattr(el, "text", "")
+        ]
+        for header in ("Core Parameters", "Output Options", "Hemisphere Analysis"):
+            assert header in texts, f"missing visible header: {header}"
+
+        # The Network tab must not keep the old merged card id.
+        client = Client(page("/blocks-network-id"))
+        with client:
+            create_network_tab()
+        ids = [
+            getattr(el, "_props", {}).get("id", "")
+            for el in client.elements.values()
+        ]
+        assert "card-network" not in ids
+
 
 
 # =============================================================================

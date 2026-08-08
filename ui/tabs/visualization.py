@@ -448,8 +448,8 @@ def create_network_tab():
             "Load a path result or create an empty HTML canvas for direct interactive drawing."
         ).classes("text-caption drocat-muted")
 
-        with ui.card().classes("w-full drocat-card").props('id="card-network"'):
-            section_header("Network Visualization · PlotPath", "account_tree")
+        with ui.card().classes("w-full drocat-card").props('id="card-network-source"'):
+            section_header("Network Source", "source")
             network_source = select_input(
                 "Canvas Source",
                 ["Path file", "Empty drawing canvas"],
@@ -524,6 +524,18 @@ def create_network_tab():
                 "Edit Mode, then add nodes and connect them interactively."
             ).classes("text-caption drocat-muted")
 
+            def update_network_source():
+                is_empty = network_source.value == "Empty drawing canvas"
+                path_input_panel.set_visibility(not is_empty)
+                empty_canvas_hint.set_visibility(is_empty)
+                if is_empty:
+                    path_upload_menu.close()
+
+            network_source.on_value_change(lambda _event: update_network_source())
+            update_network_source()
+
+        with ui.card().classes("w-full drocat-card").props('id="card-network-rendering"'):
+            section_header("Rendering Options", "palette")
             with param_grid(2):
                 path_output_dir = dir_input(label="Path Output Directory")
                 path_layout = select_input(
@@ -551,16 +563,6 @@ def create_network_tab():
                 "Create Empty Canvas",
                 icon="open_in_new",
             ).props("color=secondary outline").classes("w-full")
-
-            def update_network_source():
-                is_empty = network_source.value == "Empty drawing canvas"
-                path_input_panel.set_visibility(not is_empty)
-                empty_canvas_hint.set_visibility(is_empty)
-                if is_empty:
-                    path_upload_menu.close()
-
-            network_source.on_value_change(lambda _event: update_network_source())
-            update_network_source()
 
     with results_col:
         network_output.create(run_label="Generate Network", run_icon="account_tree")

@@ -117,33 +117,34 @@ def create_inter_dataset_tab():
                         hint="Number of parallel workers (only used when Parallel Processing is on).",
                     )
 
-                ui.separator()
-                with ui.row().classes("gap-4"):
-                    separate_hemi = checkbox_input(
-                        "Separate Hemispheres (L/R)", False,
-                        hint="Split type/group aggregation into _L/_R/_U hemisphere labels.",
-                    )
-                    keep_hemi_conserved = checkbox_input(
-                        "Keep Only Hemisphere-Conserved Edges", False,
-                        hint="Keep only edges conserved between hemispheres (requires Separate Hemispheres).",
-                    )
-                    symmetry_analysis = checkbox_input(
-                        "Symmetry Analysis", True,
-                        hint="Generate per-dataset hemisphere symmetry summaries (auto-enabled with Separate Hemispheres).",
-                    )
-                    find_reciprocal = checkbox_input(
-                        "Find Reciprocal Connections", False,
-                        hint="Build reciprocal graphs and include them in reports.",
-                    )
-                def _sync_hemisphere_options():
-                    if separate_hemi.value:
-                        keep_hemi_conserved.enable()
-                        symmetry_analysis.enable()
-                    else:
-                        keep_hemi_conserved.disable()
-                        symmetry_analysis.disable()
-                separate_hemi.on_value_change(lambda _e: _sync_hemisphere_options())
-                _sync_hemisphere_options()
+        with ui.card().classes("w-full drocat-card").props('id="card-interdataset-hemisphere"'):
+            section_header("Hemisphere Analysis", "sync_alt")
+            with ui.row().classes("gap-4"):
+                separate_hemi = checkbox_input(
+                    "Separate Hemispheres (L/R)", False,
+                    hint="Split type/group aggregation into _L/_R/_U hemisphere labels.",
+                )
+                keep_hemi_conserved = checkbox_input(
+                    "Keep Only Hemisphere-Conserved Edges", False,
+                    hint="Keep only edges conserved between hemispheres (requires Separate Hemispheres).",
+                )
+                symmetry_analysis = checkbox_input(
+                    "Symmetry Analysis", True,
+                    hint="Generate per-dataset hemisphere symmetry summaries (auto-enabled with Separate Hemispheres).",
+                )
+                find_reciprocal = checkbox_input(
+                    "Find Reciprocal Connections", False,
+                    hint="Build reciprocal graphs and include them in reports.",
+                )
+            def _sync_hemisphere_options():
+                if separate_hemi.value:
+                    keep_hemi_conserved.enable()
+                    symmetry_analysis.enable()
+                else:
+                    keep_hemi_conserved.disable()
+                    symmetry_analysis.disable()
+            separate_hemi.on_value_change(lambda _e: _sync_hemisphere_options())
+            _sync_hemisphere_options()
 
     with results_col:
         output_panel.create(run_label="Run Comparison", run_icon="play_arrow")
