@@ -343,6 +343,43 @@ def _import_visualizer():
         return None
 
 
+def _load_neuron_type_map(dataset: str, project_root: Optional[str] = None
+                          ) -> Tuple[Dict[int, str], Dict[int, str]]:
+    """bodyId -> type / instance maps for a dataset.
+
+    Uses the allneurons neuron table (fullest coverage), falling back to the
+    neuron index parquet. These are the same sources ``SkeletonVectorCache``
+    merges into the vector cache, so type lookups work even for datasets that
+    have no vector cache yet (e.g. male-cns v1.0 with cached skeletons only).
+    """
+    root = Path(project_root) if project_root else Path(__file__).parent.parent
+    folder = _dataset_folder(dataset)
+    type_map: Dict[int, str] = {}
+    instance_map: Dict[int, str] = {}
+
+    csv_path = root / "datasets" / folder / f"{folder}_allneurons_neuron_df.csv"
+    if csv_path.exists():
+        try:
+            tdf = pd.read_csv(csv_path, usecols=["bodyId", "type", "instance"])
+            tdf["bodyId"] = tdf["bodyId"].astype(np.int64)
+            type_map = dict(zip(tdf["bodyId"], tdf["type"].fillna("").astype(str)))
+            instance_map = dict(zip(tdf["bodyId"], tdf["instance"].fillna("").astype(str)))
+            return type_map, instance_map
+        except Exception:
+            pass
+
+    index_path = root / "cache" / folder / "neuron_index.parquet"
+    if index_path.exists():
+        try:
+            idx_df = pd.read_parquet(index_path, columns=["bodyId", "type", "instance"])
+            idx_df["bodyId"] = idx_df["bodyId"].astype(np.int64)
+            type_map = dict(zip(idx_df["bodyId"], idx_df["type"].fillna("").astype(str)))
+            instance_map = dict(zip(idx_df["bodyId"], idx_df["instance"].fillna("").astype(str)))
+        except Exception:
+            pass
+    return type_map, instance_map
+
+
 def _find_skeleton_file(dataset: str, body_id: int,
                         project_root: Optional[str] = None) -> Optional[Path]:
     """Locate a cached skeleton/mesh pickle for a bodyId.
@@ -541,33 +578,7 @@ class SkeletonVectorCache:
         # Attach type/instance (used by type-level aggregation and result
         # reporting). The allneurons neuron table has the fullest bodyId ->
         # type/instance coverage; the neuron index is the fallback.
-        type_map: Optional[Dict[int, str]] = None
-        instance_map: Optional[Dict[int, str]] = None
-        folder = _dataset_folder(self.dataset)
-        csv_path = (self.project_root / "datasets" / folder
-                    / f"{folder}_allneurons_neuron_df.csv")
-        if csv_path.exists():
-            try:
-                tdf = pd.read_csv(csv_path, usecols=["bodyId", "type", "instance"])
-                tdf["bodyId"] = tdf["bodyId"].astype(np.int64)
-                type_map = dict(zip(tdf["bodyId"],
-                                    tdf["type"].fillna("").astype(str)))
-                instance_map = dict(zip(tdf["bodyId"],
-                                        tdf["instance"].fillna("").astype(str)))
-            except Exception:
-                type_map = None
-        if type_map is None:
-            index_path = self.project_root / "cache" / folder / "neuron_index.parquet"
-            if index_path.exists():
-                try:
-                    idx_df = pd.read_parquet(index_path, columns=["bodyId", "type", "instance"])
-                    idx_df["bodyId"] = idx_df["bodyId"].astype(np.int64)
-                    type_map = dict(zip(idx_df["bodyId"],
-                                        idx_df["type"].fillna("").astype(str)))
-                    instance_map = dict(zip(idx_df["bodyId"],
-                                            idx_df["instance"].fillna("").astype(str)))
-                except Exception:
-                    type_map = None
+        type_map, instance_map = _load_neuron_type_map(self.dataset, str(self.project_root))
         if type_map:
             df["type"] = df["bodyId"].map(type_map).fillna("")
             df["instance"] = df["bodyId"].map(instance_map or {}).fillna("")
@@ -914,9 +925,12 @@ class MorphologyComparer:
                         results = self._nblast_search(query_df, data)
                 else:
                     raise ValueError(
-                        "Connection-profile search returned no candidates for "
-                        f"{self.query} in {self.dataset} and no vector cache "
-                        "exists to fall back to. Check the connection cache."
+                        "Connection-profile search found candidates for "
+                        f"{self.query} in {self.dataset} but none could be "
+                        "scored: no cached skeletons were usable, transient "
+                        "fetches returned nothing, and no vector cache exists "
+                        "to fall back to. Check network/token access and the "
+                        "skeleton cache, or build the vector cache first."
                     )
         else:
             # Cache-direct search (FlyWire bulk caches and explicit choice).
@@ -1052,16 +1066,29 @@ class MorphologyComparer:
             scores[keep] = similarity_matrix(q_vec, X_c[keep], self.metric)
 
         query_type = query_df["type"].iloc[0] if len(query_df) else ""
-        # Type lookup + intra-type similarity from the vector cache (when it
-        # exists); fetched candidates without cached types are untyped.
+        # Type lookup: vector cache first, then the neuron table / index (so
+        # datasets without a vector cache still get typed results). The
+        # intra-type similarity comes from the vector cache when present,
+        # otherwise from the query members' own vectors (the query type's
+        # members are exactly what a type query resolves).
         cache_data = cache.load()
-        id_to_type: Dict[int, str] = {}
-        intra = float("nan")
+        id_to_type, _ = _load_neuron_type_map(self.dataset, str(self.project_root))
         if cache_data is not None:
             id_to_type = {int(b): t for b, t in zip(cache_data["bodyIds"], cache_data["types"])}
+        intra = float("nan")
+        if cache_data is not None and len(cache_data["bodyIds"]):
             intra = self._intra_type_similarity(
                 query_type, cache_data["bodyIds"], cache_data["types"],
                 cache_data["X"], self.metric,
+            )
+        elif query_type and mask_q.any():
+            ok = np.where(mask_q)[0]
+            intra = self._intra_type_similarity(
+                query_type,
+                np.array([query_ids[i] for i in ok], dtype=np.int64),
+                [str(query_df["type"].iloc[i]) if i < len(query_df) else ""
+                 for i in ok],
+                X_q[ok], self.metric,
             )
 
         rows = []
@@ -1113,8 +1140,10 @@ class MorphologyComparer:
                     "candidate_source": "profile",
                 })
             if query_type and query_type not in agg and np.isfinite(intra):
-                n_members = int(sum(1 for t in cache_data["types"] if t == query_type)) \
-                    if cache_data is not None else 0
+                if cache_data is not None:
+                    n_members = int(sum(1 for t in cache_data["types"] if t == query_type))
+                else:
+                    n_members = int(sum(1 for t in id_to_type.values() if t == query_type))
                 agg_rows.append({
                     "target_type": query_type,
                     "similarity": intra,
@@ -1559,15 +1588,21 @@ class MorphologyComparer:
 
     def _type_members_from_cache(self, type_name: str) -> List[int]:
         """Member bodyIds of a type from the vector cache (capped to
-        n_per_type so type-level renders stay bounded)."""
+        n_per_type so type-level renders stay bounded); falls back to the
+        neuron table / index when the dataset has no vector cache yet."""
         try:
             data = SkeletonVectorCache(
                 self.dataset, project_root=str(self.project_root), verbose=False
             ).load()
-            if data is None:
-                return []
-            members = [int(b) for b, t in zip(data["bodyIds"], data["types"])
-                       if t == type_name]
+            members: List[int] = []
+            if data is not None:
+                members = [int(b) for b, t in zip(data["bodyIds"], data["types"])
+                           if t == type_name]
+            if not members:
+                type_map, _ = _load_neuron_type_map(
+                    self.dataset, str(self.project_root)
+                )
+                members = [int(b) for b, t in type_map.items() if t == type_name]
             return members[: max(1, self.n_per_type)]
         except Exception:
             return []

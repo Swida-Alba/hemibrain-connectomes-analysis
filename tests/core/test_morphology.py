@@ -835,6 +835,35 @@ class TestProfileFirst:
         inter = res[~res["is_intra_type"]]
         assert inter.iloc[0]["target_type"] == "Y"
 
+    def test_type_level_works_without_vector_cache(self, tmp_path, monkeypatch):
+        """Regression: type-level profile-first returned empty when the
+        dataset had skeletons + a neuron index but NO vector cache — candidate
+        types were only resolved from the vector cache, so every row was
+        untyped and the type aggregation produced nothing."""
+        comparer = self._setup(tmp_path, monkeypatch)
+        # index + skeletons only; the vector cache parquet is never built
+        # (this is the male-cns v1.0 situation)
+        write_neuron_index(tmp_path, "np:v1", [
+            (101, "T", "T_1"), (201, "T", "T_2"), (202, "Y", "Y_1"),
+        ])
+        comparer.level = "type"
+        monkeypatch.setattr(comparer, "_profile_candidates", lambda q: pd.DataFrame({
+            "target_bodyId": [201, 202],
+            "profile_similarity": [0.9, 0.8],
+        }))
+        monkeypatch.setattr(morph, "fetch_skeleton_on_demand",
+                            lambda d, b, project_root=None, persist=True: line_neuron(length=25))
+        res = comparer.find_similar()
+        assert not res.empty
+        assert {"target_type", "is_intra_type", "intra_type_similarity"}.issubset(res.columns)
+        intra = res[res["is_intra_type"] == True]  # noqa: E712
+        assert len(intra) == 1
+        assert intra.iloc[0]["target_type"] == "T"
+        # intra computed from the query member's own vector (single member)
+        assert intra.iloc[0]["intra_type_similarity"] == pytest.approx(1.0, abs=1e-6)
+        # the Y candidate is typed through the neuron index fallback
+        assert (res["target_type"] == "Y").any()
+
     def test_find_homologs_fast_bodyid_reaches_comparison(self, tmp_path, monkeypatch):
         """Regression: the bodyId branch of find_homologs_fast was nested
         inside ``if not is_bodyid:`` (dead code), so bodyId queries returned
