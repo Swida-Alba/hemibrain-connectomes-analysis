@@ -1,5 +1,7 @@
 """FindSimilar Tab - Morphological and connection-profile similarity search."""
 
+import time
+
 from nicegui import ui
 
 from ..config import DEFAULTS, PROJECT_ROOT, SRC_DIR, DATASETS, SIMILARITY_METRICS
@@ -10,6 +12,7 @@ from ..components.common import (
 )
 from ..components.output_panel import OutputPanel
 from ..runner import ScriptRunner
+from ..skeleton_pull import SkeletonPuller
 
 MORPH_METHODS = ["vector", "nblast"]
 MORPH_METRICS = ["cosine", "pearson"]
@@ -19,6 +22,7 @@ MORPH_LEVELS = ["auto", "bodyid", "type"]
 def create_find_similar_tab():
     runner = ScriptRunner()
     output_panel = OutputPanel("Similarity Output")
+    skeleton_puller = SkeletonPuller()
 
     form_col, results_col = tool_page(
         "Similar Neurons",
@@ -88,22 +92,32 @@ def create_find_similar_tab():
                     candidate_source = select_input(
                         "Candidate Source", ["auto", "cache", "profile"],
                         DEFAULTS["candidate_source"],
-                        hint="'auto': connection-profile-first for NeuPrint datasets "
-                             "(candidates from connectivity, then skeletons fetched "
-                             "for the top-N only), direct vector-cache search for "
-                             "FlyWire. 'profile': always connection-first. "
-                             "'cache': always direct vector-cache search.",
+                        hint="'auto': NeuPrint datasets use the connectivity-"
+                             "expanded search (candidates from the connection "
+                             "cache, top-N×3 similar types expanded to all "
+                             "their members, then morphology); FlyWire uses "
+                             "the full-morphology vector-cache search. "
+                             "'profile': always connectivity-expanded. "
+                             "'cache': full-morphology over the local skeleton "
+                             "population (download skeletons first).",
                     )
-                    fetch_top_n = number_input(
-                        "Fetch Top-N Skeletons", DEFAULTS["fetch_top_n"], 0, 500,
-                        hint="Profile-first: fetch skeletons for the top-N "
-                             "connection-similarity candidates. Fetched skeletons "
-                             "are transient (used for this comparison only, never "
-                             "written to the skeleton cache); already-cached "
-                             "skeletons are reused. 0 = only use cached skeletons. "
-                             "The query neuron is always fetched if missing.",
+                    candidate_expansion = number_input(
+                        "Candidate Expansion (×)", DEFAULTS["morph_candidate_expansion"], 1, 20,
+                        hint="Connectivity-expanded search: keep the top-N × "
+                             "expansion connectivity-similar TYPES from the "
+                             "connection cache, then expand to ALL their member "
+                             "bodyIds. Skeletons are fetched transiently "
+                             "(never written to the cache); cached skeletons "
+                             "are reused.",
                     )
                 with param_grid(2):
+                    roi_filter = select_input(
+                        "ROI Filter", ["All ROIs"], "All ROIs",
+                        hint="Restrict candidate discovery to synapse rows in "
+                             "the selected ROIs (only shown when the dataset's "
+                             "connection cache carries ROI data). 'All ROIs' = "
+                             "no restriction.",
+                    )
                     visualize_top_n = number_input(
                         "Visualize Top-N Types", DEFAULTS["morph_visualize_top_n"], 0, 50,
                         hint="After the run, render the 3D skeletons of the top-N "
@@ -131,6 +145,96 @@ def create_find_similar_tab():
                         "One-time build from cached skeletons (auto-triggered on "
                         "first query); incremental afterwards."
                     ).classes("text-caption drocat-muted")
+
+                # --- full-morphology skeleton download (like Settings pull) ---
+                download_label = ui.label("").classes("text-caption drocat-muted")
+                download_bar = ui.linear_progress(value=0, show_value=False).classes(
+                    "w-full"
+                ).set_visibility(False)
+                with ui.row().classes("items-center gap-2"):
+                    download_button = ui.button(
+                        "Download All Skeletons", icon="download"
+                    ).props("color=secondary outline")
+                    cancel_download_button = ui.button(
+                        "Cancel", icon="stop"
+                    ).props("flat dense").set_visibility(False)
+                    ui.label(
+                        "Full-morphology mode: fetch every missing skeleton to "
+                        "the local cache (resumable, persists for reuse). "
+                        "FlyWire datasets already have bulk skeletons locally."
+                    ).classes("text-caption drocat-muted")
+
+            def refresh_roi_options():
+                # ROI data availability differs per dataset (male-cns has 114
+                # ROIs; hemibrain's connection cache has none).
+                try:
+                    from pathlib import Path
+                    import polars as pl
+                    conn_path = (Path(PROJECT_ROOT) / "cache"
+                                 / dataset.value.replace(":", "_").replace(".", "_")
+                                 / "connections.parquet")
+                    rois = ["All ROIs"]
+                    if conn_path.exists():
+                        conn = pl.read_parquet(conn_path)
+                        if "roi" in conn.columns:
+                            vals = (conn["roi"].drop_nulls()
+                                    .filter(pl.col("roi") != "")
+                                    .unique().sort().to_list())
+                            if vals:
+                                rois = ["All ROIs"] + [str(v) for v in vals]
+                    roi_filter.options = rois
+                    if roi_filter.value not in rois:
+                        roi_filter.value = "All ROIs"
+                    roi_filter.set_visibility(len(rois) > 1)
+                except Exception:
+                    roi_filter.set_visibility(False)
+
+            def refresh_download_ui():
+                st = skeleton_puller.state
+                download_button.set_visibility(not st["running"])
+                cancel_download_button.set_visibility(st["running"])
+                download_bar.set_visibility(st["running"] and st["total"] > 0)
+                if st["running"] and st["total"] > 0:
+                    download_bar.value = st["current"] / max(1, st["total"])
+                    eta = ""
+                    if st["fetch_started_at"] and st["current"] > 0:
+                        elapsed = max(0.001, time.time() - st["fetch_started_at"])
+                        rate = st["current"] / elapsed
+                        remaining = (st["total"] - st["current"]) / rate
+                        eta = f" · ETA {int(remaining // 60)}m {int(remaining % 60):02d}s"
+                    download_label.text = f"{st['info']}{eta}"
+                elif st["done"]:
+                    s = st.get("summary") or {}
+                    if st["error"]:
+                        download_label.text = f"Download failed: {st['error']}"
+                        ui.notify(f"Skeleton download failed: {st['error']}", type="negative")
+                    else:
+                        download_label.text = (
+                            f"Download {st['info']} {s.get('fetched', 0)}/"
+                            f"{s.get('total', 0)} fetched, {s.get('errors', 0)} errors"
+                        )
+                        if s.get("fetched", 0) > 0:
+                            ui.notify(
+                                f"{s.get('fetched')} skeletons downloaded "
+                                f"({s.get('skipped_existing', 0)} already cached)",
+                                type="positive",
+                            )
+                            refresh_coverage()
+                else:
+                    download_label.text = ""
+
+            def start_download():
+                ok = skeleton_puller.start(dataset.value)
+                if not ok:
+                    ui.notify("A skeleton download is already running", type="warning")
+                refresh_download_ui()
+
+            def stop_download():
+                skeleton_puller.cancel()
+                download_label.text = "Cancelling after the current batch..."
+
+            download_button.on_click(start_download)
+            cancel_download_button.on_click(stop_download)
 
             def refresh_coverage():
                 # Lightweight: no navis/statvis import at page build (they are
@@ -169,12 +273,12 @@ def create_find_similar_tab():
                         cache = SkeletonVectorCache(
                             dataset.value, n_workers=8, verbose=False
                         )
-                        return cache.build(fetch_missing=int(fetch_top_n.value))
+                        return cache.build(fetch_missing=0)
 
                     stats = await asyncio.to_thread(_run)
                     ui.notify(
                         f"Vector cache ready: {stats['rows']} rows "
-                        f"({stats['new']} new, {stats['fetched']} fetched)"
+                        f"({stats['new']} new)"
                     )
                     refresh_coverage()
                 except Exception as ex:
@@ -268,10 +372,15 @@ def create_find_similar_tab():
             morph_panel.set_visibility(is_morph)
             profile_panel.set_visibility(not is_morph)
 
+        def on_dataset_change(_e=None):
+            refresh_coverage()
+            refresh_roi_options()
+
         mode_toggle.on_value_change(lambda _e: sync_mode())
-        dataset.on_value_change(lambda _e: refresh_coverage())
+        dataset.on_value_change(on_dataset_change)
         sync_mode()
-        refresh_coverage()
+        on_dataset_change()
+        ui.timer(0.5, refresh_download_ui)
 
     with results_col:
         output_panel.create(run_label="Run Similarity Search", run_icon="play_arrow")
@@ -299,7 +408,8 @@ def create_find_similar_tab():
             "nblast_prefilter": int(nblast_prefilter.value),
             "n_per_type": int(n_per_type.value),
             "candidate_source": candidate_source.value,
-            "fetch_top_n": int(fetch_top_n.value),
+            "candidate_expansion": int(candidate_expansion.value),
+            "roi_filter": None if roi_filter.value == "All ROIs" else [roi_filter.value],
             "visualize_top_n": int(visualize_top_n.value),
             "visualize_by": visualize_by.value,
             "output_dir": morph_output_dir.value,

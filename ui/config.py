@@ -141,7 +141,7 @@ DEFAULTS = {
     "nblast_prefilter": 100,
     "n_per_type": 5,
     "candidate_source": "auto",
-    "fetch_top_n": 20,
+    "morph_candidate_expansion": 3,
     "morph_visualize_top_n": 6,
     "morph_visualize_by": "type",
 }

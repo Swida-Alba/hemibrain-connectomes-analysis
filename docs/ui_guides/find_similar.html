@@ -45,37 +45,52 @@
     morphological scoring:</p>
   <ul>
     <li><b>auto</b> (default): NeuPrint datasets (hemibrain, male-cns, ...)
-      use <b>connection-profile-first</b>: a connectivity similarity search
-      (HomologFinder) ranks candidates, then skeletons are fetched only for
-      the <b>top-N</b> of them — bounding the skeleton fetch to an acceptable
-      scale. FlyWire datasets (which have bulk mesh caches) search the vector
-      cache directly.</li>
-    <li><b>profile</b>: always connection-first (all datasets).</li>
-    <li><b>cache</b>: always direct vector-cache search.</li>
+      use the <b>connectivity-expanded</b> search: candidates are found
+      directly in the connection cache
+      (<code>cache/{dataset}/connections.parquet</code> — neurons sharing
+      upstream/downstream partners with the query, ranked by shared-partner
+      count), the top <b>N × Candidate Expansion</b> connectivity-similar
+      <b>types</b> are kept and expanded to <b>all their member neurons</b>;
+      skeletons are then fetched for the pool (transient) and morphology is
+      compared. FlyWire datasets (which have bulk mesh caches) search the
+      vector cache directly (full-morphology).</li>
+    <li><b>profile</b>: always connectivity-expanded (all datasets).</li>
+    <li><b>cache</b>: full-morphology over the complete local skeleton
+      population (download skeletons first — see below).</li>
   </ul>
-  <p><b>Fetch Top-N Skeletons</b> (default 20) is the fetch bound: in
-    profile-first mode it is the number of top connection-similarity
-    candidates whose skeletons are fetched. Fetched skeletons are
-    <b>transient</b> — used for the current comparison only and never written
-    to the skeleton cache; already-cached skeletons are still reused. 0 = only
-    use already-cached skeletons. The query neuron is always fetched if
-    missing. Results carry both <code>profile_similarity</code>
-    (connectivity) and <code>similarity</code> (morphology) scores. If the
-    connection search finds no candidates (sparse connectivity), the search
-    falls back to the vector cache when available.</p>
+  <p><b>Candidate Expansion (×)</b> (default 3) controls the type-level
+    expansion: with <code>top_n=10</code> the top 30 connectivity-similar
+    types are kept and every member of those types enters the scoring pool
+    (per-type safety cap 100). Fetched skeletons are <b>transient</b> — used
+    for the current comparison only and never written to the skeleton cache;
+    already-cached skeletons are reused and the query neuron is always
+    fetched if missing. <b>ROI Filter</b> (shown when the dataset's
+    connection cache carries synapse location data — male-cns has 114 ROIs
+    like <code>AL(L)</code>, hemibrain has none) restricts candidate
+    discovery to synapse rows in the selected ROIs. Results carry both
+    <code>profile_similarity</code> (normalized shared-partner count) and
+    <code>similarity</code> (morphology) scores. If no candidates are found,
+    the search falls back to the vector cache when available.</p>
+
+  <h2>Full-morphology mode &amp; skeleton download</h2>
+  <p><b>Download All Skeletons</b> fetches every missing skeleton of the
+    dataset to <code>cache/{dataset}/skeletons/</code> — the same resumable
+    background-pull pattern as the Settings panel's full dataset pull
+    (parallel, progress bar with ETA, cancel; already-cached skeletons are
+    skipped). FlyWire FAFB v783 already has bulk skeletons locally, so only
+    the vector cache build is needed there. After the download, build the
+    vector cache and run with <b>Candidate Source = cache</b> to compare the
+    query against the entire local skeleton population (fully
+    morphology-based analysis).</p>
 
   <h2>Skeleton vector cache</h2>
   <p>One parquet file per dataset:
     <code>cache/{dataset}/morphology/skeleton_vectors.parquet</code>
     (~1 KB/neuron, ~30–50x smaller than the raw skeletons). It builds
-    incrementally from already-cached skeletons (~15–85 ms/neuron), is
-    auto-triggered on the first query, and can be extended by
-    <b>Fetch Missing Skeletons</b> (fetches up to N neurons on demand and
-    persists them to the skeleton cache for reuse).</p>
-  <div class="callout">
-    <b>Coverage:</b> the cache only covers skeletons already downloaded. With
-    partial coverage, missing candidates simply do not appear in the results.
-  </div>
+    incrementally from already-cached skeletons (~15–85 ms/neuron) and is
+    auto-triggered on the first query. Without a vector cache, the
+    connectivity-expanded search z-scores the pool vectors with
+    pool-computed statistics so cosine scores stay scale-fair.</p>
 
   <h2>Connection profile similarity</h2>
   <p>The relocated "find similar" search from Homolog Finding: query-vs-all
@@ -138,17 +153,23 @@
     panel; a visualization failure never discards the search results.</p>
 
   <h2>Output</h2>
-  <p>Each run is saved in its own timestamped folder:</p>
+  <p>Each run is saved in its own timestamped folder with two always-written
+    result tables (mirroring the homolog finding outputs):</p>
   <pre><code>morphological: {output_dir}/findsimilar_{DATASET}_{query}_{timestamp}/
                  results.csv, type_summary.csv, README.txt
 profile:       {output_dir}/findhomologs_{SRC}_to_{TGT}_{query}_{timestamp}/</code></pre>
-  <p><code>results.csv</code> holds the ranked rows (type-to-type for type
-    queries, bodyId-to-bodyId for bodyId queries). <code>type_summary.csv</code>
-    is the per-target-type summary, mirroring the homolog finding output:
-    bodyId runs aggregate each target type's
-    <code>avg/max/min/std_similarity</code>, <code>n_bodyids</code>,
-    <code>avg_profile_similarity</code> and an <code>is_query_type</code>
-    flag; type runs carry the type rows directly.</p>
+  <ul>
+    <li><b>results.csv</b> always holds <b>bodyId-level</b> similarities
+      (ranked <code>target_bodyId</code> rows), whatever the query kind.
+      A type query ranks the individual neurons of the found types; the
+      query type's own members are excluded.</li>
+    <li><b>type_summary.csv</b> always holds <b>type-level</b> similarities
+      (one row per target type, the query type first as the intra-type
+      reference with <code>is_intra_type=True</code>), whatever the query
+      kind. Type searches rank the top-N types over the whole cached
+      skeleton population (connection candidates + cached skeletons), so the
+      result is not capped at the candidate types.</li>
+  </ul>
 </main>
 </body>
 </html>

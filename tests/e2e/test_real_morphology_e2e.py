@@ -328,7 +328,8 @@ class TestProfileFirstPath:
 class TestOutputsAndAutoLevel:
     def test_auto_level_follows_query_kind(self, tmp_path_factory):
         """level='auto': a type query yields type-to-type rows; a bodyId
-        query yields bodyId-to-bodyId rows."""
+        query yields bodyId-to-bodyId rows. results.csv is always
+        bodyId-level and type_summary.csv always type-level."""
         out = tmp_path_factory.mktemp("e2e_out")
         c_type = morph.MorphologyComparer(
             query="aMe12", dataset=DATASET, level="auto", method="vector",
@@ -340,6 +341,12 @@ class TestOutputsAndAutoLevel:
         assert "is_intra_type" in res.columns
         assert res.iloc[0]["target_type"] == "aMe12"
         assert res.iloc[0]["is_intra_type"] == True  # noqa: E712
+        run_dir = Path(c_type.output_folder)
+        body_rows = pd.read_csv(run_dir / "results.csv")
+        assert "target_bodyId" in body_rows.columns  # bodyId-level ALWAYS
+        type_rows = pd.read_csv(run_dir / "type_summary.csv")
+        assert "target_type" in type_rows.columns  # type-level ALWAYS
+        assert type_rows.iloc[0]["is_intra_type"] == True  # noqa: E712
 
         out2 = tmp_path_factory.mktemp("e2e_out")
         c_bid = morph.MorphologyComparer(
@@ -351,10 +358,42 @@ class TestOutputsAndAutoLevel:
         res2 = c_bid.find_similar()
         assert "target_bodyId" in res2.columns
         assert "is_same_type" in res2.columns
+        run_dir2 = Path(c_bid.output_folder)
+        assert "target_bodyId" in pd.read_csv(run_dir2 / "results.csv").columns
+        assert "target_type" in pd.read_csv(run_dir2 / "type_summary.csv").columns
+
+    def test_type_search_ranks_top_types_over_expanded_connectivity_types(
+        self, tmp_path_factory
+    ):
+        """A type search ranks the top-N types from the connection cache:
+        candidates -> top-(N x 3) connectivity-similar types -> all members;
+        every returned type must be within that expanded candidate set."""
+        out = tmp_path_factory.mktemp("e2e_out")
+        comparer = morph.MorphologyComparer(
+            query="aMe12", dataset=DATASET, level="type", method="vector",
+            metric="cosine", top_n=10, output_dir=str(out),
+            project_root=str(PROJECT_ROOT), candidate_source="profile",
+            candidate_expansion=3, verbose=False,
+        )
+        res = comparer.find_similar()
+        assert not res.empty
+        assert len(res) >= 5, f"type search covered too few types: {res['target_type'].tolist()}"
+        # the intra reference row is rank 1
+        assert res.iloc[0]["target_type"] == "aMe12"
+        assert res.iloc[0]["is_intra_type"] == True  # noqa: E712
+        # every inter type is within the top-(N x 3) connectivity candidate
+        # types (direct cross-check of the discovery step)
+        qdf = comparer._resolve_query()
+        cand = comparer._connection_cache_candidates(qdf)
+        assert not cand.empty
+        top_types = {str(t) for t in cand["target_type"] if str(t)}
+        inter = res[res["is_intra_type"] == False]  # noqa: E712
+        assert set(inter["target_type"]) <= top_types, \
+            f"types outside the connectivity candidate set: " \
+            f"{set(inter['target_type']) - top_types}"
 
     def test_run_saves_type_summary_like_homologs(self, tmp_path_factory):
-        """Every run writes results.csv + type_summary.csv; bodyId runs get
-        per-type avg/best/std aggregation, type runs get the type rows."""
+        """Every run writes results.csv (bodyId) + type_summary.csv (type)."""
         out = tmp_path_factory.mktemp("e2e_out")
         comparer = morph.MorphologyComparer(
             query=5813058431, dataset=DATASET, level="bodyid", method="vector",
@@ -367,12 +406,12 @@ class TestOutputsAndAutoLevel:
         run_dir = Path(comparer.output_folder)
         assert (run_dir / "results.csv").exists()
         summary = pd.read_csv(run_dir / "type_summary.csv")
-        assert {"target_type", "avg_similarity", "max_similarity",
-                "std_similarity", "n_bodyids", "is_query_type"}.issubset(summary.columns)
-        # the query type (aMe12) is present and flagged
+        assert {"target_type", "similarity", "n_bodyids",
+                "is_intra_type"}.issubset(summary.columns)
+        # the query type (aMe12) is present and flagged as the intra row
         row = summary[summary["target_type"] == "aMe12"]
         assert len(row) == 1
-        assert row.iloc[0]["is_query_type"] == True  # noqa: E712
+        assert row.iloc[0]["is_intra_type"] == True  # noqa: E712
 
 
 class TestVisualization:

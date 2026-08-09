@@ -549,15 +549,18 @@ class TestMorphologyComparer:
         comparer = self._make_comparer(root, query=101, level="bodyid")
         comparer.find_similar()
         run_dir = Path(comparer.output_folder)
+        # results.csv is bodyId-level; type_summary.csv the type rows
+        res = pd.read_csv(run_dir / "results.csv")
+        assert "target_bodyId" in res.columns
         summary = pd.read_csv(run_dir / "type_summary.csv")
-        assert {"target_type", "avg_similarity", "max_similarity", "min_similarity",
-                "std_similarity", "n_bodyids", "is_query_type"}.issubset(summary.columns)
-        # identical-morphology LINE partner ranks first; flagged as query type
+        assert {"target_type", "similarity", "n_bodyids", "is_intra_type",
+                "intra_type_similarity"}.issubset(summary.columns)
+        # the query type (LINE, both members) is the intra reference first
         assert summary.iloc[0]["target_type"] == "LINE"
-        assert summary.iloc[0]["is_query_type"] == True  # noqa: E712
-        assert summary.iloc[0]["n_bodyids"] == 1
+        assert summary.iloc[0]["is_intra_type"] == True  # noqa: E712
+        assert summary.iloc[0]["n_bodyids"] == 2
         assert summary.iloc[1]["target_type"] == "Y"
-        assert summary.iloc[1]["is_query_type"] == False  # noqa: E712
+        assert summary.iloc[1]["is_intra_type"] == False  # noqa: E712
 
     def test_type_summary_written_for_type_level(self, tmp_path, monkeypatch):
         root = self._setup(tmp_path, monkeypatch)
@@ -568,6 +571,23 @@ class TestMorphologyComparer:
         assert {"target_type", "similarity", "n_bodyids", "is_intra_type"}.issubset(summary.columns)
         assert summary.iloc[0]["target_type"] == "LINE"
         assert summary.iloc[0]["is_intra_type"] == True  # noqa: E712
+
+    def test_type_search_writes_bodyid_results_csv(self, tmp_path, monkeypatch):
+        """results.csv is ALWAYS bodyId-level: a type query's results.csv
+        holds the ranked bodyIds (query members excluded) while
+        type_summary.csv holds the type rows."""
+        root = self._setup(tmp_path, monkeypatch)
+        comparer = self._make_comparer(root, query=101, level="type")
+        comparer.find_similar()
+        run_dir = Path(comparer.output_folder)
+        res = pd.read_csv(run_dir / "results.csv")
+        assert "target_bodyId" in res.columns
+        assert 101 not in res["target_bodyId"].tolist()  # query member excluded
+        assert res["target_type"].tolist() == ["LINE", "Y"]
+        summary = pd.read_csv(run_dir / "type_summary.csv")
+        assert "target_type" in summary.columns
+        assert summary.iloc[0]["is_intra_type"] == True  # noqa: E712
+        assert summary.iloc[0]["target_type"] == "LINE"
 
 
 class TestVisualizeTopResults:
@@ -784,27 +804,52 @@ class TestCandidateSource:
 
 
 class TestProfileFirst:
-    def _setup(self, tmp_path, monkeypatch, query=101):
+    """Connectivity-expanded pipeline: connection-cache candidates ->
+    top-(top_n x candidate_expansion) types -> all members -> morphology."""
+
+    def _setup(self, tmp_path, monkeypatch, query=101, **kwargs):
         write_skeleton(tmp_path, "np:v1", query, line_neuron(length=20))
         write_skeleton(tmp_path, "np:v1", 201, line_neuron(length=20))  # identical
         write_skeleton(tmp_path, "np:v1", 202, bushy_y_neuron())
 
-        comparer = morph.MorphologyComparer(
+        params = dict(
             query=query, dataset="np:v1", level="bodyid", method="vector",
-            candidate_source="profile", fetch_top_n=3, top_n=5,
-            output_dir=str(tmp_path / "out"), project_root=str(tmp_path), verbose=False,
+            candidate_source="profile", candidate_expansion=3, top_n=5,
+            output_dir=str(tmp_path / "out"), project_root=str(tmp_path),
+            verbose=False,
         )
+        params.update(kwargs)
+        comparer = morph.MorphologyComparer(**params)
         monkeypatch.setattr(comparer, "_resolve_query", lambda: pd.DataFrame({
             "bodyId": [query], "type": ["T"], "instance": ["T_1"],
         }))
         return comparer
 
-    def test_profile_first_ranks_and_bounds_fetch(self, tmp_path, monkeypatch):
+    def _candidates(self, rows):
+        """Build a fake _connection_cache_candidates result."""
+        return pd.DataFrame({
+            "target_bodyId": [r[0] for r in rows],
+            "shared_count": [r[1] for r in rows],
+            "profile_similarity": [r[2] for r in rows],
+            "target_type": [r[3] for r in rows],
+        })
+
+    def _index(self, tmp_path, entries):
+        write_neuron_index(tmp_path, "np:v1", entries)
+
+    def test_type_expansion_pool_and_transient_fetch(self, tmp_path, monkeypatch):
+        """Candidates -> top types -> ALL their members become the pool;
+        missing members are fetched transiently (never persisted)."""
         comparer = self._setup(tmp_path, monkeypatch)
-        monkeypatch.setattr(comparer, "_profile_candidates", lambda q: pd.DataFrame({
-            "target_bodyId": [201, 202, 203, 204, 205],
-            "profile_similarity": [0.9, 0.8, 0.7, 0.6, 0.5],
-        }))
+        self._index(tmp_path, [
+            (101, "T", "T_1"), (201, "T", "T_2"),
+            (202, "Y", "Y_1"), (204, "Z", "Z_1"),
+        ])
+        monkeypatch.setattr(comparer, "_connection_cache_candidates",
+                            lambda q: self._candidates([
+                                (201, 9, 1.0, "T"), (202, 5, 0.6, "Y"),
+                                (204, 3, 0.3, "Z"),
+                            ]))
         fetched = []
 
         def fake_fetch(dataset, bid, project_root=None, persist=True):
@@ -815,72 +860,54 @@ class TestProfileFirst:
 
         monkeypatch.setattr(morph, "fetch_skeleton_on_demand", fake_fetch)
         res = comparer.find_similar()
-
-        # only the top-3 candidates are considered; among them only the
-        # missing skeleton (203) is fetched — the fetch is bounded by top-N
-        assert res["target_bodyId"].tolist() == [201, 203, 202] or \
-               res["target_bodyId"].tolist() == [201, 202, 203]
-        assert 204 not in res["target_bodyId"].tolist()
-        assert 205 not in res["target_bodyId"].tolist()
-        assert fetched == [203]
+        assert not res.empty
+        # pool = T {101, 201} + Y {202} + Z {204}; only 204 is missing
+        assert fetched == [204]
         # no skeleton cache files were created by the transient fetches
         skel_dir = tmp_path / "cache" / morph._dataset_folder("np:v1") / "skeletons"
-        assert sorted(p.name for p in skel_dir.glob("*.pkl")) == ["101.pkl", "201.pkl", "202.pkl"]
-        assert "profile_similarity" in res.columns
-        # identical morphology ranks first
+        assert sorted(p.name for p in skel_dir.glob("*.pkl")) ==             ["101.pkl", "201.pkl", "202.pkl"]
+        # query neuron excluded from its own results
+        assert 101 not in res["target_bodyId"].tolist()
+        # identical morphology ranks first; all pool members are ranked
         assert res.iloc[0]["target_bodyId"] == 201
-        assert res.iloc[0]["similarity"] >= res.iloc[1]["similarity"]
+        assert {"profile_similarity", "target_type"} <= set(res.columns)
+        assert set(res["target_bodyId"]) == {201, 202, 204}
 
-    def test_profile_first_fetch_top_n_caps_candidates(self, tmp_path, monkeypatch):
-        comparer = self._setup(tmp_path, monkeypatch)
-        # only 201 has a skeleton; fetch_top_n=1 -> only 201 considered
-        comparer.fetch_top_n = 1
-        monkeypatch.setattr(comparer, "_profile_candidates", lambda q: pd.DataFrame({
-            "target_bodyId": [201, 202, 203],
-            "profile_similarity": [0.9, 0.8, 0.7],
-        }))
-        fetched = []
-
-        def fake_fetch(dataset, bid, project_root=None, persist=True):
-            fetched.append(bid)
-            return line_neuron(length=25)
-
-        monkeypatch.setattr(morph, "fetch_skeleton_on_demand", fake_fetch)
-        res = comparer.find_similar()
-        assert res["target_bodyId"].tolist() == [201]
-        assert fetched == []  # 201's skeleton already exists
-
-    def test_nblast_rejected_for_flywire_mesh_cache(self, tmp_path, monkeypatch):
-        comparer = morph.MorphologyComparer(
-            query=1, dataset="flywire_FAFB_v783", method="nblast",
-            project_root=str(tmp_path), verbose=False,
-        )
-        monkeypatch.setattr(comparer, "_resolve_query", lambda: pd.DataFrame({
-            "bodyId": [1], "type": ["T"], "instance": ["t"],
-        }))
-        with pytest.raises(ValueError, match="NBLAST requires neuron skeletons"):
-            comparer.find_similar()
-
-    def _type_populated(self, tmp_path):
-        """Give np:v1 typed members + a vector cache (like the real datasets)."""
-        write_neuron_index(tmp_path, "np:v1", [
-            (101, "T", "T_1"), (201, "T", "T_2"), (202, "Y", "Y_1"),
+    def test_type_expansion_caps_types(self, tmp_path, monkeypatch):
+        """Only the top (top_n x expansion) TYPES enter the pool."""
+        comparer = self._setup(tmp_path, monkeypatch, top_n=1, candidate_expansion=2)
+        self._index(tmp_path, [
+            (101, "T", "T_1"), (201, "T", "T_2"),
+            (202, "Y", "Y_1"), (204, "Z", "Z_1"), (205, "Z", "Z_2"),
         ])
-        morph.SkeletonVectorCache(
-            "np:v1", project_root=str(tmp_path), n_workers=1, verbose=False
-        ).build()
+        write_skeleton(tmp_path, "np:v1", 204, line_neuron(length=25))
+        write_skeleton(tmp_path, "np:v1", 205, line_neuron(length=25))
+        monkeypatch.setattr(comparer, "_connection_cache_candidates",
+                            lambda q: self._candidates([
+                                (201, 9, 1.0, "T"), (202, 5, 0.6, "Y"),
+                                (204, 3, 0.3, "Z"), (205, 3, 0.3, "Z"),
+                            ]))
+        monkeypatch.setattr(morph, "fetch_skeleton_on_demand",
+                            lambda d, b, project_root=None, persist=True:
+                            line_neuron(length=25))
+        res = comparer.find_similar()
+        # top-1 x 2 types = T, Y -> Z members never scored
+        assert not res.empty
+        assert "Z" not in res["target_type"].tolist()
+        assert 204 not in res["target_bodyId"].tolist()
 
     def test_profile_first_bodyid_carries_intra_columns(self, tmp_path, monkeypatch):
         comparer = self._setup(tmp_path, monkeypatch)
-        self._type_populated(tmp_path)
-        monkeypatch.setattr(comparer, "_profile_candidates", lambda q: pd.DataFrame({
-            "target_bodyId": [201, 202],
-            "profile_similarity": [0.9, 0.8],
-        }))
-        fetched = []
+        self._index(tmp_path, [
+            (101, "T", "T_1"), (201, "T", "T_2"), (202, "Y", "Y_1"),
+        ])
+        monkeypatch.setattr(comparer, "_connection_cache_candidates",
+                            lambda q: self._candidates([
+                                (201, 9, 1.0, "T"), (202, 5, 0.6, "Y"),
+                            ]))
         monkeypatch.setattr(morph, "fetch_skeleton_on_demand",
                             lambda d, b, project_root=None, persist=True:
-                            fetched.append(b) or line_neuron(length=25))
+                            line_neuron(length=25))
         res = comparer.find_similar()
         assert {"is_same_type", "intra_type_similarity"}.issubset(res.columns)
         # 201 is the same type (T) and identical morphology -> top hit
@@ -892,16 +919,17 @@ class TestProfileFirst:
 
     def test_profile_first_type_level_includes_intra_reference(self, tmp_path, monkeypatch):
         comparer = self._setup(tmp_path, monkeypatch)
-        self._type_populated(tmp_path)
+        self._index(tmp_path, [
+            (101, "T", "T_1"), (201, "T", "T_2"), (202, "Y", "Y_1"),
+        ])
         comparer.level = "type"
-        # only a different-type candidate reaches the top-N: the query type's
-        # intra reference must still be injected from the vector cache
-        monkeypatch.setattr(comparer, "_profile_candidates", lambda q: pd.DataFrame({
-            "target_bodyId": [202],
-            "profile_similarity": [0.8],
-        }))
+        monkeypatch.setattr(comparer, "_connection_cache_candidates",
+                            lambda q: self._candidates([
+                                (201, 9, 1.0, "T"), (202, 5, 0.6, "Y"),
+                            ]))
         monkeypatch.setattr(morph, "fetch_skeleton_on_demand",
-                            lambda d, b, project_root=None, persist=True: line_neuron(length=25))
+                            lambda d, b, project_root=None, persist=True:
+                            line_neuron(length=25))
         res = comparer.find_similar()
         assert not res.empty
         intra = res[res["is_intra_type"]]
@@ -915,33 +943,145 @@ class TestProfileFirst:
         assert inter.iloc[0]["target_type"] == "Y"
 
     def test_type_level_works_without_vector_cache(self, tmp_path, monkeypatch):
-        """Regression: type-level profile-first returned empty when the
-        dataset had skeletons + a neuron index but NO vector cache — candidate
-        types were only resolved from the vector cache, so every row was
-        untyped and the type aggregation produced nothing."""
+        """Type-level profile-first works with skeletons + neuron index but
+        NO vector cache (male-cns v1.0 situation)."""
         comparer = self._setup(tmp_path, monkeypatch)
-        # index + skeletons only; the vector cache parquet is never built
-        # (this is the male-cns v1.0 situation)
-        write_neuron_index(tmp_path, "np:v1", [
+        self._index(tmp_path, [
             (101, "T", "T_1"), (201, "T", "T_2"), (202, "Y", "Y_1"),
         ])
         comparer.level = "type"
-        monkeypatch.setattr(comparer, "_profile_candidates", lambda q: pd.DataFrame({
-            "target_bodyId": [201, 202],
-            "profile_similarity": [0.9, 0.8],
-        }))
+        monkeypatch.setattr(comparer, "_connection_cache_candidates",
+                            lambda q: self._candidates([
+                                (201, 9, 1.0, "T"), (202, 5, 0.6, "Y"),
+                            ]))
         monkeypatch.setattr(morph, "fetch_skeleton_on_demand",
-                            lambda d, b, project_root=None, persist=True: line_neuron(length=25))
+                            lambda d, b, project_root=None, persist=True:
+                            line_neuron(length=25))
         res = comparer.find_similar()
         assert not res.empty
         assert {"target_type", "is_intra_type", "intra_type_similarity"}.issubset(res.columns)
         intra = res[res["is_intra_type"] == True]  # noqa: E712
         assert len(intra) == 1
         assert intra.iloc[0]["target_type"] == "T"
-        # intra computed from the query member's own vector (single member)
         assert intra.iloc[0]["intra_type_similarity"] == pytest.approx(1.0, abs=1e-6)
-        # the Y candidate is typed through the neuron index fallback
         assert (res["target_type"] == "Y").any()
+
+    def test_type_search_uses_only_connectivity_candidates(self, tmp_path, monkeypatch):
+        """Regression: a cached-only type must NOT rank; a member of an
+        expanded candidate type that is not itself a candidate row must."""
+        comparer = self._setup(tmp_path, monkeypatch)
+        # 103 (Y) is cached but Y is NOT among the connectivity candidates
+        write_skeleton(tmp_path, "np:v1", 103, y_neuron())
+        self._index(tmp_path, [
+            (101, "T", "T_1"), (201, "T", "T_2"),
+            (202, "Y", "Y_1"), (103, "Y", "Y_2"),
+        ])
+        comparer.level = "type"
+        monkeypatch.setattr(comparer, "_connection_cache_candidates",
+                            lambda q: self._candidates([(201, 9, 1.0, "T")]))
+        monkeypatch.setattr(morph, "fetch_skeleton_on_demand",
+                            lambda d, b, project_root=None, persist=True:
+                            line_neuron(length=25))
+        res = comparer.find_similar()
+        assert not res.empty
+        assert not (res["target_type"] == "Y").any(), \
+            "cached-only type leaked into the connectivity-only pool"
+        # now Y enters via a candidate: all Y members (even non-candidate 103)
+        # join the pool through the type expansion
+        comparer2 = self._setup(tmp_path, monkeypatch)
+        comparer2.level = "type"
+        monkeypatch.setattr(comparer2, "_connection_cache_candidates",
+                            lambda q: self._candidates([
+                                (201, 9, 1.0, "T"), (103, 4, 0.4, "Y"),
+                            ]))
+        res2 = comparer2.find_similar()
+        assert (res2["target_type"] == "Y").any(),             "type -> individual expansion failed (non-candidate member missing)"
+
+    def test_pool_standardization_without_vector_cache(self, tmp_path, monkeypatch):
+        """Without a vector cache the pool vectors are z-scored with
+        pool-computed stats; scores match the manual z-scored cosine."""
+        comparer = self._setup(tmp_path, monkeypatch)
+        self._index(tmp_path, [
+            (101, "T", "T_1"), (201, "T", "T_2"), (202, "Y", "Y_1"),
+        ])
+        monkeypatch.setattr(comparer, "_connection_cache_candidates",
+                            lambda q: self._candidates([
+                                (201, 9, 1.0, "T"), (202, 5, 0.6, "Y"),
+                            ]))
+        monkeypatch.setattr(morph, "fetch_skeleton_on_demand",
+                            lambda d, b, project_root=None, persist=True:
+                            line_neuron(length=25))
+        res = comparer.find_similar()
+        assert not res.empty
+
+        # manual: raw vectors for query + pool, z-scored with pool stats
+        cache = morph.SkeletonVectorCache("np:v1", project_root=str(tmp_path), verbose=False)
+        ids = [101, 201, 202]
+        Xr, mask = cache.vectors_for(ids, compute_missing=True)
+        assert mask.all()
+        mu = Xr.mean(axis=0)
+        sd = Xr.std(axis=0)
+        sd[sd <= 0] = 1.0
+        Xz = (Xr - mu) / sd
+        qz = Xz[0]
+        for _, row in res.iterrows():
+            idx = ids.index(int(row["target_bodyId"]))
+            expected = morph.cosine_similarity_matrix(qz, Xz[idx].reshape(1, -1))[0]
+            assert row["similarity"] == pytest.approx(expected, abs=1e-9),                 row["target_bodyId"]
+
+    def test_download_all_skeletons_resumable(self, tmp_path, monkeypatch):
+        """download_all_skeletons: persist=True, skips existing, respects
+        limit and the cancel event."""
+        write_neuron_index(tmp_path, "np:v1", [
+            (101, "T", "T_1"), (201, "T", "T_2"), (202, "Y", "Y_1"),
+        ])
+        fetched = []
+
+        def fake_fetch(dataset, bid, project_root=None, persist=True):
+            assert persist is True
+            fetched.append(bid)
+            folder = (Path(project_root) / "cache"
+                      / morph._dataset_folder(dataset) / "skeletons")
+            folder.mkdir(parents=True, exist_ok=True)
+            with open(folder / f"{bid}.pkl", "wb") as f:
+                pickle.dump(line_neuron(length=25), f)
+            return line_neuron(length=25)
+
+        monkeypatch.setattr(morph, "fetch_skeleton_on_demand", fake_fetch)
+        progress = []
+
+        summary = morph.download_all_skeletons(
+            "np:v1", project_root=str(tmp_path), max_workers=2, limit=2,
+            progress_callback=lambda c, t, i: progress.append((c, t)),
+            verbose=False,
+        )
+        assert summary["fetched"] == 2 and summary["errors"] == 0
+        assert set(fetched) == {101, 201}  # deterministic first two of the index
+        assert progress and progress[-1][0] == progress[-1][1] == 2
+        # resume: the two fetched are now cached; limit=2 fetches the rest
+        summary2 = morph.download_all_skeletons(
+            "np:v1", project_root=str(tmp_path), max_workers=2, limit=2,
+            verbose=False,
+        )
+        assert summary2["fetched"] == 1 and 202 in fetched
+        assert summary2["skipped_existing"] == 2
+
+    def test_download_all_skeletons_cancel(self, tmp_path, monkeypatch):
+        import threading
+        write_neuron_index(tmp_path, "np:v1", [
+            (101, "T", "T_1"), (201, "T", "T_2"), (202, "Y", "Y_1"),
+        ])
+        monkeypatch.setattr(morph, "fetch_skeleton_on_demand",
+                            lambda d, b, project_root=None, persist=True:
+                            line_neuron(length=25))
+        ev = threading.Event()
+        ev.set()  # pre-cancelled
+        summary = morph.download_all_skeletons(
+            "np:v1", project_root=str(tmp_path), max_workers=2,
+            cancel_event=ev, verbose=False,
+        )
+        assert summary["cancelled"] is True
+        assert summary["fetched"] == 0
 
     def test_find_homologs_fast_bodyid_reaches_comparison(self, tmp_path, monkeypatch):
         """Regression: the bodyId branch of find_homologs_fast was nested
@@ -1007,6 +1147,75 @@ class TestProfileFirst:
 # ---------------------------------------------------------------------------
 # Homolog enrichment
 # ---------------------------------------------------------------------------
+
+class TestConnectionCacheCandidates:
+    """Candidate discovery straight from the connections parquet."""
+
+    def _setup(self, tmp_path, monkeypatch, with_roi=True):
+        folder = tmp_path / "cache" / morph._dataset_folder("np:v1")
+        folder.mkdir(parents=True, exist_ok=True)
+        rows = {
+            "bodyId_pre": ["2", "3", "4", "5", "1", "1", "2", "3", "3", "6"],
+            "bodyId_post": ["1", "1", "1", "1", "2", "3", "6", "6", "7", "2"],
+            "weight": [10, 8, 7, 2, 10, 5, 9, 4, 6, 9],
+        }
+        if with_roi:
+            rows["roi"] = ["AL(L)", "AL(R)", "AL(R)", "", "AL(L)", "AL(L)",
+                           "AL(L)", "AL(L)", "AL(R)", "AL(L)"]
+        rows["cached_date"] = ["x"] * len(rows["bodyId_pre"])
+        pd.DataFrame(rows).to_parquet(folder / "connections.parquet", index=False)
+        write_neuron_index(tmp_path, "np:v1", [
+            (1, "Q", "Q_1"), (2, "A", "A_1"), (3, "B", "B_1"),
+            (4, "C", "C_1"), (5, "D", "D_1"), (6, "E", "E_1"), (7, "F", "F_1"),
+        ])
+        comparer = morph.MorphologyComparer(query=1, dataset="np:v1",
+                                            project_root=str(tmp_path), verbose=False)
+        monkeypatch.setattr(comparer, "_resolve_query", lambda: pd.DataFrame({
+            "bodyId": [1], "type": ["Q"], "instance": ["Q_1"],
+        }))
+        return comparer
+
+    def test_shared_partner_ranking_and_type_join(self, tmp_path, monkeypatch):
+        comparer = self._setup(tmp_path, monkeypatch)
+        qdf = comparer._resolve_query()
+        res = comparer._connection_cache_candidates(
+            qdf, min_weight=3, min_shared_partners=2
+        )
+        # query 1 partners (w>=3): up {2,3,4}, down {2,3}; 5 excluded (w=2).
+        # candidate 6 shares upstream {2,3} + downstream {2} = 3; candidate 7
+        # shares upstream {3} = 1 -> below min_shared_partners.
+        assert res["target_bodyId"].tolist() == [6]
+        assert res["shared_count"].tolist() == [3]
+        assert res["profile_similarity"].tolist() == [1.0]
+        assert res["target_type"].tolist() == ["E"]
+
+    def test_roi_filter_restricts_candidates(self, tmp_path, monkeypatch):
+        comparer = self._setup(tmp_path, monkeypatch)
+        qdf = comparer._resolve_query()
+        # AL(R) rows only: 3->1, 4->1, 3->7. Query partners {3,4}; shared
+        # upstream for 7 = {3} -> 1 shared -> below the minimum.
+        res = comparer._connection_cache_candidates(
+            qdf, min_weight=3, min_shared_partners=2, roi_filter=["AL(R)"]
+        )
+        assert res.empty
+
+    def test_dataset_without_roi_column_falls_back_to_all_rows(self, tmp_path, monkeypatch):
+        comparer = self._setup(tmp_path, monkeypatch, with_roi=False)
+        qdf = comparer._resolve_query()
+        res = comparer._connection_cache_candidates(
+            qdf, min_weight=3, min_shared_partners=2
+        )
+        assert res["target_bodyId"].tolist() == [6]
+        assert res["shared_count"].tolist() == [3]
+
+    def test_missing_connection_cache_returns_empty(self, tmp_path, monkeypatch):
+        comparer = morph.MorphologyComparer(query=1, dataset="np:v1",
+                                            project_root=str(tmp_path), verbose=False)
+        monkeypatch.setattr(comparer, "_resolve_query", lambda: pd.DataFrame({
+            "bodyId": [1], "type": ["Q"], "instance": ["Q_1"],
+        }))
+        assert comparer._connection_cache_candidates(comparer._resolve_query()).empty
+
 
 class TestEnrichment:
     def test_enrichment_adds_columns_with_valid_range(self, tmp_path):

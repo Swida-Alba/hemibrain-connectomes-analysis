@@ -766,6 +766,120 @@ def fetch_skeleton_on_demand(dataset: str, body_id: int,
     return neuron
 
 
+def download_all_skeletons(dataset: str, project_root: Optional[str] = None,
+                           max_workers: int = 8, limit: Optional[int] = None,
+                           progress_callback=None, cancel_event=None,
+                           verbose: bool = True) -> Dict[str, object]:
+    """Download every missing skeleton of a dataset to the local cache.
+
+    Mirrors the Settings-panel full dataset pull: iterates the neuron index
+    (allneurons table, neuron index fallback), fetches only the neurons
+    missing from ``cache/{dataset}/skeletons/`` (resumable — existing files
+    are skipped), parallel over a thread pool, and persists each skeleton
+    (``persist=True``). ``progress_callback(current, total, info)`` and
+    ``cancel_event`` (threading.Event) drive the UI; ``limit`` bounds the
+    download (tests / smoke runs). Returns a summary dict.
+    """
+    import threading
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    root = Path(project_root) if project_root else Path(__file__).parent.parent
+    folder = _dataset_folder(dataset)
+    skeleton_dir = root / "cache" / folder / "skeletons"
+    skeleton_dir.mkdir(parents=True, exist_ok=True)
+
+    # Index of all bodyIds.
+    index: List[int] = []
+    csv_path = root / "datasets" / folder / f"{folder}_allneurons_neuron_df.csv"
+    if csv_path.exists():
+        try:
+            import polars as pl
+            index = pl.read_csv(csv_path, columns=["bodyId"])["bodyId"] \
+                .cast(pl.Int64).to_list()
+        except Exception:
+            index = []
+    if not index:
+        index_path = root / "cache" / folder / "neuron_index.parquet"
+        if index_path.exists():
+            try:
+                index = pd.read_parquet(index_path, columns=["bodyId"])["bodyId"] \
+                    .astype(np.int64).tolist()
+            except Exception:
+                index = []
+
+    existing = {int(p.stem) for p in skeleton_dir.rglob("*.pkl")}
+    missing = [int(b) for b in index if int(b) not in existing]
+    if limit is not None:
+        missing = missing[: int(limit)]
+    total = len(missing)
+    if total == 0:
+        if verbose:
+            print(f"[morphology] download_all_skeletons: "
+                  f"{len(existing)} skeletons already cached; nothing to fetch.")
+        return {"total": 0, "fetched": 0, "skipped_existing": len(existing),
+                "cancelled": False, "errors": 0}
+
+    if verbose:
+        print(f"[morphology] download_all_skeletons: fetching {total} "
+              f"skeletons ({dataset})...")
+    if progress_callback:
+        progress_callback(0, total, f"Fetching skeletons (0/{total})")
+
+    fetched = 0
+    errors = 0
+    cancelled = False
+    cancel_event = cancel_event or threading.Event()
+    lock = threading.Lock()
+
+    def _fetch_one(bid: int) -> bool:
+        if cancel_event.is_set():
+            return False
+        try:
+            nrn = fetch_skeleton_on_demand(
+                dataset, bid, project_root=str(root), persist=True
+            )
+            ok = nrn is not None
+        except Exception:
+            ok = False
+        with lock:
+            nonlocal fetched, errors
+            if ok:
+                fetched += 1
+            else:
+                errors += 1
+            if progress_callback:
+                progress_callback(fetched + errors, total,
+                                  f"Fetching skeletons ({fetched + errors}/{total})")
+        return ok
+
+    try:
+        with ThreadPoolExecutor(max_workers=max(1, int(max_workers))) as ex:
+            futures = [ex.submit(_fetch_one, bid) for bid in missing]
+            for fut in as_completed(futures):
+                if cancel_event.is_set():
+                    cancelled = True
+                    for f in futures:
+                        f.cancel()
+                    break
+                fut.result()
+    finally:
+        if progress_callback:
+            progress_callback(fetched + errors, total,
+                              "Cancelled." if cancelled else "Finished.")
+
+    summary = {
+        "total": total,
+        "fetched": fetched,
+        "skipped_existing": len(existing),
+        "cancelled": cancelled,
+        "errors": errors,
+    }
+    if verbose:
+        print(f"[morphology] download_all_skeletons: {fetched}/{total} fetched, "
+              f"{errors} errors, cancelled={cancelled}")
+    return summary
+
+
 # =============================================================================
 # MorphologyComparer (runner-facing)
 # =============================================================================
@@ -791,6 +905,11 @@ class MorphologyComparer:
         candidate_source: str = "auto",
         fetch_top_n: int = 20,
         fetch_missing: Optional[int] = None,
+        candidate_expansion: int = 3,
+        min_weight: int = 3,
+        min_shared_partners: int = 2,
+        roi_filter: Optional[List[str]] = None,
+        max_pool_per_type: int = 100,
         visualize_top_n: int = 0,
         visualize_by: str = "type",
         output_dir: Optional[str] = None,
@@ -811,6 +930,11 @@ class MorphologyComparer:
         self.candidate_source = str(candidate_source).lower()
         # Backward-compatible alias: fetch_missing -> fetch_top_n.
         self.fetch_top_n = int(fetch_top_n if fetch_missing is None else fetch_missing)
+        self.candidate_expansion = int(candidate_expansion)
+        self.min_weight = int(min_weight)
+        self.min_shared_partners = int(min_shared_partners)
+        self.roi_filter = list(roi_filter) if roi_filter else None
+        self.max_pool_per_type = int(max_pool_per_type)
         self.visualize_top_n = int(visualize_top_n)
         self.visualize_by = str(visualize_by).lower()
         self.verbose = verbose
@@ -827,6 +951,14 @@ class MorphologyComparer:
         if self.candidate_source not in ("auto", "cache", "profile"):
             raise ValueError(
                 f"Invalid candidate_source: {self.candidate_source} (auto|cache|profile)"
+            )
+        if self.candidate_expansion < 1:
+            raise ValueError(
+                f"Invalid candidate_expansion: {self.candidate_expansion} (>= 1)"
+            )
+        if self.min_shared_partners < 1:
+            raise ValueError(
+                f"Invalid min_shared_partners: {self.min_shared_partners} (>= 1)"
             )
         if self.visualize_by not in ("type", "bodyid"):
             raise ValueError(
@@ -930,8 +1062,8 @@ class MorphologyComparer:
         )
 
         if source == "profile":
-            results = self._profile_first_search(query_df, cache)
-            if results.empty:
+            bodyid_df, type_df = self._profile_first_search(query_df, cache)
+            if bodyid_df.empty and type_df.empty:
                 # Connection-profile discovery can return nothing for neurons
                 # with sparse connectivity; fall back to the vector cache when
                 # one exists, otherwise surface a clear error.
@@ -942,9 +1074,9 @@ class MorphologyComparer:
                         "the vector cache."
                     )
                     if self.method == "vector":
-                        results = self._vector_search(query_df, data)
+                        bodyid_df, type_df = self._vector_search(query_df, data)
                     else:
-                        results = self._nblast_search(query_df, data)
+                        bodyid_df, type_df = self._nblast_search(query_df, data)
                 else:
                     raise ValueError(
                         "Connection-profile search found candidates for "
@@ -956,7 +1088,9 @@ class MorphologyComparer:
                     )
         else:
             # Cache-direct search (FlyWire bulk caches and explicit choice).
-            cache.ensure(fetch_missing=self.fetch_top_n if self.candidate_source != "auto" else 0)
+            # Skeletons are only ever fetched explicitly (Download All
+            # Skeletons); the vector cache builds from what is local.
+            cache.ensure(fetch_missing=0)
             data = cache.load()
             if data is None or len(data["bodyIds"]) == 0:
                 raise ValueError(
@@ -964,86 +1098,182 @@ class MorphologyComparer:
                     "cache first (Build Vector Cache button)."
                 )
             if self.method == "vector":
-                results = self._vector_search(query_df, data)
+                bodyid_df, type_df = self._vector_search(query_df, data)
             else:
-                results = self._nblast_search(query_df, data)
+                bodyid_df, type_df = self._nblast_search(query_df, data)
 
+        # The returned/primary frame follows the level (type-to-type for type
+        # queries, bodyId-to-bodyId otherwise); both files are always saved.
+        results = type_df if self.level == "type" else bodyid_df
         if results.empty:
             self._log("No similar neurons found.")
         else:
-            self._save_results(results, query_df)
+            self._save_results(results, bodyid_df, type_df, query_df)
             self._visualize_top_results(results)
         return results
 
     # ---------------------------------------------------- profile-first
-    def _profile_candidates(self, query_df: pd.DataFrame) -> pd.DataFrame:
-        """Rank candidates by connection-profile similarity (HomologFinder).
+    def _connection_cache_candidates(self, query_df: pd.DataFrame,
+                                     min_weight: Optional[int] = None,
+                                     min_shared_partners: Optional[int] = None,
+                                     roi_filter: Optional[List[str]] = None,
+                                     top_k: Optional[int] = None) -> pd.DataFrame:
+        """Rank candidate neurons directly from the connection cache.
 
-        Returns a DataFrame with target_bodyId and profile_similarity,
-        sorted descending. Runs in a temp output dir (candidate discovery
-        only) which is removed afterwards.
+        Reads ``cache/{dataset}/connections.parquet``
+        (bodyId_pre, bodyId_post, weight, roi) with polars and finds neurons
+        sharing upstream/downstream partners with the query:
+
+        1. the query's partner rows (``weight >= min_weight``; optionally
+           restricted to ``roi_filter`` ROIs when the dataset has ROI data —
+           ``"*"`` = non-empty ROIs only),
+        2. shared-partner adjacency: candidates = neurons sharing at least
+           ``min_shared_partners`` upstream/downstream partner neurons with
+           the query,
+        3. ranked by shared-partner count (descending), target types joined
+           via the neuron type map.
+
+        Lightweight (no profile building); same adjacency semantics as the
+        homolog finding, direct from the cache. Returns a DataFrame with
+        target_bodyId, shared_count, profile_similarity (normalized 0-1 by
+        the max shared count) and target_type.
         """
-        import shutil
-        import tempfile
-        from comparison.profile_comparator import HomologFinder
+        import polars as pl
 
-        query_label = str(self.query)
-        tmp = tempfile.mkdtemp(prefix="drocat_profile_cand_")
-        try:
-            finder = HomologFinder(
-                source=query_label,
-                source_dataset=self.dataset,
-                target_dataset=self.dataset,
-                output_dir=tmp,
-                top_n=max(self.top_n, self.fetch_top_n),
-                min_shared_partners=2,
-                vector_prune_fraction=0.2,
-                similarity_metric="rank_union",
-                vector_prefiltering=True,
-                include_untyped_partners=True,
-                use_cache=self.use_cache,
-                min_synapse_threshold=3,
-                morphological_enrichment=False,
-                ensure_cache_complete=False,
-                verbose=False,
-            )
-            res = finder.find_homologs_fast()
-        finally:
-            shutil.rmtree(tmp, ignore_errors=True)
+        min_weight = self.min_weight if min_weight is None else int(min_weight)
+        min_shared_partners = self.min_shared_partners \
+            if min_shared_partners is None else int(min_shared_partners)
+        roi_filter = self.roi_filter if roi_filter is None else roi_filter
 
-        if res is None or res.empty or "target_bodyId" not in res.columns:
+        conn_path = (Path(self.project_root) / "cache"
+                     / _dataset_folder(self.dataset) / "connections.parquet")
+        if not conn_path.exists():
+            self._log("Connection cache missing; no candidates discoverable.")
             return pd.DataFrame()
-        out = res[["target_bodyId"]].copy()
-        out["target_bodyId"] = out["target_bodyId"].astype(np.int64)
-        score_col = "rank_union" if "rank_union" in res.columns else (
-            "combined" if "combined" in res.columns else "similarity"
+        try:
+            conn = pl.read_parquet(conn_path)
+        except Exception as exc:
+            self._log(f"Connection cache unreadable: {exc}")
+            return pd.DataFrame()
+
+        has_roi = "roi" in conn.columns and \
+            bool(conn.filter(pl.col("roi").is_not_null() & (pl.col("roi") != "")).height)
+        if has_roi and roi_filter:
+            if roi_filter == ["*"] or roi_filter == "*":
+                conn = conn.filter(pl.col("roi").is_not_null() & (pl.col("roi") != ""))
+            else:
+                conn = conn.filter(pl.col("roi").is_in(roi_filter))
+
+        query_ids = [int(b) for b in query_df["bodyId"].tolist()]
+        q = pl.Series("q", query_ids, dtype=pl.Int64)
+        conn = conn.with_columns([
+            pl.col("bodyId_pre").cast(pl.Int64, strict=False),
+            pl.col("bodyId_post").cast(pl.Int64, strict=False),
+        ]).drop_nulls(["bodyId_pre", "bodyId_post"])
+        conn = conn.filter(pl.col("weight") >= min_weight)
+
+        up = conn.filter(pl.col("bodyId_post").is_in(q))      # partners -> query
+        down = conn.filter(pl.col("bodyId_pre").is_in(q))     # query -> partners
+
+        def _shared(partner_col: str, candidate_col: str, partner_ids) -> "pl.DataFrame":
+            if len(partner_ids) == 0:
+                return pl.DataFrame({candidate_col: [], "n_shared": []})
+            shared = (conn
+                      .filter(pl.col(partner_col).is_in(partner_ids)
+                              & ~pl.col(candidate_col).is_in(q))
+                      .group_by([candidate_col, partner_col])
+                      .agg(pl.len().alias("_w"))
+                      .group_by(candidate_col)
+                      .agg(pl.len().alias("n_shared")))
+            return shared
+
+        up_shared = _shared("bodyId_pre", "bodyId_post", up["bodyId_pre"].unique())
+        down_shared = _shared("bodyId_post", "bodyId_pre", down["bodyId_post"].unique())
+
+        counts = None
+        for part in (up_shared, down_shared):
+            if part.height == 0:
+                continue
+            part = part.rename({part.columns[0]: "candidate"})
+            counts = part if counts is None else counts.vstack(part)
+        if counts is None:
+            return pd.DataFrame()
+        counts = (counts
+                  .group_by("candidate")
+                  .agg(pl.col("n_shared").sum())
+                  .filter(pl.col("n_shared") >= min_shared_partners)
+                  .sort("n_shared", descending=True))
+        if top_k:
+            counts = counts.head(top_k)
+
+        out = pd.DataFrame({
+            "target_bodyId": counts["candidate"].to_list(),
+            "shared_count": counts["n_shared"].to_list(),
+        })
+        if out.empty:
+            return out
+        max_shared = float(out["shared_count"].max()) or 1.0
+        out["profile_similarity"] = out["shared_count"] / max_shared
+        type_map, _ = _load_neuron_type_map(self.dataset, str(self.project_root))
+        out["target_type"] = out["target_bodyId"].map(
+            lambda b: type_map.get(int(b), "")
         )
-        out["profile_similarity"] = pd.to_numeric(
-            res.get(score_col, np.nan), errors="coerce"
-        )
-        # A multi-source query can return the same candidate twice; keep the
-        # best profile score per bodyId.
-        return (out
-                .sort_values("profile_similarity", ascending=False)
-                .drop_duplicates("target_bodyId")
-                .reset_index(drop=True))
+        return out
 
     def _profile_first_search(self, query_df: pd.DataFrame, cache: SkeletonVectorCache) -> pd.DataFrame:
-        """Connection-similarity first, then morphology on the top-N fetched
-        skeletons. Bounds the skeleton fetch to ``fetch_top_n`` neurons.
+        """Connectivity-first, then morphology on the expanded candidate pool.
 
-        Fetched skeletons are TRANSIENT: they are used for the current
-        comparison only and never written to the skeleton cache (the vector
-        cache is the persistent artifact). Already-cached skeletons are still
-        reused.
+        Candidate discovery reads the connection cache directly
+        (``_connection_cache_candidates``); the top ``top_n * candidate_expansion``
+        connectivity-similar TYPES are then expanded to ALL their member
+        bodyIds (type map, safety cap ``max_pool_per_type``) — the scoring
+        pool. Fetched skeletons are TRANSIENT (used for the current
+        comparison only, never written to the skeleton cache); cached
+        skeletons are reused. Without a vector cache the pool vectors are
+        z-scored with pool-computed statistics so cosine is scale-fair.
         """
-        self._log("Profile-first search: running connection-profile candidate discovery...")
-        candidates = self._profile_candidates(query_df)
+        self._log("Profile-first search: running connection-cache candidate discovery...")
+        candidates = self._connection_cache_candidates(query_df)
         if candidates.empty:
-            self._log("Connection-profile search returned no candidates.")
-            return pd.DataFrame()
-        candidates = candidates.head(max(1, self.fetch_top_n))
-        cand_ids = [int(b) for b in candidates["target_bodyId"]]
+            self._log("Connection-cache search returned no candidates.")
+            return pd.DataFrame(), pd.DataFrame()
+
+        # Rank the candidate TYPES by mean shared-partner count, keep the
+        # top (top_n * candidate_expansion) types.
+        import collections
+        type_scores: Dict[str, List[float]] = collections.defaultdict(list)
+        for _, row in candidates.iterrows():
+            t = str(row.get("target_type", "") or "")
+            if t:
+                type_scores[t].append(float(row["shared_count"]))
+        ranked_types = sorted(type_scores.items(),
+                              key=lambda kv: (-np.mean(kv[1]), kv[0]))
+        keep_types = [t for t, _ in ranked_types[: max(1, self.top_n * self.candidate_expansion)]]
+        if not keep_types:
+            self._log("Connection-cache candidates carry no types.")
+            return pd.DataFrame(), pd.DataFrame()
+
+        # Expand every kept type to ALL its member bodyIds (type map); the
+        # union is the scoring pool. Per-type safety cap bounds huge types.
+        type_map, _ = _load_neuron_type_map(self.dataset, str(self.project_root))
+        pool_ids: List[int] = []
+        seen_pool = set()
+        for t in keep_types:
+            members = [int(b) for b, tt in type_map.items() if tt == t]
+            members = members[: self.max_pool_per_type]
+            for m in members:
+                if m not in seen_pool:
+                    seen_pool.add(m)
+                    pool_ids.append(m)
+        self._log(f"Profile-first: {len(keep_types)} expanded types -> "
+                  f"{len(pool_ids)} pool neurons "
+                  f"({len(candidates)} connectivity candidates)")
+
+        prof_by_id = {
+            int(b): float(v)
+            for b, v in zip(candidates["target_bodyId"], candidates["profile_similarity"])
+            if np.isfinite(v)
+        }
 
         def _load_missing(ids: List[int]) -> Dict[int, "navis.TreeNeuron"]:
             """Fetch skeletons missing from the cache, kept in memory only."""
@@ -1062,28 +1292,42 @@ class MorphologyComparer:
         query_ids = [int(b) for b in query_df["bodyId"].tolist()]
         query_neurons = _load_missing(query_ids)
 
-        # Fetch skeletons for the top-N candidates (bounded, transient).
-        cand_neurons = _load_missing(cand_ids)
-        self._log(f"Profile-first: {len(cand_ids)} candidates, "
-                  f"{len(cand_neurons)} skeletons fetched (transient)")
+        # Fetch skeletons for pool neurons missing from the cache (bounded,
+        # transient; every pool neuron can trigger a fetch).
+        pool_neurons = _load_missing(pool_ids)
+        self._log(f"Profile-first: {len(pool_ids)} pool neurons, "
+                  f"{len(pool_neurons)} skeletons fetched (transient)")
 
-        # Vectors for query + candidates: cached vectors first, then any
+        # Vectors for query + pool: cached vectors first, then any
         # in-memory fetched neurons.
         X_q, mask_q = cache.vectors_for(query_ids, compute_missing=True)
         for i, bid in enumerate(query_ids):
             if not mask_q[i] and bid in query_neurons:
                 _, vec = vectorize_neuron(query_neurons[bid])
                 X_q[i], mask_q[i] = vec, True
-        X_c, mask_c = cache.vectors_for(cand_ids, compute_missing=True)
-        for i, bid in enumerate(cand_ids):
-            if not mask_c[i] and bid in cand_neurons:
-                _, vec = vectorize_neuron(cand_neurons[bid])
+        X_c, mask_c = cache.vectors_for(pool_ids, compute_missing=True)
+        for i, bid in enumerate(pool_ids):
+            if not mask_c[i] and bid in pool_neurons:
+                _, vec = vectorize_neuron(pool_neurons[bid])
                 X_c[i], mask_c[i] = vec, True
         if not mask_q.any():
             raise ValueError("Could not vectorize the query neuron.")
+
+        # Without a vector cache the vectors are RAW (morphometrics + shape
+        # on very different scales): z-score query + pool with pool-computed
+        # statistics so cosine is scale-fair (constant features -> std 1).
+        cache_data = cache.load()
+        if cache_data is None and (mask_q.any() or mask_c.any()):
+            all_rows = np.vstack([X_q[mask_q], X_c[mask_c]])
+            mu = all_rows.mean(axis=0)
+            sd = all_rows.std(axis=0)
+            sd[sd <= 0] = 1.0
+            X_q[mask_q] = (X_q[mask_q] - mu) / sd
+            X_c[mask_c] = (X_c[mask_c] - mu) / sd
+
         q_vec = X_q[mask_q].mean(axis=0)
         keep = mask_c
-        scores = np.full(len(cand_ids), np.nan)
+        scores = np.full(len(pool_ids), np.nan)
         if keep.any():
             scores[keep] = similarity_matrix(q_vec, X_c[keep], self.metric)
 
@@ -1093,7 +1337,6 @@ class MorphologyComparer:
         # intra-type similarity comes from the vector cache when present,
         # otherwise from the query members' own vectors (the query type's
         # members are exactly what a type query resolves).
-        cache_data = cache.load()
         id_to_type, _ = _load_neuron_type_map(self.dataset, str(self.project_root))
         if cache_data is not None:
             id_to_type = {int(b): t for b, t in zip(cache_data["bodyIds"], cache_data["types"])}
@@ -1114,18 +1357,22 @@ class MorphologyComparer:
             )
 
         rows = []
-        for i, bid in enumerate(cand_ids):
+        for i, bid in enumerate(pool_ids):
             if not keep[i]:
                 continue
             t = id_to_type.get(bid, "")
+            # The query neurons (and, for type searches, every neuron of the
+            # query type) are the query itself and stay out of the rows; the
+            # intra reference row is injected in the type summary instead.
+            if bid in set(query_ids) or (self.level == "type" and t == query_type):
+                continue
             rows.append({
                 "source_bodyId": query_ids[0],
                 "source_type": query_type,
                 "target_bodyId": bid,
                 "target_type": t,
                 "target_instance": "",
-                "profile_similarity": float(candidates.loc[i, "profile_similarity"])
-                if np.isfinite(candidates.loc[i, "profile_similarity"]) else np.nan,
+                "profile_similarity": prof_by_id.get(bid, np.nan),
                 "similarity": float(scores[i]),
                 "is_same_type": t == query_type if t else False,
                 "intra_type_similarity": intra,
@@ -1133,65 +1380,64 @@ class MorphologyComparer:
                 "metric": self.metric,
                 "candidate_source": "profile",
             })
-        if not rows:
-            return pd.DataFrame()
+        if not rows and not (self.level == "type" and np.isfinite(intra)):
+            return pd.DataFrame(), pd.DataFrame()
 
-        # Type-level: aggregate candidate rows by type (the query type itself
+        # Type-level aggregation over ALL scored rows (the query type itself
         # is included as the intra-type reference row; injected from the
-        # vector cache when no query-type candidate reached the top-N).
-        if self.level == "type":
-            import collections
-            agg: Dict[str, List[float]] = collections.defaultdict(list)
-            prof: Dict[str, List[float]] = collections.defaultdict(list)
-            for r in rows:
-                if r["target_type"]:
-                    agg[r["target_type"]].append(r["similarity"])
-                    if np.isfinite(r["profile_similarity"]):
-                        prof[r["target_type"]].append(r["profile_similarity"])
-            agg_rows = []
-            for t, vals in agg.items():
-                agg_rows.append({
-                    "target_type": t,
-                    "similarity": float(np.mean(vals)),
-                    "n_bodyids": len(vals),
-                    "profile_similarity": float(np.mean(prof[t])) if prof[t] else np.nan,
-                    "is_intra_type": t == query_type,
-                    "intra_type_similarity": intra if t == query_type else float("nan"),
-                    "method": self.method,
-                    "metric": self.metric,
-                    "candidate_source": "profile",
-                })
-            if query_type and query_type not in agg and np.isfinite(intra):
-                if cache_data is not None:
-                    n_members = int(sum(1 for t in cache_data["types"] if t == query_type))
-                else:
-                    n_members = int(sum(1 for t in id_to_type.values() if t == query_type))
-                agg_rows.append({
-                    "target_type": query_type,
-                    "similarity": intra,
-                    "n_bodyids": n_members,
-                    "profile_similarity": np.nan,
-                    "is_intra_type": True,
-                    "intra_type_similarity": intra,
-                    "method": self.method,
-                    "metric": self.metric,
-                    "candidate_source": "profile",
-                })
-            agg_rows = sorted(agg_rows, key=lambda r: (not r["is_intra_type"], -r["similarity"], r["target_type"]))
-            results = pd.DataFrame(agg_rows).head(self.top_n).reset_index(drop=True)
-            results.insert(0, "rank", np.arange(1, len(results) + 1))
-            return results
+        # type map when no query-type neuron reached the pool).
+        import collections
+        agg: Dict[str, List[float]] = collections.defaultdict(list)
+        prof: Dict[str, List[float]] = collections.defaultdict(list)
+        for r in rows:
+            if r["target_type"]:
+                agg[r["target_type"]].append(r["similarity"])
+                if np.isfinite(r["profile_similarity"]):
+                    prof[r["target_type"]].append(r["profile_similarity"])
+        agg_rows = []
+        for t, vals in agg.items():
+            agg_rows.append({
+                "target_type": t,
+                "similarity": float(np.mean(vals)),
+                "n_bodyids": len(vals),
+                "profile_similarity": float(np.mean(prof[t])) if prof[t] else np.nan,
+                "is_intra_type": t == query_type,
+                "intra_type_similarity": intra if t == query_type else float("nan"),
+                "method": self.method,
+                "metric": self.metric,
+                "candidate_source": "profile",
+            })
+        if query_type and query_type not in agg and np.isfinite(intra):
+            if cache_data is not None:
+                n_members = int(sum(1 for t in cache_data["types"] if t == query_type))
+            else:
+                n_members = int(sum(1 for t in id_to_type.values() if t == query_type))
+            agg_rows.append({
+                "target_type": query_type,
+                "similarity": intra,
+                "n_bodyids": n_members,
+                "profile_similarity": np.nan,
+                "is_intra_type": True,
+                "intra_type_similarity": intra,
+                "method": self.method,
+                "metric": self.metric,
+                "candidate_source": "profile",
+            })
+        agg_rows = sorted(agg_rows, key=lambda r: (not r["is_intra_type"], -r["similarity"], r["target_type"]))
+        type_df = pd.DataFrame(agg_rows).head(self.top_n).reset_index(drop=True)
+        type_df.insert(0, "rank", np.arange(1, len(type_df) + 1))
 
+        # bodyId-level rows: top-N scored neurons.
         rows = sorted(rows, key=lambda r: (-r["similarity"], r["target_bodyId"]))
-        results = pd.DataFrame(rows).head(self.top_n).reset_index(drop=True)
-        results.insert(0, "rank", np.arange(1, len(results) + 1))
+        bodyid_df = pd.DataFrame(rows).head(self.top_n).reset_index(drop=True)
+        bodyid_df.insert(0, "rank", np.arange(1, len(bodyid_df) + 1))
 
-        # NBLAST refinement over the fetched candidate skeletons (transient).
+        # NBLAST refinement over the fetched pool skeletons (transient).
         if self.method == "nblast":
             neurons = dict(query_neurons)
-            neurons.update(cand_neurons)
-            results = self._nblast_refine(results, query_df, cache, neurons)
-        return results
+            neurons.update(pool_neurons)
+            bodyid_df = self._nblast_refine(bodyid_df, query_df, cache, neurons)
+        return bodyid_df, type_df
 
     def _nblast_refine(self, results: pd.DataFrame, query_df: pd.DataFrame,
                        cache: SkeletonVectorCache,
@@ -1256,35 +1502,61 @@ class MorphologyComparer:
         total = float(pair.sum()) - n  # drop the diagonal (self = 1)
         return total / (n * (n - 1))
 
-    def _vector_search(self, query_df: pd.DataFrame, data: dict) -> pd.DataFrame:
+    def _vector_search(self, query_df: pd.DataFrame, data: dict
+                       ) -> Tuple[pd.DataFrame, pd.DataFrame]:
+        """Vector similarity over the cache population.
+
+        Returns (bodyId-level df, type-level df): results.csv always holds
+        the bodyId rows and type_summary.csv the type rows, whatever the
+        query kind. Type queries score from the type centroid and exclude
+        the query type's members from the bodyId rows; the type rows carry
+        the intra-type reference row."""
         body_ids = data["bodyIds"]
         types = data["types"]
         X = data["X"]
+        query_ids = [int(b) for b in query_df["bodyId"].tolist()]
+        query_ids_set = set(query_ids)
+        q_type = query_df["type"].iloc[0] if len(query_df) else ""
+        intra = self._intra_type_similarity(q_type, body_ids, types, X, self.metric)
 
+        # --- bodyId rows ---
+        rows = []
         if self.level == "type":
-            # Query type vector = mean of the query's member vectors.
-            q_mask = np.isin(body_ids, query_df["bodyId"].to_numpy())
+            # Query type vector = mean of the query's member vectors; every
+            # query member is the query itself and is excluded.
+            q_mask = np.isin(body_ids, query_ids)
             q_vec = X[q_mask].mean(axis=0) if q_mask.any() else None
             if q_vec is None:
-                return pd.DataFrame()
-            q_type = query_df["type"].iloc[0] if len(query_df) else ""
+                return pd.DataFrame(), pd.DataFrame()
             scores = similarity_matrix(q_vec, X, self.metric)
-            return self._aggregate_by_type(
-                body_ids, types, scores, query_type=q_type,
-                metric=self.metric, X=X,
-            )
+            for i, bid in enumerate(body_ids):
+                if int(bid) in query_ids_set:
+                    continue
+                rows.append({
+                    "source_bodyId": query_ids[0],
+                    "source_type": q_type,
+                    "target_bodyId": int(bid),
+                    "target_type": types[i],
+                    "target_instance": data["instances"][i],
+                    "similarity": float(scores[i]),
+                    "is_same_type": types[i] == q_type,
+                    "intra_type_similarity": intra,
+                    "method": self.method,
+                    "metric": self.metric,
+                })
         else:
-            rows = []
+            # Multi-query support: each query row is ranked independently
+            # (self and any co-query neurons excluded from its rows).
             for _, qrow in query_df.iterrows():
                 q_vec = self._vector_for_body_id(int(qrow["bodyId"]), body_ids, X)
                 if q_vec is None:
                     continue
                 scores = similarity_matrix(q_vec, X, self.metric)
-                intra = self._intra_type_similarity(
+                row_intra = self._intra_type_similarity(
                     qrow["type"], body_ids, types, X, self.metric
                 )
                 for i, bid in enumerate(body_ids):
-                    if int(bid) == int(qrow["bodyId"]):
+                    if int(bid) in query_ids_set:
                         continue
                     rows.append({
                         "source_bodyId": int(qrow["bodyId"]),
@@ -1294,14 +1566,25 @@ class MorphologyComparer:
                         "target_instance": data["instances"][i],
                         "similarity": float(scores[i]),
                         "is_same_type": types[i] == qrow["type"],
-                        "intra_type_similarity": intra,
+                        "intra_type_similarity": row_intra,
                         "method": self.method,
                         "metric": self.metric,
                     })
-            rows = sorted(rows, key=lambda r: (-r["similarity"], r["target_bodyId"]))
-            results = pd.DataFrame(rows).head(self.top_n).reset_index(drop=True)
-            results.insert(0, "rank", np.arange(1, len(results) + 1))
-            return results
+        rows = sorted(rows, key=lambda r: (-r["similarity"], r["target_bodyId"]))
+        bodyid_df = pd.DataFrame(rows).head(self.top_n).reset_index(drop=True)
+        bodyid_df.insert(0, "rank", np.arange(1, len(bodyid_df) + 1))
+
+        # --- type rows (from the query centroid, incl. intra reference) ---
+        q_mask = np.isin(body_ids, query_ids)
+        q_vec = X[q_mask].mean(axis=0) if q_mask.any() else None
+        type_df = pd.DataFrame()
+        if q_vec is not None:
+            scores = similarity_matrix(q_vec, X, self.metric)
+            type_df = self._aggregate_by_type(
+                body_ids, types, scores, query_type=q_type,
+                metric=self.metric, X=X,
+            )
+        return bodyid_df, type_df
 
     def _vector_for_body_id(self, bid: int, body_ids: np.ndarray, X: np.ndarray) -> Optional[np.ndarray]:
         idx = np.where(body_ids == bid)[0]
@@ -1344,7 +1627,8 @@ class MorphologyComparer:
         return results
 
     # ------------------------------------------------------------------ nblast
-    def _nblast_search(self, query_df: pd.DataFrame, data: dict) -> pd.DataFrame:
+    def _nblast_search(self, query_df: pd.DataFrame, data: dict
+                       ) -> Tuple[pd.DataFrame, pd.DataFrame]:
         body_ids = data["bodyIds"]
         types = data["types"]
         X = data["X"]
@@ -1367,7 +1651,7 @@ class MorphologyComparer:
 
         if not len(prefilter_idx):
             self._log("NBLAST: no candidates survived the vector prefilter.")
-            return pd.DataFrame()
+            return pd.DataFrame(), pd.DataFrame()
 
         # Build dotprops for query + candidates (in microns; NEVER cached).
         query_dp = self._dotprops_for_ids(list(query_ids))
@@ -1400,47 +1684,11 @@ class MorphologyComparer:
         query_type = query_df["type"].iloc[0] if len(query_df) else ""
         intra = self._intra_type_similarity(query_type, body_ids, types, X, "cosine")
 
-        if self.level == "type":
-            import collections
-            agg: Dict[str, List[float]] = collections.defaultdict(list)
-            for bid, score in ranked:
-                t = id_to_type.get(bid, "")
-                if t:
-                    agg[t].append(score)
-            rows = []
-            for t, vals in agg.items():
-                # Cap per-type pairs to n_per_type for the mean.
-                vals = sorted(vals, reverse=True)[: self.n_per_type]
-                rows.append({
-                    "target_type": t,
-                    "similarity": float(np.mean(vals)),
-                    "n_bodyids": len(vals),
-                    "is_intra_type": t == query_type,
-                    "intra_type_similarity": intra if t == query_type else float("nan"),
-                    "method": self.method,
-                    "metric": "nblast",
-                })
-            # All query-type members are the query itself and cannot be
-            # candidates; inject the intra-type reference row from the vector
-            # statistics so type queries always carry the intra data.
-            if query_type and query_type not in agg and np.isfinite(intra):
-                n_members = int(sum(1 for t in types if t == query_type))
-                rows.append({
-                    "target_type": query_type,
-                    "similarity": intra,
-                    "n_bodyids": n_members,
-                    "is_intra_type": True,
-                    "intra_type_similarity": intra,
-                    "method": self.method,
-                    "metric": "nblast",
-                })
-            rows = sorted(rows, key=lambda r: (not r["is_intra_type"], -r["similarity"], r["target_type"]))
-            results = pd.DataFrame(rows).head(self.top_n).reset_index(drop=True)
-            results.insert(0, "rank", np.arange(1, len(results) + 1))
-            return results
-
+        # --- bodyId rows (query members excluded) ---
         rows = []
-        for bid, score in ranked[: self.top_n]:
+        for bid, score in ranked:
+            if bid in query_ids:
+                continue
             t = id_to_type.get(bid, "")
             rows.append({
                 "source_bodyId": int(query_df["bodyId"].iloc[0]),
@@ -1454,9 +1702,49 @@ class MorphologyComparer:
                 "method": self.method,
                 "metric": "nblast",
             })
-        results = pd.DataFrame(rows).reset_index(drop=True)
-        results.insert(0, "rank", np.arange(1, len(results) + 1))
-        return results
+        bodyid_df = pd.DataFrame(rows).head(self.top_n).reset_index(drop=True)
+        bodyid_df.insert(0, "rank", np.arange(1, len(bodyid_df) + 1))
+
+        # --- type rows (per-type NBLAST means + intra reference) ---
+        import collections
+        agg: Dict[str, List[float]] = collections.defaultdict(list)
+        for bid, score in ranked:
+            if bid in query_ids:
+                continue
+            t = id_to_type.get(bid, "")
+            if t:
+                agg[t].append(score)
+        agg_rows = []
+        for t, vals in agg.items():
+            # Cap per-type pairs to n_per_type for the mean.
+            vals = sorted(vals, reverse=True)[: self.n_per_type]
+            agg_rows.append({
+                "target_type": t,
+                "similarity": float(np.mean(vals)),
+                "n_bodyids": len(vals),
+                "is_intra_type": t == query_type,
+                "intra_type_similarity": intra if t == query_type else float("nan"),
+                "method": self.method,
+                "metric": "nblast",
+            })
+        # All query-type members are the query itself and cannot be
+        # candidates; inject the intra-type reference row from the vector
+        # statistics so type queries always carry the intra data.
+        if query_type and query_type not in agg and np.isfinite(intra):
+            n_members = int(sum(1 for t in types if t == query_type))
+            agg_rows.append({
+                "target_type": query_type,
+                "similarity": intra,
+                "n_bodyids": n_members,
+                "is_intra_type": True,
+                "intra_type_similarity": intra,
+                "method": self.method,
+                "metric": "nblast",
+            })
+        agg_rows = sorted(agg_rows, key=lambda r: (not r["is_intra_type"], -r["similarity"], r["target_type"]))
+        type_df = pd.DataFrame(agg_rows).head(self.top_n).reset_index(drop=True)
+        type_df.insert(0, "rank", np.arange(1, len(type_df) + 1))
+        return bodyid_df, type_df
 
     def _dotprops_for_ids(self, body_ids: List[int],
                           neurons: Optional[Dict[int, "navis.TreeNeuron"]] = None
@@ -1489,17 +1777,21 @@ class MorphologyComparer:
         return out
 
     # ------------------------------------------------------------------ save
-    def _save_results(self, results: pd.DataFrame, query_df: pd.DataFrame):
+    def _save_results(self, results: pd.DataFrame, bodyid_df: pd.DataFrame,
+                      type_df: pd.DataFrame, query_df: pd.DataFrame):
+        """Save the run outputs: results.csv always holds the bodyId-level
+        rows and type_summary.csv the type-level rows, whatever the query
+        kind (mirrors the homolog finding outputs). ``results`` is the
+        primary frame (type-to-type for type queries, bodyId-to-bodyId
+        otherwise) recorded in the README."""
         query_label = str(self.query)
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         name = self.saveas or f"findsimilar_{_dataset_folder(self.dataset)}_{query_label[:40]}_{timestamp}"
         run_dir = Path(self.output_dir) / name
         run_dir.mkdir(parents=True, exist_ok=True)
 
-        results.to_csv(run_dir / "results.csv", index=False)
-        summary = self._build_type_summary(results)
-        if summary is not None:
-            summary.to_csv(run_dir / "type_summary.csv", index=False)
+        bodyid_df.to_csv(run_dir / "results.csv", index=False)
+        type_df.to_csv(run_dir / "type_summary.csv", index=False)
         params = {
             "query": str(self.query),
             "dataset": self.dataset,
@@ -1513,6 +1805,9 @@ class MorphologyComparer:
             "visualize_top_n": self.visualize_top_n,
             "visualize_by": self.visualize_by,
             "query_bodyIds": [int(b) for b in query_df["bodyId"].tolist()],
+            "n_bodyid_rows": len(bodyid_df),
+            "n_type_rows": len(type_df),
+            "primary_level": self.level,
             "output_folder": str(run_dir),
         }
         readme = [f"DROCAT Find Similar Neurons (morphological)",
@@ -1521,61 +1816,10 @@ class MorphologyComparer:
         for k, v in params.items():
             readme.append(f"{k}: {v}")
         (run_dir / "README.txt").write_text("\n".join(readme))
-        self._log(f"Results saved to: {run_dir}")
+        self._log(f"Results saved to: {run_dir} "
+                  f"({len(bodyid_df)} bodyId rows -> results.csv, "
+                  f"{len(type_df)} type rows -> type_summary.csv)")
         self.output_folder = str(run_dir)
-
-    def _build_type_summary(self, results: pd.DataFrame) -> Optional[pd.DataFrame]:
-        """Per-target-type summary of the results (like homolog finding's
-        type_summary.csv).
-
-        bodyId-level runs are aggregated per target type (avg/best/std
-        similarity, profile mean, counts, query-type flag); type-level runs
-        are already aggregated, so their rows are written as-is. Returns None
-        when the results carry no type information."""
-        if results is None or results.empty or "target_type" not in results.columns:
-            return None
-        if self.level == "type" or "is_intra_type" in results.columns:
-            cols = [c for c in ("target_type", "similarity", "n_bodyids",
-                                "profile_similarity", "is_intra_type")
-                    if c in results.columns]
-            out = results[cols].copy()
-            out = out.sort_values("similarity", ascending=False).reset_index(drop=True)
-            return out
-        if "target_bodyId" not in results.columns:
-            return None
-
-        def _flag_query_type(rows: pd.DataFrame) -> bool:
-            if "is_same_type" in rows.columns:
-                return bool((rows["is_same_type"] == True).any())  # noqa: E712
-            return False
-
-        rows = []
-        for t, sub in results.groupby("target_type", sort=False):
-            if not str(t):
-                continue
-            sim = sub["similarity"].astype(float)
-            row = {
-                "target_type": str(t),
-                "avg_similarity": float(sim.mean()),
-                "max_similarity": float(sim.max()),
-                "min_similarity": float(sim.min()),
-                "std_similarity": float(sim.std()) if len(sim) > 1 else 0.0,
-                "n_bodyids": int(len(sub)),
-                "is_query_type": _flag_query_type(sub),
-            }
-            if "profile_similarity" in sub.columns:
-                prof = pd.to_numeric(sub["profile_similarity"], errors="coerce")
-                row["avg_profile_similarity"] = float(prof.mean()) \
-                    if prof.notna().any() else float("nan")
-            if "source_bodyId" in sub.columns:
-                row["n_source_bodyIds"] = int(sub["source_bodyId"].nunique())
-            rows.append(row)
-        if not rows:
-            return None
-        out = pd.DataFrame(rows).sort_values(
-            "avg_similarity", ascending=False
-        ).reset_index(drop=True)
-        return out
 
     # ------------------------------------------------------------------ viz
     def _visualize_top_results(self, results: pd.DataFrame):
