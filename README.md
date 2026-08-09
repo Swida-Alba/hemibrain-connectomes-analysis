@@ -54,21 +54,21 @@ A Python toolkit for analyzing and visualizing connectome data from **all NeuPri
 
 ## Installation
 
-One-click install after cloning the repository
-(`git clone --branch v4.5.0 https://github.com/Swida-Alba/Drosophila-cross-dataset-connectome-analysis.git drocat && cd drocat`):
+One-click install & launch — just run the launcher after cloning the
+repository:
 
 | Platform | Command |
 | --- | --- |
-| macOS / Linux | `bash archive/install/install.sh` |
-| Windows | `powershell -ExecutionPolicy Bypass -File archive/install/install.ps1` |
+| macOS / Linux | `./run_DROCAT.command` |
+| Windows | `run_DROCAT.bat` |
 
-The installer discovers conda (installing Miniconda if missing), creates the
-versioned `drocat-4.5.0` Python 3.11 environment, installs the pinned
-dependencies, runs `pip check`, and verifies the installation. Alternatively,
-double-click `run_DROCAT.command` (macOS) / `run_DROCAT.bat` (Windows) — it
-installs on first run and launches the web UI.
+On first run it creates the versioned `drocat-4.5.0` Python 3.11 environment
+(calling the bundled installer from `archive/install/`), installs the pinned
+dependencies, runs `pip check`, verifies the installation, and opens the web
+UI. Later runs are self-healing: if the environment is missing or
+inconsistent, it re-installs automatically before starting.
 
-📖 **[Full Installation Guide](docs/INSTALLATION.md)** — agent-assisted install, manual steps, environment policy, token setup (NeuPrint / CAVE), and the Codex + DeepSeek (`deepseek-v4-flash`) agent configuration.
+📖 **[Full Installation Guide](docs/INSTALLATION.md)** — installer details, agent-assisted install, manual steps, environment policy, token setup (NeuPrint / CAVE), and the Codex + DeepSeek (`deepseek-v4-flash`) agent configuration.
 
 ---
 

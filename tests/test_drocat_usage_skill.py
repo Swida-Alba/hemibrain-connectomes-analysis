@@ -57,7 +57,7 @@ def test_readme_exposes_direct_analysis_and_beginner_setup() -> None:
     install = (ROOT / "docs" / "INSTALLATION.md").read_text(encoding="utf-8")
     assert "skills/drocat-usage/SKILL.md" in readme
     assert "docs/INSTALLATION.md" in readme
-    assert "archive/install/install.sh" in readme  # one-click install
+    assert "run_DROCAT.command" in readme  # one-click install & launch
     assert "deepseek-v4-flash" in readme
     # the agent fetch commands live in the installation guide
     assert "raw.githubusercontent.com/Swida-Alba/Drosophila-cross-dataset-connectome-analysis/v4.5.0/skills/drocat-usage/SKILL.md" in install
