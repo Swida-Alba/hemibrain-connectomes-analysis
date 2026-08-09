@@ -1,16 +1,28 @@
 # *Drosophila* Connectome Analysis Toolkit (DROCAT) v4.5.0
 
-A Python toolkit for analyzing and visualizing connectome data from **all NeuPrint databases and FlyWire datasets**: type-based pathfinding, interactive network visualizations with NT grouping, 3D neuron morphology rendering, cross-dataset comparison, and EM↔LM driver line mapping (NeuronBridge).
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Python 3.11](https://img.shields.io/badge/Python-3.11-3776AB.svg)](https://www.python.org/downloads/)
+
+DROCAT is a Python toolkit for analyzing and visualizing connectome data from **all NeuPrint databases and FlyWire datasets** — type-based pathfinding, interactive network visualizations with neurotransmitter grouping, 3D neuron morphology rendering, cross-dataset comparison, and EM↔LM driver line mapping (NeuronBridge). Everything is available both through a web UI and as standalone scripts.
 
 > [!TIP]
 > 🤖 **Agent-assisted:** ask your AI agent to run the bundled
-> [`drocat-install`](skills/drocat-install/SKILL.md) skill — it fetches this repository,
-> installs all dependencies, configures tokens, verifies the installation, and launches
+> [`drocat-install`](skills/drocat-install/SKILL.md) skill — it installs all
+> dependencies, configures tokens, verifies the installation, and launches
 > the web UI for you. For script analysis without the UI, use the
-> [`drocat-usage`](skills/drocat-usage/SKILL.md) skill. New to agents? Start with the
-> [agent setup section](docs/INSTALLATION.md#5-agent-assisted-install--agent-setup) of the installation guide.
+> [`drocat-usage`](skills/drocat-usage/SKILL.md) skill. New to agents? Start
+> with the [agent setup section](docs/INSTALLATION.md#5-agent-assisted-install--agent-setup).
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+---
+
+## Table of Contents
+
+- [Key Features](#key-features)
+- [Quick Start](#quick-start)
+- [Documentation](#documentation)
+- [Supported Datasets](#supported-datasets)
+- [What's New in v4.5.0](#whats-new-in-v450)
+- [Contributing](#contributing) · [License](#license) · [Support](#support)
 
 ---
 
@@ -21,13 +33,48 @@ A Python toolkit for analyzing and visualizing connectome data from **all NeuPri
 | **🗄️ Dataset Support** | NeuPrint (hemibrain, male-cns, optic-lobe, manc) + FlyWire (FAFB, BANC), inter-dataset analysis |
 | **🔬 EM↔LM Mapping** | NeuronBridge integration for GAL4/Split-GAL4 driver line discovery |
 | **🎨 Visualization** | 3D skeletons, interactive networks, Sankey diagrams, heatmaps |
-| **🔎 Similar Neurons** | Morphological + connection-profile similarity with connectivity-expanded candidates, full-morphology skeleton download, ROI filtering |
+| **🔎 Similar Neurons** | Morphological + connection-profile similarity with connectivity-expanded candidates, ROI filtering, full-morphology downloads |
 | **📊 Analysis** | Multi-hop pathfinding, cross-dataset comparison, hemisphere-aware analysis |
 | **⚡ Performance** | 10-100x speedup with local caching, Polars acceleration |
 
 ---
 
-## Getting Started
+## Quick Start
+
+**Requirements:** conda (auto-installed if missing) and internet access on first run.
+
+**Option 1 — One-click install & launch.** After cloning the repository, run the launcher:
+
+| Platform | Command |
+| --- | --- |
+| macOS / Linux | `./run_DROCAT.command` (or double-click) |
+| Windows | `run_DROCAT.bat` (or double-click) |
+
+On first run it creates the versioned `drocat-4.5.0` Python 3.11 environment (via the bundled installer in `archive/install/`), installs the pinned dependencies, runs `pip check`, verifies the installation, and opens the web UI at **http://127.0.0.1:8080**. Later runs are self-healing: a missing or inconsistent environment is repaired automatically before starting. If the port is busy, the launcher offers a new one interactively.
+
+**Option 2 — Agent-assisted install.** Ask your AI agent to fetch and follow the install skill:
+
+> Fetch https://raw.githubusercontent.com/Swida-Alba/Drosophila-cross-dataset-connectome-analysis/v4.5.0/skills/drocat-install/SKILL.md and follow it to finish installing, verifying, and launching DROCAT on this machine.
+
+For script analysis without the UI, the agent should instead fetch the direct-analysis skill:
+
+> Fetch https://raw.githubusercontent.com/Swida-Alba/Drosophila-cross-dataset-connectome-analysis/v4.5.0/skills/drocat-usage/SKILL.md and follow it to install and use the DROCAT v4.5.0 direct-analysis skill for this repository, then finish the requested analysis end-to-end without opening the UI.
+
+**Manual launch** (after installation):
+
+```bash
+conda activate drocat-4.5.0 && python ui/app.py
+```
+
+Every UI panel links to its own instruction guide (see [docs/ui_guides/README.html](docs/ui_guides/README.html)).
+
+📖 **[Full Installation Guide](docs/INSTALLATION.md)** — installer details, manual setup, environment policy, token configuration (NeuPrint / CAVE), and agent setup (Codex + DeepSeek `deepseek-v4-flash`).
+
+---
+
+## Documentation
+
+**Start here:**
 
 | Guide | Description |
 | --- | --- |
@@ -37,7 +84,7 @@ A Python toolkit for analyzing and visualizing connectome data from **all NeuPri
 | **[Troubleshooting](docs/TROUBLESHOOTING.md)** | Common issues and solutions |
 | **[Documentation Hub](docs/README.md)** | Full documentation index |
 
-## Feature Documentation
+**Feature guides:**
 
 | Feature | Guide | Script |
 | --- | --- | --- |
@@ -48,52 +95,8 @@ A Python toolkit for analyzing and visualizing connectome data from **all NeuPri
 | **Homolog Finding** | [Homolog Guide](docs/core-features/HomologFinding_Guide.md) | `FindHomologs.py` |
 | **3D Visualization** | [3D Skeleton Guide](docs/visualizations/3D_Skeleton_Guide.md) | `plot3dSkeleton.py` |
 | **Path Visualization** | [Interaction Guide](docs/visualizations/VisualizePath_Interaction_Guide.md) | `PlotPath.py` |
-| **UI Guides** | [docs/ui_guides/README.html](docs/ui_guides/README.html) | All web UI panels |
+| **Web UI Panels** | [docs/ui_guides/README.html](docs/ui_guides/README.html) | All web UI panels |
 | **Output Files** | [Output Files Reference](docs/OUTPUT_FILES.md) | File formats |
-
----
-
-## Installation
-
-**Option 1 — One-click install & launch** — after cloning the repository,
-just run the launcher:
-
-| Platform | Command |
-| --- | --- |
-| macOS / Linux | `./run_DROCAT.command` |
-| Windows | `run_DROCAT.bat` |
-
-On first run it creates the versioned `drocat-4.5.0` Python 3.11 environment
-(calling the bundled installer from `archive/install/`), installs the pinned
-dependencies, runs `pip check`, verifies the installation, and opens the web
-UI. Later runs are self-healing: if the environment is missing or
-inconsistent, it re-installs automatically before starting.
-
-**Option 2 — Agent-assisted install**
-
-Ask your AI agent to fetch and follow the install skill:
-
-> Fetch https://raw.githubusercontent.com/Swida-Alba/Drosophila-cross-dataset-connectome-analysis/v4.5.0/skills/drocat-install/SKILL.md and follow it to finish installing, verifying, and launching DROCAT on this machine.
-
-For script analysis without the UI, the agent should instead fetch the
-direct-analysis skill:
-
-> Fetch https://raw.githubusercontent.com/Swida-Alba/Drosophila-cross-dataset-connectome-analysis/v4.5.0/skills/drocat-usage/SKILL.md and follow it to install and use the DROCAT v4.5.0 direct-analysis skill for this repository, then finish the requested analysis end-to-end without opening the UI.
-
-📖 **[Full Installation Guide](docs/INSTALLATION.md)** — installer details, agent-assisted install, manual steps, environment policy, token setup (NeuPrint / CAVE), and the Codex + DeepSeek (`deepseek-v4-flash`) agent configuration.
-
----
-
-## Launch the Web UI
-
-| Platform | Command |
-| --- | --- |
-| macOS | Double-click `run_DROCAT.command`, or `./run_DROCAT.command` |
-| Linux | `./run_DROCAT.command` |
-| Windows | Double-click `run_DROCAT.bat`, or `run_DROCAT.bat` |
-| Manual | `conda activate drocat-4.5.0 && python ui/app.py` |
-
-The UI opens at **http://127.0.0.1:8080** — every panel links to its own instruction guide (see [docs/ui_guides/README.html](docs/ui_guides/README.html)).
 
 ---
 
@@ -101,7 +104,8 @@ The UI opens at **http://127.0.0.1:8080** — every panel links to its own instr
 
 All NeuPrint server datasets are supported (verified against `api.neuprint.janelia.org`), plus the FlyWire/Codex datasets. NeuPrint datasets are fetched automatically; FlyWire datasets use local files (see the Settings tab).
 
-### NeuPrint (11)
+<details>
+<summary><b>NeuPrint (11 datasets)</b> — male-cns, hemibrain, optic-lobe, manc, fib19, mushroombody</summary>
 
 | Dataset | Description (from NeuPrint server) |
 | --- | --- |
@@ -117,6 +121,8 @@ All NeuPrint server datasets are supported (verified against `api.neuprint.janel
 | `fib19:v1.0` | Partial reconstruction of the fly medulla / lobula / lobula plate |
 | `mushroombody` | Fly alpha lobe in the mushroom body (983 neurons) |
 
+</details>
+
 ### FlyWire / Codex (3, local files required)
 
 | Dataset | Description |
@@ -127,7 +133,7 @@ All NeuPrint server datasets are supported (verified against `api.neuprint.janel
 
 > BANC (Brain And Nerve Cord) is served via FlyWire/Codex as `flywire_BANC_v888` (local data files). The NeuPrint server metadata also lists a hidden `banc:v888` entry, but it is not queryable through the NeuPrint API and is therefore not supported.
 
-📖 **[FlyWire Setup Guide](docs/FLYWIRE_USAGE.md)** | **[Available ROI Meshes](docs/AVAILABLE_ROIS.md)**
+📖 **[FlyWire Setup Guide](docs/FLYWIRE_USAGE.md)** · **[Available ROI Meshes](docs/AVAILABLE_ROIS.md)**
 
 ---
 
@@ -140,7 +146,7 @@ All NeuPrint server datasets are supported (verified against `api.neuprint.janel
 - **Palette editor** — drag-and-drop reordering of discrete palette colors, a range slider applied directly to the displayed palette, a reset button beside the preview, and lateral range labels.
 - **3D Skeleton reorganization** — independent card blocks for general appearance, neuron colors, synapse colors, and brain-region ROIs, with hemisphere-aware options.
 
-📖 **[Full changelog](docs/README.md#recent-updates)** | **[Agent setup](docs/INSTALLATION.md#5-agent-assisted-install--agent-setup)** — including the low-cost DeepSeek (`deepseek-v4-flash`) Codex configuration
+📖 **[Full changelog](docs/README.md#recent-updates)** · **[Agent setup](docs/INSTALLATION.md#5-agent-assisted-install--agent-setup)** — including the low-cost DeepSeek (`deepseek-v4-flash`) Codex configuration
 
 ---
 
