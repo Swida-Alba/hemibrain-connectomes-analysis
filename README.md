@@ -21,6 +21,7 @@ A Python toolkit for analyzing and visualizing connectome data from **all NeuPri
 | **🗄️ Dataset Support** | NeuPrint (hemibrain, male-cns, optic-lobe, manc) + FlyWire (FAFB, BANC), inter-dataset analysis |
 | **🔬 EM↔LM Mapping** | NeuronBridge integration for GAL4/Split-GAL4 driver line discovery |
 | **🎨 Visualization** | 3D skeletons, interactive networks, Sankey diagrams, heatmaps |
+| **🔎 Similar Neurons** | Morphological + connection-profile similarity with connectivity-expanded candidates, full-morphology skeleton download, ROI filtering |
 | **📊 Analysis** | Multi-hop pathfinding, cross-dataset comparison, hemisphere-aware analysis |
 | **⚡ Performance** | 10-100x speedup with local caching, Polars acceleration |
 
@@ -54,8 +55,8 @@ A Python toolkit for analyzing and visualizing connectome data from **all NeuPri
 
 ## Installation
 
-One-click install & launch — just run the launcher after cloning the
-repository:
+**Option 1 — One-click install & launch** — after cloning the repository,
+just run the launcher:
 
 | Platform | Command |
 | --- | --- |
@@ -67,6 +68,17 @@ On first run it creates the versioned `drocat-4.5.0` Python 3.11 environment
 dependencies, runs `pip check`, verifies the installation, and opens the web
 UI. Later runs are self-healing: if the environment is missing or
 inconsistent, it re-installs automatically before starting.
+
+**Option 2 — Agent-assisted install**
+
+Ask your AI agent to fetch and follow the install skill:
+
+> Fetch https://raw.githubusercontent.com/Swida-Alba/Drosophila-cross-dataset-connectome-analysis/v4.5.0/skills/drocat-install/SKILL.md and follow it to finish installing, verifying, and launching DROCAT on this machine.
+
+For script analysis without the UI, the agent should instead fetch the
+direct-analysis skill:
+
+> Fetch https://raw.githubusercontent.com/Swida-Alba/Drosophila-cross-dataset-connectome-analysis/v4.5.0/skills/drocat-usage/SKILL.md and follow it to install and use the DROCAT v4.5.0 direct-analysis skill for this repository, then finish the requested analysis end-to-end without opening the UI.
 
 📖 **[Full Installation Guide](docs/INSTALLATION.md)** — installer details, agent-assisted install, manual steps, environment policy, token setup (NeuPrint / CAVE), and the Codex + DeepSeek (`deepseek-v4-flash`) agent configuration.
 
@@ -124,6 +136,9 @@ All NeuPrint server datasets are supported (verified against `api.neuprint.janel
 - **Script-first analysis with coding agents** — run pathfinding, comparison, NeuronBridge, FlyLight, homolog, profile, PlotPath, and 3D skeleton scripts without the UI, via the [`drocat-usage`](skills/drocat-usage/SKILL.md) skill and its `run_direct.py` launcher.
 - **Local FAFB/BANC dataset support** — local-first caching for 10-100x faster FlyWire access ([FAFB Integration](docs/FAFB_INTEGRATION.md)).
 - **NT visualization & grouping** — neurotransmitter edge groups, custom groups, export/import ([Network Features](docs/visualizations/VisualizePath_Network_Features.md)).
+- **Similar Neurons tab** — morphological (vector/NBLAST) and connection-profile similarity in one panel: connectivity-expanded candidates read directly from the connection cache (top-N×3 similar *types* expanded to all their members), ROI filtering, intra-type reference data, dual result tables (bodyId-level `results.csv` + type-level `type_summary.csv`), and a top-N 3D skeleton visualization of the found types. A full-morphology mode downloads every skeleton with a resumable progress/ETA pull and compares against the whole local population ([guide](docs/ui_guides/find_similar.html)).
+- **Palette editor** — drag-and-drop reordering of discrete palette colors, a range slider applied directly to the displayed palette, a reset button beside the preview, and lateral range labels.
+- **3D Skeleton reorganization** — independent card blocks for general appearance, neuron colors, synapse colors, and brain-region ROIs, with hemisphere-aware options.
 
 📖 **[Full changelog](docs/README.md#recent-updates)** | **[Agent setup](docs/INSTALLATION.md#5-agent-assisted-install--agent-setup)** — including the low-cost DeepSeek (`deepseek-v4-flash`) Codex configuration
 

@@ -59,9 +59,12 @@ def test_readme_exposes_direct_analysis_and_beginner_setup() -> None:
     assert "docs/INSTALLATION.md" in readme
     assert "run_DROCAT.command" in readme  # one-click install & launch
     assert "deepseek-v4-flash" in readme
-    # the agent fetch commands live in the installation guide
-    assert "raw.githubusercontent.com/Swida-Alba/Drosophila-cross-dataset-connectome-analysis/v4.5.0/skills/drocat-usage/SKILL.md" in install
-    assert "finish the requested analysis end-to-end" in install
+    # the agent fetch commands are exposed in the README installation
+    # section AND in the installation guide
+    raw_url = "raw.githubusercontent.com/Swida-Alba/Drosophila-cross-dataset-connectome-analysis/v4.5.0/skills/drocat-usage/SKILL.md"
+    assert raw_url in readme
+    assert "finish the requested analysis end-to-end" in readme
+    assert raw_url in install
 
 
 def test_skill_installation_uses_agent_command_not_manual_copy() -> None:
