@@ -9,10 +9,6 @@ A Python toolkit for analyzing and visualizing connectome data from **all NeuPri
 > the web UI for you. For script analysis without the UI, use the
 > [`drocat-usage`](skills/drocat-usage/SKILL.md) skill. New to agents? Start with the
 > [agent setup section](docs/INSTALLATION.md#5-agent-assisted-install--agent-setup) of the installation guide.
->
-> **One-line agent handoff (no local repo needed):**
->
-> > Fetch https://raw.githubusercontent.com/Swida-Alba/Drosophila-cross-dataset-connectome-analysis/v4.5.0/skills/drocat-usage/SKILL.md and follow it to install and use the DROCAT v4.5.0 direct-analysis skill for this repository, then finish the requested analysis end-to-end without opening the UI.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
@@ -58,11 +54,8 @@ A Python toolkit for analyzing and visualizing connectome data from **all NeuPri
 
 ## Installation
 
-After cloning the repository
-(`git clone --branch v4.5.0 https://github.com/Swida-Alba/Drosophila-cross-dataset-connectome-analysis.git drocat && cd drocat`),
-two options:
-
-**Option 1 — One-click install**
+One-click install after cloning the repository
+(`git clone --branch v4.5.0 https://github.com/Swida-Alba/Drosophila-cross-dataset-connectome-analysis.git drocat && cd drocat`):
 
 | Platform | Command |
 | --- | --- |
@@ -75,18 +68,7 @@ dependencies, runs `pip check`, and verifies the installation. Alternatively,
 double-click `run_DROCAT.command` (macOS) / `run_DROCAT.bat` (Windows) — it
 installs on first run and launches the web UI.
 
-**Option 2 — Agent-assisted install**
-
-Ask your AI agent to fetch and follow the install skill:
-
-> Fetch https://raw.githubusercontent.com/Swida-Alba/Drosophila-cross-dataset-connectome-analysis/v4.5.0/skills/drocat-install/SKILL.md and follow it to finish installing, verifying, and launching DROCAT on this machine.
-
-For script analysis without the UI, the agent should instead fetch the
-direct-analysis skill:
-
-> Fetch https://raw.githubusercontent.com/Swida-Alba/Drosophila-cross-dataset-connectome-analysis/v4.5.0/skills/drocat-usage/SKILL.md and follow it to install and use the DROCAT v4.5.0 direct-analysis skill for this repository, then finish the requested analysis end-to-end without opening the UI.
-
-📖 **[Full Installation Guide](docs/INSTALLATION.md)** — manual steps, environment policy, token setup (NeuPrint / CAVE), and the Codex + DeepSeek (`deepseek-v4-flash`) agent configuration.
+📖 **[Full Installation Guide](docs/INSTALLATION.md)** — agent-assisted install, manual steps, environment policy, token setup (NeuPrint / CAVE), and the Codex + DeepSeek (`deepseek-v4-flash`) agent configuration.
 
 ---
 

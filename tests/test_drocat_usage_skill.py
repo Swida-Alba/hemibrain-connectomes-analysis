@@ -54,11 +54,14 @@ def test_direct_launcher_dry_run_resolves_script_directory() -> None:
 
 def test_readme_exposes_direct_analysis_and_beginner_setup() -> None:
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    install = (ROOT / "docs" / "INSTALLATION.md").read_text(encoding="utf-8")
     assert "skills/drocat-usage/SKILL.md" in readme
     assert "docs/INSTALLATION.md" in readme
+    assert "archive/install/install.sh" in readme  # one-click install
     assert "deepseek-v4-flash" in readme
-    assert "raw.githubusercontent.com/Swida-Alba/Drosophila-cross-dataset-connectome-analysis/v4.5.0/skills/drocat-usage/SKILL.md" in readme
-    assert "finish the requested analysis end-to-end" in readme
+    # the agent fetch commands live in the installation guide
+    assert "raw.githubusercontent.com/Swida-Alba/Drosophila-cross-dataset-connectome-analysis/v4.5.0/skills/drocat-usage/SKILL.md" in install
+    assert "finish the requested analysis end-to-end" in install
 
 
 def test_skill_installation_uses_agent_command_not_manual_copy() -> None:
