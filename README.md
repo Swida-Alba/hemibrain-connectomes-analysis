@@ -7,8 +7,8 @@ A Python toolkit for analyzing and visualizing connectome data from **all NeuPri
 > [`drocat-install`](skills/drocat-install/SKILL.md) skill — it fetches this repository,
 > installs all dependencies, configures tokens, verifies the installation, and launches
 > the web UI for you. For script analysis without the UI, use the
-> [`drocat-usage`](skills/drocat-usage/SKILL.md) skill. New to agents? Start with
-> [docs/AGENT_SETUP.md](docs/AGENT_SETUP.md).
+> [`drocat-usage`](skills/drocat-usage/SKILL.md) skill. New to agents? Start with the
+> [agent setup section](docs/INSTALLATION.md#5-agent-assisted-install--agent-setup) of the installation guide.
 >
 > **One-line agent handoff (no local repo needed):**
 >
@@ -35,7 +35,7 @@ A Python toolkit for analyzing and visualizing connectome data from **all NeuPri
 | Guide | Description |
 | --- | --- |
 | **[Quick Start](docs/QUICK_START.md)** | First-time setup and basic examples |
-| **[Installation](docs/INSTALLATION.md)** | One-click, manual, and agent-assisted install + token setup |
+| **[Installation](docs/INSTALLATION.md)** | One-click, agent-assisted, and manual install + token & agent setup |
 | **[Script Examples](docs/core-features/ScriptExamples_Guide.md)** | Copy-paste code for pathfinding, comparison, NeuronBridge |
 | **[Troubleshooting](docs/TROUBLESHOOTING.md)** | Common issues and solutions |
 | **[Documentation Hub](docs/README.md)** | Full documentation index |
@@ -58,11 +58,35 @@ A Python toolkit for analyzing and visualizing connectome data from **all NeuPri
 
 ## Installation
 
-**Recommended:** one-click launcher — double-click `run_DROCAT.command` (macOS) / `run_DROCAT.bat` (Windows). It creates the versioned `drocat-4.5.0` conda environment on first run (calling the bundled installer from `archive/install/`), installs the pinned dependencies, runs `pip check`, verifies the install, and asks for NeuPrint/CAVE tokens in interactive terminals.
+After cloning the repository
+(`git clone --branch v4.5.0 https://github.com/Swida-Alba/Drosophila-cross-dataset-connectome-analysis.git drocat && cd drocat`),
+two options:
 
-Agents: use the [`drocat-install`](skills/drocat-install/SKILL.md) skill.
+**Option 1 — One-click install**
 
-📖 **[Full Installation Guide](docs/INSTALLATION.md)** — manual steps and token setup (NeuPrint / CAVE).
+| Platform | Command |
+| --- | --- |
+| macOS / Linux | `bash archive/install/install.sh` |
+| Windows | `powershell -ExecutionPolicy Bypass -File archive/install/install.ps1` |
+
+The installer discovers conda (installing Miniconda if missing), creates the
+versioned `drocat-4.5.0` Python 3.11 environment, installs the pinned
+dependencies, runs `pip check`, and verifies the installation. Alternatively,
+double-click `run_DROCAT.command` (macOS) / `run_DROCAT.bat` (Windows) — it
+installs on first run and launches the web UI.
+
+**Option 2 — Agent-assisted install**
+
+Ask your AI agent to fetch and follow the install skill:
+
+> Fetch https://raw.githubusercontent.com/Swida-Alba/Drosophila-cross-dataset-connectome-analysis/v4.5.0/skills/drocat-install/SKILL.md and follow it to finish installing, verifying, and launching DROCAT on this machine.
+
+For script analysis without the UI, the agent should instead fetch the
+direct-analysis skill:
+
+> Fetch https://raw.githubusercontent.com/Swida-Alba/Drosophila-cross-dataset-connectome-analysis/v4.5.0/skills/drocat-usage/SKILL.md and follow it to install and use the DROCAT v4.5.0 direct-analysis skill for this repository, then finish the requested analysis end-to-end without opening the UI.
+
+📖 **[Full Installation Guide](docs/INSTALLATION.md)** — manual steps, environment policy, token setup (NeuPrint / CAVE), and the Codex + DeepSeek (`deepseek-v4-flash`) agent configuration.
 
 ---
 
@@ -119,7 +143,7 @@ All NeuPrint server datasets are supported (verified against `api.neuprint.janel
 - **Local FAFB/BANC dataset support** — local-first caching for 10-100x faster FlyWire access ([FAFB Integration](docs/FAFB_INTEGRATION.md)).
 - **NT visualization & grouping** — neurotransmitter edge groups, custom groups, export/import ([Network Features](docs/visualizations/VisualizePath_Network_Features.md)).
 
-📖 **[Full changelog](docs/README.md#recent-updates)** | **[Agent setup](docs/AGENT_SETUP.md)** — including the low-cost DeepSeek (`deepseek-v4-flash`) Codex configuration
+📖 **[Full changelog](docs/README.md#recent-updates)** | **[Agent setup](docs/INSTALLATION.md#5-agent-assisted-install--agent-setup)** — including the low-cost DeepSeek (`deepseek-v4-flash`) Codex configuration
 
 ---
 

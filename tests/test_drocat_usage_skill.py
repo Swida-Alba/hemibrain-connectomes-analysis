@@ -55,7 +55,7 @@ def test_direct_launcher_dry_run_resolves_script_directory() -> None:
 def test_readme_exposes_direct_analysis_and_beginner_setup() -> None:
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     assert "skills/drocat-usage/SKILL.md" in readme
-    assert "docs/AGENT_SETUP.md" in readme
+    assert "docs/INSTALLATION.md" in readme
     assert "deepseek-v4-flash" in readme
     assert "raw.githubusercontent.com/Swida-Alba/Drosophila-cross-dataset-connectome-analysis/v4.5.0/skills/drocat-usage/SKILL.md" in readme
     assert "finish the requested analysis end-to-end" in readme
@@ -63,7 +63,7 @@ def test_readme_exposes_direct_analysis_and_beginner_setup() -> None:
 
 def test_skill_installation_uses_agent_command_not_manual_copy() -> None:
     skill = (SKILL / "SKILL.md").read_text(encoding="utf-8")
-    setup = (ROOT / "docs" / "AGENT_SETUP.md").read_text(encoding="utf-8")
+    setup = (ROOT / "docs" / "INSTALLATION.md").read_text(encoding="utf-8")
     raw_url = "raw.githubusercontent.com/Swida-Alba/Drosophila-cross-dataset-connectome-analysis/v4.5.0/skills/drocat-usage/SKILL.md"
 
     assert raw_url in skill
@@ -75,7 +75,7 @@ def test_skill_installation_uses_agent_command_not_manual_copy() -> None:
 def test_agent_workflows_have_completion_contracts() -> None:
     usage = (SKILL / "SKILL.md").read_text(encoding="utf-8")
     install = (ROOT / "skills" / "drocat-install" / "SKILL.md").read_text(encoding="utf-8")
-    setup = (ROOT / "docs" / "AGENT_SETUP.md").read_text(encoding="utf-8")
+    setup = (ROOT / "docs" / "INSTALLATION.md").read_text(encoding="utf-8")
     deepseek = (SKILL / "references" / "deepseek-codex.md").read_text(encoding="utf-8")
 
     assert "## Completion contract" in usage

@@ -35,7 +35,7 @@ python skills/drocat-usage/scripts/run_direct.py \
 ```
 
 Remove `--dry-run` after reviewing the resolved command. See the
-[beginner agent setup](AGENT_SETUP.md) for Codex + DeepSeek configuration.
+[beginner agent setup](INSTALLATION.md#52-recommended-low-cost-agent-codex--deepseek-v4-flash) for Codex + DeepSeek configuration.
 
 ## 1. Connection Path Finding
 
