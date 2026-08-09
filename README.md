@@ -28,14 +28,14 @@ DROCAT is a Python toolkit for analyzing and visualizing connectome data from **
 
 ## Key Features
 
-| Category | Features |
+| Feature | Details |
 | --- | --- |
-| **🗄️ Dataset Support** | NeuPrint (hemibrain, male-cns, optic-lobe, manc) + FlyWire (FAFB, BANC), inter-dataset analysis |
-| **🔬 EM↔LM Mapping** | NeuronBridge integration for GAL4/Split-GAL4 driver line discovery |
-| **🎨 Visualization** | 3D skeletons, interactive networks, Sankey diagrams, heatmaps |
-| **🔎 Similar Neurons** | Morphological + connection-profile similarity with connectivity-expanded candidates, ROI filtering, full-morphology downloads |
-| **📊 Analysis** | Multi-hop pathfinding, cross-dataset comparison, hemisphere-aware analysis |
-| **⚡ Performance** | 10-100x speedup with local caching, Polars acceleration |
+| **Dataset Support** | NeuPrint (hemibrain, male-cns, optic-lobe, manc) + FlyWire (FAFB, BANC), inter-dataset analysis |
+| **EM↔LM Mapping** | NeuronBridge integration for GAL4/Split-GAL4 driver line discovery |
+| **Visualization** | 3D skeletons, interactive networks, Sankey diagrams, heatmaps |
+| **Similar Neurons** | Morphological + connection-profile similarity with connectivity-expanded candidates, ROI filtering, full-morphology downloads |
+| **Analysis** | Multi-hop pathfinding, cross-dataset comparison, hemisphere-aware analysis |
+| **Performance** | 10-100x speedup with local caching, Polars acceleration |
 
 ---
 
@@ -60,7 +60,7 @@ For script analysis without the UI, the agent should instead fetch the direct-an
 
 > Fetch https://raw.githubusercontent.com/Swida-Alba/Drosophila-cross-dataset-connectome-analysis/v4.5.0/skills/drocat-usage/SKILL.md and follow it to install and use the DROCAT v4.5.0 direct-analysis skill for this repository, then finish the requested analysis end-to-end without opening the UI.
 
-**Manual launch** (after installation):
+**Manual launch** (after installation) — double-click `run_DROCAT.command` (macOS / Linux) or `run_DROCAT.bat` (Windows), or from a terminal:
 
 ```bash
 conda activate drocat-4.5.0 && python ui/app.py
