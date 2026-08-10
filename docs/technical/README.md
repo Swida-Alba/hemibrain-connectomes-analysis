@@ -57,6 +57,13 @@ real hemibrain v1.2.1 connectome query and synthetic scaling graphs.
 - Bitmask visited sets and degree-2 compression were measured and rejected
   (not faster on real connectomes)
 
+### [Type Aggregation and bodyId Discovery](./TYPE_AGGREGATION_AND_BODYID_DISCOVERY.md)
+Why FindAllPath finds paths at the bodyId level first and only then
+aggregates the in-path pairs into type-level summaries — the *bundle
+effect* (aggregating all per-bodyId pairs hides differences within a type
+and reports phantom type paths), with the minimal synthetic failure mode,
+real-data examples and comparative measurements across datasets/depths.
+
 ### [Performance Optimizations Dec 2025](./PERFORMANCE_OPTIMIZATIONS_DEC2025.md)
 Details on Polars integration and `skip_bodyId` optimization.
 

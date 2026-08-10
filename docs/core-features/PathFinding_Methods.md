@@ -4,6 +4,15 @@ The `FindAllPath` function in `coana.py` leverages the optimized `FastGraph` cor
 
 The four algorithms are also evaluated theoretically and by measured time/memory in [PATHFINDING_ALGORITHM_EVALUATION.md](../technical/PATHFINDING_ALGORITHM_EVALUATION.md), with the benchmark harness at `examples/performance/benchmark_pathfinding.py`.
 
+**Why pathfinding runs at the bodyId level first:** FindAllPath discovers
+all paths on the bodyId-level graph and only then aggregates the in-path
+pairs into type-level summaries. Aggregating *all* per-bodyId pairs into a
+type-level graph and pathfinding on that alone would hide differences
+within a type (the *bundle effect*) and report phantom type paths with no
+real neuron chain behind them. See
+[TYPE_AGGREGATION_AND_BODYID_DISCOVERY.md](../technical/TYPE_AGGREGATION_AND_BODYID_DISCOVERY.md)
+for the rationale and the comparative measurements.
+
 ## Available Algorithms
 
 ### 1. Bidirectional Search (Layer Intersection)

@@ -63,6 +63,69 @@ from vispath_pkg import VisualizePath
 
 from connection_map import ThresholdedConnectionMap
 
+
+class _FetchCancelled(Exception):
+    """Raised when a fetch loop notices the cooperative cancel event.
+
+    Unlike a fetch failure, a cancelled batch is not recorded as failed:
+    the build stops cleanly, consolidates what was fetched, and the next
+    run resumes from the checkpoint.
+    """
+
+
+def _get_api_retry_utils():
+    """Return (api_call_with_retry, APITimeoutError, APIRetryExhaustedError).
+
+    Prefers the shared src.utils.api_utils implementation (timeout via a
+    one-worker executor, exponential backoff, on_retry callback) and falls
+    back to an identical inline copy when src is not on sys.path (e.g.
+    scripts launched without the src prefix).
+    """
+    try:
+        from src.utils.api_utils import (
+            api_call_with_retry, APITimeoutError, APIRetryExhaustedError,
+        )
+        return api_call_with_retry, APITimeoutError, APIRetryExhaustedError
+    except ImportError:
+        from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
+
+        class APITimeoutError(Exception):
+            pass
+
+        class APIRetryExhaustedError(Exception):
+            pass
+
+        def api_call_with_retry(func, timeout=60, max_retries=5, retry_delay=2.0,
+                                description="API call", on_retry=None, verbose=True):
+            import time
+            last_exc = None
+            for attempt in range(1, max_retries + 1):
+                try:
+                    # shutdown(wait=False): a hung API call must not block the
+                    # retry loop (with-block would wait forever).
+                    executor = ThreadPoolExecutor(max_workers=1)
+                    try:
+                        future = executor.submit(func)
+                        return future.result(timeout=timeout)
+                    finally:
+                        executor.shutdown(wait=False)
+                except FuturesTimeoutError:
+                    last_exc = APITimeoutError(f"{description} timed out after {timeout}s (attempt {attempt}/{max_retries})")
+                    if on_retry is not None:
+                        on_retry(attempt, last_exc)
+                    if attempt < max_retries:
+                        time.sleep(retry_delay * (2 ** (attempt - 1)))
+                except Exception as e:
+                    last_exc = e
+                    if on_retry is not None:
+                        on_retry(attempt, e)
+                    if attempt < max_retries:
+                        time.sleep(retry_delay * (2 ** (attempt - 1)))
+            raise last_exc or Exception("Unknown error")
+
+        return api_call_with_retry, APITimeoutError, APIRetryExhaustedError
+
+
 # Monkey-patch for pandas 2.x compatibility
 import neuprint.utils as neuprint_utils
 _original_connection_table_to_matrix = connection_table_to_matrix
@@ -1422,21 +1485,31 @@ class FindNeuronConnection:
       full layer trees (highest memory)
     '''
 
-    graph_edge_limit_bodyid: int = 5000
+    graph_edge_limit_bodyid: int = 1000000
     '''
     Pan-graph edge limit for the bodyId-level graph: only the strongest
-    `graph_edge_limit_bodyid` edges (by synapse weight) are kept before
+    `graph_edge_limit_bodyid` USABLE edges (by synapse weight, after the
+    reachability filter and adaptive dead-end refill) are kept before
     pathfinding, so the path count stays manageable (the number of simple
-    paths grows combinatorially with depth, branching^depth). 0/None =
-    complete graph (all edges); when edges are trimmed a warning is
-    printed telling the user how to restore the full network.
+    paths grows combinatorially with depth, branching^depth).
+
+    Applied ONLY for deep searches (``max_interlayer >= 3``) — shallow
+    searches (<= 2 layers) keep the complete graph, where the limit would
+    only drop real paths. 0/None = complete graph (no limit); when edges
+    are trimmed a warning is printed telling the user how to restore the
+    full network.
     '''
 
-    graph_edge_limit_groups: int = 1000
+    graph_edge_limit_groups: int = 5000
     '''
-    Same pan-graph edge limit for the type-level and custom-group-level
-    graphs (aggregated networks, typically much smaller than the bodyId
-    graph; defaults to 1000 edges). 0/None = complete graph.
+    Pan-graph edge limit for the type-level graph in FindPath (legacy: its
+    type paths are still found by a graph search). FindAllPath no longer
+    applies it anywhere: TYPE-level paths are DERIVED from the discovered
+    bodyId paths (unique type sequences) and custom-group paths are found
+    on the full group table (few user-defined groups, naturally bounded),
+    so neither needs an edge limit — the bodyId-level discovery bounds the
+    search space and the Visualization Edge Limit (edgeN_limit) remains
+    the only cap for drawing. 0/None = complete graph.
     '''
 
     _warn_notes: List[str] = field(default_factory=list)
@@ -1453,7 +1526,8 @@ class FindNeuronConnection:
     reconstruction starts. The graph is complete once the layers are
     fetched, so this gives immediate visual feedback while the (potentially
     long) enumeration runs afterwards; the final path-based outputs are
-    unaffected.
+    unaffected. Disabled by default (the early preview duplicates the
+    Phase-4 VisualizePath outputs with a plain edge list).
     '''
     
     search_columns: str = 'auto'
@@ -1941,8 +2015,8 @@ class FindNeuronConnection:
         roi_csv = dataset_path + '_roi_count_df.csv'
         
         if not os.path.exists(neuron_csv) or not os.path.exists(roi_csv):
-            self._vprint(f'\n📥 Complete dataset not found, downloading ALL neurons (including type=None)...', level='always')
-            self._vprint(f'   This is a one-time download for cache enrichment.', level='always')
+            self._vprint(f'\n📥 Downloading the full neuron list (including type=None) for cache enrichment...', level='always')
+            self._vprint(f'   This is a one-time download (progress bar below).', level='always')
             # Ensure we have a valid client for THIS dataset (not a different one from global default)
             self._ensure_neuprint_client()
             try:
@@ -3077,7 +3151,7 @@ class FindNeuronConnection:
         
         if not os.path.exists(dataset_path):
             # Fallback: fetch from API
-            self._vprint(f'  ⚠️ Warning: Complete dataset not found, fetching from API...', level='full')
+            self._vprint(f'  ⚠️ Warning: Local neuron table not found, fetching from API...', level='full')
             neuron_df = self._fetch_neurons_local_or_api(all_bodyids, columns=['bodyId', 'type', 'instance'])
         else:
             # Load complete dataset from CSV via the mtime-aware instance
@@ -3217,7 +3291,9 @@ class FindNeuronConnection:
         self._vprint(f'  ✓ Enrichment complete', level='full')
         return conn_df
     
-    def _fetch_neurons_batched(self, bodyIds, batch_size: int = 2000) -> pd.DataFrame:
+    def _fetch_neurons_batched(self, bodyIds, batch_size: int = 2000,
+                               cancel_event: threading.Event = None,
+                               status_callback: callable = None) -> pd.DataFrame:
         '''
         Fetch neuron info from NeuPrint in chunks of ``batch_size`` bodyIds.
         
@@ -3229,12 +3305,23 @@ class FindNeuronConnection:
         bounds both the server-side query and each response, and gives visible
         progress for large fetches.
         
+        Every chunk runs under a timeout with retries (a server that stops
+        responding is reported and reconnected instead of hanging the run),
+        and a progress bar shows the downloading progress (this is the first
+        thing a fresh dataset pull does).
+        
         Parameters:
         -----------
         bodyIds : list
             List of neuron bodyIds to fetch
         batch_size : int, optional
             Maximum bodyIds per API call (default: 2000)
+        cancel_event : threading.Event, optional
+            When set, the fetch stops between chunks/retries (raises
+            _FetchCancelled).
+        status_callback : callable, optional
+            Called with human-readable status strings (retry/reconnect
+            messages) so an embedding UI can display them.
             
         Returns:
         --------
@@ -3243,19 +3330,58 @@ class FindNeuronConnection:
         bodyIds = list(bodyIds)
         if not bodyIds:
             return pd.DataFrame()
-        
-        if len(bodyIds) <= batch_size:
-            neuron_df, _ = fetch_neurons(NeuronCriteria(bodyId=bodyIds))
-            return neuron_df
-        
+
+        from tqdm import tqdm
+        api_call_with_retry, APITimeoutError, APIRetryExhaustedError = _get_api_retry_utils()
+
+        def _status(msg):
+            if status_callback is not None:
+                status_callback(msg)
+            else:
+                self._vprint(f'  {msg}', level='full')
+
         n_batches = (len(bodyIds) + batch_size - 1) // batch_size
-        self._vprint(f'  ⏳ Fetching {len(bodyIds):,} neurons from API in {n_batches} batches of ≤{batch_size:,}...', level='full')
+        if n_batches > 1:
+            self._vprint(f'  ⏳ Fetching {len(bodyIds):,} neurons from API in {n_batches} batches of ≤{batch_size:,}...', level='full')
+
         frames = []
-        for i in range(0, len(bodyIds), batch_size):
-            chunk = bodyIds[i:i + batch_size]
-            chunk_df, _ = fetch_neurons(NeuronCriteria(bodyId=chunk))
-            if chunk_df is not None and not chunk_df.empty:
-                frames.append(chunk_df)
+        progress = tqdm(total=len(bodyIds), desc='Pulling neurons from server',
+                        unit='neuron', leave=False)
+        try:
+            for i in range(0, len(bodyIds), batch_size):
+                batch_num = i // batch_size + 1
+                if cancel_event is not None and cancel_event.is_set():
+                    raise _FetchCancelled('cancelled before neuron batch')
+                chunk = bodyIds[i:i + batch_size]
+
+                def fetch_chunk(c=chunk):
+                    chunk_df, _ = fetch_neurons(NeuronCriteria(bodyId=c))
+                    return chunk_df
+
+                def _retry_notice(attempt, exc):
+                    if cancel_event is not None and cancel_event.is_set():
+                        raise _FetchCancelled('cancelled during retry')
+                    _status(f'⚠️ Server not responding (neuron batch {batch_num}/{n_batches}) '
+                            f'— reconnecting, attempt {attempt}/5...')
+
+                try:
+                    chunk_df = api_call_with_retry(
+                        fetch_chunk,
+                        timeout=180.0,
+                        max_retries=5,
+                        retry_delay=5.0,
+                        description=f'Neuron batch {batch_num}/{n_batches}',
+                        on_retry=_retry_notice,
+                        verbose=True,
+                    )
+                except (APITimeoutError, APIRetryExhaustedError) as e:
+                    _status(f'⚠️ Neuron batch {batch_num}/{n_batches} failed after retries: {e}')
+                    continue  # keep going with the remaining chunks
+                if chunk_df is not None and not chunk_df.empty:
+                    frames.append(chunk_df)
+                progress.update(len(chunk))
+        finally:
+            progress.close()
         if not frames:
             return pd.DataFrame()
         return pd.concat(frames, ignore_index=True)
@@ -3913,35 +4039,7 @@ class FindNeuronConnection:
                         all_api_conn = []
                         
                         # Import API utilities for timeout/retry
-                        try:
-                            from src.utils.api_utils import api_call_with_retry, APITimeoutError, APIRetryExhaustedError
-                        except ImportError:
-                            # Fallback: define inline if utils not available
-                            from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
-                            class APITimeoutError(Exception): pass
-                            class APIRetryExhaustedError(Exception): pass
-                            def api_call_with_retry(func, timeout=60, max_retries=3, retry_delay=2.0, description="API call", on_retry=None, verbose=True):
-                                import time
-                                last_exc = None
-                                for attempt in range(1, max_retries + 1):
-                                    try:
-                                        # shutdown(wait=False): a hung API call must not
-                                        # block the retry loop (with-block would wait forever)
-                                        executor = ThreadPoolExecutor(max_workers=1)
-                                        try:
-                                            future = executor.submit(func)
-                                            return future.result(timeout=timeout)
-                                        finally:
-                                            executor.shutdown(wait=False)
-                                    except FuturesTimeoutError:
-                                        last_exc = APITimeoutError(f"{description} timed out after {timeout}s (attempt {attempt}/{max_retries})")
-                                        if attempt < max_retries:
-                                            time.sleep(retry_delay * (2 ** (attempt - 1)))
-                                    except Exception as e:
-                                        last_exc = e
-                                        if attempt < max_retries:
-                                            time.sleep(retry_delay * (2 ** (attempt - 1)))
-                                raise last_exc or Exception("Unknown error")
+                        api_call_with_retry, APITimeoutError, APIRetryExhaustedError = _get_api_retry_utils()
                         
                         # Create batches
                         batches = [neuprint_upstream[i:i + batch_size] for i in range(0, len(neuprint_upstream), batch_size)]
@@ -3949,52 +4047,73 @@ class FindNeuronConnection:
                         if len(batches) > 1:
                             self._vprint(f'     Processing {len(batches)} batches (size={batch_size})...', level='full')
                         
-                        # Use tqdm only if multiple batches or large single batch
-                        iterator = tqdm(batches, desc="Fetching batches", unit="batch") if len(batches) > 1 else batches
-                        
-                        failed_batches = []
-                        for batch_idx, batch in enumerate(iterator):
-                            def fetch_batch(b=batch):
-                                """Inner function for timeout wrapping."""
-                                if self.simple_fetch:
-                                    from neuprint import fetch_simple_connections
-                                    upstream_criteria = NeuronCriteria(bodyId=b)
-                                    downstream_criteria = NeuronCriteria(bodyId=neuprint_downstream) if neuprint_downstream is not None else None
-                                    return fetch_simple_connections(
-                                        upstream_criteria=upstream_criteria,
-                                        downstream_criteria=downstream_criteria,
-                                        min_weight=1,
-                                        **self.kwargs_fetch
+                        # Progress bar over the neurons being pulled: the first
+                        # run of a fresh dataset downloads every neuron here, so
+                        # the user always sees the downloading progress (also
+                        # for a single large batch).
+                        self._in_progress_bar = True
+                        progress = None
+                        try:
+                            progress = tqdm(total=len(neuprint_upstream),
+                                            desc='Pulling connections',
+                                            unit='neuron', leave=False)
+                            failed_batches = []
+                            for batch_idx, batch in enumerate(batches):
+                                def fetch_batch(b=batch):
+                                    """Inner function for timeout wrapping."""
+                                    if self.simple_fetch:
+                                        from neuprint import fetch_simple_connections
+                                        upstream_criteria = NeuronCriteria(bodyId=b)
+                                        downstream_criteria = NeuronCriteria(bodyId=neuprint_downstream) if neuprint_downstream is not None else None
+                                        return fetch_simple_connections(
+                                            upstream_criteria=upstream_criteria,
+                                            downstream_criteria=downstream_criteria,
+                                            min_weight=1,
+                                            **self.kwargs_fetch
+                                        )
+                                    else:
+                                        from neuprint import fetch_adjacencies
+                                        neuron_df, roi_conn_df = fetch_adjacencies(
+                                            sources=b,
+                                            targets=neuprint_downstream,
+                                            min_total_weight=1,
+                                            **self.kwargs_fetch
+                                        )
+                                        # roi_conn_df already has bodyId_pre, bodyId_post, roi, weight
+                                        return roi_conn_df
+
+                                def _retry_notice(attempt, exc):
+                                    self._vprint(
+                                        f'     ⚠️ Server not responding (batch {batch_idx+1}/{len(batches)}) '
+                                        f'— reconnecting, attempt {attempt}/5...',
+                                        level='always',
                                     )
-                                else:
-                                    from neuprint import fetch_adjacencies
-                                    neuron_df, roi_conn_df = fetch_adjacencies(
-                                        sources=b,
-                                        targets=neuprint_downstream,
-                                        min_total_weight=1,
-                                        **self.kwargs_fetch
+
+                                try:
+                                    # Use timeout and retry for each batch
+                                    batch_conn = api_call_with_retry(
+                                        fetch_batch,
+                                        timeout=120.0,  # 2 minutes per batch
+                                        max_retries=5,
+                                        retry_delay=5.0,
+                                        description=f"Batch {batch_idx+1}/{len(batches)}",
+                                        on_retry=_retry_notice,
+                                        verbose=True
                                     )
-                                    # roi_conn_df already has bodyId_pre, bodyId_post, roi, weight
-                                    return roi_conn_df
-                            
-                            try:
-                                # Use timeout and retry for each batch
-                                batch_conn = api_call_with_retry(
-                                    fetch_batch,
-                                    timeout=120.0,  # 2 minutes per batch
-                                    max_retries=3,
-                                    retry_delay=5.0,
-                                    description=f"Batch {batch_idx+1}/{len(batches)}",
-                                    verbose=True
-                                )
-                                if batch_conn is not None and not batch_conn.empty:
-                                    all_api_conn.append(batch_conn)
-                            except (APITimeoutError, APIRetryExhaustedError) as e:
-                                self._vprint(f"     ⚠️ Batch {batch_idx+1} failed after retries: {e}", level='full')
-                                failed_batches.append(batch_idx + 1)
-                            except Exception as e:
-                                self._vprint(f"     ⚠️ Error fetching batch {batch_idx+1}: {e}", level='full')
-                                failed_batches.append(batch_idx + 1)
+                                    if batch_conn is not None and not batch_conn.empty:
+                                        all_api_conn.append(batch_conn)
+                                except (APITimeoutError, APIRetryExhaustedError) as e:
+                                    self._vprint(f"     ⚠️ Batch {batch_idx+1} failed after retries: {e}", level='always')
+                                    failed_batches.append(batch_idx + 1)
+                                except Exception as e:
+                                    self._vprint(f"     ⚠️ Error fetching batch {batch_idx+1}: {e}", level='full')
+                                    failed_batches.append(batch_idx + 1)
+                                finally:
+                                    progress.update(len(batch))
+                        finally:
+                            if progress is not None:
+                                progress.close()
+                            self._in_progress_bar = False
                         
                         if failed_batches:
                             self._vprint(f"     ⚠️ {len(failed_batches)} batches failed: {failed_batches}", level='full')
@@ -4779,7 +4898,8 @@ class FindNeuronConnection:
         quiet: bool = False,
         progress_callback: callable = None,
         cancel_event: threading.Event = None,
-        max_workers: int = None
+        max_workers: int = None,
+        status_callback: callable = None
     ) -> dict:
         """
         Build connection cache incrementally for specified or all neurons.
@@ -4825,6 +4945,10 @@ class FindNeuronConnection:
             None or 1 keeps the sequential fetch. Appends to the cache stay
             serialized (batch-file numbering and the neuron index are not
             thread-safe), so results are identical to a sequential run.
+        status_callback : callable, optional
+            Called with human-readable status strings (server reconnect /
+            retry messages) so an embedding UI can show what is happening
+            while a batch retries.
         
         Returns:
         --------
@@ -5019,6 +5143,12 @@ class FindNeuronConnection:
             # In the parallel path appends still run in this single (main)
             # thread: batch-file numbering and the neuron index are not
             # thread-safe, while the network fetches parallelize fine.
+            def _status(msg):
+                if status_callback is not None:
+                    status_callback(msg)
+                elif not quiet:
+                    print(msg)
+
             def process_batch(i: int, connections=None, fetch_failed: bool = False) -> None:
                 nonlocal batch_connections, cancelled
                 batch = uncached[i:i + batch_size]
@@ -5029,7 +5159,9 @@ class FindNeuronConnection:
                     if connections is None:
                         connections = self._fetch_connections_bulk(
                             upstream_bodyIds=batch,
-                            downstream_bodyIds=None
+                            downstream_bodyIds=None,
+                            cancel_event=cancel_event,
+                            status_callback=status_callback,
                         )
                     if connections is not None and not connections.empty:
                         batch_connections += len(connections)
@@ -5043,6 +5175,10 @@ class FindNeuronConnection:
                     if not quiet and hasattr(batch_iter, 'set_postfix_str'):
                         mem_usage = f"{process.memory_info().rss / 1024 / 1024:.0f}MB" if process else "?"
                         batch_iter.set_postfix_str(f'neurons={len(newly_cached):,}, conns={batch_connections:,} Mem:{mem_usage}')
+                except _FetchCancelled:
+                    # The pull was cancelled mid-batch: stop cleanly, do NOT
+                    # record the batch as failed (re-run resumes it).
+                    raise
                 except Exception as e:
                     failed_neurons.extend(batch)
                     if not quiet:
@@ -5074,7 +5210,10 @@ class FindNeuronConnection:
                         i = next(batch_indices, None)
                         if i is None:
                             break
-                        pending[executor.submit(self._fetch_connections_bulk, uncached[i:i + batch_size], None)] = i
+                        pending[executor.submit(
+                            self._fetch_connections_bulk, uncached[i:i + batch_size], None,
+                            cancel_event, status_callback,
+                        )] = i
                     while pending:
                         if cancel_event is not None and cancel_event.is_set():
                             finish_cancelled()
@@ -5082,11 +5221,18 @@ class FindNeuronConnection:
                         done, _ = wait(pending, timeout=0.5, return_when=FIRST_COMPLETED)
                         if not done:
                             continue
+                        cancelled_now = False
                         for fut in done:
                             i = pending.pop(fut)
                             try:
                                 conns = fut.result()
                                 process_batch(i, connections=conns)
+                            except _FetchCancelled:
+                                # cancelled mid-fetch: stop cleanly without
+                                # marking the batch failed
+                                finish_cancelled()
+                                cancelled_now = True
+                                break
                             except Exception:
                                 process_batch(i, fetch_failed=True)
                             if not quiet and hasattr(batch_iter, 'update'):
@@ -5095,7 +5241,12 @@ class FindNeuronConnection:
                                 progress_callback(i, total, f"Batch {i // batch_size + 1}/{total_batches}")
                             next_i = next(batch_indices, None)
                             if next_i is not None:
-                                pending[executor.submit(self._fetch_connections_bulk, uncached[next_i:next_i + batch_size], None)] = next_i
+                                pending[executor.submit(
+                                    self._fetch_connections_bulk, uncached[next_i:next_i + batch_size], None,
+                                    cancel_event, status_callback,
+                                )] = next_i
+                        if cancelled_now:
+                            break
             else:
                 for i in batch_iter:
                     # Cooperative cancellation: stop after the current batch
@@ -5106,7 +5257,12 @@ class FindNeuronConnection:
                         break
                     if progress_callback:
                         progress_callback(i, total, f"Batch {i // batch_size + 1}/{total_batches}")
-                    process_batch(i)
+                    try:
+                        process_batch(i)
+                    except _FetchCancelled:
+                        # cancelled while the batch was fetching/retrying
+                        finish_cancelled()
+                        break
 
             # Consolidate batch files into main cache file
             # This is where merging happens, but only once at the end.
@@ -5155,7 +5311,9 @@ class FindNeuronConnection:
             'cancelled': cancelled,
         }
     
-    def _fetch_connections_bulk(self, upstream_bodyIds, downstream_bodyIds=None):
+    def _fetch_connections_bulk(self, upstream_bodyIds, downstream_bodyIds=None,
+                                cancel_event: threading.Event = None,
+                                status_callback: callable = None):
         """
         Fetch connections from local data without caching overhead.
         Used by build_connection_cache for faster bulk fetching.
@@ -5164,6 +5322,10 @@ class FindNeuronConnection:
         """
         if not upstream_bodyIds:
             return pd.DataFrame()
+        
+        def _status(msg):
+            if status_callback is not None:
+                status_callback(msg)
         
         # For FlyWire/FAFB: use local CSV data
         if 'fafb' in self.dataset.lower() or 'flywire' in self.dataset.lower():
@@ -5215,7 +5377,10 @@ class FindNeuronConnection:
                 raise RuntimeError(f"Bulk fetch error for FlyWire/FAFB: {type(e).__name__}: {e}") from e
         
         # For NeuPrint: Direct API call without caching overhead
-        # This is used by build_connection_cache which handles caching separately
+        # This is used by build_connection_cache which handles caching separately.
+        # The call runs under a timeout with retries: a server that stops
+        # responding is reported and reconnected instead of hanging the whole
+        # pull forever (which also made the UI cancel button ineffective).
         try:
             self._ensure_neuprint_client()
             
@@ -5225,29 +5390,56 @@ class FindNeuronConnection:
             # Ensure bodyIds are integers
             upstream_ints = [int(x) for x in upstream_bodyIds]
             downstream_ints = [int(x) for x in downstream_bodyIds] if downstream_bodyIds else None
-            
-            if self.simple_fetch:
-                from neuprint import fetch_simple_connections
-                upstream_criteria = NeuronCriteria(bodyId=upstream_ints)
-                downstream_criteria = NeuronCriteria(bodyId=downstream_ints) if downstream_ints else None
-                result = fetch_simple_connections(
-                    upstream_criteria=upstream_criteria,
-                    downstream_criteria=downstream_criteria,
-                    min_weight=1,
-                    **self.kwargs_fetch
+
+            api_call_with_retry, APITimeoutError, APIRetryExhaustedError = _get_api_retry_utils()
+
+            def fetch_batch():
+                if cancel_event is not None and cancel_event.is_set():
+                    raise _FetchCancelled('cancelled before bulk fetch')
+                if self.simple_fetch:
+                    from neuprint import fetch_simple_connections
+                    upstream_criteria = NeuronCriteria(bodyId=upstream_ints)
+                    downstream_criteria = NeuronCriteria(bodyId=downstream_ints) if downstream_ints else None
+                    return fetch_simple_connections(
+                        upstream_criteria=upstream_criteria,
+                        downstream_criteria=downstream_criteria,
+                        min_weight=1,
+                        **self.kwargs_fetch
+                    )
+                else:
+                    neuron_df, roi_conn_df = fetch_adjacencies(
+                        sources=upstream_ints,
+                        targets=downstream_ints,
+                        min_total_weight=1,
+                        **self.kwargs_fetch
+                    )
+                    # roi_conn_df already has bodyId_pre, bodyId_post, roi, weight
+                    return roi_conn_df
+
+            def _retry_notice(attempt, exc):
+                if cancel_event is not None and cancel_event.is_set():
+                    raise _FetchCancelled('cancelled during retry')
+                _status(f'⚠️ Server not responding (batch of {len(upstream_ints)} neurons) '
+                        f'— reconnecting, attempt {attempt}/5...')
+
+            try:
+                result = api_call_with_retry(
+                    fetch_batch,
+                    timeout=120.0,  # 2 minutes per batch
+                    max_retries=5,
+                    retry_delay=5.0,
+                    description=f'Bulk fetch ({len(upstream_ints)} neurons)',
+                    on_retry=_retry_notice,
+                    verbose=True,
                 )
-            else:
-                neuron_df, roi_conn_df = fetch_adjacencies(
-                    sources=upstream_ints,
-                    targets=downstream_ints,
-                    min_total_weight=1,
-                    **self.kwargs_fetch
-                )
-                # roi_conn_df already has bodyId_pre, bodyId_post, roi, weight
-                result = roi_conn_df
+            except (APITimeoutError, APIRetryExhaustedError) as e:
+                _status(f'⚠️ Server not responding — batch failed after retries: {e}')
+                raise RuntimeError(f'NeuPrint bulk fetch failed after retries: {e}') from e
             
             return result if result is not None else pd.DataFrame()
             
+        except _FetchCancelled:
+            raise
         except Exception as e:
             # Re-raise to let caller handle/log the error properly
             raise RuntimeError(f"NeuPrint bulk fetch error: {type(e).__name__}: {e}") from e
@@ -6417,37 +6609,211 @@ class FindNeuronConnection:
             self._vprint(traceback.format_exc())
         self._vprint('Done\n')
 
-    def _apply_graph_edge_limit(self, G, limit, label, reserve_nodes=None):
+    def _trim_edges_with_path_integrity(self, conn, limit, label, sources, targets,
+                                        pre_col, post_col, max_iterations=6):
         """
-        Keep only the ``limit`` strongest edges of ``G`` (by synapse
-        weight) — the pan-graph edge limit. Edges of the queried
-        source/target nodes (``reserve_nodes``) are ALWAYS reserved.
-        Warns noticeably when edges are trimmed (including the applied
-        weight threshold), records a note for user_warning_notes.txt, and
-        tells the user how to restore the complete network. Returns the
-        number of removed edges (0 when no trimming happened).
+        Trim a per-pair connection TABLE to the ``limit`` strongest USABLE
+        edges (by synapse weight), keeping path integrity.
+
+        Replaces the old graph-level trim: the trim now runs on the edge
+        table BEFORE the graph is built, and dead-end pruning cannot waste
+        the budget:
+
+        1. Reachability — two BFS passes on the full table mark the nodes
+           S-reachable (from any source) and T-reachable (to any target).
+        2. Viability filter — rows that cannot lie on any source->target
+           path (pre not S-reachable, or post not T-reachable) are dropped
+           first (exact: such an edge can never be used).
+        3. Reservation — source-outgoing / target-incoming viable rows are
+           reserved first (strongest ``limit``, NOT counted toward the
+           limit), so sources/targets keep their strongest connections.
+        4. Adaptive fill loop — keep the strongest ``budget`` non-reserved
+           viable rows, prune dead ends, and grow the budget by the
+           observed deficit (limit - usable) until the pruned graph reaches
+           the limit or the viable pool is exhausted (max iterations). The
+           budget therefore inflates only by what pruning actually cost.
+
+        Returns the trimmed table (same engine as *conn*). Warns noticeably
+        (applied threshold, removed/total, usable count) and records a note
+        for user_warning_notes.txt.
         """
-        total = G.number_of_edges()
-        if not limit or limit <= 0 or total <= limit:
-            return 0
-        removed, threshold = G.trim_to_strongest(limit, reserve_nodes=reserve_nodes)
-        threshold_str = f'weight >= {threshold:g} synapses' if threshold is not None else 'all reserved edges'
+        from collections import deque
+
+        # Normalize: accept a single table or a list of tables (concat).
+        if isinstance(conn, (list, tuple)):
+            if not conn:
+                return conn, 0, None
+            if hasattr(conn[0], 'iter_rows'):
+                import polars as pl
+                conn = pl.concat(conn, how='diagonal_relaxed')
+            else:
+                conn = pd.concat(conn, ignore_index=True)
+
+        is_polars = hasattr(conn, 'iter_rows')
+        pre_list = [str(x) for x in (conn[pre_col].to_list() if is_polars else conn[pre_col].tolist())]
+        post_list = [str(x) for x in (conn[post_col].to_list() if is_polars else conn[post_col].tolist())]
+        w_list = conn['weight'].to_list() if is_polars else conn['weight'].tolist()
+        n = len(pre_list)
+        if not n or not limit or limit <= 0:
+            return conn, 0, None
+
+        src_set = set(str(x) for x in sources)
+        tgt_set = set(str(x) for x in targets)
+
+        # adjacency + reverse adjacency (for the two BFS passes)
+        adj = {}
+        radj = {}
+        for u, v, wt in zip(pre_list, post_list, w_list):
+            adj.setdefault(u, {})[v] = wt
+            radj.setdefault(v, {})[u] = wt
+
+        def bfs(starts, edges):
+            seen = set(starts)
+            dq = deque(starts)
+            while dq:
+                u = dq.popleft()
+                for v in edges.get(u, ()):
+                    if v not in seen:
+                        seen.add(v)
+                        dq.append(v)
+            return seen
+
+        s_reach = bfs(src_set & set(adj), adj)
+        t_reach = bfs(tgt_set & set(radj), radj)
+
+        # viability filter: only rows that can lie on a source->target path
+        viable = [pre_list[i] in s_reach and post_list[i] in t_reach for i in range(n)]
+        # reservation: source-outgoing / target-incoming viable rows, capped
+        # at the limit (strongest first)
+        reserved_idx = [i for i in range(n) if viable[i]
+                        and (pre_list[i] in src_set or post_list[i] in tgt_set)]
+        reserved_idx.sort(key=lambda i: w_list[i], reverse=True)
+        reserved_idx = reserved_idx[:limit]
+        reserved_set = set(reserved_idx)
+        non_reserved_viable = [i for i in range(n) if viable[i] and i not in reserved_set]
+        non_reserved_viable.sort(key=lambda i: w_list[i], reverse=True)
+
+        # Adaptive fill loop: inflate the budget exactly by the deficit that
+        # dead-end pruning creates, until the usable edge count reaches the
+        # limit or the viable pool is exhausted. When the added edges do not
+        # increase usability (pathological cases), the budget doubles instead
+        # so the loop still terminates quickly.
+        budget = limit
+        usable = 0
+        for _ in range(max_iterations):
+            kept_idx = reserved_set | set(non_reserved_viable[:budget])
+            kept_radj = {}
+            for i in kept_idx:
+                kept_radj.setdefault(post_list[i], {})[pre_list[i]] = w_list[i]
+            kept_t_reach = bfs(tgt_set & set(kept_radj), kept_radj)
+            usable = sum(1 for i in kept_idx
+                         if pre_list[i] in kept_t_reach and post_list[i] in kept_t_reach)
+            if usable >= limit or budget >= len(non_reserved_viable):
+                break
+            budget = min(len(non_reserved_viable),
+                         max(limit + (limit - usable), budget * 2))
+
+        kept_idx = reserved_set | set(non_reserved_viable[:budget])
+        kept_non_reserved = non_reserved_viable[:budget]
+        threshold = min(w_list[i] for i in kept_non_reserved) if kept_non_reserved else None
+        removed = n - len(kept_idx)
+        trimmed = conn[list(kept_idx)] if is_polars else conn.iloc[list(kept_idx)]
+
+        threshold_str = f'weight >= {threshold:g} synapses' if threshold is not None else 'no non-reserved edges kept'
         self._vprint(
-            f'⚠️  {label} graph edge limit: kept the {limit:,} strongest edges '
-            f'(applied threshold: {threshold_str}; removed {removed:,} of '
-            f'{total:,}; source/target edges always reserved) — paths now use '
-            f'only the strongest connections. For the COMPLETE graph network, '
-            f'remove the edge limit (uncheck "Limit Graph Edges" / set the '
-            f'edge limit to 0).',
+            f'⚠️  {label} graph edge limit: kept the {limit:,} strongest usable '
+            f'non-reserved edges (applied threshold: {threshold_str}; removed '
+            f'{removed:,} of {n:,}; {usable:,} usable after dead-end pruning; '
+            f'source-outgoing and target-incoming edges reserved first — up to '
+            f'the limit — and do NOT count toward it) — paths now use only the '
+            f'strongest connections that survive pruning. For the COMPLETE graph '
+            f'network, remove the edge limit (uncheck "Limit Graph Edges" / set '
+            f'the edge limit to 0).',
             level='always',
         )
         self._warn_notes.append(
             f'- [graph edge limit] {label} graph trimmed: kept the top {limit:,} '
-            f'edges ({threshold_str}); removed {removed:,} of {total:,} edges. '
-            f'Source/target edges were always reserved. Weak intermediate '
-            f'connections are excluded from the outputs.'
+            f'non-reserved edges ({threshold_str}); removed {removed:,} of {n:,} '
+            f'rows ({usable:,} usable after dead-end pruning). Edges not on any '
+            f'source→target path were dropped first; source-outgoing and '
+            f'target-incoming edges were reserved first (up to the limit, not '
+            f'counted toward it); the budget was refilled adaptively for dead '
+            f'ends. Weak intermediate connections are excluded from the outputs.'
         )
-        return removed
+        return trimmed, removed, threshold
+
+    def _trim_bodyid_edges(self, conn_layers, sources, targets):
+        """Return the bodyId-level edge table for the discovery graph.
+
+        The pan-graph bodyId edge limit is applied ONLY for deep searches
+        (``max_interlayer >= 3``), where the path count grows
+        combinatorially (branching^depth); shallow searches (<= 2 layers)
+        keep the COMPLETE graph — there the limit would only drop real
+        paths. Returns a single DataFrame (the trimmed table, or the
+        concatenated layer tables when no trim applies).
+        """
+        if self.max_interlayer >= 3:
+            trimmed, _removed, _thr = self._trim_edges_with_path_integrity(
+                conn_layers, self.graph_edge_limit_bodyid, 'bodyId',
+                sources=sources, targets=targets,
+                pre_col='bodyId_pre', post_col='bodyId_post',
+            )
+            return trimmed
+        non_empty = [c for c in conn_layers
+                     if not (c.is_empty() if hasattr(c, 'is_empty') else c.empty)]
+        if not non_empty:
+            return conn_layers[0] if conn_layers else pd.DataFrame()
+        if hasattr(non_empty[0], 'is_empty'):  # polars frame
+            return pl.concat(non_empty, how='diagonal_relaxed')
+        return pd.concat(non_empty, ignore_index=True)
+
+    def _derive_type_paths_from_bodyid_paths(self, all_paths, node_label,
+                                             kept_type_edges, source_types,
+                                             target_types, verbose=False):
+        """Derive type-level paths from the discovered bodyId paths.
+
+        Each discovered bodyId path is mapped to its type sequence via
+        ``node_label`` (a callable bodyId -> final type label, matching the
+        labels used in conn_types), and the unique sequences are returned as
+        lists. A sequence is accepted only when:
+
+        - it starts at a queried source type and ends at a queried target
+          type, and
+        - every consecutive type pair exists in ``kept_type_edges`` (the
+          type-edge table; a defensive label-consistency check — the hops
+          always come from in-path bodyId pairs, and no type-level edge
+          limit is applied to the derivation).
+
+        ``verbose`` wraps the (potentially millions of) bodyId paths with a
+        single-line progress display (LineProgress), refreshed in place.
+
+        Unlike running a pathfinding on the type-level graph, this never
+        produces phantom type paths (type chains whose hops are each backed
+        by a different bodyId pair but never realized by one bodyId path),
+        and it preserves repeated-type routes (A->B->A) that a simple-path
+        search on the type graph would drop.
+        """
+        source_set = set(source_types)
+        target_set = set(target_types)
+        iterator = all_paths
+        if verbose:
+            try:
+                from vispath_pkg.fast_graph_core import LineProgress
+                iterator = LineProgress(all_paths, desc="Deriving type-level paths",
+                                        leave=False)
+            except ImportError:
+                pass
+        seen = set()
+        for p in iterator:
+            seen.add(tuple(node_label(n) for n in p))
+        out = []
+        for seq in seen:
+            if seq[0] not in source_set or seq[-1] not in target_set:
+                continue
+            if all((seq[i], seq[i + 1]) in kept_type_edges
+                   for i in range(len(seq) - 1)):
+                out.append(list(seq))
+        return out
 
     def _write_user_warning_notes(self, folder):
         """
@@ -6553,8 +6919,13 @@ class FindNeuronConnection:
         except OSError as e:
             self._vprint(f'  Warning: could not write user_warning_notes.txt: {e}', level='full')
 
-    def FindPath(self, find_bodyId_path=True):
+    def FindPath(self, find_bodyId_path=None):
         '''Find path between source and target neurons, adapted from FindInterClusterConnection.ipynb'''
+        # skip_bodyId=True implies skipping the bodyId-level path analysis
+        # (graph build + per-pair pathfinding); an explicit find_bodyId_path
+        # argument still wins over the dataclass flag.
+        if find_bodyId_path is None:
+            find_bodyId_path = not getattr(self, 'skip_bodyId', False)
         # Reset status columns if they exist (to allow sequential calls)
         self._reset_temp_columns()
 
@@ -6641,20 +7012,19 @@ class FindNeuronConnection:
         # Use FastGraph for pathfinding
         print('\nUsing FastGraph for pathfinding...')
         
-        # Build graph from conn_layers
-        G = FastGraph()
-        for conn in conn_layers:
-            G.build_from_dataframe(conn, 'bodyId_pre', 'bodyId_post', 'weight')
-        
         sources = list(self.source_df['bodyId'].unique())
         # Targets found in the network (Checked=True)
         targets = list(self.target_df[self.target_df['Checked'] == True]['bodyId'].unique())
         
-        # Pan-graph edge limit: keep only the strongest edges so the path
-        # count stays manageable (branching^depth); source/target edges are
-        # ALWAYS reserved; warns when trimmed.
-        self._apply_graph_edge_limit(G, self.graph_edge_limit_bodyid, 'bodyId',
-                                     reserve_nodes=sources + targets)
+        # Pan-graph edge limit on the per-pair edge TABLE (path integrity:
+        # reachability filter + adaptive dead-end refill; bounds the
+        # combinatorial path count, branching^depth). Applied ONLY for deep
+        # searches (max_interlayer >= 3); shallow searches keep the
+        # complete graph.
+        conn_trimmed = self._trim_bodyid_edges(conn_layers, sources, targets)
+        # Build graph from the connections
+        G = FastGraph()
+        G.build_from_dataframe(conn_trimmed, 'bodyId_pre', 'bodyId_post', 'weight')
         cutoff = self.max_interlayer + 1
         
         paths_found = []
@@ -6860,14 +7230,17 @@ class FindNeuronConnection:
         target_types = [t for t in self.target_df.loc[self.target_df.Checked, 'type'].unique().tolist()
                         if t is not None and (not isinstance(t, float) or not pd.isna(t))]
         
-        # Build type-level graph from conn_types
+        # Pan-graph edge limit on the type table first (path integrity:
+        # reachability filter + adaptive dead-end refill; source-outgoing /
+        # target-incoming type edges reserved first).
+        conn_types_trimmed, _r, _t = self._trim_edges_with_path_integrity(
+            conn_types, self.graph_edge_limit_groups, 'type',
+            sources=source_types, targets=target_types,
+            pre_col='type_pre', post_col='type_post',
+        )
+        # Build type-level graph from the trimmed table
         G_type = FastGraph()
-        G_type.build_from_dataframe(conn_types, 'type_pre', 'type_post', 'weight')
-        
-        # Pan-graph edge limit for the type-level graph (strongest edges
-        # only; source/target type edges always reserved).
-        self._apply_graph_edge_limit(G_type, self.graph_edge_limit_groups, 'type',
-                                     reserve_nodes=source_types + target_types)
+        G_type.build_from_dataframe(conn_types_trimmed, 'type_pre', 'type_post', 'weight')
         
         self._vprint(f'  Type-level graph: {G_type.number_of_nodes()} types, {G_type.number_of_edges()} edges', level='full')
         
@@ -7311,33 +7684,53 @@ class FindNeuronConnection:
         self._write_user_warning_notes(self.path_folder)
         self._vprint('Done\n')
     
-    def _visualize_graph_before_reconstruct(self, G):
-        """Draw the discovered network graph BEFORE path reconstruction.
+    def _build_bodyid_type_map(self):
+        """bodyId -> type label map for the early network visualization.
 
-        Uses the built FastGraph directly: every edge becomes a
-        ``source -> target`` row with its weight (VisualizePath's native
-        edge-list input), saved under ``network_early/`` inside the run
-        folder so the final path-based outputs are never overwritten. The
-        early preview shows the full explored topology (including edges not
-        on any target-reaching path); the per-layer Sankey is less
-        informative here because every row is a 2-node edge.
+        Collected from the fetched connection tables (type_pre/type_post
+        columns), then the source/target frames; untyped neurons fall back
+        to their own bodyId as the label (consistent with the type-level
+        graph fallback used elsewhere).
         """
-        import pandas as pd
-        rows = []
-        for u, neigh in G.adj.items():
-            for v, w in neigh.items():
-                rows.append((u, v, w))
-        if not rows:
-            self._vprint('  No edges to visualize early', level='full')
-            return
-        edge_df = pd.DataFrame(rows, columns=["source", "target", "weight"])
-        early_folder = os.path.join(self.allpath_folder, 'network_early')
-        os.makedirs(early_folder, exist_ok=True)
-        self._vprint(f'📊 Early network visualization ({len(rows):,} edges) -> {early_folder}', level='always')
+        type_map = {}
+        tables = getattr(self, 'all_connections_filtered', None) or []
+        if not isinstance(tables, (list, tuple)):
+            tables = [tables]
+        for tbl in tables:
+            if tbl is None:
+                continue
+            cols = tbl.columns
+            if 'type_pre' in cols and 'bodyId_pre' in cols:
+                for u, t in zip(tbl['bodyId_pre'], tbl['type_pre']):
+                    if t is not None and str(t) not in ('', 'None'):
+                        type_map.setdefault(str(u), str(t))
+            if 'type_post' in cols and 'bodyId_post' in cols:
+                for v, t in zip(tbl['bodyId_post'], tbl['type_post']):
+                    if t is not None and str(t) not in ('', 'None'):
+                        type_map.setdefault(str(v), str(t))
+        for df in (getattr(self, 'source_df', None), getattr(self, 'target_df', None)):
+            if df is None or 'bodyId' not in df.columns or 'type' not in df.columns:
+                continue
+            for b, t in zip(df['bodyId'], df['type']):
+                if t is not None and str(t) not in ('', 'None'):
+                    type_map.setdefault(str(b), str(t))
+        return type_map
+
+    def _run_early_visualization(self, edge_df, output_folder):
+        """Render one early network (edge-list DataFrame) via VisualizePath.
+
+        NETWORK-ONLY preview: the early edge list carries plain
+        (source, target, weight) rows with no path metrics, so a heatmap /
+        Sankey generated from it would just duplicate (with less data) the
+        path-based ones the final Phase-4 VisualizePath call produces after
+        the reconstruction. Only the interactive network graph is drawn,
+        which is the preview's purpose (see the topology while the path
+        enumeration is still running).
+        """
         try:
             vp = VisualizePath(
                 path_file=edge_df,
-                output_folder=early_folder,
+                output_folder=output_folder,
                 source_color=self.source_color if hasattr(self, 'source_color') else '#1f77b4',
                 intermediate_color=self.intermediate_color if hasattr(self, 'intermediate_color') else '#2ca02c',
                 target_color=self.target_color if hasattr(self, 'target_color') else '#d62728',
@@ -7348,10 +7741,94 @@ class FindNeuronConnection:
                 output_format=self.output_format,
                 verbose=(self.verbose_mode == 'full'),
             )
-            vp.visualize()
-            self._vprint('  ✓ Early network visualization created (network_early)', level='always')
+            vp.visualize(plot_heatmap=False, plot_Sankey=False, plot_network=True)
+            return True
         except Exception as e:
             self._vprint(f'  ⚠️  Early network visualization failed: {e}', level='always')
+            return False
+
+    def _visualize_graph_before_reconstruct(self, G):
+        """Draw the discovered network BEFORE path reconstruction.
+
+        The early preview is aggregated to the TYPE level (bodyId -> type,
+        weights summed), which is far more readable for large queries and
+        matches the final type-level outputs. When ``skip_bodyId`` is False
+        (bodyId-level outputs requested), a bodyId-level early network is
+        also saved under ``network_early_bodyId/``.
+        """
+        import pandas as pd
+        rows = []
+        for u, neigh in G.adj.items():
+            for v, w in neigh.items():
+                rows.append((u, v, w))
+        if not rows:
+            self._vprint('  No edges to visualize early', level='full')
+            return
+
+        # Type-level aggregation: bodyId -> type label, weights summed
+        type_map = self._build_bodyid_type_map()
+        type_rows = {}
+        for u, v, w in rows:
+            key = (type_map.get(u, u), type_map.get(v, v))
+            type_rows[key] = type_rows.get(key, 0) + w
+        type_df = pd.DataFrame(
+            [(tu, tv, w) for (tu, tv), w in type_rows.items()],
+            columns=["source", "target", "weight"],
+        )
+
+        early_folder = os.path.join(self.allpath_folder, 'network_early')
+        os.makedirs(early_folder, exist_ok=True)
+        self._vprint(f'📊 Early network visualization ({len(type_rows):,} type-level edges) -> {early_folder}', level='always')
+        if self._run_early_visualization(type_df, early_folder):
+            self._vprint('  ✓ Early type-level network visualization created (network_early)', level='always')
+
+        # BodyId-level early network only when bodyId outputs are requested
+        if not getattr(self, 'skip_bodyId', True):
+            body_df = pd.DataFrame(rows, columns=["source", "target", "weight"])
+            body_folder = os.path.join(self.allpath_folder, 'network_early_bodyId')
+            os.makedirs(body_folder, exist_ok=True)
+            self._vprint(f'📊 BodyId-level early network ({len(rows):,} edges) -> {body_folder}', level='always')
+            if self._run_early_visualization(body_df, body_folder):
+                self._vprint('  ✓ BodyId-level early network visualization created (network_early_bodyId)', level='always')
+
+    def _relocate_viz_outputs(self, input_df=None, input_name='type_paths'):
+        """Organize the Phase-4 VisualizePath artifacts of the main
+        type-level visualization into subfolders:
+
+        - ``visualization/`` holds the html artifacts, renamed with the
+          artifact type as prefix and the redundant type suffix dropped:
+          ``Network_<base>.html``, ``Sankey_<base>.html``,
+          ``Heatmap_<base>.html``.
+        - ``visualization/visualization_data/`` holds the vispath-exported
+          data files (``<base>_data_*``) plus the ORIGINAL input DataFrame
+          that was passed to VisualizePath (``<input_name>_input.csv``), so
+          every visualization is reproducible from its inputs.
+
+        The duplicated artifacts are kept, just organized (VisualizePath
+        writes them into the run-folder root first).
+        """
+        import shutil
+        base = os.path.basename(self.allpath_folder.rstrip(os.sep))
+        viz_dir = os.path.join(self.allpath_folder, 'visualization')
+        data_dir = os.path.join(viz_dir, 'visualization_data')
+        os.makedirs(data_dir, exist_ok=True)
+        for prefix, suffix in (('Network', '_network.html'),
+                               ('Sankey', '_Sankey.html'),
+                               ('Heatmap', '_heatmap.html')):
+            src = os.path.join(self.allpath_folder, base + suffix)
+            if os.path.exists(src):
+                # prefix + run name; the type suffix is redundant now
+                shutil.move(src, os.path.join(viz_dir, f'{prefix}_{base}.html'))
+        for fname in os.listdir(self.allpath_folder):
+            if fname.startswith(base + '_data'):
+                shutil.move(os.path.join(self.allpath_folder, fname),
+                            os.path.join(data_dir, fname))
+        if input_df is not None and len(input_df) > 0:
+            self._save_df_to_csv_polars(
+                input_df, os.path.join(data_dir, f'{input_name}_input.csv'))
+        self._vprint('  ✓ Visualization outputs organized under visualization/ '
+                     '(visualization_data/ for the exported data and inputs)',
+                     level='full')
     
     def FindAllPath(self, find_bodyId_path=True, forward_only=True, exclude_searched_neurons=None, 
                     use_graph_cache=True, find_reciprocal: bool = False):
@@ -7424,7 +7901,9 @@ class FindNeuronConnection:
                 '(branching^depth) — reconstruction can take hours and produce '
                 'billions of paths. For large graphs consider raising Min Synapse '
                 'Count / Min Connection Ratio / Min Traversal Prob., and/or '
-                'tightening the Graph Edge Limit (Limit Graph Edges).',
+                'tightening the Graph Edge Limit (Limit Graph Edges). Minimizing '
+                'the source/target sets, or batching them into smaller queries, '
+                'also cuts the path count dramatically.',
                 level='always',
             )
         
@@ -7738,16 +8217,16 @@ class FindNeuronConnection:
         
         # Build a directed graph from all connections
         self._vprint('Building connection graph...', level='full', end=' ')
+        # Pan-graph edge limit on the per-pair edge TABLE (path integrity:
+        # reachability filter + adaptive dead-end refill; bounds the
+        # combinatorial path count; source-outgoing / target-incoming edges
+        # reserved first, not counted toward the limit). Applied ONLY for
+        # deep searches (max_interlayer >= 3); shallow searches keep the
+        # complete graph.
+        conn_trimmed = self._trim_bodyid_edges(
+            all_connections_filtered, list(source_ID), list(targets_found))
         G = FastGraph()
-        for conn_df in all_connections_filtered:
-            G.build_from_dataframe(conn_df, 'bodyId_pre', 'bodyId_post', 'weight')
-        
-        # Pan-graph edge limit: keep only the strongest edges BEFORE pruning
-        # and pathfinding (bounds the combinatorial path count); source/target
-        # edges are ALWAYS reserved; warns when edges are trimmed and how to
-        # restore the complete network.
-        self._apply_graph_edge_limit(G, self.graph_edge_limit_bodyid, 'bodyId',
-                                     reserve_nodes=list(source_ID) + list(targets_found))
+        G.build_from_dataframe(conn_trimmed, 'bodyId_pre', 'bodyId_post', 'weight')
         
         self._vprint(f'Done! ({G.number_of_nodes()} nodes, {G.number_of_edges()} edges)', level='full')
         
@@ -8716,28 +9195,19 @@ class FindNeuronConnection:
         self._vprint(f'Found {path_count:,} paths during sequential DFS', level='full')
         self._vprint('Note: Now building type/group level summaries...', level='full')
         
-        # Type-level paths - Use separate DFS on type-level graph (much faster!)
-        self._vprint('\nFinding type-level paths using type-level graph...', level='full')
-        
-        # Build type-level graph from conn_types
-        # NOTE: conn_types now uses std_label values in type_pre/type_post when label_mapper is provided
-        # (thanks to EnrichConnectionTablePolars implementing the 6-step approach)
-        G_type = FastGraph()
-        G_type.build_from_dataframe(conn_types, 'type_pre', 'type_post', 'weight')
-        
-        # Pan-graph edge limit for the type-level graph (strongest edges only;
-        # source/target edges always reserved — raw types plus bodyId-string
-        # fallback labels cover both the mapped and unmapped label schemes).
-        reserve_types = [str(t) for t in self.source_df['type'].unique().tolist()
-                         if t is not None and (not isinstance(t, float) or not pd.isna(t))]
-        reserve_types += [str(t) for t in self.target_df.loc[self.target_df.Checked, 'type'].unique().tolist()
-                          if t is not None and (not isinstance(t, float) or not pd.isna(t))]
-        reserve_types += [str(b) for b in self.source_df['bodyId'].unique().tolist()]
-        reserve_types += [str(b) for b in self.target_df.loc[self.target_df.Checked, 'bodyId'].unique().tolist()]
-        self._apply_graph_edge_limit(G_type, self.graph_edge_limit_groups, 'type',
-                                     reserve_nodes=reserve_types)
-        
-        self._vprint(f'  Type-level graph: {G_type.number_of_nodes()} types, {G_type.number_of_edges()} edges', level='full')
+        # Type-level paths are DERIVED from the discovered bodyId paths (no
+        # second pathfinding on a type-level graph, and NO type-level edge
+        # limit): each bodyId path's node types are aggregated into a type
+        # sequence, then every hop is verified against the type-edge table.
+        # The derivation is already bounded by the bodyId-level discovery
+        # (pan-graph edge limit + filters + cutoff), so a type-level limit
+        # would only drop real backed paths — the Visualization Edge Limit
+        # (edgeN_limit) remains the only type-level cap, applied when
+        # drawing. This keeps exactly the type paths that real neurons back
+        # (no phantom type paths from the bundle effect) and preserves
+        # repeated-type routes (A->B->A) that a simple-path search on the
+        # type graph would drop.
+        self._vprint('\nDeriving type-level paths from discovered bodyId paths...', level='full')
         
         # Build bodyId → std_label map for source/target identification
         # This is needed because conn_types uses std_labels but source_df/target_df have bodyIds
@@ -8831,14 +9301,41 @@ class FindNeuronConnection:
         # No need for type_to_label_map anymore - conn_types already uses std_labels
         # and source/target types are now properly mapped to std_labels
         
-        # Find paths using DFS on type graph
-        # type_paths = [] # Removed to save memory
-        
-        # Use optimized pathfinding for type graph as well
-        # Filter sources/targets that are in the graph
-        valid_source_types = [s for s in source_types if s in G_type]
-        valid_target_types = [t for t in target_types if t in G_type]
-        
+        # Aggregate the discovered bodyId paths into type-level paths.
+        # Raw per-bodyId types come from the fetched layer tables — the same
+        # types EnrichConnectionTablePolars aggregated into conn_types.
+        raw_type_map = {}
+        for tbl in all_connections_filtered:
+            if tbl is None or tbl.is_empty():
+                continue
+            for u, t in zip(tbl['bodyId_pre'], tbl['type_pre']):
+                if t is not None and str(t).strip() not in ('', 'None'):
+                    raw_type_map.setdefault(str(u), str(t))
+            for v, t in zip(tbl['bodyId_post'], tbl['type_post']):
+                if t is not None and str(t).strip() not in ('', 'None'):
+                    raw_type_map.setdefault(str(v), str(t))
+        for df_ in (self.source_df, self.target_df):
+            for b, t in zip(df_['bodyId'], df_['type']):
+                if t is not None and str(t).strip() not in ('', 'None'):
+                    raw_type_map.setdefault(str(b), str(t))
+
+        def _node_type_label(b: str) -> str:
+            """Final type label of a bodyId inside conn_types (same
+            resolution as EnrichConnectionTablePolars: mapped std_label
+            (+ hemisphere suffix) -> raw type -> bodyId)."""
+            b = str(b)
+            if b in bodyid_to_label:
+                label = bodyid_to_label[b]
+                if self.separate_hemispheres:
+                    hemi = _extract_hemi_suffix(raw_type_map.get(b, ''))
+                    if hemi and not label.endswith(hemi):
+                        label = label + hemi
+                return label
+            t = raw_type_map.get(b)
+            if t is not None and str(t).strip() not in ('', 'None'):
+                return str(t)
+            return b
+
         # Convert conn_types to Pandas if it's Polars (statvis expects Pandas)
         conn_types_pd = conn_types
         try:
@@ -8856,21 +9353,28 @@ class FindNeuronConnection:
         
         total_type_paths = 0
         
-        if valid_source_types and valid_target_types:
-            # Use Meet-in-the-middle for type graph too
-            path_gen = G_type.find_paths_meet_in_the_middle(
-                valid_source_types, 
-                valid_target_types, 
-                cutoff=self.max_interlayer + 1,
-                verbose=(self.verbose_mode in ['simple', 'full'])
-            )
-            
-            # Stream directly to CSV to avoid OOM
-            # NOTE: conn_types already uses std_labels (from EnrichConnectionTablePolars)
-            # so no additional type_to_label_map transformation is needed
+        # Derive + verify: every type path is the type sequence of a real
+        # discovered bodyId path. Hops are checked against the (full)
+        # type-edge table as a defensive label-consistency net; endpoints
+        # must be within the queried source/target type sets. No type-level
+        # edge limit is applied — the bodyId discovery already bounds the
+        # search space (see the comment above).
+        kept_type_edges = set(zip(conn_types['type_pre'], conn_types['type_post']))
+        type_paths_to_save = self._derive_type_paths_from_bodyid_paths(
+            all_paths, _node_type_label, kept_type_edges,
+            source_types=source_types, target_types=target_types,
+            verbose=(self.verbose_mode in ['simple', 'full']),
+        )
+        self._vprint(f'  Derived {len(type_paths_to_save):,} unique type-level paths '
+                     f'from {len(all_paths):,} bodyId paths', level='full')
+        
+        if type_paths_to_save:
+            # Stream directly to CSV to avoid OOM; the builder verifies every
+            # hop's edge values against conn_types and drops paths with
+            # missing hops (should not happen after the check above).
             self._vprint(f'  Streaming type-level paths to CSV (Polars)...', level='full')
             total_type_paths = sv.process_paths_streaming(
-                path_gen,
+                type_paths_to_save,
                 conn_types_pd,
                 target_types,
                 output_path_type_csv,
@@ -8949,18 +9453,12 @@ class FindNeuronConnection:
         if conn_groups is not None and not conn_groups.is_empty() and 'custom_group' in self.source_df.columns:
             self._vprint('\nFinding group-level paths using group-level graph...', level='full')
             
-            # Build group-level graph from conn_groups
+            # Build the group-level graph from the full custom-group table.
+            # No edge limit applies: custom groups are few and user-defined,
+            # so the group-level search is naturally bounded (like the
+            # type-level derivation, which needs no limit either).
             G_group = FastGraph()
             G_group.build_from_dataframe(conn_groups, 'group_pre', 'group_post', 'weight')
-            
-            # Get source and target groups
-            source_groups = self.source_df['custom_group'].unique().tolist()
-            target_groups = self.target_df.loc[self.target_df.Checked, 'custom_group'].unique().tolist()
-            
-            # Pan-graph edge limit for the custom-group graph (strongest edges
-            # only; source/target group edges always reserved).
-            self._apply_graph_edge_limit(G_group, self.graph_edge_limit_groups, 'custom-group',
-                                         reserve_nodes=source_groups + target_groups)
             
             self._vprint(f'  Group-level graph: {G_group.number_of_nodes()} groups, {G_group.number_of_edges()} edges', level='full')
             
@@ -9469,9 +9967,19 @@ class FindNeuronConnection:
                     output_format=self.output_format,
                     verbose=(self.verbose_mode == 'full'),
                     color_edges_by_nt=True,  # Enable NT-based edge coloring
-                    separate_hemispheres=self.separate_hemispheres
+                    separate_hemispheres=self.separate_hemispheres,
+                    # The type-level matrices are already exported by
+                    # FindAllPath into data_details/conn_mat_type_*.csv (sum/max
+                    # aggregation over layer rows, discovery order); the generic
+                    # VisualizePath matrices would duplicate them with different
+                    # aggregation (mean) and ordering, so skip them here.
+                    save_data_matrices=False,
                 )
                 vp.visualize()
+                # Organize the visualization artifacts (htmls + exported
+                # data + the original input DataFrame) under visualization/
+                self._relocate_viz_outputs(input_df=paths_to_visualize,
+                                           input_name='type_paths')
                 if self.verbose_mode == 'simple':
                     self._vprint('Done', level='simple')
                 else:
@@ -9500,9 +10008,12 @@ class FindNeuronConnection:
                         output_format=self.output_format,
                         verbose=(self.verbose_mode == 'full'),
                         color_edges_by_nt=True,
-                        separate_hemispheres=self.separate_hemispheres
+                        separate_hemispheres=self.separate_hemispheres,
+                        save_data_matrices=False,  # see the path-based call above
                     )
                     vp.visualize()
+                    self._relocate_viz_outputs(input_df=edge_df,
+                                               input_name='type_edges')
                     if self.verbose_mode == 'full':
                         self._vprint('  Created network and Sankey from edge list', level='full')
                 else:

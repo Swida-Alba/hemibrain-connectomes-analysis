@@ -60,18 +60,24 @@ def create_find_path_tab():
                     hint="Minimum number of synapses for a connection to be included. Filters out weak/noisy connections.",
                 )
                 edge_limit = number_input(
-                    "Edge Limit", DEFAULTS["edgeN_limit"], 10, 5000,
-                    hint="Maximum number of edges to consider per neuron. Limits memory usage for highly connected neurons.",
+                    "Visualization Edge Limit", DEFAULTS["edgeN_limit"], 10, 5000,
+                    hint="Maximum edges drawn per visualization (network / Sankey / heatmap, "
+                         "including the network_early preview). Limits memory usage for highly "
+                         "connected neurons.",
                 )
             interlayer_warning = ui.label(
                 "⚠️ Layers ≥ 4: the path count grows combinatorially (branching^depth) — "
                 "reconstruction can take hours and produce billions of paths. Raise "
-                "Min Synapse Count / Min Connection Ratio / Min Traversal Prob., or "
-                "tighten the Graph Edge Limit in Advanced Settings."
+                "Min Synapse Count / Min Connection Ratio / Min Traversal Prob., "
+                "tighten the Graph Edge Limit in Advanced Settings, or minimize/"
+                "batch the source and target sets."
             ).classes("text-caption text-amber-8").set_visibility(False)
-            max_interlayer.on_value_change(
-                lambda e: interlayer_warning.set_visibility((e.value or 0) >= 4)
-            )
+            def _on_max_interlayer_change(e):
+                interlayer_warning.set_visibility((e.value or 0) >= 4)
+                # the bodyId edge limit only applies to deep searches
+                edge_limit_bodyid.set_enabled((e.value or 0) >= 3)
+
+            max_interlayer.on_value_change(_on_max_interlayer_change)
 
             # --- Advanced Settings (collapsed) ---
             with ui.expansion("Advanced Settings", icon="settings_suggest").classes("w-full"):
@@ -98,34 +104,27 @@ def create_find_path_tab():
                         help_doc="pathfinding_algorithms.html",
                     )
                 with ui.row().classes("gap-4"):
-                    limit_edges = checkbox_input(
-                        "Limit Graph Edges (strongest only)", True,
-                        hint="Keep only the strongest connections of the discovered "
-                             "network graph before pathfinding: the top-N edges by "
-                             "synapse weight (types/custom groups: 1000, bodyIds: 5000). "
-                             "This bounds the combinatorial path count (branching^depth) "
-                             "and focuses on strong connections. Uncheck = complete "
-                             "graph with ALL edges (can be very slow for deep layers).",
-                    )
-                    edge_limit_groups = number_input(
-                        "Edge Limit – Types/Groups", 1000, 100, 100000000,
-                        hint="Top-N strongest edges kept in the type-level and "
-                             "custom-group-level graphs. 0 = unlimited.",
-                    )
                     edge_limit_bodyid = number_input(
-                        "Edge Limit – BodyIds", 5000, 100, 100000000,
-                        hint="Top-N strongest edges kept in the bodyId-level graph. "
-                             "0 = unlimited.",
+                        "Edge Limit – BodyIds", 1000000, 100, 1000000000,
+                        hint="Top-N strongest non-reserved edges kept in the bodyId-level "
+                             "graph (source/target edges are always kept in addition). "
+                             "Applied only when Layers ≥ 3 (deep searches, where the path "
+                             "count grows combinatorially); shallow runs keep the complete "
+                             "graph. Type-level and custom-group paths are derived from the "
+                             "discovered bodyId paths and need no edge limit. "
+                             "0 = unlimited (can be very slow for deep layers).",
                     )
-                    edge_limit_groups.set_enabled(False)
-                    edge_limit_bodyid.set_enabled(False)
+                    # enabled only for deep searches (max_interlayer >= 3)
+                    edge_limit_bodyid.set_enabled((max_interlayer.value or 0) >= 3)
                     visualize_early = checkbox_input(
                         "Visualize Network Before Reconstruction", False,
                         hint="Draw the discovered network graph (all weighted edges) into "
                              "network_early/ right after the layers are fetched — before the "
                              "path enumeration — so you see the explored topology immediately "
-                             "while deep reconstruction is still running.",
-                    )
+                             "while deep reconstruction is still running. Off by default: the "
+                             "early preview duplicates the final path-based visualizations "
+                             "with a plain edge list.",
+                    ).props('id=checkbox-early-viz')
                 search_columns = select_input(
                     "Search Columns", SEARCH_COLUMNS, "auto",
                     hint="Which columns to search when resolving neuron names. "
@@ -231,12 +230,6 @@ def create_find_path_tab():
         src_mode, src_neurons = source_input.get_value()
         tgt_mode, tgt_neurons = target_input.get_value()
 
-        def _sync_edge_limits_enabled():
-            edge_limit_groups.set_enabled(limit_edges.value)
-            edge_limit_bodyid.set_enabled(limit_edges.value)
-
-        limit_edges.on_value_change(lambda _e: _sync_edge_limits_enabled())
-
         sources = apply_filter_mode(src_neurons, src_mode)
         targets = apply_filter_mode(tgt_neurons, tgt_mode)
 
@@ -264,12 +257,7 @@ def create_find_path_tab():
             "max_interlayer": int(max_interlayer.value),
             "filter_by": filter_by.value,
             "pathfinding": pathfinding_algo.value,
-            "graph_edge_limit_groups": (
-                int(edge_limit_groups.value) if limit_edges.value else 0
-            ),
-            "graph_edge_limit_bodyid": (
-                int(edge_limit_bodyid.value) if limit_edges.value else 0
-            ),
+            "graph_edge_limit_bodyid": int(edge_limit_bodyid.value),
             "visualize_before_reconstruct": visualize_early.value,
             "search_columns": search_columns.value,
             "network_layout": network_layout.value,

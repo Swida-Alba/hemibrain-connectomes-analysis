@@ -7,7 +7,128 @@ Replaces NetworkX for simple graph operations to reduce dependencies and overhea
 Date: 2025-12
 """
 
+import sys
+import time
 from collections import defaultdict
+
+
+class LineProgress:
+    """Single-line progress display that refreshes in place with ``\r``.
+
+    tqdm only rewrites the line when the stream is a TTY; when the output
+    is piped or captured it emits one line per update, spamming the log.
+    This display always rewrites the SAME line, so progress stays on one
+    line in terminals, in captured output and in logs alike.
+
+    Nested displays defer: only the most recently created running bar
+    writes the line (e.g. a pathfinding ``L{length}`` bar takes over while
+    the consumer's streaming bar wraps its generator); when it closes the
+    outer bar regains the line.
+
+    Provides the tqdm API subset the pathfinding loops use (iteration,
+    ``update``, ``set_postfix``, ``set_postfix_str`` and ``close``) so it
+    can drop in where a bar was displayed.
+    """
+
+    _active = []  # running instances, oldest first
+
+    def __init__(self, iterable, desc, total=None, leave=False, unit='it'):
+        self._it = iter(iterable)
+        self._desc = desc
+        self._total = total
+        if self._total is None and hasattr(iterable, '__len__'):
+            self._total = len(iterable)
+        self._leave = leave
+        self._unit = unit
+        self._n = 0
+        self._start = time.time()
+        self._last_refresh = 0.0
+        self._last_len = 0
+        self._postfix = ''
+        self._closed = False
+        LineProgress._active.append(self)
+
+    # -- tqdm-compatible API ------------------------------------------------
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        try:
+            item = next(self._it)
+        except StopIteration:
+            self.close()
+            raise
+        self._n += 1
+        self._refresh()
+        return item
+
+    def update(self, n=1):
+        self._n += n
+        self._refresh(force=True)
+
+    def set_postfix(self, refresh=False, **kwargs):
+        self._postfix = ', '.join(f'{k}={v}' for k, v in kwargs.items())
+        if refresh:
+            self._refresh(force=True)
+
+    def set_postfix_str(self, s, refresh=True):
+        self._postfix = s
+        if refresh:
+            self._refresh(force=True)
+
+    def close(self):
+        if self._closed:
+            return
+        was_last = bool(LineProgress._active) and self is LineProgress._active[-1]
+        if was_last:
+            if self._leave:
+                # final state stays on the line, then the line is ended
+                self._refresh(force=True)
+                sys.stdout.write('\n')
+            else:
+                # leave=False: clear the line (tqdm-style), no residue
+                sys.stdout.write('\r' + ' ' * self._last_len + '\r')
+            sys.stdout.flush()
+        try:
+            LineProgress._active.remove(self)
+        except ValueError:
+            pass
+        self._closed = True
+
+    # -- internals -----------------------------------------------------------
+    @staticmethod
+    def _fmt_secs(secs):
+        secs = max(int(secs), 0)
+        m, s = divmod(secs, 60)
+        return f'{m:02d}:{s:02d}'
+
+    def _refresh(self, force=False):
+        if self._closed:
+            return
+        # A nested (more recent) bar owns the line; defer until it closes.
+        if LineProgress._active and self is not LineProgress._active[-1]:
+            return
+        now = time.time()
+        if not force and now - self._last_refresh < 0.1:
+            return
+        self._last_refresh = now
+        elapsed = now - self._start
+        rate = self._n / elapsed if elapsed > 0 else 0.0
+        if self._total:
+            pct = self._n / self._total * 100
+            head = f'{self._desc}: {self._n}/{self._total} ({pct:4.1f}%)'
+            eta = (self._total - self._n) / rate if rate > 0 else None
+            eta_str = f'<{self._fmt_secs(eta)}' if eta is not None else '<?'
+        else:
+            head = f'{self._desc}: {self._n}{self._unit}'
+            eta_str = ''
+        msg = (f'\r{head} [{self._fmt_secs(elapsed)}{eta_str}, '
+               f'{rate:,.1f}{self._unit}/s]')
+        if self._postfix:
+            msg += f' | {self._postfix}'
+        sys.stdout.write(msg)
+        sys.stdout.flush()
+        self._last_len = len(msg) - 1  # line length without the \r
 
 
 class FastGraph:
@@ -627,11 +748,6 @@ class FastGraph:
         """
         source_set = set(sources)
         R = self.reverse()
-        
-        try:
-            from tqdm import tqdm
-        except ImportError:
-            def tqdm(iterable, **kwargs): return iterable
 
         def dfs_recursive(u, target_depth, path, visited):
             current_len = len(path) - 1
@@ -652,7 +768,7 @@ class FastGraph:
         for length in range(1, cutoff + 1):
             iterator = targets
             if verbose:
-                iterator = tqdm(targets, desc=f"L{length} Backtracking", leave=False)
+                iterator = LineProgress(targets, desc=f"L{length} Backtracking", leave=False)
             
             for t in iterator:
                 yield from dfs_recursive(t, length, [t], {t})
@@ -719,11 +835,6 @@ class FastGraph:
                 current = next_layer
             return current
 
-        try:
-            from tqdm import tqdm
-        except ImportError:
-            def tqdm(iterable, **kwargs): return iterable
-
         for length in range(1, cutoff + 1):
             mid = length // 2
             rem = length - mid
@@ -735,7 +846,7 @@ class FastGraph:
             fwd_paths_map = defaultdict(list)
             iterator = sources
             if verbose:
-                iterator = tqdm(sources, desc=f"L{length} Fwd(L{mid})", leave=False)
+                iterator = LineProgress(sources, desc=f"L{length} Fwd(L{mid})", leave=False)
             
             for s in iterator:
                 if s not in self.adj: continue
@@ -748,7 +859,7 @@ class FastGraph:
             valid_ends_for_backward = set(fwd_paths_map.keys())
             iterator = targets
             if verbose:
-                iterator = tqdm(targets, desc=f"L{length} Bwd(L{rem})", leave=False)
+                iterator = LineProgress(targets, desc=f"L{length} Bwd(L{rem})", leave=False)
                 
             for t in iterator:
                 if not list(self.predecessors(t)): continue
@@ -809,76 +920,105 @@ class FastGraph:
                             yield from guided_dfs(v, depth - 1, current_path)
                             current_path.pop()
 
-        try:
-            from tqdm import tqdm
-        except ImportError:
-            def tqdm(iterable, **kwargs): return iterable
-
         for length in range(1, cutoff + 1):
             valid_sources = [s for s in sources if s in valid_nodes_at_dist[length]]
             iterator = valid_sources
             if verbose:
-                iterator = tqdm(valid_sources, desc=f"L{length} GuidedDFS", leave=False)
+                iterator = LineProgress(valid_sources, desc=f"L{length} GuidedDFS", leave=False)
             for s in iterator:
                 yield from guided_dfs(s, length, [s])
 
-    def trim_to_strongest(self, keep, reserve_nodes=None, reserve_edges=None):
+    def trim_to_strongest(self, keep, reserve_sources=None, reserve_targets=None,
+                          reserve_edges=None, reserve_cap=None):
         """
-        Keep only the ``keep`` strongest edges (by weight), in place.
+        Keep only the ``keep`` strongest NON-reserved edges (by weight), in place.
 
-        Edges are ranked by weight (descending) across the whole graph and
-        the top ``keep`` are retained; weaker edges are dropped. Edge
-        attributes are preserved for kept edges; nodes not touched by any
-        kept edge are removed (nodes that only receive kept edges stay
-        discoverable). The reverse adjacency cache is invalidated.
+        Source/target edges are reserved first and do NOT count toward the
+        limit: every edge leaving a node in ``reserve_sources`` and every
+        edge entering a node in ``reserve_targets`` (plus the explicit
+        ``reserve_edges``) survives regardless of weight, and the strongest
+        ``keep`` other edges are added on top — so path integrity is
+        preserved (sources keep their outgoing edges, targets their incoming
+        edges) and the kept graph can exceed ``keep`` edges.
 
-        Source/target edges are ALWAYS reserved: every edge incident to a
-        node in ``reserve_nodes`` (outgoing and incoming), plus every edge
-        in ``reserve_edges``, is kept regardless of weight. The remaining
-        capacity is filled with the strongest non-reserved edges. When the
-        reserved edges alone exceed ``keep``, all of them are kept (the
-        reservation wins over the limit).
+        The auto-reservation is BOUNDED by ``reserve_cap`` (default: the
+        limit itself): when the source/target nodes are so many that their
+        incident edges alone would swallow the whole graph (e.g. type-level
+        queries or edge-list visualizations where every node is classified
+        as source/target), only the strongest ``reserve_cap`` source/target
+        edges are reserved and the remaining candidates rejoin the
+        non-reserved pool — so the trim always produces a bounded graph
+        (at most ``reserve_cap + keep`` edges plus the explicit
+        ``reserve_edges``). Edge attributes are preserved for kept edges;
+        nodes not touched by any kept edge are removed (nodes that only
+        receive kept edges stay discoverable). The reverse adjacency cache
+        is invalidated.
 
         Parameters
         ----------
         keep : int or None
-            Maximum number of edges to keep. None / <= 0 / >= the current
-            edge count => no trimming (returns (0, None)).
-        reserve_nodes : iterable, optional
-            Nodes whose incident edges are always kept (e.g. the queried
-            source and target neurons).
+            Maximum number of NON-reserved edges to keep. None / <= 0 / >=
+            the number of non-reserved edges => no trimming (returns
+            (0, None)).
+        reserve_sources : iterable, optional
+            Source nodes: ALL their outgoing edges are reserved first (up to
+            ``reserve_cap`` total).
+        reserve_targets : iterable, optional
+            Target nodes: ALL their incoming edges are reserved first (up to
+            ``reserve_cap`` total).
         reserve_edges : iterable, optional
-            Explicit (u, v) edges that are always kept.
+            Explicit (u, v) edges that are always kept (never capped).
+        reserve_cap : int, optional
+            Maximum number of auto-reserved source/target edges (default:
+            ``keep`` — the graph stays bounded even for degenerate
+            source/target classification).
 
         Returns
         -------
         tuple
             (removed_edges, threshold): the number of removed edges and the
-            applied cutoff — the minimum weight among the kept edges (None
-            when no trimming happened).
+            applied cutoff — the minimum weight among the kept NON-reserved
+            edges (None when no trimming happened or nothing non-reserved
+            was kept).
         """
         if keep is None or keep <= 0 or self._num_edges <= keep:
             return 0, None
         reserved = set(reserve_edges or ())
-        if reserve_nodes:
-            for u in set(reserve_nodes):
+        candidates = []
+        if reserve_sources:
+            for u in set(reserve_sources):
                 for v in self.adj.get(u, ()):
-                    reserved.add((u, v))
-                for pred in self.predecessors(u):
-                    reserved.add((pred, u))
-        if len(reserved) >= keep:
-            # reservation alone fills (or exceeds) the quota — keep it all
-            kept_edges = {(u, v) for u in self.adj for v in self.adj[u] if (u, v) in reserved}
-            threshold = min(self.adj[u][v] for u, v in kept_edges) if kept_edges else None
-            removed = self._apply_kept_edges(kept_edges)
-            return removed, threshold
+                    candidates.append((u, v))
+        if reserve_targets:
+            for t in set(reserve_targets):
+                for pred in self.predecessors(t):
+                    candidates.append((pred, t))
+        cap = keep if reserve_cap is None else reserve_cap
+        if candidates:
+            if cap and cap > 0 and len(candidates) > cap:
+                # degenerate classification: reserve only the strongest
+                # candidates; the rest rejoin the non-reserved pool
+                candidates.sort(key=lambda uv: self.adj[uv[0]][uv[1]], reverse=True)
+                reserved.update(candidates[:cap])
+                leftover = candidates[cap:]
+            else:
+                reserved.update(candidates)
+                leftover = []
+        else:
+            leftover = []
+        non_reserved = [
+            (u, v) for u, neigh in self.adj.items() for v in neigh
+            if (u, v) not in reserved
+        ] + leftover
+        if len(non_reserved) <= keep:
+            return 0, None
         ranked = sorted(
-            ((w, u, v) for u, neigh in self.adj.items() for v, w in neigh.items()
-             if (u, v) not in reserved),
-            key=lambda e: e[0], reverse=True,
+            non_reserved,
+            key=lambda uv: self.adj[uv[0]][uv[1]], reverse=True,
         )
-        kept_edges = reserved | {(u, v) for _, u, v in ranked[:keep - len(reserved)]}
-        threshold = min(self.adj[u][v] for u, v in kept_edges) if kept_edges else None
+        kept_non_reserved = ranked[:keep]
+        kept_edges = reserved | set(kept_non_reserved)
+        threshold = min(self.adj[u][v] for u, v in kept_non_reserved) if kept_non_reserved else None
         removed = self._apply_kept_edges(kept_edges)
         return removed, threshold
 
@@ -971,24 +1111,19 @@ class FastGraph:
                     yield from reconstruct(v, k-1, path)
                     path.pop()
 
-        try:
-            from tqdm import tqdm
-        except ImportError:
-            def tqdm(iterable, **kwargs): return iterable
-
         capped_sources = []
         total_paths = 0
         for length in range(1, cutoff + 1):
             iterator = starts
             if verbose:
-                iterator = tqdm(starts, desc=f"L{length} BuildMemo", leave=False)
+                iterator = LineProgress(starts, desc=f"L{length} BuildMemo", leave=False)
             valid_starts = []
             for s in iterator:
                 if find_valid_successors(s, length) is not None:
                     valid_starts.append(s)
             iterator = valid_starts
             if verbose:
-                iterator = tqdm(valid_starts, desc=f"L{length} Reconstruct", leave=False)
+                iterator = LineProgress(valid_starts, desc=f"L{length} Reconstruct", leave=False)
             for s in iterator:
                 for p in reconstruct(s, length, [s]):
                     yield p
@@ -1055,11 +1190,6 @@ class FastGraph:
                         next_layer[v].add(u)
             if not next_layer: break
 
-        try:
-            from tqdm import tqdm
-        except ImportError:
-            def tqdm(iterable, **kwargs): return iterable
-
         for length in range(1, cutoff + 1):
             mid = length // 2
             rem = length - mid
@@ -1092,7 +1222,7 @@ class FastGraph:
 
             iterator = meet_nodes
             if verbose:
-                iterator = tqdm(meet_nodes, desc=f"L{length} Reconstruct", leave=False)
+                iterator = LineProgress(meet_nodes, desc=f"L{length} Reconstruct", leave=False)
 
             for u in iterator:
                 f_paths = list(get_fwd_paths(u, mid))

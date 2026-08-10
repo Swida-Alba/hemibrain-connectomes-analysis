@@ -65,20 +65,180 @@ class TestFetchNeuronsBatched:
         assert calls == []
         assert out.empty
 
-    def test_chunk_errors_do_not_abort_remaining_chunks(self, monkeypatch):
+    def test_chunk_errors_retry_then_continue_with_remaining_chunks(self, monkeypatch):
+        """A chunk that keeps failing after retries is reported and SKIPPED;
+        the remaining chunks still download (resilient pull)."""
+        import time as _time
+        monkeypatch.setattr(_time, 'sleep', lambda s: None)  # no backoff wait
         calls = []
+        status = []
 
         def flaky_fetch(criteria):
             ids = criteria.bodyId
             calls.append(len(ids))
-            if len(ids) == 2000 and len(calls) == 1:
+            if len(ids) == 2000 and len(calls) <= 5:
                 raise RuntimeError('server timeout')
             return _make_chunk_df(ids), pd.DataFrame()
 
         monkeypatch.setattr(coana, 'fetch_neurons', flaky_fetch)
         fc = coana.FindNeuronConnection(dataset='male-cns:v1.0')
-        with pytest.raises(RuntimeError):
-            fc._fetch_neurons_batched(list(range(4000)), batch_size=2000)
-        # An error propagates (the caller wraps this in try/except) but the
-        # batch loop itself does not silently swallow the failure.
-        assert len(calls) == 1
+        out = fc._fetch_neurons_batched(
+            list(range(4000)), batch_size=2000, status_callback=status.append
+        )
+        assert len(out) == 2000  # only the second chunk survived
+        assert len(calls) == 6  # 5 attempts on chunk 1 + chunk 2
+        assert any('Server not responding' in s for s in status), status
+        assert any('failed after retries' in s for s in status), status
+        assert any('attempt 1/5' in s for s in status), status
+
+    def test_neurons_batched_reports_downloading_progress(self, monkeypatch):
+        """The first-run neuron pull shows a 'Pulling neurons from server'
+        progress bar over the total neuron count, updated per chunk."""
+        class _FakeTqdm:
+            instances = []
+
+            def __init__(self, *args, **kwargs):
+                self.kwargs = kwargs
+                self.updates = []
+                _FakeTqdm.instances.append(self)
+
+            def update(self, n):
+                self.updates.append(n)
+
+            def close(self):
+                pass
+
+        def fake_fetch(criteria):
+            return _make_chunk_df(criteria.bodyId), pd.DataFrame()
+
+        # Patch at BOTH levels: coana's binding (what fetch_chunk resolves)
+        # and neuprint's own attribute (leaked executor workers from earlier
+        # tests may call the restored module-level function after their
+        # test's monkeypatch is undone).
+        import neuprint as np_mod
+        monkeypatch.setattr(coana, 'fetch_neurons', fake_fetch)
+        monkeypatch.setattr(np_mod, 'fetch_neurons', fake_fetch)
+        # Even a fully unpatched call must not fail: stub the default client.
+        class _StubClient:
+            def fetch_neurons(self, criteria=None):
+                return _make_chunk_df(criteria.bodyId if criteria else []), pd.DataFrame()
+
+            def fetch_custom(self, *a, **k):
+                return pd.DataFrame()
+
+        monkeypatch.setattr(np_mod, 'default_client', lambda: _StubClient())
+
+        monkeypatch.setattr('tqdm.tqdm', _FakeTqdm)
+        fc = coana.FindNeuronConnection(dataset='male-cns:v1.0')
+        _FakeTqdm.instances.clear()
+        fc._fetch_neurons_batched(list(range(5000)), batch_size=2000)
+        assert len(_FakeTqdm.instances) == 1
+        bar = _FakeTqdm.instances[0]
+        assert bar.kwargs['total'] == 5000
+        assert bar.kwargs['desc'] == 'Pulling neurons from server'
+        assert bar.updates == [2000, 2000, 1000]
+
+    def test_neurons_batched_cancel_stops_between_chunks(self, monkeypatch):
+        """A set cancel event aborts the pull between chunks (raises
+        _FetchCancelled, never recorded as a fetch failure)."""
+        import threading
+        ev = threading.Event()
+        ev.set()
+        monkeypatch.setattr(
+            coana, 'fetch_neurons',
+            lambda criteria: (_make_chunk_df(criteria.bodyId), pd.DataFrame()),
+        )
+        fc = coana.FindNeuronConnection(dataset='male-cns:v1.0')
+        with pytest.raises(coana._FetchCancelled):
+            fc._fetch_neurons_batched(list(range(4000)), batch_size=2000,
+                                      cancel_event=ev)
+
+
+# =============================================================================
+# Bulk connection fetch: timeout/retry (reconnect) + cooperative cancel
+# =============================================================================
+
+def _conn_df(ids):
+    return pd.DataFrame({
+        'bodyId_pre': [str(i) for i in ids],
+        'bodyId_post': ['999'] * len(ids),
+        'weight': [1] * len(ids),
+        'roi': ['AL'] * len(ids),
+    })
+
+
+class TestFetchConnectionsBulk:
+    def _fc(self, monkeypatch):
+        import time as _time
+        monkeypatch.setattr(_time, 'sleep', lambda s: None)  # no backoff wait
+        fc = coana.FindNeuronConnection(dataset='male-cns:v1.0')
+        fc._ensure_neuprint_client = lambda: None  # no real login in tests
+        fc.simple_fetch = False  # route through fetch_adjacencies (patchable)
+        return fc
+
+    def test_bulk_fetch_reconnects_after_server_failure(self, monkeypatch):
+        """A server that fails twice is reconnected: the batch succeeds on
+        the third attempt and the user is told about the reconnection."""
+        import neuprint as np_mod
+        attempts = {'n': 0}
+
+        def flaky_adj(sources, targets=None, min_total_weight=1, **kw):
+            attempts['n'] += 1
+            if attempts['n'] < 3:
+                raise ConnectionError('server not responding')
+            return pd.DataFrame(), _conn_df(sources)
+
+        monkeypatch.setattr(np_mod, 'fetch_adjacencies', flaky_adj)
+        fc = self._fc(monkeypatch)
+        status = []
+        out = fc._fetch_connections_bulk(['1', '2', '3'], status_callback=status.append)
+        assert attempts['n'] == 3
+        assert len(out) == 3
+        assert any('Server not responding' in s for s in status), status
+        assert any('reconnecting' in s for s in status), status
+
+    def test_bulk_fetch_cancel_during_retry(self, monkeypatch):
+        """Cancel is honoured even while a batch is retrying: the retry
+        notice raises _FetchCancelled instead of waiting for the next
+        attempt."""
+        import threading
+        import neuprint as np_mod
+        ev = threading.Event()
+
+        def failing_adj(sources, targets=None, min_total_weight=1, **kw):
+            ev.set()  # simulate the user cancelling after the failure
+            raise ConnectionError('server down')
+
+        monkeypatch.setattr(np_mod, 'fetch_adjacencies', failing_adj)
+        fc = self._fc(monkeypatch)
+        with pytest.raises(coana._FetchCancelled):
+            fc._fetch_connections_bulk(['1'], cancel_event=ev)
+
+    def test_build_cache_cancel_mid_batch_not_marked_failed(self, tmp_path, monkeypatch):
+        """Cancelling while a batch is fetching stops the build cleanly:
+        the summary says cancelled=True and the in-flight batch is NOT
+        recorded as failed (a re-run resumes it from the checkpoint)."""
+        import threading
+        fc = coana.FindNeuronConnection(dataset='male-cns:v1.0')
+        fc.use_cache = True
+        fc._get_all_dataset_bodyids = lambda: ['1', '2', '3']
+        fc._load_neuron_index = lambda force_reload=False: pd.DataFrame()
+        fc._neuron_index_dict = {}
+        fc._get_connection_db_path = lambda: str(tmp_path / 'connections.parquet')
+        fc._get_neuron_index_path = lambda: str(tmp_path / 'neuron_index.parquet')
+        fc._consolidate_batch_files = lambda deduplicate=False: None
+        fc._count_cached_connections = lambda: 0
+        fc._append_connections_to_cache = lambda conns, batch: None
+        fc._update_neuron_index_batch = lambda batch: None
+
+        ev = threading.Event()
+
+        def cancel_bulk(*args, **kwargs):
+            ev.set()
+            raise coana._FetchCancelled('cancelled')
+
+        fc._fetch_connections_bulk = cancel_bulk
+        summary = fc.build_connection_cache(batch_size=2, quiet=True, cancel_event=ev)
+        assert summary['cancelled'] is True
+        assert summary['failed_neurons'] == []
+        assert summary['newly_cached'] == 0
