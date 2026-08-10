@@ -1,11 +1,12 @@
-"""
-Shared UI components for DROCAT.
+"""Shared UI components for DROCAT.
 
 Design language follows the Photo Selector "gallery" reference:
 light canvas, white surfaces, cobalt accent, rounded corners and
 a focus-panel + contact-sheet workspace layout.
 """
 
+import asyncio
+import os
 from nicegui import ui
 from typing import List, Optional, Callable
 from pathlib import Path
@@ -15,7 +16,6 @@ import platform
 import subprocess
 
 from ..config import PROJECT_ROOT, get_default_output_dir, set_default_output_dir
-from ..runner import pick_directory
 
 
 # Every dir_input instance (all output-directory fields stay in sync).
@@ -636,12 +636,96 @@ def checkbox_input(
     return cb
 
 
+def _list_subdirs(path: str) -> List[str]:
+    """Sorted subdirectory names under *path* ('' when not a directory)."""
+    try:
+        return sorted(
+            (e for e in os.listdir(path) if os.path.isdir(os.path.join(path, e))),
+            key=str.lower,
+        )
+    except OSError:
+        return []
+
+
+async def dir_browser_dialog(title: str = "Select Directory",
+                             initial: str = "",
+                             default_output: str = "") -> Optional[str]:
+    """Open an in-browser directory picker (server-side folder listing).
+
+    Replaces the old tkinter dialog, which blocked the whole web server
+    until dismissed and could hang (no visible window) — freezing the app.
+    This picker is fully in-browser and non-blocking: navigate subfolders,
+    jump to a typed path, or select the currently shown folder. Returns the
+    selected path or None when cancelled.
+    """
+    state = {"path": ""}
+    result = {"path": None}
+    done = asyncio.Event()
+
+    def _norm(p: str) -> str:
+        p = os.path.expanduser((p or "").strip())
+        if not p:
+            return default_output or str(Path.home())
+        return os.path.abspath(p)
+
+    def _render(p: str):
+        p = _norm(p)
+        state["path"] = p
+        path_input.value = p
+        status.text = ""
+        dir_list.clear()
+        parent = os.path.dirname(p)
+        if parent != p:
+            with dir_list:
+                ui.button(f"⬆️  {parent}", on_click=lambda pp=parent: _render(pp)) \
+                    .props("flat align=left dense").classes("w-full justify-start")
+        subs = _list_subdirs(p)
+        if not subs and parent == p:
+            status.text = "(empty folder)"
+        for entry in subs:
+            full = os.path.join(p, entry)
+            with dir_list:
+                ui.button(f"📁  {entry}", on_click=lambda f=full: _render(f)) \
+                    .props("flat align=left dense").classes("w-full justify-start")
+
+    def _go():
+        p = _norm(path_input.value)
+        if os.path.isdir(p):
+            _render(p)
+        else:
+            status.text = f"Not a directory: {p}"
+
+    def _select():
+        result["path"] = state["path"]
+        dialog.close()
+        done.set()
+
+    def _cancel():
+        dialog.close()
+        done.set()
+
+    with ui.dialog() as dialog, ui.card().classes("w-[600px] max-w-[92vw] drocat-card"):
+        ui.label(title).classes("text-h6")
+        path_input = ui.input("Path", value="").classes("w-full drocat-input")
+        dir_list = ui.column().classes("w-full max-h-72 overflow-auto")
+        status = ui.label("").classes("text-caption drocat-muted")
+        with ui.row().classes("w-full gap-2 justify-end"):
+            ui.button("Go", on_click=_go).props("outline dense")
+            ui.button("Select This Folder", on_click=_select).props("color=primary dense")
+            ui.button("Cancel", on_click=_cancel).props("flat dense")
+
+    _render(initial)
+    dialog.open()
+    await done.wait()
+    return result["path"]
+
+
 def dir_input(
     label: str = "Output Directory",
     default: Optional[str] = None,
     hint: str = "Where results will be saved. Click folder icon to browse. Changes are saved permanently as the default.",
 ) -> ui.input:
-    """Create a directory input with a native browse button.
+    """Create a directory input with an in-browser browse button.
 
     Changing the value (typed + blur, or picked with the browse button)
     persists it permanently as the default output directory and synchronizes
@@ -664,10 +748,11 @@ def dir_input(
             sync_output_dir_fields(inp, effective)
 
     with inp.add_slot("append"):
-        def browse(*args):
-            selected = pick_directory(
+        async def browse(*args):
+            selected = await dir_browser_dialog(
                 title=f"Select {label}",
                 initial=inp.value or str(PROJECT_ROOT),
+                default_output=inp.value or get_default_output_dir(),
             )
             if selected:
                 inp.value = selected

@@ -836,44 +836,8 @@ def open_file(path: str):
         pass
 
 
-def pick_directory(title: str = "Select Directory", initial: str = "") -> Optional[str]:
-    """
-    Open a native directory picker dialog (cross-platform via tkinter).
-    Returns selected path or None if cancelled.
-    """
-    import tkinter as tk
-    from tkinter import filedialog
-
-    root = tk.Tk()
-    root.withdraw()  # Hide the main window
-    root.attributes("-topmost", True)  # Bring dialog to front
-
-    path = filedialog.askdirectory(
-        title=title,
-        initialdir=initial if initial and Path(initial).exists() else str(Path.home()),
-    )
-
-    root.destroy()
-    return path if path else None
-
-
-def pick_file(title: str = "Select File", filetypes: list = None, initial: str = "") -> Optional[str]:
-    """
-    Open a native file picker dialog (cross-platform via tkinter).
-    Returns selected path or None if cancelled.
-    """
-    import tkinter as tk
-    from tkinter import filedialog
-
-    root = tk.Tk()
-    root.withdraw()
-    root.attributes("-topmost", True)
-
-    path = filedialog.askopenfilename(
-        title=title,
-        initialdir=initial if initial and Path(initial).exists() else str(Path.home()),
-        filetypes=filetypes or [("All files", "*.*")],
-    )
-
-    root.destroy()
-    return path if path else None
+# NOTE: the old tkinter-based pick_directory/pick_file helpers were removed.
+# They blocked the whole web server until the native dialog was dismissed
+# (and could hang when the window never appeared, freezing the app).
+# Directory browsing is now an in-browser dialog (dir_browser_dialog in
+# ui/components/common.py); file picking uses NiceGUI's ui.upload.

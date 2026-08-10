@@ -1053,10 +1053,40 @@ class TestRunner:
         assert expanded_rois == ["LH(L)", "LH(R)", "EB"]
         assert expanded_colors == ["#112233", "#112233", "#abcdef"]
 
-    def test_pick_directory_exists(self):
-        from ui.runner import pick_directory, pick_file
-        assert callable(pick_directory)
-        assert callable(pick_file)
+    def test_dir_browser_is_in_browser_not_tkinter(self, tmp_path):
+        """Directory browsing uses the in-browser dialog (server-side folder
+        listing), NOT the blocking tkinter dialog that could hang and freeze
+        the whole app. The tkinter helpers are gone from the runner."""
+        import ui.runner as runner_mod
+        assert not hasattr(runner_mod, "pick_directory")
+        assert not hasattr(runner_mod, "pick_file")
+
+        from ui.components.common import dir_browser_dialog, _list_subdirs
+        assert callable(dir_browser_dialog)
+        # folder listing helper: sorted subdirs only, tolerant of bad paths
+        a = tmp_path / "b_dir"; a.mkdir()
+        (tmp_path / "a_dir").mkdir()
+        (tmp_path / "a_file.txt").write_text("x")
+        assert _list_subdirs(str(tmp_path)) == ["a_dir", "b_dir"]
+        assert _list_subdirs(str(tmp_path / "nope")) == []
+        assert _list_subdirs(str(tmp_path / "a_file.txt")) == []
+
+    def test_dir_input_still_builds_with_browse_button(self):
+        """dir_input keeps its folder-open browse button (now opening the
+        in-browser dialog) and remains usable as a plain text input."""
+        from nicegui import Client
+        from nicegui.page import page
+        from ui.tabs.find_path import create_find_path_tab
+
+        client = Client(page("/dir-input-browse"))
+        with client:
+            create_find_path_tab()
+
+        icons = [
+            getattr(el, "_props", {}).get("icon")
+            for el in client.elements.values()
+        ]
+        assert "folder_open" in icons  # the browse button is still there
 
 
 # =============================================================================
