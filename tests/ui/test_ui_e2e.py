@@ -1503,6 +1503,107 @@ class TestTabs:
         assert any(el.get_value() == "Category10" for el in editors)
         assert any(el.get_value() == "Dark2" for el in editors)
 
+    def test_skeleton_tab_export_and_grouping_controls(self):
+        """The 3D Skeleton tab exposes the custom layer grouping input, the
+        individual-profile export controls (outside Advanced Settings, in
+        the Export card), and the legend-mode grouping notice."""
+        from nicegui import Client
+        from nicegui.page import page
+        from ui.tabs.visualization import create_skeleton_tab
+
+        client = Client(page("/skeleton-export-controls"))
+        with client:
+            create_skeleton_tab()
+
+        labels = [
+            getattr(el, "_props", {}).get("label")
+            for el in client.elements.values()
+            if getattr(el, "_props", {}).get("label")
+        ]
+        texts = [
+            getattr(el, "text", "")
+            for el in client.elements.values()
+            if getattr(el, "text", "")
+        ]
+        all_text = labels + texts
+        assert "Custom Layer Grouping (optional)" in all_text
+        assert "Export Individual Profiles" in all_text
+        assert "Summary Format" in all_text
+
+        assert "Export Video / GIF" in texts
+        assert "Individual Profiles (PDF / PPTX)" in texts
+        assert any("Each individual profile follows the Neuron Legend Mode" in t
+                   for t in texts), "legend-mode grouping notice missing"
+        assert any("Group layers by assigning neurons to groups" in t
+                   for t in texts), "custom grouping hint missing"
+
+        # the profiles controls live in the export card (outside Advanced
+        # Settings): the export card must be an independent block
+        ids = [
+            getattr(el, "_props", {}).get("id", "")
+            for el in client.elements.values()
+        ]
+        assert "card-skeleton-export-video" in ids
+
+    def test_find_path_tab_exposes_path_cap_control(self):
+        """The Find All Paths tab exposes the per-source path cap (the
+        practical bound for the combinatorial Reconstruct explosion)."""
+        from nicegui import Client
+        from nicegui.page import page
+        from ui.tabs.find_path import create_find_path_tab
+
+        client = Client(page("/findpath-cap-control"))
+        with client:
+            create_find_path_tab()
+
+        labels = [
+            getattr(el, "_props", {}).get("label")
+            for el in client.elements.values()
+            if getattr(el, "_props", {}).get("label")
+        ]
+        texts = [
+            getattr(el, "text", "")
+            for el in client.elements.values()
+            if getattr(el, "text", "")
+        ]
+        all_text = labels + texts
+        assert "Limit Graph Edges (strongest only)" in all_text
+        assert "Edge Limit – Types/Groups" in all_text
+        assert "Edge Limit – BodyIds" in all_text
+        assert "Visualize Network Before Reconstruction" in all_text
+        # the deep-layer warning label exists (hidden until layers >= 4)
+        assert any("Layers ≥ 4" in t for t in texts), "deep-layer warning missing"
+
+    def test_find_lines_tab_top_lines_default_is_30(self):
+        """The Find Driver Lines image/visualization top-N defaults to 30
+        lines (was 20)."""
+        from nicegui import Client
+        from nicegui.page import page
+        from ui.tabs.nb_find_lines import create_nb_find_lines_tab
+
+        client = Client(page("/nbfindlines-top30"))
+        with client:
+            create_nb_find_lines_tab()
+
+        labels = [
+            getattr(el, "_props", {}).get("label")
+            for el in client.elements.values()
+            if getattr(el, "_props", {}).get("label")
+        ]
+        texts = [
+            getattr(el, "text", "")
+            for el in client.elements.values()
+            if getattr(el, "text", "")
+        ]
+        assert "Top Lines for Images" in labels + texts
+        # find the number input by its label and check the default value
+        for el in client.elements.values():
+            if getattr(el, "_props", {}).get("label") == "Top Lines for Images":
+                assert el.value == 30, f"default top lines = {el.value}, expected 30"
+                break
+        else:
+            raise AssertionError("Top Lines for Images control not found")
+
     def test_pathfinding_tabs_have_hemisphere_filter_select(self):
         """Find All Paths and Find Direct expose the 'Hemisphere' selector
         (both / left / right) next to 'Separate Hemispheres'."""
