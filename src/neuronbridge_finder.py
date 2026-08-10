@@ -687,7 +687,7 @@ class NeuronBridgeFinder:
         self,
         func,
         *args,
-        max_retries: int = 3,
+        max_retries: int = 5,
         initial_delay: float = 1.0,
         **kwargs
     ):
@@ -3493,7 +3493,7 @@ class NeuronBridgeFinder:
         """Initialize the NeuronBridge client with retry logic."""
         import time
         
-        max_retries = 3
+        max_retries = 5
         retry_delays = [2, 5, 10]  # Seconds to wait before each retry
         
         self._vprint("🔌 Initializing NeuronBridge client...")
@@ -4488,14 +4488,14 @@ class NeuronBridgeFinder:
                 api_matches = self._retry_with_backoff(
                     self._client.get_cds_matches,
                     lm_image,
-                    max_retries=3,
+                    max_retries=5,
                     initial_delay=1.0
                 )
             else:  # pppm
                 api_matches = self._retry_with_backoff(
                     self._client.get_ppp_matches,
                     lm_image,
-                    max_retries=3,
+                    max_retries=5,
                     initial_delay=1.0
                 )
             
@@ -5033,7 +5033,7 @@ class NeuronBridgeFinder:
                         cds_matches = self._retry_with_backoff(
                             self._client.get_cds_matches,
                             em_image,
-                            max_retries=3,
+                            max_retries=5,
                             initial_delay=1.0
                         )
                         for match in cds_matches:
@@ -5061,7 +5061,7 @@ class NeuronBridgeFinder:
                         pppm_matches = self._retry_with_backoff(
                             self._client.get_ppp_matches,
                             em_image,
-                            max_retries=3,
+                            max_retries=5,
                             initial_delay=1.0
                         )
                         for match in pppm_matches:
@@ -8470,7 +8470,9 @@ class NeuronBridgeFinder:
         - download_img_for_top_n_lines applies separately to each category
         - GAL4/LexA lines: start with VT, R, GMR (e.g., VT037867, R10A06)
         - Split-GAL4 lines: start with SS, LH, MB, IS, OL, LC, etc.
-        - Separate CSV files saved: gal4_lexa_lines.csv, split_gal4_lines.csv
+        - Separate summaries saved: gal4_lexa_summary.csv, split_gal4_summary.csv
+          (the full per-line match tables are no longer written — they are
+          extremely large; line_summary.csv remains the main output)
         
         Weighted Score and Multi-Type Query:
             The weighted_score column prioritizes lines labeling ALL queried neurons:
@@ -8890,31 +8892,11 @@ class NeuronBridgeFinder:
                     sort_by=sort_by
                 )
             
-            # Save combined results (sorted by score descending)
+            # Save results: only the compact line-level summaries are written
+            # (the full per-match tables are extremely large for whole-GAL4-
+            # line queries, so all_lines.csv / gal4_lexa_lines.csv /
+            # split_gal4_lines.csv are no longer produced).
             if output_path:
-                # Skip all_lines.csv in separate_splitgal4 mode to avoid duplicate output
-                if not self.separate_splitgal4:
-                    combined_file = os.path.join(output_path, 'all_lines.csv')
-                    # Sort by score descending before saving
-                    if 'score' in combined_df.columns:
-                        combined_df_sorted = combined_df.sort_values('score', ascending=False)
-                    else:
-                        combined_df_sorted = combined_df
-                    
-                    # Use Polars for fast CSV writing if available and dataset is large
-                    self._vprint(f"\n💾 Saving results...")
-                    if HAS_POLARS and len(combined_df_sorted) > 100000:
-                        self._vprint(f"   ⚡ Using Polars for fast CSV write ({len(combined_df_sorted):,} rows)")
-                        # Ensure consistent column types for Polars conversion
-                        df_to_save = combined_df_sorted.copy()
-                        for col in ['source_bodyId', 'bodyId']:
-                            if col in df_to_save.columns:
-                                df_to_save[col] = df_to_save[col].astype(str)
-                        pl.from_pandas(df_to_save).write_csv(combined_file)
-                    else:
-                        combined_df_sorted.to_csv(combined_file, index=False)
-                    self._vprint(f"   Combined results: {combined_file}")
-                    self._vprint(f"   Total: {len(combined_df)} lines from {len(query_list)} query(s)")
                 
                 # Save line-level aggregate summary
                 if 'line' in combined_df.columns and not line_stats.empty:
@@ -8936,35 +8918,25 @@ class NeuronBridgeFinder:
                     line_stats.to_csv(summary_file, index=False)
                     self._vprint(f"   Summary: {summary_file} ({len(line_stats)} unique lines)")
                     
-                    # Save separate files for GAL4/LexA and Split-GAL4 if enabled
+                    # Save only the per-type summaries (the full per-line
+                    # match tables gal4_lexa_lines.csv / split_gal4_lines.csv
+                    # are extremely large and are no longer written)
                     if self.separate_splitgal4 and 'line_type' in line_stats.columns:
-                        # Split combined_df by line type
-                        gal4_lexa_combined = combined_df[combined_df['line_type'] == 'gal4_lexa']
-                        split_gal4_combined = combined_df[combined_df['line_type'] == 'split_gal4']
-                        
                         # Split line_stats by line type
                         gal4_lexa_stats = line_stats[line_stats['line_type'] == 'gal4_lexa']
                         split_gal4_stats = line_stats[line_stats['line_type'] == 'split_gal4']
                         
-                        # Save GAL4/LexA files (sorted by score descending)
-                        if not gal4_lexa_combined.empty:
-                            gal4_file = os.path.join(output_path, 'gal4_lexa_lines.csv')
-                            if 'score' in gal4_lexa_combined.columns:
-                                gal4_lexa_combined = gal4_lexa_combined.sort_values('score', ascending=False)
-                            gal4_lexa_combined.to_csv(gal4_file, index=False)
+                        # Save GAL4/LexA summary (sorted by score descending)
+                        if not gal4_lexa_stats.empty:
                             gal4_summary = os.path.join(output_path, 'gal4_lexa_summary.csv')
                             gal4_lexa_stats.to_csv(gal4_summary, index=False)
-                            self._vprint(f"   GAL4/LexA: {gal4_file} ({len(gal4_lexa_combined)} matches, {len(gal4_lexa_stats)} unique)")
+                            self._vprint(f"   GAL4/LexA summary: {gal4_summary} ({len(gal4_lexa_stats)} unique)")
                         
-                        # Save Split-GAL4 files (sorted by score descending)
-                        if not split_gal4_combined.empty:
-                            split_file = os.path.join(output_path, 'split_gal4_lines.csv')
-                            if 'score' in split_gal4_combined.columns:
-                                split_gal4_combined = split_gal4_combined.sort_values('score', ascending=False)
-                            split_gal4_combined.to_csv(split_file, index=False)
+                        # Save Split-GAL4 summary (sorted by score descending)
+                        if not split_gal4_stats.empty:
                             split_summary = os.path.join(output_path, 'split_gal4_summary.csv')
                             split_gal4_stats.to_csv(split_summary, index=False)
-                            self._vprint(f"   Split-GAL4: {split_file} ({len(split_gal4_combined)} matches, {len(split_gal4_stats)} unique)")
+                            self._vprint(f"   Split-GAL4 summary: {split_summary} ({len(split_gal4_stats)} unique)")
             
             # Download images if requested
             if download_images and output_path:

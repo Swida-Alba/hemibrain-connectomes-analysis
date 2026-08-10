@@ -81,7 +81,7 @@ def create_nb_find_lines_tab():
             section_header("Image Download", "image")
             with ui.row().classes("gap-4"):
                 download_images = checkbox_input("Download Images", False, hint="Download matched images from NeuronBridge.")
-                download_flylight = checkbox_input("From FlyLight", False, hint="Download from FlyLight S3/CDN.")
+                download_flylight = checkbox_input("From FlyLight", True, hint="Download from FlyLight S3/CDN. On by default.").props('id=checkbox-flylight')
                 generate_pdf = checkbox_input("PDF Summary", True, hint="Create a PDF with downloaded images ordered by score.")
                 generate_pptx = checkbox_input("PPTX Summary", False, hint="Create a PowerPoint summary alongside the PDF.")
             with param_grid(2):
