@@ -213,7 +213,8 @@ class TestBuildConnectionCacheCancel:
         max_active = 0
         active_lock = threading.Lock()
 
-        def fake_fetch(upstream_bodyIds, downstream_bodyIds=None):
+        def fake_fetch(upstream_bodyIds, downstream_bodyIds=None,
+                          cancel_event=None, status_callback=None):
             nonlocal active, max_active
             with active_lock:
                 active += 1
@@ -269,7 +270,8 @@ class TestBuildConnectionCacheCancel:
         import time
         import pandas as pd
 
-        def fake_fetch(upstream_bodyIds, downstream_bodyIds=None):
+        def fake_fetch(upstream_bodyIds, downstream_bodyIds=None,
+                          cancel_event=None, status_callback=None):
             time.sleep(0.1)
             return pd.DataFrame({
                 "bodyId_pre": upstream_bodyIds,
@@ -320,7 +322,8 @@ class TestBuildConnectionCacheCancel:
 
         fetched = []
 
-        def fake_fetch(upstream_bodyIds, downstream_bodyIds=None):
+        def fake_fetch(upstream_bodyIds, downstream_bodyIds=None,
+                          cancel_event=None, status_callback=None):
             fetched.extend(upstream_bodyIds)
             # The real _fetch_connections_bulk returns a pandas frame
             import pandas as pd
@@ -340,7 +343,8 @@ class TestBuildConnectionCacheCancel:
 
         real_fetch = fake_fetch
 
-        def cancel_after_first_batch(upstream_bodyIds, downstream_bodyIds=None):
+        def cancel_after_first_batch(upstream_bodyIds, downstream_bodyIds=None,
+                                      cancel_event=None, status_callback=None):
             result = real_fetch(upstream_bodyIds, downstream_bodyIds)
             first_batch_done.set()
             cancel_event.set()  # cancel as soon as the first batch returns
@@ -385,7 +389,8 @@ class TestBuildConnectionCacheCancel:
             cache_folder=str(tmp_path / "cache" / "fake_v2"),
         )
 
-        def fake_fetch(upstream_bodyIds, downstream_bodyIds=None):
+        def fake_fetch(upstream_bodyIds, downstream_bodyIds=None,
+                          cancel_event=None, status_callback=None):
             # The real _fetch_connections_bulk returns a pandas frame
             import pandas as pd
 
@@ -435,7 +440,8 @@ class TestRepeatPullCacheStatus:
                 script_path=str(tmp_path),
                 cache_folder=str(tmp_path / "cache" / "fake_v5"),
             )
-            fc._fetch_connections_bulk = lambda upstream_bodyIds, downstream_bodyIds=None: pd.DataFrame({
+            fc._fetch_connections_bulk = lambda upstream_bodyIds, downstream_bodyIds=None,\
+                                        cancel_event=None, status_callback=None: pd.DataFrame({
                 "bodyId_pre": upstream_bodyIds,
                 "bodyId_post": [str(int(b) + 1000) for b in upstream_bodyIds],
                 "weight": [5] * len(upstream_bodyIds),

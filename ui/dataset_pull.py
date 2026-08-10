@@ -101,6 +101,12 @@ class DatasetPuller:
             if self._state["fetch_started_at"] is None and total > 0:
                 self._state["fetch_started_at"] = time.time()
 
+    def _status(self, msg: str) -> None:
+        """Live status strings (server reconnect / retry messages) shown in
+        the Settings tab's status label while a batch retries."""
+        with self._lock:
+            self._state["info"] = msg
+
     def _run(
         self,
         dataset: str,
@@ -124,6 +130,7 @@ class DatasetPuller:
                 progress_callback=self._progress,
                 cancel_event=self._cancel_event,
                 max_workers=max_workers,
+                status_callback=self._status,
             )
             with self._lock:
                 self._state["summary"] = summary

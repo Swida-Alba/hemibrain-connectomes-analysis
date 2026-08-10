@@ -1024,11 +1024,41 @@ def getCriteriaAndName(requiredNeurons):
         fname += '_etc'
     return criteria, fname
 
-def pull_dataset(dataset, save_path=None, omitNoneType=False, client=None):
+def pull_dataset(dataset, save_path=None, omitNoneType=False, client=None, batch_size=2000, fetch_fn=None):
+    '''
+    Download the complete neuron table of a NeuPrint dataset (including
+    neurons with type=None) and save it as CSV.
+
+    The download is CHUNKED, time-bounded and retried: fetching the whole
+    dataset in one ``fetch_neurons(None)`` call has no timeout and no
+    progress feedback, so a large dataset stalls for minutes and looks like
+    a hang. Instead the bodyIds are listed with one light query, then the
+    neuron info is fetched in chunks of ``batch_size`` under
+    ``api_call_with_retry`` (timeout + 5 reconnect attempts per chunk) with
+    a live progress bar.
+
+    Parameters
+    ----------
+    dataset : str
+        NeuPrint dataset identifier, e.g. 'male-cns:v1.0'.
+    save_path : str, optional
+        Output path prefix; ``_neuron_df.csv`` and ``_roi_count_df.csv``
+        are written next to it.
+    omitNoneType : bool
+        Drop rows without a type before saving (default False = keep).
+    client : object, optional
+        NeuPrint client; uses the default client when None.
+    batch_size : int
+        Neurons fetched per API call (default 2000).
+    fetch_fn : callable, optional
+        Fetch function with the neuprint signature ``(criteria, client)``
+        returning ``(neuron_df, roi_count_df)``. Defaults to the module-level
+        ``fetch_neurons``; injectable for tests/adapters.
+    '''
     # requires login to hemibrain dataset
     if save_path is None:
         # Go up from src/ to project root, then into datasets/
-        dataset_normalized = dataset.replace(':','_').replace('.','_')
+        dataset_normalized = dataset.replace(':', '_').replace('.', '_')
         project_root = os.path.dirname(os.path.dirname(__file__))
         dataset_dir = os.path.join(project_root, "datasets", dataset_normalized)
         
@@ -1039,8 +1069,127 @@ def pull_dataset(dataset, save_path=None, omitNoneType=False, client=None):
             # Create new structure by default
             os.makedirs(dataset_dir, exist_ok=True)
             save_path = os.path.join(dataset_dir, f"{dataset_normalized}_allneurons")
-            
-    neuron_df, roi_count_df = fetch_neurons(None, client=client)
+
+    from neuprint import NeuronCriteria as NC
+    from neuprint import default_client
+
+    try:
+        from src.utils.api_utils import api_call_with_retry, APITimeoutError, APIRetryExhaustedError
+    except ImportError:
+        # Inline fallback when src is not on sys.path (scripts launched
+        # without the src prefix).
+        from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
+
+        class APITimeoutError(Exception):
+            pass
+
+        class APIRetryExhaustedError(Exception):
+            pass
+
+        def api_call_with_retry(func, timeout=60, max_retries=5, retry_delay=2.0,
+                                description="API call", on_retry=None, verbose=True):
+            import time
+            last_exc = None
+            for attempt in range(1, max_retries + 1):
+                try:
+                    # shutdown(wait=False): a hung API call must not block the
+                    # retry loop (with-block would wait forever).
+                    executor = ThreadPoolExecutor(max_workers=1)
+                    try:
+                        future = executor.submit(func)
+                        return future.result(timeout=timeout)
+                    finally:
+                        executor.shutdown(wait=False)
+                except FuturesTimeoutError:
+                    last_exc = APITimeoutError(f"{description} timed out after {timeout}s (attempt {attempt}/{max_retries})")
+                    if on_retry is not None:
+                        on_retry(attempt, last_exc)
+                    if attempt < max_retries:
+                        time.sleep(retry_delay * (2 ** (attempt - 1)))
+                except Exception as e:
+                    last_exc = e
+                    if on_retry is not None:
+                        on_retry(attempt, e)
+                    if attempt < max_retries:
+                        time.sleep(retry_delay * (2 ** (attempt - 1)))
+            raise last_exc or Exception("Unknown error")
+
+    if client is None:
+        client = default_client()
+    else:
+        # NeuronCriteria construction itself requires the neuprint DEFAULT
+        # client (the criteria factory is client-bound in this neuprint
+        # version), so make the passed client the default for this pull.
+        try:
+            from neuprint import set_default_client
+            set_default_client(client)
+        except Exception:
+            pass
+
+    # The neuprint fetch function to use (module-level by default). Tests
+    # inject a fake here directly — avoiding module-global monkeypatching
+    # that races with api_call_with_retry's worker threads.
+    fetch_fn = fetch_fn or fetch_neurons
+
+    # 1) Light bodyId-only query (bounded + retried): chunking needs the id
+    #    list, and the ids-only response is far smaller than the full table.
+    ids_df = api_call_with_retry(
+        lambda: client.fetch_custom("MATCH (n:Neuron) RETURN n.bodyId AS bodyId"),
+        timeout=120.0,
+        max_retries=5,
+        retry_delay=5.0,
+        description='Neuron list query',
+        on_retry=lambda attempt, exc: print(
+            f'⚠️ Server not responding (neuron list) — reconnecting, attempt {attempt}/5...'),
+        verbose=True,
+    )
+    all_ids = [int(x) for x in ids_df['bodyId'].tolist()]
+    total = len(all_ids)
+
+    # 2) Chunked neuron download with timeout/retry + live progress bar
+    neuron_frames = []
+    roi_frames = []
+    n_batches = (total + batch_size - 1) // batch_size
+    progress = tqdm(total=total, desc='Downloading neuron list', unit='neuron', leave=False)
+    try:
+        for i in range(0, total, batch_size):
+            batch_num = i // batch_size + 1
+            chunk = all_ids[i:i + batch_size]
+
+            def fetch_chunk(c=chunk):
+                return fetch_fn(NC(bodyId=c), client=client)
+
+            try:
+                ndf, rdf = api_call_with_retry(
+                    fetch_chunk,
+                    timeout=180.0,
+                    max_retries=5,
+                    retry_delay=5.0,
+                    description=f'Neuron batch {batch_num}/{n_batches}',
+                    on_retry=lambda attempt, exc, b=batch_num: print(
+                        f'⚠️ Server not responding (neuron batch {b}/{n_batches}) '
+                        f'— reconnecting, attempt {attempt}/5...'),
+                    verbose=True,
+                )
+            except (APITimeoutError, APIRetryExhaustedError) as e:
+                print(f'⚠️ Neuron batch {batch_num}/{n_batches} failed after retries: {e}')
+                continue  # keep going with the remaining batches
+            if ndf is not None and not ndf.empty:
+                neuron_frames.append(ndf)
+            if rdf is not None and not rdf.empty:
+                roi_frames.append(rdf)
+            progress.update(len(chunk))
+    finally:
+        progress.close()
+
+    if not neuron_frames:
+        raise RuntimeError(
+            f'Failed to download neurons for {dataset}: every batch failed after retries '
+            f'(server unreachable). Check the connection and re-run.'
+        )
+    neuron_df = pd.concat(neuron_frames, ignore_index=True)
+    roi_count_df = pd.concat(roi_frames, ignore_index=True) if roi_frames else pd.DataFrame()
+
     if omitNoneType:
         # delete rows with type is empty
         neuron_df = neuron_df[neuron_df['type'].notna()]
@@ -5085,11 +5234,19 @@ def process_paths_streaming(path_gen, conn_data, targets, output_path,
     first_write = True
     first_excl_write = True
     
-    # Use tqdm for progress bar if verbose
+    # Single-line progress display (\r-based, so it refreshes in place even
+    # when the output is piped/captured). When the generator carries its own
+    # pathfinding bars (the L{...} stages), they take over the line while
+    # they run; this bar then writes its final summary once they are done.
     if verbose:
         try:
-            iterator = tqdm(path_gen, desc=f"Streaming {level}-level paths", unit="path")
+            from vispath_pkg.fast_graph_core import LineProgress
         except ImportError:
+            LineProgress = None
+        if LineProgress is not None:
+            iterator = LineProgress(path_gen, desc=f"Streaming {level}-level paths",
+                                    unit="path", leave=True)
+        else:
             iterator = path_gen
     else:
         iterator = path_gen

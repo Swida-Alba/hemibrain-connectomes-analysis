@@ -1482,14 +1482,14 @@ class FlyLightDownloader:
         
         return all_filtered
     
-    def _download_file_http(self, file: FlyLightFile, local_path: Path, max_retries: int = 3) -> bool:
+    def _download_file_http(self, file: FlyLightFile, local_path: Path, max_retries: int = 5) -> bool:
         """
         Download a file using HTTP with retry logic for transient errors.
         
         Args:
             file: FlyLightFile object to download
             local_path: Local path to save the file
-            max_retries: Maximum number of retry attempts (default: 3)
+            max_retries: Maximum number of retry attempts (default: 5)
             
         Returns:
             True if successful, False otherwise

@@ -11,7 +11,7 @@ Usage:
     result = api_call_with_retry(
         lambda: client.fetch_custom(query),
         timeout=60,
-        max_retries=3,
+        max_retries=5,
         description="Fetching connections"
     )
 """
@@ -37,7 +37,7 @@ class APIRetryExhaustedError(Exception):
 def api_call_with_retry(
     func: Callable[[], T],
     timeout: float = 60.0,
-    max_retries: int = 3,
+    max_retries: int = 5,
     retry_delay: float = 2.0,
     description: str = "API call",
     on_retry: Optional[Callable[[int, Exception], None]] = None,
@@ -55,7 +55,7 @@ def api_call_with_retry(
         func: A callable (lambda or function) that performs the API call.
               Should take no arguments and return the result.
         timeout: Maximum time in seconds to wait for each attempt (default: 60)
-        max_retries: Maximum number of retry attempts (default: 3)
+        max_retries: Maximum number of retry attempts (default: 5)
         retry_delay: Initial delay between retries in seconds (default: 2.0)
                      Uses exponential backoff: delay * 2^(attempt-1)
         description: Human-readable description for error messages
@@ -231,7 +231,7 @@ def process_batches_with_retry(
     batches: list,
     process_func: Callable[[Any], Any],
     timeout: float = 60.0,
-    max_retries: int = 3,
+    max_retries: int = 5,
     description_prefix: str = "Processing batch",
     show_progress: bool = True,
     verbose: bool = True
@@ -243,7 +243,7 @@ def process_batches_with_retry(
         batches: List of batch items to process
         process_func: Function to call for each batch, takes batch as argument
         timeout: Timeout per batch in seconds
-        max_retries: Max retries per batch
+        max_retries: Max retries per batch (default: 5)
         description_prefix: Prefix for progress description
         show_progress: Show tqdm progress bar
         verbose: Print retry warnings

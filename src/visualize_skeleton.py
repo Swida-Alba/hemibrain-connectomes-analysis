@@ -6070,7 +6070,7 @@ class VisualizeSkeleton:
                     if self.client_type == 'flywire' and self.client_flywire:
                         missing_df = self.neuron_dfs[i][self.neuron_dfs[i]['bodyId'].isin(fetch_ids)]
                         # Retry logic for network errors
-                        max_retries = 3
+                        max_retries = 5
                         for attempt in range(max_retries):
                             try:
                                 raw_neuron_vols = self.client_flywire.fetch_skeletons(self.layer_criteria[i], with_synapses=self.show_connectors)
@@ -6107,7 +6107,7 @@ class VisualizeSkeleton:
                                 kwargs['client'] = self.client
                             
                             # Retry logic for network errors
-                            max_retries = 3
+                            max_retries = 5
                             for attempt in range(max_retries):
                                 try:
                                     raw_neuron_vols = neu.fetch_skeletons(missing_df, **kwargs)
