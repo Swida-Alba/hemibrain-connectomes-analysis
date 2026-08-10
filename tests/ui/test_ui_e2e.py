@@ -683,6 +683,24 @@ class TestRunner:
         sr2._run_logs = [("stdout", "nothing here")]
         assert sr2._extract_output_folder("/tmp") is None
 
+    def test_extract_output_folder_accepts_path_only_morphology_marker(self):
+        """The morphology backend announces its run folder with a path-only
+        'Results saved to:' marker (counts on a separate line); the UI must
+        resolve it so output files stream during similar finding."""
+        from ui.runner import ScriptRunner
+        sr = ScriptRunner()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            run = Path(tmpdir) / "findsimilar_hemibrain_v1_2_1_aMe12_20260801_120000"
+            run.mkdir()
+            (run / "results.csv").write_text("rank,target_bodyId\n1,201")
+            sr._run_logs = [
+                ("stdout", f"Results saved to: {run}"),
+                ("stdout", "Saved 30 bodyId rows -> results.csv, "
+                           "12 type rows -> type_summary.csv"),
+            ]
+            assert sr._extract_output_folder(tmpdir) == str(run)
+            assert sr._resolve_scan_dir(tmpdir) == str(run)
+
     def test_resolve_scan_dir_failed_run_returns_none(self):
         """A failed run that created no folder must NOT scan the shared root
         (which would surface files from previous runs, e.g. BANC files while

@@ -49,6 +49,31 @@ VECTOR_DIM = len(MORPHOMETRIC_FEATURES) + PERSISTENCE_DIM
 
 VECTOR_CACHE_VERSION = 1
 
+# Step-progress totals reported to the web UI during a similarity run
+# (see the [DROCAT][progress] event protocol in ui/components/output_panel.py).
+PROFILE_FIRST_TOTAL_STEPS = 6   # connectivity-first (NeuPrint) pipeline
+CACHE_DIRECT_TOTAL_STEPS = 4    # vector-cache-direct (FlyWire) pipeline
+
+# Maximum number of cached skeletons sampled for population standardization
+# statistics when a dataset has no vector cache (see ``population_stats``).
+POPULATION_STATS_SAMPLE = 3000
+
+# A dataset whose skeleton cache holds fewer than this many neurons cannot
+# estimate stable population statistics on its own; ``population_stats``
+# then borrows them from a version sibling (e.g. male-cns:v1.0 <- v0.9).
+MIN_POPULATION_STATS_SKELETONS = 300
+
+# Vectorization levels ("basis"). Every vector cache holds ONE level; the
+# basis is decided by the M2.1 level sweep (raw won: simplification adds no
+# discrimination). NeuPrint skeletons are cached on disk ONLY at the fixed
+# 90%-simplified level (``SKELETON_CACHE_LEVEL``), raw skeletons are never
+# persisted; raw vectors are persisted at fetch time instead.
+VECTOR_BASIS_RAW = "raw"
+VECTOR_BASIS_SIMP90 = "simp90"
+SKELETON_CACHE_LEVEL = VECTOR_BASIS_SIMP90   # on-disk NeuPrint cache level
+SKELETON_DOWNSAMPLE_FACTOR = 10             # navis.downsample_neuron factor
+                                            # (keeps ~10% of nodes)
+
 
 # =============================================================================
 # Feature extraction
@@ -316,21 +341,38 @@ def vectorize_neuron(neuron) -> Tuple[Dict[str, float], np.ndarray]:
     return morph, vector
 
 
-def _vectorize_one_file(path: str) -> Optional[Tuple[int, List[float], List[float]]]:
+def _neuron_rep(neuron) -> str:
+    """Representation of a neuron: 'skeleton' or 'mesh' ('' otherwise).
+
+    Skeletons and meshes produce different feature semantics in the shared
+    124-dim schema, so a comparison must never mix the two (nor two
+    simplification levels of the same kind).
+    """
+    if hasattr(neuron, "nodes") and neuron.nodes is not None and len(neuron.nodes):
+        return "skeleton"
+    if hasattr(neuron, "vertices") and neuron.vertices is not None and len(neuron.vertices):
+        return "mesh"
+    return ""
+
+
+def _vectorize_one_file(path: str) -> Optional[Tuple[int, List[float], List[float], str]]:
     """Module-level worker for parallel cache builds (picklable).
 
     Returns None for un-vectorizable pickles (corrupt or unexpected types)
-    so a single bad file cannot break the whole build."""
+    so a single bad file cannot break the whole build. The 4th element is
+    the neuron representation ('skeleton' | 'mesh')."""
     try:
         with open(path, "rb") as f:
             neuron = pickle.load(f)
         morph, vector = vectorize_neuron(neuron)
+        rep = _neuron_rep(neuron)
     except Exception:
         return None
     body_id = int(Path(path).stem)
     # Shape block (persistence / spatial histogram) = the tail after the
     # morphometric block.
-    return body_id, [morph[f] for f in MORPHOMETRIC_FEATURES], vector[len(MORPHOMETRIC_FEATURES):].tolist()
+    return (body_id, [morph[f] for f in MORPHOMETRIC_FEATURES],
+            vector[len(MORPHOMETRIC_FEATURES):].tolist(), rep)
 
 
 def _import_visualizer():
@@ -399,6 +441,93 @@ def _find_skeleton_file(dataset: str, body_id: int,
     return nested[0] if nested else None
 
 
+def _skeleton_folder_level(dataset: str,
+                           project_root: Optional[str] = None) -> str:
+    """Simplification level of a dataset's on-disk skeleton cache.
+
+    Reads the ``skeletons/.level`` marker ("raw" | "simp90"). A missing
+    marker means the cache predates the level marker and holds RAW
+    skeletons, which is also the default for datasets that never simplify
+    (FlyWire/BANC mesh caches).
+    """
+    root = Path(project_root) if project_root else Path(__file__).parent.parent
+    marker = root / "cache" / _dataset_folder(dataset) / "skeletons" / ".level"
+    try:
+        v = marker.read_text().strip()
+        if v in (VECTOR_BASIS_RAW, VECTOR_BASIS_SIMP90):
+            return v
+    except Exception:
+        pass
+    return VECTOR_BASIS_RAW
+
+
+def _write_skeleton_level_marker(dataset: str,
+                                 project_root: Optional[str] = None):
+    """Write the ``skeletons/.level`` marker (= the simplified cache level).
+
+    Idempotent: once a folder is marked simplified it stays so; the marker
+    is never downgraded, so a partially-simplified migration cannot
+    silently revert to raw.
+    """
+    root = Path(project_root) if project_root else Path(__file__).parent.parent
+    marker = root / "cache" / _dataset_folder(dataset) / "skeletons" / ".level"
+    try:
+        if not marker.exists():
+            marker.parent.mkdir(parents=True, exist_ok=True)
+            marker.write_text(SKELETON_CACHE_LEVEL + "\n")
+    except Exception:
+        pass
+
+
+def _downsample_for_cache(neuron) -> "navis.TreeNeuron":
+    """Deterministic simplification for the on-disk NeuPrint skeleton cache.
+
+    ``navis.downsample_neuron(factor=10)`` keeps ~10% of nodes while
+    preserving root/leaves/branchpoints — the canonical "90% simplified"
+    skeleton. Falls back to the original neuron when downsampling fails.
+    """
+    try:
+        # navis' default soma detection flags every node with radius >= 1
+        # (neuprint radii are in nm) as soma; a whole-neuron "soma" makes
+        # every node a downsample fix point and freezes the skeleton at
+        # full resolution. Treat a multi-node soma as no soma.
+        soma = getattr(neuron, "soma", None)
+        if soma is not None and hasattr(soma, "__len__") and len(soma) > 1:
+            neuron = neuron.copy()
+            neuron.soma = None
+        return navis.downsample_neuron(neuron, downsampling_factor=SKELETON_DOWNSAMPLE_FACTOR)
+    except Exception:
+        return neuron
+
+
+# Per-(dataset, root) memo for legacy vector caches without a ``rep`` column.
+_REP_MEMO: Dict[Tuple[str, str], str] = {}
+
+
+def _infer_dataset_rep(dataset: str, project_root: Optional[str] = None) -> str:
+    """Representation of a dataset's cached skeletons ('skeleton'|'mesh').
+
+    Legacy vector caches predate the ``rep`` column; the representation is
+    inferred once per (dataset, project) from the first cached pickle.
+    """
+    root = Path(project_root) if project_root else Path(__file__).parent.parent
+    key = (dataset, str(root))
+    if key in _REP_MEMO:
+        return _REP_MEMO[key]
+    rep = ""
+    try:
+        files = SkeletonVectorCache(
+            dataset, project_root=str(root), verbose=False
+        )._discover_skeleton_files()
+        if files:
+            with open(files[0], "rb") as f:
+                rep = _neuron_rep(pickle.load(f))
+    except Exception:
+        rep = ""
+    _REP_MEMO[key] = rep
+    return rep
+
+
 # =============================================================================
 # Similarity
 # =============================================================================
@@ -465,13 +594,18 @@ class SkeletonVectorCache:
             print(msg)
 
     # ------------------------------------------------------------ meta
-    def _write_meta(self, stats: Dict[str, List[float]], n_rows: int):
+    def _write_meta(self, stats: Dict[str, List[float]], n_rows: int,
+                    rep: str = "", vector_basis: str = VECTOR_BASIS_RAW):
         meta = {
             "version": VECTOR_CACHE_VERSION,
             "dataset": self.dataset,
             "feature_columns": MORPHOMETRIC_FEATURES,
             "persistence_dim": PERSISTENCE_DIM,
             "n_rows": n_rows,
+            "rep": rep,
+            # Simplification level of the vectors in this cache ("raw" |
+            # "simp90"); the cache holds ONE level and never mixes.
+            "vector_basis": vector_basis,
             "built_at": datetime.now().isoformat(timespec="seconds"),
             "mean": stats["mean"],
             "std": stats["std"],
@@ -504,11 +638,23 @@ class SkeletonVectorCache:
             except Exception:
                 existing = {}
 
+        # The cache holds ONE vectorization level (its "basis"). On-disk
+        # skeletons are vectorized only when their simplification level
+        # matches that basis: post-cleanup NeuPrint caches hold simp90
+        # files while the basis is raw, so those files are skipped (their
+        # vectors come from the vector cache / raw fetches instead).
+        basis = (self._load_meta() or {}).get("vector_basis") or VECTOR_BASIS_RAW
+        folder_level = _skeleton_folder_level(self.dataset, str(self.project_root))
+
         # Candidate skeleton files not yet vectorized.
         files = self._discover_skeleton_files()
+        files = [f for f in files if folder_level == basis]
         pending = [f for f in files if int(Path(f).stem) not in existing]
 
         # Optional on-demand fetch to extend coverage (cap applies).
+        # fetch_skeleton_on_demand already vectorizes at fetch time (raw
+        # basis) and persists the vector; the fetched row set is refreshed
+        # below so those rows are not dropped by the merge.
         fetched_new = 0
         if fetch_missing and fetch_missing > 0:
             index_path = self.project_root / "cache" / _dataset_folder(self.dataset) / "neuron_index.parquet"
@@ -525,8 +671,21 @@ class SkeletonVectorCache:
                 for bid in missing[:fetch_missing]:
                     nrn = fetch_skeleton_on_demand(self.dataset, bid, project_root=str(self.project_root))
                     if nrn is not None:
-                        pending.append(str(self.skeleton_dir / f"{bid}.pkl"))
                         fetched_new += 1
+            if fetched_new:
+                # Re-discover after the fetches: they wrote new skeleton
+                # files (and, in the real pipeline, already appended the
+                # raw vectors). Refresh the row set and the pending files
+                # so neither the fetched vectors nor the on-disk files are
+                # dropped by the merge below.
+                try:
+                    df_old = pd.read_parquet(self.parquet_path)
+                    existing = {int(r["bodyId"]): r for r in df_old.to_dict("records")}
+                except Exception:
+                    pass
+                files = self._discover_skeleton_files()
+                files = [f for f in files if folder_level == basis]
+                pending = [f for f in files if int(Path(f).stem) not in existing]
 
         rows = []
         if pending:
@@ -550,6 +709,23 @@ class SkeletonVectorCache:
                 f"{elapsed:.1f}s ({elapsed / max(len(pending), 1) * 1000:.1f} ms/neuron)"
             )
 
+        # A cache must hold ONE representation (skeleton vs mesh) and one
+        # simplification level: vector features differ between the two, so
+        # rows of any other representation are skipped (never mixed into
+        # comparisons). The majority representation of the pending set wins.
+        ok_rows = [r for r in rows if r is not None]
+        rep = ""
+        if ok_rows:
+            from collections import Counter
+            rep = Counter(r[3] for r in ok_rows).most_common(1)[0][0]
+            foreign = sum(1 for r in ok_rows if r[3] != rep)
+            if foreign:
+                self._log(
+                    f"[SkeletonVectorCache] Skipping {foreign} pickles of a "
+                    f"different representation ({'mesh' if rep == 'skeleton' else 'skeleton'})"
+                )
+            rows = [r if r is None or r[3] == rep else None for r in rows]
+
         # Merge with existing rows (type/instance are refreshed from the
         # neuron index below, so drop any stale copies from previous builds).
         records = []
@@ -560,8 +736,8 @@ class SkeletonVectorCache:
         for row in rows:
             if row is None:
                 continue
-            bid, morph_vals, pv_vals = row
-            record = {"bodyId": bid}
+            bid, morph_vals, pv_vals, row_rep = row
+            record = {"bodyId": bid, "rep": row_rep}
             for name, val in zip(MORPHOMETRIC_FEATURES, morph_vals):
                 record[name] = float(val)
             for i, val in enumerate(pv_vals):
@@ -570,7 +746,8 @@ class SkeletonVectorCache:
 
         if not records:
             self._log("[SkeletonVectorCache] No skeletons available to vectorize.")
-            self._write_meta({"mean": [], "std": []}, 0)
+            self._write_meta({"mean": [], "std": []}, 0, rep=rep,
+                             vector_basis=basis)
             return {"rows": 0, "new": 0, "fetched": 0}
 
         df = pd.DataFrame(records).sort_values("bodyId").reset_index(drop=True)
@@ -593,7 +770,8 @@ class SkeletonVectorCache:
         mean = mat.mean(axis=0).tolist()
         std = mat.std(axis=0).tolist()
         std = [s if s > 0 else 1.0 for s in std]
-        self._write_meta({"mean": mean, "std": std}, len(df))
+        self._write_meta({"mean": mean, "std": std}, len(df), rep=rep,
+                         vector_basis=basis)
 
         self._log(
             f"[SkeletonVectorCache] Cache ready: {len(df)} rows "
@@ -613,7 +791,12 @@ class SkeletonVectorCache:
         return df[cols].to_numpy(dtype=float)
 
     def load(self) -> Optional[dict]:
-        """Load the cache: meta + raw df + standardized matrix + index arrays."""
+        """Load the cache: meta + raw df + standardized matrix + index arrays.
+
+        ``rep`` carries each row's representation ('skeleton' | 'mesh');
+        ``dataset_rep`` the cache's single representation (legacy caches
+        without a ``rep`` column infer it from the first cached file).
+        """
         if not self.parquet_path.exists():
             return None
         df = pd.read_parquet(self.parquet_path)
@@ -625,6 +808,12 @@ class SkeletonVectorCache:
         std = np.asarray(meta.get("std") or raw.std(axis=0), dtype=float)
         std = np.where(std <= 0, 1.0, std)
         X = (raw - mean) / std
+        reps = df.get("rep", pd.Series([""] * len(df))).fillna("").astype(str).tolist()
+        if reps and reps[0]:
+            from collections import Counter
+            dataset_rep = Counter(reps).most_common(1)[0][0]
+        else:
+            dataset_rep = _infer_dataset_rep(self.dataset, self.project_root)
         return {
             "meta": meta,
             "df": df,
@@ -633,6 +822,8 @@ class SkeletonVectorCache:
             "bodyIds": df["bodyId"].astype(np.int64).to_numpy(),
             "types": df.get("type", pd.Series([""] * len(df))).fillna("").astype(str).tolist(),
             "instances": df.get("instance", pd.Series([""] * len(df))).fillna("").astype(str).tolist(),
+            "rep": reps,
+            "dataset_rep": dataset_rep,
         }
 
     def ensure(self, fetch_missing: int = 0) -> dict:
@@ -654,41 +845,355 @@ class SkeletonVectorCache:
                 n_vectors = 0
         return {"skeletons": n_skeletons, "vectors": n_vectors}
 
+    # ------------------------------------------------------------ append
+    def append_vectors(self, records: List[Tuple[int, np.ndarray, str]],
+                       vector_basis: str = VECTOR_BASIS_RAW) -> int:
+        """Persist freshly-computed vectors (raw feature rows) into the cache.
+
+        Called when a vector was computed from a cached skeleton file or from
+        an online-fetched skeleton that was NOT persisted: the VECTOR is
+        stored so later queries reuse it without re-fetching or
+        re-vectorizing, even though the original skeleton stays uncached.
+        Rows are merged by bodyId (dedupe); the cache's standardization
+        statistics (meta mean/std) are left untouched, so the standardized
+        space stays consistent across appends. Rows of a representation
+        different from the cache's are rejected (a cache holds ONE level),
+        and rows whose ``vector_basis`` differs from the cache's basis are
+        rejected too (a cache holds ONE simplification level). Returns the
+        number of rows actually added.
+        """
+        if not records:
+            return 0
+        # Cross-process safety: UI runs execute in separate subprocesses, so
+        # the read-modify-write is guarded with an advisory file lock
+        # (POSIX; best-effort elsewhere).
+        lock_fd = None
+        lock_path = self.parquet_path.with_suffix(".parquet.lock")
+        try:
+            import fcntl
+            lock_fd = open(lock_path, "w")
+            fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        except (ImportError, OSError):
+            lock_fd = None
+        try:
+            type_map, instance_map = _load_neuron_type_map(
+                self.dataset, str(self.project_root)
+            )
+            rows_new = []
+            for bid, vec, rep in records:
+                bid = int(bid)
+                row = {"bodyId": bid, "rep": rep}
+                for i, name in enumerate(MORPHOMETRIC_FEATURES):
+                    row[name] = float(vec[i])
+                for i in range(PERSISTENCE_DIM):
+                    row[f"pv_{i}"] = float(vec[len(MORPHOMETRIC_FEATURES) + i])
+                row["type"] = type_map.get(bid, "") if type_map else ""
+                row["instance"] = (instance_map or {}).get(bid, "") if instance_map else ""
+                rows_new.append(row)
+            df_new = pd.DataFrame(rows_new)
+
+            existing = self.load()
+            if existing is not None:
+                cache_rep = existing.get("dataset_rep", "")
+                cache_basis = ((existing.get("meta") or {})
+                               .get("vector_basis") or VECTOR_BASIS_RAW)
+                if cache_basis != vector_basis:
+                    # Different simplification level: never mix (a cache
+                    # holds ONE basis).
+                    return 0
+                if cache_rep:
+                    df_new = df_new[df_new["rep"] == cache_rep]
+                if df_new.empty:
+                    return 0
+                old = existing["df"]
+                keep_cols = [c for c in old.columns]
+                df_new = df_new[[c for c in keep_cols if c in df_new.columns]]
+                known = set(old["bodyId"].astype(np.int64))
+                df_new = df_new[~df_new["bodyId"].astype(np.int64).isin(known)]
+                if df_new.empty:
+                    return 0
+                df = pd.concat([old, df_new], ignore_index=True)
+            else:
+                # Creating the cache: keep it homogeneous (majority
+                # representation of this batch) and record the basis.
+                from collections import Counter
+                canonical = (Counter(df_new["rep"].astype(str))
+                             .most_common(1)[0][0] if len(df_new) else "")
+                if canonical:
+                    df_new = df_new[df_new["rep"].astype(str) == canonical]
+                if df_new.empty:
+                    return 0
+                df = df_new
+
+            self.morph_dir.mkdir(parents=True, exist_ok=True)
+            df.to_parquet(self.parquet_path, index=False)
+
+            # The standardization stats (meta mean/std) stay untouched so the
+            # standardized space of existing rows is preserved; only the row
+            # count and bookkeeping are refreshed. A freshly-created cache
+            # gets its own stats (like a full build).
+            meta = self._load_meta() or {}
+            if not meta.get("mean"):
+                mat = self._raw_matrix(df)
+                mean = mat.mean(axis=0).tolist()
+                std = mat.std(axis=0).tolist()
+                std = [s if s > 0 else 1.0 for s in std]
+                meta["mean"] = mean
+                meta["std"] = std
+            meta["dataset"] = self.dataset
+            meta["n_rows"] = len(df)
+            meta["built_at"] = datetime.now().isoformat(timespec="seconds")
+            if "rep" not in meta and len(df_new) and "rep" in df_new.columns:
+                meta["rep"] = str(df_new["rep"].iloc[0])
+            # Record the basis when creating the cache; existing caches keep
+            # their own basis (enforced by the check above).
+            if "vector_basis" not in meta:
+                meta["vector_basis"] = vector_basis
+            self.meta_path.write_text(json.dumps(meta, indent=2))
+            return len(df_new)
+        finally:
+            if lock_fd is not None:
+                try:
+                    fcntl.flock(lock_fd, fcntl.LOCK_UN)
+                except Exception:
+                    pass
+                lock_fd.close()
+
     # ------------------------------------------------------------ vectors_for
-    def vectors_for(self, body_ids: List[int], compute_missing: bool = True) -> Tuple[np.ndarray, np.ndarray]:
+    def vectors_for(self, body_ids: List[int], compute_missing: bool = True
+                    ) -> Tuple[np.ndarray, np.ndarray, List[str]]:
         """Return standardized vectors for bodyIds.
 
         Rows missing from the cache are computed on the fly when a skeleton
-        file exists (``compute_missing=True``); otherwise they are NaN rows.
-        Never fetches from the server and never forces a full cache build.
+        file of the cache's representation AND simplification level exists
+        (``compute_missing=True``); files of a DIFFERENT representation
+        (e.g. skeletons beside bulk meshes) or of a different level than
+        the cache's ``vector_basis`` are skipped so comparisons never mix
+        levels. Otherwise they are NaN rows. Never fetches from the server
+        and never forces a full cache build. Returns (vectors, mask, reps)
+        where ``reps`` carries each row's representation ('skeleton' |
+        'mesh' | '').
         """
         body_ids = [int(b) for b in body_ids]
         data = self.load()
         known: Dict[int, int] = {}
         X = np.zeros((0, VECTOR_DIM))
+        dataset_rep = ""
+        basis = VECTOR_BASIS_RAW
         if data is not None:
             known = {int(b): i for i, b in enumerate(data["bodyIds"])}
             X = data["X"]
+            dataset_rep = data.get("dataset_rep", "")
+            basis = ((data.get("meta") or {}).get("vector_basis")
+                     or VECTOR_BASIS_RAW)
 
         result = np.full((len(body_ids), VECTOR_DIM), np.nan)
+        reps = [""] * len(body_ids)
+        computed: List[Tuple[int, np.ndarray, str]] = []
         for j, bid in enumerate(body_ids):
             if bid in known:
                 result[j] = X[known[bid]]
+                reps[j] = dataset_rep
                 continue
             if compute_missing:
-                pkl = _find_skeleton_file(
-                    self.dataset, bid, project_root=str(self.project_root)
-                )
+                # Level guard: on-disk skeletons are vectorized only when
+                # their simplification level matches the cache's basis
+                # (post-cleanup NeuPrint caches hold simp90 files while
+                # the basis is raw -> never vectorized here).
+                pkl = None
+                if _skeleton_folder_level(self.dataset, str(self.project_root)) == basis:
+                    pkl = _find_skeleton_file(
+                        self.dataset, bid, project_root=str(self.project_root)
+                    )
                 if pkl is not None:
                     try:
                         with open(pkl, "rb") as f:
                             neuron = pickle.load(f)
+                        row_rep = _neuron_rep(neuron)
+                        if dataset_rep and row_rep != dataset_rep:
+                            continue  # different representation: never mix
                         _, vec = vectorize_neuron(neuron)
                         result[j] = vec
+                        reps[j] = row_rep
+                        # Persist the vector: later queries reuse it without
+                        # re-loading and re-vectorizing the skeleton file.
+                        computed.append((bid, vec, row_rep))
                     except Exception:
                         result[j] = np.nan
+        if computed:
+            self.append_vectors(computed, vector_basis=basis)
         mask = ~np.isnan(result[:, 0])
-        return result, mask
+        return result, mask, reps
+
+
+# =============================================================================
+# Population standardization statistics
+# =============================================================================
+
+def _datasets_share_population(dataset: str, other: str,
+                               root: Path) -> bool:
+    """True when at least 30% of the smaller neuron index is in the other.
+
+    Guards the version-sibling statistics fallback: two versions of one
+    reconstruction (e.g. male-cns v0.9/v1.0) share their neurons, so the
+    older release's population stats are a valid baseline for the newer.
+    """
+    def _ids(ds: str):
+        p = root / "cache" / _dataset_folder(ds) / "neuron_index.parquet"
+        if not p.exists():
+            return None
+        try:
+            import polars as pl
+            return set(pl.read_parquet(p, columns=["bodyId"])["bodyId"].to_list())
+        except Exception:
+            return None
+    a, b = _ids(dataset), _ids(other)
+    if not a or not b:
+        return False
+    smaller, bigger = (a, b) if len(a) <= len(b) else (b, a)
+    return len(smaller & bigger) / len(smaller) >= 0.3
+
+
+def _sibling_skeleton_dirs(dataset: str, root: Path) -> List[Path]:
+    """Skeleton-cache directories of version siblings sharing the population.
+
+    Two versions of one reconstruction (e.g. male-cns v0.9/v1.0) contain the
+    same neurons, so the sibling's cached skeletons extend the sample used
+    for population standardization statistics. The dataset-folder convention
+    is inverted (``male-cns_v1_0`` -> ``male-cns:v1.0``) and every candidate
+    is verified against ``_datasets_share_population``.
+    """
+    name = dataset.split(":")[0] if ":" in dataset else dataset
+    if not name:
+        return []
+    dirs: List[Path] = []
+    cache_root = root / "cache"
+    if not cache_root.is_dir():
+        return []
+    for folder in sorted(cache_root.iterdir()):
+        if not folder.is_dir() or not folder.name.startswith(name + "_"):
+            continue
+        parts = folder.name.split("_")
+        if len(parts) < 2:
+            continue
+        sibling = f"{parts[0]}:{parts[1]}" + (
+            f".{'.'.join(parts[2:])}" if len(parts) > 2 else ""
+        )
+        if sibling == dataset or not _datasets_share_population(dataset, sibling, root):
+            continue
+        skel = folder / "skeletons"
+        if skel.is_dir():
+            dirs.append(skel)
+    return dirs
+
+
+def population_stats(dataset: str, project_root: Optional[str] = None,
+                     max_sample: int = POPULATION_STATS_SAMPLE
+                     ) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
+    """Population mean/std for a dataset's cached skeletons.
+
+    Stable standardization statistics used when a dataset has no vector
+    cache: pool-only statistics depend on the (connectivity-skewed) pool
+    composition and distort the geometry between query and candidates. The
+    stats are computed once from a bounded sample of cached skeletons and
+    persisted under ``morphology/population_stats.json`` for reuse. A
+    dataset with too few cached skeletons extends its sample with a version
+    sibling's skeletons (same reconstruction, e.g. male-cns v1.0 <- v0.9).
+    Returns (None, None) when no statistics can be estimated.
+    """
+    root = Path(project_root) if project_root else Path(__file__).parent.parent
+    folder = _dataset_folder(dataset)
+    cache_dir = root / "cache" / folder
+    stats_file = cache_dir / "morphology" / "population_stats.json"
+    if stats_file.exists():
+        try:
+            data = json.loads(stats_file.read_text())
+            if (data.get("dataset") == dataset and data.get("dim") == VECTOR_DIM
+                    and data.get("sample_cap") == max_sample
+                    and int(data.get("n", 0)) >= MIN_POPULATION_STATS_SKELETONS):
+                return (np.asarray(data["mean"], dtype=float),
+                        np.asarray(data["std"], dtype=float))
+        except Exception:
+            pass
+
+    vc = SkeletonVectorCache(dataset, project_root=str(root), verbose=False)
+    files = vc._discover_skeleton_files()
+
+    # Level guard: the statistics must match the vector basis (raw). Once
+    # raw skeletons are replaced by the simplified cache (NeuPrint), the
+    # on-disk sample can no longer be vectorized at the right level; fall
+    # back to the vector cache's own raw meta stats, which were computed
+    # from the same feature schema at fetch time.
+    basis = (vc._load_meta() or {}).get("vector_basis") or VECTOR_BASIS_RAW
+    if _skeleton_folder_level(dataset, str(root)) != basis:
+        data = vc.load()
+        if data is not None:
+            meta = data.get("meta") or {}
+            m = meta.get("mean")
+            s = meta.get("std")
+            if m is not None and s is not None:
+                mm = np.asarray(m, dtype=float)
+                ss = np.asarray(s, dtype=float)
+                if mm.shape == (VECTOR_DIM,) and ss.shape == (VECTOR_DIM,):
+                    return mm, ss
+        return None, None
+
+    # Too few cached skeletons for stable stats: sample from the version
+    # sibling's cache instead — it contains the same neurons (shared
+    # reconstruction, e.g. male-cns v1.0 <- v0.9), and the sparse local
+    # cache may be morphologically skewed (e.g. one query's transient
+    # fetches), which would bias the statistics. Only a LARGER sibling
+    # cache is used (the sibling may itself be the sparse one).
+    if len(files) < MIN_POPULATION_STATS_SKELETONS:
+        sibling_files: List[str] = []
+        for skel_dir in _sibling_skeleton_dirs(dataset, root):
+            sf = sorted(str(p) for p in skel_dir.rglob("*.pkl"))
+            if len(sf) > len(sibling_files):
+                sibling_files = sf
+        if len(sibling_files) > len(files):
+            files = sibling_files
+
+    if not files:
+        return None, None
+    if len(files) > max_sample:
+        rng = np.random.default_rng(0)
+        files = [files[i] for i in
+                 rng.choice(len(files), max_sample, replace=False)]
+    try:
+        rows = vc._vectorize_parallel(files)
+        if len(rows) != len(files):
+            # A broken worker pool can silently drop rows; recompute
+            # sequentially so the statistics stay deterministic.
+            raise ValueError("parallel vectorization incomplete")
+    except Exception:
+        rows = [_vectorize_one_file(p) for p in files]
+    # One representation per dataset: mixed skeleton/mesh samples would
+    # bias the statistics (different feature semantics in one schema).
+    ok_rows = [r for r in rows if r is not None]
+    if ok_rows:
+        from collections import Counter
+        canonical = Counter(r[3] for r in ok_rows).most_common(1)[0][0]
+        ok_rows = [r for r in ok_rows if r[3] == canonical]
+    vecs = [np.concatenate([r[1], r[2]]) for r in ok_rows]
+    if not vecs:
+        return None, None
+    mat = np.asarray(vecs, dtype=float)
+    mu = mat.mean(axis=0)
+    sd = mat.std(axis=0)
+    sd = np.where(sd <= 0, 1.0, sd)
+    try:
+        (cache_dir / "morphology").mkdir(parents=True, exist_ok=True)
+        stats_file.write_text(json.dumps({
+            "dataset": dataset,
+            "dim": VECTOR_DIM,
+            "n": len(vecs),
+            "sample_cap": max_sample,
+            "mean": mu.tolist(),
+            "std": sd.tolist(),
+        }))
+    except Exception:
+        pass
+    return mu, sd
 
 
 # =============================================================================
@@ -713,7 +1218,15 @@ def _fetch_neuprint_skeleton(dataset: str, body_id: int):
     if df is None or len(df) == 0:
         return None
     try:
-        return navis.TreeNeuron(df)
+        nrn = navis.TreeNeuron(df)
+        # navis' default soma detection flags every node with radius >= 1
+        # (neuprint radii are in nm) as soma; a whole-neuron "soma" would
+        # freeze the skeleton at full resolution during downsampling and
+        # distort the soma_radius feature.
+        soma = nrn.soma
+        if soma is not None and hasattr(soma, "__len__") and len(soma) > 1:
+            nrn.soma = None
+        return nrn
     except Exception:
         return None
 
@@ -727,31 +1240,51 @@ def _fetch_cave_skeleton(dataset: str, body_id: int):
 
 def fetch_skeleton_on_demand(dataset: str, body_id: int,
                              project_root: Optional[str] = None,
-                             persist: bool = True) -> Optional["navis.TreeNeuron"]:
+                             persist: bool = True,
+                             level: str = VECTOR_BASIS_RAW
+                             ) -> Optional["navis.TreeNeuron"]:
     """Fetch a neuron skeleton if missing (reusing any cached file).
 
     NeuPrint datasets use ``neuprint.fetch_skeleton``; FlyWire/CAVE datasets
     use ``CAVEDataFetcher.fetch_skeleton`` (which caches itself). With
-    ``persist=True`` the fetched neuron is pickled to
+    ``persist=True`` the fetched neuron is simplified to the fixed cache
+    level (``SKELETON_CACHE_LEVEL``, downsample factor 10) and pickled to
     ``cache/{dataset}/skeletons/{body_id}.pkl`` so later calls reuse it; with
     ``persist=False`` (transient, profile-first comparisons) the neuron is
     returned in memory only and never written to the skeleton cache.
+
+    ``level`` selects the consumer's simplification level:
+
+    - ``"raw"`` (default): returns the RAW skeleton. Raw is NEVER served
+      from the disk cache (raw skeletons are not persisted); vectors come
+      from the vector cache instead.
+    - ``"simp90"``: hits the simplified cache file when present.
+
+    Every online fetch vectorizes the RAW skeleton immediately and persists
+    the vector (basis ``VECTOR_BASIS_RAW``), so later comparisons reuse it
+    even though the raw skeleton is not stored on disk.
     """
     body_id = int(body_id)
+    level = str(level).lower()
+    if level not in (VECTOR_BASIS_RAW, VECTOR_BASIS_SIMP90):
+        raise ValueError(f"Invalid level: {level} (raw|simp90)")
     root = Path(project_root) if project_root else Path(__file__).parent.parent
     cache_dir = root / "cache" / _dataset_folder(dataset) / "skeletons"
 
-    existing = _find_skeleton_file(dataset, body_id, project_root=str(root))
-    if existing is not None:
-        try:
-            with open(existing, "rb") as f:
-                neuron = pickle.load(f)
-            if type(neuron).__name__ in ("TreeNeuron", "MeshNeuron"):
-                return neuron
-        except Exception:
-            pass
-        # Unsupported/corrupt pickle: drop it and fetch fresh.
-        existing.unlink(missing_ok=True)
+    # Cache hit only for simp90 consumers: raw skeletons are never on disk,
+    # so a raw request always goes to the server (or the vector cache).
+    if level == VECTOR_BASIS_SIMP90:
+        existing = _find_skeleton_file(dataset, body_id, project_root=str(root))
+        if existing is not None:
+            try:
+                with open(existing, "rb") as f:
+                    neuron = pickle.load(f)
+                if type(neuron).__name__ in ("TreeNeuron", "MeshNeuron"):
+                    return neuron
+            except Exception:
+                pass
+            # Unsupported/corrupt pickle: drop it and fetch fresh.
+            existing.unlink(missing_ok=True)
 
     dataset_l = dataset.lower()
     if any(k in dataset_l for k in ("flywire", "fafb", "banc")):
@@ -759,10 +1292,33 @@ def fetch_skeleton_on_demand(dataset: str, body_id: int,
     else:
         neuron = _fetch_neuprint_skeleton(dataset, body_id)
 
-    if neuron is not None and persist:
+    if neuron is None:
+        return None
+
+    # Vectorize the RAW skeleton at fetch time and persist the vector
+    # (basis raw): later comparisons reuse it without re-fetching or
+    # re-vectorizing, even though the raw skeleton itself is not stored.
+    # Best-effort: a vectorization failure must not break the fetch.
+    try:
+        _, vec = vectorize_neuron(neuron)
+        SkeletonVectorCache(dataset, project_root=str(root), verbose=False).append_vectors(
+            [(body_id, vec, _neuron_rep(neuron))], vector_basis=VECTOR_BASIS_RAW
+        )
+    except Exception:
+        pass
+
+    if persist:
+        # Persist ONLY the simplified skeleton (raw never cached) and mark
+        # the folder's level so level guards can enforce the invariant.
         cache_dir.mkdir(parents=True, exist_ok=True)
         with open(cache_dir / f"{body_id}.pkl", "wb") as f:
-            pickle.dump(neuron, f)
+            pickle.dump(_downsample_for_cache(neuron), f)
+        _write_skeleton_level_marker(dataset, str(root))
+        if level == VECTOR_BASIS_SIMP90:
+            try:
+                return _downsample_for_cache(neuron)
+            except Exception:
+                pass
     return neuron
 
 
@@ -775,8 +1331,10 @@ def download_all_skeletons(dataset: str, project_root: Optional[str] = None,
     Mirrors the Settings-panel full dataset pull: iterates the neuron index
     (allneurons table, neuron index fallback), fetches only the neurons
     missing from ``cache/{dataset}/skeletons/`` (resumable — existing files
-    are skipped), parallel over a thread pool, and persists each skeleton
-    (``persist=True``). ``progress_callback(current, total, info)`` and
+    are skipped), parallel over a thread pool, and persists each skeleton at
+    the fixed simplified cache level (``persist=True``; raw is never
+    persisted, raw vectors are appended at fetch time).
+    ``progress_callback(current, total, info)`` and
     ``cancel_event`` (threading.Event) drive the UI; ``limit`` bounds the
     download (tests / smoke runs). Returns a summary dict.
     """
@@ -917,6 +1475,7 @@ class MorphologyComparer:
         verbose: bool = True,
         n_workers: int = 8,
         use_cache: bool = True,
+        cache_fetched_skeletons: bool = False,
         project_root: Optional[str] = None,
     ):
         self.query = query
@@ -940,6 +1499,9 @@ class MorphologyComparer:
         self.verbose = verbose
         self.n_workers = max(1, int(n_workers))
         self.use_cache = use_cache
+        # Persist transiently-fetched skeletons (profile-first / NBLAST) to
+        # the skeleton cache for reuse; off by default (memory-only fetches).
+        self.cache_fetched_skeletons = bool(cache_fetched_skeletons)
         self.project_root = Path(project_root) if project_root else Path(__file__).parent.parent
 
         if self.level not in ("auto", "bodyid", "type"):
@@ -974,6 +1536,16 @@ class MorphologyComparer:
     def _log(self, msg: str):
         if self.verbose:
             print(msg)
+
+    def _progress(self, step: int, total: int, label: str = ""):
+        """Emit a structured step-progress event consumed by the web UI.
+
+        The line is a control event (determinate bar + step label in the
+        results panel), not log output, and is only emitted when verbose.
+        """
+        if self.verbose:
+            print(f"[DROCAT][progress] {int(step)}/{int(total)} {label}".rstrip(),
+                  flush=True)
 
     # ------------------------------------------------------ candidate source
     def _is_flywire(self) -> bool:
@@ -1040,6 +1612,10 @@ class MorphologyComparer:
         if self.dataset is None:
             raise ValueError("No dataset specified.")
         source = self._resolved_candidate_source()
+        # The step scheme depends on the pipeline: connectivity-first
+        # (NeuPrint) reports 6 steps, vector-cache-direct (FlyWire) 4.
+        total_steps = (PROFILE_FIRST_TOTAL_STEPS if source == "profile"
+                       else CACHE_DIRECT_TOTAL_STEPS)
         self._log(f"Morphological similarity: query={self.query} dataset={self.dataset} "
                   f"method={self.method} level={self.level} metric={self.metric} "
                   f"candidate_source={source}")
@@ -1051,6 +1627,7 @@ class MorphologyComparer:
                 "cache contains meshes. Use the 'vector' method instead."
             )
 
+        self._progress(1, total_steps, "Resolving query neuron")
         query_df = self._resolve_query()
         if self.level == "auto":
             self.level = self._resolve_level(query_df)
@@ -1073,6 +1650,10 @@ class MorphologyComparer:
                         "Profile-first found no candidates; falling back to "
                         "the vector cache."
                     )
+                    self._progress(2, CACHE_DIRECT_TOTAL_STEPS,
+                                   "Loading vector cache (fallback)")
+                    self._progress(3, CACHE_DIRECT_TOTAL_STEPS,
+                                   self._scoring_step_label())
                     if self.method == "vector":
                         bodyid_df, type_df = self._vector_search(query_df, data)
                     else:
@@ -1090,6 +1671,7 @@ class MorphologyComparer:
             # Cache-direct search (FlyWire bulk caches and explicit choice).
             # Skeletons are only ever fetched explicitly (Download All
             # Skeletons); the vector cache builds from what is local.
+            self._progress(2, CACHE_DIRECT_TOTAL_STEPS, "Loading vector cache")
             cache.ensure(fetch_missing=0)
             data = cache.load()
             if data is None or len(data["bodyIds"]) == 0:
@@ -1097,6 +1679,7 @@ class MorphologyComparer:
                     f"No vectorized neurons for {self.dataset}. Build the vector "
                     "cache first (Build Vector Cache button)."
                 )
+            self._progress(3, CACHE_DIRECT_TOTAL_STEPS, self._scoring_step_label())
             if self.method == "vector":
                 bodyid_df, type_df = self._vector_search(query_df, data)
             else:
@@ -1110,7 +1693,16 @@ class MorphologyComparer:
         else:
             self._save_results(results, bodyid_df, type_df, query_df)
             self._visualize_top_results(results)
+        self._progress(total_steps, total_steps,
+                       "Saving results & visualization" if not results.empty
+                       else "Search finished (no similar neurons found)")
         return results
+
+    def _scoring_step_label(self) -> str:
+        """Label for the scoring step (vector vs NBLAST refinement)."""
+        if self.method == "nblast":
+            return "Building dotprops & NBLAST scoring"
+        return "Scoring similarity (vector)"
 
     # ---------------------------------------------------- profile-first
     def _connection_cache_candidates(self, query_df: pd.DataFrame,
@@ -1229,10 +1821,15 @@ class MorphologyComparer:
         bodyIds (type map, safety cap ``max_pool_per_type``) — the scoring
         pool. Fetched skeletons are TRANSIENT (used for the current
         comparison only, never written to the skeleton cache); cached
-        skeletons are reused. Without a vector cache the pool vectors are
-        z-scored with pool-computed statistics so cosine is scale-fair.
+        skeletons are reused. Every scored vector is standardized with ONE
+        consistent set of statistics (cache meta, sample-based population
+        stats, or pool stats as a last resort), and the whole comparison
+        runs at ONE representation level (skeleton vs mesh — rows of any
+        other representation are unscorable).
         """
         self._log("Profile-first search: running connection-cache candidate discovery...")
+        self._progress(2, PROFILE_FIRST_TOTAL_STEPS,
+                       "Discovering candidates (connection cache)")
         candidates = self._connection_cache_candidates(query_df)
         if candidates.empty:
             self._log("Connection-cache search returned no candidates.")
@@ -1252,6 +1849,9 @@ class MorphologyComparer:
         if not keep_types:
             self._log("Connection-cache candidates carry no types.")
             return pd.DataFrame(), pd.DataFrame()
+
+        self._progress(3, PROFILE_FIRST_TOTAL_STEPS,
+                       f"Expanding {len(keep_types)} candidate types to the scoring pool")
 
         # Expand every kept type to ALL its member bodyIds (type map); the
         # union is the scoring pool. Per-type safety cap bounds huge types.
@@ -1275,78 +1875,203 @@ class MorphologyComparer:
             if np.isfinite(v)
         }
 
-        def _load_missing(ids: List[int]) -> Dict[int, "navis.TreeNeuron"]:
-            """Fetch skeletons missing from the cache, kept in memory only."""
+        def _load_missing(ids: List[int], rep: str = "") -> Dict[int, "navis.TreeNeuron"]:
+            """Fetch skeletons missing from the cache, kept in memory only.
+
+            Workflow order: neurons whose VECTOR is already cached need no
+            skeleton at all (``cache_ids``); otherwise a cached skeleton
+            file is reused — but only when its simplification level matches
+            the cache's ``vector_basis`` (post-cleanup NeuPrint caches hold
+            simp90 files while the basis is raw, so those are fetched raw
+            transiently); only the truly missing ones are fetched online.
+            ``rep`` ('skeleton'|'mesh') is the comparison's representation:
+            fetches of any other representation are skipped so levels are
+            never mixed within one comparison.
+            """
             loaded: Dict[int, navis.TreeNeuron] = {}
-            for bid in ids:
-                if _find_skeleton_file(self.dataset, bid, project_root=str(self.project_root)) is not None:
+            n_ids = len(ids)
+            for i, bid in enumerate(ids, start=1):
+                if int(bid) in cache_ids:
+                    continue  # vector already cached: no skeleton needed
+                if (_find_skeleton_file(self.dataset, bid, project_root=str(self.project_root)) is not None
+                        and _skeleton_folder_level(self.dataset, str(self.project_root)) == cache_basis):
                     continue
+                self._progress(4, PROFILE_FIRST_TOTAL_STEPS,
+                               f"Loading skeletons ({i}/{n_ids})")
                 nrn = fetch_skeleton_on_demand(
-                    self.dataset, bid, project_root=str(self.project_root), persist=False
+                    self.dataset, bid, project_root=str(self.project_root),
+                    persist=self.cache_fetched_skeletons,
                 )
                 if nrn is not None:
+                    if rep and _neuron_rep(nrn) != rep:
+                        continue  # different representation: never comparable
                     loaded[bid] = nrn
             return loaded
 
-        # Query skeleton is always ensured (fetched transiently if missing).
+        self._progress(4, PROFILE_FIRST_TOTAL_STEPS, "Loading & vectorizing skeletons")
         query_ids = [int(b) for b in query_df["bodyId"].tolist()]
+
+        cache_data = cache.load()
+        cache_ids = (set(int(b) for b in cache_data["bodyIds"])
+                     if cache_data is not None else set())
+        cache_rep = cache_data.get("dataset_rep", "") if cache_data is not None else ""
+        cache_basis = (((cache_data.get("meta") or {}).get("vector_basis")
+                        or VECTOR_BASIS_RAW) if cache_data is not None
+                       else VECTOR_BASIS_RAW)
+
+        # Query skeleton is always ensured (fetched transiently if missing;
+        # neurons with a cached VECTOR need no fetch at all).
         query_neurons = _load_missing(query_ids)
 
+        # The comparison's representation: the majority among the query
+        # members (cache rows carry the cache's representation).
+        from collections import Counter
+        known_q = []
+        for bid in query_ids:
+            if int(bid) in cache_ids:
+                known_q.append(cache_rep)
+            elif int(bid) in query_neurons:
+                known_q.append(_neuron_rep(query_neurons[int(bid)]))
+        q_rep = Counter(r for r in known_q if r).most_common(1)[0][0] \
+            if any(known_q) else ""
+        if not q_rep:
+            # No cached/fetched query member with a known representation
+            # (e.g. all query rows computed from cache files): infer it from
+            # the dataset's skeleton store.
+            q_rep = _infer_dataset_rep(self.dataset, str(self.project_root))
+
         # Fetch skeletons for pool neurons missing from the cache (bounded,
-        # transient; every pool neuron can trigger a fetch).
-        pool_neurons = _load_missing(pool_ids)
+        # transient; every pool neuron can trigger a fetch). Fetches of a
+        # different representation than the query are skipped.
+        pool_neurons = _load_missing(pool_ids, rep=q_rep)
         self._log(f"Profile-first: {len(pool_ids)} pool neurons, "
                   f"{len(pool_neurons)} skeletons fetched (transient)")
 
         # Vectors for query + pool: cached vectors first, then any
-        # in-memory fetched neurons.
-        X_q, mask_q = cache.vectors_for(query_ids, compute_missing=True)
+        # in-memory fetched neurons. ``reps`` tracks each row's
+        # representation ('skeleton' | 'mesh') so the comparison never mixes
+        # levels.
+        X_q, mask_q, rep_q = cache.vectors_for(query_ids, compute_missing=True)
+        fetched_vectors: List[Tuple[int, np.ndarray, str]] = []
         for i, bid in enumerate(query_ids):
             if not mask_q[i] and bid in query_neurons:
                 _, vec = vectorize_neuron(query_neurons[bid])
                 X_q[i], mask_q[i] = vec, True
-        X_c, mask_c = cache.vectors_for(pool_ids, compute_missing=True)
+                rep_q[i] = _neuron_rep(query_neurons[bid])
+                fetched_vectors.append((int(bid), vec, rep_q[i]))
+        X_c, mask_c, rep_c = cache.vectors_for(pool_ids, compute_missing=True)
         for i, bid in enumerate(pool_ids):
             if not mask_c[i] and bid in pool_neurons:
                 _, vec = vectorize_neuron(pool_neurons[bid])
                 X_c[i], mask_c[i] = vec, True
+                rep_c[i] = _neuron_rep(pool_neurons[bid])
+                fetched_vectors.append((int(bid), vec, rep_c[i]))
+
+        # ALWAYS persist the computed vectors, even when the skeleton itself
+        # was not cached (transient fetch): later queries reuse the vector
+        # without re-fetching or re-vectorizing. Rows of a representation
+        # different from the cache's are rejected inside append_vectors.
+        if fetched_vectors:
+            cache.append_vectors(fetched_vectors, vector_basis=cache_basis)
+
+        # ONE representation per comparison: skeletons and meshes (or two
+        # simplification levels) produce different features in the shared
+        # schema, so rows of any other representation than the query's are
+        # unscorable and stay out of the masks.
+        from collections import Counter
+        known_q = [r for r in rep_q if r]
+        q_rep = Counter(known_q).most_common(1)[0][0] if known_q else ""
+        if q_rep:
+            rep_q = np.array(rep_q)
+            rep_c = np.array(rep_c)
+            mask_q = mask_q & (rep_q == q_rep)
+            mask_c = mask_c & (rep_c == q_rep)
         if not mask_q.any():
             raise ValueError("Could not vectorize the query neuron.")
 
-        # Without a vector cache the vectors are RAW (morphometrics + shape
-        # on very different scales): z-score query + pool with pool-computed
-        # statistics so cosine is scale-fair (constant features -> std 1).
-        cache_data = cache.load()
-        if cache_data is None and (mask_q.any() or mask_c.any()):
-            all_rows = np.vstack([X_q[mask_q], X_c[mask_c]])
-            mu = all_rows.mean(axis=0)
-            sd = all_rows.std(axis=0)
-            sd[sd <= 0] = 1.0
-            X_q[mask_q] = (X_q[mask_q] - mu) / sd
-            X_c[mask_c] = (X_c[mask_c] - mu) / sd
+        # Standardize EVERY scored vector with ONE consistent set of
+        # statistics so cosine is scale-fair (raw morphometrics + shape are
+        # on very different scales). Cache rows are already standardized
+        # with the cache's own meta stats: they are left untouched when
+        # those stats are used, and restored to raw (then re-standardized)
+        # when the stats come from elsewhere. Freshly-computed rows always
+        # receive the chosen transform. A small vector cache carries skewed,
+        # unreliable stats (it is typically built from one query's transient
+        # fetches), so its meta is ignored in favour of sample-based stats,
+        # which extend the sample with a version sibling's skeletons.
+        meta_mu = meta_sd = None
+        if cache_data is not None:
+            meta = cache_data.get("meta") or {}
+            m = meta.get("mean")
+            s = meta.get("std")
+            if m is not None and s is not None:
+                mm = np.asarray(m, dtype=float)
+                ss = np.asarray(s, dtype=float)
+                if mm.shape == (VECTOR_DIM,) and ss.shape == (VECTOR_DIM,):
+                    meta_mu, meta_sd = mm, ss
+
+        using_cache_stats = False
+        if mask_q.any() or mask_c.any():
+            mu = sd = None
+            if (meta_mu is not None
+                    and len(cache_data["bodyIds"]) >= MIN_POPULATION_STATS_SKELETONS):
+                mu, sd, using_cache_stats = meta_mu, meta_sd, True
+            if mu is None:
+                mu, sd = population_stats(self.dataset, str(self.project_root))
+            if mu is None:
+                # Last resort: pool-computed statistics.
+                all_rows = np.vstack([X_q[mask_q], X_c[mask_c]])
+                mu = all_rows.mean(axis=0)
+                sd = all_rows.std(axis=0)
+                sd = np.where(sd <= 0, 1.0, sd)
+
+            cache_q = (np.array([int(b) in cache_ids for b in query_ids])
+                       & mask_q)
+            cache_c = (np.array([int(b) in cache_ids for b in pool_ids])
+                       & mask_c)
+            if using_cache_stats:
+                # Cache rows already use these stats; transform only the
+                # freshly-computed rows (raw -> standardized).
+                X_q[mask_q & ~cache_q] = (X_q[mask_q & ~cache_q] - mu) / sd
+                X_c[mask_c & ~cache_c] = (X_c[mask_c & ~cache_c] - mu) / sd
+            else:
+                # Cache rows carry the cache's own standardization: restore
+                # the raw vectors first so every row gets the same transform.
+                if meta_mu is not None:
+                    X_q[cache_q] = X_q[cache_q] * meta_sd + meta_mu
+                    X_c[cache_c] = X_c[cache_c] * meta_sd + meta_mu
+                X_q[mask_q] = (X_q[mask_q] - mu) / sd
+                X_c[mask_c] = (X_c[mask_c] - mu) / sd
 
         q_vec = X_q[mask_q].mean(axis=0)
         keep = mask_c
         scores = np.full(len(pool_ids), np.nan)
         if keep.any():
+            self._progress(5, PROFILE_FIRST_TOTAL_STEPS,
+                           f"Scoring similarity ({self.method})")
             scores[keep] = similarity_matrix(q_vec, X_c[keep], self.metric)
 
         query_type = query_df["type"].iloc[0] if len(query_df) else ""
-        # Type lookup: vector cache first, then the neuron table / index (so
-        # datasets without a vector cache still get typed results). The
-        # intra-type similarity comes from the vector cache when present,
-        # otherwise from the query members' own vectors (the query type's
-        # members are exactly what a type query resolves).
+        # Type lookup: the full neuron table / index map, with the vector
+        # cache's labels overriding for the neurons it covers (the cache is
+        # freshest there). The old replace-all behaviour silently dropped
+        # every pool neuron outside the cache from the type-level results.
         id_to_type, _ = _load_neuron_type_map(self.dataset, str(self.project_root))
         if cache_data is not None:
-            id_to_type = {int(b): t for b, t in zip(cache_data["bodyIds"], cache_data["types"])}
+            id_to_type.update(
+                {int(b): t for b, t in zip(cache_data["bodyIds"], cache_data["types"])}
+            )
         intra = float("nan")
-        if cache_data is not None and len(cache_data["bodyIds"]):
+        # Intra-type reference, consistent with the standardization above:
+        # with the cache's own stats the cache population supplies it (it
+        # holds every member of the query type); otherwise it comes from
+        # the unified-standardized query vectors.
+        if using_cache_stats and cache_data is not None and len(cache_data["bodyIds"]):
             intra = self._intra_type_similarity(
                 query_type, cache_data["bodyIds"], cache_data["types"],
                 cache_data["X"], self.metric,
             )
-        elif query_type and mask_q.any():
+        if not np.isfinite(intra) and query_type and mask_q.any():
             ok = np.where(mask_q)[0]
             intra = self._intra_type_similarity(
                 query_type,
@@ -1443,6 +2168,7 @@ class MorphologyComparer:
                        cache: SkeletonVectorCache,
                        neurons: Optional[Dict[int, "navis.TreeNeuron"]] = None) -> pd.DataFrame:
         """Replace vector scores with NBLAST scores for the fetched candidates."""
+        self._progress(5, PROFILE_FIRST_TOTAL_STEPS, "Refining scores with NBLAST")
         cand_ids = [int(b) for b in results["target_bodyId"].tolist()]
         query_dp = self._dotprops_for_ids(
             [int(b) for b in query_df["bodyId"].tolist()], neurons=neurons
@@ -1749,11 +2475,11 @@ class MorphologyComparer:
     def _dotprops_for_ids(self, body_ids: List[int],
                           neurons: Optional[Dict[int, "navis.TreeNeuron"]] = None
                           ) -> Dict[int, Optional["navis.core.dotprop.Dotprops"]]:
-        """Load skeletons and build dotprops in microns (never persisted).
+        """Load skeletons and build dotprops in microns.
 
         ``neurons`` supplies transient in-memory skeletons (profile-first
         fetches) so they are not re-fetched; anything missing is fetched
-        transiently (persist=False)."""
+        (persisted only when ``cache_fetched_skeletons`` is enabled)."""
         out: Dict[int, Optional[navis.core.dotprop.Dotprops]] = {}
         for bid in body_ids:
             nrn = (neurons or {}).get(bid)
@@ -1761,7 +2487,8 @@ class MorphologyComparer:
                 pkl = _find_skeleton_file(self.dataset, bid, project_root=str(self.project_root))
                 if pkl is None:
                     nrn = fetch_skeleton_on_demand(
-                        self.dataset, bid, project_root=str(self.project_root), persist=False
+                        self.dataset, bid, project_root=str(self.project_root),
+                        persist=self.cache_fetched_skeletons,
                     )
                 else:
                     with open(pkl, "rb") as f:
@@ -1816,9 +2543,11 @@ class MorphologyComparer:
         for k, v in params.items():
             readme.append(f"{k}: {v}")
         (run_dir / "README.txt").write_text("\n".join(readme))
-        self._log(f"Results saved to: {run_dir} "
-                  f"({len(bodyid_df)} bodyId rows -> results.csv, "
-                  f"{len(type_df)} type rows -> type_summary.csv)")
+        # The run-folder marker line must carry the path ONLY (the UI parses
+        # the folder by splitting after the marker and checking isdir).
+        self._log(f"Results saved to: {run_dir}")
+        self._log(f"Saved {len(bodyid_df)} bodyId rows -> results.csv, "
+                  f"{len(type_df)} type rows -> type_summary.csv")
         self.output_folder = str(run_dir)
 
     # ------------------------------------------------------------------ viz
@@ -1958,7 +2687,8 @@ def enrich_homolog_results(
         cache = SkeletonVectorCache(
             dataset, project_root=project_root, verbose=verbose
         )
-        return cache.vectors_for(bids, compute_missing=True)
+        X, ok, _ = cache.vectors_for(bids, compute_missing=True)
+        return X, ok
 
     src_ids = [int(b) for b in results_df["source_bodyId"].tolist()]
     tgt_ids = [int(b) for b in results_df["target_bodyId"].tolist()]

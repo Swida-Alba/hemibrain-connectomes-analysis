@@ -163,6 +163,18 @@ def create_find_similar_tab():
                         "the local cache (resumable, persists for reuse). "
                         "FlyWire datasets already have bulk skeletons locally."
                     ).classes("text-caption drocat-muted")
+                with ui.row().classes("items-center gap-2"):
+                    cache_fetched = checkbox_input(
+                        "Cache Fetched Skeletons", False,
+                        hint="Save skeletons fetched transiently during a search "
+                             "(profile-first candidate fetches / NBLAST) to the "
+                             "local skeleton cache so later runs reuse them. "
+                             "Off by default: fetched skeletons stay in memory "
+                             "only (their VECTORS are always cached regardless).",
+                    )
+                    ui.label(
+                        "For a persistent full-morphology pool, prefer 'Download All Skeletons'."
+                    ).classes("text-caption drocat-muted")
 
             def refresh_roi_options():
                 # ROI data availability differs per dataset (male-cns has 114
@@ -417,6 +429,7 @@ def create_find_similar_tab():
             "verbose": True,
             "n_workers": 8,
             "use_cache": True,
+            "cache_fetched_skeletons": cache_fetched.value,
         }
         result = await output_panel.run(
             runner, "find_similar_morphology", constructor_params,
@@ -428,7 +441,7 @@ def create_find_similar_tab():
             "green" if result["returncode"] == 0 else "red",
         )
         output_panel.show_files(
-            result["files"], result.get("output_folder") or output_dir.value
+            result["files"], result.get("output_folder") or morph_output_dir.value
         )
 
     async def run_profile():
@@ -471,7 +484,7 @@ def create_find_similar_tab():
             "green" if result["returncode"] == 0 else "red",
         )
         output_panel.show_files(
-            result["files"], result.get("output_folder") or output_dir.value
+            result["files"], result.get("output_folder") or profile_output_dir.value
         )
 
     async def run_similar():

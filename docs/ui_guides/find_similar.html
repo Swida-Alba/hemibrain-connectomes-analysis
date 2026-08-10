@@ -53,7 +53,11 @@
       <b>types</b> are kept and expanded to <b>all their member neurons</b>;
       skeletons are then fetched for the pool (transient) and morphology is
       compared. FlyWire datasets (which have bulk mesh caches) search the
-      vector cache directly (full-morphology).</li>
+      vector cache directly (full-morphology). All scores are computed at
+      <b>one consistent representation level</b>: skeleton and mesh neurons
+      (or two simplification levels) are never mixed in a single
+      comparison — neurons cached or fetched at a different level than the
+      query are simply not scored.</li>
     <li><b>profile</b>: always connectivity-expanded (all datasets).</li>
     <li><b>cache</b>: full-morphology over the complete local skeleton
       population (download skeletons first — see below).</li>
@@ -61,16 +65,23 @@
   <p><b>Candidate Expansion (×)</b> (default 3) controls the type-level
     expansion: with <code>top_n=10</code> the top 30 connectivity-similar
     types are kept and every member of those types enters the scoring pool
-    (per-type safety cap 100). Fetched skeletons are <b>transient</b> — used
-    for the current comparison only and never written to the skeleton cache;
-    already-cached skeletons are reused and the query neuron is always
-    fetched if missing. <b>ROI Filter</b> (shown when the dataset's
-    connection cache carries synapse location data — male-cns has 114 ROIs
-    like <code>AL(L)</code>, hemibrain has none) restricts candidate
-    discovery to synapse rows in the selected ROIs. Results carry both
-    <code>profile_similarity</code> (normalized shared-partner count) and
-    <code>similarity</code> (morphology) scores. If no candidates are found,
-    the search falls back to the vector cache when available.</p>
+    (per-type safety cap 100). Fetched skeletons are <b>transient</b> by
+    default — used for the current comparison only and never written to the
+    skeleton cache; the <b>Cache Fetched Skeletons</b> option saves them to
+    the local cache for reuse (for a persistent full-morphology pool prefer
+    <b>Download All Skeletons</b>). Either way the computed <b>vectors</b>
+    are always persisted into the vector cache — the lookup order is
+    vector cache, then cached skeleton file, then online fetch, and a
+    fetched neuron is never vectorized twice. Already-cached skeletons are
+    reused and the query neuron is always fetched if missing. <b>ROI
+    Filter</b> (shown
+    when the dataset's connection cache carries synapse location data —
+    male-cns has 114 ROIs like <code>AL(L)</code>, hemibrain has none)
+    restricts candidate discovery to synapse rows in the selected ROIs.
+    Results carry both <code>profile_similarity</code> (normalized
+    shared-partner count) and <code>similarity</code> (morphology) scores. If
+    no candidates are found, the search falls back to the vector cache when
+    available.</p>
 
   <h2>Full-morphology mode &amp; skeleton download</h2>
   <p><b>Download All Skeletons</b> fetches every missing skeleton of the

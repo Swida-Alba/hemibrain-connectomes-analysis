@@ -4965,11 +4965,30 @@ class VisualizeSkeleton:
         
         return extrusion_ids
     
-    def _load_cached_neurons(self, neuron_df, transformed_target=None):
+    def _skeleton_cache_is_simplified(self) -> bool:
+        """True when the skeleton cache holds the fixed simplified level.
+
+        Reads the ``skeletons/.level`` marker written by the cache pipeline
+        (morphology.fetch_skeleton_on_demand and ``_save_cached_neurons``);
+        a missing marker means the cache predates the marker (raw).
+        """
+        marker = os.path.join(self._get_cache_path('skeletons'), '.level')
+        try:
+            with open(marker) as f:
+                return f.read().strip() == 'simp90'
+        except Exception:
+            return False
+
+    def _load_cached_neurons(self, neuron_df, transformed_target=None,
+                             ignore_cache=False):
         """Load cached neuron skeletons if available.
-        
+
         Loads individual {bodyId}.pkl files from cache/{dataset}/skeletons/
-        
+        (NeuPrint caches hold the fixed 90%-simplified skeletons). With
+        ``ignore_cache=True`` (less-simplified render, NeuPrint only) every
+        neuron is reported missing so the caller re-fetches RAW skeletons
+        transiently; the simplified cache is still written from that fetch.
+
         Returns:
             tuple: (navis.NeuronList or None, list of missing bodyIds)
         """
@@ -4985,6 +5004,9 @@ class VisualizeSkeleton:
         missing_ids = []
         
         for bid in body_ids:
+            if ignore_cache:
+                missing_ids.append(bid)
+                continue
             cache_file = os.path.join(cache_dir, f'{bid}.pkl')
             if os.path.exists(cache_file):
                 try:
@@ -5009,12 +5031,20 @@ class VisualizeSkeleton:
     
     def _save_cached_neurons(self, neuron_df, neuron_vols):
         """Save neuron skeletons to cache as individual {bodyId}.pkl files.
-        
+
+        NeuPrint skeletons are cached ONLY at the fixed 90%-simplified level
+        (``navis.downsample_neuron`` factor 10): the raw skeleton is never
+        persisted, and the folder's ``.level`` marker is written so the
+        morphology pipeline's level guards stay consistent.
+
         Saves each neuron as a separate file for better reusability.
         """
         if not self.cache_neurons:
             return
         
+        is_neuprint = not (self.client_type == 'flywire'
+                           or 'flywire' in self.dataset.lower()
+                           or 'fafb' in self.dataset.lower())
         cache_dir = self._get_cache_path('skeletons')
         
         import pickle
@@ -5035,13 +5065,43 @@ class VisualizeSkeleton:
                     if os.path.exists(cache_file):
                         continue
                     
+                    # NeuPrint: persist ONLY the simplified skeleton (raw is
+                    # never cached); the morphology pipeline vectorizes the
+                    # raw skeleton on its next fetch instead.
+                    to_store = neuron
+                    if is_neuprint and hasattr(neuron, 'nodes'):
+                        try:
+                            # A multi-node "soma" (navis' radius>=1 detection
+                            # on nm radii) would freeze the skeleton at full
+                            # resolution during downsampling.
+                            soma = getattr(neuron, 'soma', None)
+                            if soma is not None and hasattr(soma, '__len__') and len(soma) > 1:
+                                neuron = neuron.copy()
+                                neuron.soma = None
+                            to_store = navis.downsample_neuron(
+                                neuron, downsampling_factor=self.NEUPRINT_SKELETON_DOWNSAMPLE
+                            )
+                        except Exception:
+                            to_store = neuron
+                    
                     with open(cache_file, 'wb') as f:
-                        pickle.dump(neuron, f)
+                        pickle.dump(to_store, f)
                     saved_count += 1
                 except Exception as e:
                     self._vprint(f'  ⚠ Failed to save skeleton {bid}: {e}')
         
         if saved_count > 0:
+            if is_neuprint:
+                # Mark the folder's simplification level (idempotent);
+                # only the NeuPrint path writes simplified skeletons.
+                try:
+                    marker = os.path.join(cache_dir, '.level')
+                    if not os.path.exists(marker):
+                        os.makedirs(cache_dir, exist_ok=True)
+                        with open(marker, 'w') as f:
+                            f.write('simp90\n')
+                except Exception:
+                    pass
             self._vprint(f'  💾 Saved {saved_count} new neurons to cache', level='full')
     
     # Cache stores meshes simplified with soma-aware parameters
@@ -5049,6 +5109,14 @@ class VisualizeSkeleton:
     # Soma: 0.8 simplification (keep 20% of faces) to prevent extrusion artifacts
     FAFB_MESH_CACHE_SIMPLIFICATION = 0.95  # Skeleton simplification level
     FAFB_MESH_CACHE_SOMA_SIMPLIFICATION = 0.8  # Gentler simplification for soma region
+
+    # NeuPrint skeletons are cached ONLY at the fixed 90%-simplified level
+    # (``navis.downsample_neuron`` factor 10, keeps ~10% of nodes): raw
+    # skeletons are never persisted. Rendering at >= this level skips the
+    # render-time decimation (the tube mesh is already at the cache level);
+    # rendering below it transiently re-fetches RAW skeletons instead.
+    NEUPRINT_SKELETON_CACHE_LEVEL = 0.9
+    NEUPRINT_SKELETON_DOWNSAMPLE = 10
     FAFB_MESH_CACHE_SOMA_RADIUS = 20000  # 20µm radius around soma for gentler simplification
     
     def _get_fafb_mesh_cache_key(self):
@@ -5955,8 +6023,16 @@ class VisualizeSkeleton:
                 if cached_mesh_neurons:
                     self._vprint(f'    ✓ {len(cached_mesh_neurons)}/{len(layer_body_ids)} from mesh cache', level='full', use_tqdm=True)
             
-            # Load from raw cache (for non-FAFB datasets)
-            cache_result = self._load_cached_neurons(self.neuron_dfs[i])
+            # Load from raw cache (for non-FAFB datasets). NeuPrint caches
+            # hold the fixed 90%-simplified skeletons; a less-simplified
+            # render (< 0.9) is too coarse for them, so the cache is ignored
+            # and the RAW skeletons are re-fetched transiently (the
+            # simplified cache is still written from the same fetch).
+            ignore_skeleton_cache = (not is_fafb and self.skeleton_mode == 'tube'
+                                     and self.skeleton_mesh_simplification
+                                     < self.NEUPRINT_SKELETON_CACHE_LEVEL)
+            cache_result = self._load_cached_neurons(self.neuron_dfs[i],
+                                                     ignore_cache=ignore_skeleton_cache)
             cached_neurons, missing_ids = cache_result
             
             # Check and fix MANC scaling for cached neurons (handling legacy cache)
@@ -6450,7 +6526,17 @@ class VisualizeSkeleton:
             # Simplify individual neurons if requested (and not merging)
             # Simplify individual neurons if requested
             # Skip for FAFB - already handled in the FAFB-specific block above
-            if self.skeleton_mesh_simplification > 0 and self.skeleton_mode == 'tube' and not fafb_already_simplified:
+            # NeuPrint: on-disk skeletons are ALREADY at the fixed
+            # 90%-simplified cache level; when the requested simplification
+            # is at or above that level, the render-time decimation is
+            # skipped — otherwise the tube mesh would be decimated twice
+            # (10% nodes -> ~1% faces). Below that level the render ran on
+            # transient RAW fetches and decimates at the user's level.
+            render_simplification = self.skeleton_mesh_simplification
+            if (not is_fafb and self._skeleton_cache_is_simplified()
+                    and render_simplification >= self.NEUPRINT_SKELETON_CACHE_LEVEL):
+                render_simplification = 0.0
+            if render_simplification > 0 and self.skeleton_mode == 'tube' and not fafb_already_simplified:
                 try:
                     import trimesh
                     simplified_neurons = []
@@ -6483,7 +6569,7 @@ class VisualizeSkeleton:
                             if mesh_n and hasattr(mesh_n, 'trimesh'):
                                 n_faces = len(mesh_n.trimesh.faces)
                                 total_original_faces += n_faces
-                                target_faces = max(100, int(n_faces * (1 - self.skeleton_mesh_simplification)))  # Keep at least 100 faces
+                                target_faces = max(100, int(n_faces * (1 - render_simplification)))  # Keep at least 100 faces
                                 if target_faces < n_faces:
                                     # Use open3d for accurate simplification (trimesh 4.x fast_simplification only achieves ~60%)
                                     # Create NEW MeshNeuron from simplified trimesh (can't just assign to .trimesh)
