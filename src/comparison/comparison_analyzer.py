@@ -625,6 +625,8 @@ class ComparisonAnalyzer:
             skip_bodyId=self.parameters.skip_bodyId,  # Skip bodyId-level processing if requested
             label_mapper=self.label_mapper,  # Pass label mapper for standardization
             pathfinding=self.parameters.pathfinding,  # Pass pathfinding algorithm
+            graph_edge_limit_bodyid=self.parameters.graph_edge_limit_bodyid,  # bodyId edge limit (deep searches)
+            edgeN_limit=self.parameters.edgeN_limit,  # Visualization Edge Limit
             search_columns=self.parameters.search_columns,  # Column scope for neuron name resolution
             force_API_fetching=use_force_api,  # Use CAVE API for FAFB if enabled
             cache_only=self.parameters.cache_only,  # Use cache-only mode if enabled

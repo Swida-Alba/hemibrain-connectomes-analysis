@@ -566,7 +566,7 @@ params = ComparisonParameters(
 
 analyzer = ComparisonAnalyzer(params, verbose=True)
 analyzer.run_comparison()
-analyzer.generate_report()
+analyzer.export_results()
 
 print("[DROCAT] Done.")
 '''

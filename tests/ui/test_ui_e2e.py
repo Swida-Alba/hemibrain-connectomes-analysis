@@ -241,6 +241,10 @@ class TestRunner:
         script = sr._generate_inter_dataset_script({"datasets": ["a", "b"]}, None)
         assert "ComparisonParameters" in script
         assert "ComparisonAnalyzer" in script
+        # the run must EXPORT the results (report files, comparison_results/,
+        # visualizations) — generate_report() alone only builds the text
+        assert "export_results()" in script
+        assert "generate_report()" not in script
 
     def test_generate_neuronbridge_script(self):
         from ui.runner import ScriptRunner
@@ -1567,10 +1571,31 @@ class TestTabs:
             if getattr(el, "text", "")
         ]
         all_text = labels + texts
-        assert "Limit Graph Edges (strongest only)" in all_text
-        assert "Edge Limit – Types/Groups" in all_text
+        # only the bodyId-level pan-graph edge limit remains in the UI:
+        # type-level paths are derived from the bodyId discovery and
+        # custom-group paths are found on the full group table (no limits)
         assert "Edge Limit – BodyIds" in all_text
+        limits = {}
+        for el in client.elements.values():
+            label = getattr(el, "_props", {}).get("label")
+            if label == "Edge Limit – BodyIds":
+                limits[label] = el
+        assert limits["Edge Limit – BodyIds"].value == 1000000, limits
+        # the bodyId edge limit only applies to deep searches: with the
+        # default Layers = 2 the control starts DISABLED
+        assert limits["Edge Limit – BodyIds"]._props.get("disable") is True
+        # the type/group edge-limit controls are gone from the UI
+        assert "Limit Graph Edges" not in all_text
+        assert "Edge Limit – Groups" not in all_text
+        assert "Edge Limit – Types/Groups" not in all_text
         assert "Visualize Network Before Reconstruction" in all_text
+        # the early-visualization checkbox is OFF by default (matched via its
+        # stable id; the checkbox label itself is client-side slot text)
+        early_viz = [
+            el for el in client.elements.values()
+            if getattr(el, "_props", {}).get("id") == "checkbox-early-viz"
+        ]
+        assert early_viz and early_viz[0].value is False
         # the deep-layer warning label exists (hidden until layers >= 4)
         assert any("Layers ≥ 4" in t for t in texts), "deep-layer warning missing"
 
@@ -1603,6 +1628,14 @@ class TestTabs:
                 break
         else:
             raise AssertionError("Top Lines for Images control not found")
+
+        # 'From FlyLight' image download is ON by default (matched via its
+        # stable id; checkbox labels are client-side slot text)
+        flylight = [
+            el for el in client.elements.values()
+            if getattr(el, "_props", {}).get("id") == "checkbox-flylight"
+        ]
+        assert flylight and flylight[0].value is True, "From FlyLight default must be checked"
 
     def test_pathfinding_tabs_have_hemisphere_filter_select(self):
         """Find All Paths and Find Direct expose the 'Hemisphere' selector
@@ -1695,6 +1728,33 @@ class TestTabs:
             for el in client.elements.values()
         ]
         assert "card-network" not in ids
+
+    def test_interdataset_symmetry_off_without_hemispheres(self):
+        """Regression: the cross-dataset tab must NOT pass symmetry_analysis=True
+        (or keep-hemisphere-conserved) when Separate Hemispheres is unchecked —
+        the dependent checkboxes are unchecked AND disabled by default, so a
+        greyed-out True never reaches ComparisonParameters."""
+        from nicegui import Client
+        from nicegui.page import page
+        from ui.tabs.inter_dataset import create_inter_dataset_tab
+
+        client = Client(page("/interdataset-symmetry"))
+        with client:
+            create_inter_dataset_tab()
+        by_id = {}
+        for el in client.elements.values():
+            pid = getattr(el, "_props", {}).get("id")
+            if pid:
+                by_id[pid] = el
+        sep = by_id["checkbox-separate-hemi"]
+        sym = by_id["checkbox-symmetry"]
+        cons = by_id["checkbox-hemi-conserved"]
+        assert sep.value is False
+        # symmetry is unchecked AND disabled while hemispheres are off
+        assert sym.value is False, "symmetry must be unchecked without hemispheres"
+        assert sym._props.get("disable") is True
+        assert cons.value is False
+        assert cons._props.get("disable") is True
 
 
 
@@ -2383,7 +2443,11 @@ class TestHTTPServer:
                         assert "DROCAT" in html
                         assert "drocat-cobalt" in html
                         break
-                except urllib.error.URLError as error:
+                except (urllib.error.URLError, OSError) as error:
+                    # urlopen+read share the 1s socket timeout; a slow first
+                    # render of the ~680 KB DROCAT page can exceed it and
+                    # raise a bare TimeoutError (an OSError, NOT wrapped in
+                    # URLError) — retry until the deadline either way.
                     if time.monotonic() >= deadline:
                         pytest.fail(f"UI server did not become ready: {error}")
                     time.sleep(0.2)

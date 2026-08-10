@@ -116,6 +116,25 @@ def create_inter_dataset_tab():
                         "Max Workers", 4, 1, 16,
                         hint="Number of parallel workers (only used when Parallel Processing is on).",
                     )
+                with param_grid(2):
+                    edge_limit_bodyid = number_input(
+                        "Edge Limit – BodyIds", 1000000, 100, 1000000000,
+                        hint="Top-N strongest non-reserved edges kept in the bodyId-level "
+                             "graph of the FindAllPath runs (source/target edges are always "
+                             "kept in addition). Applied only when Layers ≥ 3 (deep searches); "
+                             "shallow runs keep the complete graph. 0 = unlimited.",
+                    )
+                    edge_limit_viz = number_input(
+                        "Visualization Edge Limit", 500, 10, 5000,
+                        hint="Maximum edges drawn per visualization (network / Sankey / "
+                             "heatmap) in the FindAllPath runs. Limits memory usage for "
+                             "highly connected neurons.",
+                    )
+                    # the bodyId edge limit only applies to deep searches
+                    edge_limit_bodyid.set_enabled((max_interlayer.value or 0) >= 3)
+                    max_interlayer.on_value_change(
+                        lambda e: edge_limit_bodyid.set_enabled((e.value or 0) >= 3)
+                    )
 
         with ui.card().classes("w-full drocat-card").props('id="card-interdataset-hemisphere"'):
             section_header("Hemisphere Analysis", "sync_alt")
@@ -123,15 +142,15 @@ def create_inter_dataset_tab():
                 separate_hemi = checkbox_input(
                     "Separate Hemispheres (L/R)", False,
                     hint="Split type/group aggregation into _L/_R/_U hemisphere labels.",
-                )
+                ).props('id=checkbox-separate-hemi')
                 keep_hemi_conserved = checkbox_input(
                     "Keep Only Hemisphere-Conserved Edges", False,
                     hint="Keep only edges conserved between hemispheres (requires Separate Hemispheres).",
-                )
+                ).props('id=checkbox-hemi-conserved')
                 symmetry_analysis = checkbox_input(
                     "Symmetry Analysis", True,
                     hint="Generate per-dataset hemisphere symmetry summaries (auto-enabled with Separate Hemispheres).",
-                )
+                ).props('id=checkbox-symmetry')
                 find_reciprocal = checkbox_input(
                     "Find Reciprocal Connections", False,
                     hint="Build reciprocal graphs and include them in reports.",
@@ -140,9 +159,15 @@ def create_inter_dataset_tab():
                 if separate_hemi.value:
                     keep_hemi_conserved.enable()
                     symmetry_analysis.enable()
+                    # auto-enabled with Separate Hemispheres (per the hint)
+                    symmetry_analysis.value = True
                 else:
+                    # uncheck + disable the hemisphere-dependent options so a
+                    # greyed-out True is never passed to the backend
                     keep_hemi_conserved.disable()
+                    keep_hemi_conserved.value = False
                     symmetry_analysis.disable()
+                    symmetry_analysis.value = False
             separate_hemi.on_value_change(lambda _e: _sync_hemisphere_options())
             _sync_hemisphere_options()
 
@@ -199,6 +224,8 @@ def create_inter_dataset_tab():
             "max_interlayer": int(max_interlayer.value),
             "thresholds": thresholds,
             "top_edges": int(top_edges.value),
+            "graph_edge_limit_bodyid": int(edge_limit_bodyid.value),
+            "edgeN_limit": int(edge_limit_viz.value),
             "pathfinding": pathfinding.value,
             "search_columns": search_columns.value,
             "skip_bodyId": skip_bodyid.value,

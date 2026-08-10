@@ -168,6 +168,15 @@ class ComparisonParameters:
     
     top_edges: int = -1
     """Number of top edges for visualization focus. -1 means include all edges."""
+
+    graph_edge_limit_bodyid: int = 1000000
+    """Pan-graph edge limit for the bodyId-level graph in the FindAllPath
+    runs (applied only for max_interlayer >= 3, where the path count grows
+    combinatorially; 0 = complete graph)."""
+
+    edgeN_limit: int = 500
+    """Visualization Edge Limit passed to the FindAllPath visualizations
+    (network / Sankey / heatmap — maximum edges drawn per visualization)."""
     
     overall_label_mapper: Optional[Any] = None
     """LabelMapper object or configuration for defining source, target, and intermediate neuron labels."""
@@ -512,7 +521,8 @@ class ComparisonParameters:
             if self.symmetry_analysis:
                 if self.verbose:
                     print("\033[33m⚠️  Note: symmetry_analysis requires separate_hemispheres=True to produce meaningful results.\n"
-                          "   Symmetry section will show a notice in the HTML report.\033[0m")
+                          "   Setting symmetry_analysis=False.\033[0m")
+                self.symmetry_analysis = False
         
         # Validate comparison_mode
         valid_modes = ['path', 'edge']
@@ -1211,6 +1221,8 @@ class ComparisonParameters:
             'thresholds': self.thresholds,
             'max_interlayer': self.max_interlayer,
             'top_edges': self.top_edges,
+            'graph_edge_limit_bodyid': self.graph_edge_limit_bodyid,
+            'edgeN_limit': self.edgeN_limit,
             'comparison_mode': self.comparison_mode,
             'pathfinding': self.pathfinding,
             
@@ -1349,6 +1361,8 @@ class ComparisonParameters:
             max_interlayer=data.get('max_interlayer', 2),
             thresholds=data.get('thresholds', [1, 3, 5, 10, 20]),
             top_edges=data.get('top_edges', 50),
+            graph_edge_limit_bodyid=data.get('graph_edge_limit_bodyid', 1000000),
+            edgeN_limit=data.get('edgeN_limit', 500),
             comparison_mode=data.get('comparison_mode', 'path'),
             
             # Verification settings
