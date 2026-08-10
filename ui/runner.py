@@ -38,7 +38,17 @@ _ANSI_ESCAPE_RE = re.compile(
 
 # tqdm-style progress bar line, e.g.
 # "Building target profiles:  45%|████▍       | 1328/2972 [00:05<00:06, 252.17it/s]"
-_PROGRESS_LINE_RE = re.compile(r"^\s*.*?\d+%\|.*\|\s*\d+/\d+\s*\[.*\]\s*$")
+# tqdm bars with a total:   desc 100%|████| 1234/2635 [00:12<00:05, 210.0it/s]
+# tqdm bars WITHOUT a total (unit counters, e.g. "Processing paths"):
+#   desc: 13295222path [00:28, 735242.01path/s]
+# Both are single-line refreshes that should update one log line in place.
+_PROGRESS_LINE_RE = re.compile(
+    r"^\s*(?:"
+    r".*?\d+%\|.*\|\s*\d+/\d+\s*\[.*\]"   # with total (n/N + %)
+    r"|"
+    r".*?:\s*\d+(?:\.\d+)?(?:path|it|file)s?\s*\[[^\]]*\]"  # unit counter
+    r")\s*$"
+)
 
 
 class _OutputSplitter:

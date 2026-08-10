@@ -195,6 +195,30 @@ class TestRunner:
         parts = list(splitter.feed("[HomologFinder] Loaded cache\r\n"))
         assert parts == [("[HomologFinder] Loaded cache", False)]
 
+    def test_output_splitter_classifies_unit_counter_bars(self):
+        """tqdm bars WITHOUT a total (e.g. 'Processing paths: 13295222path
+        [00:28, ...]') must be progress lines — not stderr warnings with a
+        '[WARN] ' prefix — so they update one line in place."""
+        from ui.runner import _OutputSplitter
+
+        splitter = _OutputSplitter()
+        parts = list(splitter.feed(
+            "Processing paths: 0path [00:00, ?path/s]\n"
+            "Processing paths: 36950path [00:00, 369481.85path/s]\n"
+            "Processing paths: 13369202path [00:28, 736577.89path/s]\n"
+            "⚠️  Warning: something real\n"
+        ))
+        assert parts == [
+            ("Processing paths: 0path [00:00, ?path/s]", True),
+            ("Processing paths: 36950path [00:00, 369481.85path/s]", True),
+            ("Processing paths: 13369202path [00:28, 736577.89path/s]", True),
+            ("⚠️  Warning: something real", False),
+        ]
+        # the in-place refresh groups all three under the same bar name
+        from ui.components.output_panel import _progress_bar_name
+        assert _progress_bar_name("Processing paths: 13369202path [00:28, ...]") == \
+            "Processing paths"
+
     def test_generate_find_path_script(self):
         from ui.runner import ScriptRunner
         sr = ScriptRunner()
@@ -1839,6 +1863,45 @@ class TestComponents:
         panel.log("done   ", "stdout")
         assert len(children) == 5
         assert children[4].text == "done"
+
+    def test_output_panel_step_progress_events_drive_determinate_bar(self):
+        """[DROCAT][progress] events switch the bar to a determinate step
+        fraction, set the step label, and never appear in the log."""
+        from nicegui import Client
+        from nicegui.page import page
+        from ui.components.output_panel import OutputPanel
+
+        client = Client(page("/output-panel-step-progress-test"))
+        with client:
+            panel = OutputPanel("Test")
+            panel.create()
+            # Indeterminate bar, like a live run (set_running(True) needs an
+            # event loop for its scrollIntoView JS, so set it directly here).
+            panel.progress_bar.props("indeterminate")
+
+        # The event is consumed: bar value + label update, no log line.
+        panel.log("[DROCAT][progress] 1/6 Resolving query neuron", "stdout")
+        assert panel.progress_bar.value == pytest.approx(1 / 6)
+        assert panel.progress_label.text == "Step 1/6 — Resolving query neuron"
+        assert panel.log_area.default_slot.children == []
+
+        # A later step moves the bar forward and replaces the label.
+        panel.log("[DROCAT][progress] 3/6 Expanding candidate types to the scoring pool", "stdout")
+        assert panel.progress_bar.value == pytest.approx(0.5)
+        assert panel.progress_label.text == "Step 3/6 — Expanding candidate types to the scoring pool"
+
+        # The final step completes the bar; regular output still logs after.
+        panel.log("[DROCAT][progress] 6/6 Saving results & visualization", "stdout")
+        assert panel.progress_bar.value == pytest.approx(1.0)
+        assert panel.progress_label.text == "Step 6/6 — Saving results & visualization"
+        panel.log("regular line", "stdout")
+        assert len(panel.log_area.default_slot.children) == 1
+        assert panel.log_area.default_slot.children[0].text == "regular line"
+
+        # Ending the run hides the progress row and clears the label.
+        panel.set_running(False)
+        assert panel.progress_label.text == ""
+        assert panel.progress_row.visible is False
 
     def test_output_dir_fields_sync_and_persist(self, tmp_path, monkeypatch):
         """Output-directory fields share one persisted default: setting one

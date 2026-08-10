@@ -14,9 +14,19 @@ from ..runner import open_folder, open_file
 
 
 # Label of a tqdm-style progress bar, e.g. "Building target profiles:" from
-# "Building target profiles:  45%|████▍       | 1328/2972 [00:05<00:06, ...]".
-# Used to refresh the same bar in place instead of appending a new line.
-_PROGRESS_NAME_RE = re.compile(r"^\s*([^%]*?)\s*\d+%\|")
+# "Building target profiles:  45%|████▍       | 1328/2972 [00:05<00:06, ...]"
+# or "Processing paths:" from "Processing paths: 13295222path [00:28, ...]"
+# (unit counters without a total). Used to refresh the same bar in place
+# instead of appending a new line.
+_PROGRESS_NAME_RE = re.compile(
+    r"^\s*([^%]*?)\s*\d+%\||^\s*([^:]*?):\s*\d+(?:\.\d+)?(?:path|it|file)s?\s*\["
+)
+
+# Structured step-progress event emitted by backend pipelines, e.g.
+# "[DROCAT][progress] 2/6 Discovering candidates (connection cache)".
+# Drives the determinate progress bar + step label in the results panel;
+# the line itself is a control event and never appears in the log.
+_PROGRESS_EVENT_RE = re.compile(r"^\[DROCAT\]\[progress\]\s*(\d+)\s*/\s*(\d+)\s*(.*)$")
 
 
 # Sentinel key for the file list inside a folder-tree node.
@@ -26,7 +36,9 @@ _FILES_KEY = "__files__"
 def _progress_bar_name(message: str) -> str:
     """Extract the progress-bar label from a tqdm-style line ('' if none)."""
     match = _PROGRESS_NAME_RE.match(message)
-    return match.group(1).rstrip() if match else ""
+    if not match:
+        return ""
+    return (match.group(1) or match.group(2) or "").rstrip()
 
 
 _STATUS_COLORS = {
@@ -78,6 +90,7 @@ class OutputPanel:
         self.files_container = None
         self.status_label: Optional[ui.badge] = None
         self.progress_bar = None
+        self.progress_label: Optional[ui.label] = None
         self.progress_row = None
         self.run_button: Optional[ui.button] = None
         self.cancel_button: Optional[ui.button] = None
@@ -122,9 +135,12 @@ class OutputPanel:
                 ).classes("drocat-cancel-btn")
                 self.cancel_button.disable()
 
-            # Progress row (visible while running)
-            self.progress_row = ui.row().classes("w-full items-center gap-2 drocat-progress-row")
+            # Progress row (visible while running): step label above the bar.
+            # Backends emit [DROCAT][progress] events to switch the bar from
+            # indeterminate to a determinate step fraction with a label.
+            self.progress_row = ui.column().classes("w-full gap-1 drocat-progress-row")
             with self.progress_row:
+                self.progress_label = ui.label("").classes("text-caption drocat-muted")
                 self.progress_bar = ui.linear_progress(value=0, show_value=False).classes("w-full")
                 self.progress_row.set_visibility(False)
 
@@ -157,6 +173,23 @@ class OutputPanel:
             # whitespace-only residue so the log stays tidy.
             message = message.rstrip()
             if not message:
+                return
+            # Structured step-progress events from the backend drive the
+            # determinate bar + step label; they are control lines, not log
+            # output, so they are consumed here and never pushed to the log.
+            step_match = _PROGRESS_EVENT_RE.match(message)
+            if step_match:
+                self._last_is_progress = False
+                self._last_progress_name = None
+                step = int(step_match.group(1))
+                total = int(step_match.group(2))
+                label = step_match.group(3).strip()
+                if self.progress_bar is not None:
+                    self.progress_bar.props(":indeterminate='false'")
+                    self.progress_bar.value = min(1.0, step / max(1, total))
+                if self.progress_label is not None:
+                    text = f"Step {step}/{total}" + (f" — {label}" if label else "")
+                    self.progress_label.text = text
                 return
             # Progress lines (tqdm-style \r updates) refresh the previous line
             # of the SAME progress bar in place, so long-running functions
@@ -233,6 +266,8 @@ class OutputPanel:
             if self.progress_bar:
                 self.progress_bar.props(":indeterminate='false'")
                 self.progress_bar.value = 1.0 if self._files else 0.0
+            if self.progress_label:
+                self.progress_label.text = ""
 
     def _stop_file_streaming(self):
         """Stop the output-folder polling timer (run finished or cancelled)."""
@@ -281,12 +316,13 @@ class OutputPanel:
         failing the handler and leaving an empty log with a stuck Run button).
         """
         try:
-            # Stream output files during the run: poll every 1.5s.
+            # Stream output files during the run: poll every 1.5s. Started
+            # even without a caller-provided dir: the run folder is resolved
+            # from the backend's own output-folder marker in that case.
             self._stop_file_streaming()
-            if output_dir:
-                self._poll_timer = ui.timer(
-                    1.5, lambda: self._poll_output_files(runner, output_dir)
-                )
+            self._poll_timer = ui.timer(
+                1.5, lambda: self._poll_output_files(runner, output_dir)
+            )
             return await runner.run(
                 tool_name,
                 constructor_params,

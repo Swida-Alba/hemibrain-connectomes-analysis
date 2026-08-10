@@ -2527,6 +2527,20 @@ class HomologFinder:
             else:
                 print(f"[HomologFinder] {msg}")
 
+    def _progress(self, step: int, total: int, label: str = ""):
+        """Emit a structured step-progress event consumed by the web UI.
+
+        The line is a control event (determinate bar + step label in the
+        results panel), not log output. Uses tqdm.write() inside a progress
+        bar so the bar is redrawn after the event.
+        """
+        if self.verbose:
+            msg = f"[DROCAT][progress] {int(step)}/{int(total)} {label}".rstrip()
+            if self._in_progress_bar:
+                tqdm.write(msg)
+            else:
+                print(msg, flush=True)
+
     def _get_type_mapper_for_comparison(self, is_cross_dataset: bool) -> Optional[CrossDatasetTypeMapper]:
         """
         Get the type mapper for cross-dataset comparison if enabled.
@@ -3605,6 +3619,7 @@ class HomologFinder:
             self._log(f"Source bodyId: {query}")
         
         # Build source profiles using memory-efficient method
+        self._progress(1, 4, "Building source profiles")
         self._log(f"Building source profiles for {len(source_bodyids)} neurons...")
         source_profiles = self._build_profiles_memory_safe(
             source_bodyids, 
@@ -3640,6 +3655,7 @@ class HomologFinder:
         self._log(f"Found {len(all_target_bodyids)} neurons in target dataset ({typed_count} typed, {untyped_count} untyped)")
         
         # Build target profiles using memory-efficient method
+        self._progress(2, 4, "Building target profiles")
         target_profiles = self._build_profiles_memory_safe(
             all_target_bodyids,
             target_dataset,
@@ -3671,6 +3687,7 @@ class HomologFinder:
         type_mapper = self._get_type_mapper_for_comparison(is_cross_dataset)
 
         # Run shared comparison core
+        self._progress(3, 4, "Comparing & scoring candidates")
         results_df, intra_type_df, skipped_sources, warned_sources, source_status_map, target_status_map, target_status_counts = self._compare_candidates_core(
             source_bodyids=list(source_profiles.keys()),
             source_profiles_cache=source_profiles,
@@ -3729,6 +3746,7 @@ class HomologFinder:
         results_df = self._enrich_with_morphology(results_df, source_dataset, target_dataset)
 
         # Save results if output_dir is provided
+        self._progress(4, 4, "Saving results")
         if output_dir is not None:
             save_result = self._save_homolog_results_internal(
                 results_df=results_df,
@@ -4997,6 +5015,7 @@ class HomologFinder:
             self._prewarm_profile_cache(target_dataset)
         
         # Step 1: Load connection caches
+        self._progress(1, 6, "Loading connection data")
         self._log("Loading and processing connection data...")
         self._in_progress_bar = True
         try:
@@ -5040,6 +5059,7 @@ class HomologFinder:
                         except Exception:
                             pass
                         
+                        self._progress(2, 6, "Building source profiles")
                         tqdm.write(f"[HomologFinder] Pre-building {len(source_bodyids_early)} source profiles while connections are loaded...")
                         
                         # Build source profiles with deferred writes
@@ -5156,6 +5176,7 @@ class HomologFinder:
                     source_status_map[bid] = status
             else:
                 # Fallback: Build profiles now (may require reloading connection data)
+                self._progress(2, 6, "Building source profiles")
                 self._log("Building source profiles via ConnectivityProfiler (1-hop/2-hop hybrid)")
                 
                 # Consolidate any existing batch files first
@@ -5232,7 +5253,8 @@ class HomologFinder:
             # For both cross-dataset and same-dataset: use adjacency expansion
             # Cross-dataset: find target neurons by TYPE matching (source partner types → target bodyIds)
             # Same-dataset: find target neurons by shared partners
-            
+
+            self._progress(3, 6, "Discovering candidate neurons (adjacency expansion)")
             if is_cross_dataset:
                 # Cross-dataset adjacency expansion using TYPE matching:
                 # Step 1: Get upstream types (A) and downstream types (B) from source neurons
@@ -5396,6 +5418,7 @@ class HomologFinder:
             target_status_map: Dict[int, ConnectivityStatus] = {}  # bodyId -> status
             
             if all_candidate_bodyids:
+                self._progress(4, 6, "Building target profiles")
                 target_profiles_cache = self._build_profiles_batch(
                     list(all_candidate_bodyids),
                     target_dataset,
@@ -5416,6 +5439,7 @@ class HomologFinder:
             type_mapper = self._get_type_mapper_for_comparison(is_cross_dataset)
             
             # Shared comparison core
+            self._progress(5, 6, "Comparing & scoring candidates")
             results_df, intra_type_df, skipped_sources, warned_sources, source_status_map, target_status_map, target_status_counts = self._compare_candidates_core(
                 source_bodyids=source_bodyids,
                 source_profiles_cache=source_profiles_cache,
@@ -5480,6 +5504,7 @@ class HomologFinder:
             save_output_dir = output_dir if output_dir is not None else self.output_dir
             # Attach vector-based morphological similarity (post-search only).
             results_df = self._enrich_with_morphology(results_df, source_dataset, target_dataset)
+            self._progress(6, 6, "Saving results")
             self._save_homolog_results_internal(
                 results_df=results_df,
                 query=query,
@@ -5517,6 +5542,7 @@ class HomologFinder:
         from .connectivity_profiler import ConnectivityStatus
 
         # Build source profile using ConnectivityProfiler (1-hop/2-hop hybrid)
+        self._progress(2, 6, "Building source profile")
         self._log("Building source profile via ConnectivityProfiler (1-hop/2-hop hybrid)")
         source_profile = self.profiler.get_profile(query, source_dataset)
         if source_profile is None:
@@ -5541,6 +5567,7 @@ class HomologFinder:
         }
 
         # Step 3: Find candidates via adjacency expansion (2-hop neighbors, bodyId-level)
+        self._progress(3, 6, "Discovering candidate neurons (adjacency expansion)")
         self._log("Finding candidate field via adjacency expansion (bodyId-level)...")
 
         candidate_map: Dict[int, Dict[int, int]] = {}
@@ -5660,6 +5687,7 @@ class HomologFinder:
             return pd.DataFrame()
 
         # Step 4: Build profiles for all candidates using ConnectivityProfiler (1-hop/2-hop hybrid)
+        self._progress(4, 6, "Building target profiles")
         target_profiles_cache: Dict[int, 'ConnectivityProfile'] = {}
         target_status_counts: Dict[str, int] = {s.value: 0 for s in ConnectivityStatus}
         target_status_map: Dict[int, ConnectivityStatus] = {}
@@ -5683,6 +5711,7 @@ class HomologFinder:
         type_mapper = self._get_type_mapper_for_comparison(is_cross_dataset)
         
         # Step 5: Compare via shared core
+        self._progress(5, 6, "Comparing & scoring candidates")
         results_df, intra_type_df, skipped_sources, warned_sources, source_status_map, target_status_map, target_status_counts = self._compare_candidates_core(
             source_bodyids=source_bodyids,
             source_profiles_cache=source_profiles_cache,
@@ -5782,6 +5811,7 @@ class HomologFinder:
             }
         }
 
+        self._progress(6, 6, "Saving results")
         self._save_homolog_results_internal(
             results_df=results_df,
             query=query,
