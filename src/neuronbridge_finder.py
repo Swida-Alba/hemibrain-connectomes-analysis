@@ -1037,7 +1037,30 @@ class NeuronBridgeFinder:
         """
         import polars as pl
         
-        # Ensure consistent column types before Polars conversion
+        # Normalize every object column before ``pl.from_pandas``:
+        # columns mixing python ints with numeric strings (large bodyId /
+        # rootId values arrive as strings from the API, ints from local
+        # matches) make pyarrow fail with "Could not convert ... tried to
+        # convert to int64". All-numeric columns become numeric; anything
+        # with non-numeric content is forced to strings so inference never
+        # fails. Integer-valued columns beyond int64 stay strings so the
+        # huge IDs never lose precision in float64.
+        for col in combined_df.columns:
+            ser = combined_df[col]
+            if ser.dtype != object:
+                continue
+            numeric = pd.to_numeric(ser, errors='coerce')
+            if numeric.notna().all():
+                if numeric.dtype.kind == 'i':
+                    combined_df[col] = numeric
+                elif (numeric % 1 == 0).all():
+                    combined_df[col] = ser.astype(str)
+                else:
+                    combined_df[col] = numeric
+            else:
+                combined_df[col] = ser.astype(str)
+        
+        # Ensure consistent column types before Polars conversion:
         # bodyId columns can have mixed int/str types (especially FlyWire IDs)
         for col in ['source_bodyId', 'bodyId']:
             if col in combined_df.columns:
@@ -1162,11 +1185,16 @@ class NeuronBridgeFinder:
                 
                 # Sort based on sort_by parameter
                 if sort_by == 'completeness':
+                    # Best coverage of all queries: highest fraction of
+                    # query neurons matched, regardless of score.
+                    line_stats_pl = line_stats_pl.sort('coverage_ratio', descending=True)
+                    self._vprint(f"   📊 Sorting by coverage_ratio (fraction of query neurons matched)")
+                else:
+                    # Default 'max': score-weighted coverage (agg_mean_score
+                    # × coverage_ratio) — rewards both strong matches and
+                    # broad coverage.
                     line_stats_pl = line_stats_pl.sort('weighted_score', descending=True)
                     self._vprint(f"   📊 Sorting by weighted_score (agg_mean_score × coverage_ratio)")
-                else:
-                    line_stats_pl = line_stats_pl.sort('agg_mean_score', descending=True)
-                    self._vprint(f"   📊 Sorting by agg_mean_score (average match scores)")
             elif is_multi_dataset and 'min_score_per_dataset' in line_stats_pl.columns:
                 line_stats_pl = line_stats_pl.sort('min_score_per_dataset', descending=True)
                 self._vprint(f"   📊 Multi-dataset sorting: by min_score_per_dataset")
@@ -1354,11 +1382,16 @@ class NeuronBridgeFinder:
                 line_stats['weighted_score'] = line_stats['agg_mean_score'] * line_stats['coverage_ratio']
                 
                 if sort_by == 'completeness':
+                    # Best coverage of all queries: highest fraction of
+                    # query neurons matched, regardless of score.
+                    line_stats = line_stats.sort_values('coverage_ratio', ascending=False)
+                    self._vprint(f"   📊 Sorting by coverage_ratio (fraction of query neurons matched)")
+                else:
+                    # Default 'max': score-weighted coverage (agg_mean_score
+                    # × coverage_ratio) — rewards both strong matches and
+                    # broad coverage.
                     line_stats = line_stats.sort_values('weighted_score', ascending=False)
                     self._vprint(f"   📊 Sorting by weighted_score (agg_mean_score × coverage_ratio)")
-                else:
-                    line_stats = line_stats.sort_values('agg_mean_score', ascending=False)
-                    self._vprint(f"   📊 Sorting by agg_mean_score (average match scores)")
                 self._vprint(f"      Total query neurons: {total_query_neurons}")
             elif is_multi_dataset:
                 line_stats = line_stats.sort_values('min_score_per_dataset', ascending=False)
@@ -8339,7 +8372,7 @@ class NeuronBridgeFinder:
         sort_by: str = 'max',
         output_dir: Optional[str] = None,
         download_images: Optional[str] = 'flylight',
-        download_img_for_top_n_lines: Optional[int] = 10,
+        download_img_for_top_n_lines: Optional[int] = 30,
         image_formats: Union[str, List[str]] = None,
         image_types: Union[str, List[str]] = 'all',
         max_download_images_per_line: Optional[int] = 12,
@@ -8378,8 +8411,10 @@ class NeuronBridgeFinder:
             If None, uses self.match_type. Default: None
         sort_by : str
             Sorting method for line summary results (case-insensitive):
-            - 'completeness': Sort by weighted_score (prioritizes lines labeling ALL queried neurons)
-            - 'max': Sort by agg_max_score (prioritizes lines with highest individual match scores)
+            - 'max': Sort by weighted_score (agg_mean_score × coverage_ratio —
+              rewards lines with strong matches AND broad coverage). Default.
+            - 'completeness': Sort by coverage_ratio (prioritizes lines
+              labeling ALL queried neurons, regardless of score).
             Default: 'max'
         output_dir : str, optional
             Directory to save results. If provided, saves individual and combined CSVs.
@@ -8391,7 +8426,7 @@ class NeuronBridgeFinder:
             - None/False: No image download (default)
         download_img_for_top_n_lines : int, optional
             Download images only for top N lines (by aggregate score/rank).
-            Default: None (download for all lines)
+            Default: 30 (None downloads for all lines)
         image_formats : str or list
             File formats to download. For neuronbridge: 'png', 'jpg'.
             For flylight: 'png', 'jpg', 'h5j', 'lsm', 'mp4', 'json', 'all'.
@@ -9005,7 +9040,26 @@ class NeuronBridgeFinder:
                             if lines_without_flylight:
                                 self._vprint(f"\n⚠️  Note: No FlyLight images found for {len(lines_without_flylight)} line(s):")
                                 self._vprint(f"   {', '.join(lines_without_flylight)}")
-                                self._vprint("   (tried all categories including MCFO fallback)")
+                                self._vprint("   (tried all categories including MCFO/flweb/RawImages fallbacks)")
+                                
+                                # Last-resort fallback: NeuronBridge images for
+                                # the lines the FlyLight sources missed
+                                # (flylight-only runs; 'both' already covered
+                                # them in the neuronbridge step above).
+                                if download_source == 'flylight':
+                                    self._vprint(f"\n🔄 NeuronBridge fallback for {len(lines_without_flylight)} line(s) without FlyLight images...")
+                                    nb_fb_dir = os.path.join(fl_dir, 'neuronbridge_fallback')
+                                    fb_files = self._download_neuronbridge_images(
+                                        lines=lines_without_flylight,
+                                        output_dir=nb_fb_dir,
+                                        formats=image_formats,
+                                        image_types=image_types,
+                                        max_files=max_download_images_per_line,
+                                        verbose=self.verbose,
+                                    )
+                                    if fb_files:
+                                        self._vprint(f"   ✅ NeuronBridge fallback: {len(fb_files)} files for "
+                                                     f"{len(set(os.path.basename(os.path.dirname(p)) for p in fb_files))} line(s)")
                         
                         # Generate PDF/PPTX summary if images were downloaded
                         # from EITHER source. (Previously nested in the FlyLight
@@ -9420,6 +9474,17 @@ class NeuronBridgeFinder:
         # Split by '-' and try to find region field (MCFO and other formats)
         parts = filename.split('-')
         
+        # flweb CGI imagery (flweb.janelia.org view_flew_imagery.cgi) embeds
+        # the region in the sample tag: fA01b / fA00b (brain) and fA01v /
+        # fA00v (VNC) — e.g. R85D07_AE_01_03-fA01b_C101223_..._total.jpg.
+        # Check the joined name (the tag may sit mid-filename, not on a
+        # '-' boundary).
+        combined_lower = (filename + ' ' + (full_key or '')).lower()
+        if 'fa01b' in combined_lower or 'fa00b' in combined_lower:
+            return 'Brain'
+        if 'fa01v' in combined_lower or 'fa00v' in combined_lower:
+            return 'VNC'
+        
         # VNC-specific keywords (check first to avoid confusion with 'ventral')
         vnc_keywords = ['vnc', 'ventral_nerve_cord', 'metathoracic', 'prothoracic', 'mesothoracic']
         
@@ -9768,6 +9833,34 @@ class NeuronBridgeFinder:
             
             return collected_files
         
+        def get_flweb_fallback_files(line_name: str, max_files_limit: int) -> List:
+            """Fallback: flweb.janelia.org CGI (view_flew_imagery.cgi).
+
+            The FlyLight Expression Web holds expression-pattern imagery for
+            lines that the chosen S3 collections may not cover (e.g. R-lines
+            like R85D07 — https://flweb.janelia.org/cgi-bin/view_flew_imagery.cgi?line=R85D07).
+            Type filters are lenient (projections / all) because the CGI
+            filenames do not carry the S3 'CDM'/'mip' tags; the region and
+            simple-mode filters still apply.
+            """
+            try:
+                from flylight_downloader import FlyLightDownloader
+                dl = FlyLightDownloader(
+                    output_dir=output_dir,
+                    collection_category=None,
+                    formats='all',
+                    image_types='all',
+                    verbose=False
+                )
+                files = dl._get_r_line_files(line_name)
+                files = self._filter_flylight_files_by_region(files)
+                files = apply_simple_mode_filter(files, 'Gen1 GAL4')
+                if max_files_limit:
+                    files = files[:max_files_limit]
+                return files
+            except Exception:
+                return []
+        
         downloaded = []
         
         # Normalize category to list
@@ -9843,10 +9936,32 @@ class NeuronBridgeFinder:
                         {'formats': line_formats, 'image_types': line_image_types},
                         max_files_limit
                     )
-                    if not files:
-                        with warning_lock:
-                            warning_msg = f"⚠️  No images found for {line_name} in any collection (including MCFO)"
-                            self._warning_collector.append(warning_msg)
+                
+                # flweb CGI fallback: expression-pattern imagery on
+                # flweb.janelia.org for lines the collections missed
+                # (e.g. R-lines like R85D07).
+                if not files:
+                    with warning_lock:
+                        warning_msg = f"ℹ️  No files from collections for {line_name}, trying flweb.janelia.org..."
+                        self._warning_collector.append(warning_msg)
+                    files = get_flweb_fallback_files(line_name, max_files_limit)
+                
+                # RawImages collection fallback: raw confocal data on S3.
+                if not files:
+                    with warning_lock:
+                        warning_msg = f"ℹ️  No flweb files for {line_name}, trying RawImages collection..."
+                        self._warning_collector.append(warning_msg)
+                    files = get_files_for_line_sequential(
+                        line_name,
+                        ['RawImages'],
+                        {'formats': line_formats, 'image_types': line_image_types},
+                        max_files_limit
+                    )
+                
+                if not files:
+                    with warning_lock:
+                        warning_msg = f"⚠️  No images found for {line_name} in any collection (including MCFO/flweb/RawImages)"
+                        self._warning_collector.append(warning_msg)
                 
                 return (line_name, files)
             except Exception:

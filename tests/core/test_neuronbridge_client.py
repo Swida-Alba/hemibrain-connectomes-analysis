@@ -133,3 +133,114 @@ def test_client_url_encodes_lookup_ids():
 
     assert client.get_lm_images("line/with space") == []
     assert session.urls[-1] == lookup_url
+
+
+def test_aggregate_results_polars_mixed_bodyid_columns():
+    """Columns mixing python ints with numeric strings (large bodyId /
+    rootId values from the API vs ints from local matches) must not crash
+    the Polars conversion with ArrowInvalid."""
+    import pandas as pd
+    from neuronbridge_finder import NeuronBridgeFinder
+
+    finder = object.__new__(NeuronBridgeFinder)
+    finder.separate_splitgal4 = False
+    finder._vprint = lambda *a, **k: None
+
+    df = pd.DataFrame({
+        "line": ["KCab-p", "KCab-p", "MBON01"],
+        "score": [0.9, 0.8, 0.7],
+        "source_bodyId": ["123", "456", "789"],
+        "bodyId": [12345, "2881486496092082187", 999],   # mixed int/str
+        "rootId": ["2881486496092082187", 42, "77"],     # mixed str/int
+        "label": ["a", "b", 3],                          # mixed labels
+        "huge": ["99999999999999999999999", "1", "2"],   # beyond int64
+    })
+    combined, line_stats = finder._aggregate_results_polars(df, "cds", False, "max")
+    assert not combined.empty and len(line_stats) == 2
+    # bodyId columns stay strings (explicit contract); other all-numeric
+    # columns become exact int64; mixed labels stay strings; huge IDs are
+    # preserved exactly (never rounded through float64).
+    assert combined["source_bodyId"].dtype == object
+    assert combined["bodyId"].dtype == object
+    assert combined["rootId"].dtype.kind == "i"
+    assert combined["label"].dtype == object
+    assert combined["huge"].iloc[0] == "99999999999999999999999"
+    # the aggregation still computes per-line stats
+    assert set(line_stats.columns) >= {"line", "match_count", "agg_mean_score"}
+
+
+def test_line_stats_sorted_by_weighted_score_for_max():
+    """sort_by='max' (default) ranks lines by weighted_score
+    (agg_mean_score × coverage_ratio), not by the raw mean."""
+    import pandas as pd
+    from neuronbridge_finder import NeuronBridgeFinder
+
+    finder = object.__new__(NeuronBridgeFinder)
+    finder.separate_splitgal4 = False
+    finder._vprint = lambda *a, **k: None
+
+    # A: 3 matches @ 0.6  -> mean 0.60, coverage 3/4, weighted 0.450
+    # B: 2 matches @ 0.95 -> mean 0.95, coverage 2/4, weighted 0.475
+    # 'max' must prefer B (higher weighted) even though A covers more.
+    df = pd.DataFrame({
+        "line": ["A", "A", "A", "B", "B"],
+        "score": [0.6, 0.6, 0.6, 0.95, 0.95],
+        "source_bodyId": ["q1", "q2", "q3", "q1", "q2"],
+    })
+    _, line_stats = finder._aggregate_results_polars(df, "cds", False, "max")
+    assert line_stats["line"].tolist() == ["B", "A"]
+    w = dict(zip(line_stats["line"], line_stats["weighted_score"]))
+    assert w["B"] > w["A"]
+
+
+def test_line_stats_sorted_by_coverage_ratio_for_completeness():
+    """sort_by='completeness' ranks lines by coverage_ratio (fraction of
+    query neurons matched), regardless of score."""
+    import pandas as pd
+    from neuronbridge_finder import NeuronBridgeFinder
+
+    finder = object.__new__(NeuronBridgeFinder)
+    finder.separate_splitgal4 = False
+    finder._vprint = lambda *a, **k: None
+
+    # Same data as above: A covers 3/4, B only 2/4 but scores higher.
+    df = pd.DataFrame({
+        "line": ["A", "A", "A", "B", "B"],
+        "score": [0.6, 0.6, 0.6, 0.95, 0.95],
+        "source_bodyId": ["q1", "q2", "q3", "q1", "q2"],
+    })
+    _, line_stats = finder._aggregate_results_polars(df, "cds", False, "completeness")
+    assert line_stats["line"].tolist() == ["A", "B"]
+    c = dict(zip(line_stats["line"], line_stats["coverage_ratio"]))
+    assert c["A"] > c["B"]
+
+
+def test_parse_region_from_filename_flweb_tags():
+    """flweb CGI imagery embeds the region in the sample tag
+    (fA01b/fA00b = brain, fA01v/fA00v = VNC); it must not fall through
+    to 'Other' or the Brain/VNC region filters drop every flweb file."""
+    import pandas as pd
+    from neuronbridge_finder import NeuronBridgeFinder
+
+    finder = object.__new__(NeuronBridgeFinder)
+    finder.region = "Brain"
+    finder._vprint = lambda *a, **k: None
+
+    brain = "R85D07_AE_01_03-fA01b_C101223_20101223135821687_total.jpg"
+    vnc = "R85D07_AE_01_01-fA01v_C101223_20101223135718562_total.jpg"
+    assert finder._parse_region_from_filename(brain, "") == "Brain"
+    assert finder._parse_region_from_filename(vnc, "") == "VNC"
+    assert finder._parse_region_from_filename("fA00b_something.jpg", "") == "Brain"
+    assert finder._parse_region_from_filename("fA00v_something.jpg", "") == "VNC"
+
+    # the region filter now keeps the flweb brain projection for Brain mode
+    class FakeFile:
+        def __init__(self, filename, key=""):
+            self.filename = filename
+            self.key = key
+            self.url = ""
+
+    kept = finder._filter_flylight_files_by_region(
+        [FakeFile(brain, brain), FakeFile(vnc, vnc)]
+    )
+    assert [f.filename for f in kept] == [brain]

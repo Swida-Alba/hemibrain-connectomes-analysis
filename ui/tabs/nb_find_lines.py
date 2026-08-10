@@ -46,7 +46,7 @@ def create_nb_find_lines_tab():
                 )
                 top_image_lines = number_input(
                     "Top Lines for Images",
-                    20,
+                    30,
                     1,
                     100,
                     hint=(
@@ -73,7 +73,8 @@ def create_nb_find_lines_tab():
                     )
                     sort_by = select_input(
                         "Sort By", ["max", "completeness"], "max",
-                        hint="'max': highest match score. 'completeness': best coverage of all queries.",
+                        hint="'max': score-weighted matches (score × coverage). "
+                             "'completeness': best coverage of all queries.",
                     )
 
         with ui.card().classes("w-full drocat-card").props('id="card-nb-image-download"'):
@@ -82,6 +83,7 @@ def create_nb_find_lines_tab():
                 download_images = checkbox_input("Download Images", False, hint="Download matched images from NeuronBridge.")
                 download_flylight = checkbox_input("From FlyLight", False, hint="Download from FlyLight S3/CDN.")
                 generate_pdf = checkbox_input("PDF Summary", True, hint="Create a PDF with downloaded images ordered by score.")
+                generate_pptx = checkbox_input("PPTX Summary", False, hint="Create a PowerPoint summary alongside the PDF.")
             with param_grid(2):
                 image_formats = multi_select_input(
                     "Image Formats", ["png", "jpg"], ["png", "jpg"],
@@ -149,6 +151,13 @@ def create_nb_find_lines_tab():
         elif download_images.value:
             dl_source = 'neuronbridge'
 
+        # Summary formats: PDF and/or PPTX (the backend accepts a list)
+        summary_formats = []
+        if generate_pdf.value:
+            summary_formats.append("pdf")
+        if generate_pptx.value:
+            summary_formats.append("pptx")
+
         method_params = {
             "queries": query,
             "dataset": ds,
@@ -156,7 +165,7 @@ def create_nb_find_lines_tab():
             "match_type": match_algo.value,
             "download_images": dl_source,
             "download_img_for_top_n_lines": int(top_image_lines.value) if dl_source else None,
-            "summary_format": 'pdf' if generate_pdf.value else None,
+            "summary_format": summary_formats or None,
             "sort_by": sort_by.value,
             "image_formats": image_formats.value or ["png"],
             "image_types": image_types.value or ["cdm"],
