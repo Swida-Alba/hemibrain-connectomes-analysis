@@ -182,7 +182,7 @@ fc = FindNeuronConnection(
     skip_bodyId=True,                # Skip bodyId-level for speed
     use_cache=True,
     output_format='csv',
-    edgeN_limit=500,                 # Limit edges in visualizations
+    edgeN_limit=500,                 # Visualization Edge Limit (network/Sankey/heatmap)
 )
 
 fc.InitializeNeuronInfo()

@@ -25,6 +25,7 @@ vispath.py in this repository) and only execute code extracted from
 that trusted, locally-produced file.
 """
 
+import os
 import shutil
 import subprocess
 import sys
@@ -267,9 +268,10 @@ class TestNetworkTrimForPlot:
     def test_fallback_trim_reserves_source_target_edges_and_reports_threshold(self):
         messages = []
         vp = self._make_vp(messages)
-        vp.edgeN_limit = 3
+        vp.edgeN_limit = 2
         G = FastGraph()
-        # source/target edges (weak but reserved)
+        # source-outgoing / target-incoming edges (weak but reserved, and
+        # NOT counted toward the limit)
         G.add_edge("S", "A", 1)
         G.add_edge("B", "T", 2)
         G.node_attrs["S"] = {"node_type": "source"}
@@ -286,10 +288,40 @@ class TestNetworkTrimForPlot:
         kept = set(G_plot.edges())
         # reserved source/target edges always survive
         assert {("S", "A"), ("B", "T")} <= kept
-        # one strong intermediate fills the remaining capacity
-        assert len(kept) == 3
-        # the warning carries the explicit trim end (applied threshold)
-        assert any("applied threshold: weight >= 1" in m for m in messages), messages
+        # the limit applies to NON-reserved edges only: 2 reserved + top-2
+        assert len(kept) == 4
+        assert ("X", "Y") not in kept  # weakest non-reserved cut
+        # the warning carries the explicit trim end (applied threshold) of
+        # the non-reserved portion
+        assert any("applied threshold: weight >= 90" in m for m in messages), messages
+
+    def test_trim_reservation_capped_for_degenerate_source_target_classification(self):
+        """Regression for the network_early preview: with an edge-list input
+        every node is classified as source/target, so the raw reservation
+        would swallow the whole graph and the limit would do nothing. The
+        auto-reservation is capped at edgeN_limit and the output stays
+        bounded (<= 2 x edgeN_limit)."""
+        messages = []
+        vp = self._make_vp(messages)
+        vp.edgeN_limit = 3
+        G = FastGraph()
+        # every node is a source or a target (degenerate classification)
+        G.add_edge("A", "B", 1)
+        G.add_edge("B", "C", 2)
+        G.add_edge("C", "D", 3)
+        G.add_edge("D", "E", 4)
+        G.add_edge("E", "F", 5)
+        G.add_edge("F", "G", 6)
+        G.add_edge("G", "H", 7)
+        G.add_edge("H", "A", 8)
+        for n in ["A", "B", "C", "D", "E", "F", "G", "H"]:
+            G.node_attrs[n] = {"node_type": "source"}
+
+        vp.G_network = G
+        G_plot = vp._trim_network_for_plot()
+        # bounded: at most 2 x edgeN_limit edges survive
+        assert G_plot.number_of_edges() <= 2 * vp.edgeN_limit
+        assert any("capped at 3 strongest edges" in m for m in messages), messages
 
     def test_path_based_trim_reserves_source_target_edges_and_reports_threshold(self):
         messages = []
@@ -318,3 +350,110 @@ class TestNetworkTrimForPlot:
         kept = set(G_plot.edges())
         assert {("S", "A"), ("B", "T")} <= kept  # reserved source/target edges
         assert any("applied threshold" in m for m in messages), messages
+
+
+# =============================================================================
+# save_data: the connMatrix exports can be skipped (FindAllPath keeps the
+# canonical type-level matrices in data_details/conn_mat_type_*.csv)
+# =============================================================================
+
+class TestSaveDataMatrices:
+    """save_data_matrices=False skips the connMatrix exports but still
+    writes the connections/original_paths files."""
+
+    def _make_vp(self, tmp_path, save_data_matrices):
+        vp = object.__new__(VisualizePath)
+        vp.conn_df = pd.DataFrame({
+            "source": ["A", "A", "B"],
+            "target": ["B", "C", "C"],
+            "weight": [3, 5, 7],
+            "ratio": [0.5, 0.4, 0.3],
+            "probability": [0.9, 0.8, 0.7],
+        })
+        vp.path_df = pd.DataFrame({"path": ["A->B->C"], "length": [2], "path_prob": [0.72]})
+        vp.output_folder = str(tmp_path)
+        vp.base_filename = "run"
+        vp.output_format = "csv"
+        vp.save_data_matrices = save_data_matrices
+        vp._vprint = lambda *a, **k: None
+        return vp
+
+    def test_skip_matrices_keeps_connections_and_paths(self, tmp_path):
+        vp = self._make_vp(tmp_path, save_data_matrices=False)
+        files = vp.save_data()
+        names = [os.path.basename(f) for f in files]
+        assert "run_data_connections.csv" in names
+        assert "run_data_original_paths.csv" in names
+        assert not any("connMatrix" in n for n in names), names
+
+    def test_default_still_writes_matrices(self, tmp_path):
+        vp = self._make_vp(tmp_path, save_data_matrices=True)
+        files = vp.save_data()
+        names = [os.path.basename(f) for f in files]
+        assert "run_data_connMatrix_weight.csv" in names
+        assert "run_data_connMatrix_ratio.csv" in names
+        assert "run_data_connMatrix_prob.csv" in names
+
+
+# =============================================================================
+# Visualization Edge Limit: the heatmap must consume the SAME edge set as the
+# network (reserved source/target edges survive in all three visualizations)
+# =============================================================================
+
+class TestVisualizationEdgeLimitConsistency:
+    """The shared _select_edges_for_plot / _filter_conn_df_for_plot give the
+    heatmap exactly the edge set the network draws — a weak source/target
+    edge survives everywhere, and a weak intermediate edge is cut everywhere."""
+
+    def _make_vp(self, messages=None):
+        vp = object.__new__(VisualizePath)
+        vp._vprint = lambda msg: messages.append(msg)
+        vp.path_df = None
+        return vp
+
+    def _graph_and_conn(self):
+        G = FastGraph()
+        G.add_edge("S", "A", 1)     # weak source-outgoing — reserved
+        G.add_edge("A", "T", 2)     # weak target-incoming — reserved
+        G.add_edge("A", "M", 100)   # strong intermediate
+        G.add_edge("M", "B", 90)    # strong intermediate
+        G.add_edge("B", "C", 80)    # weakest intermediate — cut
+        G.node_attrs["S"] = {"node_type": "source"}
+        G.node_attrs["T"] = {"node_type": "target"}
+        conn_df = pd.DataFrame({
+            "source": ["S", "A", "A", "M", "B"],
+            "target": ["A", "T", "M", "B", "C"],
+            "weight": [1, 2, 100, 90, 80],
+        })
+        return G, conn_df
+
+    def test_heatmap_filter_uses_same_edge_set_as_network(self):
+        messages = []
+        vp = self._make_vp(messages)
+        vp.edgeN_limit = 2
+        vp.G_network, conn_df = self._graph_and_conn()
+
+        filtered = vp._filter_conn_df_for_plot(conn_df)
+        kept = set(zip(filtered["source"], filtered["target"]))
+        # the weak reserved source/target edges survive (reservation)
+        assert {("S", "A"), ("A", "T")} <= kept, kept
+        # the weakest intermediate edge is cut in the heatmap too
+        assert ("B", "C") not in kept, kept
+        # identical to the edge set the network draws
+        G_plot = vp._trim_network_for_plot()
+        assert set(G_plot.edges()) == kept
+
+    def test_selector_reserves_weak_source_target_edges(self):
+        messages = []
+        vp = self._make_vp(messages)
+        vp.edgeN_limit = 2
+        vp.G_network, _ = self._graph_and_conn()
+        selected = vp._select_edges_for_plot()
+        assert selected is not None
+        kept_edges, reserved_count, capped, selected_paths, threshold = selected
+        assert {("S", "A"), ("A", "T")} <= set(kept_edges)
+        assert ("B", "C") not in set(kept_edges)
+        assert reserved_count == 2
+        assert capped is False
+        assert selected_paths is None          # weight-based fallback branch
+        assert threshold == 90                 # min weight among kept non-reserved

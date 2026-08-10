@@ -457,7 +457,7 @@ In the browser:
 # Limit edges for performance
 vp = VisualizePath(
     'data.xlsx',
-    edgeN_limit=500,  # Keep top 500 edges by weight
+    edgeN_limit=500,   # Keep top 500 edges by weight
     edge_width_scale='log'  # Better visual separation
 )
 ```

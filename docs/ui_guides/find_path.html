@@ -45,7 +45,7 @@
     <tr><th>Parameter</th><th>Default</th><th>Meaning</th><th>Example</th></tr>
     <tr><td>Max Intermediate Layers</td><td>2</td><td>Path length: 0 = direct, 2 = two intermediates</td><td>3 finds longer circuits but is slower</td></tr>
     <tr><td>Min Synapse Count</td><td>3</td><td>Connections below this weight are removed</td><td>10 keeps only strong edges</td></tr>
-    <tr><td>Edge Limit</td><td>500</td><td>Maximum edges considered per neuron</td><td>50 for very dense regions</td></tr>
+    <tr><td>Visualization Edge Limit</td><td>500</td><td>Maximum edges drawn per visualization (network / Sankey / heatmap, incl. the network_early preview)</td><td>50 for very dense regions</td></tr>
     <tr><td>Min Connection Ratio</td><td>0.0</td><td>Minimum weight/post ratio</td><td>0.1 keeps only dominant outputs</td></tr>
     <tr><td>Min Traversal Prob.</td><td>0.0</td><td>ratio/0.3, capped at 1.0</td><td>0.5 = confident paths only</td></tr>
     <tr><td>Algorithm</td><td>MemoizedDFS</td><td>MemoizedDFS (fastest measured at all depths, no graph copy; the default), DFS (backward memoized, few targets), MeetInMiddle (shallow queries), DP (robust), Bidirectional (shortest-first, high memory). See the <a href="pathfinding_algorithms.html">pathfinding algorithms guide</a>.</td><td>MemoizedDFS</td></tr>
