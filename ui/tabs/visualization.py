@@ -1,5 +1,6 @@
 """Visualization Tab - 3D skeleton and path network visualization."""
 
+import os
 import tempfile
 from datetime import datetime
 from pathlib import Path
@@ -80,8 +81,21 @@ def create_skeleton_tab():
                 label="Custom Layer Names (optional)",
                 show_filter=False,
                 show_upload=False,
-                hint="Display names for each neuron layer, in the same order as the chips.",
+                hint="Display names for each neuron layer, in the same order as the chips. "
+                     "Give two layers the SAME name to group them into one legend entry "
+                     "and one individual profile.",
             )
+            custom_grouping = ui.textarea(
+                label="Custom Layer Grouping (optional)",
+                placeholder=("One group per line:  group_name -> neuron1, neuron2\n"
+                             "Neuron values are bodyIds, types or instances.\n"
+                             "A bare neuron line forms a single-neuron group."),
+            ).props('outlined dense').classes("w-full")
+            ui.label(
+                "Group layers by assigning neurons to groups (one line = one group). "
+                "Each group becomes one layer, one legend entry and one individual "
+                "profile. Overrides the Neurons/Layers chips and Custom Layer Names."
+            ).classes("text-caption drocat-muted")
             with param_grid(2):
                 dataset = dataset_selector()
                 output_dir = dir_input()
@@ -110,8 +124,9 @@ def create_skeleton_tab():
                     )
                     legend_mode = select_input(
                         "Neuron Legend Mode", ["layer", "type", "single"], "layer",
-                        hint="'layer': one neuron legend entry per layer. 'type': per neuron type. "
-                             "'single': every neuron. ROI meshes always remain separate.",
+                        hint="'layer': one neuron legend entry per layer (or per custom group). "
+                             "'type': per neuron type. 'single': every neuron. "
+                             "ROI meshes always remain separate.",
                     )
                     neuron_alpha = number_input(
                         "Neuron Opacity", 0.2, 0, 1, 0.1,
@@ -251,6 +266,20 @@ def create_skeleton_tab():
                         "Show Connectors", False,
                         hint="Show synaptic connector markers.",
                     )
+                with ui.row().classes("gap-4"):
+                    default_simplification = checkbox_input(
+                        "Use Default Mesh Simplification", True,
+                        hint="Use the dataset default (0.9 faces removed for NeuPrint, "
+                             "0.95 for FlyWire). Uncheck to set the value below.",
+                    )
+                    mesh_simplification = number_input(
+                        "Mesh Simplification (faces removed)", 0.9, 0.0, 0.99, 0.05,
+                        hint="Fraction of tube-mesh faces REMOVED for rendering: "
+                             "0.9 = keep 10% (NeuPrint default), 0.95 = keep 5% "
+                             "(FlyWire default). Higher = faster/coarser, lower = "
+                             "more detailed but slower.",
+                    )
+                    mesh_simplification.set_enabled(False)
 
                 ui.label("Export").classes("drocat-mini-label")
                 with param_grid(3):
@@ -273,25 +302,12 @@ def create_skeleton_tab():
                         hint="Export PNG screenshots from 6 angles.",
                     )
 
-                ui.label("Individual Profiles (PDF / PPTX)").classes("drocat-mini-label")
-                with ui.row().classes("gap-4"):
-                    export_individual_profiles = checkbox_input(
-                        "Export Individual Profiles", False,
-                        hint="After rendering, generate a PDF/PPTX with per-neuron profile plots.",
-                    )
-                    summary_format = multi_select_input(
-                        "Summary Format", ["pdf", "pptx"], ["pdf"],
-                        hint="Output formats for the individual-profile summary.",
-                    )
-                with param_grid(3):
-                    profile_cols = number_input("Images Per Page (cols)", 3, 1, 6)
-                    profile_rows = number_input("Images Per Page (rows)", 2, 1, 6)
-                    profile_views = multi_select_input(
-                        "Profile Views", ["front", "side", "top", "back", "bottom"], ["front"],
-                        hint="Camera views included in each individual profile.",
-                    )
-
-                ui.label("Rotating Video / GIF").classes("drocat-mini-label")
+            # ------------------------------------------------------------------
+            # Export Video / GIF + Individual Profiles (independent block,
+            # outside advanced settings)
+            # ------------------------------------------------------------------
+            with ui.card().classes("w-full drocat-card").props('id="card-skeleton-export-video"'):
+                section_header("Export Video / GIF", "videocam")
                 with ui.row().classes("gap-4"):
                     export_video = checkbox_input(
                         "Export Video", False,
@@ -308,6 +324,37 @@ def create_skeleton_tab():
                     fps = number_input("FPS", 30, 5, 60, 5)
                     degree_per_frame = number_input("Degrees / Frame", 1.0, 0.1, 5.0, 0.1)
                     gif_scale = number_input("GIF Scale", 0.2, 0.05, 1.0, 0.05)
+
+                ui.separator().classes("my-2")
+                section_header("Individual Profiles (PDF / PPTX)", "photo_library")
+                with ui.row().classes("gap-4"):
+                    export_individual_profiles = checkbox_input(
+                        "Export Individual Profiles", False,
+                        hint="After rendering, generate a PDF/PPTX with per-neuron profile plots.",
+                    )
+                    summary_format = multi_select_input(
+                        "Summary Format", ["pdf", "pptx"], ["pdf"],
+                        hint="Output formats for the individual-profile summary.",
+                    )
+                with param_grid(3):
+                    profile_cols = number_input("Images Per Page (cols)", 3, 1, 6)
+                    profile_rows = number_input("Images Per Page (rows)", 2, 1, 6)
+                    profile_views = multi_select_input(
+                        "Profile Views", ["front", "side", "top", "back", "bottom"], ["front"],
+                        hint="Camera views included in each individual profile.",
+                    )
+                ui.label(
+                    "Each individual profile follows the Neuron Legend Mode: "
+                    "'single' = one profile per neuron, 'type' = one profile per type "
+                    "(all layers combined), 'layer' = one profile per layer / custom group."
+                ).classes("text-caption drocat-muted")
+
+        def _sync_simplification_enabled():
+            mesh_simplification.set_enabled(not default_simplification.value)
+
+        default_simplification.on_value_change(
+            lambda _e: _sync_simplification_enabled()
+        )
 
     with results_col:
         skeleton_output.create(run_label="Generate 3D Skeleton", run_icon="view_in_ar")
@@ -368,12 +415,43 @@ def create_skeleton_tab():
 
         custom_names = [str(n) for n in custom_layer_names.get_value()[1]]
 
+        # Custom layer grouping: write the textarea to a layer_map.csv the
+        # backend parses (rows with the same 'layer' value are grouped).
+        layer_map_csv = None
+        grouping_text = (custom_grouping.value or "").strip()
+        if grouping_text:
+            try:
+                import pandas as pd
+                rows = []
+                for line in grouping_text.splitlines():
+                    line = line.strip()
+                    if not line:
+                        continue
+                    if "->" in line:
+                        group, _, members = line.partition("->")
+                        group = group.strip()
+                        for m in members.split(","):
+                            m = m.strip()
+                            if m:
+                                rows.append((group, m))
+                    else:
+                        rows.append((line, line))
+                if rows:
+                    os.makedirs(output_dir.value, exist_ok=True)
+                    layer_map_csv = os.path.join(output_dir.value, "layer_map.csv")
+                    pd.DataFrame(rows, columns=["layer", "id_type_instance"]).to_csv(
+                        layer_map_csv, index=False
+                    )
+            except Exception as e:
+                ui.notify(f"Failed to write layer grouping CSV: {e}", type="warning")
+
         constructor_params = {
             "dataset": dataset.value,
             "neuron_layers": neurons,
             "search_columns": search_columns.value,
             "hemisphere": hemisphere.value,
             "custom_layer_names": custom_names,
+            "layer_map_csv": layer_map_csv,
             "output_dir": output_dir.value,
             "skeleton_mode": skeleton_mode.value,
             "brain_mesh": brain_mesh.value,
@@ -401,6 +479,10 @@ def create_skeleton_tab():
             "export_views": export_views.value,
             "show_fig": show_fig.value,
             "brain_mesh_color": brain_mesh_picker.get_value(),
+            "skeleton_mesh_simplification": (
+                None if default_simplification.value
+                else float(mesh_simplification.value)
+            ),
         }
         method_params = {
             "export_individual_profiles": export_individual_profiles.value,
