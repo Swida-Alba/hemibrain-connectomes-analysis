@@ -247,7 +247,8 @@ class CAVEDataFetcher:
             return None
     
     def fetch_skeleton(self, body_id: int, use_cache: bool = True, 
-                       simplify_mesh: float = 0.95) -> Optional['navis.TreeNeuron']:
+                       simplify_mesh: float = 0.95,
+                       denoise_twigs: Optional[float] = 10000.0) -> Optional['navis.TreeNeuron']:
         """Fetch skeleton for a neuron by skeletonizing the mesh.
         
         Since FlyWire doesn't have L2 cache for pcg_skel, we fetch the mesh
@@ -263,6 +264,13 @@ class CAVEDataFetcher:
             Mesh simplification factor before skeletonization (0.0-1.0).
             Higher values remove more faces for faster skeletonization.
             Default 0.95 removes 95% of faces. Cached skeletons use this level.
+        denoise_twigs : float or None
+            Length threshold (nm) for pruning terminal twigs after
+            skeletonization (``navis.prune_twigs``, recursive). FAFB
+            skeletonizations carry short twig artifacts that add noise to
+            morphology features; the denoising evaluation showed 5-10 µm
+            twig pruning improves same-type discrimination. ``None``
+            disables pruning. Default 10000 (10 µm).
             
         Returns
         -------
@@ -276,6 +284,8 @@ class CAVEDataFetcher:
         if use_cache:
             cached = self._load_from_cache(cache_path)
             if cached is not None:
+                if denoise_twigs:
+                    cached = self._denoise_skeleton(cached, denoise_twigs)
                 if self.verbose:
                     print(f"  ✓ Loaded skeleton from API cache: {body_id}")
                 return cached
@@ -314,6 +324,11 @@ class CAVEDataFetcher:
             skeleton.name = str(body_id)
             skeleton.units = 'nm'
             
+            # Denoise: prune short terminal twigs (artifacts of mesh
+            # skeletonization), then cache the denoised skeleton.
+            if denoise_twigs:
+                skeleton = self._denoise_skeleton(skeleton, denoise_twigs)
+            
             # Save to cache
             self._save_to_cache(skeleton, cache_path)
             
@@ -328,8 +343,23 @@ class CAVEDataFetcher:
                 print(f"  ✗ Failed to fetch skeleton: {body_id}: {e}")
             return None
     
+    @staticmethod
+    def _denoise_skeleton(neuron, threshold_nm: float) -> 'navis.TreeNeuron':
+        """Prune terminal twigs shorter than ``threshold_nm`` (recursive).
+
+        Mesh-derived skeletons carry short twig artifacts (small tracing
+        noise); removing them makes morphology features more stable. Falls
+        back to the input when pruning fails.
+        """
+        try:
+            import navis
+            return navis.prune_twigs(neuron, size=float(threshold_nm), recursive=True)
+        except Exception:
+            return neuron
+    
     def fetch_skeletons(self, body_ids: List[int], use_cache: bool = True,
-                        simplify_mesh: float = 0.95) -> 'navis.NeuronList':
+                        simplify_mesh: float = 0.95,
+                        denoise_twigs: Optional[float] = 10000.0) -> 'navis.NeuronList':
         """Fetch skeletons for multiple neurons.
         
         Parameters
@@ -341,6 +371,9 @@ class CAVEDataFetcher:
         simplify_mesh : float
             Mesh simplification factor (0.0-1.0). Default 0.95 removes 95% of faces.
             Cached skeletons use 0.95 simplification.
+        denoise_twigs : float or None
+            Twig-pruning threshold in nm passed to ``fetch_skeleton``
+            (default 10000 = 10 µm; None disables).
             
         Returns
         -------
@@ -357,7 +390,8 @@ class CAVEDataFetcher:
             iterator = tqdm(body_ids, desc="Fetching skeletons")
         
         for bid in iterator:
-            skeleton = self.fetch_skeleton(bid, use_cache=use_cache, simplify_mesh=simplify_mesh)
+            skeleton = self.fetch_skeleton(bid, use_cache=use_cache, simplify_mesh=simplify_mesh,
+                                           denoise_twigs=denoise_twigs)
             if skeleton is not None:
                 neurons.append(skeleton)
             else:
