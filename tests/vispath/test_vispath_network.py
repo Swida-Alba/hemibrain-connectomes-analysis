@@ -236,3 +236,85 @@ class TestHistoryLogicNode:
             f"history harness failed:\n{res.stdout}\n{res.stderr}"
         )
         assert "ALL HISTORY TESTS PASSED" in res.stdout
+
+
+# =============================================================================
+# Network trim for plotting: source/target reservation + threshold warning
+# =============================================================================
+
+class TestNetworkTrimForPlot:
+    """_trim_network_for_plot keeps the edgeN_limit strongest edges but
+    ALWAYS reserves the source/target edges, and reports the applied
+    weight threshold in the trim warning."""
+
+    def _make_vp(self, messages=None):
+        vp = object.__new__(VisualizePath)
+        vp._vprint = lambda msg: messages.append(msg)
+        vp.path_df = None
+        return vp
+
+    def test_no_trim_when_within_limit(self):
+        messages = []
+        vp = self._make_vp(messages)
+        vp.edgeN_limit = 500
+        G = FastGraph()
+        G.add_edge("S", "A", 3)
+        G.add_edge("A", "T", 5)
+        vp.G_network = G
+        assert vp._trim_network_for_plot() is G  # unchanged
+        assert messages == []
+
+    def test_fallback_trim_reserves_source_target_edges_and_reports_threshold(self):
+        messages = []
+        vp = self._make_vp(messages)
+        vp.edgeN_limit = 3
+        G = FastGraph()
+        # source/target edges (weak but reserved)
+        G.add_edge("S", "A", 1)
+        G.add_edge("B", "T", 2)
+        G.node_attrs["S"] = {"node_type": "source"}
+        G.node_attrs["T"] = {"node_type": "target"}
+        G.node_attrs["A"] = {"node_type": "intermediate"}
+        G.node_attrs["B"] = {"node_type": "intermediate"}
+        # strong intermediate edges (may be cut)
+        G.add_edge("A", "M", 100)
+        G.add_edge("M", "B", 90)
+        G.add_edge("X", "Y", 80)
+        vp.G_network = G
+
+        G_plot = vp._trim_network_for_plot()
+        kept = set(G_plot.edges())
+        # reserved source/target edges always survive
+        assert {("S", "A"), ("B", "T")} <= kept
+        # one strong intermediate fills the remaining capacity
+        assert len(kept) == 3
+        # the warning carries the explicit trim end (applied threshold)
+        assert any("applied threshold: weight >= 1" in m for m in messages), messages
+
+    def test_path_based_trim_reserves_source_target_edges_and_reports_threshold(self):
+        messages = []
+        vp = self._make_vp(messages)
+        vp.edgeN_limit = 4
+        G = FastGraph()
+        G.add_edge("S", "A", 1)
+        G.add_edge("B", "T", 2)
+        G.node_attrs["S"] = {"node_type": "source"}
+        G.node_attrs["T"] = {"node_type": "target"}
+        G.node_attrs["A"] = {"node_type": "intermediate"}
+        G.node_attrs["B"] = {"node_type": "intermediate"}
+        G.add_edge("A", "M", 100)
+        G.add_edge("M", "B", 90)
+        G.add_edge("X", "Y", 80)
+        vp.G_network = G
+        # path_df: two paths — one weak (S>A>M>B>T) and one strong (S>A>X>Y>B>T)
+        vp.path_df = pd.DataFrame(
+            {
+                "path_block": ["S>A>M>B>T", "S>A>X>Y>B>T"],
+                "weights": [[1, 100, 90, 2], [1, 50, 60, 2]],
+            }
+        )
+
+        G_plot = vp._trim_network_for_plot()
+        kept = set(G_plot.edges())
+        assert {("S", "A"), ("B", "T")} <= kept  # reserved source/target edges
+        assert any("applied threshold" in m for m in messages), messages

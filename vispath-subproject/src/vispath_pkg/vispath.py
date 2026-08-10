@@ -2344,7 +2344,7 @@ class VisualizePath:
         
         # If simplification is needed, limit to top paths that give us ~max_edges unique edges
         if needs_simplification:
-            self._vprint(f'\033[33m⚠️ Large dataset ({total_paths} paths) - selecting top paths for {MAX_EDGES} edges\033[0m')
+            self._vprint(f'\033[33m⚠️ Large dataset ({total_paths} paths) - selecting top paths for {MAX_EDGES} edges (source/target edges always reserved — every kept path keeps its first/last hop)\033[0m')
             
             # Iteratively add paths until we reach max_edges unique edges
             paths_to_use = []
@@ -2366,7 +2366,8 @@ class VisualizePath:
             
             # Use only the selected paths
             path_df_to_process = path_df_sorted.loc[paths_to_use]
-            self._vprint(f'  Selected top {len(paths_to_use)} paths → {len(unique_edges)} unique edges')
+            threshold = path_df_sorted.loc[paths_to_use[-1], '_min_weight'] if paths_to_use else 0
+            self._vprint(f'  Selected top {len(paths_to_use)} paths → {len(unique_edges)} unique edges (applied threshold: path min-weight >= {threshold:g})')
         else:
             path_df_to_process = path_df_sorted
         
@@ -3751,7 +3752,142 @@ class VisualizePath:
 </html>"""
         
         return html
-    
+
+    def _trim_network_for_plot(self):
+        """
+        Trim G_network to the edgeN_limit strongest edges for plotting.
+
+        Path-based filtering preserves complete paths; edges of the
+        source/target nodes are ALWAYS reserved (they survive the trim
+        regardless of weight). Returns the graph to plot (the original
+        network when no trimming is needed); prints the trim warning with
+        the applied weight threshold when edges are dropped.
+        """
+        G_to_plot = self.G_network
+        if self.edgeN_limit > 0 and self.G_network.number_of_edges() > self.edgeN_limit:
+            # Reserved edges: every edge incident to a source/target node
+            reserved_edges = set()
+            for node, attrs in self.G_network.node_attrs.items():
+                if attrs.get('node_type') in ('source', 'target'):
+                    for v in self.G_network.adj.get(node, ()):
+                        reserved_edges.add((node, v))
+                    for u in self.G_network.predecessors(node):
+                        reserved_edges.add((u, node))
+
+            self._vprint(f'\033[33m⚠️ Too many edges ({self.G_network.number_of_edges()}) - simplifying to top {self.edgeN_limit} edges from top paths (source/target edges always reserved)\033[0m')
+
+            # Use path-based filtering if path_df is available
+            if self.path_df is not None and 'path_block' in self.path_df.columns and 'weights' in self.path_df.columns:
+                # Compute min_weight for each path
+                path_df_with_score = self.path_df.copy()
+
+                def compute_path_min_weight(weights_value):
+                    weights_list = self._safe_eval_list(weights_value)
+                    if not weights_list:
+                        return 0
+                    return min(weights_list)
+
+                path_df_with_score['_min_weight'] = path_df_with_score['weights'].apply(compute_path_min_weight)
+                path_df_sorted = path_df_with_score.sort_values('_min_weight', ascending=False)
+
+                # Collect edges with their weights from paths
+                # Use dict to track edge data: {(source, target): {'weight': max_weight, ...}}
+                edge_data_dict = {}
+                selected_paths = []
+
+                # Check which optional columns are available
+                has_ratios = 'connection_ratios' in self.path_df.columns
+                has_probs = 'traversal_probabilities' in self.path_df.columns
+
+                capacity = max(0, self.edgeN_limit - len(reserved_edges))
+                for idx, row in path_df_sorted.iterrows():
+                    path_block = row['path_block']
+                    nodes = self._parse_path_block(path_block)
+                    weights = self._safe_eval_list(row['weights'])
+                    ratios = self._safe_eval_list(row.get('connection_ratios', [])) if has_ratios else []
+                    probs = self._safe_eval_list(row.get('traversal_probabilities', [])) if has_probs else []
+
+                    # Add edges from this path with their weights
+                    for i in range(len(nodes) - 1):
+                        edge_key = (nodes[i], nodes[i + 1])
+                        weight = weights[i] if i < len(weights) else 0
+                        ratio = ratios[i] if i < len(ratios) else 0
+                        prob = probs[i] if i < len(probs) else 0
+
+                        # Skip zero-weight edges
+                        if weight == 0:
+                            continue
+
+                        if edge_key not in edge_data_dict:
+                            edge_data_dict[edge_key] = {
+                                'weight': weight,
+                                'ratio': ratio,
+                                'probability': prob
+                            }
+                        else:
+                            # Use max weight for same edge
+                            edge_data_dict[edge_key]['weight'] = max(edge_data_dict[edge_key]['weight'], weight)
+
+                    selected_paths.append(idx)
+
+                    # Stop when we have enough edges (reserved edges already counted)
+                    if len(edge_data_dict) >= capacity:
+                        break
+
+                # Final kept edges = reserved (source/target) + selected path edges
+                kept_edges = dict(edge_data_dict)
+                for (u, v) in reserved_edges:
+                    kept_edges.setdefault((u, v), {'weight': self.G_network.adj[u][v],
+                                                   'ratio': 0, 'probability': 0})
+
+                # Create subgraph with the kept edges
+                G_sub = FastGraph()
+
+                for (u, v), data in kept_edges.items():
+                    G_sub.add_edge(u, v, **data)
+                    # Copy node attributes from original graph if available
+                    if u in self.G_network.node_attrs:
+                        G_sub.node_attrs[u].update(self.G_network.node_attrs[u])
+                    if v in self.G_network.node_attrs:
+                        G_sub.node_attrs[v].update(self.G_network.node_attrs[v])
+
+                G_to_plot = G_sub
+                threshold = min(d['weight'] for d in kept_edges.values()) if kept_edges else 0
+                self._vprint(f'  Selected {len(selected_paths)} paths + {len(reserved_edges)} reserved source/target edges → kept {G_to_plot.number_of_edges()} edges (applied threshold: weight >= {threshold:g})')
+            else:
+                # Fallback to weight-based filtering if no path data
+                edges = sorted(
+                    ((u, v, d) for u, v, d in self.G_network.edges(data=True)
+                     if (u, v) not in reserved_edges),
+                    key=lambda x: abs(x[2].get('weight', 0)), reverse=True,
+                )
+                top_edges = edges[:max(0, self.edgeN_limit - len(reserved_edges))]
+
+                # Create new graph with top edges + reserved edges
+                G_sub = FastGraph()
+
+                def _add_kept_edge(u, v, data):
+                    G_sub.add_edge(u, v, **data)
+                    # Copy node attributes
+                    if u in self.G_network.node_attrs:
+                        G_sub.node_attrs[u].update(self.G_network.node_attrs[u])
+                    if v in self.G_network.node_attrs:
+                        G_sub.node_attrs[v].update(self.G_network.node_attrs[v])
+
+                for (u, v) in reserved_edges:
+                    data = self.G_network.edge_attrs.get((u, v), {'weight': self.G_network.adj[u][v]})
+                    _add_kept_edge(u, v, data)
+                for u, v, data in top_edges:
+                    _add_kept_edge(u, v, data)
+
+                G_to_plot = G_sub
+                kept_weights = [d.get('weight', 0) for _, _, d in top_edges]
+                if reserved_edges:
+                    kept_weights += [self.G_network.adj[u][v] for (u, v) in reserved_edges]
+                threshold = min(kept_weights) if kept_weights else 0
+                self._vprint(f'  Kept top {len(top_edges)} + {len(reserved_edges)} reserved edges → {G_to_plot.number_of_edges()} edges (applied threshold: weight >= {threshold:g})')
+        return G_to_plot
+
     def create_network(self):
         """
         Create interactive Cytoscape.js network visualization.
@@ -3778,103 +3914,9 @@ class VisualizePath:
             self.build_network()
         
         self._vprint("\nCreating interactive network visualization...")
-        
-        # Simplify network if too many edges (> edgeN_limit)
-        # Use path-based filtering to preserve complete paths
-        G_to_plot = self.G_network
-        if self.edgeN_limit > 0 and self.G_network.number_of_edges() > self.edgeN_limit:
-             self._vprint(f'\033[33m⚠️ Too many edges ({self.G_network.number_of_edges()}) - simplifying to top {self.edgeN_limit} edges from top paths\033[0m')
-             
-             # Use path-based filtering if path_df is available
-             if self.path_df is not None and 'path_block' in self.path_df.columns and 'weights' in self.path_df.columns:
-                 # Compute min_weight for each path
-                 path_df_with_score = self.path_df.copy()
-                 
-                 def compute_path_min_weight(weights_value):
-                     weights_list = self._safe_eval_list(weights_value)
-                     if not weights_list:
-                         return 0
-                     return min(weights_list)
-                 
-                 path_df_with_score['_min_weight'] = path_df_with_score['weights'].apply(compute_path_min_weight)
-                 path_df_sorted = path_df_with_score.sort_values('_min_weight', ascending=False)
-                 
-                 # Collect edges with their weights from paths
-                 # Use dict to track edge data: {(source, target): {'weight': max_weight, ...}}
-                 edge_data_dict = {}
-                 selected_paths = []
-                 
-                 # Check which optional columns are available
-                 has_ratios = 'connection_ratios' in self.path_df.columns
-                 has_probs = 'traversal_probabilities' in self.path_df.columns
-                 
-                 for idx, row in path_df_sorted.iterrows():
-                     path_block = row['path_block']
-                     nodes = self._parse_path_block(path_block)
-                     weights = self._safe_eval_list(row['weights'])
-                     ratios = self._safe_eval_list(row.get('connection_ratios', [])) if has_ratios else []
-                     probs = self._safe_eval_list(row.get('traversal_probabilities', [])) if has_probs else []
-                     
-                     # Add edges from this path with their weights
-                     for i in range(len(nodes) - 1):
-                         edge_key = (nodes[i], nodes[i + 1])
-                         weight = weights[i] if i < len(weights) else 0
-                         ratio = ratios[i] if i < len(ratios) else 0
-                         prob = probs[i] if i < len(probs) else 0
-                         
-                         # Skip zero-weight edges
-                         if weight == 0:
-                             continue
-                         
-                         if edge_key not in edge_data_dict:
-                             edge_data_dict[edge_key] = {
-                                 'weight': weight,
-                                 'ratio': ratio,
-                                 'probability': prob
-                             }
-                         else:
-                             # Use max weight for same edge
-                             edge_data_dict[edge_key]['weight'] = max(edge_data_dict[edge_key]['weight'], weight)
-                     
-                     selected_paths.append(idx)
-                     
-                     # Stop when we have enough edges
-                     if len(edge_data_dict) >= self.edgeN_limit:
-                         break
-                 
-                 # Create subgraph with edges from selected paths
-                 G_sub = FastGraph()
-                 
-                 for (u, v), data in edge_data_dict.items():
-                     G_sub.add_edge(u, v, **data)
-                     # Copy node attributes from original graph if available
-                     if u in self.G_network.node_attrs:
-                         G_sub.node_attrs[u].update(self.G_network.node_attrs[u])
-                     if v in self.G_network.node_attrs:
-                         G_sub.node_attrs[v].update(self.G_network.node_attrs[v])
-                 
-                 G_to_plot = G_sub
-                 self._vprint(f'  Selected {len(selected_paths)} paths → kept {G_to_plot.number_of_edges()} edges')
-             else:
-                 # Fallback to weight-based filtering if no path data
-                 edges = sorted(self.G_network.edges(data=True), key=lambda x: abs(x[2].get('weight', 0)), reverse=True)
-                 top_edges = edges[:self.edgeN_limit]
-                 
-                 # Create new graph with top edges
-                 G_sub = FastGraph()
-                 
-                 # Add edges and their nodes
-                 for u, v, data in top_edges:
-                     G_sub.add_edge(u, v, **data)
-                     # Copy node attributes
-                     if u in self.G_network.node_attrs:
-                         G_sub.node_attrs[u].update(self.G_network.node_attrs[u])
-                     if v in self.G_network.node_attrs:
-                         G_sub.node_attrs[v].update(self.G_network.node_attrs[v])
-                 
-                 G_to_plot = G_sub
-                 self._vprint(f'  Kept {G_to_plot.number_of_edges()} edges (by weight)')
-        
+
+        G_to_plot = self._trim_network_for_plot()
+
         output_path = os.path.join(self.output_folder, self.base_filename + '_network.html')
         
         self._plot_cytoscape_network(

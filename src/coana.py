@@ -1,7 +1,7 @@
 # connectome analysis module -- coana
 import os
 import threading
-from typing import List
+from typing import List, Optional
 import sys
 import json
 import shutil
@@ -1420,6 +1420,40 @@ class FindNeuronConnection:
     - 'DP': Backward Reachability (DP) - robust, low memory, no reverse copy
     - 'Bidirectional': Bidirectional BFS - shortest paths first, but stores
       full layer trees (highest memory)
+    '''
+
+    graph_edge_limit_bodyid: int = 5000
+    '''
+    Pan-graph edge limit for the bodyId-level graph: only the strongest
+    `graph_edge_limit_bodyid` edges (by synapse weight) are kept before
+    pathfinding, so the path count stays manageable (the number of simple
+    paths grows combinatorially with depth, branching^depth). 0/None =
+    complete graph (all edges); when edges are trimmed a warning is
+    printed telling the user how to restore the full network.
+    '''
+
+    graph_edge_limit_groups: int = 1000
+    '''
+    Same pan-graph edge limit for the type-level and custom-group-level
+    graphs (aggregated networks, typically much smaller than the bodyId
+    graph; defaults to 1000 edges). 0/None = complete graph.
+    '''
+
+    _warn_notes: List[str] = field(default_factory=list)
+    '''
+    Internal: collects notes about operations that may tilt the outputs
+    (graph edge-limit trims etc.), written to user_warning_notes.txt in
+    the run folder root at the end of FindPath / FindAllPath.
+    '''
+
+    visualize_before_reconstruct: bool = False
+    '''
+    If True, FindAllPath draws a network visualization of the discovered
+    graph (all edges, weighted) into ``network_early/`` BEFORE the path
+    reconstruction starts. The graph is complete once the layers are
+    fetched, so this gives immediate visual feedback while the (potentially
+    long) enumeration runs afterwards; the final path-based outputs are
+    unaffected.
     '''
     
     search_columns: str = 'auto'
@@ -6382,7 +6416,143 @@ class FindNeuronConnection:
             self._vprint(f'  Warning: VisualizePath visualization failed: {e}')
             self._vprint(traceback.format_exc())
         self._vprint('Done\n')
-    
+
+    def _apply_graph_edge_limit(self, G, limit, label, reserve_nodes=None):
+        """
+        Keep only the ``limit`` strongest edges of ``G`` (by synapse
+        weight) — the pan-graph edge limit. Edges of the queried
+        source/target nodes (``reserve_nodes``) are ALWAYS reserved.
+        Warns noticeably when edges are trimmed (including the applied
+        weight threshold), records a note for user_warning_notes.txt, and
+        tells the user how to restore the complete network. Returns the
+        number of removed edges (0 when no trimming happened).
+        """
+        total = G.number_of_edges()
+        if not limit or limit <= 0 or total <= limit:
+            return 0
+        removed, threshold = G.trim_to_strongest(limit, reserve_nodes=reserve_nodes)
+        threshold_str = f'weight >= {threshold:g} synapses' if threshold is not None else 'all reserved edges'
+        self._vprint(
+            f'⚠️  {label} graph edge limit: kept the {limit:,} strongest edges '
+            f'(applied threshold: {threshold_str}; removed {removed:,} of '
+            f'{total:,}; source/target edges always reserved) — paths now use '
+            f'only the strongest connections. For the COMPLETE graph network, '
+            f'remove the edge limit (uncheck "Limit Graph Edges" / set the '
+            f'edge limit to 0).',
+            level='always',
+        )
+        self._warn_notes.append(
+            f'- [graph edge limit] {label} graph trimmed: kept the top {limit:,} '
+            f'edges ({threshold_str}); removed {removed:,} of {total:,} edges. '
+            f'Source/target edges were always reserved. Weak intermediate '
+            f'connections are excluded from the outputs.'
+        )
+        return removed
+
+    def _write_user_warning_notes(self, folder):
+        """
+        Write user_warning_notes.txt at the run folder root listing every
+        operation that may tilt the outputs (graph trims, thresholds,
+        filters...). Only written when at least one note applies; the file
+        exists so results are never presented without their caveats.
+        """
+        notes = list(self._warn_notes)
+
+        # --- other operations that may tilt the outputs ---
+        if getattr(self, 'edgeN_limit', 0):
+            notes.append(
+                f'- [edge limit per neuron] edgeN_limit={self.edgeN_limit}: at most '
+                f'the strongest {self.edgeN_limit} edges per neuron were considered '
+                f'when fetching connections.'
+            )
+        if getattr(self, 'min_synapse_num', 0) > 1:
+            notes.append(
+                f'- [threshold] min_synapse_num={self.min_synapse_num}: connections '
+                f'with fewer synapses were excluded.'
+            )
+        if getattr(self, 'min_ratio', 0) > 0:
+            notes.append(
+                f'- [threshold] min_ratio={self.min_ratio}: connections below this '
+                f'weight/post ratio were excluded.'
+            )
+        if getattr(self, 'min_traversal_probability', 0) > 0:
+            notes.append(
+                f'- [threshold] min_traversal_probability={self.min_traversal_probability}: '
+                f'paths below this traversal probability were excluded.'
+            )
+        keywords = getattr(self, 'keyword_in_path_to_remove', None) or []
+        if keywords and [str(k) for k in keywords] != ['None']:
+            notes.append(
+                f'- [filter] keyword_in_path_to_remove={keywords}: paths containing '
+                f'these keywords were removed from the outputs.'
+            )
+        if getattr(self, 'max_interlayer', 0) >= 4:
+            notes.append(
+                f'- [depth] max_interlayer={self.max_interlayer}: paths longer than '
+                f'{self.max_interlayer} interlayers were never searched; deep paths '
+                f'are absent from the outputs.'
+            )
+        if getattr(self, 'separate_hemispheres', False):
+            notes.append(
+                '- [hemisphere] separate_hemispheres=True: type/group aggregation '
+                'was split into _L/_R/_U labels.'
+            )
+        if getattr(self, 'hemisphere_filter', 'both') != 'both':
+            notes.append(
+                f'- [hemisphere] hemisphere_filter={self.hemisphere_filter}: only '
+                f'neurons of that hemisphere were used.'
+            )
+        if getattr(self, 'keep_only_hemisphere_conserved_connections', False):
+            notes.append(
+                '- [hemisphere] keep_only_hemisphere_conserved_connections=True: '
+                'only edges conserved between hemispheres were kept.'
+            )
+        if getattr(self, 'symmetry_analysis', False):
+            notes.append(
+                '- [symmetry] symmetry_analysis=True: ipsilateral/contralateral '
+                'outputs were generated.'
+            )
+        if getattr(self, 'find_reciprocal', False):
+            notes.append(
+                '- [enrichment] find_reciprocal=True: reciprocal direct connections '
+                'were added to the path graph.'
+            )
+        if getattr(self, 'skip_bodyId', False):
+            notes.append(
+                '- [output] skip_bodyId=True: individual bodyId-level results are '
+                'not included in the outputs (type-level aggregation only).'
+            )
+        if getattr(self, 'pathN_to_show', -1) > 0:
+            notes.append(
+                f'- [visualization] pathN_to_show={self.pathN_to_show}: only the '
+                f'top {self.pathN_to_show} paths (by discovery order) were '
+                f'visualized/saved.'
+            )
+        if getattr(self, 'cache_only', False):
+            notes.append(
+                '- [data] cache_only=True: results depend entirely on the local '
+                'cache; missing neurons are absent from the outputs.'
+            )
+
+        if not notes:
+            return
+        path = os.path.join(folder, 'user_warning_notes.txt')
+        try:
+            with open(path, 'w', encoding='utf-8') as f:
+                f.write('DROCAT user warning notes\n')
+                f.write('=' * 60 + '\n')
+                f.write('The following operations were applied during this run and may '
+                        'tilt the outputs (paths, edges, visualizations). Review them '
+                        'before interpreting the results:\n\n')
+                f.write('\n'.join(notes))
+                f.write('\n\nTo obtain the complete network, remove the graph edge '
+                        'limit (uncheck "Limit Graph Edges" / set the edge limits to '
+                        '0) and relax the filters above as appropriate.\n')
+            self._vprint(f'  ⚠️  Run applied output-affecting operations — see '
+                         f'user_warning_notes.txt in the run folder', level='always')
+        except OSError as e:
+            self._vprint(f'  Warning: could not write user_warning_notes.txt: {e}', level='full')
+
     def FindPath(self, find_bodyId_path=True):
         '''Find path between source and target neurons, adapted from FindInterClusterConnection.ipynb'''
         # Reset status columns if they exist (to allow sequential calls)
@@ -6479,6 +6649,12 @@ class FindNeuronConnection:
         sources = list(self.source_df['bodyId'].unique())
         # Targets found in the network (Checked=True)
         targets = list(self.target_df[self.target_df['Checked'] == True]['bodyId'].unique())
+        
+        # Pan-graph edge limit: keep only the strongest edges so the path
+        # count stays manageable (branching^depth); source/target edges are
+        # ALWAYS reserved; warns when trimmed.
+        self._apply_graph_edge_limit(G, self.graph_edge_limit_bodyid, 'bodyId',
+                                     reserve_nodes=sources + targets)
         cutoff = self.max_interlayer + 1
         
         paths_found = []
@@ -6678,17 +6854,22 @@ class FindNeuronConnection:
         print('Analyzing path info by type:')
         print('Building type-level graph and finding paths...')
         
-        # Build type-level graph from conn_types
-        G_type = FastGraph()
-        G_type.build_from_dataframe(conn_types, 'type_pre', 'type_post', 'weight')
-        
-        self._vprint(f'  Type-level graph: {G_type.number_of_nodes()} types, {G_type.number_of_edges()} edges', level='full')
-        
         # Get source and target types (filter out NaN/None values)
         source_types = [t for t in self.source_df['type'].unique().tolist() 
                         if t is not None and (not isinstance(t, float) or not pd.isna(t))]
         target_types = [t for t in self.target_df.loc[self.target_df.Checked, 'type'].unique().tolist()
                         if t is not None and (not isinstance(t, float) or not pd.isna(t))]
+        
+        # Build type-level graph from conn_types
+        G_type = FastGraph()
+        G_type.build_from_dataframe(conn_types, 'type_pre', 'type_post', 'weight')
+        
+        # Pan-graph edge limit for the type-level graph (strongest edges
+        # only; source/target type edges always reserved).
+        self._apply_graph_edge_limit(G_type, self.graph_edge_limit_groups, 'type',
+                                     reserve_nodes=source_types + target_types)
+        
+        self._vprint(f'  Type-level graph: {G_type.number_of_nodes()} types, {G_type.number_of_edges()} edges', level='full')
         
         # Find paths using DFS on type graph
         type_paths = []
@@ -7125,8 +7306,52 @@ class FindNeuronConnection:
             traceback.print_exc()
         
 
-        
+        # Standalone warning notes (graph trims, thresholds, filters...) at
+        # the run folder root — written whenever an op may tilt the outputs.
+        self._write_user_warning_notes(self.path_folder)
         self._vprint('Done\n')
+    
+    def _visualize_graph_before_reconstruct(self, G):
+        """Draw the discovered network graph BEFORE path reconstruction.
+
+        Uses the built FastGraph directly: every edge becomes a
+        ``source -> target`` row with its weight (VisualizePath's native
+        edge-list input), saved under ``network_early/`` inside the run
+        folder so the final path-based outputs are never overwritten. The
+        early preview shows the full explored topology (including edges not
+        on any target-reaching path); the per-layer Sankey is less
+        informative here because every row is a 2-node edge.
+        """
+        import pandas as pd
+        rows = []
+        for u, neigh in G.adj.items():
+            for v, w in neigh.items():
+                rows.append((u, v, w))
+        if not rows:
+            self._vprint('  No edges to visualize early', level='full')
+            return
+        edge_df = pd.DataFrame(rows, columns=["source", "target", "weight"])
+        early_folder = os.path.join(self.allpath_folder, 'network_early')
+        os.makedirs(early_folder, exist_ok=True)
+        self._vprint(f'📊 Early network visualization ({len(rows):,} edges) -> {early_folder}', level='always')
+        try:
+            vp = VisualizePath(
+                path_file=edge_df,
+                output_folder=early_folder,
+                source_color=self.source_color if hasattr(self, 'source_color') else '#1f77b4',
+                intermediate_color=self.intermediate_color if hasattr(self, 'intermediate_color') else '#2ca02c',
+                target_color=self.target_color if hasattr(self, 'target_color') else '#d62728',
+                link_color=self.link_color if hasattr(self, 'link_color') else 'rgba(100,100,100,0.3)',
+                network_layout=self.network_layout if hasattr(self, 'network_layout') else 'hierarchical',
+                showfig=self.showfig,
+                edgeN_limit=self.edgeN_limit,
+                output_format=self.output_format,
+                verbose=(self.verbose_mode == 'full'),
+            )
+            vp.visualize()
+            self._vprint('  ✓ Early network visualization created (network_early)', level='always')
+        except Exception as e:
+            self._vprint(f'  ⚠️  Early network visualization failed: {e}', level='always')
     
     def FindAllPath(self, find_bodyId_path=True, forward_only=True, exclude_searched_neurons=None, 
                     use_graph_cache=True, find_reciprocal: bool = False):
@@ -7189,6 +7414,19 @@ class FindNeuronConnection:
         # If flag not provided, use instance attribute
         if find_reciprocal is None:
             find_reciprocal = self.find_reciprocal
+
+        # Warn on deep searches: the number of simple paths grows
+        # combinatorially (branching^depth), so L4+ reconstruction can take
+        # hours and produce billions of paths.
+        if self.max_interlayer >= 4:
+            self._vprint(
+                '⚠️  max_interlayer >= 4: the path count grows combinatorially '
+                '(branching^depth) — reconstruction can take hours and produce '
+                'billions of paths. For large graphs consider raising Min Synapse '
+                'Count / Min Connection Ratio / Min Traversal Prob., and/or '
+                'tightening the Graph Edge Limit (Limit Graph Edges).',
+                level='always',
+            )
         
         # Create allpaths folder with parameter suffix
         import datetime
@@ -7503,6 +7741,14 @@ class FindNeuronConnection:
         G = FastGraph()
         for conn_df in all_connections_filtered:
             G.build_from_dataframe(conn_df, 'bodyId_pre', 'bodyId_post', 'weight')
+        
+        # Pan-graph edge limit: keep only the strongest edges BEFORE pruning
+        # and pathfinding (bounds the combinatorial path count); source/target
+        # edges are ALWAYS reserved; warns when edges are trimmed and how to
+        # restore the complete network.
+        self._apply_graph_edge_limit(G, self.graph_edge_limit_bodyid, 'bodyId',
+                                     reserve_nodes=list(source_ID) + list(targets_found))
+        
         self._vprint(f'Done! ({G.number_of_nodes()} nodes, {G.number_of_edges()} edges)', level='full')
         
         # Pruning: Remove nodes that cannot reach any target
@@ -7551,6 +7797,13 @@ class FindNeuronConnection:
             else:
                 self._vprint('Warning: No targets found in graph (should have been caught earlier).', level='full')
         
+        # Optional early visualization: the network graph is complete once
+        # the layers are fetched — drawing it now gives immediate visual
+        # feedback while the (potentially long) path reconstruction runs
+        # afterwards. Uses the built graph directly (edge-list input).
+        if self.visualize_before_reconstruct and G.number_of_nodes() > 0:
+            self._visualize_graph_before_reconstruct(G)
+        
         # Find all neurons that are on ANY path from any source to any target
         # with path length ≤ max_interlayer
         neurons_in_paths = set()
@@ -7591,7 +7844,10 @@ class FindNeuronConnection:
             elif self.verbose_mode == 'full':
                 self._vprint('Using memoized DFS (forward, valid-successor pruning)...', level='full')
             
-            path_gen = G.find_paths_memoized_dfs(source_ID, targets_found, self.max_interlayer + 1, verbose=(self.verbose_mode in ['simple', 'full']))
+            path_gen = G.find_paths_memoized_dfs(
+                source_ID, targets_found, self.max_interlayer + 1,
+                verbose=(self.verbose_mode in ['simple', 'full']),
+            )
             
         elif algo == 'MeetInMiddle':
             if self.verbose_mode == 'simple':
@@ -7628,12 +7884,12 @@ class FindNeuronConnection:
             
             path_gen = G.find_paths_backward_dp(source_ID, targets_found, self.max_interlayer + 1, verbose=(self.verbose_mode in ['simple', 'full']))
 
-        # Common collection logic
+        # Common collection logic. The per-length progress bars inside the
+        # pathfinding generators already report the running path total (see
+        # the L{length} Reconstruct postfix), so no separate counter bar is
+        # wrapped around the generator here — one line, refreshed in place.
         if path_gen:
-            if self.verbose_mode in ['simple', 'full']:
-                    path_iter = tqdm(path_gen, desc="Processing paths", leave=False, unit="path")
-            else:
-                    path_iter = path_gen
+            path_iter = path_gen
 
             for p in path_iter:
                 path_count += 1
@@ -8469,6 +8725,18 @@ class FindNeuronConnection:
         G_type = FastGraph()
         G_type.build_from_dataframe(conn_types, 'type_pre', 'type_post', 'weight')
         
+        # Pan-graph edge limit for the type-level graph (strongest edges only;
+        # source/target edges always reserved — raw types plus bodyId-string
+        # fallback labels cover both the mapped and unmapped label schemes).
+        reserve_types = [str(t) for t in self.source_df['type'].unique().tolist()
+                         if t is not None and (not isinstance(t, float) or not pd.isna(t))]
+        reserve_types += [str(t) for t in self.target_df.loc[self.target_df.Checked, 'type'].unique().tolist()
+                          if t is not None and (not isinstance(t, float) or not pd.isna(t))]
+        reserve_types += [str(b) for b in self.source_df['bodyId'].unique().tolist()]
+        reserve_types += [str(b) for b in self.target_df.loc[self.target_df.Checked, 'bodyId'].unique().tolist()]
+        self._apply_graph_edge_limit(G_type, self.graph_edge_limit_groups, 'type',
+                                     reserve_nodes=reserve_types)
+        
         self._vprint(f'  Type-level graph: {G_type.number_of_nodes()} types, {G_type.number_of_edges()} edges', level='full')
         
         # Build bodyId → std_label map for source/target identification
@@ -8684,6 +8952,15 @@ class FindNeuronConnection:
             # Build group-level graph from conn_groups
             G_group = FastGraph()
             G_group.build_from_dataframe(conn_groups, 'group_pre', 'group_post', 'weight')
+            
+            # Get source and target groups
+            source_groups = self.source_df['custom_group'].unique().tolist()
+            target_groups = self.target_df.loc[self.target_df.Checked, 'custom_group'].unique().tolist()
+            
+            # Pan-graph edge limit for the custom-group graph (strongest edges
+            # only; source/target group edges always reserved).
+            self._apply_graph_edge_limit(G_group, self.graph_edge_limit_groups, 'custom-group',
+                                         reserve_nodes=source_groups + target_groups)
             
             self._vprint(f'  Group-level graph: {G_group.number_of_nodes()} groups, {G_group.number_of_edges()} edges', level='full')
             
@@ -9499,6 +9776,10 @@ class FindNeuronConnection:
             self._vprint('===========\n', level='simple')
         else:
             self._vprint('Done\n', level='full')
+
+        # Standalone warning notes (graph trims, thresholds, filters...) at
+        # the run folder root — written whenever an op may tilt the outputs.
+        self._write_user_warning_notes(self.allpath_folder)
 
     def _is_symmetric_dataset(self) -> bool:
         dataset = str(self.dataset).lower()

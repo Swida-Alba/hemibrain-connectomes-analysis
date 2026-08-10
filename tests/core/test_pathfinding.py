@@ -309,3 +309,305 @@ def test_algorithms_handle_edge_cases(algo):
         ("B", "X", "Y", "T1"),
         ("B", "X", "Y", "T2"),
     }
+
+
+# ---------------------------------------------------------------------------
+# MemoizedDFS: per-source cap
+# ---------------------------------------------------------------------------
+
+def _fanout_graph():
+    """A -> X1..X6 -> Y -> T: 6 paths of length 3 from A, 6 from B."""
+    G = FastGraph()
+    for u in ["A", "B"]:
+        for i in range(6):
+            G.add_edge(u, f"X{i}", 1)
+            G.add_edge(f"X{i}", "Y", 1)
+    G.add_edge("Y", "T", 1)
+    return G
+
+
+def test_trim_to_strongest_keeps_top_weight_edges_only():
+    """trim_to_strongest keeps the strongest edges by weight across the
+    whole graph (pan-graph limit), not per node."""
+    G = FastGraph()
+    G.add_edge("A", "B", 1)
+    G.add_edge("B", "C", 9)
+    G.add_edge("A", "C", 5)
+    G.add_edge("C", "D", 2)
+    G.add_node("Z", node_type="source")
+    assert G.number_of_edges() == 4
+
+    removed, threshold = G.trim_to_strongest(2)
+    assert removed == 2
+    assert threshold == 5  # applied cutoff = min weight among kept edges
+    assert G.number_of_edges() == 2
+    # the two strongest edges survive (9 and 5)
+    assert set(G.edges()) == {("B", "C"), ("A", "C")}
+    # nodes left without any edge are dropped; Z was already isolated
+    assert "Z" not in G
+    assert "D" not in G  # only had the weak C->D edge
+    assert "A" in G and "B" in G and "C" in G
+
+
+def test_trim_to_strongest_noop_for_unlimited_or_huge_limit():
+    """None / 0 / negative / >= edge count all leave the graph unchanged."""
+    G = FastGraph()
+    G.add_edge("A", "B", 3)
+    G.add_edge("B", "C", 1)
+    for limit in (None, 0, -5, 2, 100):
+        assert G.trim_to_strongest(limit) == (0, None)
+        assert set(G.edges()) == {("A", "B"), ("B", "C")}
+
+
+def test_trim_to_strongest_preserves_attrs_and_radj_invalidation():
+    """Kept edges keep their edge attrs; the reverse adjacency cache is
+    invalidated so predecessor lookups reflect the trimmed graph."""
+    G = FastGraph()
+    G.add_edge("A", "B", 10, color="red")
+    G.add_edge("B", "C", 1, color="blue")
+    assert list(G.predecessors("B")) == ["A"]  # build the radj cache
+
+    removed, threshold = G.trim_to_strongest(1)
+    assert (removed, threshold) == (1, 10)
+    assert set(G.edges()) == {("A", "B")}
+    assert G.edge_attrs[("A", "B")]["color"] == "red"
+    assert list(G.predecessors("B")) == ["A"]
+    assert list(G.predecessors("C")) == []  # C's edge was trimmed
+
+
+def test_trim_to_strongest_reserves_source_target_edges():
+    """Edges incident to reserve_nodes (outgoing AND incoming) survive the
+    trim regardless of weight; the rest is filled with the strongest."""
+    G = FastGraph()
+    G.add_edge("S", "A", 1)    # weak source edge — must survive
+    G.add_edge("S", "B", 2)    # weak source edge — must survive
+    G.add_edge("A", "T", 1)    # weak target edge — must survive
+    G.add_edge("B", "T", 3)    # weak target edge — must survive
+    G.add_edge("A", "M", 100)  # strong intermediate
+    G.add_edge("M", "B", 90)   # strong intermediate
+    G.add_edge("X", "Y", 80)   # strong but isolated from S/T — may be cut
+
+    removed, threshold = G.trim_to_strongest(4, reserve_nodes=["S", "T"])
+    # 4 reserved source/target edges stay; capacity 0 left for others
+    assert removed == 3
+    kept = set(G.edges())
+    assert {("S", "A"), ("S", "B"), ("A", "T"), ("B", "T")} <= kept
+    assert ("X", "Y") not in kept
+    assert threshold == 1  # a reserved weak edge defines the threshold
+
+
+def test_trim_to_strongest_reservation_wins_over_limit():
+    """When reserved edges alone exceed the quota, all of them are kept."""
+    G = FastGraph()
+    G.add_edge("S", "A", 5)
+    G.add_edge("S", "B", 4)
+    G.add_edge("S", "C", 3)
+    G.add_edge("A", "T", 2)
+    removed, threshold = G.trim_to_strongest(2, reserve_nodes=["S", "T"])
+    assert removed == 0
+    assert threshold == 2
+    assert G.number_of_edges() == 4  # reservation wins
+
+
+def test_trimmed_graph_still_finds_paths():
+    """Pathfinding on the trimmed graph works and only uses kept edges."""
+    G = FastGraph()
+    G.add_edge("S", "X", 1)   # weak
+    G.add_edge("X", "T", 1)   # weak
+    G.add_edge("S", "Y", 50)  # strong
+    G.add_edge("Y", "T", 60)  # strong
+    G.trim_to_strongest(2)
+    paths = list(G.find_paths_memoized_dfs(["S"], ["T"], 3))
+    assert paths == [["S", "Y", "T"]]  # the weak route was dropped
+
+
+def test_trim_reserved_edges_keep_paths_alive():
+    """Reserving source/target edges keeps weak-only routes findable."""
+    G = FastGraph()
+    G.add_edge("S", "X", 1)   # weak source edge — reserved
+    G.add_edge("X", "T", 1)   # weak target edge — reserved
+    G.add_edge("S", "Y", 50)  # strong
+    G.add_edge("Y", "T", 60)  # strong
+    G.trim_to_strongest(2, reserve_nodes=["S", "T"])
+    paths = list(G.find_paths_memoized_dfs(["S"], ["T"], 3))
+    assert paths == [["S", "X", "T"], ["S", "Y", "T"]]  # both routes
+
+
+# ---------------------------------------------------------------------------
+# FindAllPath: early graph visualization + deep-layer warning
+# ---------------------------------------------------------------------------
+
+def test_early_graph_visualization_feeds_built_graph_as_edge_list(monkeypatch, tmp_path):
+    """The early visualization consumes the built FastGraph DIRECTLY (edge
+    list with source/target/weight) before any path reconstruction, and
+    writes into network_early/ inside the run folder."""
+    import sys
+    sys.path.insert(0, str(PROJECT_ROOT / "src"))
+    import coana
+
+    fc = object.__new__(coana.FindNeuronConnection)
+    fc.allpath_folder = str(tmp_path)
+    fc.verbose_mode = "full"
+    fc.showfig = False
+    fc.edgeN_limit = 500
+    fc.output_format = "xlsx"
+    fc.network_layout = "hierarchical"
+    fc.source_color = fc.intermediate_color = fc.target_color = fc.link_color = None
+    fc._vprint = lambda *a, **k: None
+
+    G = FastGraph()
+    G.add_edge("A", "B", 3)
+    G.add_edge("B", "C", 5)
+
+    captured = {}
+
+    class FakeVisualizePath:
+        def __init__(self, **kw):
+            captured.update(kw)
+
+        def visualize(self):
+            captured["visualized"] = True
+
+    monkeypatch.setattr(coana, "VisualizePath", FakeVisualizePath)
+    fc._visualize_graph_before_reconstruct(G)
+
+    assert captured["visualized"] is True
+    df = captured["path_file"]
+    assert list(df.columns) == ["source", "target", "weight"]
+    assert len(df) == 2
+    assert (tmp_path / "network_early").is_dir()
+
+
+def test_find_all_path_optimization_fields_exist():
+    """The pathfinding optimization knobs are dataclass fields with the
+    documented defaults (pan-graph edge limits on, early viz off)."""
+    import dataclasses
+    import sys
+    sys.path.insert(0, str(PROJECT_ROOT / "src"))
+    import coana
+    fields = {f.name: f.default for f in dataclasses.fields(coana.FindNeuronConnection)}
+    assert fields.get("graph_edge_limit_bodyid") == 5000
+    assert fields.get("graph_edge_limit_groups") == 1000
+    assert fields.get("visualize_before_reconstruct") is False
+    # the old per-source path cap is gone
+    assert "max_paths_per_source" not in fields
+
+
+def test_apply_graph_edge_limit_trims_warns_and_honors_zero():
+    """The pan-graph edge limit keeps the strongest edges (source/target
+    reserved), prints a NOTICEABLE warning with the applied weight
+    threshold, and does nothing when the limit is 0/None."""
+    import sys
+    sys.path.insert(0, str(PROJECT_ROOT / "src"))
+    import coana
+
+    warnings = []
+    fc = object.__new__(coana.FindNeuronConnection)
+    fc._vprint = lambda msg, level='full': warnings.append(msg)
+    fc._warn_notes = []
+
+    G = FastGraph()
+    G.add_edge("S", "A", 1)    # weak source edge — reserved
+    G.add_edge("A", "T", 2)    # weak target edge — reserved
+    G.add_edge("S", "B", 100)  # strong source edge — reserved
+    G.add_edge("B", "T", 200)  # strong target edge — reserved
+    G.add_edge("A", "M", 50)   # strong intermediate — may be cut
+    G.add_edge("M", "B", 60)   # strong intermediate — may be cut
+    G.add_edge("X", "Y", 80)   # strong, isolated — fills spare capacity
+
+    removed = fc._apply_graph_edge_limit(G, 5, "bodyId", reserve_nodes=["S", "T"])
+    assert removed == 2  # the two intermediate edges were cut
+    kept = set(G.edges())
+    assert {("S", "A"), ("A", "T"), ("S", "B"), ("B", "T")} <= kept  # reserved
+    assert ("X", "Y") in kept  # strongest non-reserved fills the capacity
+    assert len(warnings) == 1
+    msg = warnings[0]
+    assert "⚠️" in msg and "bodyId graph edge limit" in msg
+    assert "strongest edges" in msg
+    assert "applied threshold: weight >= 1 synapses" in msg  # explicit trim end
+    assert "always reserved" in msg
+    assert "COMPLETE graph network" in msg and "remove the edge limit" in msg
+    # the trim is recorded for user_warning_notes.txt
+    assert len(fc._warn_notes) == 1 and "[graph edge limit]" in fc._warn_notes[0]
+
+    # limit 0 / None / large-enough -> untouched, no warning
+    G2 = FastGraph()
+    G2.add_edge("X", "Y", 1)
+    warnings.clear()
+    assert fc._apply_graph_edge_limit(G2, 0, "type") == 0
+    assert fc._apply_graph_edge_limit(G2, None, "type") == 0
+    assert fc._apply_graph_edge_limit(G2, 5, "type") == 0
+    assert set(G2.edges()) == {("X", "Y")}
+    assert warnings == []
+
+
+def test_write_user_warning_notes_lists_tilting_operations(tmp_path):
+    """user_warning_notes.txt is written at the run folder root when the
+    run applied output-tilting operations (trims, thresholds, filters,
+    hemisphere/symmetry/reciprocal, output/visualization caps)."""
+    import sys
+    sys.path.insert(0, str(PROJECT_ROOT / "src"))
+    import coana
+
+    fc = object.__new__(coana.FindNeuronConnection)
+    fc._vprint = lambda *a, **k: None
+    fc._warn_notes = ["- [graph edge limit] bodyId graph trimmed: kept the top 5,000 edges (weight >= 20 synapses); removed 1,234 of 6,234 edges."]
+    fc.edgeN_limit = 500
+    fc.min_synapse_num = 3
+    fc.min_ratio = 0.05
+    fc.min_traversal_probability = 0.1
+    fc.keyword_in_path_to_remove = ["None"]
+    fc.max_interlayer = 4
+    fc.separate_hemispheres = False
+    fc.hemisphere_filter = "both"
+    fc.keep_only_hemisphere_conserved_connections = False
+    fc.symmetry_analysis = True
+    fc.find_reciprocal = False
+    fc.skip_bodyId = False
+    fc.pathN_to_show = 200
+    fc.cache_only = False
+
+    fc._write_user_warning_notes(str(tmp_path))
+    path = tmp_path / "user_warning_notes.txt"
+    assert path.exists()
+    text = path.read_text(encoding="utf-8")
+    assert "user warning notes" in text
+    assert "[graph edge limit]" in text and "weight >= 20 synapses" in text
+    assert "[threshold] min_synapse_num=3" in text
+    assert "[threshold] min_ratio=0.05" in text
+    assert "[threshold] min_traversal_probability=0.1" in text
+    assert "[depth] max_interlayer=4" in text
+    assert "[symmetry] symmetry_analysis=True" in text
+    assert "[visualization] pathN_to_show=200" in text
+    assert "[edge limit per neuron] edgeN_limit=500" in text
+    # inactive operations are NOT listed
+    assert "hemisphere" not in text and "reciprocal" not in text
+    assert "skip_bodyId" not in text and "cache_only" not in text
+
+
+def test_write_user_warning_notes_skipped_when_nothing_applies(tmp_path):
+    """No file is written when the run applied no tilting operations."""
+    import sys
+    sys.path.insert(0, str(PROJECT_ROOT / "src"))
+    import coana
+
+    fc = object.__new__(coana.FindNeuronConnection)
+    fc._vprint = lambda *a, **k: None
+    fc._warn_notes = []
+    fc.edgeN_limit = 0
+    fc.min_synapse_num = 1
+    fc.min_ratio = 0
+    fc.min_traversal_probability = 0
+    fc.keyword_in_path_to_remove = ["None"]
+    fc.max_interlayer = 2
+    fc.separate_hemispheres = False
+    fc.hemisphere_filter = "both"
+    fc.keep_only_hemisphere_conserved_connections = False
+    fc.symmetry_analysis = False
+    fc.find_reciprocal = False
+    fc.skip_bodyId = False
+    fc.pathN_to_show = -1
+    fc.cache_only = False
+
+    fc._write_user_warning_notes(str(tmp_path))
+    assert not (tmp_path / "user_warning_notes.txt").exists()

@@ -822,6 +822,85 @@ class FastGraph:
             for s in iterator:
                 yield from guided_dfs(s, length, [s])
 
+    def trim_to_strongest(self, keep, reserve_nodes=None, reserve_edges=None):
+        """
+        Keep only the ``keep`` strongest edges (by weight), in place.
+
+        Edges are ranked by weight (descending) across the whole graph and
+        the top ``keep`` are retained; weaker edges are dropped. Edge
+        attributes are preserved for kept edges; nodes not touched by any
+        kept edge are removed (nodes that only receive kept edges stay
+        discoverable). The reverse adjacency cache is invalidated.
+
+        Source/target edges are ALWAYS reserved: every edge incident to a
+        node in ``reserve_nodes`` (outgoing and incoming), plus every edge
+        in ``reserve_edges``, is kept regardless of weight. The remaining
+        capacity is filled with the strongest non-reserved edges. When the
+        reserved edges alone exceed ``keep``, all of them are kept (the
+        reservation wins over the limit).
+
+        Parameters
+        ----------
+        keep : int or None
+            Maximum number of edges to keep. None / <= 0 / >= the current
+            edge count => no trimming (returns (0, None)).
+        reserve_nodes : iterable, optional
+            Nodes whose incident edges are always kept (e.g. the queried
+            source and target neurons).
+        reserve_edges : iterable, optional
+            Explicit (u, v) edges that are always kept.
+
+        Returns
+        -------
+        tuple
+            (removed_edges, threshold): the number of removed edges and the
+            applied cutoff — the minimum weight among the kept edges (None
+            when no trimming happened).
+        """
+        if keep is None or keep <= 0 or self._num_edges <= keep:
+            return 0, None
+        reserved = set(reserve_edges or ())
+        if reserve_nodes:
+            for u in set(reserve_nodes):
+                for v in self.adj.get(u, ()):
+                    reserved.add((u, v))
+                for pred in self.predecessors(u):
+                    reserved.add((pred, u))
+        if len(reserved) >= keep:
+            # reservation alone fills (or exceeds) the quota — keep it all
+            kept_edges = {(u, v) for u in self.adj for v in self.adj[u] if (u, v) in reserved}
+            threshold = min(self.adj[u][v] for u, v in kept_edges) if kept_edges else None
+            removed = self._apply_kept_edges(kept_edges)
+            return removed, threshold
+        ranked = sorted(
+            ((w, u, v) for u, neigh in self.adj.items() for v, w in neigh.items()
+             if (u, v) not in reserved),
+            key=lambda e: e[0], reverse=True,
+        )
+        kept_edges = reserved | {(u, v) for _, u, v in ranked[:keep - len(reserved)]}
+        threshold = min(self.adj[u][v] for u, v in kept_edges) if kept_edges else None
+        removed = self._apply_kept_edges(kept_edges)
+        return removed, threshold
+
+    def _apply_kept_edges(self, kept_edges):
+        """Drop every edge not in ``kept_edges`` (in place); removes nodes
+        that end up without any edge and invalidates the radj cache."""
+        kept_nodes = {u for u, v in kept_edges} | {v for u, v in kept_edges}
+        removed = 0
+        for u in list(self.adj):
+            for v in list(self.adj[u]):
+                if (u, v) not in kept_edges:
+                    del self.adj[u][v]
+                    self.edge_attrs.pop((u, v), None)
+                    self._num_edges -= 1
+                    removed += 1
+            if not self.adj[u] and u not in kept_nodes:
+                del self.adj[u]
+                self.node_attrs.pop(u, None)
+        self._radj = None
+        self._radj_dirty = False
+        return removed
+
     def find_paths_memoized_dfs(self, sources, targets, cutoff, direction='forward', verbose=False):
         """
         Memoized DFS with valid successor pruning.
@@ -897,6 +976,8 @@ class FastGraph:
         except ImportError:
             def tqdm(iterable, **kwargs): return iterable
 
+        capped_sources = []
+        total_paths = 0
         for length in range(1, cutoff + 1):
             iterator = starts
             if verbose:
@@ -909,7 +990,16 @@ class FastGraph:
             if verbose:
                 iterator = tqdm(valid_starts, desc=f"L{length} Reconstruct", leave=False)
             for s in iterator:
-                yield from reconstruct(s, length, [s])
+                for p in reconstruct(s, length, [s]):
+                    yield p
+                    total_paths += 1
+                if verbose:
+                    # keep the running path total on the SAME bar (no
+                    # separate counter line interleaving with the bar)
+                    try:
+                        iterator.set_postfix(paths=f"{total_paths:,}", refresh=True)
+                    except Exception:
+                        pass
 
     def find_paths_bidirectional_bfs(self, sources, targets, cutoff, verbose=False):
         """
