@@ -29,6 +29,15 @@ from ..components.palette_picker import (
 from ..components.edge_list_editor import edge_list_editor, draft_recovery_banner
 
 
+def _flatten_neuron_layers(neuron_layers) -> list:
+    """Flatten the nested layer model into one neuron per entry for the
+    per-neuron palette counts (single-neuron layers are plain values)."""
+    return [
+        n for layer in neuron_layers
+        for n in (layer if isinstance(layer, list) else [layer])
+    ]
+
+
 COLOR_PRESETS = {
     "Cool": {"source": "#4A90E2", "intermediate": "#50E3C2", "target": "#B8E986", "link": "rgba(74,144,226,0.3)"},
     "Default": {"source": "#1f77b4", "intermediate": "rgba(44,160,44,1.0)", "target": "#d62728", "link": "rgba(100,100,100,0.6)"},
@@ -396,6 +405,11 @@ def create_skeleton_tab():
             neuron_layers = converted
         custom_names = layer_tree.get_custom_layer_names()
         rois = roi_select.value or []
+
+        # Flatten the (filter-converted) layers for the per-neuron palette:
+        # one neuron color per neuron; synapse colors span the gaps between
+        # consecutive neurons (same counts as the old flat chip list).
+        neurons = _flatten_neuron_layers(neuron_layers)
 
         # Assign the exact displayed palette order (including custom reordering).
         neuron_colors = assign_palette_colors(

@@ -252,6 +252,35 @@ class TestTabIntegration:
         ]
         assert "card-skeleton-layers" in ids
 
+    def test_commit_add_rerenders_without_touching_sender(self):
+        """Enter-commit re-renders the board: the old add input is replaced
+        by a fresh empty one and must not be written to afterwards (writing
+        to a deleted element warns and can break the event loop)."""
+        from types import SimpleNamespace
+
+        client = Client(page(f"/layer-tree-commit-{id(object())}"))
+        with client:
+            handle = layer_tree_editor()
+        add_input = next(
+            el for el in client.elements.values()
+            if type(el).__name__ == "Input"
+        )
+        add_input.value = "aMe12"
+        listener = next(
+            l for l in add_input._event_listeners.values()
+            if l.type == "keydown.enter"
+        )
+        listener.handler(SimpleNamespace(sender=add_input))
+
+        assert handle.layers[0]["neurons"] == ["aMe12"]
+        # The committed input was deleted by the re-render...
+        assert add_input not in client.elements.values()
+        # ...and replaced by fresh, empty add inputs (one per layer).
+        inputs = [el for el in client.elements.values()
+                  if type(el).__name__ == "Input"]
+        assert len(inputs) == 3
+        assert all(el.value == "" for el in inputs)
+
     def test_component_builds_outside_client(self):
         """Handle methods work without a NiceGUI slot (render is a no-op)."""
         handle = LayerTreeHandle()

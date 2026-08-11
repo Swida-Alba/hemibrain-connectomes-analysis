@@ -224,9 +224,10 @@ class LayerTreeHandle:
                 )
 
     def _commit_add(self, event, layer: int) -> None:
-        sender = event.sender
-        if self.add_neuron(layer, sender.value or ""):
-            sender.value = ""
+        # add_neuron re-renders the board and REPLACES this input with a fresh
+        # empty one — the sender must not be touched afterwards (writing to a
+        # deleted element warns and can break the event loop).
+        self.add_neuron(layer, event.sender.value or "")
 
     def _render_chip(self, i: int, j: int, neuron: str) -> None:
         chip = ui.element("div").classes("drocat-layer-chip")

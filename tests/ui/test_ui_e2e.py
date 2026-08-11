@@ -1616,6 +1616,18 @@ class TestTabs:
         assert "drocat-active" in buttons["Net-Viz"]._classes
         assert "drocat-active" not in buttons["Path"]._classes
 
+    def test_flatten_neuron_layers(self):
+        """The nested layer model flattens into one neuron per entry for
+        the per-neuron palette counts (single-neuron layers are plain
+        values, multi-neuron layers are lists)."""
+        from ui.tabs.visualization import _flatten_neuron_layers
+
+        assert _flatten_neuron_layers(["aMe12", ["aMe10", "MBON01"], "KC"]) == [
+            "aMe12", "aMe10", "MBON01", "KC",
+        ]
+        assert _flatten_neuron_layers([["a", "b"]]) == ["a", "b"]
+        assert _flatten_neuron_layers([]) == []
+
     def test_skeleton_tab_shares_pathfinding_search_controls(self):
         """The 3D Skeleton tab must expose the same neuron-search controls as
         pathfinding: a filter-mode select (exact/starts-with/contains/...)
