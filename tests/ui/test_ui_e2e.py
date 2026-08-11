@@ -1727,6 +1727,12 @@ class TestTabs:
 
         assert "Export Video / GIF" in texts
         assert "Individual Profiles (PDF / PPTX)" in texts
+        # Legend mode defaults to per-type entries.
+        legend = [
+            el for el in client.elements.values()
+            if getattr(el, "_props", {}).get("label") == "Neuron Legend Mode"
+        ]
+        assert legend and legend[0].value == "type", "legend mode should default to 'type'"
         assert any("Each individual profile follows the Neuron Legend Mode" in t
                    for t in texts), "legend-mode grouping notice missing"
         assert any("Each row is one layer" in t
