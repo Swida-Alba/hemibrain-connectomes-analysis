@@ -88,26 +88,27 @@ def create_skeleton_tab():
             with param_grid(2):
                 dataset = dataset_selector()
                 output_dir = dir_input()
-            filter_mode = select_input(
-                "Match by",
-                ["exact", "startswith", "contains", "endswith", "regex"],
-                "exact",
-                hint="The filter mode (exact / starts with / contains / ends with / "
-                     "regex) applies to every neuron in the layer tree, matching "
-                     "the pathfinding search backend.",
-            )
-            search_columns = select_input(
-                "Search Columns", SEARCH_COLUMNS, "auto",
-                hint="Which columns to search when resolving neuron names (same as "
-                     "pathfinding). 'auto': all columns (bodyId -> type -> instance -> "
-                     "flywireType/others). Use 'type'/'instance'/'bodyId' to restrict.",
-            )
-            hemisphere = select_input(
-                "Hemisphere", ["both", "left", "right"], "both",
-                hint="'both': plot all neurons. 'left'/'right': plot only that hemisphere. "
-                     "Neurons WITHOUT an explicit hemisphere (no _L/_R instance suffix "
-                     "or Soma side) are always included in every option.",
-            )
+            with param_grid(3):
+                filter_mode = select_input(
+                    "Match by",
+                    ["exact", "startswith", "contains", "endswith", "regex"],
+                    "exact",
+                    hint="The filter mode (exact / starts with / contains / ends with / "
+                         "regex) applies to every neuron in the layer tree, matching "
+                         "the pathfinding search backend.",
+                )
+                search_columns = select_input(
+                    "Search Columns", SEARCH_COLUMNS, "auto",
+                    hint="Which columns to search when resolving neuron names (same as "
+                         "pathfinding). 'auto': all columns (bodyId -> type -> instance -> "
+                         "flywireType/others). Use 'type'/'instance'/'bodyId' to restrict.",
+                )
+                hemisphere = select_input(
+                    "Hemisphere", ["both", "left", "right"], "both",
+                    hint="'both': plot all neurons. 'left'/'right': plot only that hemisphere. "
+                         "Neurons WITHOUT an explicit hemisphere (no _L/_R instance suffix "
+                         "or Soma side) are always included in every option.",
+                )
 
             # ------------------------------------------------------------------
             # General Appearance (independent block)
