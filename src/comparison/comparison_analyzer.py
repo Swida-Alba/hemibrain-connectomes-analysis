@@ -562,7 +562,7 @@ class ComparisonAnalyzer:
         Args:
             dataset_name: Dataset identifier string
             threshold: Weight threshold for path finding
-            verbose_mode: Verbosity level for FindAllPath ('simple', 'full', 'silent')
+            verbose_mode: Verbosity level for the path run ('simple', 'full', 'silent')
             
         Returns:
             DataFrame with path analysis results
@@ -636,11 +636,16 @@ class ComparisonAnalyzer:
         )
         
         # Initialize and run analysis
-        # Use FindAllPath() as specified in TODO_comparison.md:
+        # Use FindAllPath()/FindShortestPath() as specified in TODO_comparison.md:
         # "DO NOT use the FindDirectConnection() function, because the FindAllPath() 
         # function can already include direct connections as 1-hop paths"
+        # (FindShortestPath likewise includes direct connections as 1-hop
+        # shortest paths).
         fnc.InitializeNeuronInfo()
-        fnc.FindAllPath(find_reciprocal=self.parameters.find_reciprocal)
+        if self.parameters.path_mode == 'shortest':
+            fnc.FindShortestPath(find_reciprocal=self.parameters.find_reciprocal)
+        else:
+            fnc.FindAllPath(find_reciprocal=self.parameters.find_reciprocal)
         
         # Get results - FindAllPath saves both path data and connection data
         # For comparison metrics, we need the connection data (edge-level) format:
@@ -1086,20 +1091,22 @@ class ComparisonAnalyzer:
         Run edge-based analyses for all datasets and thresholds.
         
         Optimized Edge Mode Workflow:
-        1. Run FindAllPath() at LOWEST threshold to get bodyId connections
+        1. Run the path tool (FindAllPath, or FindShortestPath when
+           path_mode='shortest') at LOWEST threshold to get bodyId connections
         2. Filter bodyId data by ALL thresholds and aggregate ALL to type-level immediately
-        3. Run FindAllPath() for remaining thresholds (only for output consistency, no aggregation)
+        3. Run the path tool for remaining thresholds (only for output consistency, no aggregation)
         
         This approach:
         - Fetches connections only once (at lowest threshold)
         - Computes all edge aggregations upfront using FastGraph
-        - Runs FindAllPath for other thresholds only to generate path output files
+        - Runs the path tool for other thresholds only to generate path output files
         """
         from core.fast_graph import FastGraph
         
         dataset_names = self.parameters.get_dataset_names()
         lowest_threshold = min(self.parameters.thresholds)
         sorted_thresholds = sorted(self.parameters.thresholds)
+        path_tool = 'FindShortestPath' if self.parameters.path_mode == 'shortest' else 'FindAllPath'
         
         for dataset_name in dataset_names:
             if dataset_name not in self.raw_results:
@@ -1107,8 +1114,8 @@ class ComparisonAnalyzer:
             
             self._log(f"Edge mode analysis for \033[94m{dataset_name}\033[0m ({len(sorted_thresholds)} thresholds)")
             
-            # ===== Step 1: Run FindAllPath for LOWEST threshold =====
-            self._log(f"Running FindAllPath for {dataset_name} @ threshold={lowest_threshold}")
+            # ===== Step 1: Run the path tool for LOWEST threshold =====
+            self._log(f"Running {path_tool} for {dataset_name} @ threshold={lowest_threshold}")
             self.run_path_analysis(dataset_name, lowest_threshold, verbose_mode='simple')
             
             # ===== Step 2: Get bodyId-level connections =====
@@ -1120,7 +1127,7 @@ class ComparisonAnalyzer:
                 self._log(f"Warning: No bodyId connections found for {dataset_name}")
                 for threshold in self.parameters.thresholds:
                     self.raw_results[dataset_name][threshold] = pd.DataFrame()
-                # Still run FindAllPath for other thresholds for output consistency
+                # Still run the path tool for other thresholds for output consistency
                 remaining_thresholds = [t for t in sorted_thresholds if t != lowest_threshold]
                 for threshold in tqdm(remaining_thresholds, desc=f"  {dataset_name} thresholds", leave=False, unit="thr"):
                     self.run_path_analysis(dataset_name, threshold, verbose_mode='silent')
@@ -1132,16 +1139,19 @@ class ComparisonAnalyzer:
             source_types = set(self.parameters.get_source_neurons_for_dataset(dataset_name))
             target_types = set(self.parameters.get_target_neurons_for_dataset(dataset_name))
             max_layers = self.parameters.max_interlayer + 1
+            if self.parameters.path_mode == 'shortest' and self.parameters.max_interlayer <= 0:
+                max_layers = None  # unlimited depth in shortest mode
             
             # ===== Step 3: Filter and aggregate for ALL thresholds at once =====
             self._log(f"Aggregating edges for all {len(sorted_thresholds)} thresholds...")
             for threshold in tqdm(sorted_thresholds, desc=f"  Aggregating", leave=False, unit="thr"):
                 self._process_threshold_aggregation(
                     dataset_name, threshold, bodyid_df, label_map,
-                    source_types, target_types, max_layers, skip_existing
+                    source_types, target_types, max_layers, skip_existing,
+                    path_mode=self.parameters.path_mode
                 )
             
-            # ===== Step 4: Run FindAllPath for remaining thresholds (output consistency only) =====
+            # ===== Step 4: Run the path tool for remaining thresholds (output consistency only) =====
             remaining_thresholds = [t for t in sorted_thresholds if t != lowest_threshold]
             if remaining_thresholds:
                 for threshold in tqdm(remaining_thresholds, desc=f"  {dataset_name} thresholds", leave=False, unit="thr"):
@@ -1158,8 +1168,9 @@ class ComparisonAnalyzer:
         label_map: Dict,
         source_types: set,
         target_types: set,
-        max_layers: int,
-        skip_existing: bool
+        max_layers: Optional[int],
+        skip_existing: bool,
+        path_mode: str = 'all'
     ):
         """Process edge aggregation for a single threshold."""
         # Check if already computed in memory
@@ -1179,7 +1190,7 @@ class ComparisonAnalyzer:
             # Aggregate to type-level using FastGraph
             result_df = self._aggregate_and_find_paths(
                 filtered_df, label_map, source_types, target_types,
-                max_layers, dataset_name, threshold
+                max_layers, dataset_name, threshold, path_mode=path_mode
             )
             valid_count = result_df['has_valid_path'].sum() if not result_df.empty and 'has_valid_path' in result_df.columns else 0
             self._log(f"  threshold={threshold}: {len(result_df)} type edges ({valid_count} with valid paths)")
@@ -1231,9 +1242,10 @@ class ComparisonAnalyzer:
                 except Exception as e:
                     self._log(f"Warning: Could not load cached bodyId data: {e}")
         
-        # Only run FindAllPath if explicitly requested (avoids duplicate runs)
+        # Only run the path tool if explicitly requested (avoids duplicate runs)
         if run_findallpath:
-            self._log(f"Running FindAllPath for {dataset_name} @ threshold={threshold} to get bodyId connections")
+            path_tool = 'FindShortestPath' if self.parameters.path_mode == 'shortest' else 'FindAllPath'
+            self._log(f"Running {path_tool} for {dataset_name} @ threshold={threshold} to get bodyId connections")
             self.run_path_analysis(dataset_name, threshold)
             
             # Try to load the bodyId file that was generated
@@ -1296,9 +1308,10 @@ class ComparisonAnalyzer:
         label_map: Dict,
         source_types: set,
         target_types: set,
-        max_layers: int,
+        max_layers: Optional[int],
         dataset_name: str,
-        threshold: int
+        threshold: int,
+        path_mode: str = 'all'
     ) -> pd.DataFrame:
         """
         Aggregate bodyId edges to type-level and find valid paths.
@@ -1308,9 +1321,11 @@ class ComparisonAnalyzer:
             label_map: Dict mapping bodyId -> type
             source_types: Set of source neuron types
             target_types: Set of target neuron types
-            max_layers: Maximum path length
+            max_layers: Maximum path length (None = unlimited, shortest mode only)
             dataset_name: Dataset name for metadata
             threshold: Current threshold for metadata
+            path_mode: 'all' (every path within max_layers) or 'shortest'
+                (edges valid only when they lie on a per-pair minimum-hop path)
             
         Returns:
             DataFrame with type-level edges and has_valid_path flag
@@ -1337,15 +1352,22 @@ class ComparisonAnalyzer:
         graph_source_types = [t for t in source_types if G_type.has_node(t)]
         graph_target_types = [t for t in target_types if G_type.has_node(t)]
         
-        # Find all paths
+        # Find paths (all paths, or only per-pair shortest paths)
         valid_edges = set()
         if graph_source_types and graph_target_types:
             try:
-                # Use memoized DFS for efficiency
-                paths = list(G_type.find_paths_memoized_dfs(
-                    graph_source_types, graph_target_types, max_layers, 
-                    direction='backward', verbose=False
-                ))
+                if path_mode == 'shortest':
+                    # Edges are valid only when they lie on a per-pair
+                    # minimum-hop path; cutoff None = unlimited depth.
+                    paths = list(G_type.find_paths_shortest(
+                        graph_source_types, graph_target_types, cutoff=max_layers
+                    ))
+                else:
+                    # Use memoized DFS for efficiency
+                    paths = list(G_type.find_paths_memoized_dfs(
+                        graph_source_types, graph_target_types, max_layers, 
+                        direction='backward', verbose=False
+                    ))
                 
                 # Extract edges from paths
                 for path in paths:

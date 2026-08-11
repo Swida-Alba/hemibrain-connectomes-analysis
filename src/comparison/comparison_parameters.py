@@ -151,7 +151,12 @@ class ComparisonParameters:
     - Empty list []: All neurons having a given type (excludes untyped neurons)"""
     
     max_interlayer: int = 2
-    """Maximum interlayer hops for path finding (shared across ALL datasets)"""
+    """Maximum interlayer hops for path finding (shared across ALL datasets).
+    In shortest path mode (path_mode='shortest') this is an EXACT depth
+    bound: paths are capped at max_interlayer + 1 edges (0 = direct
+    connections only; the UI defaults to 8). Set a high value (e.g. 99)
+    for effectively unlimited search — simple paths cannot exceed the
+    neuron count, so a high bound is never reached in practice."""
     
     # Analysis settings
     thresholds: List[int] = field(default_factory=lambda: [1, 3, 5, 10, 20])
@@ -169,10 +174,11 @@ class ComparisonParameters:
     top_edges: int = -1
     """Number of top edges for visualization focus. -1 means include all edges."""
 
-    graph_edge_limit_bodyid: int = 1000000
-    """Pan-graph edge limit for the bodyId-level graph in the FindAllPath
-    runs (applied only for max_interlayer >= 3, where the path count grows
-    combinatorially; 0 = complete graph)."""
+    graph_edge_limit_bodyid: Optional[int] = None
+    """Pan-graph edge limit for the bodyId-level graph in the path runs.
+    None = per-mode default (FindAllPath: 1,000,000, applied only for
+    max_interlayer >= 3; FindShortestPath: 0 = no trimming, since trimming
+    can inflate shortest distances). 0 = complete graph."""
 
     edgeN_limit: int = 500
     """Visualization Edge Limit passed to the FindAllPath visualizations
@@ -263,6 +269,19 @@ class ComparisonParameters:
     - 'DP': Backward Reachability (DP) - robust, low memory
     - 'Bidirectional': Bidirectional BFS - shortest paths first, but stores
       full layer trees (highest memory)
+    Ignored when path_mode='shortest' (shortest enumeration uses a fixed
+    BFS-distance-guided algorithm).
+    """
+    
+    path_mode: str = 'all'
+    """Path enumeration mode for the per-dataset runs:
+    - 'all': FindAllPath() — every path within max_interlayer (default).
+    - 'shortest': FindShortestPath() — only the per-(source, target)
+      minimum-hop paths (all ties kept). max_interlayer is an EXACT depth
+      bound there (0 = direct connections only; 8 = UI default; set a high
+      value like 99 for effectively unlimited search). Discovery stops
+      early once all targets are found.
+    Applies to both comparison modes ('path' and 'edge').
     """
     
     search_columns: str = 'auto'
@@ -529,6 +548,11 @@ class ComparisonParameters:
         if self.comparison_mode not in valid_modes:
             raise ValueError(f"comparison_mode must be one of {valid_modes}, got: {self.comparison_mode}")
         
+        # Validate path_mode
+        valid_path_modes = ['all', 'shortest']
+        if self.path_mode not in valid_path_modes:
+            raise ValueError(f"path_mode must be one of {valid_path_modes}, got: {self.path_mode}")
+        
         # Initialize auto type mapper (stores CrossDatasetTypeMapper instance if enabled)
         self._auto_type_mapper = None
         if self.auto_type_mapping:
@@ -606,6 +630,10 @@ class ComparisonParameters:
             if self.auto_type_mapping and self._auto_type_mapper:
                 print(f"  └─ Type mapper loaded successfully")
             print(f"Comparison Mode: {self.comparison_mode}")
+            print(f"Path Enumeration: {self.path_mode}" +
+                  (" (per-pair shortest paths only; Max Layers is an exact depth bound, "
+                   "0 = direct connections only)"
+                   if self.path_mode == 'shortest' else ""))
             print(f"Separate Hemispheres: {self.separate_hemispheres}")
             print(f"Hemisphere Symmetry Analysis: {self.symmetry_analysis}")
             print(f"Keep Only Hemisphere-Conserved: {self.keep_only_hemisphere_conserved_connections}")
@@ -1224,6 +1252,7 @@ class ComparisonParameters:
             'graph_edge_limit_bodyid': self.graph_edge_limit_bodyid,
             'edgeN_limit': self.edgeN_limit,
             'comparison_mode': self.comparison_mode,
+            'path_mode': self.path_mode,
             'pathfinding': self.pathfinding,
             
             # Auto type mapping
@@ -1361,9 +1390,10 @@ class ComparisonParameters:
             max_interlayer=data.get('max_interlayer', 2),
             thresholds=data.get('thresholds', [1, 3, 5, 10, 20]),
             top_edges=data.get('top_edges', 50),
-            graph_edge_limit_bodyid=data.get('graph_edge_limit_bodyid', 1000000),
+            graph_edge_limit_bodyid=data.get('graph_edge_limit_bodyid', None),
             edgeN_limit=data.get('edgeN_limit', 500),
             comparison_mode=data.get('comparison_mode', 'path'),
+            path_mode=data.get('path_mode', 'all'),
             
             # Verification settings
             verification_direction=verification.get('direction', 'both'),
@@ -1407,9 +1437,10 @@ class ComparisonParameters:
         
         workspace_path = None
         for candidate in workspace_candidates:
+            # the auto mapping source is the male-cns v1.0 neuron info
             neuron_df_path = os.path.join(
-                candidate, 'datasets', 'male-cns_v0_9', 
-                'male-cns_v0_9_allneurons_neuron_df.csv'
+                candidate, 'datasets', 'male-cns_v1_0', 
+                'male-cns_v1_0_allneurons_neuron_df.csv'
             )
             if os.path.exists(neuron_df_path):
                 workspace_path = candidate
@@ -1594,4 +1625,5 @@ class ComparisonParameters:
                 f"sources={len(self._ensure_flat_list(self.source_neurons))}, "
                 f"targets={len(self._ensure_flat_list(self.target_neurons))}, "
                 f"max_interlayer={self.max_interlayer}, "
+                f"path_mode={self.path_mode}, "
                 f"thresholds={self.thresholds})")

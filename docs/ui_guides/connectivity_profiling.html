@@ -14,16 +14,19 @@
   </header>
   <h1>Connectivity Profiling</h1>
   <p class="lede">
-    Compare connectivity profiles of neuron types (or bodyIds) inside one
-    dataset using Jaccard, cosine and rank-correlation similarities.
+    Compare connectivity profiles of neuron types (or bodyIds / custom groups)
+    using six identical metrics — combined, Jaccard, weighted Jaccard, cosine,
+    rank correlation and rank-correlation union (same metric set as the Find
+    Homologs tab) — within one dataset or across several datasets at once.
   </p>
 
   <h2>Quick start</h2>
   <ol>
     <li>Enter 2+ neurons (e.g. <code>aMe12</code>, <code>aMe10</code>,
       <code>aMe9</code>).</li>
-    <li>Pick the dataset; keep <b>Top K Partners = 15</b>.</li>
-    <li>Click <b>Run Profiling</b>.</li>
+    <li>Pick one or more datasets (two or more enables the cross-dataset mode).</li>
+    <li>Click <b>Run Profiling</b>; open <b>report.html</b> in the output folder
+      for the overall summary of all heatmaps.</li>
   </ol>
 
   <h2>Inputs &amp; examples</h2>
@@ -31,8 +34,28 @@
     <tr><th>Query</th><th>Meaning</th></tr>
     <tr><td><code>aMe12, aMe10, aMe9</code></td><td>Three types compared pairwise</td></tr>
     <tr><td><code>720575940610453042, aMe12</code></td><td>BodyId vs type (mixed allowed)</td></tr>
-    <tr><td><code>KC.*</code> (Filter = Starts with)</td><td>All KC types compared</td></tr>
+    <tr><td><code>KC.*</code> (Filter = Starts with)</td><td>All KC types compared — under <b>Aggregation Level = type</b> each matched KC type becomes its own independent row; under <b>custom group</b> the query is taken literally</td></tr>
   </table>
+
+  <h2>Multi-dataset (cross-dataset) mode</h2>
+  <p>
+    Selecting <b>two or more datasets</b> profiles the SAME query in every
+    dataset and compares it on two levels:
+  </p>
+  <ul>
+    <li><b>Intra-dataset</b> — N×N similarity of the queried types/bodyIds/
+      groups within each dataset (per-dataset folder).</li>
+    <li><b>Inter-dataset</b> — datasets × datasets similarity of the SAME
+      queried neuron across datasets, using the homolog-finding backend
+      algorithm (2-hop expanded partner types).</li>
+  </ul>
+  <p>
+    Different names of the same neuron across datasets are handled
+    automatically via the <b>male-cns v1.0</b> neuron info (the type mapper),
+    e.g. FAFB <code>MTe07</code> is standardized to <code>MeVPLo2</code>.
+    <code>cross_dataset/mapping_summary.csv</code> lists the resolved name of
+    every queried neuron per dataset.
+  </p>
 
   <h2>Profile construction</h2>
   <table>
@@ -40,7 +63,7 @@
     <tr><td>Top K Partners</td><td>15</td><td>Top partners per direction by synapse weight</td></tr>
     <tr><td>Min Unique Types (M)</td><td>5</td><td>Minimum partner types; K expands automatically if fewer</td></tr>
     <tr><td>Min Synapse Threshold</td><td>3</td><td>Connection weight cutoff for profiles</td></tr>
-    <tr><td>Aggregation Level</td><td>type</td><td>type (grouped) or bodyid (per neuron)</td></tr>
+    <tr><td>Aggregation Level</td><td>type</td><td><b>type</b> (each matched type is one row; patterns expand to independent types), <b>bodyid</b> (per neuron), or <b>custom group</b> (rows from a LabelMapper preset — select one in the card that appears, managed in Settings)</td></tr>
     <tr><td>Direction</td><td>both</td><td>upstream, downstream, or both</td></tr>
   </table>
 
@@ -57,11 +80,14 @@
 
   <h2>Output</h2>
   <pre><code>{output_dir}/profiling_{DATASET}_{query}_{timestamp}/
-  profiles/individual/...
-  profiles/aggregated/...
-  type_level/results/type_similarity_*.csv
-  type_level/visualization/heatmap_*.html
-  bodyid_level/results/bodyid_similarity_*.csv</code></pre>
+  report.html                        # overall summary with ALL heatmaps
+  intra_dataset/{dataset}/           # per-dataset N×N comparisons
+    results/similarity_{direction}_{metric}.csv
+    visualization/heatmap_*.html
+  cross_dataset/                     # same neuron across datasets (2+ datasets)
+    mapping_summary.csv              # resolved name of each neuron per dataset
+    per_neuron/{anchor}/results|visualization
+  profiles/{dataset}/aggregated/*_profile.json</code></pre>
 
   <div class="callout warn">
     <b>First run on a new dataset</b> - profile extraction needs connection

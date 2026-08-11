@@ -9,7 +9,7 @@ corresponding type name in other datasets. This allows for accurate cross-datase
 comparison even when type names differ.
 
 Key Features:
-- Auto-loads type mappings from male-cns_v0_9_allneurons_neuron_df.csv
+- Auto-loads type mappings from male-cns_v1_0_allneurons_neuron_df.csv
 - Handles 1-to-1, N-to-1, and 1-to-N type relationships
 - Warns about N-to-1 aggregations that should be avoided
 - Priority-based resolution: male-cns > flywire > manc > hemibrain > optic-lobe
@@ -28,8 +28,8 @@ from comparison.label_mapper import LabelMapper
 
 # Dataset priority for type name resolution (lower index = higher priority)
 DATASET_PRIORITY = [
-    'male-cns:v0.9',
-    'male-cns_v0_9',
+    'male-cns:v1.0',
+    'male-cns_v1_0',
     'flywire_FAFB_v783',
     'flywire_BANC_v626',
     'flywire_FAFB',
@@ -46,8 +46,8 @@ DATASET_PRIORITY = [
 
 # Mapping from dataset names to neuron_df column names
 DATASET_TO_TYPE_COL = {
-    'male-cns:v0.9': 'type',
-    'male-cns_v0_9': 'type',
+    'male-cns:v1.0': 'type',
+    'male-cns_v1_0': 'type',
     'flywire_FAFB_v783': 'flywireType',
     'flywire_BANC_v626': 'flywireType',  # BANC uses same flywireType col
     'flywire_FAFB': 'flywireType',
@@ -103,13 +103,13 @@ class CrossDatasetTypeMapper:
         >>> mapper = CrossDatasetTypeMapper(workspace_path='/path/to/project')
         >>> 
         >>> # Get equivalent type in target dataset
-        >>> flywire_type = mapper.get_mapped_type('aMe12', 'male-cns:v0.9', 'flywire_FAFB_v783')
+        >>> flywire_type = mapper.get_mapped_type('aMe12', 'male-cns:v1.0', 'flywire_FAFB_v783')
         >>> 
         >>> # Resolve a type name to all equivalent types across datasets
-        >>> type_map = mapper.resolve_type_across_datasets('MeVPLo2', ['male-cns:v0.9', 'flywire_FAFB_v783'])
+        >>> type_map = mapper.resolve_type_across_datasets('MeVPLo2', ['male-cns:v1.0', 'flywire_FAFB_v783'])
         >>> 
         >>> # Get canonical display name
-        >>> display_name = mapper.get_display_name('MeVPLo2', datasets=['male-cns:v0.9', 'flywire_FAFB_v783'])
+        >>> display_name = mapper.get_display_name('MeVPLo2', datasets=['male-cns:v1.0', 'flywire_FAFB_v783'])
     """
     
     def __init__(
@@ -156,8 +156,8 @@ class CrossDatasetTypeMapper:
             self._neuron_df_path = os.path.join(
                 workspace_path, 
                 'datasets', 
-                'male-cns_v0_9', 
-                'male-cns_v0_9_allneurons_neuron_df.csv'
+                'male-cns_v1_0', 
+                'male-cns_v1_0_allneurons_neuron_df.csv'
             )
         
         self._workspace_path = workspace_path
@@ -263,7 +263,7 @@ class CrossDatasetTypeMapper:
                 continue
             
             male_cns_types.add(mcns_type)
-            self._dataset_types['male-cns:v0.9'][mcns_type].add(body_id)
+            self._dataset_types['male-cns:v1.0'][mcns_type].add(body_id)
             
             if flywire_type:
                 flywire_types.add(flywire_type)
@@ -287,7 +287,7 @@ class CrossDatasetTypeMapper:
         
         # Build final mappings (only 1-to-1 or 1-to-N that we can handle)
         self._type_mappings = {
-            'male-cns:v0.9': {},
+            'male-cns:v1.0': {},
             'flywire_FAFB_v783': {},
             'flywire_BANC_v626': {},
             'hemibrain:v1.2.1': {},
@@ -297,19 +297,19 @@ class CrossDatasetTypeMapper:
         
         # Process male-cns to other datasets
         for mcns_type in male_cns_types:
-            self._type_mappings['male-cns:v0.9'][mcns_type] = {}
+            self._type_mappings['male-cns:v1.0'][mcns_type] = {}
             
             # Flywire mapping
             fw_types = mcns_to_flywire.get(mcns_type, set())
             if len(fw_types) == 1:
                 fw_type = next(iter(fw_types))
-                self._type_mappings['male-cns:v0.9'][mcns_type]['flywire_FAFB_v783'] = fw_type
-                self._type_mappings['male-cns:v0.9'][mcns_type]['flywire_BANC_v626'] = fw_type
+                self._type_mappings['male-cns:v1.0'][mcns_type]['flywire_FAFB_v783'] = fw_type
+                self._type_mappings['male-cns:v1.0'][mcns_type]['flywire_BANC_v626'] = fw_type
             elif len(fw_types) > 1:
                 # N-to-1 from male-cns perspective (one mcns type maps to multiple flywire types)
                 # This means the mcns type is a superset - we can still use it but warn
                 self._conflicts.append(TypeMappingConflict(
-                    source_dataset='male-cns:v0.9',
+                    source_dataset='male-cns:v1.0',
                     target_dataset='flywire_FAFB_v783',
                     source_type=mcns_type,
                     target_types=fw_types,
@@ -320,10 +320,10 @@ class CrossDatasetTypeMapper:
             hb_types = mcns_to_hemibrain.get(mcns_type, set())
             if len(hb_types) == 1:
                 hb_type = next(iter(hb_types))
-                self._type_mappings['male-cns:v0.9'][mcns_type]['hemibrain:v1.2.1'] = hb_type
+                self._type_mappings['male-cns:v1.0'][mcns_type]['hemibrain:v1.2.1'] = hb_type
             elif len(hb_types) > 1:
                 self._conflicts.append(TypeMappingConflict(
-                    source_dataset='male-cns:v0.9',
+                    source_dataset='male-cns:v1.0',
                     target_dataset='hemibrain:v1.2.1',
                     source_type=mcns_type,
                     target_types=hb_types,
@@ -334,11 +334,11 @@ class CrossDatasetTypeMapper:
             manc_types_mapped = mcns_to_manc.get(mcns_type, set())
             if len(manc_types_mapped) == 1:
                 manc_type = next(iter(manc_types_mapped))
-                self._type_mappings['male-cns:v0.9'][mcns_type]['manc:v1.0'] = manc_type
-                self._type_mappings['male-cns:v0.9'][mcns_type]['manc:v1.2.1'] = manc_type
+                self._type_mappings['male-cns:v1.0'][mcns_type]['manc:v1.0'] = manc_type
+                self._type_mappings['male-cns:v1.0'][mcns_type]['manc:v1.2.1'] = manc_type
             elif len(manc_types_mapped) > 1:
                 self._conflicts.append(TypeMappingConflict(
-                    source_dataset='male-cns:v0.9',
+                    source_dataset='male-cns:v1.0',
                     target_dataset='manc:v1.0',
                     source_type=mcns_type,
                     target_types=manc_types_mapped,
@@ -350,12 +350,12 @@ class CrossDatasetTypeMapper:
             mcns_types = flywire_to_mcns.get(fw_type, set())
             if len(mcns_types) == 1:
                 mcns_type = next(iter(mcns_types))
-                self._type_mappings['flywire_FAFB_v783'][fw_type] = {'male-cns:v0.9': mcns_type}
-                self._type_mappings['flywire_BANC_v626'][fw_type] = {'male-cns:v0.9': mcns_type}
+                self._type_mappings['flywire_FAFB_v783'][fw_type] = {'male-cns:v1.0': mcns_type}
+                self._type_mappings['flywire_BANC_v626'][fw_type] = {'male-cns:v1.0': mcns_type}
                 
                 # Also populate hemibrain/manc mappings transitively
-                if mcns_type in self._type_mappings['male-cns:v0.9']:
-                    for target_ds, target_type in self._type_mappings['male-cns:v0.9'][mcns_type].items():
+                if mcns_type in self._type_mappings['male-cns:v1.0']:
+                    for target_ds, target_type in self._type_mappings['male-cns:v1.0'][mcns_type].items():
                         if target_ds not in ['flywire_FAFB_v783', 'flywire_BANC_v626']:
                             if fw_type not in self._type_mappings['flywire_FAFB_v783']:
                                 self._type_mappings['flywire_FAFB_v783'][fw_type] = {}
@@ -368,25 +368,25 @@ class CrossDatasetTypeMapper:
                 # This should NOT be aggregated
                 self._conflicts.append(TypeMappingConflict(
                     source_dataset='flywire_FAFB_v783',
-                    target_dataset='male-cns:v0.9',
+                    target_dataset='male-cns:v1.0',
                     source_type=fw_type,
                     target_types=mcns_types,
                     relationship='N-to-1',
                 ))
                 self._n_to_1_types['flywire_FAFB_v783'].add(fw_type)
                 for mt in mcns_types:
-                    self._n_to_1_types['male-cns:v0.9'].add(mt)
+                    self._n_to_1_types['male-cns:v1.0'].add(mt)
         
         # Similarly for hemibrain
         for hb_type in hemibrain_types:
             mcns_types = hemibrain_to_mcns.get(hb_type, set())
             if len(mcns_types) == 1:
                 mcns_type = next(iter(mcns_types))
-                self._type_mappings['hemibrain:v1.2.1'][hb_type] = {'male-cns:v0.9': mcns_type}
+                self._type_mappings['hemibrain:v1.2.1'][hb_type] = {'male-cns:v1.0': mcns_type}
                 
                 # Transitive mappings
-                if mcns_type in self._type_mappings['male-cns:v0.9']:
-                    for target_ds, target_type in self._type_mappings['male-cns:v0.9'][mcns_type].items():
+                if mcns_type in self._type_mappings['male-cns:v1.0']:
+                    for target_ds, target_type in self._type_mappings['male-cns:v1.0'][mcns_type].items():
                         if target_ds != 'hemibrain:v1.2.1':
                             if hb_type not in self._type_mappings['hemibrain:v1.2.1']:
                                 self._type_mappings['hemibrain:v1.2.1'][hb_type] = {}
@@ -394,14 +394,14 @@ class CrossDatasetTypeMapper:
             elif len(mcns_types) > 1:
                 self._conflicts.append(TypeMappingConflict(
                     source_dataset='hemibrain:v1.2.1',
-                    target_dataset='male-cns:v0.9',
+                    target_dataset='male-cns:v1.0',
                     source_type=hb_type,
                     target_types=mcns_types,
                     relationship='N-to-1',
                 ))
                 self._n_to_1_types['hemibrain:v1.2.1'].add(hb_type)
                 for mt in mcns_types:
-                    self._n_to_1_types['male-cns:v0.9'].add(mt)
+                    self._n_to_1_types['male-cns:v1.0'].add(mt)
         
         # Build reverse lookup for fast type resolution
         self._build_reverse_lookup()
@@ -419,7 +419,7 @@ class CrossDatasetTypeMapper:
             
             for src_type, target_maps in type_maps.items():
                 # The src_type in src_dataset maps to these target types
-                mcns_type = target_maps.get('male-cns:v0.9', src_type) if src_dataset != 'male-cns:v0.9' else src_type
+                mcns_type = target_maps.get('male-cns:v1.0', src_type) if src_dataset != 'male-cns:v1.0' else src_type
                 self._reverse_mappings[src_dataset][src_type] = mcns_type
     
     def get_mapped_type(
@@ -467,7 +467,7 @@ class CrossDatasetTypeMapper:
         ds_lower = dataset.lower()
         
         if 'male-cns' in ds_lower or 'male_cns' in ds_lower:
-            return 'male-cns:v0.9'
+            return 'male-cns:v1.0'
         elif 'banc' in ds_lower:
             return 'flywire_BANC_v626'
         elif 'fafb' in ds_lower or ('flywire' in ds_lower and 'banc' not in ds_lower):
@@ -556,8 +556,8 @@ class CrossDatasetTypeMapper:
     
     # Dataset short codes for display names
     DATASET_SHORT_CODES = {
-        'male-cns:v0.9': 'M',
-        'male-cns_v0_9': 'M',
+        'male-cns:v1.0': 'M',
+        'male-cns_v1_0': 'M',
         'flywire_FAFB_v783': 'F',
         'flywire_FAFB': 'F',
         'flywire_BANC_v626': 'B',
@@ -574,8 +574,8 @@ class CrossDatasetTypeMapper:
     
     # Full dataset names for hover info
     DATASET_FULL_NAMES = {
-        'male-cns:v0.9': 'male-cns v0.9',
-        'male-cns_v0_9': 'male-cns v0.9',
+        'male-cns:v1.0': 'male-cns v1.0',
+        'male-cns_v1_0': 'male-cns v1.0',
         'flywire_FAFB_v783': 'FlyWire FAFB v783',
         'flywire_FAFB': 'FlyWire FAFB',
         'flywire_BANC_v626': 'FlyWire BANC v626',
@@ -657,7 +657,7 @@ class CrossDatasetTypeMapper:
         mappings = self.resolve_type_across_datasets(base_name, datasets, source_dataset)
         
         # Get male-cns name as canonical (primary display name)
-        mcns_name = mappings.get('male-cns:v0.9') or mappings.get('male-cns_v0_9')
+        mcns_name = mappings.get('male-cns:v1.0') or mappings.get('male-cns_v1_0')
         
         if not mcns_name:
             # Use the original type name as canonical
@@ -856,7 +856,7 @@ class CrossDatasetTypeMapper:
                     normalized_filter_types.add(base)
         
         # Determine which columns/datasets to include
-        all_datasets = ['male-cns:v0.9', 'flywire_FAFB_v783', 'flywire_BANC_v626', 
+        all_datasets = ['male-cns:v1.0', 'flywire_FAFB_v783', 'flywire_BANC_v626', 
                         'hemibrain:v1.2.1', 'manc:v1.0', 'manc:v1.2.1']
         if datasets:
             # Only include specified datasets, in the order they appear in all_datasets
@@ -869,12 +869,12 @@ class CrossDatasetTypeMapper:
             return
         
         # Start from male-cns types and export their mappings
-        mcns_mappings = self._type_mappings.get('male-cns:v0.9', {})
+        mcns_mappings = self._type_mappings.get('male-cns:v1.0', {})
         
         for mcns_type, target_maps in mcns_mappings.items():
             row = {}
             for ds in output_datasets:
-                if ds == 'male-cns:v0.9':
+                if ds == 'male-cns:v1.0':
                     row[ds] = mcns_type
                 else:
                     row[ds] = target_maps.get(ds, '')
@@ -986,7 +986,7 @@ class CrossDatasetTypeMapper:
             mappings = self.resolve_type_across_datasets(type_name, datasets, source_ds)
             
             # Use male-cns name as label if available
-            mcns_name = mappings.get('male-cns:v0.9') or mappings.get('male-cns_v0_9') or type_name
+            mcns_name = mappings.get('male-cns:v1.0') or mappings.get('male-cns_v1_0') or type_name
             labels.append(mcns_name)
             
             # Build dataset mapping
@@ -1194,11 +1194,11 @@ class CrossDatasetTypeMapper:
         
         # If already from male-cns, return as-is
         norm_src = self._normalize_dataset_name(source_dataset)
-        if norm_src == 'male-cns:v0.9':
+        if norm_src == 'male-cns:v1.0':
             return type_name
         
         # Get male-cns mapping
-        mapped = self.get_mapped_type(type_name, norm_src, 'male-cns:v0.9')
+        mapped = self.get_mapped_type(type_name, norm_src, 'male-cns:v1.0')
         return mapped if mapped else type_name
     
     def get_merge_mapping_for_types(
@@ -1252,7 +1252,7 @@ class CrossDatasetTypeMapper:
             source_ds = None
             prefix_upper = prefix.upper()
             if prefix_upper in ['MCNS', 'MALECNS', 'MALE-CNS']:
-                source_ds = 'male-cns:v0.9'
+                source_ds = 'male-cns:v1.0'
             elif prefix_upper in ['FAFB', 'FLYWIRE', 'FW']:
                 source_ds = 'flywire_FAFB_v783'
             elif prefix_upper in ['BANC']:
@@ -1348,7 +1348,7 @@ class CrossDatasetTypeMapper:
         norm_ds = self._normalize_dataset_name(source_dataset)
         
         # If already male-cns, return as-is
-        if norm_ds == 'male-cns:v0.9':
+        if norm_ds == 'male-cns:v1.0':
             return partner_types.copy()
         
         standardized: Dict[str, float] = {}

@@ -498,6 +498,10 @@ class VisualizePath:
         self.verbose = verbose  # Store verbose flag for controlling print output
         
         self.edgeN_limit = edgeN_limit
+        # Set True once any plot (network/heatmap/Sankey) actually trims
+        # edges to the Visualization Edge Limit; read by coana to gate the
+        # '[edge limit per neuron]' warning note.
+        self.edge_limit_trimmed = False
         self.output_format = output_format
         self.save_data_matrices = save_data_matrices
         
@@ -2346,6 +2350,7 @@ class VisualizePath:
         
         # If simplification is needed, limit to top paths that give us ~max_edges unique edges
         if needs_simplification:
+            self.edge_limit_trimmed = True
             self._vprint(f'\033[33m⚠️ Large dataset ({total_paths} paths) - selecting top paths for {MAX_EDGES} edges (source/target edges always reserved — every kept path keeps its first/last hop)\033[0m')
             
             # Iteratively add paths until we reach max_edges unique edges
@@ -3774,6 +3779,7 @@ class VisualizePath:
         if self.edgeN_limit <= 0 or G is None \
                 or G.number_of_edges() <= self.edgeN_limit:
             return None
+        self.edge_limit_trimmed = True
         # Reserved edges: source nodes' OUTGOING + target nodes' INCOMING
         # edges — kept first and NOT counted toward the edgeN_limit, so
         # path integrity is preserved. The auto-reservation is BOUNDED to
@@ -4896,7 +4902,34 @@ class VisualizePath:
                                 <span class="alpha-value" id="individualOpacityValue">100%</span>
                             </div>
                         </div>
+                        <!-- Geometry: precise numeric size/position editing -->
+                        <div class="color-group" id="geomNodeGroup" style="display: none;">
+                            <label>Position / Size (node):</label>
+                            <div style="display: grid; grid-template-columns: auto 1fr auto 1fr; gap: 4px; align-items: center; font-size: 10px; color: #555;">
+                                <span>X</span>
+                                <input type="number" id="selGeomX" step="1" style="width: 100%; padding: 3px; border: 1px solid #ddd; border-radius: 3px; font-size: 11px;">
+                                <span>Y</span>
+                                <input type="number" id="selGeomY" step="1" style="width: 100%; padding: 3px; border: 1px solid #ddd; border-radius: 3px; font-size: 11px;">
+                            </div>
+                            <div style="display: grid; grid-template-columns: auto 1fr; gap: 4px; align-items: center; margin-top: 4px; font-size: 10px; color: #555;">
+                                <span>Size&nbsp;(px)</span>
+                                <input type="number" id="selGeomSize" min="1" step="1" style="width: 100%; padding: 3px; border: 1px solid #ddd; border-radius: 3px; font-size: 11px;">
+                            </div>
+                        </div>
+                        <div class="color-group" id="geomEdgeGroup" style="display: none;">
+                            <label>Width (edge):</label>
+                            <div style="display: grid; grid-template-columns: auto 1fr; gap: 4px; align-items: center; font-size: 10px; color: #555;">
+                                <span>Width&nbsp;(px)</span>
+                                <input type="number" id="selGeomWidth" min="0.5" step="0.5" style="width: 100%; padding: 3px; border: 1px solid #ddd; border-radius: 3px; font-size: 11px;">
+                            </div>
+                            <div style="font-size: 9px; color: #888; margin-top: 3px;">Edges are anchored to their endpoints — no free position.</div>
+                        </div>
+                        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-top: 6px;">
+                            <button class="btn" id="alignHBtn" onclick="alignSelectedNodes('h')" title="Align selected nodes horizontally (same Y)" style="font-size: 10px; padding: 5px; background: #00897b; opacity: 0.4;">⇔ Align H</button>
+                            <button class="btn" id="alignVBtn" onclick="alignSelectedNodes('v')" title="Align selected nodes vertically (same X)" style="font-size: 10px; padding: 5px; background: #00897b; opacity: 0.4;">⇕ Align V</button>
+                        </div>
                         <button class="apply-btn" onclick="applyIndividualColor()">Apply to Selected</button>
+                        <button class="apply-btn" onclick="applySelectedGeometry()" style="background: #00838f;">Apply Size/Position</button>
                         <button class="clear-selection-btn" onclick="clearSelection()">Clear Selection</button>
                     </div>
                 </div>
@@ -6107,6 +6140,24 @@ class VisualizePath:
         const HISTORY_LIMIT = 50;
         let lastFilterHistoryValue = '';  // last edge-filter value recorded in history
 
+        function captureStyleBypass(el) {{
+            // Style bypasses (per-element overrides set via el.style()) live in
+            // _private.style; ele.json() does NOT expose them in Cytoscape
+            // 3.28.1, so read them directly and deep-copy: the object is a
+            // live reference into the element and later edits would otherwise
+            // corrupt earlier snapshots.
+            const st = el._private && el._private.style;
+            if (!st) return null;
+            const keys = Object.keys(st);
+            if (keys.length === 0) return null;
+            const out = {{}};
+            keys.forEach(k => {{
+                const v = st[k];
+                out[k] = (v && typeof v === 'object' && 'value' in v) ? v.value : v;
+            }});
+            return JSON.parse(JSON.stringify(out));
+        }}
+
         function captureState() {{
             // Deep-copy data()/position(): Cytoscape returns LIVE references to
             // its internal objects, so storing them directly would let later
@@ -6116,11 +6167,14 @@ class VisualizePath:
                 nodes: cy.nodes().map(n => ({{
                     data: JSON.parse(JSON.stringify(n.data())),
                     classes: n.classes(),
-                    position: {{ x: n.position().x, y: n.position().y }}
+                    position: {{ x: n.position().x, y: n.position().y }},
+                    // Per-element style overrides (color/size bypasses)
+                    style: captureStyleBypass(n)
                 }})),
                 edges: cy.edges().map(e => ({{
                     data: JSON.parse(JSON.stringify(e.data())),
-                    classes: e.classes()
+                    classes: e.classes(),
+                    style: captureStyleBypass(e)
                 }})),
                 selected: cy.$(':selected').map(el => el.id()),
                 zoom: cy.zoom(),
@@ -6142,6 +6196,15 @@ class VisualizePath:
             cy.elements().remove();
             cy.add(state.nodes.map(n => ({{ data: n.data, classes: n.classes, position: n.position }})));
             cy.add(state.edges.map(e => ({{ data: e.data, classes: e.classes }})));
+            // Re-apply the captured per-element style overrides so undo/redo
+            // round-trips individual color/size edits exactly (re-added
+            // elements start with stylesheet appearance only).
+            state.nodes.forEach(n => {{
+                if (n.style) cy.getElementById(n.data.id).style(n.style);
+            }});
+            state.edges.forEach(e => {{
+                if (e.style) cy.getElementById(e.data.id).style(e.style);
+            }});
             (state.selected || []).forEach(id => {{
                 const el = cy.getElementById(id);
                 if (el.length > 0) el.select();
@@ -6213,26 +6276,42 @@ class VisualizePath:
         }}
 
         // Node relocation (drag) is part of the history: the pre-drag state
-        // is stashed on dragstart and committed on dragfree, so undo
-        // restores the positions before the move. Click-without-drag and
+        // is stashed on grab and committed on dragfree, so undo restores the
+        // positions before the move. NOTE: node drags in Cytoscape.js fire
+        // grab/drag/free/dragfree — there is no node-level 'dragstart' (that
+        // event only exists for core pan gestures), so the stash must happen
+        // on 'grab' or drags are never recorded. Click-without-drag and
         // multi-node drags (dragfree can fire once per node) are deduplicated
         // by checking that positions actually changed.
         let pendingDragState = null;
-        cy.on('dragstart', 'node', function(evt) {{
-            pendingDragState = captureState();
-        }});
-        cy.on('dragfree', 'node', function(evt) {{
-            if (!pendingDragState) return;
-            const posById = {{}};
-            pendingDragState.nodes.forEach(n => {{ posById[n.data.id] = n.position; }});
-            let moved = false;
-            cy.nodes().forEach(n => {{
-                const p0 = posById[n.id()];
-                const p1 = n.position();
-                if (p0 && (p0.x !== p1.x || p0.y !== p1.y)) moved = true;
+        function registerDragHistory() {{
+            cy.on('grab', 'node', function(evt) {{
+                pendingDragState = captureState();
             }});
-            if (moved) pushStateHistory('Move nodes', pendingDragState);
-            pendingDragState = null;
+            cy.on('dragfree', 'node', function(evt) {{
+                if (!pendingDragState) return;
+                const posById = {{}};
+                pendingDragState.nodes.forEach(n => {{ posById[n.data.id] = n.position; }});
+                let moved = false;
+                cy.nodes().forEach(n => {{
+                    const p0 = posById[n.id()];
+                    const p1 = n.position();
+                    if (p0 && (p0.x !== p1.x || p0.y !== p1.y)) moved = true;
+                }});
+                if (moved) pushStateHistory('Move nodes', pendingDragState);
+                pendingDragState = null;
+                // Keep the numeric geometry inputs in sync with manual drags
+                // (dragged node only when it is still selected).
+                if (evt.target.selected()) syncSelectedGeometryInputs(evt.target);
+            }});
+        }}
+        registerDragHistory();
+
+        // Keep the align buttons' enabled state in sync with ANY selection
+        // change (shift/box selection, programmatic) — tap selections are
+        // additionally refreshed via syncSelectedGeometryInputs.
+        cy.on('select unselect', 'node', function() {{
+            updateAlignButtons();
         }});
 
         function undo() {{
@@ -7408,6 +7487,8 @@ class VisualizePath:
             document.getElementById('individualOpacity').value = currentOpacity;
             document.getElementById('individualOpacityValue').textContent = currentOpacity + '%';
             document.getElementById('individualControls').style.display = 'block';
+            // Populate the size/position inputs for the tapped element
+            syncSelectedGeometryInputs(element);
         }});
 
         // Extract hex color from rgba/rgb string
@@ -7480,6 +7561,139 @@ class VisualizePath:
                 'Click on a node or edge to customize its color<br>' +
                 '<em>Hold Shift to select multiple elements</em>';
             document.getElementById('individualControls').style.display = 'none';
+            syncSelectedGeometryInputs(null);
+        }}
+
+        // ===== GEOMETRY EDITING (precise size / position) =====
+        // Numeric editing of the selected elements, next to color editing.
+        // Node positions are model coordinates; node size keeps nodes
+        // circular (width == height). Multi-selection: position moves every
+        // selected node by the delta of the primary (last-tapped) element,
+        // size/width applies absolutely to all selected elements.
+
+        // Fill the geometry inputs from the primary element and show the
+        // matching node/edge rows; pass null to hide both rows.
+        function syncSelectedGeometryInputs(primary) {{
+            const nodeGroup = document.getElementById('geomNodeGroup');
+            const edgeGroup = document.getElementById('geomEdgeGroup');
+            if (!primary) {{
+                if (nodeGroup) nodeGroup.style.display = 'none';
+                if (edgeGroup) edgeGroup.style.display = 'none';
+            }} else if (primary.isNode()) {{
+                if (nodeGroup) nodeGroup.style.display = 'block';
+                if (edgeGroup) edgeGroup.style.display = 'none';
+                const pos = primary.position();
+                document.getElementById('selGeomX').value = Math.round(pos.x * 10) / 10;
+                document.getElementById('selGeomY').value = Math.round(pos.y * 10) / 10;
+                document.getElementById('selGeomSize').value = Math.round(primary.numericStyle('width'));
+            }} else {{
+                if (nodeGroup) nodeGroup.style.display = 'none';
+                if (edgeGroup) edgeGroup.style.display = 'block';
+                document.getElementById('selGeomWidth').value = Math.round(primary.numericStyle('width') * 10) / 10;
+            }}
+            updateAlignButtons();
+        }}
+
+        // Align buttons are only enabled with 2+ selected nodes
+        function updateAlignButtons() {{
+            const enabled = cy.$('node:selected').length >= 2;
+            ['alignHBtn', 'alignVBtn'].forEach(id => {{
+                const btn = document.getElementById(id);
+                if (btn) btn.style.opacity = enabled ? '1' : '0.4';
+            }});
+        }}
+
+        // Apply the numeric size/position values to the selection as ONE
+        // history entry ('Move nodes' for position-only, 'Resize element'
+        // whenever a size/width changes).
+        function applySelectedGeometry() {{
+            const selected = getSelectedElements();
+            if (selected.length === 0) {{
+                alert('Please select one or more nodes/edges first');
+                return;
+            }}
+            let primary = selectedElement;
+            if (!primary || !primary.selected()) primary = selected[0];
+
+            if (primary.isNode()) {{
+                const nodes = selected.nodes();
+                const newX = parseFloat(document.getElementById('selGeomX').value);
+                const newY = parseFloat(document.getElementById('selGeomY').value);
+                const newSize = parseFloat(document.getElementById('selGeomSize').value);
+                const pos = primary.position();
+                const wantMove = !isNaN(newX) && !isNaN(newY) && (newX !== pos.x || newY !== pos.y);
+                const wantResize = !isNaN(newSize) && newSize > 0 && newSize !== primary.numericStyle('width');
+                if (!wantMove && !wantResize) return;
+
+                pushHistory(wantResize ? 'Resize element' : 'Move nodes');
+                if (wantMove) {{
+                    // primary goes to the exact coordinates; every other
+                    // selected node shifts by the same delta so their
+                    // relative placement survives
+                    const dx = newX - pos.x;
+                    const dy = newY - pos.y;
+                    cy.batch(() => {{
+                        nodes.forEach(n => {{
+                            if (n === primary) {{
+                                n.position({{ x: newX, y: newY }});
+                            }} else {{
+                                const p = n.position();
+                                n.position({{ x: p.x + dx, y: p.y + dy }});
+                            }}
+                        }});
+                    }});
+                }}
+                if (wantResize) {{
+                    cy.batch(() => {{
+                        nodes.forEach(n => n.style({{ 'width': newSize + 'px', 'height': newSize + 'px' }}));
+                    }});
+                }}
+                refreshEdgeStyles(false);  // keep endpoints/offsets attached to resized nodes
+                updateHoverInfo('✓ Geometry updated' + (wantMove ? ' (position)' : '') + (wantResize ? ' (size)' : ''));
+            }} else {{
+                const edges = selected.edges();
+                const newWidth = parseFloat(document.getElementById('selGeomWidth').value);
+                if (isNaN(newWidth) || newWidth <= 0 || newWidth === primary.numericStyle('width')) return;
+
+                pushHistory('Resize element');
+                cy.batch(() => {{
+                    edges.forEach(e => {{
+                        // style bypass wins over the stylesheet mapData used
+                        // by the global width sliders; customSize marks the
+                        // edge as manually sized
+                        e.style('width', newWidth + 'px');
+                        e.data('customSize', true);
+                    }});
+                }});
+                updateHoverInfo('✓ Edge width set to ' + newWidth + 'px');
+            }}
+            syncSelectedGeometryInputs(primary);
+        }}
+
+        // Align the selected nodes horizontally (same Y) or vertically
+        // (same X) on the mean coordinate of the selection.
+        function alignSelectedNodes(axis) {{
+            const nodes = cy.$('node:selected');
+            if (nodes.length < 2) {{
+                alert('Select at least two nodes to align');
+                return;
+            }}
+            pushHistory('Align nodes');
+            const coord = (axis === 'h') ? 'y' : 'x';
+            let sum = 0;
+            nodes.forEach(n => {{ sum += n.position()[coord]; }});
+            const mean = sum / nodes.length;
+            cy.batch(() => {{
+                nodes.forEach(n => {{
+                    const p = n.position();
+                    n.position(coord === 'x' ? {{ x: mean, y: p.y }} : {{ x: p.x, y: mean }});
+                }});
+            }});
+            refreshEdgeStyles(false);
+            const primary = (selectedElement && selectedElement.selected()) ? selectedElement : nodes[0];
+            syncSelectedGeometryInputs(primary);
+            updateHoverInfo('✓ Aligned ' + nodes.length + ' nodes ' +
+                (axis === 'h' ? 'horizontally (same Y)' : 'vertically (same X)'));
         }}
 
         // Apply initial opacity values from parsed input colors
@@ -9131,6 +9345,7 @@ class VisualizePath:
         elif getattr(self, 'G_network', None) is None and self.edgeN_limit \
                 and len(self.conn_df) > self.edgeN_limit:
             # standalone heatmap without a network graph: plain top-N fallback
+            self.edge_limit_trimmed = True
             self._vprint(
                 f'  Filtering top {self.edgeN_limit} edges by weight (out of {len(self.conn_df)})')
             conn_df_to_use = self.conn_df.sort_values(

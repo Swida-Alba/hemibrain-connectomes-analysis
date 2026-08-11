@@ -43,7 +43,12 @@ def create_find_homologs_tab():
                 top_k = number_input("Top K Partners", DEFAULTS["top_k"], 5, 50, hint="Top K partners per direction for profile construction.")
                 top_m = number_input("Min Types (M)", DEFAULTS["top_m"], 3, 20, hint="Minimum unique partner types in profile.")
             with param_grid(2):
-                similarity_metric = select_input("Similarity Metric", SIMILARITY_METRICS, DEFAULTS["similarity_metric"], hint="Metric for comparing connectivity profiles.")
+                similarity_metric = select_input(
+                    "Sort By", SIMILARITY_METRICS, DEFAULTS["similarity_metric"],
+                    hint="Metric used ONLY for ordering the candidate list (top-N cut). "
+                         "All similarity metrics (jaccard, cosine, rank_corr, combined) are "
+                         "always computed — same backend as Connectivity Profiling.",
+                )
                 viz_top_n = number_input("Visualize Top N", 5, 1, 20, hint="Number of top candidates to render as 3D skeletons.")
             with ui.row().classes("gap-4"):
                 use_fast = checkbox_input("Fast Search", True, hint="Use adjacency expansion for faster candidate discovery.")

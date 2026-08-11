@@ -585,8 +585,40 @@ class ProfileComparator:
         rank_corr = ProfileComparator.rank_correlation(profile_a, profile_b, direction)
         overlap_a, overlap_b = ProfileComparator.overlap_fraction(profile_a, profile_b, direction)
         
+        # Weighted Jaccard: sum(min(w_a, w_b)) / sum(max(w_a, w_b)) over the
+        # partner-type union (same semantics as the homolog scorer)
+        set_a = ProfileComparator._get_partner_sets(profile_a, direction)
+        set_b = ProfileComparator._get_partner_sets(profile_b, direction)
+        w_partners = sorted(set_a | set_b)
+        if w_partners:
+            w_vec_a = ProfileComparator._get_weight_vector(profile_a, w_partners, direction)
+            w_vec_b = ProfileComparator._get_weight_vector(profile_b, w_partners, direction)
+            w_intersection = float(np.sum(np.minimum(w_vec_a, w_vec_b)))
+            w_union = float(np.sum(np.maximum(w_vec_a, w_vec_b)))
+            weighted_jaccard = w_intersection / w_union if w_union > 0 else 0.0
+        else:
+            weighted_jaccard = 0.0
+        
         # Normalize rank_corr from [-1, 1] to [0, 1]
         rank_norm = (rank_corr + 1) / 2 if not np.isnan(rank_corr) else np.nan
+        
+        # Rank correlation on the UNION of partner types (missing = 0.0) —
+        # same semantics as the homolog scorer's rank_union
+        if len(w_partners) >= 3:
+            u_vec_a = ProfileComparator._get_weight_vector(profile_a, w_partners, direction)
+            u_vec_b = ProfileComparator._get_weight_vector(profile_b, w_partners, direction)
+            if len(set(u_vec_a)) > 1 and len(set(u_vec_b)) > 1:
+                try:
+                    from scipy.stats import spearmanr
+                    rank_union, _ = spearmanr(u_vec_a, u_vec_b)
+                    rank_union = float(rank_union) if not np.isnan(rank_union) else np.nan
+                except Exception:
+                    rank_union = np.nan
+            else:
+                rank_union = np.nan
+        else:
+            rank_union = np.nan
+        rank_union_norm = (rank_union + 1) / 2 if not np.isnan(rank_union) else 0.5
         
         # Compute weighted combined score (only Jaccard + normalized rank)
         # Use 0.5 for missing rank (neutral)
@@ -602,9 +634,12 @@ class ProfileComparator:
         return {
             'combined': combined,
             'jaccard': jaccard,
+            'weighted_jaccard': weighted_jaccard,
             'cosine': cosine,
             'rank': rank_corr,  # Original [-1, 1]
             'rank_norm': rank_norm,  # Normalized [0, 1]
+            'rank_union': rank_union,  # Union-based rank, original [-1, 1]
+            'rank_union_norm': rank_union_norm,  # Normalized [0, 1]
             'overlap_a_in_b': overlap_a,
             'overlap_b_in_a': overlap_b,
             'overlap_avg': overlap_avg
@@ -1137,9 +1172,19 @@ class ProfileComparator:
         else:
             cosine = 0.0
         
+        # Weighted Jaccard over the bodyId union (same semantics as the
+        # homolog scorer's weighted_jaccard)
+        if all_bodyids:
+            w_intersection = float(np.sum(np.minimum(vec_a, vec_b)))
+            w_union = float(np.sum(np.maximum(vec_a, vec_b)))
+            weighted_jaccard = w_intersection / w_union if w_union > 0 else 0.0
+        else:
+            weighted_jaccard = 0.0
+        
         return {
             'combined': combined,
             'jaccard': jaccard,
+            'weighted_jaccard': weighted_jaccard,
             'cosine': cosine,
             'rank': rank_corr,
             'rank_norm': rank_norm,
@@ -1369,6 +1414,15 @@ class ProfileComparator:
             else:
                 cosine = 0.0
             
+            # Weighted Jaccard: sum(min(w_a, w_b)) / sum(max(w_a, w_b)) over
+            # the union — same semantics as the profiling scorer
+            if all_types:
+                w_intersection = float(np.sum(np.minimum(vec_a, vec_b)))
+                w_union = float(np.sum(np.maximum(vec_a, vec_b)))
+                weighted_jaccard = w_intersection / w_union if w_union > 0 else 0.0
+            else:
+                weighted_jaccard = 0.0
+            
             # Compute combined score
             rank_norm = (rank_corr + 1) / 2 if not np.isnan(rank_corr) else 0.5
             
@@ -1383,6 +1437,7 @@ class ProfileComparator:
                 'shared_count': shared_count,
                 'combined': combined,
                 'jaccard': jaccard,
+                'weighted_jaccard': weighted_jaccard,
                 'cosine': cosine,
                 'rank': rank_corr,
                 'rank_union': rank_union,
@@ -4542,7 +4597,6 @@ class HomologFinder:
                     rank_corr_raw = score_dict['rank']
                     rank_corr_norm = (rank_corr_raw + 1) / 2 if not np.isnan(rank_corr_raw) else np.nan
                     rank_union_raw = score_dict['rank_union']
-                    rank_union_norm = (rank_union_raw + 1) / 2 if not np.isnan(rank_union_raw) else np.nan
 
                     # Optional score filter
                     if min_score is not None and (pd.isna(rank_corr_norm) or rank_corr_norm < min_score):
@@ -4559,9 +4613,11 @@ class HomologFinder:
                         'union_type_count': score_dict['union_type_count'],
                         'rank_corr': rank_corr_norm,
                         'rank_corr_raw': rank_corr_raw,
-                        'rank_union': rank_union_norm,
-                        'rank_union_raw': rank_union_raw,
+                        # rank_union is the RAW union-based Spearman correlation
+                        # (sign meaningful, 0 = no monotonic relation)
+                        'rank_union': rank_union_raw,
                         'jaccard': score_dict['jaccard'],
+                        'weighted_jaccard': score_dict.get('weighted_jaccard', 0.0),
                         'cosine': score_dict['cosine'],
                         'combined': score_dict['combined'],
                         'is_same_type': source_type_str == target_type_str if target_type_str else False,
@@ -4585,7 +4641,6 @@ class HomologFinder:
                     rank_corr_raw = scores['rank']
                     rank_corr_norm = (rank_corr_raw + 1) / 2 if not np.isnan(rank_corr_raw) else np.nan
                     rank_union_raw = scores.get('rank_union', np.nan)
-                    rank_union_norm = (rank_union_raw + 1) / 2 if not np.isnan(rank_union_raw) else np.nan
 
                     if min_score is not None and (pd.isna(rank_corr_norm) or rank_corr_norm < min_score):
                         continue
@@ -4604,9 +4659,9 @@ class HomologFinder:
                         'union_type_count': scores.get('union_type_count', 0),
                         'rank_corr': rank_corr_norm,
                         'rank_corr_raw': rank_corr_raw,
-                        'rank_union': rank_union_norm,
-                        'rank_union_raw': rank_union_raw,
+                        'rank_union': rank_union_raw,
                         'jaccard': scores['jaccard'],
+                        'weighted_jaccard': scores.get('weighted_jaccard', 0.0),
                         'cosine': scores['cosine'],
                         'combined': scores['combined'],
                         'is_same_type': source_type_str == target_type_str if target_type_str else False,
@@ -4637,7 +4692,6 @@ class HomologFinder:
                     rank_corr_raw = scores['rank']
                     rank_corr_norm = (rank_corr_raw + 1) / 2 if not np.isnan(rank_corr_raw) else np.nan
                     rank_union_raw = scores.get('rank_union', np.nan)
-                    rank_union_norm = (rank_union_raw + 1) / 2 if not np.isnan(rank_union_raw) else np.nan
 
                     source_partner_count = len(ProfileComparator._get_all_bodyids(profile_a, 'both'))
                     target_partner_count = len(ProfileComparator._get_all_bodyids(profile_b, 'both'))
@@ -4656,9 +4710,9 @@ class HomologFinder:
                         'union_type_count': scores.get('union_type_count', 0),
                         'rank_corr': rank_corr_norm,
                         'rank_corr_raw': rank_corr_raw,
-                        'rank_union': rank_union_norm,
-                        'rank_union_raw': rank_union_raw,
+                        'rank_union': rank_union_raw,
                         'jaccard': scores['jaccard'],
+                        'weighted_jaccard': scores.get('weighted_jaccard', 0.0),
                         'cosine': scores['cosine'],
                         'combined': scores['combined'],
                         'is_same_type': True,
@@ -4940,8 +4994,8 @@ class HomologFinder:
                 - union_type_count: Total unique types/bodyIds in union
                 - rank_corr: Normalized rank correlation [0,1] (shared partners only)
                 - rank_corr_raw: Raw Spearman correlation [-1,1]
-                - rank_union: Normalized rank correlation [0,1] (all partners, missing=0)
-                - rank_union_raw: Raw Spearman correlation [-1,1]
+                - rank_union: Raw Spearman correlation [-1,1] on the partner
+                  union (missing = 0); sign is meaningful, 0 = no relation
                 - jaccard: Jaccard similarity
                 - cosine: Cosine similarity
                 - combined: Weighted combined score
@@ -6097,8 +6151,7 @@ class HomologFinder:
             f.write("  combined: Weighted score of jaccard + rank_corr (0-1, higher=better)\n")
             f.write("  rank_corr: Spearman correlation on SHARED partners (0-1, higher=better)\n")
             f.write("  rank_corr_raw: Raw Spearman correlation (-1 to 1)\n")
-            f.write("  rank_union: Spearman correlation on ALL partners, missing=0 (0-1)\n")
-            f.write("  rank_union_raw: Raw Spearman correlation for union (-1 to 1)\n")
+            f.write("  rank_union: Raw Spearman correlation on the partner union (-1 to 1)\n")
             f.write("  jaccard: Jaccard similarity of partner sets (0-1, higher=better)\n")
             f.write("  cosine: Cosine similarity of weight vectors (0-1, higher=better)\n")
             f.write("  adjacency_score: Number of shared partners found during candidate discovery\n")
@@ -7531,6 +7584,24 @@ class ConnectivityProfileComparer:
     Aggregation Strategies:
         - 'bodyid': Compare individual bodyId profiles directly
         - 'type': Aggregate profiles by neuron type using mean pooling
+        - 'custom': Compare user-defined custom groups (LabelMapper preset,
+          nested-list groups or group_map_csv)
+    
+    Pattern Expansion:
+        - aggregation_level='type': a query item that matches no exact type
+          and looks like a regex pattern ('aMe.*', '.*DN.*') expands into
+          its matched types, each becoming an INDEPENDENT row. The same
+          pattern under 'custom' aggregation is taken literally as one group.
+    
+    Custom Groups (aggregation_level='custom'):
+        - LabelMapper preset JSON (custom_mapping_file): groups come from
+          the preset's source_mapping side — each custom_label/std_label
+          row is one group, and its members for the profiling dataset fill
+          the row
+        - Nested list query: [['Group1', [id1, id2]], ...]
+        - group_map_csv: columns 'group' and 'id_type_instance'
+        - A flat query under 'custom' keeps each item as one single-member
+          group (no pattern expansion)
     
     Auto Type Mapping (Cross-Dataset):
         When comparing across datasets, partner types may have different names
@@ -7597,6 +7668,7 @@ class ConnectivityProfileComparer:
         self,
         query: Union[str, int, List[Union[str, int, List]], Dict[str, List]],
         dataset: Optional[str] = None,
+        datasets: Optional[List[str]] = None,
         aggregation_level: str = 'type',
         top_k: int = 15,
         top_m: int = 5,
@@ -7608,6 +7680,7 @@ class ConnectivityProfileComparer:
         verbose: bool = True,
         use_cache: bool = True,
         group_map_csv: Optional[str] = None,
+        custom_mapping_file: Optional[str] = None,
         skip_bodyId_level: Union[bool, str] = 'auto',
         use_auto_type_mapping: bool = True,
         ensure_cache_complete: bool = False,
@@ -7630,7 +7703,20 @@ class ConnectivityProfileComparer:
                 For intra-dataset comparison, this is required.
                 For cross-dataset comparison (dict query), this should be None.
                 If dict query is provided but dataset is not None, a warning is issued.
-            aggregation_level: 'bodyid' or 'type'
+            datasets: Optional list of dataset identifiers for MULTI-DATASET
+                profiling (2+): the same query is profiled in every dataset
+                (names mapped per dataset via the type mapper), intra-dataset
+                matrices are computed per dataset, and the same queried
+                neuron is compared ACROSS datasets with the homolog finding
+                backend algorithm. When provided, `dataset` is ignored.
+            aggregation_level: 'bodyid', 'type' or 'custom'
+                - 'type' (default): each matched neuron type is one row;
+                  pattern items like 'aMe.*' expand to independent types
+                - 'bodyid': every individual neuron is one row
+                  (labels {bodyId}_{type})
+                - 'custom': rows are user-defined custom groups (from a
+                  LabelMapper preset, nested-list query or group_map_csv);
+                  a flat query keeps each item as its own group
             top_k: Top K partners per direction (default: 15)
             top_m: Minimum unique types to ensure (default: 5)
             min_synapse_threshold: Minimum synapses for connections
@@ -7645,6 +7731,16 @@ class ConnectivityProfileComparer:
                 - 'group': custom group name (neurons with same group value are grouped)
                 - 'id_type_instance': neuron identifier (bodyId, type, or instance name)
                 When provided, this overrides `query` parameter.
+            custom_mapping_file: Path to a LabelMapper preset JSON (the format
+                exported by the Settings tab's mapping presets, passed straight to
+                LabelMapper(overall_mapping_json=...)). Custom groups are read from
+                the preset's source_mapping side: each custom_label/std_label row is
+                one group, and its members for the profiling dataset fill the row.
+                When provided, this overrides `query` and forces
+                aggregation_level='custom' (rows = groups).
+                JSON format: {"source_mapping": {
+                    "custom_label": ["grp1", "grp2"],
+                    "hemibrain:v1.2.1": [["aMe12", "aMe12_R"], ["aMe12_L"]]}}
             skip_bodyId_level: Whether to skip bodyId-level computations (Steps 3 & 4).
                 - False: Always compute bodyId-level matrices
                 - True: Always skip bodyId-level matrices  
@@ -7668,6 +7764,18 @@ class ConnectivityProfileComparer:
         
         # Detect cross-dataset mode (dict query format)
         self.is_cross_dataset = isinstance(query, dict)
+        
+        # Multi-dataset profiling mode (2+ datasets, one shared query)
+        self.is_multi_dataset = datasets is not None and len(datasets) >= 2
+        
+        # Normalize aggregation level (accepts the UI label 'custom group')
+        self.aggregation_level = {
+            'type': 'type', 'bodyid': 'bodyid',
+            'custom': 'custom', 'custom group': 'custom',
+        }.get(str(aggregation_level).lower(), 'type')
+        self.custom_mapping_file = custom_mapping_file
+        # Set early: the query/mapping parsing below logs via self._log
+        self.verbose = verbose
         
         if self.is_cross_dataset:
             # Cross-dataset comparison mode
@@ -7705,6 +7813,35 @@ class ConnectivityProfileComparer:
                 self._log_pending = f"Cross-dataset comparison: bodyId-level matrices skipped (profiles from different datasets)"
             self.skip_bodyId_level = True
             
+        elif self.is_multi_dataset:
+            # Multi-dataset profiling mode: the SAME query is resolved in every
+            # dataset (type names mapped per dataset) and compared both within
+            # each dataset (intra) and across datasets (inter, same neuron).
+            self._cross_dataset_query = None
+            self.datasets = [str(ds) for ds in datasets]
+            self.dataset = self.datasets[0]
+            self._log_pending = None
+            
+            # Parse group_map_csv / LabelMapper preset / nested query as usual
+            if group_map_csv is not None:
+                self.query, self._custom_group_names = self._parse_group_map_csv(group_map_csv)
+            elif custom_mapping_file is not None:
+                self.query, self._custom_group_names = self._load_custom_groups_from_mapping(
+                    custom_mapping_file, self.dataset
+                )
+                if self.aggregation_level != 'custom':
+                    self._log(f"custom_mapping_file forces aggregation_level='custom' "
+                              f"(was '{self.aggregation_level}')")
+                    self.aggregation_level = 'custom'
+            else:
+                self.query, self._custom_group_names = self._normalize_query(query)
+            
+            # Cross-dataset comparisons always skip the separate bodyId-level
+            # matrices (the intra matrices already cover each dataset).
+            if skip_bodyId_level != True:
+                self._log_pending = f"Multi-dataset comparison: separate bodyId-level matrices skipped"
+            self.skip_bodyId_level = True
+            
         else:
             # Intra-dataset comparison mode
             self._cross_dataset_query = None
@@ -7714,9 +7851,24 @@ class ConnectivityProfileComparer:
             # Parse group_map_csv if provided (overrides query)
             if group_map_csv is not None:
                 self.query, self._custom_group_names = self._parse_group_map_csv(group_map_csv)
+            elif custom_mapping_file is not None:
+                # Custom groups from a LabelMapper preset (source side);
+                # rows are groups, so custom aggregation is forced.
+                self.query, self._custom_group_names = self._load_custom_groups_from_mapping(
+                    custom_mapping_file, dataset
+                )
+                if self.aggregation_level != 'custom':
+                    self._log(f"custom_mapping_file forces aggregation_level='custom' "
+                              f"(was '{self.aggregation_level}')")
+                    self.aggregation_level = 'custom'
             else:
                 # Normalize query and detect nested list format
                 self.query, self._custom_group_names = self._normalize_query(query)
+            
+            # A single-element `datasets` list is equivalent to `dataset`
+            # (the UI always passes `datasets`)
+            if dataset is None and datasets:
+                dataset = str(datasets[0])
             
             if dataset is None:
                 raise ValueError(
@@ -7725,19 +7877,19 @@ class ConnectivityProfileComparer:
                     "{'datasetA': [types], 'datasetB': [types]}"
                 )
         
-        self.dataset = dataset if not self.is_cross_dataset else self.datasets[0]
-        self.aggregation_level = aggregation_level
+        self.dataset = self.datasets[0] if (self.is_cross_dataset or self.is_multi_dataset) else dataset
         self.top_k = top_k
         self.top_m = top_m
         self.min_synapse_threshold = min_synapse_threshold
         self.direction = direction
         self.output_dir = output_dir
         self.generate_heatmaps = generate_heatmaps
+        self.skip_heatmap = not generate_heatmaps
         self.show_figures = show_figures
         self.verbose = verbose
         self.use_cache = use_cache
         self.ensure_cache_complete = ensure_cache_complete
-        if not self.is_cross_dataset:
+        if not (self.is_cross_dataset or self.is_multi_dataset):
             self.skip_bodyId_level = skip_bodyId_level
         
         # Generate query name for output folder
@@ -7751,7 +7903,7 @@ class ConnectivityProfileComparer:
             use_cache=use_cache
         )
         
-        profiler_datasets = self.datasets if self.is_cross_dataset else [dataset]
+        profiler_datasets = self.datasets if (self.is_cross_dataset or self.is_multi_dataset) else [dataset]
         self.profiler = ConnectivityProfiler(
             datasets=profiler_datasets,
             config=config,
@@ -8024,6 +8176,114 @@ class ConnectivityProfileComparer:
         
         return normalized, group_names
 
+    def _load_custom_groups_from_mapping(
+        self, mapping_path: str, dataset: str
+    ) -> Tuple[List, List[str]]:
+        """
+        Load custom groups from a LabelMapper preset JSON (source side).
+        
+        The preset format is the LabelMapper overall JSON exported by the
+        Settings tab's mapping presets:
+            {"source_mapping": {
+                "custom_label": ["grp1", "grp2"],
+                "hemibrain:v1.2.1": [["aMe12", "aMe12_R"], ["aMe12_L"]]}}
+        Each custom_label/std_label row becomes one group; the group members
+        are the identifiers listed for the profiling dataset. Groups without
+        any members in this dataset are dropped with a warning.
+        
+        Args:
+            mapping_path: Path to the LabelMapper preset JSON.
+            dataset: Profiling dataset; must appear as a key of the mapping.
+        
+        Returns:
+            Tuple of (normalized_query, custom_group_names), each group
+            being a list of bodyIds/types — same contract as
+            _parse_group_map_csv.
+        """
+        import json as _json
+        
+        try:
+            data = _json.loads(Path(mapping_path).read_text(encoding='utf-8'))
+        except (OSError, ValueError) as e:
+            raise ValueError(f"Could not read custom mapping file {mapping_path}: {e}")
+        
+        side = data.get('source_mapping') or {}
+        labels = side.get('custom_label') or side.get('std_label') or []
+        if not labels:
+            self._log("Warning: mapping file has no source groups "
+                      "(custom_label/std_label) — custom groups skipped")
+            return [], []
+        
+        # The profiling dataset may appear under its exact name or the
+        # normalized variant (colons/dots replaced by underscores).
+        candidates = {dataset, dataset.replace(':', '_').replace('.', '_')}
+        ds_key = next(
+            (k for k in side
+             if k not in ('custom_label', 'std_label') and k in candidates),
+            None
+        )
+        if ds_key is None:
+            self._log(f"Warning: mapping file has no groups for dataset "
+                      f"'{dataset}' — custom groups skipped")
+            return [], []
+        
+        # Keep the per-dataset member lists (multi-dataset mode resolves each
+        # group against its own dataset's members). Keys are normalized to the
+        # dataset identifiers this comparer knows.
+        self._mapping_ds_members = {}
+        if self.is_multi_dataset:
+            for side_key, rows in side.items():
+                if side_key in ('custom_label', 'std_label'):
+                    continue
+                for known_ds in self.datasets:
+                    if side_key in (known_ds, known_ds.replace(':', '_').replace('.', '_')):
+                        processed_rows = []
+                        for row in (rows or []):
+                            if isinstance(row, str):
+                                row = [row]
+                            processed_rows.append([
+                                int(str(v).strip()) if str(v).strip().isdigit() else str(v).strip()
+                                for v in (row or [])
+                            ])
+                        self._mapping_ds_members[known_ds] = processed_rows
+        
+        normalized = []
+        group_names = []
+        group_rows = side.get(ds_key) or []
+        for i, label in enumerate(labels):
+            member_list = group_rows[i] if i < len(group_rows) else None
+            if isinstance(member_list, str):
+                member_list = [member_list]
+            if not member_list:
+                continue
+            processed = []
+            for id_val in member_list:
+                id_str = str(id_val).strip()
+                processed.append(int(id_str) if id_str.isdigit() else id_str)
+            if not processed:
+                continue
+            group_names.append(str(label))
+            normalized.append(processed)
+        
+        if not group_names:
+            self._log(f"Warning: no groups with members in '{dataset}' "
+                      f"found in mapping file")
+            return [], []
+        
+        self._log(f"Loaded {len(group_names)} custom groups from mapping file:")
+        for name, ids in zip(group_names, normalized):
+            self._log(f"  {name}: {len(ids)} identifiers")
+        
+        return normalized, group_names
+
+    @staticmethod
+    def _looks_like_pattern(item: str) -> bool:
+        """Whether a query item is likely a regex pattern rather than a
+        literal type name (exact-type lookup is tried first, so a literal
+        containing '.' still resolves as a type when one exists)."""
+        return any(ch in item for ch in '*?[]()^$|+{}.')
+
+
     def _generate_query_name(self) -> str:
         """
         Generate a filesystem-safe name from the query.
@@ -8066,23 +8326,92 @@ class ConnectivityProfileComparer:
         else:
             return Path.home() / 'connectome_analysis' / 'connectivity_profiling' / folder_name
     
-    def _get_neurons_to_compare(self) -> Dict[str, List]:
+    def _map_query_item(self, item: Any, dataset: str) -> Any:
+        """Map one query item (type / bodyId / pattern) into a dataset's naming.
+
+        bodyIds and patterns pass through unchanged (patterns are expanded per
+        dataset); type names are mapped through the cross-dataset type mapper
+        when it is loaded (auto type mapping).
         """
-        Get the neurons/groups to compare based on query.
+        if isinstance(item, int) or (isinstance(item, str) and item.isdigit()):
+            return item
+        item_str = str(item)
+        if self._looks_like_pattern(item_str):
+            return item_str
+        if self._type_mapper is not None:
+            mapped = self._type_mapper.resolve_type_across_datasets(
+                item_str, [dataset], source_dataset=None
+            ).get(dataset)
+            if mapped and str(mapped) != item_str:
+                return str(mapped)
+        return item_str
+
+    def _mapped_query_for(self, dataset: str) -> List:
+        """Query items (or custom-group members) mapped into a dataset's
+        naming. Only meaningful in multi-dataset mode with a loaded mapper;
+        otherwise the original query is returned unchanged."""
+        if not self.is_multi_dataset or self._type_mapper is None:
+            return self.query
+        if self._custom_group_names:
+            # Prefer the preset's per-dataset member lists (LabelMapper input);
+            # fall back to mapping the primary dataset's members.
+            members = getattr(self, '_mapping_ds_members', {}).get(dataset)
+            if members is not None:
+                return [list(m) for m in members]
+            return [[self._map_query_item(m, dataset) for m in members]
+                    for members in self.query]
+        return [self._map_query_item(i, dataset) for i in self.query]
+
+    def _canonical_label(self, label: str, dataset: str) -> str:
+        """Canonical (male-cns v1.0) name for a type label via the mapper;
+        unchanged when the mapper is off or does not know the label."""
+        if self._type_mapper is not None:
+            canon = self._type_mapper.get_canonical_type(label, dataset)
+            if canon and canon != label:
+                return canon
+        return label
+
+    def _get_neurons_to_compare(
+        self,
+        dataset: Optional[str] = None,
+        query: Optional[List] = None,
+        custom_group_names: Optional[List[str]] = None,
+    ) -> Dict[str, List]:
+        """
+        Get the neurons/groups to compare based on query and aggregation level.
         
         Handles:
-        - Simple list: ['Mi1', 'Tm3'] -> auto-determine labels
-        - Nested list with custom names: [['Group1', [ids]], ...] via _custom_group_names
-        - group_map_csv: same as nested list format
+        - Explicit groups (nested list / group_map_csv / LabelMapper preset):
+          each group is one row, regardless of aggregation level
+        - aggregation_level='type': bodyIds resolve to their type rows;
+          exact types are one row per type; pattern items ('aMe.*') expand
+          into their matched types, each an INDEPENDENT row
+        - aggregation_level='bodyid': every individual bodyId is its own
+          row (labels {bodyId}_{type}); patterns expand to types, then to
+          their bodyIds
+        - aggregation_level='custom': each flat query item is taken literally
+          as one single-member group (no pattern expansion)
+        
+        Args:
+            dataset: Dataset to resolve against (defaults to self.dataset).
+            query: Query items to resolve (defaults to self.query).
+            custom_group_names: Group names (defaults to self._custom_group_names).
         
         Returns:
-            Dictionary mapping label -> list of identifiers
+            Dictionary mapping label -> list of identifiers (bodyIds or
+            type names to resolve later).
         """
+        dataset = dataset or self.dataset
+        if query is None:
+            query = self.query
+        if custom_group_names is None:
+            custom_group_names = self._custom_group_names
+        
         neurons = {}
         
-        # If custom group names are set (from nested list or group_map_csv)
-        if self._custom_group_names:
-            for idx, (group_name, ids) in enumerate(zip(self._custom_group_names, self.query)):
+        # If custom group names are set (nested list, CSV or LabelMapper)
+        if custom_group_names:
+            for idx, (group_name, ids) in enumerate(zip(custom_group_names, query)):
                 # ids should be a list of bodyIds/types
                 if isinstance(ids, list):
                     neurons[group_name] = ids
@@ -8090,12 +8419,24 @@ class ConnectivityProfileComparer:
                     neurons[group_name] = [ids]
             return neurons
         
+        if self.aggregation_level == 'custom':
+            # No explicit group input: each flat item is its own group,
+            # taken literally (patterns are NOT expanded — the user defines
+            # the grouping explicitly).
+            for item in query:
+                try:
+                    bid = int(item)
+                    neurons[str(bid)] = [bid]
+                except (ValueError, TypeError):
+                    neurons[str(item)] = [str(item)]
+            return neurons
+        
         # Simple list format - original behavior
         # First, collect all numeric items (bodyIds) to do batch lookup
         bodyid_items = []
         type_items = []
         
-        for item in self.query:
+        for item in query:
             try:
                 bid = int(item)
                 bodyid_items.append(bid)
@@ -8106,12 +8447,16 @@ class ConnectivityProfileComparer:
         bodyid_to_type = {}
         if bodyid_items:
             self._log(f"Looking up types for {len(bodyid_items)} bodyIds...")
-            bodyid_to_type = self.profiler.get_types_for_bodyids(bodyid_items, self.dataset)
+            bodyid_to_type = self.profiler.get_types_for_bodyids(bodyid_items, dataset)
         
         # Process bodyIds
         for bid in bodyid_items:
             ntype = bodyid_to_type.get(bid)
-            if ntype:
+            if self.aggregation_level == 'bodyid':
+                # rows are individual neurons
+                label = f"{bid}_{ntype}" if ntype else str(bid)
+                neurons[label] = [bid]
+            elif ntype:
                 if ntype not in neurons:
                     neurons[ntype] = []
                 neurons[ntype].append(bid)
@@ -8122,18 +8467,43 @@ class ConnectivityProfileComparer:
         # Process type names/patterns
         for item_str in type_items:
             # It's a type name or pattern - get all bodyIds for this type
-            body_ids = self.profiler.get_bodyids_for_type(item_str, self.dataset)
+            body_ids = self.profiler.get_bodyids_for_type(item_str, dataset)
             if body_ids:
-                neurons[item_str] = body_ids
+                if self.aggregation_level == 'bodyid':
+                    # every bodyId of the type is its own row
+                    for bid in body_ids:
+                        neurons[f"{bid}_{item_str}"] = [bid]
+                else:
+                    neurons[item_str] = body_ids
+            elif self._looks_like_pattern(item_str):
+                # aggregation_level='type': expand the pattern into its
+                # matched types, each becoming an INDEPENDENT row
+                matched_types = self.profiler.list_types(item_str, dataset)
+                if matched_types:
+                    for tname in matched_types:
+                        tids = self.profiler.get_bodyids_for_type(tname, dataset)
+                        if not tids:
+                            continue
+                        if self.aggregation_level == 'bodyid':
+                            for bid in tids:
+                                neurons[f"{bid}_{tname}"] = [bid]
+                        else:
+                            neurons[tname] = tids
+                else:
+                    # No exact type and no pattern match: keep the raw item
+                    neurons[item_str] = [item_str]
             else:
                 # Single type with no bodyIds found
                 neurons[item_str] = [item_str]
         
         return neurons
     
-    def _extract_all_profiles(self) -> Tuple[Dict[str, ConnectivityProfile], Dict[Tuple[str, int], ConnectivityProfile]]:
+    def _extract_profiles_for_dataset(
+        self, dataset: str
+    ) -> Tuple[Dict[str, ConnectivityProfile], Dict[Tuple[str, int], ConnectivityProfile]]:
         """
-        Extract both type-aggregated profiles and individual bodyId profiles.
+        Extract both type-aggregated profiles and individual bodyId profiles
+        for ONE dataset (query names mapped into it in multi-dataset mode).
         
         Uses batch processing with the connection cache for efficiency.
         All profiles are built directly from the in-memory connection cache
@@ -8144,7 +8514,11 @@ class ConnectivityProfileComparer:
             - type_profiles: Dictionary mapping type_label -> aggregated ConnectivityProfile
             - bodyid_profiles: Dictionary mapping (type_label, bodyId) -> individual ConnectivityProfile
         """
-        neurons = self._get_neurons_to_compare()  # {type_label: [bodyIds]}
+        query = self._mapped_query_for(dataset) if self.is_multi_dataset else self.query
+        neurons = self._get_neurons_to_compare(
+            dataset=dataset, query=query,
+            custom_group_names=self._custom_group_names,
+        )  # {type_label: [bodyIds]}
         
         type_profiles = {}
         bodyid_profiles = {}  # Key: (type_label, bodyId)
@@ -8177,7 +8551,7 @@ class ConnectivityProfileComparer:
         skip_cache = total_bodyids > 100
         all_profiles = self.profiler.get_profiles_batch(
             all_bodyids, 
-            self.dataset, 
+            dataset, 
             force_refresh=False,
             skip_profile_cache=skip_cache,
             show_progress=self.verbose
@@ -8195,24 +8569,176 @@ class ConnectivityProfileComparer:
                 bodyid_profiles[(label, bid)] = profile
         
         # Create aggregated type profiles
-        self._log("Aggregating type-level profiles...")
-        for label, neuron_ids in tqdm(neurons.items(), desc="Aggregating types", 
-                                       disable=not self.verbose, unit="type"):
-            individual_profiles = []
-            
-            for nid in neuron_ids:
-                bid = int(nid) if isinstance(nid, str) and nid.isdigit() else nid
-                if (label, bid) in bodyid_profiles:
-                    individual_profiles.append(bodyid_profiles[(label, bid)])
-            
-            # Create aggregated type profile
-            if len(individual_profiles) == 1:
-                type_profiles[label] = individual_profiles[0]
-            elif len(individual_profiles) > 1:
-                type_profiles[label] = self._aggregate_profiles_from_list(individual_profiles, label)
+        if self.aggregation_level == 'bodyid':
+            # 'bodyid' aggregation: rows are individual neurons — labels from
+            # _get_neurons_to_compare already embed the bodyId
+            # ({bodyId}_{type}), so no mean-pooling is needed.
+            self._log(f"Using bodyId aggregation: {len(bodyid_profiles)} individual rows")
+            type_profiles = {}
+            for (label, bid), profile in bodyid_profiles.items():
+                type_profiles[label] = profile
+        else:
+            self._log("Aggregating type-level profiles...")
+            for label, neuron_ids in tqdm(neurons.items(), desc="Aggregating types", 
+                                           disable=not self.verbose, unit="type"):
+                individual_profiles = []
+                
+                for nid in neuron_ids:
+                    bid = int(nid) if isinstance(nid, str) and nid.isdigit() else nid
+                    if (label, bid) in bodyid_profiles:
+                        individual_profiles.append(bodyid_profiles[(label, bid)])
+                
+                # Create aggregated type profile
+                if len(individual_profiles) == 1:
+                    type_profiles[label] = individual_profiles[0]
+                elif len(individual_profiles) > 1:
+                    type_profiles[label] = self._aggregate_profiles_from_list(individual_profiles, label)
         
-        self._log(f"Extracted {len(type_profiles)} type profiles, {len(bodyid_profiles)} bodyId profiles")
+        self._log(f"Extracted {len(type_profiles)} type profiles, {len(bodyid_profiles)} bodyId profiles from {dataset}")
         return type_profiles, bodyid_profiles
+
+    def _extract_all_profiles(self) -> Tuple[Dict[str, ConnectivityProfile], Dict[Tuple[str, int], ConnectivityProfile]]:
+        """Extract profiles for the primary dataset (single-dataset mode)."""
+        return self._extract_profiles_for_dataset(self.dataset)
+    
+    # ------------------------------------------------------------------
+    # Inter-dataset comparisons (same queried neuron across datasets)
+    # ------------------------------------------------------------------
+    
+    def _build_anchor_profiles(
+        self, profiles_by_dataset: Dict[str, Dict[str, ConnectivityProfile]]
+    ) -> Dict[str, Dict[str, Tuple[str, ConnectivityProfile]]]:
+        """Map queried neurons/groups to their per-dataset profiles.
+    
+        Anchors are the QUERIED items (the "same neuron" concept across
+        datasets):
+        - custom groups: each group name is an anchor (members were mapped
+          per dataset during extraction)
+        - type names: anchor key is the canonical (male-cns v1.0) name; the
+          per-dataset profile is the profile of the mapped name in that
+          dataset
+        - bodyIds: anchor is the bodyId; per-dataset profiles are the mapped
+          type's profiles (the bodyId's type in the source dataset)
+        - patterns: anchors are the matched types of the FIRST dataset
+    
+        Returns:
+            Dict[anchor -> {dataset: (label_in_dataset, profile)}]; only
+            anchors present in >= 2 datasets are kept.
+        """
+        anchors: Dict[str, Dict[str, Tuple[str, ConnectivityProfile]]] = {}
+            
+        if self._custom_group_names:
+            for gname in self._custom_group_names:
+                per_ds = {}
+                for ds, profiles in profiles_by_dataset.items():
+                    if gname in profiles:
+                        per_ds[ds] = (gname, profiles[gname])
+                if len(per_ds) >= 2:
+                    anchors[gname] = per_ds
+            return anchors
+            
+        for item in self.query:
+            item_str = str(item)
+            if item_str.isdigit():
+                # bodyId: use its type (mapped per dataset) as the profile
+                bid = int(item_str)
+                per_ds = {}
+                for ds, profiles in profiles_by_dataset.items():
+                    ntype = (self.profiler.get_types_for_bodyids([bid], ds) or {}).get(bid)
+                    if not ntype:
+                        continue
+                    if self.aggregation_level == 'bodyid':
+                        label = f"{bid}_{ntype}"
+                    else:
+                        label = self._map_query_item(ntype, ds)
+                    if label in profiles:
+                        per_ds[ds] = (label, profiles[label])
+                if len(per_ds) >= 2:
+                    anchors[item_str] = per_ds
+            elif self._looks_like_pattern(item_str):
+                # patterns: anchors = matched types in the first dataset
+                matched = self.profiler.list_types(item_str, self.datasets[0])
+                for tname in matched:
+                    per_ds = {}
+                    for ds, profiles in profiles_by_dataset.items():
+                        label = self._map_query_item(tname, ds)
+                        if label in profiles:
+                            per_ds[ds] = (label, profiles[label])
+                    if len(per_ds) >= 2:
+                        key = self._canonical_label(tname, self.datasets[0])
+                        anchors[key] = per_ds
+            else:
+                # exact type name
+                per_ds = {}
+                for ds, profiles in profiles_by_dataset.items():
+                    label = self._map_query_item(item_str, ds)
+                    if label in profiles:
+                        per_ds[ds] = (label, profiles[label])
+                if len(per_ds) >= 2:
+                    key = self._canonical_label(item_str, self.datasets[0])
+                    anchors[key] = per_ds
+            
+        return anchors
+    
+    def _compute_inter_dataset_matrices(
+        self, anchor_profiles: Dict[str, Dict[str, Tuple[str, ConnectivityProfile]]]
+    ) -> Dict[str, Dict[str, Dict[str, pd.DataFrame]]]:
+        """
+        Compute per-anchor datasets × datasets similarity matrices using the
+        homolog-finding backend algorithm (2-hop expanded partner types,
+        standardized to canonical names, combined = 0.5·jaccard + 0.5·rank).
+    
+        Returns:
+            Dict[anchor -> {direction: {metric: DataFrame}}]
+        """
+        mapper = self._type_mapper
+        directions = ['both', 'upstream', 'downstream'] if self.direction == 'both' else [self.direction]
+        metrics = ['jaccard', 'weighted_jaccard', 'cosine', 'rank_corr', 'rank_corr_union', 'combined']
+        out: Dict[str, Dict[str, Dict[str, pd.DataFrame]]] = {}
+            
+        for anchor, per_ds in anchor_profiles.items():
+            present = [ds for ds in self.datasets if ds in per_ds]
+            n = len(present)
+            matrices = {}
+            for direction in directions:
+                dir_name = 'combined' if direction == 'both' else direction
+                metric_matrices = {m: np.full((n, n), np.nan) for m in metrics}
+                for i, d1 in enumerate(present):
+                    p1 = per_ds[d1][1]
+                    for j, d2 in enumerate(present):
+                        if i == j:
+                            continue  # intra-dataset pair, not part of inter comparison
+                        p2 = per_ds[d2][1]
+                        if mapper is not None:
+                            types_a = ProfileComparator._get_expanded_types_standardized(
+                                p1, direction, mapper
+                            )
+                            types_b = ProfileComparator._get_expanded_types_standardized(
+                                p2, direction, mapper
+                            )
+                            scores = self._compute_similarity_from_types(types_a, types_b)
+                        else:
+                            scores = ProfileComparator.combined_score(p1, p2, direction=direction)
+                        metric_matrices['jaccard'][i, j] = scores.get('jaccard', 0.0)
+                        metric_matrices['weighted_jaccard'][i, j] = scores.get('weighted_jaccard', 0.0)
+                        metric_matrices['cosine'][i, j] = scores.get('cosine', 0.0)
+                        metric_matrices['combined'][i, j] = scores.get('combined', 0.0)
+                        rank_val = scores.get('rank', np.nan)
+                        metric_matrices['rank_corr'][i, j] = rank_val if not np.isnan(rank_val) else 0.0
+                        # rank_corr_union = the RAW union-based rank — sign is
+                        # meaningful, 0 = no monotonic relation (same semantics
+                        # as the homolog results' rank_union column)
+                        rank_union_val = scores.get('rank_union', np.nan)
+                        metric_matrices['rank_corr_union'][i, j] = (
+                            rank_union_val if not np.isnan(rank_union_val) else 0.0
+                        )
+                matrices[dir_name] = {
+                    m: pd.DataFrame(metric_matrices[m], index=present, columns=present)
+                    for m in metrics
+                }
+            out[anchor] = matrices
+            
+        return out
     
     def _extract_cross_dataset_profiles(
         self
@@ -8350,7 +8876,7 @@ class ConnectivityProfileComparer:
         n_cols = len(col_labels)
         
         directions = ['both', 'upstream', 'downstream'] if self.direction == 'both' else [self.direction]
-        metrics = ['jaccard', 'cosine', 'rank_corr', 'rank_corr_union']
+        metrics = ['jaccard', 'weighted_jaccard', 'cosine', 'rank_corr', 'rank_corr_union', 'combined']
         
         all_matrices = {}
         total_pairs = n_rows * n_cols
@@ -8406,13 +8932,20 @@ class ConnectivityProfileComparer:
                             )
                         
                         metric_matrices['jaccard'][i, j] = scores.get('jaccard', 0.0)
+                        metric_matrices['weighted_jaccard'][i, j] = scores.get('weighted_jaccard', 0.0)
                         metric_matrices['cosine'][i, j] = scores.get('cosine', 0.0)
+                        metric_matrices['combined'][i, j] = scores.get('combined', 0.0)
                         
                         rank_val = scores.get('rank', np.nan)
                         metric_matrices['rank_corr'][i, j] = rank_val if not np.isnan(rank_val) else 0.0
                         
-                        rank_norm = scores.get('rank_norm', np.nan)
-                        metric_matrices['rank_corr_union'][i, j] = rank_norm if not np.isnan(rank_norm) else 0.5
+                        # rank_corr_union = the RAW union-based rank — sign is
+                        # meaningful, 0 = no monotonic relation (same semantics
+                        # as the homolog results' rank_union column)
+                        rank_union_val = scores.get('rank_union', np.nan)
+                        metric_matrices['rank_corr_union'][i, j] = (
+                            rank_union_val if not np.isnan(rank_union_val) else 0.0
+                        )
                         
                         pbar.update(1)
             
@@ -8454,6 +8987,15 @@ class ConnectivityProfileComparer:
             norm_a, norm_b = np.linalg.norm(vec_a), np.linalg.norm(vec_b)
             cosine = float(np.dot(vec_a, vec_b) / (norm_a * norm_b)) if norm_a > 0 and norm_b > 0 else 0.0
         
+        # Weighted Jaccard: sum(min(w_a, w_b)) / sum(max(w_a, w_b)) over the
+        # union — identical to the homolog scorer's weighted_jaccard
+        if union:
+            w_intersection = float(np.sum(np.minimum(vec_a, vec_b)))
+            w_union = float(np.sum(np.maximum(vec_a, vec_b)))
+            weighted_jaccard = w_intersection / w_union if w_union > 0 else 0.0
+        else:
+            weighted_jaccard = 0.0
+        
         # Rank correlation on shared types
         shared_types = sorted(intersection)
         if len(shared_types) >= 3:
@@ -8470,14 +9012,36 @@ class ConnectivityProfileComparer:
         else:
             rank_corr = np.nan
         
-        # Normalized rank correlation
+        # Rank correlation on the UNION of types (missing = 0.0) — the same
+        # metric as the homolog backend's rank_union (batch_compare_cross_dataset),
+        # so profiling and homolog report identical values for the same pair.
+        union_types = sorted(union)
+        if len(union_types) >= 3:
+            weights_a_union = [types_a.get(t, 0.0) for t in union_types]
+            weights_b_union = [types_b.get(t, 0.0) for t in union_types]
+            if len(set(weights_a_union)) > 1 and len(set(weights_b_union)) > 1:
+                try:
+                    rank_union, _ = spearmanr(weights_a_union, weights_b_union)
+                    rank_union = float(rank_union) if not np.isnan(rank_union) else np.nan
+                except:
+                    rank_union = np.nan
+            else:
+                rank_union = np.nan
+        else:
+            rank_union = np.nan
+        
+        # Normalized rank correlations
         rank_norm = (rank_corr + 1) / 2 if not np.isnan(rank_corr) else 0.5
+        rank_union_norm = (rank_union + 1) / 2 if not np.isnan(rank_union) else 0.5
         
         return {
             'jaccard': jaccard,
+            'weighted_jaccard': weighted_jaccard,
             'cosine': cosine,
             'rank': rank_corr,
             'rank_norm': rank_norm,
+            'rank_union': rank_union,
+            'rank_union_norm': rank_union_norm,
             'combined': 0.5 * jaccard + 0.5 * rank_norm if jaccard > 0 else 0.0,
         }
 
@@ -8578,7 +9142,7 @@ class ConnectivityProfileComparer:
         n = len(labels)
         
         directions = ['both', 'upstream', 'downstream'] if self.direction == 'both' else [self.direction]
-        metrics = ['jaccard', 'cosine', 'rank_corr', 'rank_corr_union']
+        metrics = ['jaccard', 'weighted_jaccard', 'cosine', 'rank_corr', 'rank_corr_union', 'combined']
         
         all_matrices = {}
         
@@ -8614,16 +9178,26 @@ class ConnectivityProfileComparer:
                             metric_matrices['jaccard'][i, j] = scores['jaccard']
                             metric_matrices['jaccard'][j, i] = scores['jaccard']
                             
+                            metric_matrices['weighted_jaccard'][i, j] = scores['weighted_jaccard']
+                            metric_matrices['weighted_jaccard'][j, i] = scores['weighted_jaccard']
+                            
                             metric_matrices['cosine'][i, j] = scores['cosine']
                             metric_matrices['cosine'][j, i] = scores['cosine']
+                            
+                            metric_matrices['combined'][i, j] = scores['combined']
+                            metric_matrices['combined'][j, i] = scores['combined']
                             
                             rank_val = scores['rank'] if not np.isnan(scores['rank']) else 0.0
                             metric_matrices['rank_corr'][i, j] = rank_val
                             metric_matrices['rank_corr'][j, i] = rank_val
                             
-                            rank_norm = scores['rank_norm'] if not np.isnan(scores.get('rank_norm', np.nan)) else 0.5
-                            metric_matrices['rank_corr_union'][i, j] = rank_norm
-                            metric_matrices['rank_corr_union'][j, i] = rank_norm
+                            # rank_corr_union = RAW union-based rank (sign
+                            # meaningful, 0 = neutral — same as the homolog
+                            # rank_union)
+                            rank_union_val = scores.get('rank_union', np.nan)
+                            rank_union_val = rank_union_val if not np.isnan(rank_union_val) else 0.0
+                            metric_matrices['rank_corr_union'][i, j] = rank_union_val
+                            metric_matrices['rank_corr_union'][j, i] = rank_union_val
                             
                             pbar.update(1)
             
@@ -8658,7 +9232,7 @@ class ConnectivityProfileComparer:
         n = len(labels)
         
         directions = ['both', 'upstream', 'downstream'] if self.direction == 'both' else [self.direction]
-        metrics = ['jaccard', 'cosine', 'rank_corr', 'rank_corr_union']
+        metrics = ['jaccard', 'weighted_jaccard', 'cosine', 'rank_corr', 'rank_corr_union', 'combined']
         
         all_matrices = {}
         
@@ -8737,7 +9311,7 @@ class ConnectivityProfileComparer:
         n = len(type_labels)
         
         directions = ['both', 'upstream', 'downstream'] if self.direction == 'both' else [self.direction]
-        metrics = ['jaccard', 'cosine', 'rank_corr', 'rank_corr_union']
+        metrics = ['jaccard', 'weighted_jaccard', 'cosine', 'rank_corr', 'rank_corr_union', 'combined']
         
         all_matrices = {}
         
@@ -8771,12 +9345,15 @@ class ConnectivityProfileComparer:
                                             direction=direction
                                         )
                                         scores_list['jaccard'].append(scores['jaccard'])
+                                        scores_list['weighted_jaccard'].append(scores['weighted_jaccard'])
                                         scores_list['cosine'].append(scores['cosine'])
+                                        scores_list['combined'].append(scores['combined'])
                                         scores_list['rank_corr'].append(
                                             scores['rank'] if not np.isnan(scores['rank']) else 0.0
                                         )
                                         scores_list['rank_corr_union'].append(
-                                            scores['rank_norm'] if not np.isnan(scores.get('rank_norm', np.nan)) else 0.5
+                                            scores.get('rank_union', np.nan)
+                                            if not np.isnan(scores.get('rank_union', np.nan)) else 0.0
                                         )
                             
                             for m in metrics:
@@ -8801,12 +9378,15 @@ class ConnectivityProfileComparer:
                                         direction=direction
                                     )
                                     scores_list['jaccard'].append(scores['jaccard'])
+                                    scores_list['weighted_jaccard'].append(scores['weighted_jaccard'])
                                     scores_list['cosine'].append(scores['cosine'])
+                                    scores_list['combined'].append(scores['combined'])
                                     scores_list['rank_corr'].append(
                                         scores['rank'] if not np.isnan(scores['rank']) else 0.0
                                     )
                                     scores_list['rank_corr_union'].append(
-                                        scores['rank_norm'] if not np.isnan(scores.get('rank_norm', np.nan)) else 0.5
+                                        scores.get('rank_union', np.nan)
+                                        if not np.isnan(scores.get('rank_union', np.nan)) else 0.0
                                     )
                         
                         for m in metrics:
@@ -8893,7 +9473,7 @@ class ConnectivityProfileComparer:
             'output_path': str(output_path)
         }
         
-        metrics_list = ['jaccard', 'cosine', 'rank_corr', 'rank_corr_union']
+        metrics_list = ['jaccard', 'weighted_jaccard', 'cosine', 'rank_corr', 'rank_corr_union', 'combined']
         directions_available = list(type_matrices.keys())
         
         # Save parameters
@@ -8902,6 +9482,8 @@ class ConnectivityProfileComparer:
                       [{'group': n, 'ids': ids} for n, ids in zip(self._custom_group_names, self.query)],
             'custom_group_names': self._custom_group_names,
             'group_map_csv': self.group_map_csv,
+            'custom_mapping_file': self.custom_mapping_file,
+            'aggregation_level': self.aggregation_level,
             'query_name': self.query_name,
             'dataset': self.dataset,
             'top_k': self.top_k,
@@ -9081,9 +9663,11 @@ class ConnectivityProfileComparer:
             # Metric display names for titles
             metric_names = {
                 'jaccard': 'Jaccard Similarity',
+                'weighted_jaccard': 'Weighted Jaccard Similarity',
                 'cosine': 'Cosine Similarity',
                 'rank_corr': 'Rank Correlation',
-                'rank_corr_union': 'Rank Correlation (Normalized)',
+                'rank_corr_union': 'Rank Correlation (Union)',
+                'combined': 'Combined Score',
             }
             
             prefix_display = {
@@ -9197,8 +9781,13 @@ class ConnectivityProfileComparer:
         if self.is_cross_dataset:
             return self._run_cross_dataset()
         
+        # Branch for multi-dataset profiling (intra + inter comparisons)
+        if self.is_multi_dataset:
+            return self._run_multi_dataset()
+        
         self._log(f"Starting connectivity profile comparison for {self.dataset}")
         self._log(f"Query: {self._format_query_for_log(self.query)}")
+        self._log(f"Aggregation level: {self.aggregation_level}")
         
         # Step 0: Optionally ensure connection cache is complete BEFORE profile
         # extraction. Full-dataset completion is opt-in to avoid multi-hour
@@ -9216,7 +9805,15 @@ class ConnectivityProfileComparer:
         
         # Determine whether to skip bodyId-level computation
         n_bodyid = len(bodyid_profiles)
-        if self.skip_bodyId_level == 'auto':
+        if self.aggregation_level == 'bodyid':
+            # The main matrices already compare individual bodyIds, so the
+            # separate bodyId-level and type-avg-bodyId steps would only
+            # duplicate them.
+            do_skip_bodyid = True
+            self._log("⚠️  aggregation_level='bodyid': the main matrices already compare "
+                      "individual neurons, so the separate bodyId-level and type-avg-bodyId "
+                      "matrices are skipped.")
+        elif self.skip_bodyId_level == 'auto':
             do_skip_bodyid = n_bodyid > 1000
             if do_skip_bodyid:
                 n_pairs = n_bodyid * (n_bodyid - 1) // 2
@@ -9284,6 +9881,360 @@ class ConnectivityProfileComparer:
             'is_cross_dataset': False,
         }
     
+    @staticmethod
+    def _safe_folder_name(name: Any) -> str:
+        """Filesystem-safe folder name for datasets / anchors / labels."""
+        return (str(name).replace('/', '_').replace(' ', '_')
+                .replace(':', '_').replace('.', '_'))
+
+    def _save_multi_dataset_results(
+        self,
+        profiles_by_dataset: Dict[str, Dict[str, ConnectivityProfile]],
+        matrices_by_dataset: Dict[str, Dict[str, Dict[str, pd.DataFrame]]],
+        inter_matrices: Dict[str, Dict[str, Dict[str, pd.DataFrame]]],
+        anchor_profiles: Dict[str, Dict[str, Tuple[str, ConnectivityProfile]]],
+    ) -> Dict[str, Any]:
+        """
+        Save multi-dataset results in a reorganized output folder:
+
+            {output}/connectivity_profiling_{query}_{timestamp}/
+            ├── report.html                  # overall summary (all heatmaps)
+            ├── parameters.json
+            ├── README.txt
+            ├── intra_dataset/{dataset}/     # per-dataset N×N comparisons
+            │   ├── results/similarity_{direction}_{metric}.csv
+            │   └── visualization/heatmap_{prefix}_{direction}_{metric}.html
+            ├── cross_dataset/
+            │   ├── mapping_summary.csv      # anchor -> resolved name per dataset
+            │   └── per_neuron/{anchor}/     # same neuron across datasets
+            │       ├── results/similarity_{direction}_{metric}.csv
+            │       └── visualization/heatmap_*.html
+            └── profiles/{dataset}/aggregated/*_profile.json
+        """
+        output_path = self._get_output_path()
+        output_path.mkdir(parents=True, exist_ok=True)
+        intra_base = output_path / 'intra_dataset'
+        cross_base = output_path / 'cross_dataset'
+        profiles_base = output_path / 'profiles'
+        saved = {'matrices_saved': [], 'heatmaps_generated': [],
+                 'profiles_saved': [], 'output_path': str(output_path)}
+        
+        # --- intra-dataset matrices + heatmaps per dataset ---
+        for ds, matrices in matrices_by_dataset.items():
+            safe_ds = self._safe_folder_name(ds)
+            results_dir = intra_base / safe_ds / 'results'
+            viz_dir = intra_base / safe_ds / 'visualization'
+            results_dir.mkdir(parents=True, exist_ok=True)
+            for direction, metric_matrices in matrices.items():
+                for metric, mdf in metric_matrices.items():
+                    csv_path = results_dir / f'similarity_{direction}_{metric}.csv'
+                    mdf.to_csv(csv_path)
+                    saved['matrices_saved'].append(str(csv_path))
+            if self.generate_heatmaps:
+                self._log(f"Generating intra-dataset heatmaps for {ds}...")
+                self._generate_heatmaps_vispath(matrices, viz_dir, saved, prefix='intra')
+        
+        # --- aggregated profiles per dataset ---
+        for ds, profiles in profiles_by_dataset.items():
+            ds_dir = profiles_base / self._safe_folder_name(ds) / 'aggregated'
+            ds_dir.mkdir(parents=True, exist_ok=True)
+            for label, profile in profiles.items():
+                safe_label = self._safe_folder_name(label)
+                profile_path = ds_dir / f'{safe_label}_profile.json'
+                with open(profile_path, 'w') as f:
+                    json.dump(profile.to_dict(), f, indent=2)
+                saved['profiles_saved'].append(str(profile_path))
+        
+        # --- inter-dataset matrices + heatmaps per anchor ---
+        for anchor, matrices in inter_matrices.items():
+            safe_anchor = self._safe_folder_name(anchor)
+            results_dir = cross_base / 'per_neuron' / safe_anchor / 'results'
+            viz_dir = cross_base / 'per_neuron' / safe_anchor / 'visualization'
+            results_dir.mkdir(parents=True, exist_ok=True)
+            for direction, metric_matrices in matrices.items():
+                for metric, mdf in metric_matrices.items():
+                    csv_path = results_dir / f'similarity_{direction}_{metric}.csv'
+                    mdf.to_csv(csv_path)
+                    saved['matrices_saved'].append(str(csv_path))
+            if self.generate_heatmaps:
+                self._log(f"Generating inter-dataset heatmaps for '{anchor}'...")
+                self._generate_heatmaps_vispath(matrices, viz_dir, saved, prefix='inter')
+        
+        # --- name-mapping summary (anchor -> resolved name per dataset) ---
+        summary_rows = []
+        for anchor, per_ds in anchor_profiles.items():
+            row = {'anchor': anchor}
+            for ds in self.datasets:
+                row[ds] = per_ds[ds][0] if ds in per_ds else ''
+            summary_rows.append(row)
+        if summary_rows:
+            summary_df = pd.DataFrame(summary_rows)
+            summary_path = cross_base / 'mapping_summary.csv'
+            summary_df.to_csv(summary_path, index=False)
+            saved['matrices_saved'].append(str(summary_path))
+        
+        # --- parameters.json ---
+        params = {
+            'query': self.query if not self._custom_group_names else
+                      [{'group': n, 'ids': ids} for n, ids in zip(self._custom_group_names, self.query)],
+            'custom_group_names': self._custom_group_names,
+            'group_map_csv': self.group_map_csv,
+            'custom_mapping_file': self.custom_mapping_file,
+            'aggregation_level': self.aggregation_level,
+            'query_name': self.query_name,
+            'datasets': self.datasets,
+            'top_k': self.top_k,
+            'top_m': self.top_m,
+            'min_synapse_threshold': self.min_synapse_threshold,
+            'direction': self.direction,
+            'use_auto_type_mapping': self._type_mapper is not None,
+            'inter_anchors': list(anchor_profiles.keys()),
+            'timestamp': datetime.now().isoformat(),
+        }
+        with open(output_path / 'parameters.json', 'w') as f:
+            json.dump(params, f, indent=2, default=str)
+        
+        # --- README.txt ---
+        readme_lines = [
+            "Multi-Dataset Connectivity Profile Comparison Results",
+            "=" * 50,
+            f"Datasets: {', '.join(self.datasets)}",
+            f"Query: {self._format_query_for_log(self.query)}",
+            f"Aggregation level: {self.aggregation_level}",
+            f"Auto type mapping: {'ON' if self._type_mapper is not None else 'OFF'}",
+            "",
+            "intra_dataset/{dataset}/: N×N similarity of the queried neurons within",
+            "  each dataset (rows/columns = types, bodyIds or custom groups).",
+            "cross_dataset/per_neuron/{anchor}/: datasets × datasets similarity of the",
+            "  SAME queried neuron across datasets (homolog-finding backend algorithm,",
+            "  partner types standardized to the male-cns v1.0 canonical names).",
+            "cross_dataset/mapping_summary.csv: resolved name of each anchor per dataset.",
+            "report.html: overall summary embedding every heatmap.",
+            "",
+            f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+        ]
+        (output_path / 'README.txt').write_text('\n'.join(readme_lines), encoding='utf-8')
+        
+        # --- overall report embedding all heatmaps ---
+        if self.generate_heatmaps:
+            report_path = self._generate_overall_report(
+                output_path, matrices_by_dataset, inter_matrices, anchor_profiles
+            )
+            saved['report_path'] = str(report_path)
+        
+        return saved
+
+    def _generate_overall_report(
+        self,
+        output_path: Path,
+        matrices_by_dataset: Dict[str, Dict[str, Dict[str, pd.DataFrame]]],
+        inter_matrices: Dict[str, Dict[str, Dict[str, pd.DataFrame]]],
+        anchor_profiles: Dict[str, Dict[str, Tuple[str, ConnectivityProfile]]],
+    ) -> Path:
+        """Build report.html embedding every intra- and inter-dataset heatmap.
+
+        The interactive heatmaps are standalone HTML pages; the report embeds
+        them in iframes so one file summarizes the whole run.
+        """
+        from urllib.parse import quote
+        
+        metrics_display = {'jaccard': 'Jaccard Similarity',
+                           'weighted_jaccard': 'Weighted Jaccard Similarity',
+                           'cosine': 'Cosine Similarity',
+                           'rank_corr': 'Rank Correlation',
+                           'rank_corr_union': 'Rank Correlation (Union)',
+                           'combined': 'Combined Score'}
+        directions = (['combined', 'upstream', 'downstream']
+                      if self.direction == 'both' else [self.direction])
+        ds_list = self.datasets
+        
+        def esc(text: Any) -> str:
+            return str(text).replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+        
+        lines = []
+        a = lines.append
+        a('<!DOCTYPE html>')
+        a('<html><head><meta charset="utf-8">')
+        a(f'<title>Connectivity Profiling Report — {esc(self.query_name)}</title>')
+        a('<style>'
+          'body{font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;'
+          'margin:28px auto;max-width:1200px;color:#222;line-height:1.5}'
+          'h1{font-size:24px;margin-bottom:4px}h2{font-size:19px;margin-top:40px;'
+          'border-bottom:2px solid #4a7;padding-bottom:4px}'
+          'h3{font-size:14px;margin:18px 0 4px;color:#444}'
+          'table{border-collapse:collapse;font-size:13px;margin:10px 0}'
+          'td,th{border:1px solid #ccc;padding:4px 10px;text-align:left}'
+          'th{background:#f2f7f4}'
+          'iframe{width:100%;height:520px;border:1px solid #ddd;border-radius:8px;'
+          'margin:4px 0 10px;background:#fff}'
+          '.muted{color:#777;font-size:12px}'
+          '.toc{font-size:13px;columns:2;margin:10px 0}'
+          '.toc li{margin:2px 0}'
+          '</style>')
+        a('</head><body>')
+        a(f'<h1>Connectivity Profiling Report</h1>')
+        a(f'<p class="muted">Generated {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}</p>')
+        
+        # meta table
+        a('<table>')
+        a(f'<tr><th>Datasets</th><td>{" · ".join(esc(d) for d in ds_list)}</td></tr>')
+        a(f'<tr><th>Query</th><td>{esc(self._format_query_for_log(self.query))}</td></tr>')
+        a(f'<tr><th>Aggregation level</th><td>{esc(self.aggregation_level)}</td></tr>')
+        a(f'<tr><th>Direction</th><td>{esc(self.direction)}</td></tr>')
+        a(f'<tr><th>Auto type mapping</th><td>{"ON" if self._type_mapper is not None else "OFF"} '
+          '(names standardized to male-cns v1.0 canonical types)</td></tr>')
+        a('<tr><th>Metrics</th><td>jaccard · cosine · rank_corr · rank_corr_union</td></tr>')
+        a('</table>')
+        
+        # table of contents
+        a('<h2>Contents</h2><div class="toc"><ul>')
+        for ds in ds_list:
+            a(f'<li><a href="#intra-{quote(esc(ds), safe="")}">Intra-dataset — {esc(ds)}</a></li>')
+        for anchor in inter_matrices:
+            a(f'<li><a href="#inter-{quote(esc(anchor), safe="")}">Inter-dataset — {esc(anchor)}</a></li>')
+        a('</ul></div>')
+        
+        # intra-dataset sections (one per dataset)
+        for ds in ds_list:
+            a(f'<h2 id="intra-{quote(esc(ds), safe="")}">Intra-dataset — {esc(ds)}</h2>')
+            a(f'<p class="muted">Profiles across the queried types/bodyIds/groups within {esc(ds)}.</p>')
+            matrices = matrices_by_dataset.get(ds)
+            if not matrices:
+                a('<p class="muted">No intra-dataset matrices (fewer than 2 profiles).</p>')
+                continue
+            for direction in directions:
+                for metric in matrices.get(direction, {}):
+                    rel = (f'intra_dataset/{quote(self._safe_folder_name(ds), safe="")}/'
+                           f'visualization/heatmap_intra_{direction}_{metric}.html')
+                    a(f'<h3>{esc(direction)} · {esc(metrics_display.get(metric, metric))}</h3>')
+                    a(f'<iframe src="{rel}" loading="lazy"></iframe>')
+        
+        # inter-dataset sections (one per queried neuron/group)
+        for anchor, matrices in inter_matrices.items():
+            per_ds = anchor_profiles[anchor]
+            a(f'<h2 id="inter-{quote(esc(anchor), safe="")}">Inter-dataset — {esc(anchor)}</h2>')
+            resolved = ', '.join(f'{esc(d)}: {esc(per_ds[d][0])}' for d in ds_list if d in per_ds)
+            a(f'<p class="muted">Same queried neuron across datasets ({resolved}).</p>')
+            for direction in directions:
+                for metric in matrices.get(direction, {}):
+                    rel = (f'cross_dataset/per_neuron/{quote(self._safe_folder_name(anchor), safe="")}/'
+                           f'visualization/heatmap_inter_{direction}_{metric}.html')
+                    a(f'<h3>{esc(direction)} · {esc(metrics_display.get(metric, metric))}</h3>')
+                    a(f'<iframe src="{rel}" loading="lazy"></iframe>')
+        
+        # name-mapping summary table
+        a('<h2>Name mapping across datasets</h2>')
+        a('<table><tr><th>Anchor</th>' + ''.join(f'<th>{esc(d)}</th>' for d in ds_list) + '</tr>')
+        for anchor, per_ds in anchor_profiles.items():
+            a(f'<tr><td>{esc(anchor)}</td>' +
+              ''.join(f'<td>{esc(per_ds[d][0]) if d in per_ds else "—"}</td>' for d in ds_list) + '</tr>')
+        a('</table>')
+        a('</body></html>')
+        
+        report_path = output_path / 'report.html'
+        report_path.write_text('\n'.join(lines), encoding='utf-8')
+        self._log(f"Overall report (all heatmaps): {report_path}")
+        return report_path
+
+    def _run_multi_dataset(self) -> Dict[str, Any]:
+        """
+        Run multi-dataset profiling.
+        
+        The same query is resolved in every dataset (type names mapped per
+        dataset via the type mapper):
+        1. intra-dataset N×N similarity matrices per dataset
+        2. inter-dataset comparisons of the SAME queried neuron across
+           datasets (homolog-finding backend algorithm)
+        3. a reorganized output folder plus report.html embedding all heatmaps
+        """
+        ds_list = self.datasets
+        self._log("=" * 60)
+        self._log("MULTI-DATASET CONNECTIVITY PROFILE COMPARISON")
+        self._log("=" * 60)
+        self._log(f"Datasets ({len(ds_list)}): {', '.join(ds_list)}")
+        self._log(f"Query: {self._format_query_for_log(self.query)}")
+        self._log(f"Aggregation level: {self.aggregation_level}")
+        
+        # Auto type mapping: resolve each query name per dataset
+        self._type_mapper = None
+        if self.use_auto_type_mapping:
+            try:
+                self._type_mapper = get_type_mapper()
+                if self._type_mapper is None or not self._type_mapper._loaded:
+                    self._type_mapper = None
+            except Exception as e:
+                self._log(f"Warning: could not load the type mapper: {e}")
+                self._type_mapper = None
+        if self._type_mapper is not None:
+            self._log("Auto type mapping: ENABLED (names mapped per dataset via the "
+                      "male-cns v1.0 neuron info)")
+        else:
+            self._log("Auto type mapping: DISABLED — names are used as-is per dataset")
+        
+        # Step 1: per-dataset extraction + intra-dataset matrices
+        profiles_by_dataset: Dict[str, Dict[str, ConnectivityProfile]] = {}
+        matrices_by_dataset: Dict[str, Dict[str, Dict[str, pd.DataFrame]]] = {}
+        for ds in ds_list:
+            self._log("")
+            self._log(f"--- Dataset: {ds} ---")
+            if self.use_cache and self.ensure_cache_complete:
+                self._ensure_connection_cache_complete_for_dataset(ds)
+            type_profiles, _ = self._extract_profiles_for_dataset(ds)
+            profiles_by_dataset[ds] = type_profiles
+            if len(type_profiles) >= 2:
+                self._log(f"Computing intra-dataset similarity matrices for {ds}...")
+                matrices_by_dataset[ds] = self._compute_similarity_matrices(type_profiles)
+            else:
+                self._log(f"Warning: fewer than 2 profiles in {ds} — "
+                          f"intra-dataset matrices skipped")
+        
+        # Step 2: inter-dataset comparisons (same queried neuron across datasets)
+        self._log("")
+        self._log("Computing inter-dataset comparisons "
+                  "(same queried neuron across datasets)...")
+        anchor_profiles = self._build_anchor_profiles(profiles_by_dataset)
+        inter_matrices = self._compute_inter_dataset_matrices(anchor_profiles)
+        self._log(f"Inter-dataset comparisons ready for "
+                  f"{len(anchor_profiles)} queried neurons/groups")
+        
+        # Step 3: save everything + overall report
+        saved_files = self._save_multi_dataset_results(
+            profiles_by_dataset, matrices_by_dataset, inter_matrices, anchor_profiles
+        )
+        output_path = saved_files.get('output_path', '')
+        
+        # Summary
+        self._log("")
+        self._log("=" * 60)
+        self._log("MULTI-DATASET PROFILING COMPLETE")
+        self._log("=" * 60)
+        self._log(f"Output: {output_path}")
+        self._log(f"Datasets: {len(ds_list)}")
+        self._log(f"Inter-dataset anchors (same neuron across datasets): "
+                  f"{len(anchor_profiles)}")
+        self._log("Output includes:")
+        self._log("  - report.html: overall summary with ALL heatmaps")
+        self._log("  - intra_dataset/{dataset}/: per-dataset N×N matrices & heatmaps")
+        self._log("  - cross_dataset/per_neuron/{anchor}/: same neuron across datasets")
+        self._log("  - cross_dataset/mapping_summary.csv: resolved names per dataset")
+        self._log("  - profiles/{dataset}/: aggregated connectivity profiles")
+        
+        return {
+            'is_multi_dataset': True,
+            'n_type_profiles': sum(len(p) for p in profiles_by_dataset.values()),
+            'n_bodyid_profiles': 0,
+            'output_path': output_path,
+            'datasets': ds_list,
+            'type_labels': sorted({lbl for pro in profiles_by_dataset.values() for lbl in pro}),
+            'matrices_saved': saved_files.get('matrices_saved', []),
+            'heatmaps_generated': saved_files.get('heatmaps_generated', []),
+            'report_path': saved_files.get('report_path', ''),
+            'bodyid_level_skipped': True,
+            'is_cross_dataset': False,
+            'use_auto_type_mapping': self._type_mapper is not None,
+            'inter_anchors': list(anchor_profiles.keys()),
+        }
+
     def _run_cross_dataset(self) -> Dict[str, Any]:
         """
         Run cross-dataset connectivity profile comparison.

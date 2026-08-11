@@ -1136,6 +1136,116 @@ class FastGraph:
                     except Exception:
                         pass
 
+    def find_paths_shortest(self, sources, targets, cutoff=None, verbose=False):
+        """
+        Enumerate ALL shortest (minimum hop-count) paths for every reachable
+        (source, target) pair. Tied shortest paths are all yielded, each once.
+
+        Mechanism
+        ---------
+        1. One backward BFS per target over the lazy reverse index ->
+           dist[v] = hops from v to that target. Per-target distances (not a
+           single nearest-target gradient) are required for correct per-pair
+           results when sources and targets overlap: a shortest s->t route
+           need not descend the nearest-target distance.
+        2. Forward DFS from each source restricted to edges (u, v) with
+           dist[v] == dist[u] - 1; a path ends exactly at the target (the
+           only distance-0 node of its BFS). The strict distance descent
+           makes cycles impossible, so no visited bookkeeping is needed.
+
+        Complexity is O(T*(V + E)) preprocessing plus output size —
+        polynomial, unlike the all-path algorithms (no branching^depth
+        explosion). Consistent with the sibling algorithms, zero-hop paths
+        (a source that is itself a target) are NOT yielded.
+
+        Parameters
+        ----------
+        sources : iterable
+            Source nodes
+        targets : iterable
+            Target nodes
+        cutoff : int or None
+            Maximum path length (edges); paths longer than this are not
+            yielded. None = unlimited.
+        verbose : bool
+            Show a single-line progress display
+
+        Yields
+        ------
+        list
+            Each shortest path as a list of nodes
+        """
+        from collections import deque
+
+        target_set = set(t for t in targets if t in self.adj)
+        if not target_set:
+            return
+        source_list = [s for s in dict.fromkeys(sources) if s in self.adj]
+        if not source_list:
+            return
+
+        radj = self._ensure_radj()
+        adj = self.adj
+
+        target_iter = sorted(target_set, key=str)
+        if verbose:
+            target_iter = LineProgress(target_iter, desc='Shortest Distances', leave=False)
+
+        total_paths = 0
+        for t in target_iter:
+            # Phase 1: backward BFS from this target
+            dist = {t: 0}
+            queue = deque([t])
+            while queue:
+                u = queue.popleft()
+                d = dist[u] + 1
+                for p in radj.get(u, ()):
+                    if p not in dist:
+                        dist[p] = d
+                        queue.append(p)
+
+            # Phase 2: walk the shortest-path DAG toward t. The walk is
+            # ITERATIVE (explicit stack of (node, path, neighbor iterator)) —
+            # the distance descent makes cycles impossible, so no visited
+            # bookkeeping is needed, and very long shortest paths cannot hit
+            # the Python recursion limit. Neighbor order matches the
+            # recursive DFS (depth-first, adjacency order).
+            def emit(start):
+                stack = [(start, [start], iter(adj.get(start, ())))]
+                while stack:
+                    node, path, nbr_iter = stack[-1]
+                    du = dist[node]
+                    advanced = False
+                    for v in nbr_iter:
+                        dv = dist.get(v)
+                        if dv is None or dv != du - 1:
+                            continue
+                        if v == t:
+                            yield path + [v]
+                        else:
+                            stack.append((v, path + [v], iter(adj.get(v, ()))))
+                        advanced = True
+                        break
+                    if not advanced:
+                        stack.pop()
+
+            for s in source_list:
+                if s == t:
+                    continue  # zero-hop paths excluded (sibling convention)
+                ds = dist.get(s)
+                if ds is None or (cutoff is not None and ds > cutoff):
+                    continue
+                for p in emit(s):
+                    yield p
+                    total_paths += 1
+            if verbose:
+                # keep the running path total on the SAME bar (no separate
+                # counter line interleaving with the bar)
+                try:
+                    target_iter.set_postfix(paths=f"{total_paths:,}", refresh=True)
+                except Exception:
+                    pass
+
     def find_paths_bidirectional_bfs(self, sources, targets, cutoff, verbose=False):
         """
         Bidirectional BFS (Layer-based) pathfinding.

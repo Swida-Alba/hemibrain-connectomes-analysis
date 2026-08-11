@@ -1,10 +1,12 @@
 """
-FindPath Tab - Multi-hop pathfinding between neuron groups.
+FindShortestPath Tab - Shortest (minimum hop-count) pathfinding between
+neuron groups. Backend: FindNeuronConnection.FindShortestPath (the shared
+FindAllPath pipeline with shortest-only enumeration).
 """
 
 from nicegui import ui
 
-from ..config import DEFAULTS, PATHFINDING_ALGORITHMS, FILTER_OPTIONS, OUTPUT_FORMATS, NETWORK_LAYOUTS, SEARCH_COLUMNS
+from ..config import DEFAULTS, FILTER_OPTIONS, OUTPUT_FORMATS, NETWORK_LAYOUTS, SEARCH_COLUMNS
 from ..components.common import (
     dataset_selector, neuron_list_input, number_input, select_input,
     checkbox_input, dir_input, apply_filter_mode, section_header, param_grid, tool_page,
@@ -15,10 +17,10 @@ from ..runner import ScriptRunner
 from ..type_suggestions import get_dataset_pools, match_suggestions
 
 
-def create_find_path_tab():
-    """Create the FindPath tab UI."""
+def create_find_shortest_tab():
+    """Create the Shortest Paths tab UI."""
     runner = ScriptRunner()
-    output_panel = OutputPanel("Pathfinding Output")
+    output_panel = OutputPanel("Shortest Pathfinding Output")
 
     def _type_suggest(text):
         """Auto-suggest from the selected dataset's type names. Type matches
@@ -29,10 +31,10 @@ def create_find_path_tab():
         return match_suggestions(text, get_dataset_pools(ds), scope)
 
     form_col, results_col = tool_page(
-        "Find All Paths",
-        "Discover multi-hop pathways between source and target neuron groups.",
-        icon="route",
-        doc="find_path.md",
+        "Shortest Paths",
+        "Find only the shortest (minimum hop-count) paths between source and target neuron groups.",
+        icon="alt_route",
+        doc="find_shortest.md",
     )
 
     with form_col:
@@ -59,12 +61,17 @@ def create_find_path_tab():
                 output_dir = dir_input()
                 mapping_select = mapping_selector(label="Custom Grouping")
 
-        with ui.card().classes("w-full drocat-card").props('id="card-findpath-core"'):
+        with ui.card().classes("w-full drocat-card").props('id="card-findshortest-core"'):
             section_header("Core Parameters", "tune")
             with param_grid(3):
                 max_interlayer = number_input(
-                    "Max Intermediate Layers", DEFAULTS["max_interlayer"], 0, 10,
-                    hint="Maximum number of intermediate neuron layers between source and target. Higher = more paths but slower.",
+                    "Max Layers", 8, 0, 100,
+                    hint="EXACT number of intermediate layers: paths are capped at "
+                         "Max Layers + 1 edges (0 = direct connections only; default 8). "
+                         "Set a high, unreachable number (e.g. 99) for effectively "
+                         "unlimited search — paths never repeat neurons, so a high bound "
+                         "is never reached. If any found path hits the cap, a warning "
+                         "suggests raising it.",
                 )
                 min_synapse = number_input(
                     "Min Synapse Count", DEFAULTS["min_synapse_num"], 1, 100,
@@ -76,19 +83,11 @@ def create_find_path_tab():
                          "including the network_early preview). Limits memory usage for highly "
                          "connected neurons.",
                 )
-            interlayer_warning = ui.label(
-                "⚠️ Layers ≥ 4: the path count grows combinatorially (branching^depth) — "
-                "reconstruction can take hours and produce billions of paths. Raise "
-                "Min Synapse Count / Min Connection Ratio / Min Traversal Prob., "
-                "tighten the Graph Edge Limit in Advanced Settings, or minimize/"
-                "batch the source and target sets."
-            ).classes("text-caption text-amber-8").set_visibility(False)
-            def _on_max_interlayer_change(e):
-                interlayer_warning.set_visibility((e.value or 0) >= 4)
-                # the bodyId edge limit only applies to deep searches
-                edge_limit_bodyid.set_enabled((e.value or 0) >= 3)
-
-            max_interlayer.on_value_change(_on_max_interlayer_change)
+            ui.label(
+                "ℹ️ Only per-pair shortest paths are enumerated (all ties kept). "
+                "Shortest enumeration is polynomial — no combinatorial path explosion, "
+                "so deep searches stay fast."
+            ).classes("text-caption text-teal-8")
 
             # --- Advanced Settings (collapsed) ---
             with ui.expansion("Advanced Settings", icon="settings_suggest").classes("w-full"):
@@ -109,30 +108,20 @@ def create_find_path_tab():
                         "Min Traversal Prob.", DEFAULTS["min_traversal_probability"], 0, 1, 0.01,
                         hint="Minimum traversal probability (ratio/0.3, capped at 1.0). Controls path confidence threshold.",
                     )
-                    pathfinding_algo = select_input(
-                        "Algorithm", PATHFINDING_ALGORITHMS, DEFAULTS["pathfinding"],
-                        hint="MemoizedDFS: recommended default (fastest measured at all depths, no graph copy). DFS: backward memoized, best with few targets. MeetInMiddle: shallow queries. DP: robust. Bidirectional: shortest-first but high memory.",
-                        help_doc="pathfinding_algorithms.html",
+                    edge_limit_bodyid = number_input(
+                        "Edge Limit – BodyIds", 0, 0, 1000000000,
+                        hint="Off by default — shortest-path results need no path-count bound, "
+                             "and trimming can inflate reported distances. Set only to cap "
+                             "memory on extremely large graphs (distances then become "
+                             "shortest-within-trimmed-graph).",
                     )
                 with ui.row().classes("gap-4"):
-                    edge_limit_bodyid = number_input(
-                        "Edge Limit – BodyIds", 1000000, 100, 1000000000,
-                        hint="Top-N strongest non-reserved edges kept in the bodyId-level "
-                             "graph (source/target edges are always kept in addition). "
-                             "Applied only when Layers ≥ 3 (deep searches, where the path "
-                             "count grows combinatorially); shallow runs keep the complete "
-                             "graph. Type-level and custom-group paths are derived from the "
-                             "discovered bodyId paths and need no edge limit. "
-                             "0 = unlimited (can be very slow for deep layers).",
-                    )
-                    # enabled only for deep searches (max_interlayer >= 3)
-                    edge_limit_bodyid.set_enabled((max_interlayer.value or 0) >= 3)
                     visualize_early = checkbox_input(
                         "Visualize Network Before Reconstruction", False,
                         hint="Draw the discovered network graph (all weighted edges) into "
                              "network_early/ right after the layers are fetched — before the "
                              "path enumeration — so you see the explored topology immediately "
-                             "while deep reconstruction is still running. Off by default: the "
+                             "while reconstruction is still running. Off by default: the "
                              "early preview duplicates the final path-based visualizations "
                              "with a plain edge list.",
                     ).props('id=checkbox-early-viz')
@@ -158,7 +147,7 @@ def create_find_path_tab():
                              "Requires the cache to be pre-built.",
                     )
 
-        with ui.card().classes("w-full drocat-card").props('id="card-findpath-output"'):
+        with ui.card().classes("w-full drocat-card").props('id="card-findshortest-output"'):
             section_header("Output Options", "output")
             with param_grid(2):
                 custom_source_name = ui.input(
@@ -180,11 +169,10 @@ def create_find_path_tab():
                 )
                 saveas = ui.input(
                     label="Save Folder Name (optional)",
-                    placeholder="e.g., aMe_clock_paths",
+                    placeholder="e.g., aMe_clock_shortest",
                 ).classes("w-full drocat-input").tooltip(
                     "Custom output folder name. Leave empty for the unified auto name "
-                    "(findallpath_<dataset>_<src>_to_<tgt>_<params>_<timestamp>; "
-                    "findpath_... in per-path mode)."
+                    "(findshortestpath_<dataset>_<src>_to_<tgt>_<params>_<timestamp>)."
                 )
             with ui.row().classes("gap-4"):
                 skip_bodyid = checkbox_input(
@@ -196,7 +184,7 @@ def create_find_path_tab():
                     hint="Open the interactive HTML visualization automatically after completion.",
                 )
 
-        with ui.card().classes("w-full drocat-card").props('id="card-findpath-hemisphere"'):
+        with ui.card().classes("w-full drocat-card").props('id="card-findshortest-hemisphere"'):
             section_header("Hemisphere Analysis", "sync_alt")
             with ui.row().classes("gap-4"):
                 separate_hemi = checkbox_input(
@@ -239,9 +227,9 @@ def create_find_path_tab():
             _sync_hemisphere_options()
 
     with results_col:
-        output_panel.create(run_label="Find All Paths", run_icon="account_tree")
+        output_panel.create(run_label="Find Shortest Paths", run_icon="alt_route")
 
-    async def run_pathfinding():
+    async def run_shortest():
         # Get values from neuron_list_input (returns (mode, list))
         src_mode, src_neurons = source_input.get_value()
         tgt_mode, tgt_neurons = target_input.get_value()
@@ -264,7 +252,7 @@ def create_find_path_tab():
         output_panel.set_running(True)
 
         # Parse keyword filter (chips are already individual keywords)
-        keywords = [str(k) for k in keyword_filter.get_value()[1]] or ['None']
+        keywords = [str(k) for k in keyword_filter.get_value()[1]]
 
         constructor_params = {
             "dataset": dataset.value,
@@ -276,7 +264,6 @@ def create_find_path_tab():
             "min_traversal_probability": float(min_traversal.value),
             "max_interlayer": int(max_interlayer.value),
             "filter_by": filter_by.value,
-            "pathfinding": pathfinding_algo.value,
             "graph_edge_limit_bodyid": int(edge_limit_bodyid.value),
             "visualize_before_reconstruct": visualize_early.value,
             "search_columns": search_columns.value,
@@ -301,7 +288,7 @@ def create_find_path_tab():
         if mapping_path:
             constructor_params["custom_mapping_file"] = mapping_path
 
-        result = await output_panel.run(runner, "find_path", constructor_params, "find_all_path",
+        result = await output_panel.run(runner, "find_shortest", constructor_params, "find_shortest",
                                         output_dir=output_dir.value)
 
         output_panel.set_running(False)
@@ -309,5 +296,5 @@ def create_find_path_tab():
                                 "green" if result["returncode"] == 0 else "red")
         output_panel.show_files(result["files"], result.get("output_folder") or output_dir.value)
 
-    output_panel.run_button.on_click(run_pathfinding)
+    output_panel.run_button.on_click(run_shortest)
     output_panel.cancel_button.on_click(runner.cancel)

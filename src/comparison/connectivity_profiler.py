@@ -4003,6 +4003,108 @@ class ConnectivityProfiler:
                 self._log(f"Warning: Could not get bodyIds for {neuron_type} in {dataset}: {e}")
                 return []
     
+    def list_types(
+        self,
+        pattern: Optional[str] = None,
+        dataset: Optional[str] = None
+    ) -> List[str]:
+        """
+        List neuron types in a dataset, optionally filtered by a regex pattern.
+        
+        The pattern is matched with ``re.match`` semantics (anchored at the
+        start, free at the end) so it accepts the same patterns the UI name
+        filter produces ('aMe.*', '.*aMe.*', '.*aMe'). A None/empty pattern
+        returns ALL types. The full type list is cached per dataset.
+        
+        Args:
+            pattern: Regex pattern; None/empty returns all types.
+            dataset: Dataset identifier (defaults to the first configured).
+        
+        Returns:
+            Sorted list of matching type names.
+        """
+        dataset = dataset or (self.datasets[0] if self.datasets else None)
+        if dataset is None:
+            return []
+        
+        cache = getattr(self, '_all_types_cache', None)
+        if cache is None:
+            cache = {}
+            self._all_types_cache = cache
+        
+        if dataset not in cache:
+            cache[dataset] = self._load_all_types(dataset)
+        
+        all_types = cache[dataset]
+        if not pattern:
+            return list(all_types)
+        
+        try:
+            return [t for t in all_types if re.match(pattern, t)]
+        except re.error:
+            self._log(f"Warning: invalid type pattern '{pattern}' — treating as literal")
+            return [t for t in all_types if t == pattern]
+    
+    def _load_all_types(self, dataset: str) -> List[str]:
+        """Load the full sorted list of neuron types for a dataset."""
+        dataset_lower = dataset.lower()
+        
+        if 'flywire' in dataset_lower or 'fafb' in dataset_lower or 'banc' in dataset_lower:
+            # Local dataset - load neurons file
+            src_dir = Path(__file__).parent.parent
+            project_root = src_dir.parent
+            datasets_folder = project_root / 'datasets'
+            safe_name = dataset.replace(':', '_').replace('.', '_')
+            dataset_path = datasets_folder / safe_name
+            
+            neurons_files = [
+                dataset_path / f'{safe_name}_allneurons_neuron_df.parquet',
+                dataset_path / f'{safe_name}_allneurons_neuron_df.csv',
+                dataset_path / f'{safe_name}_neurons.parquet',
+                dataset_path / f'{safe_name}_neurons.csv',
+                dataset_path / 'neurons.parquet',
+                dataset_path / 'neurons.csv',
+            ]
+            
+            for neurons_file in neurons_files:
+                if neurons_file.exists():
+                    try:
+                        if str(neurons_file).endswith('.parquet'):
+                            df = pd.read_parquet(neurons_file)
+                        else:
+                            df = pd.read_csv(neurons_file)
+                        
+                        # Find type column
+                        type_col = None
+                        for col in ['type', 'cell_type', 'celltype']:
+                            if col in df.columns:
+                                type_col = col
+                                break
+                        
+                        if type_col is not None:
+                            types = df[type_col].dropna().astype(str).unique().tolist()
+                            return sorted(types)
+                    except Exception as e:
+                        self._log(f"Warning: Could not load types from {neurons_file}: {e}")
+            
+            return []
+        
+        # NeuPrint query: fetch DISTINCT types once, filter in Python so the
+        # regex semantics match re.match exactly (Cypher =~ is full-match).
+        client = self._get_client_for_dataset(dataset)
+        if client is None:
+            return []
+        
+        try:
+            query = "MATCH (n:Neuron) WHERE n.type IS NOT NULL RETURN DISTINCT n.type AS type"
+            result = client.fetch_custom(query)
+            if result is None or result.empty or 'type' not in result.columns:
+                return []
+            return sorted(str(t) for t in result['type'].dropna().unique().tolist())
+        except Exception as e:
+            self._log(f"Warning: Could not list types for {dataset}: {e}")
+            return []
+    
     def get_type_for_bodyid(
         self,
         bodyid: int,

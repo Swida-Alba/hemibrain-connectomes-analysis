@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Shortest Paths - DROCAT Instructions</title>
+  <link rel="stylesheet" href="guide.css">
+</head>
+<body>
+<main class="guide">
+  <header class="guide-top">
+    <a class="back" href="README.html">&larr; Back to guides</a>
+    <span class="tag">Connectome</span>
+  </header>
+  <h1>Shortest Paths</h1>
+  <p class="lede">
+    Find only the shortest (minimum hop-count) paths between source and
+    target neuron groups. For every reachable pair, all tied shortest paths
+    are kept. Runs on the full Find All Paths pipeline (discovery,
+    enrichment, outputs, visualization) with shortest-only enumeration.
+  </p>
+
+  <h2>Quick start</h2>
+  <ol>
+    <li>Add <b>Source Neurons</b> (e.g. <code>aMe12</code>,
+      <code>aMe10</code>).</li>
+    <li>Add <b>Target Neurons</b> (e.g. <code>PPL101</code>,
+      <code>DN1p</code>).</li>
+    <li>Click <b>Find Shortest Paths</b>.</li>
+  </ol>
+
+  <h2>Depth: unlimited by default</h2>
+  <ul>
+    <li><b>Max Layers (optional) = 0</b> means unlimited search depth.
+      Layer discovery is a BFS and stops as soon as every target has been
+      discovered — a target's first-discovery layer is its exact shortest
+      hop distance, so deeper layers cannot change any result.</li>
+    <li>Set <b>Max Layers &gt; 0</b> only as a safety cap when targets may
+      be unreachable (worst case: the whole forward cone of the sources is
+      fetched).</li>
+  </ul>
+
+  <h2>Parameters</h2>
+  <table>
+    <tr><th>Parameter</th><th>Default</th><th>Meaning</th></tr>
+    <tr><td>Max Layers (optional)</td><td>0</td><td>0 = unlimited depth; &gt;0 caps path length at <i>layers + 1</i> edges</td></tr>
+    <tr><td>Min Synapse Count</td><td>3</td><td>Minimum edge weight</td></tr>
+    <tr><td>Min Connection Ratio</td><td>0.0</td><td>Minimum weight/post ratio</td></tr>
+    <tr><td>Min Traversal Prob.</td><td>0.0</td><td>Traversal probability threshold</td></tr>
+    <tr><td>Edge Limit – BodyIds</td><td>0 (off)</td><td>See note below — trimming can inflate shortest distances</td></tr>
+    <tr><td>Filter By</td><td>bodyId</td><td>bodyId or type aggregation</td></tr>
+    <tr><td>Output Format</td><td>csv</td><td>csv or xlsx</td></tr>
+  </table>
+
+  <div class="callout tip">
+    <b>No algorithm selector:</b> shortest enumeration is a backward-BFS
+    distance pass plus a guided DFS over the shortest-path DAG — polynomial
+    in graph size. The combinatorial path explosion of Find All Paths does
+    not exist here.
+  </div>
+
+  <div class="callout warn">
+    <b>Edge Limit – BodyIds is off by default.</b> Its purpose (bounding the
+    exponential path count) does not apply to shortest enumeration, and
+    trimming by strength preserves pair <i>reachability</i> but not
+    <i>shortest distance</i> — a dropped weak edge can silently inflate a
+    reported distance. Enable it only to cap memory on extremely large
+    graphs; results then become shortest-within-trimmed-graph (noted in
+    <code>user_warning_notes.txt</code>).
+  </div>
+
+  <h2>Advanced options</h2>
+  <ul>
+    <li><b>Keywords to Exclude from Paths</b> — same semantics as Find All Paths.</li>
+    <li><b>Visualize Network Before Reconstruction</b> — early network preview.</li>
+    <li><b>Custom source/target names</b>, <b>Cache Only (Offline)</b>,
+      <b>Save Folder Name</b>.</li>
+    <li><b>Hemisphere options</b>: separate L/R labels, hemisphere filter,
+      keep conserved edges, symmetry analysis — see
+      <a href="find_path.html#hemisphere-analysis">Hemisphere analysis</a>.</li>
+    <li><b>Find Reciprocal Connections</b> — enriches the path graph with
+      direct connections among its nodes.</li>
+  </ul>
+
+  <h2>Output</h2>
+  <pre><code>{output_dir}/findshortestpath_{DATASET}_{source}_to_{target}_L{depth}w{minsyn}r{ratio}p{prob}_{timestamp}/
+  *_allpaths_type.csv            # type-level shortest paths
+  data_details/                  # parameters, neuron listings, connection tables
+  visualization/                 # network / Sankey / heatmap HTML + inputs
+  bodyId_visualization/          # (when Skip BodyId is off)</code></pre>
+  <p><code>Lmax</code> in the folder name means the search ran with
+    unlimited depth.</p>
+</main>
+</body>
+</html>

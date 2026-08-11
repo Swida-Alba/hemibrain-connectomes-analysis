@@ -159,7 +159,7 @@ Outputs are saved in a timestamped folder per run:
     *   `source_neurons` / `target_neurons`: Original query types
     *   `source_groups` / `target_groups`: Resolved types per dataset (with unmapped types removed when `auto_type_mapping=True`)
     *   `thresholds` / `max_interlayer` / `top_edges`: Analysis parameters
-    *   `comparison_mode` / `pathfinding`: Algorithm settings
+    *   `comparison_mode` / `pathfinding` / `path_mode`: Algorithm settings (`path_mode='shortest'` runs FindShortestPath per dataset: only per-pair minimum-hop paths, unlimited depth when `max_interlayer=0`)
     *   `auto_type_mapping` / `skip_bodyId` / `force_API_fetching`: Feature flags
     *   `verification_settings`: Profile verification parameters
     *   `performance_settings` / `analysis_settings`: Internal settings

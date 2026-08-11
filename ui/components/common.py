@@ -8,7 +8,7 @@ a focus-panel + contact-sheet workspace layout.
 import asyncio
 import os
 from nicegui import ui
-from typing import List, Optional, Callable
+from typing import List, Optional, Callable, Tuple
 from pathlib import Path
 import inspect
 import json
@@ -301,6 +301,9 @@ def neuron_list_input(
     show_upload: bool = True,
     max_items: Optional[int] = None,
     initial: Optional[List] = None,
+    suggestions: Optional[Callable[[str], List[Tuple[str, str]]]] = None,
+    suggestion_min_chars: int = 2,
+    suggestion_limit: int = 50,
 ) -> ui.element:
     """
     Create a chip-based list input for neurons.
@@ -314,6 +317,14 @@ def neuron_list_input(
     - ``max_items`` caps the list (used for single-input tabs); additional
       values are rejected once the cap is reached.
     - A live count badge and a Clear button keep the list manageable.
+    - ``suggestions``: optional provider ``typed_text -> [(value, hint)]``
+      powering the auto-suggest dropdown (dataset type/instance/bodyId names
+      with the searched column as a gray hint). Suggestions appear only after
+      ``suggestion_min_chars`` characters (default 2) and at most
+      ``suggestion_limit`` entries are shown. With a provider, focusing the
+      empty field opens the persistent query history (last 10 + most
+      frequent) and the native QSelect popup is replaced by the custom
+      suggestion menu.
 
     Returns container with .get_value() -> (filter_mode, neuron_list).
     """
@@ -368,9 +379,11 @@ def neuron_list_input(
                         "regex": "Regex",
                     },
                     value="exact",
-                    label="Filter",
+                    label="Match by",
                 ).classes("w-32 drocat-select").props("dense outlined").tooltip(
-                    "Exact: match exactly\nStarts with: prefix match\nContains: substring\nEnds with: suffix\nRegex: pattern"
+                    "How the query matches the Search Columns: exact, prefix "
+                    "(starts with), substring (contains), suffix (ends with) "
+                    "or regex pattern"
                 )
 
             if show_upload:
@@ -501,6 +514,10 @@ def neuron_list_input(
         are never treated as separators. Enter and focus loss are the only
         commit triggers.
         """
+        # While the suggestion menu is open the blur comes from clicking a
+        # suggestion — the click commits the picked value, not the typed text.
+        if suggestions is not None and suggest_menu.value:
+            return
         args = getattr(event, "args", None) if event is not None else None
         text = str(args or "") or pending_input["value"]
         pending_input["value"] = ""
@@ -534,6 +551,111 @@ def neuron_list_input(
             chip_input.set_value(current)
             return
         update_status()
+
+    # ------------------------------------------------------------------
+    # Auto-suggest + query history. Only active when a provider is wired
+    # (the pathfinding tabs pass ``suggestions``): a custom menu replaces
+    # the native QSelect popup (suppressed via popup-content-class) so
+    # entries can render a solid name with a gray column hint and history
+    # sections. History is read from ui/history_store (persisted per user).
+    # ------------------------------------------------------------------
+    suggest_menu = None
+    if suggestions is not None:
+        # The native QSelect popup would open empty on focus/typing; hide it
+        # (CSS rule in ui/app.py) and drive the custom menu instead.
+        chip_input.props('hide-dropdown-icon '
+                         'popup-content-class="drocat-native-popup-hidden"')
+        with ui.menu() as suggest_menu:
+            pass
+        suggest_menu.style("max-height: 360px; overflow-y: auto;")
+
+        def _commit_suggestion(value):
+            """Commit a picked suggestion/history value as a chip."""
+            current = list(chip_input.value or [])
+            if max_items is not None and len(current) >= max_items:
+                return
+            if value not in current:
+                merged = current + [value]
+                if max_items is not None:
+                    merged = merged[:max_items]
+                sync_options(merged)
+                chip_input.set_value(merged)
+            pending_input["value"] = ""
+            update_status()
+            suggest_menu.close()
+
+        def _show_suggestions(entries):
+            if not entries:
+                suggest_menu.close()
+                return
+            suggest_menu.clear()
+            with suggest_menu:
+                for value, hint in entries[:suggestion_limit]:
+                    with ui.item().props("dense").on_click(
+                            lambda v=value: _commit_suggestion(v)):
+                        with ui.row().classes("items-center gap-2 no-wrap"):
+                            ui.label(str(value)).classes("text-body2")
+                            if hint:
+                                ui.label(str(hint)).classes(
+                                    "text-caption text-grey-6")
+            suggest_menu.open()
+
+        def _show_history():
+            from ..history_store import recent as _recent, frequent as _frequent
+            recents = _recent()
+            freqs = [v for v in _frequent() if v not in recents]
+            if not recents and not freqs:
+                suggest_menu.close()
+                return
+            suggest_menu.clear()
+            with suggest_menu:
+                if recents:
+                    ui.item("Recent").props("dense disabled").classes(
+                        "text-caption drocat-muted")
+                    for v in recents:
+                        _history_item(v)
+                if freqs:
+                    ui.item("Frequent").props("dense disabled").classes(
+                        "text-caption drocat-muted")
+                    for v in freqs:
+                        _history_item(v)
+            suggest_menu.open()
+
+        def _history_item(value):
+            with ui.item().props("dense").on_click(
+                    lambda v=value: _commit_suggestion(v)):
+                ui.label(str(value)).classes("text-body2")
+
+        def _on_suggest_input(event):
+            text = str(getattr(event, "args", "") or "")
+            if len(text.strip()) < suggestion_min_chars:
+                if not text.strip():
+                    _show_history()
+                else:
+                    suggest_menu.close()
+                return
+            _show_suggestions(suggestions(text.strip()) or [])
+
+        def _on_suggest_focus(_event):
+            # No editor text yet -> offer the persistent query history.
+            if not pending_input["value"]:
+                _show_history()
+
+        def _on_menu_hide(_event):
+            # The menu closed without a suggestion pick (outside click): the
+            # typed text is still pending — commit it like a plain blur.
+            # Suggestion commits clear pending_input first, so they no-op.
+            if not suggest_menu.value and pending_input["value"]:
+                commit_pending_text()
+
+        def _close_suggest_menu(_event):
+            suggest_menu.close()
+
+        chip_input.on("input", _on_suggest_input,
+                      js_handler="(event) => emit(event?.target?.value ?? '')")
+        chip_input.on("focus", _on_suggest_focus)
+        chip_input.on_value_change(_close_suggest_menu)
+        suggest_menu.on_value_change(_on_menu_hide)
 
     # Capture the editor text while the user types. The native ``input`` event
     # (trusted typing sets the DOM value, and the js_handler ships the text) is

@@ -130,7 +130,7 @@ DEFAULTS = {
     "use_cache": True,
     "top_k": 15,
     "top_m": 5,
-    "similarity_metric": "rank_union",
+    "similarity_metric": "cosine",  # Sort By (homolog candidates): sorting only — all metrics are always computed
     "top_n": 30,
     "match_algorithm": "cds",
     # Find Similar Neurons (morphological mode)
@@ -171,6 +171,7 @@ MATCH_ALGORITHMS = ["cds", "pppm", "both"]
 
 # Comparison modes
 COMPARISON_MODES = ["path", "edge"]
+PATH_MODES = ["all", "shortest"]
 
 # Skeleton modes
 SKELETON_MODES = ["tube", "line"]

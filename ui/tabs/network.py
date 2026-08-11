@@ -1,7 +1,12 @@
-"""FindDirect Tab - Direct connection analysis."""
+"""Network tab - mutual direct connections among the queried neurons.
+
+Backend: FindNeuronConnection.FindNetwork (FindAllPath-style enrichment,
+hemisphere-aware analysis, network + heatmap visualizations without Sankey).
+"""
 
 from nicegui import ui
-from ..config import DEFAULTS, FILTER_OPTIONS, OUTPUT_FORMATS, NETWORK_LAYOUTS, SEARCH_COLUMNS
+
+from ..config import DEFAULTS, OUTPUT_FORMATS, NETWORK_LAYOUTS, SEARCH_COLUMNS
 from ..components.common import (
     dataset_selector, neuron_list_input, number_input, select_input,
     checkbox_input, dir_input, apply_filter_mode, section_header, param_grid, tool_page,
@@ -9,66 +14,72 @@ from ..components.common import (
 from ..components.mapping_editor import mapping_selector, selected_mapping_file_path
 from ..components.output_panel import OutputPanel
 from ..runner import ScriptRunner
+from ..type_suggestions import get_dataset_pools, match_suggestions
 
 
-def create_find_direct_tab():
+def create_network_tab():
+    """Create the Network tab UI (FindNetwork)."""
     runner = ScriptRunner()
-    output_panel = OutputPanel("Direct Connections Output")
+    output_panel = OutputPanel("Network Output")
+
+    def _type_suggest(text):
+        """Auto-suggest from the selected dataset's type names. Type matches
+        come first for string input; the range expands to instance/bodyId only
+        when no type matched and the search scope is 'auto'."""
+        ds = dataset.value if dataset is not None else ""
+        scope = search_columns.value if search_columns is not None else "auto"
+        return match_suggestions(text, get_dataset_pools(ds), scope)
 
     form_col, results_col = tool_page(
-        "Direct Connections",
-        "Find direct synaptic connections between neuron groups.",
-        icon="arrow_forward",
-        doc="find_direct.md",
+        "Network",
+        "Mutual direct connections among the queried neurons.",
+        icon="schema",
+        doc="find_network.md",
     )
 
     with form_col:
+        # Scope notice: the network is limited to the queried neurons.
+        ui.label(
+            "ℹ️ This tool builds a LIMITED network of direct connections among "
+            "the queried neurons only (no intermediate neurons are involved). "
+            "For a more complete network that also involves intermediate neurons, "
+            "use the Find Path tab with Find Reciprocal Connections enabled."
+        ).classes("text-caption text-amber-8 w-full")
+
         with ui.card().classes("w-full drocat-card"):
             section_header("Neuron Selection", "hub")
-            with param_grid(2):
-                source_input = neuron_list_input(
-                    label="Source Neurons",
-                    placeholder="Type or upload CSV/TSV/Excel (e.g., aMe.*)",
-                    hint="Enter source neuron types/bodyIds or upload file. Leave empty for all neurons.",
-                )
-                target_input = neuron_list_input(
-                    label="Target Neurons (optional)",
-                    placeholder="Leave empty to find all downstream targets",
-                    hint="Enter target neurons or upload file. Leave empty for all connections from sources.",
-                )
+            query_input = neuron_list_input(
+                label="Query Neurons",
+                placeholder="Type or upload CSV/TSV/Excel (e.g., aMe12, PPL101)",
+                hint="The network is built from the direct connections WITHIN this set. "
+                     "Enter neuron types, bodyIds, or patterns; upload CSV/TSV/Excel for large lists.",
+                suggestions=_type_suggest,
+            )
             with param_grid(2):
                 dataset = dataset_selector(
-                    hint="Select the connectome dataset to query.",
+                    hint="Select the connectome dataset.",
+                    allow_custom=True,
                 )
                 output_dir = dir_input()
                 mapping_select = mapping_selector(label="Custom Grouping")
 
-        with ui.card().classes("w-full drocat-card").props('id="card-finddirect-core"'):
+        with ui.card().classes("w-full drocat-card").props('id="card-network-core"'):
             section_header("Core Parameters", "tune")
-            with param_grid(3):
-                min_synapse = number_input(
-                    "Min Synapse Count", DEFAULTS["min_synapse_num"], 1, 100,
-                    hint="Minimum synapses for a connection to be included.",
-                )
-                edge_limit = number_input(
-                    "Edge Limit", 50, 10, 5000,
-                    hint="Maximum edges to include in output. Limits result size.",
-                )
+            min_synapse = number_input(
+                "Min Synapse Count", DEFAULTS["min_synapse_num"], 1, 100,
+                hint="Minimum number of synapses for a connection to be included. Filters out weak/noisy connections.",
+            )
 
             # --- Advanced Settings (collapsed) ---
             with ui.expansion("Advanced Settings", icon="settings_suggest").classes("w-full"):
-                with param_grid(3):
+                with param_grid(2):
                     min_ratio = number_input(
                         "Min Connection Ratio", DEFAULTS["min_ratio"], 0, 1, 0.01,
-                        hint="Minimum weight/post ratio. Higher = stronger connections only.",
+                        hint="Minimum weight/post ratio (0-1). Higher = stronger connections only. 0 = include all.",
                     )
                     min_traversal = number_input(
                         "Min Traversal Prob.", DEFAULTS["min_traversal_probability"], 0, 1, 0.01,
-                        hint="Minimum traversal probability threshold.",
-                    )
-                    filter_by = select_input(
-                        "Filter By", FILTER_OPTIONS, DEFAULTS["filter_by"],
-                        hint="'bodyId': individual level. 'type': aggregated by type.",
+                        hint="Minimum traversal probability (ratio/0.3, capped at 1.0). Controls connection confidence threshold.",
                     )
                 search_columns = select_input(
                     "Search Columns", SEARCH_COLUMNS, "auto",
@@ -76,52 +87,46 @@ def create_find_direct_tab():
                          "'auto': all columns (bodyId -> type -> instance -> flywireType/others). "
                          "Use 'type'/'instance'/'bodyId' to restrict the search.",
                 )
-                exclude_intra = checkbox_input(
-                    "Exclude Intra-type Connections", False,
-                    hint="Remove connections between neurons of the same type.",
-                )
                 with ui.row().classes("gap-4"):
                     use_cache = checkbox_input(
                         "Use Cache", DEFAULTS["use_cache"],
-                        hint="Enable local caching for faster repeated queries.",
+                        hint="Cache neuron data locally for 10-100x speedup on repeated runs.",
                     )
                     cache_only = checkbox_input(
                         "Cache Only (Offline)", False,
-                        hint="Use only local cache and never contact the server.",
+                        hint="Use only local cache and never contact the server. "
+                             "Requires the cache to be pre-built.",
                     )
 
-        with ui.card().classes("w-full drocat-card").props('id="card-finddirect-output"'):
+        with ui.card().classes("w-full drocat-card").props('id="card-network-output"'):
             section_header("Output Options", "output")
             with param_grid(2):
-                custom_source_name = ui.input(
-                    label="Custom Source Name (optional)",
+                custom_group_name = ui.input(
+                    label="Custom Group Name (optional)",
                     placeholder="e.g., aMe_clock",
+                ).classes("w-full").tooltip("Custom label for the queried neuron group in output files/plots.")
+                saveas = ui.input(
+                    label="Save Folder Name (optional)",
+                    placeholder="e.g., aMe_clock_network",
                 ).classes("w-full drocat-input").tooltip(
-                    "Custom label for the source group in output files."
-                )
-                custom_target_name = ui.input(
-                    label="Custom Target Name (optional)",
-                    placeholder="e.g., PPL1_dopamine",
-                ).classes("w-full drocat-input").tooltip(
-                    "Custom label for the target group in output files."
+                    "Custom output folder name. Leave empty for the unified auto name "
+                    "(findnetwork_<dataset>_<group>_<params>_<timestamp>)."
                 )
             with param_grid(3):
                 output_format = select_input(
                     "Output Format", OUTPUT_FORMATS, DEFAULTS["output_format"],
-                    hint="'csv' or 'xlsx'.",
+                    hint="'csv': faster, smaller. 'xlsx': Excel format with formatting.",
                 )
                 network_layout = select_input(
                     "Network Layout", NETWORK_LAYOUTS, DEFAULTS["network_layout"],
-                    hint="Layout for the HTML network graph.",
+                    hint="Layout algorithm for the HTML network visualization.",
                 )
-                saveas = ui.input(
-                    label="Save Folder Name (optional)",
-                    placeholder="e.g., aMe_to_PPL_direct",
-                ).classes("w-full drocat-input").tooltip(
-                    "Custom output folder name. Leave empty for the unified auto name."
+                skip_bodyid = checkbox_input(
+                    "Skip BodyId in Output", True,
+                    hint="Exclude individual bodyId-level connection tables. Type-level tables are always saved.",
                 )
 
-        with ui.card().classes("w-full drocat-card").props('id="card-finddirect-hemisphere"'):
+        with ui.card().classes("w-full drocat-card").props('id="card-network-hemisphere"'):
             section_header("Hemisphere Analysis", "sync_alt")
             with ui.row().classes("gap-4"):
                 separate_hemi = checkbox_input(
@@ -155,37 +160,42 @@ def create_find_direct_tab():
             _sync_hemisphere_options()
 
     with results_col:
-        output_panel.create(run_label="Find Direct Connections", run_icon="play_arrow")
+        output_panel.create(run_label="Find Network", run_icon="schema")
 
-    async def run_direct():
-        src_mode, src_neurons = source_input.get_value()
-        tgt_mode, tgt_neurons = target_input.get_value()
+    async def run_network():
+        mode, neurons = query_input.get_value()
+        query = apply_filter_mode(neurons, mode)
 
-        sources = apply_filter_mode(src_neurons, src_mode)
-        targets = apply_filter_mode(tgt_neurons, tgt_mode)
+        if not query:
+            ui.notify("Please enter at least one query neuron", type="warning")
+            return
+
+        # Persist the searched neurons for the auto-suggest history.
+        from ..history_store import record as _record_history
+        _record_history([str(v) for v in query])
 
         output_panel.clear()
         output_panel.set_running(True)
 
         constructor_params = {
             "dataset": dataset.value,
-            "sourceNeurons": sources if sources else [],
-            "targetNeurons": targets,
+            # FindNetwork uses the queried set as both source and target
+            # (mutual direct connections == source == target).
+            "sourceNeurons": query,
+            "targetNeurons": query,
             "output_dir": output_dir.value,
             "min_synapse_num": int(min_synapse.value),
             "min_ratio": float(min_ratio.value),
             "min_traversal_probability": float(min_traversal.value),
-            "filter_by": filter_by.value,
             "search_columns": search_columns.value,
             "network_layout": network_layout.value,
             "use_cache": use_cache.value,
-            "edgeN_limit": int(edge_limit.value),
+            "edgeN_limit": DEFAULTS["edgeN_limit"],
             "output_format": output_format.value,
-            "exclude_intra_type_connections": exclude_intra.value,
-            "custom_source_name": custom_source_name.value.strip() or "",
-            "custom_target_name": custom_target_name.value.strip() or "",
-            "saveas": saveas.value.strip() or "",
+            "skip_bodyId": skip_bodyid.value,
+            "custom_source_name": custom_group_name.value or '',
             "cache_only": cache_only.value,
+            "saveas": saveas.value.strip() or "",
             "separate_hemispheres": separate_hemi.value,
             "hemisphere_filter": hemi_filter.value,
             "keep_only_hemisphere_conserved_connections": keep_hemi_conserved.value,
@@ -195,7 +205,7 @@ def create_find_direct_tab():
         if mapping_path:
             constructor_params["custom_mapping_file"] = mapping_path
 
-        result = await output_panel.run(runner, "find_direct", constructor_params, "find_direct",
+        result = await output_panel.run(runner, "find_network", constructor_params, "find_network",
                                         output_dir=output_dir.value)
 
         output_panel.set_running(False)
@@ -203,5 +213,5 @@ def create_find_direct_tab():
                                 "green" if result["returncode"] == 0 else "red")
         output_panel.show_files(result["files"], result.get("output_folder") or output_dir.value)
 
-    output_panel.run_button.on_click(run_direct)
+    output_panel.run_button.on_click(run_network)
     output_panel.cancel_button.on_click(runner.cancel)

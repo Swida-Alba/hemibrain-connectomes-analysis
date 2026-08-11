@@ -133,14 +133,27 @@ TOOL_REGISTRY: Dict[str, dict] = {
             ),
         },
     },
-    "find_direct": {
-        "label": "Find Direct Connections",
+    "find_shortest": {
+        "label": "Find Shortest Paths",
         "import": "from coana import FindNeuronConnection",
         "class": "FindNeuronConnection",
         "var": "fc",
         "init_method": "InitializeNeuronInfo",
         "methods": {
-            "find_direct": "fc.FindDirectConnections()",
+            "find_shortest": (
+                "fc.FindShortestPath(forward_only=True, "
+                "find_reciprocal=fc.find_reciprocal)"
+            ),
+        },
+    },
+    "find_network": {
+        "label": "Find Network",
+        "import": "from coana import FindNeuronConnection",
+        "class": "FindNeuronConnection",
+        "var": "fc",
+        "init_method": "InitializeNeuronInfo",
+        "methods": {
+            "find_network": "fc.FindNetwork()",
         },
     },
     "connectivity_profiling": {
@@ -725,7 +738,7 @@ print("[DROCAT] Done.")
     # not start with one of these is a shared storage root that may contain
     # many runs — it must never be scanned as the current run's folder.
     _RUN_FOLDER_PREFIX_RE = re.compile(
-        r"^(findpath|findallpath|finddirect|findhomologs|profiling|interdataset|"
+        r"^(findpath|findallpath|findshortestpath|findnetwork|finddirect|findhomologs|profiling|interdataset|"
         r"plot3d|plotpath|colabel|findlines|findneuron|findsimilar)_"
     )
 

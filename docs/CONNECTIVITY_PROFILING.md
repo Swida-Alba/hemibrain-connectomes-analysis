@@ -144,7 +144,7 @@ comparer = ConnectivityProfileComparer(
 - `jaccard`: Set-based overlap (0-1)
 - `cosine`: Weight vector similarity (0-1)
 - `rank_corr`: Spearman correlation (-1 to 1)
-- `rank_corr_union`: Normalized rank correlation (0-1)
+- `rank_corr_union`: Raw Spearman correlation on the partner union (-1 to 1; sign meaningful, 0 = no relation)
 
 ### Output Configuration
 
@@ -170,7 +170,7 @@ Output folder is auto-generated as: `{output_dir}/connectivity_profiling_{query_
 - `jaccard`: Set-based overlap (0-1)
 - `cosine`: Weight vector similarity (0-1)
 - `rank_corr`: Spearman correlation (-1 to 1)
-- `rank_corr_union`: Normalized rank correlation (0-1)
+- `rank_corr_union`: Raw Spearman correlation on the partner union (-1 to 1; sign meaningful, 0 = no relation)
 
 ### Output Configuration
 
@@ -204,9 +204,11 @@ $$\text{RankCorr} = \rho_{spearman}$$
 
 ### Rank Correlation Union (`rank_corr_union`)
 
-Normalized rank correlation (0 to 1):
+Raw Spearman correlation on the partner union (missing = 0), NOT normalized —
+the sign is meaningful (positive = concordant, negative = discordant) and
+0 means no monotonic relation:
 
-$$\text{RankCorr}_{union} = \frac{\rho_{spearman} + 1}{2}$$
+$$\text{RankCorr}_{union} = \rho_{spearman}(union)$$
 
 ## Output Structure
 

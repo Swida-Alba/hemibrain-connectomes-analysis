@@ -28,9 +28,12 @@ function extractFunction(name, source) {
 
 const FUNCTIONS = [
     'updateHoverInfo',
+    'captureStyleBypass',
     'captureState', 'restoreState', 'syncToggleButtons',
-    'pushStateHistory', 'pushHistory', 'undo', 'redo',
+    'pushStateHistory', 'pushHistory', 'registerDragHistory',
+    'undo', 'redo',
     'updateUndoRedoButtons', 'updateHistoryList', 'jumpToHistory',
+    'syncSelectedGeometryInputs', 'updateAlignButtons', 'alignSelectedNodes',
     'parseEdgeFilterInput', 'updateIgnoredEdges',
     'parseEdgeFilterExpressions', 'parseEdgeSingleExpression',
     'evaluateEdgeCondition', 'shouldIgnoreEdge', 'applyEdgeFilter',
@@ -50,6 +53,7 @@ function buildScope(cy) {
         const HISTORY_LIMIT = 50;
         let lastFilterHistoryValue = '';
         let pendingDragState = null;
+        let selectedElement = null;
         let labelPosition = 'center';
         let hemisphereMirrorEnabled = false;
         let selfLoopsHidden = false;
@@ -84,6 +88,7 @@ function buildScope(cy) {
     const src = prelude + fnSources + `
         return {
             undo, redo, pushHistory, pushStateHistory, captureState, restoreState,
+            registerDragHistory, alignSelectedNodes,
             jumpToHistory, updateIgnoredEdges, syncToggleButtons,
             getUndoStack: () => undoStack, getRedoStack: () => redoStack,
             getFilterInput: () => els['ignoreEdgesInput'] || makeEl('ignoreEdgesInput'),
@@ -111,7 +116,10 @@ function buildGraph(nodes, edges) {
     for (const [s, t, w] of edges) {
         elements.push({ group: 'edges', data: { id: 'e' + (i++), source: s, target: t, weight: w || 1, original_weight: w || 1, label: s + '>' + t } });
     }
-    return cytoscape({ headless: true, elements: elements });
+    // styleEnabled: true so per-element style bypasses (color/size
+    // overrides) are actually applied — the default headless core ignores
+    // them, which would make the style-bypass snapshot tests meaningless.
+    return cytoscape({ headless: true, styleEnabled: true, elements: elements });
 }
 
 let failures = 0;
@@ -273,5 +281,76 @@ function check(name, got, expected) {
     check('oldest dropped', api.getUndoStack()[0].label, 'op10');
 }
 
+// ===== Test I: node drag (grab/dragfree) is committed to history =====
+// Regression: the stash was wired to a node-level 'dragstart' event that
+// Cytoscape.js never emits (dragstart exists only for core pan gestures),
+// so node relocations were never recorded and undo could not restore them.
+// The stash now happens on 'grab'; emitting the real event sequence
+// grab -> position change -> dragfree must commit a 'Move nodes' entry,
+// while grab + release without moving must NOT.
+{
+    const cy = buildGraph({ A: 'intermediate', B: 'intermediate' }, [['A', 'B', 5]]);
+    const api = buildScope(cy);
+    api.registerDragHistory();
+    const A = cy.getElementById('A');
+    A.position({ x: 10, y: 20 });
+    // grab -> move -> dragfree: recorded
+    A.emit('grab');
+    A.position({ x: 300, y: 400 });
+    A.emit('dragfree');
+    check('drag recorded', api.getUndoStack().length, 1);
+    check('drag label', api.getUndoStack()[0].label, 'Move nodes');
+    api.undo();
+    check('undo restores pre-drag position', (() => { const p = cy.getElementById('A').position(); return [p.x, p.y]; })(), [10, 20]);
+    api.redo();
+    check('redo reapplies dragged position', (() => { const p = cy.getElementById('A').position(); return [p.x, p.y]; })(), [300, 400]);
+    // grab -> release without moving: NOT recorded
+    cy.getElementById('B').emit('grab');
+    cy.getElementById('B').emit('dragfree');
+    check('click-without-drag not recorded', api.getUndoStack().length, 1);
+}
+
+// ===== Test J: per-element style overrides round-trip through undo/redo =====
+// Snapshots capture json().style (explicit bypasses only) and restoreState
+// re-applies them, so individual size/color edits survive undo/redo.
+{
+    const cy = buildGraph({ A: 'intermediate' }, []);
+    const api = buildScope(cy);
+    cy.getElementById('A').style({ 'width': '60px', 'height': '60px' });
+    api.pushHistory('Resize element');
+    cy.getElementById('A').style({ 'width': '20px', 'height': '20px' });
+    check('resized', cy.getElementById('A').numericStyle('width'), 20);
+    api.undo();
+    check('undo restores size bypass', cy.getElementById('A').numericStyle('width'), 60);
+    api.redo();
+    check('redo reapplies size bypass', cy.getElementById('A').numericStyle('width'), 20);
+}
+
+// ===== Test K: alignment of selected nodes =====
+// alignSelectedNodes('h') sets every selected node to the mean Y (X
+// untouched), records one history entry, and undo restores the spread.
+{
+    const cy = buildGraph({ A: 'intermediate', B: 'intermediate', C: 'intermediate' }, []);
+    const api = buildScope(cy);
+    cy.getElementById('A').position({ x: 0, y: 10 });
+    cy.getElementById('B').position({ x: 50, y: 30 });
+    cy.getElementById('C').position({ x: 100, y: 50 });
+    cy.getElementById('A').select();
+    cy.getElementById('B').select();
+    cy.getElementById('C').select();
+    api.alignSelectedNodes('h');
+    check('aligned to mean Y', cy.nodes().map(n => n.position().y), [30, 30, 30]);
+    check('X untouched', cy.nodes().map(n => n.position().x), [0, 50, 100]);
+    check('align recorded', api.getUndoStack()[0].label, 'Align nodes');
+    api.undo();
+    check('undo restores Y spread', cy.nodes().map(n => n.position().y), [10, 30, 50]);
+    // vertical alignment on the mean X
+    api.alignSelectedNodes('v');
+    check('aligned to mean X', cy.nodes().map(n => n.position().x), [50, 50, 50]);
+    check('Y untouched', cy.nodes().map(n => n.position().y), [10, 30, 50]);
+}
+
 console.log(failures === 0 ? 'ALL HISTORY TESTS PASSED' : failures + ' HISTORY TEST(S) FAILED');
-process.exitCode = failures === 0 ? 0 : 1;
+// process.exitCode alone would hang: styleEnabled cytoscape cores keep
+// background timers alive, so exit explicitly with the proper code.
+process.exit(failures === 0 ? 0 : 1);

@@ -61,7 +61,7 @@ class TestRunner:
 
     def test_tool_registry_has_all_tools(self):
         from ui.runner import TOOL_REGISTRY
-        expected = {"find_path", "find_direct", "connectivity_profiling", "find_homologs",
+        expected = {"find_path", "find_shortest", "connectivity_profiling", "find_homologs",
                      "inter_dataset", "nb_find_lines", "nb_find_neuron", "nb_colabel",
                      "plot3d_skeleton", "plot_path"}
         assert expected.issubset(TOOL_REGISTRY.keys())
@@ -228,12 +228,19 @@ class TestRunner:
         assert "find_reciprocal=fc.find_reciprocal" in script
         assert "male-cns:v0.9" in script
 
-    def test_generate_find_direct_script(self):
+    def test_generate_find_shortest_script(self):
         from ui.runner import ScriptRunner
         sr = ScriptRunner()
-        script = sr._generate_script("find_direct", {"dataset": "hemibrain:v1.2.1"}, "find_direct", None)
+        script = sr._generate_script("find_shortest", {"dataset": "hemibrain:v1.2.1"}, "find_shortest", None)
         assert "from coana import" in script
-        assert "FindDirectConnections" in script
+        assert "FindShortestPath" in script
+
+    def test_generate_find_network_script(self):
+        from ui.runner import ScriptRunner
+        sr = ScriptRunner()
+        script = sr._generate_script("find_network", {"dataset": "hemibrain:v1.2.1"}, "find_network", None)
+        assert "from coana import" in script
+        assert "FindNetwork()" in script
 
     def test_generate_inter_dataset_script(self):
         from ui.runner import ScriptRunner
@@ -245,6 +252,16 @@ class TestRunner:
         # visualizations) — generate_report() alone only builds the text
         assert "export_results()" in script
         assert "generate_report()" not in script
+
+    def test_generate_inter_dataset_script_passes_path_mode(self):
+        """The shortest enumeration mode reaches ComparisonParameters so the
+        per-dataset runs use FindShortestPath."""
+        from ui.runner import ScriptRunner
+        sr = ScriptRunner()
+        script = sr._generate_inter_dataset_script(
+            {"datasets": ["a", "b"], "path_mode": "shortest", "max_interlayer": 0}, None)
+        assert "path_mode='shortest'" in script
+        assert "max_interlayer=0" in script
 
     def test_generate_neuronbridge_script(self):
         from ui.runner import ScriptRunner
@@ -373,6 +390,28 @@ class TestRunner:
         ]
         assert "Min Shared Partners" not in labels
         assert "Candidate Prune %" not in labels
+
+    def test_homologs_sort_by_defaults_to_cosine(self):
+        """The candidate-ranking control is labeled 'Sort By' and defaults to
+        cosine: all metrics are always computed by the shared backend, so the
+        selection only affects the candidate ordering (top-N cut)."""
+        from nicegui import Client
+        from nicegui.page import page
+        from ui.config import DEFAULTS
+        from ui.tabs.find_homologs import create_find_homologs_tab
+
+        client = Client(page("/homologs-sort-by"))
+        with client:
+            create_find_homologs_tab()
+        by_label = {}
+        for el in client.elements.values():
+            label = getattr(el, "_props", {}).get("label")
+            if label == "Sort By":
+                by_label[label] = el
+        assert "Sort By" in by_label, by_label
+        assert by_label["Sort By"].value == DEFAULTS["similarity_metric"]
+        assert DEFAULTS["similarity_metric"] == "cosine"
+        assert "Similarity Metric" not in by_label
 
     def test_similar_tab_has_both_modes_and_loose_knobs(self):
         """The Similar tab renders both modes (morphological similarity and
@@ -1092,6 +1131,49 @@ class TestRunner:
         ]
         assert "folder_open" in icons  # the browse button is still there
 
+    def test_pathfinding_tabs_wire_auto_suggest(self):
+        """All four pathfinding tabs pass a suggestions provider to their
+        neuron inputs: the native popup is replaced by the custom suggestion
+        menu (popup-content-class + focus/history wiring) and the filter-mode
+        dropdown is labeled 'Match by'."""
+        from nicegui import Client
+        from nicegui.page import page
+        from ui.tabs.find_path import create_find_path_tab
+        from ui.tabs.find_shortest import create_find_shortest_tab
+        from ui.tabs.inter_dataset import create_inter_dataset_tab
+        from ui.tabs.network import create_network_tab
+
+        builders = [
+            ("/wire-find-path", create_find_path_tab),
+            ("/wire-find-shortest", create_find_shortest_tab),
+            ("/wire-network", create_network_tab),
+            ("/wire-inter-dataset", create_inter_dataset_tab),
+        ]
+        for route, builder in builders:
+            client = Client(page(route))
+            with client:
+                builder()
+            inputs = [
+                el for el in client.elements.values()
+                if getattr(el, "chip_input", None) is not None
+                and getattr(el, "filter_mode", None) is not None
+            ]
+            assert inputs, f"{route}: no neuron inputs found"
+            for inp in inputs:
+                chip = inp.chip_input
+                # The suggestion machinery is only wired when a provider was
+                # passed — its popup suppression marks the wired inputs.
+                assert chip._props.get("popup-content-class") == \
+                    "drocat-native-popup-hidden", route
+                event_types = [l.type for l in chip._event_listeners.values()]
+                assert "focus" in event_types, route  # history-on-focus
+                assert sum(t == "input" for t in event_types) >= 2, route
+            labels = [
+                getattr(el, "_props", {}).get("label")
+                for el in client.elements.values()
+            ]
+            assert "Match by" in labels, route
+
 
 # =============================================================================
 # Test Dataset Service
@@ -1436,19 +1518,103 @@ class TestDatasetService:
 class TestTabs:
     def test_all_tab_functions_exist(self):
         from ui.tabs import (
-            create_find_path_tab, create_find_direct_tab, create_connectivity_profiling_tab,
+            create_find_path_tab, create_find_shortest_tab, create_connectivity_profiling_tab,
             create_find_homologs_tab, create_find_similar_tab, create_inter_dataset_tab,
             create_nb_find_lines_tab, create_nb_find_neuron_tab, create_nb_colabel_tab,
-            create_skeleton_tab, create_network_tab, create_visualization_tab,
-            create_settings_tab,
+            create_skeleton_tab, create_net_viz_tab, create_network_tab,
+            create_visualization_tab, create_settings_tab,
         )
         assert all(callable(f) for f in [
-            create_find_path_tab, create_find_direct_tab, create_connectivity_profiling_tab,
+            create_find_path_tab, create_find_shortest_tab, create_connectivity_profiling_tab,
             create_find_homologs_tab, create_find_similar_tab, create_inter_dataset_tab,
             create_nb_find_lines_tab, create_nb_find_neuron_tab, create_nb_colabel_tab,
-            create_skeleton_tab, create_network_tab, create_visualization_tab,
-            create_settings_tab,
+            create_skeleton_tab, create_net_viz_tab, create_network_tab,
+            create_visualization_tab, create_settings_tab,
         ])
+
+    def test_tab_bar_shows_group_labels(self):
+        """Layered-card navigation: every group is an independent tinted card
+        holding its header above its tabs (no partition, always aligned),
+        Settings is a standalone card without a header, and clicking a group
+        tab switches the shared panel."""
+        from types import SimpleNamespace
+
+        from nicegui import Client
+        from nicegui.page import page
+        import ui.app as app_module
+
+        client = Client(page("/nav-group-labels"))
+        with client:
+            app_module.main_page()
+
+        def card_of(el):
+            node = el
+            while node is not None:
+                if "drocat-group-card" in getattr(node, "_classes", []):
+                    return node
+                slot = getattr(node, "parent_slot", None)
+                node = slot.parent if slot else None
+            return None
+
+        expected_headers = {
+            "Connection": "connection", "Visualization": "visualization",
+            "Similarity": "similarity", "NeuronBridge": "nb",
+            "FlyLight": "flylight",
+        }
+        headers = [
+            el for el in client.elements.values()
+            if "drocat-group-head" in getattr(el, "_classes", [])
+        ]
+        assert [el.text for el in headers] == list(expected_headers)
+        # Header and tabs share the same tinted card (no partition).
+        for el in headers:
+            card = card_of(el)
+            assert f"drocat-tint-{expected_headers[el.text]}" in card._classes
+        # The single NB badge modifier lives on the NeuronBridge header only.
+        for el in headers:
+            has_badge = "drocat-head-nb" in el._classes
+            assert has_badge == (el.text == "NeuronBridge")
+
+        # Every tab button lives inside its group's tinted card.
+        tint_by_label = {
+            "Path": "connection", "Shortest": "connection",
+            "Network": "connection", "Cross-Dataset": "connection",
+            "Skeleton": "visualization", "Net-Viz": "visualization",
+            "Homologs": "similarity", "Similar": "similarity",
+            "Profiling": "similarity",
+            "Find Lines": "nb", "Find Neurons": "nb", "Co-Labeling": "nb",
+            "Downloader": "flylight", "Settings": "settings",
+        }
+        buttons = {
+            ((el._props or {}).get("label") or "").replace("\n", " "): el
+            for el in client.elements.values()
+            if "drocat-group-tab" in getattr(el, "_classes", [])
+        }
+        assert set(buttons) == set(tint_by_label)
+        for label, tint in tint_by_label.items():
+            card = card_of(buttons[label])
+            assert f"drocat-tint-{tint}" in card._classes, f"{label} in wrong card"
+
+        # Settings card is standalone: no header inside it.
+        settings_card = card_of(buttons["Settings"])
+        assert "drocat-settings-card" in settings_card._classes
+        assert all(card_of(el) is not settings_card for el in headers)
+
+        # Clicking a group tab switches the shared panel and active state.
+        panels = next(
+            el for el in client.elements.values()
+            if type(el).__name__ == "TabPanels"
+        )
+        assert panels.value == "Path"
+        assert "drocat-active" in buttons["Path"]._classes
+        click = next(
+            listener for listener in buttons["Net-Viz"]._event_listeners.values()
+            if listener.type == "click"
+        )
+        click.handler(SimpleNamespace())
+        assert panels.value == "Net-Viz"
+        assert "drocat-active" in buttons["Net-Viz"]._classes
+        assert "drocat-active" not in buttons["Path"]._classes
 
     def test_skeleton_tab_shares_pathfinding_search_controls(self):
         """The 3D Skeleton tab must expose the same neuron-search controls as
@@ -1470,7 +1636,7 @@ class TestTabs:
         ]
         assert "Search Columns" in labels
         assert "Hemisphere" in labels
-        assert "Filter" in labels  # neuron_list_input filter mode dropdown
+        assert "Match by" in labels  # filter-mode select (renamed from 'Filter')
 
         # The form is split into four visually independent blocks.
         texts = [
@@ -1508,8 +1674,8 @@ class TestTabs:
         assert any(el.get_value() == "Dark2" for el in editors)
 
     def test_skeleton_tab_export_and_grouping_controls(self):
-        """The 3D Skeleton tab exposes the custom layer grouping input, the
-        individual-profile export controls (outside Advanced Settings, in
+        """The 3D Skeleton tab exposes the drag-and-drop layer tree editor,
+        the individual-profile export controls (outside Advanced Settings, in
         the Export card), and the legend-mode grouping notice."""
         from nicegui import Client
         from nicegui.page import page
@@ -1530,7 +1696,20 @@ class TestTabs:
             if getattr(el, "text", "")
         ]
         all_text = labels + texts
-        assert "Custom Layer Grouping (optional)" in all_text
+        assert "Layer Structure" in all_text
+        assert "Add Layer" in all_text
+        assert "Add Chain" not in all_text  # chain support was removed
+        # The tree seeds three layer rows (2nd/3rd may stay empty).
+        rows = [
+            el for el in client.elements.values()
+            if "drocat-layer-row" in getattr(el, "_classes", [])
+        ]
+        assert len(rows) == 3, "expected three default layer rows"
+        ids = [
+            getattr(el, "_props", {}).get("id", "")
+            for el in client.elements.values()
+        ]
+        assert "card-skeleton-layers" in ids
         assert "Export Individual Profiles" in all_text
         assert "Summary Format" in all_text
 
@@ -1538,8 +1717,8 @@ class TestTabs:
         assert "Individual Profiles (PDF / PPTX)" in texts
         assert any("Each individual profile follows the Neuron Legend Mode" in t
                    for t in texts), "legend-mode grouping notice missing"
-        assert any("Group layers by assigning neurons to groups" in t
-                   for t in texts), "custom grouping hint missing"
+        assert any("Each row is one layer" in t
+                   for t in texts), "layer tree hint missing"
 
         # the profiles controls live in the export card (outside Advanced
         # Settings): the export card must be an independent block
@@ -1638,16 +1817,16 @@ class TestTabs:
         assert flylight and flylight[0].value is True, "From FlyLight default must be checked"
 
     def test_pathfinding_tabs_have_hemisphere_filter_select(self):
-        """Find All Paths and Find Direct expose the 'Hemisphere' selector
+        """Find All Paths and Shortest expose the 'Hemisphere' selector
         (both / left / right) next to 'Separate Hemispheres'."""
         from nicegui import Client
         from nicegui.page import page
         from ui.tabs.find_path import create_find_path_tab
-        from ui.tabs.find_direct import create_find_direct_tab
+        from ui.tabs.find_shortest import create_find_shortest_tab
 
         for name, builder in [
             ("/hemi-filter-findpath", create_find_path_tab),
-            ("/hemi-filter-finddirect", create_find_direct_tab),
+            ("/hemi-filter-findshortest", create_find_shortest_tab),
         ]:
             client = Client(page(name))
             with client:
@@ -1672,19 +1851,19 @@ class TestTabs:
         from nicegui import Client
         from nicegui.page import page
         from ui.tabs.find_path import create_find_path_tab
-        from ui.tabs.find_direct import create_find_direct_tab
+        from ui.tabs.find_shortest import create_find_shortest_tab
         from ui.tabs.inter_dataset import create_inter_dataset_tab
         from ui.tabs.nb_find_lines import create_nb_find_lines_tab
-        from ui.tabs.visualization import create_network_tab
+        from ui.tabs.visualization import create_net_viz_tab
 
         expected_blocks = [
             ("/blocks-findpath", create_find_path_tab, (
                 "card-findpath-core", "card-findpath-output",
                 "card-findpath-hemisphere",
             )),
-            ("/blocks-finddirect", create_find_direct_tab, (
-                "card-finddirect-core", "card-finddirect-output",
-                "card-finddirect-hemisphere",
+            ("/blocks-findshortest", create_find_shortest_tab, (
+                "card-findshortest-core", "card-findshortest-output",
+                "card-findshortest-hemisphere",
             )),
             ("/blocks-interdataset", create_inter_dataset_tab, (
                 "card-interdataset-hemisphere",
@@ -1692,8 +1871,8 @@ class TestTabs:
             ("/blocks-nbfindlines", create_nb_find_lines_tab, (
                 "card-nb-image-download",
             )),
-            ("/blocks-network", create_network_tab, (
-                "card-network-source", "card-network-rendering",
+            ("/blocks-net-viz", create_net_viz_tab, (
+                "card-net-viz-source", "card-net-viz-rendering",
             )),
         ]
         for name, builder, blocks in expected_blocks:
@@ -1719,10 +1898,10 @@ class TestTabs:
         for header in ("Core Parameters", "Output Options", "Hemisphere Analysis"):
             assert header in texts, f"missing visible header: {header}"
 
-        # The Network tab must not keep the old merged card id.
-        client = Client(page("/blocks-network-id"))
+        # The Net-Viz tab must not keep the old merged card id.
+        client = Client(page("/blocks-net-viz-id"))
         with client:
-            create_network_tab()
+            create_net_viz_tab()
         ids = [
             getattr(el, "_props", {}).get("id", "")
             for el in client.elements.values()
@@ -1755,6 +1934,226 @@ class TestTabs:
         assert sym._props.get("disable") is True
         assert cons.value is False
         assert cons._props.get("disable") is True
+
+    def test_interdataset_edge_limits_shared_with_find_path(self):
+        """The cross-dataset tab carries both FindAllPath edge limits: the
+        bodyId-level pan-graph edge limit used for PATHFINDING (deep
+        searches, Layers >= 3) and the Visualization Edge Limit whose
+        default comes from the shared DEFAULTS (same as Find All Paths)."""
+        from nicegui import Client
+        from nicegui.page import page
+        from ui.config import DEFAULTS
+        from ui.tabs.inter_dataset import create_inter_dataset_tab
+
+        client = Client(page("/interdataset-edge-limits"))
+        with client:
+            create_inter_dataset_tab()
+        by_label = {}
+        for el in client.elements.values():
+            label = getattr(el, "_props", {}).get("label")
+            if label in ("Edge Limit – BodyIds", "Visualization Edge Limit"):
+                by_label[label] = el
+        assert "Edge Limit – BodyIds" in by_label, by_label
+        # the pathfinding edge limit: 1M bodyId edges, deep searches only
+        assert by_label["Edge Limit – BodyIds"].value == 1000000
+        # the visualization edge limit default follows the shared config
+        assert by_label["Visualization Edge Limit"].value == DEFAULTS["edgeN_limit"]
+        assert DEFAULTS["edgeN_limit"] == 500
+
+    def test_find_shortest_tab_defaults_max_layers_8(self):
+        """Shortest runs are depth-bounded by default (8 intermediate
+        layers, an EXACT bound: 0 = direct connections only). High values
+        (e.g. 99) are accepted for effectively unlimited search."""
+        from nicegui import Client
+        from nicegui.page import page
+        from ui.tabs.find_shortest import create_find_shortest_tab
+
+        client = Client(page("/findshortest-maxlayers"))
+        with client:
+            create_find_shortest_tab()
+        layers = [
+            el for el in client.elements.values()
+            if getattr(el, "_props", {}).get("label") == "Max Layers"
+        ]
+        assert layers, "Max Layers input missing"
+        assert layers[0].value == 8, layers[0].value
+        # the input accepts the semi-unlimited bound (99)
+        props = layers[0]._props
+        assert props.get("min") == 0 and props.get("max") == 100, props
+
+    def test_interdataset_mode_switch_resets_mode_defaults(self):
+        """Switching Path Enumeration resets the mode-specific defaults
+        (shortest: Max Layers 8 + Edge Limit – BodyIds 0; all: 2 + 1M) and
+        warns the user their values were reset."""
+        from nicegui import Client
+        from nicegui.page import page
+        from ui.tabs.inter_dataset import create_inter_dataset_tab
+
+        client = Client(page("/interdataset-mode-switch"))
+        with client:
+            create_inter_dataset_tab()
+        by_label = {}
+        for el in client.elements.values():
+            label = getattr(el, "_props", {}).get("label")
+            if label in ("Path Enumeration", "Max Intermediate Layers",
+                         "Edge Limit – BodyIds"):
+                by_label[label] = el
+        mode = by_label["Path Enumeration"]
+        layers = by_label["Max Intermediate Layers"]
+        limit = by_label["Edge Limit – BodyIds"]
+        # 'all' defaults
+        assert layers.value == 2 and limit.value == 1000000, (layers.value, limit.value)
+        mode.value = "shortest"
+        assert layers.value == 8 and limit.value == 0, (layers.value, limit.value)
+        mode.value = "all"
+        assert layers.value == 2 and limit.value == 1000000, (layers.value, limit.value)
+
+    def test_path_tabs_uncheck_hemisphere_dependents(self):
+        """Find All Paths and Find Shortest UNCHECK (not just disable) the
+        hemisphere-dependent options when Separate Hemispheres is off, so a
+        greyed-out True never reaches the backend."""
+        from nicegui import Client
+        from nicegui.page import page
+        from ui.tabs.find_path import create_find_path_tab
+        from ui.tabs.find_shortest import create_find_shortest_tab
+
+        for name, builder in [("/fp-hemi-uncheck", create_find_path_tab),
+                              ("/fs-hemi-uncheck", create_find_shortest_tab)]:
+            client = Client(page(name))
+            with client:
+                builder()
+            by_label = {}
+            for el in client.elements.values():
+                label = (getattr(el, "_props", {}).get("label")
+                         or getattr(el, "text", ""))
+                if label in ("Separate Hemispheres (L/R)",
+                             "Keep Only Hemisphere-Conserved Edges",
+                             "Symmetry Analysis"):
+                    by_label[label] = el
+            sep = by_label["Separate Hemispheres (L/R)"]
+            keep = by_label["Keep Only Hemisphere-Conserved Edges"]
+            sym = by_label["Symmetry Analysis"]
+            sep.value = True
+            keep.value = True
+            sym.value = True
+            sep.value = False
+            assert keep.value is False, name
+            assert sym.value is False, name
+            assert keep._props.get("disable") is True, name
+
+    def test_interdataset_path_enumeration_selector(self):
+        """The cross-dataset tab exposes a Path Enumeration selector
+        (all / shortest); shortest disables the algorithm selector and
+        defaults the bodyId edge limit off (0)."""
+        from nicegui import Client
+        from nicegui.page import page
+        from ui.tabs.inter_dataset import create_inter_dataset_tab
+
+        client = Client(page("/interdataset-path-mode"))
+        with client:
+            create_inter_dataset_tab()
+        by_label = {}
+        for el in client.elements.values():
+            label = getattr(el, "_props", {}).get("label")
+            if label in ("Path Enumeration", "Pathfinding Algorithm",
+                         "Edge Limit – BodyIds"):
+                by_label[label] = el
+        assert "Path Enumeration" in by_label, sorted(by_label)
+        assert by_label["Path Enumeration"].value == "all"
+        # defaults for 'all' mode: algorithm enabled, edge limit 1M
+        assert by_label["Pathfinding Algorithm"]._props.get("disable") is not True
+        assert by_label["Edge Limit – BodyIds"].value == 1000000
+        # switching to shortest: algorithm disabled, edge limit off (0)
+        by_label["Path Enumeration"].value = "shortest"
+        # value-change handlers run synchronously in NiceGUI element updates
+        assert by_label["Pathfinding Algorithm"]._props.get("disable") is True
+        assert by_label["Edge Limit – BodyIds"].value == 0
+
+    def test_network_tab_is_find_network_with_scope_notice(self):
+        """The Network tab (Connection group) hosts FindNetwork: a single
+        Query Neurons input, no path controls (max layers / algorithm), the
+        limited-scope notice pointing to Find Path + Find Reciprocal, and
+        the old placeholder card is gone."""
+        from nicegui import Client
+        from nicegui.page import page
+        from ui.tabs.network import create_network_tab
+
+        client = Client(page("/network-findnetwork"))
+        with client:
+            create_network_tab()
+        labels = [
+            getattr(el, "_props", {}).get("label")
+            for el in client.elements.values()
+            if getattr(el, "_props", {}).get("label")
+        ]
+        texts = [
+            getattr(el, "text", "")
+            for el in client.elements.values()
+            if getattr(el, "text", "")
+        ]
+        ids = [
+            getattr(el, "_props", {}).get("id", "")
+            for el in client.elements.values()
+        ]
+        assert "Query Neurons" in labels
+        assert "Find Network" in " ".join(texts)  # run button label
+        # limited-scope notice with the reciprocal alternative
+        assert any("Find Reciprocal Connections" in t for t in texts)
+        # no irrelevant path controls
+        assert "Max Layers" not in labels
+        assert not any("Pathfinding" in str(l) for l in labels if l)
+        # placeholder removed
+        assert "card-network-placeholder" not in ids
+        # FindNetwork cards present
+        for card_id in ("card-network-core", "card-network-output",
+                        "card-network-hemisphere"):
+            assert card_id in ids, card_id
+
+    def test_profiling_tab_custom_group_aggregation(self):
+        """The profiling tab offers a custom-group aggregation level: selecting
+        it reveals the LabelMapper preset selector that feeds
+        custom_mapping_file into ConnectivityProfileComparer."""
+        from nicegui import Client
+        from nicegui.page import page
+        from ui.tabs.connectivity_profiling import create_connectivity_profiling_tab
+
+        client = Client(page("/profiling-custom-groups"))
+        with client:
+            create_connectivity_profiling_tab()
+
+        elements = list(client.elements.values())
+        agg = [
+            el for el in elements
+            if getattr(el, "_props", {}).get("id") == "select-aggregation"
+        ]
+        assert agg, "Aggregation Level select missing"
+        agg_sel = agg[0]
+        assert agg_sel.options == ["type", "bodyid", "custom group"], agg_sel.options
+
+        # the profiling tab supports multiple datasets (cross-dataset mode)
+        multi_ds = [
+            el for el in elements
+            if getattr(el, "_props", {}).get("label") == "Datasets to compare (select 1+)"
+        ]
+        assert multi_ds, "multi-dataset selector missing"
+        assert multi_ds[0]._props.get("multiple") is True
+        assert len(multi_ds[0].value) == 2, "defaults to two datasets"
+
+        # the custom-group card is hidden until the level is chosen
+        card = [
+            el for el in elements
+            if getattr(el, "_props", {}).get("id") == "card-custom-group"
+        ]
+        assert card, "custom-group card missing"
+        assert card[0].visible is False
+        agg_sel.value = "custom group"
+        assert card[0].visible is True
+        # the card hosts the LabelMapper preset selector
+        labels = [
+            getattr(el, "_props", {}).get("label")
+            for el in client.elements.values()
+        ]
+        assert "Custom Grouping Preset" in labels
 
 
 
@@ -1975,6 +2374,84 @@ class TestComponents:
             "args": None,
         })
         assert container.get_value() == ("exact", ["PPL1, PPL2", "A -> B -> C", 720575940610453042])
+
+    def test_neuron_list_input_suggestions_menu_and_history(self, tmp_path, monkeypatch):
+        """With a suggestions provider the input replaces the native popup
+        with a custom menu: suggestions appear only after 2+ characters, show
+        a solid value + gray column hint, commit on click; an empty focused
+        field offers the persisted query history."""
+        from nicegui import Client
+        from nicegui.page import page
+        import ui.history_store as hs
+        from ui.components.common import neuron_list_input
+
+        monkeypatch.setattr(hs, "_HISTORY_PATH", tmp_path / "neuron_history.json")
+        hs.record(["aMe12", "aMe10"], now="2026-08-11T10:00:00")
+        hs.record(["aMe12"], now="2026-08-11T10:05:00")
+
+        def fake_suggest(text):
+            if text == "ap":
+                return [("APL", "type"), ("APL2", "type")]
+            return []
+
+        client = Client(page("/neuron-input-suggest-test"))
+        with client:
+            container = neuron_list_input(
+                label="Source Neurons", suggestions=fake_suggest
+            )
+
+        chip = container.chip_input
+        # The native QSelect popup is suppressed in favor of the custom menu.
+        assert chip._props.get("popup-content-class") == "drocat-native-popup-hidden"
+        assert chip._props.get("hide-dropdown-icon") is True
+
+        input_listeners = [
+            listener for listener in chip._event_listeners.values()
+            if listener.type == "input"
+        ]
+        assert len(input_listeners) == 2  # suggestion + pending-text trackers
+        suggest_input = input_listeners[0]
+        # The input hosts several ui.menus (paste/upload/suggest); the
+        # suggestion menu is the last one created.
+        menus = [el for el in client.elements.values()
+                 if type(el).__name__ == "Menu"]
+        menu = menus[-1]
+
+        # One character is below the threshold: no suggestion menu.
+        chip._handle_event({"listener_id": suggest_input.id, "args": "a"})
+        assert menu.value is False
+
+        # Two characters open the custom menu with value + gray hint entries.
+        chip._handle_event({"listener_id": suggest_input.id, "args": "ap"})
+        assert menu.value is True
+        texts = [el.text for el in client.elements.values() if getattr(el, "text", "")]
+        assert "APL" in texts and "APL2" in texts and "type" in texts
+
+        # Clicking the first suggestion commits it as a chip and closes the menu.
+        def _subtree_texts(el):
+            """Flatten the element subtree texts (labels live inside a row)."""
+            out = [getattr(el, "text", "")]
+            for child in el.default_slot.children:
+                out.extend(_subtree_texts(child))
+            return out
+
+        item = next(
+            el for el in client.elements.values()
+            if type(el).__name__ == "Item" and "APL" in _subtree_texts(el)
+        )
+        click = next(l for l in item._event_listeners.values() if l.type == "click")
+        from types import SimpleNamespace
+        click.handler(SimpleNamespace())
+        assert container.get_value() == ("exact", ["APL"])
+        assert menu.value is False
+
+        # An empty focused field offers the persisted query history.
+        focus = next(l for l in chip._event_listeners.values() if l.type == "focus")
+        chip._handle_event({"listener_id": focus.id, "args": None})
+        assert menu.value is True
+        texts = [el.text for el in client.elements.values() if getattr(el, "text", "")]
+        assert "Recent" in texts
+        assert "aMe12" in texts and "aMe10" in texts
 
     def test_parse_neuron_upload_text_and_excel(self):
         import asyncio
@@ -2292,12 +2769,28 @@ class TestApp:
         assert callable(main_page)
 
     def test_tab_toolbar_is_compact_and_non_scrolling(self):
+        """The layered-card navigation must stay compact: group cards and
+        tab segments shrink (min-width 0, equal flex) instead of scrolling;
+        horizontal scrolling only exists as the small-screen fallback."""
         from ui.app import DROCAT_CSS
 
-        assert ".drocat-tabs .q-tabs__content" in DROCAT_CSS
-        assert "overflow: hidden" in DROCAT_CSS
-        assert "flex: 1 1 0 !important" in DROCAT_CSS
-        assert ".drocat-tabs .q-tabs__arrow { display: none !important; }" in DROCAT_CSS
+        assert ".drocat-nav {" in DROCAT_CSS
+        assert ".drocat-group-card {" in DROCAT_CSS
+        assert ".drocat-group-tab {" in DROCAT_CSS
+        assert "flex: 1 1 0;" in DROCAT_CSS  # equal-width segments per card
+        assert "min-width: 0;" in DROCAT_CSS
+        # Two-row segments: icon on top, name below, tight line spacing.
+        assert "flex-direction: column" in DROCAT_CSS
+        # Multi-word names stack one word per line with tight leading.
+        # (Quasar renders the button text in .q-btn__content .block here.)
+        assert ".drocat-group-tab .q-btn__content .block" in DROCAT_CSS
+        assert "white-space: pre-line;" in DROCAT_CSS
+        assert "line-height: 1.15;" in DROCAT_CSS
+        # The NB badge renders once, on the NeuronBridge group header.
+        assert ".drocat-group-head.drocat-head-nb::after" in DROCAT_CSS
+        assert ".drocat-tint-nb .drocat-group-tab .q-icon::after" not in DROCAT_CSS
+        # Responsive fallback: horizontal scroll only below 700px.
+        assert ".drocat-nav { overflow-x: auto; scrollbar-width: none; }" in DROCAT_CSS
 
     def test_settings_never_prefills_saved_tokens_in_browser_dom(self, tmp_path, monkeypatch):
         """Saved secrets remain server-side instead of entering the client DOM."""

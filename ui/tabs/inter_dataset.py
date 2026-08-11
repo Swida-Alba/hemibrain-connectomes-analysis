@@ -1,7 +1,7 @@
 """Cross-Dataset Comparison Tab - runs ComparisonAnalyzer over N datasets."""
 
 from nicegui import ui
-from ..config import COMPARISON_MODES, PATHFINDING_ALGORITHMS, SEARCH_COLUMNS
+from ..config import DEFAULTS, COMPARISON_MODES, PATH_MODES, PATHFINDING_ALGORITHMS, SEARCH_COLUMNS
 from ..components.common import (
     dataset_multi_selector, neuron_list_input, number_input, select_input,
     checkbox_input, dir_input, section_header, param_grid, tool_page,
@@ -10,11 +10,20 @@ from ..components.common import (
 from ..components.mapping_editor import mapping_selector, selected_mapping_file_path
 from ..components.output_panel import OutputPanel
 from ..runner import ScriptRunner
+from ..type_suggestions import suggestion_pool, match_suggestions
 
 
 def create_inter_dataset_tab():
     runner = ScriptRunner()
     output_panel = OutputPanel("Comparison Output")
+
+    def _type_suggest(text):
+        """Auto-suggest across all selected datasets' type names. Type matches
+        come first for string input; the range expands to instance/bodyId only
+        when no type matched and the search scope is 'auto'."""
+        ds = datasets_select.value if datasets_select is not None else []
+        scope = search_columns.value if search_columns is not None else "auto"
+        return match_suggestions(text, suggestion_pool(ds), scope)
 
     form_col, results_col = tool_page(
         "Cross-Dataset Comparison",
@@ -43,11 +52,13 @@ def create_inter_dataset_tab():
                 label="Source Neurons",
                 placeholder="Type or upload CSV/TSV/Excel with neuron types/bodyIds",
                 hint="Source neurons for pathfinding. Upload a CSV/TSV/Excel file (first column) or type comma-separated.",
+                suggestions=_type_suggest,
             )
             target_input = neuron_list_input(
                 label="Target Neurons",
                 placeholder="Type or upload CSV/TSV/Excel with neuron types/bodyIds",
                 hint="Target neurons for pathfinding. Upload a CSV/TSV/Excel file (first column) or type comma-separated.",
+                suggestions=_type_suggest,
             )
             output_dir = dir_input()
             mapping_select = mapping_selector()
@@ -59,9 +70,19 @@ def create_inter_dataset_tab():
                     "Mode", COMPARISON_MODES, "path",
                     hint="'path': discover edges via path traversal. 'edge': compare edges independently by weight.",
                 )
+                path_mode = select_input(
+                    "Path Enumeration", PATH_MODES, "all",
+                    hint="'all': every path within the layer limit (FindAllPath). "
+                         "'shortest': only per-pair minimum-hop paths (FindShortestPath) — "
+                         "Max Layers is an EXACT depth bound (8 by default; high values "
+                         "like 99 give an effectively unlimited search).",
+                )
                 max_interlayer = number_input(
-                    "Max Intermediate Layers", 2, 0, 5,
-                    hint="Maximum hops between source and target.",
+                    "Max Intermediate Layers", 2, 0, 100,
+                    hint="Maximum hops between source and target. In shortest mode this "
+                         "is an EXACT depth bound: 0 = direct connections only, 8 = default, "
+                         "and a high unreachable number (e.g. 99) gives an effectively "
+                         "unlimited search.",
                 )
                 thresholds_input = neuron_list_input(
                     label="Synapse Thresholds",
@@ -93,7 +114,12 @@ def create_inter_dataset_tab():
                 with ui.row().classes("gap-4"):
                     skip_bodyid = checkbox_input("Skip BodyId Level", True, hint="Skip bodyId-level results for speed.")
                     cache_only = checkbox_input("Cache Only (Offline)", False, hint="Use only local cache, no server connection.")
-                    auto_type_mapping = checkbox_input("Auto Type Mapping", False, hint="Auto-map type names across datasets.")
+                    auto_type_mapping = checkbox_input(
+                        "Auto Type Mapping", True,
+                        hint="Auto-map type names across datasets via the male-cns v1.0 "
+                             "neuron info (e.g. FAFB MTe07 <-> male-cns MeVPLo2) when no "
+                             "custom LabelMapper preset is selected.",
+                    )
                 with param_grid(3):
                     min_ratio = number_input(
                         "Min Connection Ratio", 0.0, 0, 1, 0.01,
@@ -125,16 +151,45 @@ def create_inter_dataset_tab():
                              "shallow runs keep the complete graph. 0 = unlimited.",
                     )
                     edge_limit_viz = number_input(
-                        "Visualization Edge Limit", 500, 10, 5000,
+                        "Visualization Edge Limit", DEFAULTS["edgeN_limit"], 10, 5000,
                         hint="Maximum edges drawn per visualization (network / Sankey / "
                              "heatmap) in the FindAllPath runs. Limits memory usage for "
-                             "highly connected neurons.",
+                             "highly connected neurons. Same default as the Find All Paths tab.",
                     )
                     # the bodyId edge limit only applies to deep searches
+                    # ('all' mode); in shortest mode it is an explicit opt-in
+                    # (default off - trimming can inflate shortest distances)
                     edge_limit_bodyid.set_enabled((max_interlayer.value or 0) >= 3)
                     max_interlayer.on_value_change(
-                        lambda e: edge_limit_bodyid.set_enabled((e.value or 0) >= 3)
+                        lambda e: edge_limit_bodyid.set_enabled(
+                            True if path_mode.value == 'shortest' else (e.value or 0) >= 3
+                        )
                     )
+
+                    def _apply_path_mode_defaults(notify=False):
+                        """A mode switch resets the mode-specific defaults:
+                        shortest -> Max Layers 8, Edge Limit – BodyIds 0 (off);
+                        all -> Max Layers 2, Edge Limit – BodyIds 1M (deep
+                        searches). The user is warned their values were reset."""
+                        if path_mode.value == 'shortest':
+                            pathfinding.disable()
+                            edge_limit_bodyid.set_enabled(True)
+                            edge_limit_bodyid.value = 0
+                            max_interlayer.value = 8
+                        else:
+                            pathfinding.enable()
+                            edge_limit_bodyid.set_enabled((max_interlayer.value or 0) >= 3)
+                            edge_limit_bodyid.value = 1000000
+                            max_interlayer.value = 2
+                        if notify:
+                            ui.notify(
+                                f"Path Enumeration switched to '{path_mode.value}': "
+                                "Max Layers and Edge Limit – BodyIds were reset to the "
+                                "mode defaults — re-enter custom values if needed.",
+                                type="warning",
+                            )
+                    path_mode.on_value_change(lambda _e: _apply_path_mode_defaults(notify=True))
+                    _apply_path_mode_defaults()
 
         with ui.card().classes("w-full drocat-card").props('id="card-interdataset-hemisphere"'):
             section_header("Hemisphere Analysis", "sync_alt")
@@ -189,6 +244,10 @@ def create_inter_dataset_tab():
             ui.notify("Please add at least 2 datasets to compare", type="warning")
             return
 
+        # Persist the searched neurons for the auto-suggest history.
+        from ..history_store import record as _record_history
+        _record_history([str(v) for v in sources + targets])
+
         # Parse thresholds (chip values are already normalized to integers;
         # split comma-joined chips defensively in case a list was typed into
         # one chip before the run).
@@ -221,6 +280,7 @@ def create_inter_dataset_tab():
             "target_neurons": targets,
             "output_folder": output_dir.value,
             "comparison_mode": comparison_mode.value,
+            "path_mode": path_mode.value,
             "max_interlayer": int(max_interlayer.value),
             "thresholds": thresholds,
             "top_edges": int(top_edges.value),

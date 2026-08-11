@@ -144,16 +144,53 @@ class TestGeneratedHtmlStructure:
         # right-click hide node / hide edge (both context-menu paths)
         assert "pushHistory('Hide node')" in js
         assert "pushHistory('Hide edge')" in js
-        # drag relocation is committed to history on dragfree
+        # drag relocation is committed to history on dragfree; the pre-drag
+        # stash MUST be on 'grab' — Cytoscape.js has no node-level
+        # 'dragstart' event (only a core pan gesture), so wiring to
+        # dragstart silently records nothing and undo cannot restore moves
         assert "pushStateHistory('Move nodes', pendingDragState)" in js
+        assert "function registerDragHistory" in js
+        assert "cy.on('grab', 'node'" in js
+        assert "cy.on('dragstart', 'node'" not in js
         # edge filter changes are recorded per distinct value
         assert "pushHistory('Edge filter')" in js
         # layout import and label-position toggle are recorded
         assert "pushHistory('Import layout')" in js
         assert "pushHistory('Toggle label position')" in js
+        # geometry editing (precise size/position) and alignment are recorded
+        assert "pushHistory('Resize element')" in js
+        assert "pushHistory('Align nodes')" in js
         # the three visibility toggles are recorded
         for label in ("Toggle self-loops", "Toggle orphans", "Toggle dead-ends"):
             assert f"pushHistory('{label}')" in js
+
+    def test_geometry_editor_present(self, network_html):
+        """Precise size/position editing and alignment helpers: numeric
+        inputs in the Selected Element(s) panel, node-vs-edge row groups,
+        align buttons, and the apply/align functions."""
+        html = network_html.read_text(encoding="utf-8")
+        js = _script_text(network_html)
+        # geometry inputs: X/Y/size for nodes, width for edges
+        for elem_id in ('selGeomX', 'selGeomY', 'selGeomSize', 'selGeomWidth',
+                        'geomNodeGroup', 'geomEdgeGroup',
+                        'alignHBtn', 'alignVBtn'):
+            assert f'id="{elem_id}"' in html, f'missing element {elem_id}'
+        assert 'onclick="applySelectedGeometry()"' in html
+        assert 'onclick="alignSelectedNodes(\'h\')"' in html
+        assert 'onclick="alignSelectedNodes(\'v\')"' in html
+        assert "function applySelectedGeometry" in js
+        assert "function alignSelectedNodes" in js
+        assert "function syncSelectedGeometryInputs" in js
+        assert "function updateAlignButtons" in js
+        # selection sync hooks: tap fills the inputs, dragfree refreshes
+        # them after a manual drag, clearSelection resets the rows
+        assert "syncSelectedGeometryInputs(element)" in js
+        assert "syncSelectedGeometryInputs(evt.target)" in js
+        assert "syncSelectedGeometryInputs(null)" in js
+        # align-button enabled state follows any selection change
+        assert "cy.on('select unselect', 'node'" in js
+        # manual edge widths are marked so they are recognizable as custom
+        assert "e.data('customSize', true)" in js
 
     def test_snapshots_are_complete_deep_copies(self, network_html):
         js = _script_text(network_html)
@@ -169,6 +206,16 @@ class TestGeneratedHtmlStructure:
                       "zoom", "pan"):
             assert field in js
         assert "syncToggleButtons()" in js
+        # per-element style overrides (color/size bypasses) are captured
+        # from _private.style — ele.json() does NOT expose bypasses in
+        # Cytoscape 3.28.1 — and re-applied on restore, so individual
+        # edits round-trip through undo/redo
+        assert "function captureStyleBypass" in js
+        assert "el._private && el._private.style" in js
+        assert "style: captureStyleBypass(n)" in js
+        assert "style: captureStyleBypass(e)" in js
+        assert "if (n.style) cy.getElementById(n.data.id).style(n.style)" in js
+        assert "if (e.style) cy.getElementById(e.data.id).style(e.style)" in js
 
     def test_dead_end_fixpoint_is_order_independent(self, network_html):
         js = _script_text(network_html)

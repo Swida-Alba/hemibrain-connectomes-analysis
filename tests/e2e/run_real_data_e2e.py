@@ -37,9 +37,9 @@ def out(name: str) -> str:
 
 TOOLS = [
     {
-        "name": "find_direct",
-        "tool_name": "find_direct",
-        "method": "find_direct",
+        "name": "find_shortest",
+        "tool_name": "find_shortest",
+        "method": "find_shortest",
         "constructor_params": {
             "dataset": "male-cns:v0.9",
             "sourceNeurons": ["aMe12"],

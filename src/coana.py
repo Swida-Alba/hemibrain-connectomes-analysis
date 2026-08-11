@@ -221,7 +221,7 @@ def _findallpath_cache_key(
     dataset_safe: str,
     source_ID,
     target_ID,
-    max_interlayer: int,
+    max_interlayer,
     separate_hemispheres: bool,
     filter_by: str,
     min_ratio: float,
@@ -237,6 +237,11 @@ def _findallpath_cache_key(
     ratio/probability thresholds, intra-type exclusion, hemisphere mode).
     Otherwise a later run with different filters would silently reuse a
     graph built under different filter conditions.
+
+    ``max_interlayer=None`` (FindShortestPath) omits the depth from the
+    key: shortest runs stop discovery early, so the fetched depth is a
+    result, not a query parameter; cache entries carry a ``'depth'``
+    field instead and are extended when a deeper fetch is needed.
     """
     source_hash = _id_set_digest(source_ID)
     target_hash = _id_set_digest(target_ID)
@@ -245,8 +250,9 @@ def _findallpath_cache_key(
         f"{filter_by}|{min_ratio}|{min_traversal_probability}|"
         f"{int(bool(exclude_intra_type_connections))}"
     )
+    depth_part = f"{max_interlayer}_" if max_interlayer is not None else ""
     return (
-        f"{dataset_safe}_{source_hash}_{target_hash}_{max_interlayer}_"
+        f"{dataset_safe}_{source_hash}_{target_hash}_{depth_part}"
         f"{hemi_flag}_{filters}"
     )
 
@@ -398,6 +404,13 @@ class FindNeuronConnection:
             cols_to_drop = [col for col in ['isInPath'] if col in self.source_df.columns]
             if cols_to_drop:
                 self.source_df = self.source_df.drop(columns=cols_to_drop)
+
+        # Per-run limit-reached flags: gates the config-derived notes in
+        # user_warning_notes.txt, so a later run on the same instance never
+        # inherits a limit hit from an earlier one.
+        self._edgeN_limit_reached = False
+        self._min_synapse_excluded = False
+        self._depth_cap_reached = False
 
     def _extract_nodes_from_path_graph(self, conn_inpath: pd.DataFrame) -> List[str]:
         """Extract unique bodyIds from path graph edges."""
@@ -1469,6 +1482,10 @@ class FindNeuronConnection:
       -1: Fetch source/target neurons only (no connections). Use FetchNeuronsOnly().
        0: Direct connections only. Use FindDirectConnections().
        1, 2, ...: Include interlayer connections. Use FindAllPath() or FindPath().
+    In FindShortestPath() this is an EXACT depth bound: paths are capped at
+    max_interlayer + 1 edges (0 = direct connections only). Set a high
+    value (e.g. 99) for effectively unlimited search — simple paths cannot
+    exceed the neuron count, so a high bound is never reached in practice.
     '''
     
     pathfinding: str = 'MemoizedDFS'
@@ -1485,7 +1502,7 @@ class FindNeuronConnection:
       full layer trees (highest memory)
     '''
 
-    graph_edge_limit_bodyid: int = 1000000
+    graph_edge_limit_bodyid: Optional[int] = None
     '''
     Pan-graph edge limit for the bodyId-level graph: only the strongest
     `graph_edge_limit_bodyid` USABLE edges (by synapse weight, after the
@@ -1493,11 +1510,12 @@ class FindNeuronConnection:
     pathfinding, so the path count stays manageable (the number of simple
     paths grows combinatorially with depth, branching^depth).
 
-    Applied ONLY for deep searches (``max_interlayer >= 3``) — shallow
-    searches (<= 2 layers) keep the complete graph, where the limit would
-    only drop real paths. 0/None = complete graph (no limit); when edges
-    are trimmed a warning is printed telling the user how to restore the
-    full network.
+    None = per-mode default: FindAllPath applies 1,000,000 (only for deep
+    searches, ``max_interlayer >= 3``); FindShortestPath applies 0 (no
+    trimming — shortest enumeration is polynomial, and trimming can
+    inflate reported distances). 0/None = complete graph (no limit); when
+    edges are trimmed a warning is printed telling the user how to restore
+    the full network.
     '''
 
     graph_edge_limit_groups: int = 5000
@@ -1517,6 +1535,29 @@ class FindNeuronConnection:
     Internal: collects notes about operations that may tilt the outputs
     (graph edge-limit trims etc.), written to user_warning_notes.txt in
     the run folder root at the end of FindPath / FindAllPath.
+    '''
+
+    _edgeN_limit_reached: bool = False
+    '''
+    Internal: set True when the Visualization Edge Limit (edgeN_limit)
+    actually trimmed edges in a visualization run (network/heatmap/Sankey).
+    Gates the '[edge limit per neuron]' note in user_warning_notes.txt: the
+    limit is only worth warning about when it was hit. Reset per run.
+    '''
+
+    _min_synapse_excluded: bool = False
+    '''
+    Internal: set True when the min_synapse_num threshold actually dropped
+    connections during fetching. Gates the '[threshold] min_synapse_num'
+    note in user_warning_notes.txt. Reset per run.
+    '''
+
+    _depth_cap_reached: bool = False
+    '''
+    Internal: set True when layer discovery hit the max_interlayer depth
+    cap with a live frontier (deeper paths may exist but were never
+    searched). Gates the '[depth] max_interlayer' note in
+    user_warning_notes.txt. Reset per run.
     '''
 
     visualize_before_reconstruct: bool = False
@@ -3811,6 +3852,8 @@ class FindNeuronConnection:
         total_before_filter = len(combined)
         if min_weight > 1 and 'weight' in combined.columns:
             combined = combined[combined['weight'] >= min_weight]
+            if len(combined) < total_before_filter:
+                self._min_synapse_excluded = True
         
         self._vprint(f'  ⏳ Applying filters to {total_before_filter} connections...', level='full')
         self._vprint(f'     Filtered: {total_before_filter} → {len(combined)} connections (weight ≥ {min_weight})', level='full')
@@ -4202,7 +4245,10 @@ class FindNeuronConnection:
         else:
             # BodyId-level filtering: filter individual connections by weight first
             if min_weight > 1:
+                before_count = len(combined)
                 combined = combined[combined['weight'] >= min_weight].copy()
+                if len(combined) < before_count:
+                    self._min_synapse_excluded = True
             
             # Then apply ratio/prob filters if specified
             if (min_traversal_prob > 0 or min_conn_ratio > 0) and len(combined) > 0:
@@ -4619,9 +4665,12 @@ class FindNeuronConnection:
         # mixed two definitions of the cutoff: an edge-thresholded denominator
         # with a pair-thresholded numerator.)
         if min_weight > 1:
+            before_count = len(connections_with_types)
             connections_with_types = connections_with_types[
                 connections_with_types['weight'] >= min_weight
             ].copy()
+            if len(connections_with_types) < before_count:
+                self._min_synapse_excluded = True
 
         # Per-pair traversal probabilities feed the compound type-level
         # aggregate ('product'/'average'); only needed when the prob filter is
@@ -6491,6 +6540,7 @@ class FindNeuronConnection:
                     verbose=(self.verbose_mode == 'full')
                 )
                 vp.visualize()
+                self._record_viz_edge_trim(vp)
                 self._vprint('  ✓ Created complete VisualizePath visualization:')
                 self._vprint('    - Interactive heatmap (type-level connections)')
                 self._vprint('    - Sankey diagram (flow visualization)')
@@ -6557,6 +6607,7 @@ class FindNeuronConnection:
                     verbose=(self.verbose_mode == 'full')
                 )
                 vp_bodyId.visualize()
+                self._record_viz_edge_trim(vp_bodyId)
                 self._vprint('  ✓ Created VisualizePath visualization for bodyId-level connections:')
                 self._vprint('    - Interactive heatmap (bodyId-level connections)')
                 self._vprint('    - Sankey diagram (bodyId flow visualization)')
@@ -6598,6 +6649,7 @@ class FindNeuronConnection:
                     verbose=(self.verbose_mode == 'full')
                 )
                 vp_group.visualize()
+                self._record_viz_edge_trim(vp_group)
                 self._vprint('  ✓ Created VisualizePath visualization for custom groups:')
                 self._vprint('    - Interactive heatmap (custom group connections)')
                 self._vprint('    - Sankey diagram (group flow visualization)')
@@ -6607,6 +6659,203 @@ class FindNeuronConnection:
             import traceback
             self._vprint(f'  Warning: VisualizePath visualization failed: {e}')
             self._vprint(traceback.format_exc())
+        self._vprint('Done\n')
+
+    def FindNetwork(self):
+        '''
+        Build the mutual direct-connection network among the QUERIED neurons.
+
+        Equivalent to FindDirectConnections with source == target == the
+        queried set: every 1-hop connection whose BOTH endpoints are in the
+        query is kept (both directions), while connections to non-queried
+        neurons are excluded — the output is the induced sub-network of the
+        query only. For a more complete network that also involves
+        intermediate neurons, use FindPath/FindAllPath with Find Reciprocal
+        Connections instead.
+
+        Pipeline follows the FindAllPath backend:
+        - EnrichConnectionTable with global incoming-weight denominators
+        - hemisphere-aware analysis (separate_hemispheres labels, symmetry
+          analysis, hemisphere-conserved edge filtering)
+        - VisualizePath network + heatmap (NO Sankey), organized under
+          visualization/
+
+        Outputs (nothing else): parameters.txt / all_attributes.json,
+        data_details/ (neurons.csv, connection_type.csv,
+        connection_info_bodyId.csv unless skip_bodyId, custom groups when
+        present, hemisphere_unconserved_edges.csv when filtered),
+        user_warning_notes.txt, visualization/ (network + heatmap HTML and
+        their inputs).
+        '''
+        import polars as pl
+
+        self._reset_temp_columns()
+        if self.source_df.empty:
+            self._vprint("Error: Query neuron DataFrame is empty. Cannot build a network.", level='always')
+            return
+
+        # --- Run folder (no depth component: direct connections only) ---
+        import datetime
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        param_suffix = f"w{self.min_synapse_num}"
+        param_suffix += f"r{_format_decimal_for_folder(self.min_ratio)}"
+        param_suffix += f"p{_format_decimal_for_folder(self.min_traversal_probability)}"
+        param_suffix += f"_{timestamp}"
+
+        if self.saveas:
+            network_folder = self.save_folder
+        else:
+            network_folder = os.path.join(
+                self.output_dir,
+                f"findnetwork_{dataset_abbrev(self.dataset)}_{self.source_fname}_{param_suffix}",
+            )
+        if not os.path.exists(network_folder):
+            os.makedirs(network_folder)
+            self._vprint(f'  📁 Created output folder: {network_folder}', level='full')
+        self.network_folder = network_folder
+        # _relocate_viz_outputs organizes artifacts relative to allpath_folder
+        self.allpath_folder = network_folder
+
+        # Run metadata
+        public_attrs = {
+            k: v for k, v in self.__dict__.items()
+            if not k.startswith('_') and k not in ('source_df', 'target_df', 'client_hemibrain', 'client_flywire')
+        }
+        public_attrs['tool'] = 'findnetwork'
+        with open(os.path.join(network_folder, 'all_attributes.json'), 'w') as f:
+            json.dump(public_attrs, f, indent=4, default=lambda o: '<not serializable>')
+        with open(os.path.join(network_folder, 'parameters.txt'), 'w') as f:
+            f.write(f'FindNetwork: mutual direct connections among {self.source_fname} neurons\n')
+            for key, value in self.parameter_dict.items():
+                keylen = len(key)
+                f.write(f'{key}:{" "*(30-keylen)}{value}\n')
+            f.write('\n')
+
+        self.source_df['bodyId'] = self.source_df['bodyId'].astype(str)
+        node_ids = self.source_df['bodyId'].unique().tolist()
+        self._vprint(f'\nBuilding the mutual direct-connection network among '
+                     f'{len(node_ids)} queried neurons...', level='always')
+
+        # --- Fetch mutual direct connections + neuron listing ---
+        details_folder = os.path.join(network_folder, 'data_details')
+        os.makedirs(details_folder, exist_ok=True)
+        self._save_df_to_csv_polars(self.parameter_df, os.path.join(details_folder, 'parameters.csv'))
+        self._save_df_to_csv_polars(self.source_df, os.path.join(details_folder, 'neurons.csv'))
+
+        conn_df = self._fetch_direct_connections_for_nodes(node_ids)
+        if conn_df.empty:
+            self._vprint('\033[33mNo direct connections found among the queried neurons.\033[0m', level='always')
+            self._vprint('Note: FindNetwork only covers direct connections WITHIN the queried '
+                         'set. For a more complete network involving intermediate neurons, use '
+                         'Find Path with Find Reciprocal Connections.', level='always')
+            return
+
+        conn_df['bodyId_pre'] = conn_df['bodyId_pre'].astype(str)
+        conn_df['bodyId_post'] = conn_df['bodyId_post'].astype(str)
+        self._vprint(f'Found {len(conn_df)} direct connections within the queried set', level='full')
+
+        # --- Enrich (FindAllPath-style: global incoming denominators) ---
+        neurons_df_pd = self._fetch_neurons_local_or_api(node_ids, columns=['bodyId', 'type', 'post'])
+        neurons_df = pl.from_pandas(neurons_df_pd)
+
+        post_types = conn_df['type_post'].dropna().unique().tolist() if 'type_post' in conn_df.columns else []
+        global_incoming_weights = self._fetch_total_incoming_weight_by_type(post_types, min_weight=self.min_synapse_num) if post_types else None
+        post_bodyIds = conn_df['bodyId_post'].dropna().unique().tolist()
+        global_incoming_body_weights = self._fetch_total_incoming_weight(post_bodyIds, min_weight=self.min_synapse_num) if post_bodyIds else None
+
+        conn_df, conn_type, conn_group = sv.EnrichConnectionTable(
+            conn_df,
+            traversal_probability_threshold=0,
+            dataset=self.dataset,
+            script_path=self.script_path,
+            target_neurons_df=neurons_df,
+            label_mapper=self.label_mapper,
+            global_incoming_weights=global_incoming_weights,
+            separate_hemispheres=self.separate_hemispheres,
+            global_incoming_body_weights=global_incoming_body_weights,
+        )
+
+        # --- Hemisphere-aware analysis (FindAllPath order: analyze BEFORE
+        # filtering, then optionally drop unconserved edges) ---
+        try:
+            if self.symmetry_analysis and self._is_symmetric_dataset():
+                self._vprint('Running hemisphere symmetry analysis on unfiltered data...', level='full')
+                sym_conn_types = conn_type.to_pandas() if isinstance(conn_type, pl.DataFrame) else conn_type
+                self._run_hemisphere_symmetry_analysis(sym_conn_types, paths_df=None)
+        except Exception as e:
+            self._vprint(f'  Warning: Hemisphere symmetry analysis failed: {e}', level='full')
+
+        unconserved_types = None
+        if self.keep_only_hemisphere_conserved_connections and self.separate_hemispheres:
+            self._vprint('Filtering hemisphere-unconserved edges...', level='full')
+            if conn_type is not None and len(conn_type) > 0:
+                conn_type, unconserved_types = self._filter_hemisphere_unconserved_edges(
+                    conn_type, pre_col='type_pre', post_col='type_post', weight_col='weight'
+                )
+            if conn_group is not None and len(conn_group) > 0:
+                group_cols = conn_group.columns if hasattr(conn_group, 'columns') else conn_group.collect_schema().names()
+                group_pre_col = 'custom_group_pre' if 'custom_group_pre' in group_cols else 'type_pre'
+                group_post_col = 'custom_group_post' if 'custom_group_post' in group_cols else 'type_post'
+                conn_group, _ = self._filter_hemisphere_unconserved_edges(
+                    conn_group, pre_col=group_pre_col, post_col=group_post_col, weight_col='weight'
+                )
+        if unconserved_types is not None and len(unconserved_types) > 0:
+            self._save_df_to_csv_polars(
+                unconserved_types, os.path.join(details_folder, 'hemisphere_unconserved_edges.csv'))
+            self._vprint(f'  ✓ Saved hemisphere_unconserved_edges.csv ({len(unconserved_types)} edges)', level='full')
+
+        # --- Save connection tables (no path files, no matrices) ---
+        self._save_df_to_csv_polars(conn_type, os.path.join(details_folder, 'connection_type.csv'))
+        if not self.skip_bodyId:
+            self._save_df_to_csv_polars(conn_df, os.path.join(details_folder, 'connection_info_bodyId.csv'))
+        else:
+            self._vprint('Skipping bodyId-level data saving (skip_bodyId=True)', level='full')
+        if conn_group is not None and len(conn_group) > 0:
+            self._save_df_to_csv_polars(conn_group, os.path.join(details_folder, 'connection_custom_groups.csv'))
+        self._write_user_warning_notes(network_folder)
+
+        # --- Visualization: network + heatmap only (NO Sankey) ---
+        try:
+            conn_type_pd = conn_type.to_pandas() if isinstance(conn_type, pl.DataFrame) else conn_type
+            if conn_type_pd is not None and len(conn_type_pd) > 0:
+                edge_df = conn_type_pd[['type_pre', 'type_post', 'weight']].copy()
+                edge_df.columns = ['source', 'target', 'weight']
+                if 'connection_ratio' in conn_type_pd.columns:
+                    edge_df['ratio'] = conn_type_pd['connection_ratio'].values
+                if 'traversal_probability' in conn_type_pd.columns:
+                    edge_df['probability'] = conn_type_pd['traversal_probability'].values
+                if 'nt_type' in conn_type_pd.columns:
+                    edge_df['nt_type'] = conn_type_pd['nt_type'].values
+                elif 'nt_type_pre' in conn_type_pd.columns:
+                    edge_df['nt_type'] = conn_type_pd['nt_type_pre'].values
+
+                vp = VisualizePath(
+                    path_file=edge_df,
+                    output_folder=network_folder,
+                    source_color=self.source_color if hasattr(self, 'source_color') else '#1f77b4',
+                    intermediate_color=self.intermediate_color if hasattr(self, 'intermediate_color') else '#2ca02c',
+                    target_color=self.target_color if hasattr(self, 'target_color') else '#d62728',
+                    link_color=self.link_color if hasattr(self, 'link_color') else 'rgba(100,100,100,0.3)',
+                    network_layout=self.network_layout if hasattr(self, 'network_layout') else 'hierarchical',
+                    showfig=self.showfig,
+                    edgeN_limit=self.edgeN_limit,
+                    output_format=self.output_format,
+                    verbose=(self.verbose_mode == 'full'),
+                    color_edges_by_nt=True,
+                    separate_hemispheres=self.separate_hemispheres,
+                    save_data_matrices=False,
+                )
+                vp.visualize(plot_network=True, plot_heatmap=True, plot_Sankey=False)
+                self._record_viz_edge_trim(vp)
+                self._relocate_viz_outputs(input_df=edge_df, input_name='network_edges')
+                self._vprint('  ✓ Created network + heatmap visualizations (no Sankey)', level='full')
+            else:
+                self._vprint('  No connections left to visualize', level='full')
+        except Exception as e:
+            self._vprint(f'  Warning: FindNetwork visualization failed: {e}', level='always')
+            import traceback
+            traceback.print_exc()
+
         self._vprint('Done\n')
 
     def _trim_edges_with_path_integrity(self, conn, limit, label, sources, targets,
@@ -6742,22 +6991,59 @@ class FindNeuronConnection:
         )
         return trimmed, removed, threshold
 
-    def _trim_bodyid_edges(self, conn_layers, sources, targets):
+    def _normalized_keyword_filter(self):
+        """Return the keyword filter as a list, or None when the user left it
+        empty. The 'None' sentinel (field default / UI convention) must NEVER
+        reach path_filter as a literal keyword — it would silently drop paths
+        whose path_str contains the substring 'None'."""
+        raw = getattr(self, 'keyword_in_path_to_remove', None)
+        if raw is None or raw == 'None':
+            return None
+        keywords = [raw] if isinstance(raw, str) else list(raw)
+        if not keywords or [str(k) for k in keywords] == ['None']:
+            return None
+        return keywords
+
+    def _trim_bodyid_edges(self, conn_layers, sources, targets, path_mode='all'):
         """Return the bodyId-level edge table for the discovery graph.
 
-        The pan-graph bodyId edge limit is applied ONLY for deep searches
-        (``max_interlayer >= 3``), where the path count grows
+        In 'all' mode the pan-graph bodyId edge limit is applied ONLY for
+        deep searches (``max_interlayer >= 3``), where the path count grows
         combinatorially (branching^depth); shallow searches (<= 2 layers)
         keep the COMPLETE graph — there the limit would only drop real
-        paths. Returns a single DataFrame (the trimmed table, or the
+        paths. The per-mode default is 1,000,000 when the caller left
+        ``graph_edge_limit_bodyid`` unset (None).
+
+        In 'shortest' mode the default is OFF (0): shortest enumeration is
+        polynomial so there is no path count to bound, and trimming by
+        strength preserves pair reachability but NOT shortest distances
+        (a dropped weak edge can inflate a reported distance). Only an
+        explicit ``graph_edge_limit_bodyid > 0`` enables trimming.
+
+        Returns a single DataFrame (the trimmed table, or the
         concatenated layer tables when no trim applies).
         """
-        if self.max_interlayer >= 3:
+        # None = per-mode default (1M for 'all', 0 for 'shortest'); an
+        # explicit 0 always means "no trimming".
+        limit = self.graph_edge_limit_bodyid
+        if limit is None:
+            limit = 1000000 if path_mode == 'all' else 0
+        apply_trim = (self.max_interlayer >= 3) if path_mode == 'all' \
+            else (limit > 0)
+        if apply_trim:
             trimmed, _removed, _thr = self._trim_edges_with_path_integrity(
-                conn_layers, self.graph_edge_limit_bodyid, 'bodyId',
+                conn_layers, limit, 'bodyId',
                 sources=sources, targets=targets,
                 pre_col='bodyId_pre', post_col='bodyId_post',
             )
+            if path_mode == 'shortest':
+                self._warn_notes.append(
+                    '- [shortest mode + graph edge limit] reported distances are '
+                    'the shortest paths WITHIN THE TRIMMED graph: trimming keeps '
+                    'pair reachability but not minimum hop distances, so true '
+                    'shortest routes using dropped weak edges are missed and '
+                    'distances can be inflated.'
+                )
             return trimmed
         non_empty = [c for c in conn_layers
                      if not (c.is_empty() if hasattr(c, 'is_empty') else c.empty)]
@@ -6825,13 +7111,16 @@ class FindNeuronConnection:
         notes = list(self._warn_notes)
 
         # --- other operations that may tilt the outputs ---
-        if getattr(self, 'edgeN_limit', 0):
+        # Config-derived notes are written ONLY when the limit/threshold was
+        # actually reached during the run (edges trimmed, connections dropped,
+        # depth cap hit); a limit that never bit needs no caveat.
+        if getattr(self, 'edgeN_limit', 0) and getattr(self, '_edgeN_limit_reached', False):
             notes.append(
                 f'- [edge limit per neuron] edgeN_limit={self.edgeN_limit}: at most '
                 f'the strongest {self.edgeN_limit} edges per neuron were considered '
                 f'when fetching connections.'
             )
-        if getattr(self, 'min_synapse_num', 0) > 1:
+        if getattr(self, 'min_synapse_num', 0) > 1 and getattr(self, '_min_synapse_excluded', False):
             notes.append(
                 f'- [threshold] min_synapse_num={self.min_synapse_num}: connections '
                 f'with fewer synapses were excluded.'
@@ -6852,7 +7141,8 @@ class FindNeuronConnection:
                 f'- [filter] keyword_in_path_to_remove={keywords}: paths containing '
                 f'these keywords were removed from the outputs.'
             )
-        if getattr(self, 'max_interlayer', 0) >= 4:
+        if (getattr(self, 'max_interlayer', 0) >= 4
+                and getattr(self, '_depth_cap_reached', False)):
             notes.append(
                 f'- [depth] max_interlayer={self.max_interlayer}: paths longer than '
                 f'{self.max_interlayer} interlayers were never searched; deep paths '
@@ -6919,6 +7209,17 @@ class FindNeuronConnection:
         except OSError as e:
             self._vprint(f'  Warning: could not write user_warning_notes.txt: {e}', level='full')
 
+    def _record_viz_edge_trim(self, vp):
+        """Mirror the Visualization Edge Limit trim state to the per-run
+        flag that gates the '[edge limit per neuron]' warning note.
+
+        The trim decision lives inside VisualizePath (the network/heatmap
+        share one edge set, the Sankey has its own simplification); the flag
+        is set whenever any of them actually dropped edges.
+        """
+        if getattr(vp, 'edge_limit_trimmed', False):
+            self._edgeN_limit_reached = True
+
     def FindPath(self, find_bodyId_path=None):
         '''Find path between source and target neurons, adapted from FindInterClusterConnection.ipynb'''
         # skip_bodyId=True implies skipping the bodyId-level path analysis
@@ -6971,6 +7272,7 @@ class FindNeuronConnection:
         currLayer = 0
         targetNum_checked = 0
         Flag = True
+        frontier_dried = False
         conn_layers = []
         searchedNeurons = source_ID
         # searching for target neurons
@@ -7005,9 +7307,16 @@ class FindNeuronConnection:
             currLayer += 1
             if len(post_ID) == 0:
                 print('!!!NO NEURONS FOUND IN NEXT LAYER!!!')
+                frontier_dried = True
                 break
         if Flag: print('\nNOT All Target Neurons Traced')
         else: print('\nAll Target Neurons Traced')
+        # The depth cap truncated the search only when it ended the loop with
+        # a live frontier (targets untraced, next layer non-empty): an early
+        # stop (all targets traced) or a dried-up frontier means the bound
+        # never bit and deeper paths cannot exist.
+        self._depth_cap_reached = (Flag and not frontier_dried
+                                   and self.max_interlayer >= 0)
         
         # Use FastGraph for pathfinding
         print('\nUsing FastGraph for pathfinding...')
@@ -7279,7 +7588,7 @@ class FindNeuronConnection:
                 self._vprint(f'  Removed {before_filter - after_filter} paths with zero-weight hops at type level', level='full')
         
         path_df_type = sv.split_path(path_df_type)
-        path_df_type, path_df_type_excluded = sv.path_filter(path_df_type,self.keyword_in_path_to_remove)
+        path_df_type, path_df_type_excluded = sv.path_filter(path_df_type, self._normalized_keyword_filter())
         
         # Save configuration files to path folder
         self._vprint('\nSaving configuration files...', level='full')
@@ -7611,6 +7920,7 @@ class FindNeuronConnection:
                     color_edges_by_nt=True  # Enable NT-based edge coloring
                 )
                 vp.visualize()
+                self._record_viz_edge_trim(vp)
                 self._vprint('  Created network_selected_paths.html and sankey_selected_paths.html')
             else:
                 self._vprint('  No paths found to visualize')
@@ -7671,6 +7981,7 @@ class FindNeuronConnection:
                     verbose=(self.verbose_mode == 'full')
                 )
                 vp_bodyId.visualize()
+                self._record_viz_edge_trim(vp_bodyId)
                 self._vprint('  Created bodyId-level visualizations in bodyId_visualization subfolder')
 
         except Exception as e:
@@ -7742,6 +8053,7 @@ class FindNeuronConnection:
                 verbose=(self.verbose_mode == 'full'),
             )
             vp.visualize(plot_heatmap=False, plot_Sankey=False, plot_network=True)
+            self._record_viz_edge_trim(vp)
             return True
         except Exception as e:
             self._vprint(f'  ⚠️  Early network visualization failed: {e}', level='always')
@@ -7832,42 +8144,80 @@ class FindNeuronConnection:
     
     def FindAllPath(self, find_bodyId_path=True, forward_only=True, exclude_searched_neurons=None, 
                     use_graph_cache=True, find_reciprocal: bool = False):
+        '''Find all paths between source and target neurons within max_interlayer.
+
+        Thin wrapper over the shared pathfinding pipeline
+        (``_find_paths_core``) with ``path_mode='all'``. See
+        ``FindShortestPath`` for the shortest-only variant that reuses the
+        exact same pipeline (discovery, enrichment, outputs, visualization).
         '''
-        Find all paths between source and target neurons within max_interlayer.
-        
-        Parameters:
-        -----------
-        find_bodyId_path : bool, default=True
-            Whether to find paths at bodyId level
-        forward_only : bool, default=True
-            If True: Query each neuron only once per layer (RECOMMENDED - more efficient)
-            If False: Re-query all discovered neurons at each layer (slower but comprehensive)
-            
-            IMPORTANT: Both modes fetch ALL connections including recurrent/reciprocal ones.
-            The difference is query efficiency, NOT the connections found:
-            - True: Queries each neuron once → faster, less redundant
-            - False: Re-queries neurons → slower, but ensures no connections missed due to filtering
-            
-            For most use cases, True is recommended (4-14x faster with same results).
-        use_graph_cache : bool, default=True
-            If True, caches the bodyId-level graph at the lowest threshold seen and reuses
-            it for higher thresholds by filtering edges. This significantly speeds up 
-            comparison runs that test multiple thresholds on the same dataset.
-            
-            Cache reuse rules:
-            - If cached_threshold <= current_threshold: Reuse cached graph, filter edges
-            - If cached_threshold > current_threshold: Rebuild from scratch (need more edges)
-        exclude_searched_neurons : bool, deprecated
-            Deprecated parameter name. Use forward_only instead.
-            If provided, it will override forward_only for backward compatibility.
-        find_reciprocal : bool, default=False
-            If True, enrich the path graph by finding all direct connections among
-            nodes in the path graph and saving them in a find_reciprocal subfolder.
-        
-        Logic:
-        1. Fetch connections layer by layer, discovering network structure
-        2. Identify which target neurons exist in the searched network
-        3. Find all paths from sources to targets with path length ≤ max_interlayer
+        return self._find_paths_core(
+            path_mode='all',
+            find_bodyId_path=find_bodyId_path,
+            forward_only=forward_only,
+            exclude_searched_neurons=exclude_searched_neurons,
+            use_graph_cache=use_graph_cache,
+            find_reciprocal=find_reciprocal,
+        )
+
+    def FindShortestPath(self, find_bodyId_path=True, forward_only=True, exclude_searched_neurons=None,
+                         use_graph_cache=True, find_reciprocal: bool = False):
+        '''
+        Find ONLY the shortest paths between source and target neurons.
+
+        For every reachable (source, target) pair the minimum hop-count
+        paths under the search criteria (min synapse count / connection
+        ratio / traversal probability) are returned — all tied shortest
+        paths, each once.
+
+        Differences from FindAllPath (the rest of the pipeline is shared):
+
+        - Depth: ``max_interlayer`` is an EXACT depth bound: paths are
+          capped at ``max_interlayer + 1`` edges (0 = direct connections
+          only; the default UI value is 8). Layer discovery stops early as
+          soon as every target has been discovered (BFS discovery order
+          makes the first-appearance layer the exact shortest distance, so
+          deeper layers cannot change any result). For effectively
+          unlimited search set a high, unreachable number (e.g. 99):
+          simple paths cannot exceed the neuron count, so the bound is
+          never hit in practice.
+        - Enumeration: fixed backward-BFS-distance-guided DFS
+          (``FastGraph.find_paths_shortest``); the pathfinding-algorithm
+          selector does not apply. Shortest enumeration is polynomial, so
+          the combinatorial-explosion warning/limits of FindAllPath are
+          unnecessary.
+        - BodyId edge limit: OFF by default in shortest mode (0 = no
+          trimming). Trimming keeps pair reachability but not shortest
+          distances, so enabling it can inflate reported distances (noted
+          in user_warning_notes). Set ``graph_edge_limit_bodyid > 0`` to
+          opt in.
+
+        Parameters mirror FindAllPath: find_bodyId_path, forward_only,
+        exclude_searched_neurons (deprecated alias of forward_only),
+        use_graph_cache, find_reciprocal.
+        '''
+        return self._find_paths_core(
+            path_mode='shortest',
+            find_bodyId_path=find_bodyId_path,
+            forward_only=forward_only,
+            exclude_searched_neurons=exclude_searched_neurons,
+            use_graph_cache=use_graph_cache,
+            find_reciprocal=find_reciprocal,
+        )
+
+    def _find_paths_core(self, path_mode, find_bodyId_path=True, forward_only=True,
+                         exclude_searched_neurons=None,
+                         use_graph_cache=True, find_reciprocal: bool = False):
+        '''
+        Shared pathfinding pipeline for FindAllPath (``path_mode='all'``)
+        and FindShortestPath (``path_mode='shortest'``).
+
+        Phases: 1) layer-by-layer connection discovery (cache-aware,
+        shortest mode stops when all targets are discovered), 2) target
+        identification, 3) path enumeration ('all': selectable algorithm
+        within max_interlayer; 'shortest': all per-pair minimum-hop
+        paths), then enrichment, type-path derivation, saving and
+        visualization — identical for both modes.
         '''
         import polars as pl
         
@@ -7894,8 +8244,9 @@ class FindNeuronConnection:
 
         # Warn on deep searches: the number of simple paths grows
         # combinatorially (branching^depth), so L4+ reconstruction can take
-        # hours and produce billions of paths.
-        if self.max_interlayer >= 4:
+        # hours and produce billions of paths. Shortest mode is exempt —
+        # its enumeration is polynomial (BFS distances + guided DFS).
+        if path_mode == 'all' and self.max_interlayer >= 4:
             self._vprint(
                 '⚠️  max_interlayer >= 4: the path count grows combinatorially '
                 '(branching^depth) — reconstruction can take hours and produce '
@@ -7906,10 +8257,19 @@ class FindNeuronConnection:
                 'also cuts the path count dramatically.',
                 level='always',
             )
+        elif path_mode == 'shortest':
+            self._vprint(
+                'ℹ️  Shortest mode: only per-pair minimum-hop paths are '
+                'enumerated (polynomial — no combinatorial path explosion).',
+                level='full',
+            )
         
         # Create allpaths folder with parameter suffix
         import datetime
-        param_suffix = f"_L{self.max_interlayer}w{self.min_synapse_num}"
+        # Depth label for the folder name (always an exact bound now).
+        depth_label = f'L{self.max_interlayer}'
+        folder_prefix = 'findshortestpath' if path_mode == 'shortest' else 'findallpath'
+        param_suffix = f"_{depth_label}w{self.min_synapse_num}"
         param_suffix += f"r{_format_decimal_for_folder(self.min_ratio)}"
         param_suffix += f"p{_format_decimal_for_folder(self.min_traversal_probability)}"
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -7919,10 +8279,10 @@ class FindNeuronConnection:
             # If saveas is set, use save_folder directly
             self.allpath_folder = self.save_folder
         else:
-            # Unified per-run folder: findallpath_{dataset}_{src}_to_{tgt}{params}_{ts}
+            # Unified per-run folder: {tool}_{dataset}_{src}_to_{tgt}{params}_{ts}
             self.allpath_folder = os.path.join(
                 self.output_dir,
-                f"findallpath_{dataset_abbrev(self.dataset)}_{self.source_fname}"
+                f"{folder_prefix}_{dataset_abbrev(self.dataset)}_{self.source_fname}"
                 f"_to_{self.target_fname}_{param_suffix.lstrip('_')}",
             )
             
@@ -7936,6 +8296,7 @@ class FindNeuronConnection:
             k: v for k, v in self.__dict__.items() 
             if not k.startswith('_') and k not in ('source_df', 'target_df', 'client_hemibrain', 'client_flywire')
         }
+        public_attrs['path_mode'] = path_mode
         with open(os.path.join(self.allpath_folder, 'all_attributes.json'), 'w') as f:
             json.dump(public_attrs, f, indent=4, default=lambda o: '<not serializable>')
         
@@ -7944,6 +8305,7 @@ class FindNeuronConnection:
             for key, value in self.parameter_dict.items():
                 keylen = len(key)
                 f.write(f'{key}:{" "*(30-keylen)}{value}\n')
+            f.write(f'path_mode:{" "*21}{path_mode}\n')
             f.write('\n')
         
         # Ensure bodyIds are strings for consistent processing
@@ -7962,12 +8324,15 @@ class FindNeuronConnection:
         # Generate cache key based on query parameters (not threshold).
         # Threshold is handled separately (a lower-threshold graph is filtered
         # up); all other edge-affecting filters are part of the key so a run
-        # with different filters never reuses the wrong graph.
+        # with different filters never reuses the wrong graph. Shortest mode
+        # omits the depth from the key (discovery stops early, so the fetched
+        # depth is a result, not a query parameter; entries carry a 'depth'
+        # field instead).
         cache_key = _findallpath_cache_key(
             self._dataset_safe,
             source_ID,
             target_ID,
-            self.max_interlayer,
+            self.max_interlayer if path_mode == 'all' else None,
             self.separate_hemispheres,
             self.filter_by,
             self.min_ratio,
@@ -7977,23 +8342,74 @@ class FindNeuronConnection:
         
         cached_data = _FINDALLPATH_GRAPH_CACHE.get(cache_key) if use_graph_cache else None
         use_cached_graph = False
+        extend_cached_graph = False
+        
+        # Required discovery depth in layer tables: 'all' always fetches
+        # max_interlayer + 1 tables; 'shortest' likewise treats
+        # max_interlayer as an exact bound (0 = direct connections only).
+        required_depth = (self.max_interlayer + 1) if path_mode == 'all' else (
+            (self.max_interlayer + 1) if self.max_interlayer > 0 else 1
+        )
         
         if cached_data is not None:
             cached_threshold = cached_data.get('threshold', float('inf'))
+            # Legacy entries predate the depth field; assume they cover the
+            # required depth (they were keyed by max_interlayer).
+            cached_depth = cached_data.get('depth', float('inf'))
+            # 'complete' marks discovery that ended because all targets were
+            # found or the frontier dried up; an incomplete entry stopped at
+            # a depth cap and may still hide deeper targets.
+            cached_complete = cached_data.get('complete', True)
             # Can reuse if cached threshold <= current threshold (more edges in cache)
             if cached_threshold <= self.min_synapse_num:
-                use_cached_graph = True
-                self._vprint(f'\n⚡ Reusing cached graph from threshold={cached_threshold} (current={self.min_synapse_num})', level='simple')
+                # Shortest-mode entries may have been EARLY-STOPPED at the
+                # cached threshold (all targets found there): filtering the
+                # prefix up to a higher threshold can remove exactly the
+                # edges that triggered the stop, hiding deeper layers the
+                # current threshold needs. Reuse/extend shortest caches only
+                # at the SAME threshold; FindAllPath entries are full-depth
+                # and stay filter-up-reusable.
+                shortest_threshold_changed = (
+                    path_mode == 'shortest'
+                    and self.min_synapse_num > cached_threshold
+                )
+                if path_mode == 'shortest' and cached_complete:
+                    # Complete discovery: every target was found (or the
+                    # frontier dried up) — the graph is final regardless of
+                    # the requested bound, so any deeper run can reuse it.
+                    depth_ok = True
+                else:
+                    depth_ok = cached_depth >= required_depth
+                if depth_ok and not shortest_threshold_changed:
+                    use_cached_graph = True
+                    self._vprint(f'\n⚡ Reusing cached graph from threshold={cached_threshold} (current={self.min_synapse_num})', level='simple')
+                elif path_mode == 'shortest' and not shortest_threshold_changed:
+                    # Shallower cached graph is a valid prefix (same filters,
+                    # same sources, same threshold): resume the layer fetch
+                    # from the cached last layer instead of rebuilding.
+                    extend_cached_graph = True
+                    self._vprint(f'\n⚡ Extending cached graph (depth={cached_depth}, threshold={cached_threshold}) with deeper layers', level='simple')
+                elif shortest_threshold_changed:
+                    self._vprint(f'\n📊 Shortest cache at threshold={cached_threshold} stopped its '
+                                 f'discovery there; threshold={self.min_synapse_num} needs a fresh '
+                                 f'discovery - rebuilding', level='full')
+                else:
+                    self._vprint(f'\n📊 Cache exists at depth={cached_depth}, but need depth={required_depth} - rebuilding', level='full')
             else:
                 # Cached threshold is higher - need to rebuild with lower threshold
                 self._vprint(f'\n📊 Cache exists at threshold={cached_threshold}, but need threshold={self.min_synapse_num} - rebuilding', level='full')
         
-        if use_cached_graph:
+        if use_cached_graph or extend_cached_graph:
             # Refresh recency so frequently used queries are evicted last
             _FINDALLPATH_GRAPH_CACHE.pop(cache_key, None)
             _FINDALLPATH_GRAPH_CACHE[cache_key] = cached_data
             # ===== FAST PATH: Reuse cached graph and filter by threshold =====
+            # (extension reuses the cached tables as a prefix and resumes the
+            # layer fetch in Phase 1)
             all_connections = cached_data['all_connections']
+            # Cached entries carry their own discovery-completeness: reuse
+            # it so the depth-cap flag below reflects the cached run too.
+            discovery_complete = cached_data.get('complete', True)
             
             # Filter connections by current threshold
             if self.min_synapse_num > cached_threshold:
@@ -8001,6 +8417,8 @@ class FindNeuronConnection:
                 for conn_pl in all_connections:
                     if not conn_pl.is_empty():
                         filtered = conn_pl.filter(pl.col('weight') >= self.min_synapse_num)
+                        if filtered.height < conn_pl.height:
+                            self._min_synapse_excluded = True
                         filtered_connections.append(filtered)
                     else:
                         filtered_connections.append(conn_pl)
@@ -8028,12 +8446,13 @@ class FindNeuronConnection:
             # ===== STANDARD PATH: Fetch connections and build graph =====
             all_connections_filtered = None  # Will be set in Phase 1
         
-        # PHASE 1: Fetch all connections in the network up to max_interlayer layers
+        # PHASE 1: Fetch all connections in the network up to the search depth
         if not use_cached_graph:
             if self.verbose_mode == 'simple':
                 self._vprint(f'\nPhase 1: Fetching all network layers...', level='simple')
             elif self.verbose_mode == 'full':
-                self._vprint(f'\n=== PHASE 1: Fetching all network layers (0 to {self.max_interlayer + 1}) ===', level='full')
+                self._vprint(f'\n=== PHASE 1: Fetching network layers '
+                             f'(0 to {self.max_interlayer + 1}; stops early when all targets are discovered) ===', level='full')
                 if forward_only:
                     self._vprint('Mode: Layer-by-layer querying (query each neuron once - RECOMMENDED)', level='full')
                     self._vprint('Note: Still fetches ALL connections including recurrent/reciprocal ones', level='full')
@@ -8042,11 +8461,31 @@ class FindNeuronConnection:
                     self._vprint('Note: Slower but ensures no connections missed due to filtering', level='full')
                 self._vprint('', level='full')
             
-            all_neurons_in_network = set(source_ID)
-            layer_neurons = [set(source_ID)]  # Layer 0: sources
-            all_connections = []
+            if extend_cached_graph:
+                # Resume from the cached prefix (already threshold-filtered in
+                # the fast path above; membership was recomputed from it).
+                all_connections = list(all_connections_filtered)
+                start_layer = len(all_connections)
+                self._vprint(f'  Resuming layer fetch from layer {start_layer} '
+                             f'({start_layer} cached layer tables kept)', level='full')
+            else:
+                all_neurons_in_network = set(source_ID)
+                layer_neurons = [set(source_ID)]  # Layer 0: sources
+                all_connections = []
+                start_layer = 0
             
-            for layer_idx in range(self.max_interlayer + 1):
+            target_ID_set = set(target_ID)
+            # Number of layer tables to fetch: max_interlayer is an exact
+            # bound in both modes (0 = direct connections only).
+            fetch_bound = self.max_interlayer + 1
+            
+            layer_idx = start_layer
+            # Discovery completeness: a run that stops because all targets
+            # were found or the frontier dried up is complete; one that hits
+            # the depth cap may still hide deeper targets (relevant for
+            # cache reuse by later deeper/unlimited runs).
+            discovery_complete = True
+            while fetch_bound is None or layer_idx < fetch_bound:
                 # Determine which neurons to fetch based on mode
                 if forward_only:
                     # Only fetch from current layer's neurons (faster, each neuron queried once)
@@ -8106,6 +8545,21 @@ class FindNeuronConnection:
                         self._vprint(f'Layer {layer_idx}->{layer_idx+1}: {len(post_neurons)} downstream neurons, {len(next_layer)} new, {len(conn_df)} connections', level='full')
                     else:
                         self._vprint(f'Layer {layer_idx}->{layer_idx+1}: {len(post_neurons)} total downstream, {len(next_layer)} new neurons, {len(conn_df)} connections', level='full')
+                
+                # Shortest-mode early stop: discovery is BFS, so a target's
+                # first-appearance layer is its exact shortest hop distance —
+                # deeper layers cannot change any result once every target is
+                # in the network.
+                if path_mode == 'shortest' and target_ID_set and target_ID_set <= all_neurons_in_network:
+                    self._vprint(f'\n✓ All targets discovered (layer {layer_idx + 1}) — '
+                                 f'stopping discovery early (shortest distances are final)', level='full')
+                    break
+                
+                layer_idx += 1
+            else:
+                # Loop condition became false: the depth cap ended discovery
+                # (breaks above keep discovery_complete=True).
+                discovery_complete = False
             
             self._vprint(f'\nTotal neurons in network: {len(all_neurons_in_network)}', level='full')
             self._vprint(f'Total layers fetched: {len(layer_neurons)}', level='full')
@@ -8114,11 +8568,13 @@ class FindNeuronConnection:
             if use_graph_cache:
                 _findallpath_cache_put(cache_key, {
                     'threshold': self.min_synapse_num,
+                    'depth': len(all_connections),
+                    'complete': discovery_complete,
                     'all_connections': all_connections,
                     'layer_neurons': layer_neurons,
                     'all_neurons_in_network': all_neurons_in_network,
                 })
-                self._vprint(f'  💾 Cached graph at threshold={self.min_synapse_num} for future reuse', level='full')
+                self._vprint(f'  💾 Cached graph at threshold={self.min_synapse_num} (depth={len(all_connections)}) for future reuse', level='full')
             
             # Use the freshly fetched connections
             all_connections_filtered = all_connections
@@ -8127,6 +8583,24 @@ class FindNeuronConnection:
             self._vprint(f'Phase 1: Skipped (using cached graph)', level='simple')
             self._vprint(f'  Cached neurons in network: {len(all_neurons_in_network)}', level='full')
             self._vprint(f'  Cached layers: {len(layer_neurons)}', level='full')
+
+        # Whether the max_interlayer depth cap actually truncated the
+        # discovery: the cap ended the layer fetch while the frontier was
+        # still alive (new neurons discovered at the last fetched layer), so
+        # deeper paths may exist but were never searched. A run that stopped
+        # because all targets were found or the frontier dried up is
+        # complete — the bound never bit — and needs no depth warning.
+        self._depth_cap_reached = (
+            not discovery_complete
+            and bool(layer_neurons) and bool(layer_neurons[-1])
+        )
+        if self._depth_cap_reached:
+            self._vprint(
+                f'  ⚠️  Depth cap reached: the frontier was still alive at '
+                f'max_interlayer={self.max_interlayer}; paths beyond it were '
+                f'never searched.',
+                level='full',
+            )
         
         # PHASE 2: Identify which targets exist in the searched network
         if self.verbose_mode == 'simple':
@@ -8220,11 +8694,13 @@ class FindNeuronConnection:
         # Pan-graph edge limit on the per-pair edge TABLE (path integrity:
         # reachability filter + adaptive dead-end refill; bounds the
         # combinatorial path count; source-outgoing / target-incoming edges
-        # reserved first, not counted toward the limit). Applied ONLY for
-        # deep searches (max_interlayer >= 3); shallow searches keep the
-        # complete graph.
+        # reserved first, not counted toward the limit). In 'all' mode
+        # applied ONLY for deep searches (max_interlayer >= 3); shallow
+        # searches keep the complete graph. In 'shortest' mode applied only
+        # when explicitly enabled (graph_edge_limit_bodyid > 0).
         conn_trimmed = self._trim_bodyid_edges(
-            all_connections_filtered, list(source_ID), list(targets_found))
+            all_connections_filtered, list(source_ID), list(targets_found),
+            path_mode=path_mode)
         G = FastGraph()
         G.build_from_dataframe(conn_trimmed, 'bodyId_pre', 'bodyId_post', 'weight')
         
@@ -8293,12 +8769,15 @@ class FindNeuronConnection:
         self._vprint(f'Maximum path length: {self.max_interlayer + 1} edges', level='full')
         # self._vprint(f'Using optimized DFS algorithm (explores shared path segments only once)', level='full')
         
-        # Select pathfinding algorithm
-        algo = self.pathfinding
-        valid_algos = ['DP', 'Bidirectional', 'DFS', 'MemoizedDFS', 'MeetInMiddle', 'Backtracking']
-        if algo not in valid_algos:
-            self._vprint(f'Warning: Unknown pathfinding algorithm "{algo}", defaulting to "DP"', level='always')
-            algo = 'DP'
+        # Select pathfinding algorithm ('all' mode only; 'shortest' mode
+        # uses the fixed BFS-distance-guided enumerator below).
+        algo = None
+        if path_mode == 'all':
+            algo = self.pathfinding
+            valid_algos = ['DP', 'Bidirectional', 'DFS', 'MemoizedDFS', 'MeetInMiddle', 'Backtracking']
+            if algo not in valid_algos:
+                self._vprint(f'Warning: Unknown pathfinding algorithm "{algo}", defaulting to "DP"', level='always')
+                algo = 'DP'
         
         path_count = 0
         all_paths = []  # Initialize list to store all found paths
@@ -8309,7 +8788,20 @@ class FindNeuronConnection:
         
         path_gen = None
         
-        if algo == 'Bidirectional':
+        if path_mode == 'shortest':
+            if self.verbose_mode == 'simple':
+                self._vprint(f'Finding shortest paths...', level='simple')
+            elif self.verbose_mode == 'full':
+                self._vprint(f'Using shortest-path enumeration (backward BFS distances '
+                             f'+ guided DFS, capped at {self.max_interlayer + 1} edges)...', level='full')
+            
+            path_gen = G.find_paths_shortest(
+                source_ID, targets_found,
+                self.max_interlayer + 1,
+                verbose=(self.verbose_mode in ['simple', 'full']),
+            )
+        
+        elif algo == 'Bidirectional':
             if self.verbose_mode == 'simple':
                 self._vprint(f'Finding path [bidirectional]...', level='simple')
             elif self.verbose_mode == 'full':
@@ -8392,6 +8884,33 @@ class FindNeuronConnection:
         
         self._vprint(f'\n✅ Pathfinding complete!', level='full')
         self._vprint(f'   Total paths found: {path_count:,}', level='full')
+        if path_mode == 'shortest':
+            # Per-pair shortest distance summary (all tied paths of a pair
+            # share the same length; pairs are the (source, target) combos).
+            pair_distances = {(p[0], p[-1]): len(p) - 1 for p in all_paths}
+            if pair_distances:
+                dists = list(pair_distances.values())
+                self._vprint(f'   Shortest distances: {len(pair_distances):,} pairs, '
+                             f'min {min(dists)} hop(s), max {max(dists)} hop(s)', level='full')
+                # A path at the depth bound may be the tip of a longer
+                # route — warn the user to raise the bound (e.g. 99 for an
+                # effectively unlimited search).
+                cap = self.max_interlayer + 1
+                if max(dists) >= cap:
+                    self._vprint(
+                        f'\033[33m⚠️  {sum(1 for d in dists if d >= cap):,} of '
+                        f'{len(dists):,} pair(s) reach the Max Layers bound '
+                        f'({self.max_interlayer} intermediate layers). These are the '
+                        f'shortest paths within the bound; longer alternative routes may '
+                        f'exist. Increase Max Layers (e.g. 99 for effectively unlimited '
+                        f'search) to be sure.\033[0m',
+                        level='always',
+                    )
+            reached_targets = {p[-1] for p in all_paths}
+            unreached = [t for t in targets_found if t not in reached_targets]
+            if unreached:
+                self._vprint(f'   ⚠️ {len(unreached)} target(s) in the network have no path '
+                             f'from any source (unreachable pairs report nothing)', level='full')
         self._vprint(f'   Neurons in valid paths: {len(neurons_in_paths):,}', level='full')
         self._vprint(f'   Unique edges in valid paths: {len(edges_in_paths):,}', level='full')
         self._vprint(f'   Layer-specific edges in valid paths: {len(edges_in_paths_with_layer):,}', level='full')
@@ -9368,6 +9887,28 @@ class FindNeuronConnection:
         self._vprint(f'  Derived {len(type_paths_to_save):,} unique type-level paths '
                      f'from {len(all_paths):,} bodyId paths', level='full')
         
+        if path_mode == 'shortest' and type_paths_to_save:
+            # Different bodyId instances of a target type can sit at
+            # different distances, so the derivation yields per-instance
+            # shortest type sequences. At the type level the tool reports
+            # the per-(source type, target type) minimum length only —
+            # all ties kept, longer per-instance routes dropped.
+            best_len_by_pair = {}
+            for seq in type_paths_to_save:
+                key = (seq[0], seq[-1])
+                length = len(seq) - 1
+                if key not in best_len_by_pair or length < best_len_by_pair[key]:
+                    best_len_by_pair[key] = length
+            before = len(type_paths_to_save)
+            type_paths_to_save = [
+                seq for seq in type_paths_to_save
+                if len(seq) - 1 == best_len_by_pair[(seq[0], seq[-1])]
+            ]
+            if len(type_paths_to_save) != before:
+                self._vprint(f'  Shortest mode: kept {len(type_paths_to_save):,} of '
+                             f'{before:,} type paths (per-type-pair minimum length; '
+                             f'ties kept)', level='full')
+        
         if type_paths_to_save:
             # Stream directly to CSV to avoid OOM; the builder verifies every
             # hop's edge values against conn_types and drops paths with
@@ -9468,15 +10009,28 @@ class FindNeuronConnection:
             
             # Find paths using DFS on group graph
             group_paths = []
-            for source_group in source_groups:
-                if pd.isna(source_group) or source_group not in G_group:
-                    continue
-                for target_group in target_groups:
-                    if pd.isna(target_group) or target_group not in G_group:
+            if path_mode == 'shortest':
+                # Shortest mode: per (source group, target group)
+                # minimum-hop paths (all ties); the all-paths depth cap
+                # only applies when the user set an explicit limit.
+                valid_sources = [g for g in source_groups
+                                 if not pd.isna(g) and g in G_group]
+                valid_targets = [g for g in target_groups
+                                 if not pd.isna(g) and g in G_group]
+                group_cutoff = self.max_interlayer + 1
+                for path in G_group.find_paths_shortest(
+                        valid_sources, valid_targets, cutoff=group_cutoff):
+                    group_paths.append(path)
+            else:
+                for source_group in source_groups:
+                    if pd.isna(source_group) or source_group not in G_group:
                         continue
-                    # Find all simple paths with length <= max_interlayer + 1
-                    for path in G_group.all_simple_paths(source_group, target_group, cutoff=self.max_interlayer + 1):
-                        group_paths.append(path)
+                    for target_group in target_groups:
+                        if pd.isna(target_group) or target_group not in G_group:
+                            continue
+                        # Find all simple paths with length <= max_interlayer + 1
+                        for path in G_group.all_simple_paths(source_group, target_group, cutoff=self.max_interlayer + 1):
+                            group_paths.append(path)
             
             self._vprint(f'  Found {len(group_paths):,} group-level paths', level='full')
             
@@ -9517,7 +10071,7 @@ class FindNeuronConnection:
                     self._vprint(f'  Removed {before_filter - after_filter} paths with zero-weight hops at group level', level='full')
             
             path_df_group = sv.split_path(path_df_group)
-            path_df_group, path_df_group_excluded = sv.path_filter(path_df_group, self.keyword_in_path_to_remove)
+            path_df_group, path_df_group_excluded = sv.path_filter(path_df_group, self._normalized_keyword_filter())
             
             # Sort path_df_group
             if not path_df_group.empty:
@@ -9595,7 +10149,7 @@ class FindNeuronConnection:
                     self._vprint(f'  Removed {before_filter - after_filter} paths with hemisphere-unconserved edges', level='full')
         
         path_df_type = sv.split_path(path_df_type)
-        path_df_type, path_df_type_excluded = sv.path_filter(path_df_type,self.keyword_in_path_to_remove)
+        path_df_type, path_df_type_excluded = sv.path_filter(path_df_type, self._normalized_keyword_filter())
         
         EXCEL_ROW_LIMIT = 1_048_576
         
@@ -9976,6 +10530,7 @@ class FindNeuronConnection:
                     save_data_matrices=False,
                 )
                 vp.visualize()
+                self._record_viz_edge_trim(vp)
                 # Organize the visualization artifacts (htmls + exported
                 # data + the original input DataFrame) under visualization/
                 self._relocate_viz_outputs(input_df=paths_to_visualize,
@@ -10012,6 +10567,7 @@ class FindNeuronConnection:
                         save_data_matrices=False,  # see the path-based call above
                     )
                     vp.visualize()
+                    self._record_viz_edge_trim(vp)
                     self._relocate_viz_outputs(input_df=edge_df,
                                                input_name='type_edges')
                     if self.verbose_mode == 'full':
@@ -10255,6 +10811,7 @@ class FindNeuronConnection:
                     verbose=(self.verbose_mode == 'full')
                 )
                 vp_bodyId.visualize()
+                self._record_viz_edge_trim(vp_bodyId)
                 if self.verbose_mode == 'simple':
                     self._vprint('Done', level='simple')
                 else:
@@ -10271,6 +10828,7 @@ class FindNeuronConnection:
                                         output_format=self.output_format,
                                         verbose=(self.verbose_mode == 'full'))
                 vp_group.visualize()
+                self._record_viz_edge_trim(vp_group)
                 if self.verbose_mode == 'full':
                     self._vprint(f'  ✓ Custom group visualizations created ({len(group_paths_to_viz)} paths)', level='full')
                     

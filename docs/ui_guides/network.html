@@ -1,0 +1,262 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Network - DROCAT Instructions</title>
+  <link rel="stylesheet" href="guide.css">
+</head>
+<body>
+<main class="guide">
+  <header class="guide-top">
+    <a class="back" href="README.html">&larr; Back to guides</a>
+    <span class="tag">Network</span>
+  </header>
+  <h1>Network (PlotPath)</h1>
+  <p class="lede">
+    The <b>Network</b> tab turns pathway data into interactive graphs: a
+    Sankey flow diagram, a connection heatmap and a draggable Cytoscape network,
+    plus an editable empty drawing canvas. It runs
+    <code>vispath_pkg.VisualizePath</code> in the background. For neuron
+    morphology see the separate <a href="skeleton.html">3D Skeleton guide</a>.
+  </p>
+
+  <h2>Quick start - path network</h2>
+  <ol>
+    <li>Run <b>Find All Paths</b> first.</li>
+    <li>Upload its <code>*_allpaths_type.csv</code> (or
+      <code>*_allpaths_info.xlsx</code>) file.</li>
+    <li>Click <b>Generate Network</b>.</li>
+  </ol>
+
+  <h2>Quick start - empty drawing canvas</h2>
+  <ol>
+    <li>Set <b>Canvas Source</b> to <b>Empty drawing canvas</b>; no path file
+      is required.</li>
+    <li>Click <b>Generate Network</b> and open the generated HTML.</li>
+    <li>Enable <b>Edit Mode</b>, add nodes, and connect them directly on the
+      canvas.</li>
+    <li>For a one-click workflow, use <b>Create Empty Canvas</b>; it generates
+      the HTML and opens it in a new browser tab automatically.</li>
+  </ol>
+
+  <h2 id="input-files">Network input files - full specification</h2>
+  <p>The upload button accepts <b>CSV, XLSX and XLS</b> files. The backend
+    (<code>VisualizePath</code>) auto-detects one of <b>three data
+    formats</b> inside the file, so you can feed it Find All Paths output, a
+    simple edge list, or a connection matrix. Only one file is loaded at a
+    time; uploading a new file replaces the previous one.</p>
+
+  <h3>Format 1 - Path-based (Find All Paths output)</h3>
+  <p>Each row is one complete multi-hop path. This is the format produced by
+    the <a href="find_path.html">Find All Paths</a> tab.</p>
+  <table>
+    <tr><th>Column</th><th>Required</th><th>Accepted names</th><th>Meaning</th></tr>
+    <tr>
+      <td>Path</td>
+      <td><b>yes</b></td>
+      <td><code>path_block</code>, <code>path</code>, <code>path_str</code></td>
+      <td>Ordered node sequence, e.g. <code>A-&gt;B-&gt;C</code>.
+        Aliases are renamed to <code>path_block</code> automatically.</td>
+    </tr>
+    <tr>
+      <td>Weights</td>
+      <td><b>yes</b></td>
+      <td><code>weights</code></td>
+      <td>List of per-hop weights (synapse counts), e.g. <code>[10, 5]</code>.
+        Length must equal number of nodes &minus; 1.</td>
+    </tr>
+    <tr>
+      <td>Connection ratios</td>
+      <td>optional</td>
+      <td><code>connection_ratios</code>, <code>ratio</code>,
+        <code>ratios</code>, <code>connection_ratio</code>,
+        <code>conn_ratio</code></td>
+      <td>Per-hop connection ratios (case-insensitive match).</td>
+    </tr>
+    <tr>
+      <td>Traversal probabilities</td>
+      <td>optional</td>
+      <td><code>traversal_probabilities</code>, <code>probability</code>,
+        <code>probabilities</code>, <code>prob</code>,
+        <code>traversal_probability</code>, <code>trav_prob</code></td>
+      <td>Per-hop traversal probabilities (case-insensitive match).</td>
+    </tr>
+    <tr>
+      <td>Layer</td>
+      <td>optional</td>
+      <td><code>layer</code></td>
+      <td>Layer annotation kept for downstream analysis.</td>
+    </tr>
+  </table>
+
+  <div class="example">
+    <div class="example-title">Minimal path-based CSV</div>
+    <pre><code>path,weights
+aMe12-&gt;aMe10-&gt;MBON01,"[128, 47]"
+aMe12-&gt;PPL101-&gt;MBON01,"[63, 22]"</code></pre>
+    <p class="small">Two 2-hop paths. Weights are the synapse counts of each
+      hop; here <code>min_weight</code> would be 47 and 22 respectively.</p>
+  </div>
+
+  <h4>Find All Paths files at a glance</h4>
+  <table>
+    <tr><th>File</th><th>Content</th></tr>
+    <tr><td><code>{source}_to_{target}_allpaths_type.csv</code></td>
+      <td>Type-level paths (<b>recommended</b> for visualization).</td></tr>
+    <tr><td><code>{source}_to_{target}_allpaths_bodyId.csv</code></td>
+      <td>bodyId-level paths (finer grain, more rows).</td></tr>
+    <tr><td><code>{source}_to_{target}_allpaths_info.xlsx</code></td>
+      <td>Excel workbook; the <code>path_type</code> /
+        <code>path_bodyId</code> sheets hold the same tables.</td></tr>
+  </table>
+  <p>Columns of the path tables: <code>path_str</code> (node list),
+    <code>path</code> (<code>A-&gt;B-&gt;C</code> string),
+    <code>weights</code>, <code>probabilities</code>, <code>ratios</code>,
+    <code>min_weight</code> (bottleneck synapse count),
+    <code>path_prob</code> (product of hop probabilities),
+    <code>min_ratio</code>, <code>length</code> (number of hops). Extra
+    columns are ignored, so the files can be filtered/sorted (e.g. keep only
+    rows with <code>min_weight &ge; 10</code>) and re-uploaded as-is.</p>
+
+  <h3>Format 2 - Edge list</h3>
+  <p>Each row is one directed connection; the network is built directly from
+    the edges (every edge becomes a 1-hop path). Detection accepts these
+    column sets:</p>
+  <ul>
+    <li><code>source</code> / <code>target</code> / <code>weight</code></li>
+    <li><code>from</code> / <code>to</code> / <code>weight</code></li>
+    <li><code>pre</code> / <code>post</code> / <code>weight</code></li>
+    <li>Any <code>{prefix}_pre</code> + <code>{prefix}_post</code> +
+      <code>weight</code> combination, e.g. <code>bodyId_pre</code>,
+      <code>bodyId_post</code>, <code>weight</code> (the connection tables
+      cached by DROCAT use this layout).</li>
+  </ul>
+  <p>The weight column may also be named <code>weights</code>,
+    <code>synapse_count</code> or <code>count</code>. An optional
+    <code>color</code> / <code>edge_color</code> / <code>link_color</code>
+    column assigns a per-edge color (hex or rgba).</p>
+
+  <div class="example">
+    <div class="example-title">Edge-list CSV</div>
+    <pre><code>source,target,weight
+aMe12,aMe10,128
+aMe10,MBON01,47
+aMe12,PPL101,63</code></pre>
+  </div>
+
+  <h3>Format 3 - Connection matrix</h3>
+  <p>A 2D numeric table where <b>rows are pre-synaptic</b> and <b>columns are
+    post-synaptic</b> nodes. Every non-zero cell becomes an edge. In a CSV the
+    first text column is used as the row labels; column headers are the target
+    labels. If labels are missing, nodes are named <code>N0, N1, ...</code>.</p>
+
+  <div class="example">
+    <div class="example-title">Matrix CSV</div>
+    <pre><code>,aMe10,PPL101,MBON01
+aMe12,0,63,0
+aMe10,0,0,47
+PPL101,0,0,22</code></pre>
+  </div>
+
+  <h3>Excel sheet selection</h3>
+  <p>For workbooks the sheet is chosen automatically in this priority order:
+    <code>path_type</code> &rarr; <code>path_bodyId</code> &rarr;
+    <code>path_block</code> &rarr; <code>paths</code>. A workbook with a
+    single sheet uses that sheet; any other sheet layout falls back to the
+    first sheet when run from the UI. For CSV files no sheet selection
+    applies.</p>
+
+  <div class="callout warn">
+    <b>Common mistakes</b>
+    - Uploading a path file with a <code>path</code> column but no
+    <code>weights</code> column (both are required).
+    - A <code>weights</code> list whose length does not match the number of
+    hops (nodes &minus; 1).
+    - Saving CSV with BOM/UTF-16 - use UTF-8.
+    - Expecting an edge list named <code>pre_syn</code>/<code>post_syn</code>
+    to work without a <code>weight</code> column.
+  </div>
+
+  <h2>Quick start - edge list editor</h2>
+  <ol>
+    <li>The <b>Edge List Editor</b> card is always visible in the Net-Viz tab,
+      below the source card.</li>
+    <li>Enter a <b>Draft Name</b>, click <b>Add Edge</b>, fill source / target /
+      weight in the edit row and click <b>Apply to Selected</b>.</li>
+    <li>Set <b>Canvas Source</b> to <b>Edge list editor</b> and click
+      <b>Generate Network</b> - the draft is auto-saved and used directly as
+      the network input.</li>
+  </ol>
+
+  <h2 id="edge-list-editor">Edge list editor - auto-save &amp; recovery</h2>
+  <p>The editor builds a Format-2 edge list interactively and persists every
+    change automatically:</p>
+  <ul>
+    <li><b>Auto-save</b>: about half a second after the last edit the draft is
+      flushed atomically to <code>local_data/edge_list_drafts/</code>
+      (<code>{name}.csv</code> + a metadata sidecar). If the UI or its port
+      shuts down accidentally, nothing is lost.</li>
+    <li><b>Unsaved reminder</b>: a draft stays marked as <i>pending
+      export</i> until you click <b>Export CSV</b>. On the next start, the
+      Network tab shows a recovery banner listing every draft with pending
+      edits; each has a <b>Recover</b> button that loads it back into the
+      editor.</li>
+    <li><b>Editing</b>: select table rows to load them into the edit row,
+      apply changes, add or delete edges. Renaming a draft moves it (the old
+      draft is removed). <b>Delete Draft</b> removes it from disk.</li>
+    <li><b>Running</b>: with Canvas Source = Edge list editor,
+      <b>Generate Network</b> flushes the draft and feeds its CSV straight to
+      PlotPath, so the draft must contain at least one complete edge
+      (source, target, weight).</li>
+    <li><b>Export CSV</b> copies the draft into the Path Output Directory as
+      <code>{name}_edge_list.csv</code> and clears the pending-export
+      marker.</li>
+  </ul>
+
+  <h2>Rendering options</h2>
+  <ul>
+    <li><b>Canvas Source</b>: <b>Path file</b> (load Find All Paths output or
+      any format above), <b>Edge list editor</b> (build/edit an auto-saved
+      edge list), or <b>Empty drawing canvas</b>.</li>
+    <li><b>Path Output Directory</b>: every run creates its own
+      <code>plotpath_{name}_{timestamp}/</code> subfolder inside it.</li>
+    <li><b>Network Layout</b>: hierarchical (default), spring, circular,
+      shell, or distributed.</li>
+    <li><b>Color Scheme</b>: swatch-preview presets (Cool, Default, Warm,
+      Purple) for source / intermediate / target nodes and links.</li>
+    <li><b>Open in Browser</b>: open the HTML results right after the run.</li>
+  </ul>
+  <p class="small">The network view shows at most the 500 strongest edges
+    (source/target connections are always kept); the exported data files
+    always contain the complete table.</p>
+
+  <h2>Working with the generated network HTML</h2>
+  <ul>
+    <li><b>Explore</b>: drag nodes, hover for weight/probability tooltips,
+      click a node or edge to highlight its neighborhood, right-click to hide
+      elements.</li>
+    <li><b>Adjust</b>: live sliders for node size, font size and edge width;
+      toggle orphan nodes, self-loops and dead ends; re-run the layout.</li>
+    <li><b>Color</b>: restyle selected elements or whole groups (source /
+      intermediate / target nodes, all edges).</li>
+    <li><b>Edit Mode</b> (empty canvas): add nodes, drag from one node to
+      another to connect them, double-click to edit properties, right-click
+      to delete. Every action is recorded - use Undo/Redo or the history
+      list to jump between states.</li>
+    <li><b>Save your work</b>: Save/Load layout, Export/Import graph (JSON)
+      and export the figure as PNG or SVG.</li>
+  </ul>
+
+  <h2>Output</h2>
+  <pre><code>{path_output_dir}/plotpath_{name}_{timestamp}/
+    {name}_Sankey.html   - flow-based diagram
+    {name}_heatmap.html  - connection matrix heatmap
+    {name}_network.html  - interactive network (editable)
+    {name}_data.xlsx     - connection tables used for the plots
+
+Empty canvas mode:
+    {name}_network.html  - editable canvas only</code></pre>
+</main>
+</body>
+</html>

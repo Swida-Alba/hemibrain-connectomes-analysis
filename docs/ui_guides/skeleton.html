@@ -3,64 +3,57 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>3D Skeleton + Network - DROCAT Instructions</title>
+  <title>3D Skeleton - DROCAT Instructions</title>
   <link rel="stylesheet" href="guide.css">
 </head>
 <body>
 <main class="guide">
   <header class="guide-top">
     <a class="back" href="README.html">&larr; Back to guides</a>
-    <span class="tag">3D Skeleton + Network</span>
+    <span class="tag">3D Skeleton</span>
   </header>
-  <h1>3D Skeleton + Network</h1>
+  <h1>3D Skeleton (plot3dSkeleton)</h1>
   <p class="lede">
-    Two top-level tabs: <b>3D Skeleton (plot3dSkeleton)</b> for neuron
-    morphology and <b>Network (PlotPath)</b> for pathway graphs. Each tab has
-    its own run action, log, and output files.
+    The <b>3D Skeleton</b> tab renders neuron morphology, synapses and brain
+    region meshes from any configured dataset into an interactive HTML scene.
+    It runs <code>VisualizeSkeleton.plot_neurons()</code> in the background.
+    For pathway graphs see the separate
+    <a href="network.html">Network guide</a>.
   </p>
 
-  <h2>Quick start - 3D skeleton</h2>
+  <h2>Quick start</h2>
   <ol>
-    <li>Add neurons/layers as chips (e.g. <code>aMe12</code> or
-      <code>aMe12 -&gt; MBON01</code>).</li>
+    <li>In the <b>Layer Structure</b> tree, three layer rows are ready by
+      default — add neurons to them, or click <b>Add Layer</b> for more
+      rows.</li>
     <li>Pick the dataset; keep <b>Brain Mesh = template</b> and
       <b>ROIs = EB, LH, AL</b>.</li>
-    <li>Click <b>Generate 3D Skeleton</b> in the 3D Skeleton tab.</li>
+    <li>Click <b>Generate 3D Skeleton</b>.</li>
   </ol>
 
-  <h2>Quick start - path network</h2>
-  <ol>
-    <li>Run <b>Find All Paths</b> first.</li>
-    <li>Upload its <code>*_allpaths_type.csv</code> (or
-      <code>*_allpaths_info.xlsx</code>) file.</li>
-    <li>Click <b>Generate Network</b> in the Network tab.</li>
-  </ol>
-
-  <h2>Quick start - empty drawing canvas</h2>
-  <ol>
-    <li>Open the top-level <b>Network</b> tab.</li>
-    <li>Set <b>Canvas Source</b> to <b>Empty drawing canvas</b>; no path file is required.</li>
-    <li>Click <b>Generate Network</b> and open the generated HTML.</li>
-    <li>Enable <b>Edit Mode</b>, add nodes, and connect them directly on the canvas.</li>
-    <li>For a one-click workflow, use <b>Create Empty Canvas</b>; it generates the
-      HTML and opens it in a new browser tab automatically.</li>
-  </ol>
-
-  <h2>3D skeleton - inputs &amp; examples</h2>
+  <h2>Inputs &amp; examples - the layer tree</h2>
+  <p>The tree mirrors the script's nested-list layer model: each row is one
+    layer and may hold several neurons (type, instance, bodyId or regex).
+    Drag a row to reorder layers; drag a neuron chip onto another row to
+    regroup it. Optional layer names feed the legend (unnamed layers are
+    auto-named): the per-row name input is collapsed behind the small edit
+    button so the rows stay compact.</p>
   <table>
-    <tr><th>Neuron / Layer value</th><th>Meaning</th></tr>
+    <tr><th>Neuron value</th><th>Meaning</th></tr>
     <tr><td><code>aMe12</code></td><td>All bodyIds of type aMe12</td></tr>
     <tr><td><code>720575940610453042</code></td><td>Single bodyId</td></tr>
-    <tr><td><code>aMe12 -&gt; aMe10 -&gt; MBON01</code></td><td>Chain rendered as one connected path</td></tr>
-    <tr><td>Custom layer names</td><td>Display names, one per chip in order</td></tr>
+    <tr><td><code>aMe12_R</code></td><td>Hemisphere-specific instance</td></tr>
+    <tr><td><code>KC.*</code></td><td>Regex pattern (with Match by = Regex)</td></tr>
   </table>
-  <p>The neuron input also has a <b>Filter</b> mode (exact / starts with /
-    contains / ends with / regex) that converts every chip into a regex
-    pattern, and a <b>Search Columns</b> selector (<code>auto</code> /
-    <code>type</code> / <code>instance</code> / <code>bodyId</code>) — the
-    same neuron-search backend as Find All Paths.</p>
+  <p>The <b>Match by</b> mode (exact / starts with / contains / ends with /
+    regex) converts every neuron in the tree into a regex pattern, and the
+    <b>Search Columns</b> selector (<code>auto</code> / <code>type</code> /
+    <code>instance</code> / <code>bodyId</code>) scopes name resolution — the
+    same neuron-search backend as Find All Paths. Upload formats for neuron
+    lists are documented in
+    <a href="input_formats.html">Input File Formats</a>.</p>
 
-  <h2 id="hemisphere-analysis">3D skeleton - hemisphere analysis</h2>
+  <h2 id="hemisphere-analysis">Hemisphere analysis</h2>
   <p>The <b>Hemisphere</b> selector (next to Search Columns) restricts the
     plotted neurons to one side:</p>
   <ul>
@@ -81,7 +74,7 @@
     including those without a suffix.
   </div>
 
-  <h2>3D skeleton - options</h2>
+  <h2>Options</h2>
   <p>The form is organized into four independent blocks, each with its own
     card: <b>General Appearance</b>, <b>Neuron Colors</b>, <b>Synapse
     Colors</b> and <b>Brain Region ROIs</b>.</p>
@@ -135,7 +128,7 @@
     </div>
   </div>
 
-  <h2>3D skeleton - advanced</h2>
+  <h2>Advanced</h2>
   <ul>
     <li><b>Cache Neurons/Synapses</b>: faster repeat renders.</li>
     <li><b>Smooth Skeleton</b>, <b>Show Soma</b>, <b>Show Connectors</b>.</li>
@@ -148,22 +141,11 @@
       GIF scale.</li>
   </ul>
 
-  <h2>Path network - options</h2>
-  <ul>
-    <li><b>Canvas Source</b>: load a Find All Paths file or create an empty
-      interactive drawing canvas.</li>
-    <li><b>Color Scheme</b>: swatch-preview schemes for
-      source/intermediate/target/link.</li>
-    <li><b>Network Layout</b>: hierarchical, spring, circular, distributed.</li>
-    <li>Interactive HTML and XLSX connection tables are always generated.</li>
-  </ul>
-
   <h2>Output</h2>
-  <pre><code>3D:  {output_dir}/plot3d_{DATASET}_{layers}_{timestamp}/
-       {layers}.html, {layers}_neuron_info.xlsx, parameters.txt
-Path: {path_output_dir}/{folder_name}_{timestamp}/
-       {folder}_Sankey.html, {folder}_heatmap.html, {folder}_network.html
-       {folder}_data.xlsx</code></pre>
+  <pre><code>{output_dir}/plot3d_{DATASET}_{layers}_{timestamp}/
+    {layers}.html              - interactive 3D scene
+    {layers}_neuron_info.xlsx  - per-neuron metadata
+    parameters.txt             - exact parameters of the run</code></pre>
 
   <div class="callout warn">
     <b>3D export needs Chrome</b> when Export Method = webdriver and

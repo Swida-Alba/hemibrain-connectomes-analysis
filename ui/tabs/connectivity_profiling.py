@@ -3,9 +3,10 @@
 from nicegui import ui
 from ..config import DEFAULTS
 from ..components.common import (
-    dataset_selector, neuron_list_input, number_input, select_input, checkbox_input,
+    dataset_multi_selector, neuron_list_input, number_input, select_input, checkbox_input,
     dir_input, apply_filter_mode, section_header, param_grid, tool_page,
 )
+from ..components.mapping_editor import mapping_selector, selected_mapping_file_path
 from ..components.output_panel import OutputPanel
 from ..runner import ScriptRunner
 
@@ -30,7 +31,14 @@ def create_connectivity_profiling_tab():
                 hint="Enter 2+ neurons to compare profiles. Upload CSV/TSV/Excel for large lists.",
             )
             with param_grid(2):
-                dataset = dataset_selector(hint="Dataset to compute profiles from.")
+                datasets_select = dataset_multi_selector(
+                    label="Datasets to compare (select 1+)",
+                    default=["male-cns:v0.9", "hemibrain:v1.2.1"],
+                    hint="One dataset: intra-dataset profiling only. Two or more: the same "
+                         "query is profiled in every dataset (names mapped per dataset) and "
+                         "compared both within each dataset (intra) and across datasets "
+                         "(inter, same neuron).",
+                )
                 output_dir = dir_input()
 
         with ui.card().classes("w-full drocat-card"):
@@ -53,8 +61,9 @@ def create_connectivity_profiling_tab():
 
                 ui.separator()
                 ui.label(
-                    "All four similarity matrices are generated: Jaccard, cosine, "
-                    "rank correlation, and rank-correlation union."
+                    "All six similarity matrices are generated: combined, Jaccard, "
+                    "weighted Jaccard, cosine, rank correlation, and rank-correlation "
+                    "union (same metric set as the Find Homologs tab)."
                 ).classes("text-caption drocat-muted")
                 cluster_heatmap = checkbox_input(
                     "Generate Heatmaps", True,
@@ -66,13 +75,18 @@ def create_connectivity_profiling_tab():
                         hint="Minimum synapse count for a connection to enter a profile.",
                     )
                     aggregation_level = select_input(
-                        "Aggregation Level", ["type", "bodyid"], "type",
-                        hint="'type': aggregate profiles per neuron type. 'bodyid': per individual neuron.",
-                    )
+                        "Aggregation Level", ["type", "bodyid", "custom group"], "type",
+                        hint="'type': each matched neuron type is one row — patterns like "
+                             "'aMe.*' or name-filter inputs expand into their independent "
+                             "types. 'bodyid': every individual neuron is one row. "
+                             "'custom group': rows come from the LabelMapper preset below.",
+                    ).props('id=select-aggregation')
                     skip_bodyid_level = select_input(
                         "BodyId-Level Computation", ["auto", "skip", "compute"], "auto",
                         hint="'auto': skip when >1000 bodyIds. 'skip': type-level only. "
-                             "'compute': always compute bodyId-level matrices.",
+                             "'compute': always compute bodyId-level matrices. "
+                             "Ignored when Aggregation Level is 'bodyid' (the main matrices "
+                             "are already bodyId-level).",
                     )
                 with ui.row().classes("gap-4"):
                     show_figures = checkbox_input(
@@ -85,6 +99,29 @@ def create_connectivity_profiling_tab():
                          "Very slow on first use (can take hours); leave off to use the "
                          "connections already cached.",
                 )
+
+            # Custom grouping via LabelMapper presets (only for the
+            # 'custom group' aggregation level)
+            custom_group_box = ui.card().classes("w-full drocat-card").props('id=card-custom-group')
+            with custom_group_box:
+                section_header("Custom Groups (LabelMapper)", "group_work")
+                mapping_select = mapping_selector(
+                    label="Custom Grouping Preset",
+                    hint="Saved LabelMapper preset (manage in the Settings tab). Each "
+                         "source-side group becomes one row of the comparison matrix.",
+                )
+                ui.label(
+                    "Groups are read from the preset's source mapping: each custom label "
+                    "is one group, and its members for the selected datasets fill the rows. "
+                    "The neuron query above is ignored in this mode."
+                ).classes("text-caption drocat-muted")
+            custom_group_box.set_visibility(False)
+
+            aggregation_level.on_value_change(
+                lambda e: custom_group_box.set_visibility(
+                    (e.value or "") == "custom group"
+                )
+            )
 
     with results_col:
         output_panel.create(run_label="Run Profiling", run_icon="play_arrow")
@@ -118,7 +155,7 @@ def create_connectivity_profiling_tab():
 
         constructor_params = {
             "query": query,
-            "dataset": dataset.value,
+            "datasets": list(datasets_select.value),
             "output_dir": output_dir.value,
             "top_k": int(top_k.value),
             "top_m": int(top_m.value),
@@ -128,10 +165,21 @@ def create_connectivity_profiling_tab():
             "show_figures": show_figures.value,
             "verbose": True,
             "use_cache": True,
-            "aggregation_level": aggregation_level.value,
+            "aggregation_level": {
+                "type": "type",
+                "bodyid": "bodyid",
+                "custom group": "custom",
+            }[aggregation_level.value],
             "skip_bodyId_level": skip_bodyid_param,
             "ensure_cache_complete": full_cache.value,
         }
+
+        if aggregation_level.value == "custom group":
+            mapping_path = selected_mapping_file_path(mapping_select.value)
+            if not mapping_path:
+                ui.notify("Please select a LabelMapper preset for the custom groups", type="warning")
+                return
+            constructor_params["custom_mapping_file"] = mapping_path
 
         result = await output_panel.run(runner, "connectivity_profiling", constructor_params, "run",
                                         output_dir=output_dir.value)

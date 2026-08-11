@@ -28,17 +28,18 @@ app.add_static_files("/docs", PROJECT_ROOT / "docs")
 from ui.config import APP_TITLE, APP_VERSION, APP_PORT, APP_HOST
 from ui.tabs import (
     create_find_path_tab,
-    create_find_direct_tab,
-    create_connectivity_profiling_tab,
+    create_find_shortest_tab,
+    create_network_tab,
+    create_inter_dataset_tab,
+    create_skeleton_tab,
+    create_net_viz_tab,
     create_find_homologs_tab,
     create_find_similar_tab,
-    create_inter_dataset_tab,
+    create_connectivity_profiling_tab,
     create_nb_find_lines_tab,
     create_nb_find_neuron_tab,
     create_nb_colabel_tab,
     create_flylight_tab,
-    create_skeleton_tab,
-    create_network_tab,
     create_settings_tab,
 )
 
@@ -62,6 +63,13 @@ DROCAT_CSS = """
     --drocat-radius-md: 16px;
     --drocat-radius-lg: 24px;
     --drocat-shadow: 0 16px 40px rgba(11, 31, 58, .08);
+    /* Tab-group tints, shared by the group headers and their tabs */
+    --drocat-tint-connection: #eaf0ff;
+    --drocat-tint-visualization: #e2f6f5;
+    --drocat-tint-similarity: #fff3e0;
+    --drocat-tint-nb: #f6f1ff;
+    --drocat-tint-flylight: #edf9f0;
+    --drocat-tint-settings: #eef1f5;
 }
 
 html, body {
@@ -111,92 +119,104 @@ html, body {
 }
 .drocat-doc-link:hover { text-decoration: underline !important; }
 
-/* ---------- Segmented navigation ---------- */
-.drocat-tabs {
-    display: flex; gap: 2px; padding: 4px;
-    background: var(--drocat-soft);
+/* ---------- Grouped navigation: layered cards ---------- */
+/* Every tab group is its own tinted card: the group header sits on top of
+   its tab segments INSIDE the same card, so header and tabs are always
+   aligned and each group reads as an independent block. Settings is a
+   standalone card (no header), separated from the function groups. */
+.drocat-nav {
+    display: flex;
+    gap: 8px;
+    align-items: stretch;
+}
+.drocat-group-card {
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    padding: 4px;
     border: 1px solid var(--drocat-line);
     border-radius: 14px;
     box-shadow: inset 0 1px 3px rgba(11, 31, 58, .04);
-    overflow: hidden;
-    scrollbar-width: none;
 }
-.drocat-tabs .q-tabs__content {
-    width: 100%;
+.drocat-group-card.drocat-tint-connection { background: var(--drocat-tint-connection); }
+.drocat-group-card.drocat-tint-visualization { background: var(--drocat-tint-visualization); }
+.drocat-group-card.drocat-tint-similarity { background: var(--drocat-tint-similarity); }
+.drocat-group-card.drocat-tint-nb { background: var(--drocat-tint-nb); }
+.drocat-group-card.drocat-tint-flylight { background: var(--drocat-tint-flylight); }
+.drocat-group-card.drocat-tint-settings { background: var(--drocat-tint-settings); }
+/* Settings stands alone on the right, apart from the function groups. */
+.drocat-settings-card { margin-left: auto; flex: 0 0 auto; }
+.drocat-group-head {
     min-width: 0;
-    gap: 2px;
-    overflow: hidden !important;
-}
-.drocat-tabs .q-tab {
-    min-width: 0 !important;
-    min-height: 40px !important;
-    flex: 1 1 0 !important;
-    padding: 0 5px !important;
-    border-radius: 9px;
-    color: var(--drocat-navy); font-size: 13px; font-weight: 600;
-    transition: background .16s ease, color .16s ease, box-shadow .16s ease;
-}
-.drocat-tabs .q-tab:hover { background: #e8edf6; }
-.drocat-tabs .q-tab--active {
-    color: var(--drocat-cobalt) !important;
-    background: var(--drocat-surface) !important;
-    box-shadow: 0 2px 6px rgba(11, 31, 58, .10);
-}
-.drocat-tabs .q-tab__icon { font-size: 17px; }
-.drocat-tabs .q-tab__label {
-    min-width: 0;
+    text-align: center;
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: .08em;
+    text-transform: uppercase;
+    color: var(--drocat-navy);
+    white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
-    white-space: nowrap;
-    font-size: 11px;
-    font-weight: 650;
-    letter-spacing: -.015em;
+    padding: 2px 4px 0;
 }
-/* Group tints: Connectome (blue) vs NeuronBridge (purple) segments */
-.drocat-tabs .drocat-connectome-tab { background: var(--drocat-cobalt-soft); }
-.drocat-tabs .drocat-connectome-tab:hover { background: #dfe9ff !important; }
-.drocat-tabs .drocat-nb-tab { background: #f6f1ff; }
-.drocat-tabs .q-tab--active.drocat-nb-tab {
-    color: #7c3aed !important;
-}
-.drocat-tabs .drocat-nb-tab:hover { background: #efe6ff !important; }
-/* FlyLight imagery download: its own light-green tint (not NB purple) */
-.drocat-tabs .drocat-flylight-tab { background: #edf9f0; }
-.drocat-tabs .q-tab--active.drocat-flylight-tab {
-    color: #15803d !important;
-}
-.drocat-tabs .drocat-flylight-tab:hover { background: #dff4e6 !important; }
-/* The NB badge sits NEXT to the tab icon (no overlap) and uses the same
-   font as the tab names, so it reads as part of the label typography. */
-.drocat-nb-tab .q-tab__icon {
-    display: inline-flex;
-    align-items: center;
-    gap: 3px;
-}
-.drocat-nb-tab .q-tab__icon::after {
+/* The single NB badge lives on the NeuronBridge group header. */
+.drocat-group-head.drocat-head-nb::after {
     content: "NB";
-    padding: 1px 5px;
+    margin-left: 6px;
+    padding: 1px 6px;
     border-radius: 999px;
     background: #7c3aed;
     color: #fff;
-    /* The icon element uses the Material Icons font; the badge must use the
-       app font (same as tab names) instead of inheriting it. */
+    /* The header is plain text; the badge keeps the app font explicitly. */
     font-family: Inter, "Avenir Next", "Segoe UI", Helvetica, Arial, sans-serif;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: .02em;
+}
+.drocat-group-tabs { display: flex; gap: 2px; flex: 1; }
+.drocat-group-tab {
+    flex: 1 1 0;
+    min-width: 0;
+    min-height: 54px;
+    padding: 6px 4px;
+    border-radius: 9px;
+    transition: background .16s ease, color .16s ease, box-shadow .16s ease;
+}
+.drocat-group-tab.q-btn--flat { color: var(--drocat-navy); }
+/* Two-row segments: icon on top, name below. */
+.drocat-group-tab .q-btn__content { flex-direction: column; gap: 2px; }
+.drocat-group-tab .q-icon { font-size: 18px; }
+.drocat-group-tab .q-btn__label,
+.drocat-group-tab .q-btn__content .block {
+    min-width: 0;
     font-size: 11px;
     font-weight: 650;
-    line-height: 1.2;
     letter-spacing: -.015em;
-    white-space: nowrap;
+    /* Multi-word names render one word per line with tight leading. */
+    white-space: pre-line;
+    line-height: 1.15;
 }
-.drocat-tabs .q-tabs__arrow { display: none !important; }
+.drocat-group-tab:hover { background: rgba(255, 255, 255, .55); }
+.drocat-group-tab.drocat-active {
+    background: var(--drocat-surface) !important;
+    box-shadow: 0 2px 6px rgba(11, 31, 58, .10);
+}
+/* The active segment takes its group's accent color. */
+.drocat-tint-connection .drocat-group-tab.drocat-active { color: var(--drocat-cobalt) !important; }
+.drocat-tint-visualization .drocat-group-tab.drocat-active { color: #0e7490 !important; }
+.drocat-tint-similarity .drocat-group-tab.drocat-active { color: #b45309 !important; }
+.drocat-tint-nb .drocat-group-tab.drocat-active { color: #7c3aed !important; }
+.drocat-tint-flylight .drocat-group-tab.drocat-active { color: #15803d !important; }
+.drocat-tint-settings .drocat-group-tab.drocat-active { color: #475467 !important; }
 
 @media (max-width: 1100px) {
-    .drocat-tabs { gap: 1px; padding: 3px; }
-    .drocat-tabs .q-tabs__content { gap: 1px; }
-    .drocat-tabs .q-tab { padding: 0 3px !important; min-height: 36px !important; }
-    .drocat-tabs .q-tab__icon { font-size: 15px; }
-    .drocat-tabs .q-tab__label { font-size: 9px; letter-spacing: -.03em; }
-    .drocat-nb-tab .q-tab__icon::after { font-size: 9px; padding: 0 4px; }
+    .drocat-nav { gap: 4px; }
+    .drocat-group-head { font-size: 10px; letter-spacing: .05em; }
+    .drocat-group-head.drocat-head-nb::after { font-size: 8px; padding: 0 5px; margin-left: 4px; }
+    .drocat-group-tab { min-height: 46px; padding: 4px 3px; }
+    .drocat-group-tab .q-icon { font-size: 15px; }
+    .drocat-group-tab .q-btn__label { font-size: 9px; letter-spacing: -.03em; }
 }
 
 /* Panel tag badge (NeuronBridge etc.) */
@@ -236,6 +256,9 @@ html, body {
 }
 
 @media (max-width: 700px) {
+    .drocat-nav { overflow-x: auto; scrollbar-width: none; }
+    .drocat-group-card { min-width: 170px; }
+    .drocat-group-head { font-size: 9px; letter-spacing: .03em; }
     .drocat-header { min-height: 64px !important; padding: 0 16px !important; }
     .drocat-brand-mark { width: 36px; height: 36px; border-radius: 11px; }
     .drocat-brand-sub, .drocat-header-link { display: none; }
@@ -382,6 +405,43 @@ html, body {
 }
 .drocat-custom-color-row:hover { background: var(--drocat-soft); }
 
+/* ---------- Layer tree editor (Skeleton tab) ---------- */
+.drocat-layer-board { min-height: 8px; }
+.drocat-layer-row {
+    border: 1px solid var(--drocat-line);
+    border-radius: 12px;
+    background: var(--drocat-surface);
+    padding: 8px 10px;
+    cursor: grab;
+}
+.drocat-layer-row:hover { border-color: var(--drocat-line-strong); }
+.drocat-layer-grip { color: var(--drocat-faint); cursor: grab; }
+.drocat-layer-neurons {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    align-items: center;
+    padding: 6px 2px 2px;
+    border-top: 1px dashed var(--drocat-line);
+    min-height: 34px;
+}
+.drocat-layer-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+    padding: 3px 4px 3px 10px;
+    border: 1px solid var(--drocat-line-strong);
+    border-radius: 8px;
+    background: var(--drocat-soft);
+    color: var(--drocat-navy);
+    font-size: 12px;
+    font-weight: 600;
+    cursor: grab;
+}
+.drocat-layer-chip:hover { border-color: var(--drocat-cobalt); }
+.drocat-layer-chip .q-btn { width: 22px; height: 22px; }
+.drocat-layer-add { max-width: 180px; }
+
 /* ---------- Results panel ---------- */
 .drocat-results-head { padding-bottom: 12px; }
 .drocat-results-mark {
@@ -453,6 +513,9 @@ html, body {
 .q-chip { border-radius: 8px; background: var(--drocat-soft) !important; color: var(--drocat-navy) !important; }
 .q-spinner { color: var(--drocat-cobalt) !important; }
 .nicegui-upload { border: 1px dashed var(--drocat-line-strong) !important; border-radius: 10px !important; }
+/* Auto-suggest inputs (pathfinding tabs) replace the native QSelect popup
+   with a custom suggestion/history menu; hide the empty native one. */
+.drocat-native-popup-hidden { display: none !important; }
 """
 
 @ui.page("/")
@@ -476,51 +539,104 @@ def main_page():
 
     # Main content
     with ui.column().classes("w-full drocat-shell gap-3"):
-        # Segmented navigation. Groups are distinguished by tint instead of
-        # labels: Connectome tabs get the blue segment, NeuronBridge tabs the
-        # purple segment (their tabs already carry the NB badge).
-        with ui.tabs().classes("drocat-tabs w-full") as tabs:
-            tab_pathfinding = ui.tab("Find Path", icon="route").classes("drocat-connectome-tab")
-            tab_direct = ui.tab("Direct", icon="arrow_forward").classes("drocat-connectome-tab")
-            tab_skeleton = ui.tab("3D Skeleton", icon="view_in_ar").classes("drocat-connectome-tab")
-            tab_network = ui.tab("Network", icon="account_tree").classes("drocat-connectome-tab")
-            tab_comparison = ui.tab("Cross-Dataset", icon="sync_alt").classes("drocat-connectome-tab")
-            tab_homologs = ui.tab("Homologs", icon="compare").classes("drocat-connectome-tab")
-            tab_similar = ui.tab("Similar", icon="science").classes("drocat-connectome-tab")
-            tab_profiling = ui.tab("Profiling", icon="analytics").classes("drocat-connectome-tab")
-            tab_find_lines = ui.tab("Find Lines", icon="biotech").classes("drocat-nb-tab")
-            tab_find_neuron = ui.tab("Find Neurons", icon="search").classes("drocat-nb-tab")
-            tab_colabel = ui.tab("Co-Labeling", icon="layers").classes("drocat-nb-tab")
-            tab_flylight = ui.tab("FlyLight", icon="download").classes("drocat-flylight-tab")
-            tab_settings = ui.tab("Settings", icon="settings")
+        # Grouped navigation - layered cards. Every group is its own tinted
+        # card holding its header on top of its tab segments (no partition,
+        # always aligned): Connection blue, Visualization teal, Similarity
+        # amber, NeuronBridge purple + NB badge, FlyLight green. Settings is
+        # a standalone slate card (no header), separated from the groups.
+        NAV_GROUPS = [
+            ("Connection", "connection", 4, [
+                ("Path", "route"), ("Shortest", "alt_route"),
+                ("Network", "schema"), ("Cross-Dataset", "sync_alt"),
+            ]),
+            ("Visualization", "visualization", 2, [
+                ("Skeleton", "view_in_ar"), ("Net-Viz", "account_tree"),
+            ]),
+            ("Similarity", "similarity", 3, [
+                ("Homologs", "compare"), ("Similar", "science"),
+                ("Profiling", "analytics"),
+            ]),
+            ("NeuronBridge", "nb", 3, [
+                ("Find Lines", "biotech"), ("Find Neurons", "search"),
+                ("Co-Labeling", "layers"),
+            ]),
+            ("FlyLight", "flylight", 1, [("Downloader", "download")]),
+        ]
+        tab_buttons = {}
 
-        with ui.tab_panels(tabs, value=tab_pathfinding).classes("w-full bg-transparent"):
-            with ui.tab_panel(tab_pathfinding).classes("p-0"):
+        def group_tab(label: str, icon: str):
+            # Newlines + white-space: pre-line stack multi-word names one
+            # word per line (Find Lines -> Find / Lines) with tight leading.
+            button = ui.button(label.replace(" ", "\n"), icon=icon).props(
+                "flat dense no-caps"
+            ).classes("drocat-group-tab")
+            button.on_click(lambda _event, name=label: nav_panels.set_value(name))
+            tab_buttons[label] = button
+            return button
+
+        with ui.element("div").classes("drocat-nav w-full"):
+            for group_name, tint, size, tabs in NAV_GROUPS:
+                with ui.element("div").classes(
+                    f"drocat-group-card drocat-tint-{tint}"
+                ).style(f"flex: {size} 1 0"):
+                    ui.label(group_name).classes(
+                        f"drocat-group-head drocat-head-{tint}"
+                    )
+                    with ui.element("div").classes("drocat-group-tabs"):
+                        for label, icon in tabs:
+                            group_tab(label, icon)
+            # Standalone Settings card (no header), apart from the groups.
+            with ui.element("div").classes(
+                "drocat-group-card drocat-tint-settings drocat-settings-card"
+            ):
+                with ui.element("div").classes("drocat-group-tabs"):
+                    group_tab("Settings", "settings")
+
+        with ui.tab_panels(value="Path").classes("w-full bg-transparent") as nav_panels:
+            # Connection
+            with ui.tab_panel("Path").classes("p-0"):
                 create_find_path_tab()
-            with ui.tab_panel(tab_direct).classes("p-0"):
-                create_find_direct_tab()
-            with ui.tab_panel(tab_skeleton).classes("p-0"):
-                create_skeleton_tab()
-            with ui.tab_panel(tab_network).classes("p-0"):
+            with ui.tab_panel("Shortest").classes("p-0"):
+                create_find_shortest_tab()
+            with ui.tab_panel("Network").classes("p-0"):
                 create_network_tab()
-            with ui.tab_panel(tab_comparison).classes("p-0"):
+            with ui.tab_panel("Cross-Dataset").classes("p-0"):
                 create_inter_dataset_tab()
-            with ui.tab_panel(tab_find_lines).classes("p-0"):
-                create_nb_find_lines_tab()
-            with ui.tab_panel(tab_find_neuron).classes("p-0"):
-                create_nb_find_neuron_tab()
-            with ui.tab_panel(tab_colabel).classes("p-0"):
-                create_nb_colabel_tab()
-            with ui.tab_panel(tab_flylight).classes("p-0"):
-                create_flylight_tab()
-            with ui.tab_panel(tab_homologs).classes("p-0"):
+            # Visualization
+            with ui.tab_panel("Skeleton").classes("p-0"):
+                create_skeleton_tab()
+            with ui.tab_panel("Net-Viz").classes("p-0"):
+                create_net_viz_tab()
+            # Similarity
+            with ui.tab_panel("Homologs").classes("p-0"):
                 create_find_homologs_tab()
-            with ui.tab_panel(tab_similar).classes("p-0"):
+            with ui.tab_panel("Similar").classes("p-0"):
                 create_find_similar_tab()
-            with ui.tab_panel(tab_profiling).classes("p-0"):
+            with ui.tab_panel("Profiling").classes("p-0"):
                 create_connectivity_profiling_tab()
-            with ui.tab_panel(tab_settings).classes("p-0"):
+            # NeuronBridge
+            with ui.tab_panel("Find Lines").classes("p-0"):
+                create_nb_find_lines_tab()
+            with ui.tab_panel("Find Neurons").classes("p-0"):
+                create_nb_find_neuron_tab()
+            with ui.tab_panel("Co-Labeling").classes("p-0"):
+                create_nb_colabel_tab()
+            # FlyLight
+            with ui.tab_panel("Downloader").classes("p-0"):
+                create_flylight_tab()
+            # Settings
+            with ui.tab_panel("Settings").classes("p-0"):
                 create_settings_tab()
+
+        def sync_active_tab(value):
+            for label, button in tab_buttons.items():
+                if label == value:
+                    button.classes(add="drocat-active")
+                else:
+                    button.classes(remove="drocat-active")
+
+        nav_panels.on_value_change(lambda event: sync_active_tab(event.value))
+        sync_active_tab(nav_panels.value)
 
     # Footer
     with ui.footer().classes("drocat-footer justify-center"):

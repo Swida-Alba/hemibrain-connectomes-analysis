@@ -371,12 +371,26 @@ def _generate_report_header(analyzer, dataset_names: List[str], thresholds: List
     thresholds_str = ', '.join(str(t) for t in thresholds)
     datasets_display = ', '.join(nickname_map[d] for d in dataset_names)
     
+    # Path enumeration display: in shortest mode a Max Interlayer of 0 means
+    # unlimited search depth (discovery stops when all targets are found).
+    path_mode_display = getattr(params, 'path_mode', 'all')
+    if path_mode_display == 'shortest' and params.max_interlayer <= 0:
+        max_interlayer_display = 'unlimited (shortest mode)'
+    else:
+        max_interlayer_display = str(params.max_interlayer)
+    shortest_note = (
+        '<p><em>Shortest path mode: results contain only the per-(source, target) '
+        'minimum-hop paths (all ties kept); longer alternative routes are excluded.</em></p>'
+        if path_mode_display == 'shortest' else ''
+    )
+    
     return f"""
         <header>
             <h1>📊 Cross-Dataset Comparison Report</h1>
             <p>Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
             <p>Datasets: {datasets_display}</p>
-            <p>Thresholds: {thresholds_str} | Mode: <strong>{params.comparison_mode}</strong> | Max Interlayer: {params.max_interlayer}</p>
+            <p>Thresholds: {thresholds_str} | Mode: <strong>{params.comparison_mode}</strong> | Path Enumeration: <strong>{path_mode_display}</strong> | Max Interlayer: {max_interlayer_display}</p>
+            {shortest_note}
         </header>
         {mode_specific_note}
 """

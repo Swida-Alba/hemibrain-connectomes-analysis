@@ -1,6 +1,10 @@
-"""Visualization Tab - 3D skeleton and path network visualization."""
+"""Visualization tabs - 3D Skeleton and Net-Viz (path network visualization).
 
-import os
+Note: the interactive path-building Network tab lives in ui/tabs/network.py;
+this module's pathway-graph tab is named Net-Viz (net_viz) to avoid any
+name collision with it.
+"""
+
 import tempfile
 from datetime import datetime
 from pathlib import Path
@@ -9,18 +13,20 @@ from nicegui import ui
 
 from ..config import SKELETON_MODES, BRAIN_MESH_OPTIONS, NETWORK_LAYOUTS, SEARCH_COLUMNS
 from ..components.common import (
-    dataset_selector, neuron_list_input, multi_select_input, number_input, select_input,
+    dataset_selector, multi_select_input, number_input, select_input,
     checkbox_input, dir_input, read_upload_event, section_header, param_grid, tool_page,
     apply_filter_mode,
 )
 from ..components.output_panel import OutputPanel
 from ..runner import ScriptRunner
+from ..components.layer_tree_editor import layer_tree_editor
 from ..components.palette_picker import (
     palette_picker,
     palette_editor,
     color_swatch_picker,
     assign_palette_colors,
 )
+from ..components.edge_list_editor import edge_list_editor, draft_recovery_banner
 
 
 COLOR_PRESETS = {
@@ -54,7 +60,7 @@ def create_skeleton_tab():
         "3D Skeleton",
         "Interactive neuron morphology, synapse, and brain-region rendering.",
         icon="view_in_ar",
-        doc="visualization.md",
+        doc="skeleton.md",
     )
 
     with form_col:
@@ -69,36 +75,18 @@ def create_skeleton_tab():
                 "Render neuron morphology, synapses, and independent brain-region meshes."
             ).classes("text-caption drocat-muted")
             section_header("Neuron Selection (3D)", "hub")
-            neuron_chips = neuron_list_input(
-                label="Neurons / Layers",
-                show_upload=False,
-                hint="Type a neuron name and press Enter (or leave the field) to add a chip. "
-                     "Each chip = one neuron/layer; use 'A -> B -> C' for connected paths. "
-                     "The filter mode (exact / starts with / contains / ends with / regex) "
-                     "applies to every chip, matching the pathfinding search backend.",
-            )
-            custom_layer_names = neuron_list_input(
-                label="Custom Layer Names (optional)",
-                show_filter=False,
-                show_upload=False,
-                hint="Display names for each neuron layer, in the same order as the chips. "
-                     "Give two layers the SAME name to group them into one legend entry "
-                     "and one individual profile.",
-            )
-            custom_grouping = ui.textarea(
-                label="Custom Layer Grouping (optional)",
-                placeholder=("One group per line:  group_name -> neuron1, neuron2\n"
-                             "Neuron values are bodyIds, types or instances.\n"
-                             "A bare neuron line forms a single-neuron group."),
-            ).props('outlined dense').classes("w-full")
-            ui.label(
-                "Group layers by assigning neurons to groups (one line = one group). "
-                "Each group becomes one layer, one legend entry and one individual "
-                "profile. Overrides the Neurons/Layers chips and Custom Layer Names."
-            ).classes("text-caption drocat-muted")
+            layer_tree = layer_tree_editor()
             with param_grid(2):
                 dataset = dataset_selector()
                 output_dir = dir_input()
+            filter_mode = select_input(
+                "Match by",
+                ["exact", "startswith", "contains", "endswith", "regex"],
+                "exact",
+                hint="The filter mode (exact / starts with / contains / ends with / "
+                     "regex) applies to every neuron in the layer tree, matching "
+                     "the pathfinding search backend.",
+            )
             search_columns = select_input(
                 "Search Columns", SEARCH_COLUMNS, "auto",
                 hint="Which columns to search when resolving neuron names (same as "
@@ -388,14 +376,25 @@ def create_skeleton_tab():
         )
 
     async def run_skeleton():
-        mode, neurons = neuron_chips.get_value()
-        if not neurons:
-            ui.notify("Please add at least one neuron", type="warning")
+        # The layer tree maps 1:1 to the backend's nested-list model:
+        # neuron_layers[i] = layer i's neurons, custom_layer_names partial.
+        neuron_layers = layer_tree.get_neuron_layers()
+        if not neuron_layers:
+            ui.notify("Add at least one neuron to a layer", type="warning")
             return
-        # Same search semantics as pathfinding: the filter mode (exact /
-        # starts with / contains / ends with / regex) converts every chip
-        # into the regex pattern resolved by statvis.getNeurons.
-        neurons = apply_filter_mode(neurons, mode)
+        # Same search semantics as pathfinding: the filter mode converts
+        # every neuron into the regex pattern resolved by statvis.getNeurons.
+        mode = filter_mode.value
+        if mode and mode != "exact":
+            converted = []
+            for layer in neuron_layers:
+                as_list = layer if isinstance(layer, list) else [layer]
+                filtered = apply_filter_mode(as_list, mode)
+                converted.append(
+                    filtered if isinstance(layer, list) else filtered[0]
+                )
+            neuron_layers = converted
+        custom_names = layer_tree.get_custom_layer_names()
         rois = roi_select.value or []
 
         # Assign the exact displayed palette order (including custom reordering).
@@ -413,45 +412,14 @@ def create_skeleton_tab():
             roi_palette.get_colors(), len(rois)
         ) if rois else (100, 100, 100)
 
-        custom_names = [str(n) for n in custom_layer_names.get_value()[1]]
-
-        # Custom layer grouping: write the textarea to a layer_map.csv the
-        # backend parses (rows with the same 'layer' value are grouped).
-        layer_map_csv = None
-        grouping_text = (custom_grouping.value or "").strip()
-        if grouping_text:
-            try:
-                import pandas as pd
-                rows = []
-                for line in grouping_text.splitlines():
-                    line = line.strip()
-                    if not line:
-                        continue
-                    if "->" in line:
-                        group, _, members = line.partition("->")
-                        group = group.strip()
-                        for m in members.split(","):
-                            m = m.strip()
-                            if m:
-                                rows.append((group, m))
-                    else:
-                        rows.append((line, line))
-                if rows:
-                    os.makedirs(output_dir.value, exist_ok=True)
-                    layer_map_csv = os.path.join(output_dir.value, "layer_map.csv")
-                    pd.DataFrame(rows, columns=["layer", "id_type_instance"]).to_csv(
-                        layer_map_csv, index=False
-                    )
-            except Exception as e:
-                ui.notify(f"Failed to write layer grouping CSV: {e}", type="warning")
+        custom_names = layer_tree.get_custom_layer_names()
 
         constructor_params = {
             "dataset": dataset.value,
-            "neuron_layers": neurons,
+            "neuron_layers": neuron_layers,
             "search_columns": search_columns.value,
             "hemisphere": hemisphere.value,
             "custom_layer_names": custom_names,
-            "layer_map_csv": layer_map_csv,
             "output_dir": output_dir.value,
             "skeleton_mode": skeleton_mode.value,
             "brain_mesh": brain_mesh.value,
@@ -512,32 +480,47 @@ def create_skeleton_tab():
     skeleton_output.cancel_button.on_click(skeleton_runner.cancel)
 
 
-def create_network_tab():
-    """Create the standalone PlotPath network visualization tab."""
-    network_runner = ScriptRunner()
-    network_output = OutputPanel("Network Output")
+def create_net_viz_tab():
+    """Create the standalone PlotPath pathway-graph tab (Net-Viz)."""
+    net_viz_runner = ScriptRunner()
+    net_viz_output = OutputPanel("Net-Viz Output")
     path_file_path = {"path": None}
 
     form_col, results_col = tool_page(
-        "Network Visualization",
+        "Net-Viz",
         "Interactive pathway graphs and editable empty drawing canvases.",
         icon="account_tree",
-        doc="visualization.md",
+        doc="network.md",
     )
 
     with form_col:
         ui.label(
-            "Load a path result or create an empty HTML canvas for direct interactive drawing."
+            "Load a path result, build a custom edge list, or create an empty "
+            "HTML canvas for direct interactive drawing."
         ).classes("text-caption drocat-muted")
 
-        with ui.card().classes("w-full drocat-card").props('id="card-network-source"'):
-            section_header("Network Source", "source")
-            network_source = select_input(
+        # Recovery reminder: auto-saved edge-list drafts that were never
+        # exported before the previous session ended (UI/port shutdown).
+        editor_ref = {"handle": None}
+
+        def recover_draft(name):
+            handle = editor_ref.get("handle")
+            if handle is None:
+                return
+            if handle.load_draft(name):
+                net_viz_source.set_value("Edge list editor")
+
+        draft_recovery_banner(recover_draft)
+
+        with ui.card().classes("w-full drocat-card").props('id="card-net-viz-source"'):
+            section_header("Net-Viz Source", "source")
+            net_viz_source = select_input(
                 "Canvas Source",
-                ["Path file", "Empty drawing canvas"],
+                ["Path file", "Edge list editor", "Empty drawing canvas"],
                 "Path file",
                 hint=(
-                    "Path file: load Find All Paths output. Empty drawing canvas: "
+                    "Path file: load Find All Paths output. Edge list editor: build "
+                    "or edit an edge list with auto-save. Empty drawing canvas: "
                     "add nodes and edges in the generated HTML."
                 ),
             )
@@ -576,7 +559,9 @@ def create_network_tab():
                     path_upload_label.classes(replace="text-caption drocat-err")
                 path_upload_menu.close()
 
-            with ui.column().classes("w-full gap-2") as path_input_panel:
+            with ui.column().classes("w-full gap-2").props(
+                'id="net-viz-path-input"'
+            ) as path_input_panel:
                 with ui.row().classes("w-full items-center gap-2"):
                     with ui.button(icon="upload_file").props("flat dense round").classes(
                         "drocat-upload-trigger"
@@ -595,7 +580,7 @@ def create_network_tab():
                             ).props('accept=".csv,.xlsx,.xls" flat dense').classes("w-72")
                             ui.link(
                                 "File format instructions",
-                                "docs/ui_guides/input_formats.html",
+                                "docs/ui_guides/network.html#input-files",
                             ).classes("drocat-doc-link px-3 pb-2")
                     path_upload_label = ui.label("No path file selected.").classes(
                         "text-caption drocat-muted drocat-truncate"
@@ -606,17 +591,23 @@ def create_network_tab():
                 "Edit Mode, then add nodes and connect them interactively."
             ).classes("text-caption drocat-muted")
 
-            def update_network_source():
-                is_empty = network_source.value == "Empty drawing canvas"
-                path_input_panel.set_visibility(not is_empty)
-                empty_canvas_hint.set_visibility(is_empty)
-                if is_empty:
+            def update_net_viz_source():
+                source = net_viz_source.value
+                path_input_panel.set_visibility(source == "Path file")
+                empty_canvas_hint.set_visibility(source == "Empty drawing canvas")
+                if source != "Path file":
                     path_upload_menu.close()
 
-            network_source.on_value_change(lambda _event: update_network_source())
-            update_network_source()
+            net_viz_source.on_value_change(lambda _event: update_net_viz_source())
 
-        with ui.card().classes("w-full drocat-card").props('id="card-network-rendering"'):
+        # Edge-list editor card (auto-saved drafts; see ui.edge_list_store).
+        # Always visible so a custom edge list can be built at any time;
+        # Canvas Source selects which input a run consumes.
+        editor = edge_list_editor(export_dir_provider=lambda: path_output_dir.value)
+        editor_ref["handle"] = editor
+        update_net_viz_source()
+
+        with ui.card().classes("w-full drocat-card").props('id="card-net-viz-rendering"'):
             section_header("Rendering Options", "palette")
             with param_grid(2):
                 path_output_dir = dir_input(label="Path Output Directory")
@@ -647,24 +638,24 @@ def create_network_tab():
             ).props("color=secondary outline").classes("w-full")
 
     with results_col:
-        network_output.create(run_label="Generate Network", run_icon="account_tree")
+        net_viz_output.create(run_label="Generate Network", run_icon="account_tree")
 
     async def run_panel(constructor_params):
-        network_output.clear()
-        network_output.set_running(True)
-        result = await network_output.run(
-            network_runner,
+        net_viz_output.clear()
+        net_viz_output.set_running(True)
+        result = await net_viz_output.run(
+            net_viz_runner,
             "plot_path",
             constructor_params,
             "plot",
             output_dir=path_file_path.get("output_folder") or path_output_dir.value,
         )
-        network_output.set_running(False)
-        network_output.set_status(
+        net_viz_output.set_running(False)
+        net_viz_output.set_status(
             "Completed" if result["returncode"] == 0 else "Failed",
             "green" if result["returncode"] == 0 else "red",
         )
-        network_output.show_files(
+        net_viz_output.show_files(
             result["files"],
             result.get("output_folder") or path_file_path.get("output_folder") or path_output_dir.value,
         )
@@ -688,8 +679,19 @@ def create_network_tab():
         path_file_path["output_folder"] = str(run_folder)
         return str(run_folder)
 
-    async def execute_network(empty_canvas=False):
-        if not empty_canvas and not path_file_path["path"]:
+    async def execute_net_viz(empty_canvas=False):
+        editor_mode = (not empty_canvas) and net_viz_source.value == "Edge list editor"
+        if editor_mode:
+            # Flush the auto-save first so the run uses the latest edits.
+            csv_path = editor.runnable_path_file()
+            if not csv_path:
+                ui.notify(
+                    "Add at least one complete edge (source, target, weight) first",
+                    type="warning",
+                )
+                return
+            path_file_path["path"] = csv_path
+        elif not empty_canvas and not path_file_path["path"]:
             ui.notify(
                 "Please upload a path file first (Find All Paths output)",
                 type="warning",
@@ -710,18 +712,19 @@ def create_network_tab():
         }
         await run_panel(constructor_params)
 
-    async def run_network():
-        await execute_network(network_source.value == "Empty drawing canvas")
+    async def run_net_viz():
+        await execute_net_viz(net_viz_source.value == "Empty drawing canvas")
+
 
     async def create_empty_canvas():
-        await execute_network(empty_canvas=True)
+        await execute_net_viz(empty_canvas=True)
 
-    network_output.run_button.on_click(run_network)
-    network_output.cancel_button.on_click(network_runner.cancel)
+    net_viz_output.run_button.on_click(run_net_viz)
+    net_viz_output.cancel_button.on_click(net_viz_runner.cancel)
     empty_canvas_button.on_click(create_empty_canvas)
 
 
 def create_visualization_tab():
     """Backward-compatible combined view for callers outside the main app."""
     create_skeleton_tab()
-    create_network_tab()
+    create_net_viz_tab()

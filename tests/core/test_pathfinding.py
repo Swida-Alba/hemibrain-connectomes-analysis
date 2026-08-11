@@ -11,6 +11,7 @@ Covers:
     all_simple_paths on seeded random directed graphs
 """
 
+import os
 import sys
 from pathlib import Path
 
@@ -729,7 +730,7 @@ def test_find_all_path_optimization_fields_exist():
     sys.path.insert(0, str(PROJECT_ROOT / "src"))
     import coana
     fields = {f.name: f.default for f in dataclasses.fields(coana.FindNeuronConnection)}
-    assert fields.get("graph_edge_limit_bodyid") == 1000000
+    assert fields.get("graph_edge_limit_bodyid") is None
     assert fields.get("graph_edge_limit_groups") == 5000
     assert fields.get("visualize_before_reconstruct") is False
     # the old per-source path cap is gone
@@ -852,6 +853,10 @@ def test_write_user_warning_notes_lists_tilting_operations(tmp_path):
     fc.skip_bodyId = False
     fc.pathN_to_show = 200
     fc.cache_only = False
+    # the limits were actually reached during the run
+    fc._edgeN_limit_reached = True
+    fc._min_synapse_excluded = True
+    fc._depth_cap_reached = True
 
     fc._write_user_warning_notes(str(tmp_path))
     path = tmp_path / "user_warning_notes.txt"
@@ -894,6 +899,662 @@ def test_write_user_warning_notes_skipped_when_nothing_applies(tmp_path):
     fc.skip_bodyId = False
     fc.pathN_to_show = -1
     fc.cache_only = False
+    fc._edgeN_limit_reached = False
+    fc._min_synapse_excluded = False
+    fc._depth_cap_reached = False
 
     fc._write_user_warning_notes(str(tmp_path))
     assert not (tmp_path / "user_warning_notes.txt").exists()
+
+
+def test_write_user_warning_notes_omits_limits_not_reached(tmp_path):
+    """A configured limit that was never reached must NOT produce its
+    warning note: the edgeN_limit / min_synapse_num / max_interlayer notes
+    are listed only when the run actually hit the limit (edges trimmed,
+    connections dropped, depth cap reached)."""
+    import sys
+    sys.path.insert(0, str(PROJECT_ROOT / "src"))
+    import coana
+
+    fc = object.__new__(coana.FindNeuronConnection)
+    fc._vprint = lambda *a, **k: None
+    # A real graph-edge trim note (reached) keeps the file alive.
+    fc._warn_notes = ["- [graph edge limit] bodyId graph trimmed: kept the top 5,000 edges (weight >= 20 synapses); removed 1,234 of 6,234 edges."]
+    # Limits configured but NOT reached during the run.
+    fc.edgeN_limit = 500
+    fc.min_synapse_num = 3
+    fc.min_ratio = 0.05
+    fc.min_traversal_probability = 0.1
+    fc.keyword_in_path_to_remove = ["None"]
+    fc.max_interlayer = 8
+    fc.separate_hemispheres = False
+    fc.hemisphere_filter = "both"
+    fc.keep_only_hemisphere_conserved_connections = False
+    fc.symmetry_analysis = True
+    fc.find_reciprocal = False
+    fc.skip_bodyId = False
+    fc.pathN_to_show = 200
+    fc.cache_only = False
+    fc._edgeN_limit_reached = False
+    fc._min_synapse_excluded = False
+    fc._depth_cap_reached = False
+
+    fc._write_user_warning_notes(str(tmp_path))
+    path = tmp_path / "user_warning_notes.txt"
+    assert path.exists()          # the graph-edge-limit note is still there
+    text = path.read_text(encoding="utf-8")
+    assert "[graph edge limit]" in text
+    # the three config-derived notes are gated on actual limit hits
+    assert "[edge limit per neuron]" not in text
+    assert "[threshold] min_synapse_num" not in text
+    assert "[depth] max_interlayer" not in text
+
+
+def test_edgeN_limit_note_gated_on_actual_visualization_trim(tmp_path):
+    """The '[edge limit per neuron]' note appears only after a visualization
+    actually trimmed edges (vp.edge_limit_trimmed), never on config alone."""
+    import sys
+    sys.path.insert(0, str(PROJECT_ROOT / "src"))
+    from types import SimpleNamespace
+    import coana
+
+    fc = object.__new__(coana.FindNeuronConnection)
+    fc._vprint = lambda *a, **k: None
+    fc._warn_notes = []
+    fc.edgeN_limit = 500
+    fc.min_synapse_num = 1
+    fc.min_ratio = 0
+    fc.min_traversal_probability = 0
+    fc.keyword_in_path_to_remove = ["None"]
+    fc.max_interlayer = 2
+    fc.separate_hemispheres = False
+    fc.hemisphere_filter = "both"
+    fc.keep_only_hemisphere_conserved_connections = False
+    fc.symmetry_analysis = False
+    fc.find_reciprocal = False
+    fc.skip_bodyId = False
+    fc.pathN_to_show = -1
+    fc.cache_only = False
+
+    # No trim happened: no note (and no file) despite the configured limit.
+    fc._edgeN_limit_reached = False
+    fc._write_user_warning_notes(str(tmp_path))
+    assert not (tmp_path / "user_warning_notes.txt").exists()
+
+    # A visualization that trimmed edges flips the per-run flag -> note.
+    fc._record_viz_edge_trim(SimpleNamespace(edge_limit_trimmed=True))
+    fc._write_user_warning_notes(str(tmp_path))
+    text = (tmp_path / "user_warning_notes.txt").read_text(encoding="utf-8")
+    assert "[edge limit per neuron] edgeN_limit=500" in text
+
+    # A visualization that did NOT trim must not flip the flag.
+    fc2 = object.__new__(coana.FindNeuronConnection)
+    fc2.edgeN_limit = 500
+    fc2._record_viz_edge_trim(SimpleNamespace(edge_limit_trimmed=False))
+    assert getattr(fc2, "_edgeN_limit_reached", False) is False
+
+# =============================================================================
+# FastGraph.find_paths_shortest (FindShortestPath enumeration core)
+# =============================================================================
+
+def _shortest_reference(G, sources, targets, cutoff=None):
+    """Reference implementation: filter the memoized-DFS all-path output to
+    the per-(source, target)-pair minimum length (all ties kept).
+    Zero-hop paths are excluded, matching the DROCAT convention used by
+    ``_expected_paths``."""
+    max_len = cutoff if cutoff is not None else max(G.number_of_nodes(), 1)
+    best = {}
+    paths_by_pair = {}
+    for p in G.find_paths_memoized_dfs(sources, targets, max_len):
+        if len(p) < 2:
+            continue
+        key = (p[0], p[-1])
+        paths_by_pair.setdefault(key, []).append(tuple(p))
+        best[key] = min(best.get(key, len(p) - 1), len(p) - 1)
+    expected = set()
+    for key, paths in paths_by_pair.items():
+        expected.update(p for p in paths if len(p) - 1 == best[key])
+    return expected
+
+
+class TestFindPathsShortest:
+    def test_diamond_yields_all_tied_shortest_paths(self):
+        G = FastGraph()
+        for u, v in [("S", "A"), ("S", "B"), ("A", "T"), ("B", "T")]:
+            G.add_edge(u, v, 1)
+        paths = {tuple(p) for p in G.find_paths_shortest(["S"], ["T"])}
+        assert paths == {("S", "A", "T"), ("S", "B", "T")}
+
+    def test_longer_routes_are_excluded(self):
+        G = FastGraph()
+        for u, v in [("S", "T"), ("S", "A"), ("A", "B"), ("B", "T")]:
+            G.add_edge(u, v, 1)
+        paths = {tuple(p) for p in G.find_paths_shortest(["S"], ["T"])}
+        assert paths == {("S", "T")}
+
+    def test_dead_end_branches_ignored(self):
+        G = FastGraph()
+        for u, v in [("S", "A"), ("A", "T"), ("S", "D"), ("D", "E")]:
+            G.add_edge(u, v, 1)
+        paths = {tuple(p) for p in G.find_paths_shortest(["S"], ["T"])}
+        assert paths == {("S", "A", "T")}
+
+    def test_cutoff_respected_and_none_is_unlimited(self):
+        G = FastGraph()
+        for u, v in [("S", "A"), ("A", "B"), ("B", "T")]:
+            G.add_edge(u, v, 1)
+        assert list(G.find_paths_shortest(["S"], ["T"], cutoff=2)) == []
+        assert {tuple(p) for p in G.find_paths_shortest(["S"], ["T"], cutoff=3)} \
+            == {("S", "A", "B", "T")}
+        assert {tuple(p) for p in G.find_paths_shortest(["S"], ["T"], cutoff=None)} \
+            == {("S", "A", "B", "T")}
+
+    def test_unreachable_pairs_yield_nothing(self):
+        G = FastGraph()
+        G.add_edge("S", "A", 1)
+        G.add_edge("A", "T", 1)
+        G.add_node("X")  # isolated source
+        paths = {tuple(p) for p in G.find_paths_shortest(["S", "X"], ["T"])}
+        assert paths == {("S", "A", "T")}
+
+    def test_cycles_and_reciprocal_edges_do_not_derail(self):
+        G = FastGraph()
+        for u, v in [("S", "A"), ("A", "B"), ("B", "A"), ("B", "T"), ("A", "S")]:
+            G.add_edge(u, v, 1)
+        paths = {tuple(p) for p in G.find_paths_shortest(["S"], ["T"])}
+        assert paths == {("S", "A", "B", "T")}
+
+    def test_source_is_target_still_reaches_other_targets(self):
+        # Consistent with the sibling algorithms: zero-hop paths are not
+        # yielded, but a source that is also a target still reaches the
+        # OTHER targets (nearest-target gradients would miss these).
+        G = FastGraph()
+        G.add_edge("A", "C", 1)
+        G.add_edge("C", "B", 1)
+        paths = {tuple(p) for p in G.find_paths_shortest(["A"], ["A", "B"])}
+        assert paths == {("A", "C", "B")}
+
+    def test_empty_graph_and_unknown_targets(self):
+        G = FastGraph()
+        assert list(G.find_paths_shortest(["A"], ["B"])) == []
+        G.add_edge("A", "B", 1)
+        assert list(G.find_paths_shortest(["A"], ["ZZZ"])) == []
+        assert list(G.find_paths_shortest([], ["B"])) == []
+
+    def test_long_chain_no_recursion_error(self):
+        """The iterative shortest-DAG walk must handle paths far beyond the
+        Python recursion limit (unlimited depth is a supported mode)."""
+        G = FastGraph()
+        n = 2000
+        for i in range(n):
+            G.add_edge(f"N{i}", f"N{i + 1}", 1)
+        paths = {tuple(p) for p in G.find_paths_shortest(["N0"], [f"N{n}"])}
+        assert paths == {tuple(f"N{i}" for i in range(n + 1))}
+
+    def test_matches_reference_on_random_graphs(self):
+        import random
+
+        rng = random.Random(20260811)
+        for trial in range(60):
+            n_nodes = rng.randint(2, 9)
+            nodes = [f"N{i}" for i in range(n_nodes)]
+            G = FastGraph()
+            for u in nodes:
+                for v in nodes:
+                    if rng.random() < 0.3:
+                        G.add_edge(u, v, rng.randint(1, 5))
+
+            sources = [n for n in nodes if rng.random() < 0.5] or [nodes[0]]
+            targets = [n for n in nodes if rng.random() < 0.5] or [nodes[-1]]
+            cutoff = rng.choice([None, 1, 2, 3, 4])
+
+            expected = _shortest_reference(G, sources, targets, cutoff)
+            actual = {tuple(p) for p in
+                      G.find_paths_shortest(sources, targets, cutoff)}
+            assert actual == expected, (
+                f"shortest mismatch on trial {trial} (cutoff={cutoff}): "
+                f"missing={sorted(expected - actual)[:5]} "
+                f"extra={sorted(actual - expected)[:5]}"
+            )
+            # Every yielded path must be simple and minimal for its pair.
+            for p in actual:
+                assert len(p) == len(set(p)), f"non-simple path {p}"
+
+
+class TestShortestEarlyStopEquivalence:
+    """Discovery stopping at the target's first layer must yield identical
+    shortest paths as a full-depth search (BFS discovery order)."""
+
+    def test_truncating_at_target_discovery_keeps_shortest_paths(self):
+        edges = [("S", "A"), ("A", "T"), ("S", "B"), ("B", "C"),
+                 ("C", "D"), ("D", "T")]
+        full = FastGraph()
+        for u, v in edges:
+            full.add_edge(u, v, 1)
+        # Truncated graph = the layers fetched before/including target
+        # discovery (T first appears in layer 2: S->A->T).
+        truncated = FastGraph()
+        for u, v in [("S", "A"), ("S", "B"), ("A", "T"), ("B", "C")]:
+            truncated.add_edge(u, v, 1)
+        assert {tuple(p) for p in full.find_paths_shortest(["S"], ["T"])} \
+            == {tuple(p) for p in truncated.find_paths_shortest(["S"], ["T"])} \
+            == {("S", "A", "T")}
+
+
+class TestFindShortestPathCacheKey:
+    def test_shortest_key_omits_depth(self):
+        # max_interlayer=None (shortest mode) drops the depth component:
+        # the fetched depth is a result, not a query parameter.
+        k = _findallpath_cache_key(**_base_cache_kwargs(max_interlayer=None))
+        assert k != _findallpath_cache_key(**_base_cache_kwargs(max_interlayer=2))
+        assert k != _findallpath_cache_key(**_base_cache_kwargs(max_interlayer=5))
+        # Filters still differentiate keys in shortest mode.
+        assert k != _findallpath_cache_key(
+            **_base_cache_kwargs(max_interlayer=None, min_ratio=0.5))
+
+
+# =============================================================================
+# FindShortestPath pipeline: early stop, depth-aware cache, extension,
+# bodyId edge-limit gating (drives _find_paths_core with stubbed fetching)
+# =============================================================================
+
+_PIPELINE_TYPES = {"S": "TS", "A": "TA", "B": "TB", "C": "TC", "T": "TT",
+                   "Z": "TZ", "D": "TD", "T2": "TT"}
+
+
+def _make_pipeline_fc(monkeypatch, tmp_path, edges, max_interlayer,
+                      graph_edge_limit=0, target_ids=("T",), min_synapse=1):
+    """Build a FindNeuronConnection wired for an offline _find_paths_core run.
+
+    Returns (fc, fetch_calls, logs). Connection fetching is served from the
+    static ``edges`` list (bodyId_pre, bodyId_post, weight), filtered by the
+    requested min_weight exactly like the real fetch; every upstream fetch is
+    recorded in ``fetch_calls``.
+    """
+    import coana
+
+    edge_set = [(str(u), str(v), w) for (u, v, w) in edges]
+
+    fetch_calls = []
+
+    def fake_fetch(self, upstream_bodyIds, downstream_bodyIds=None,
+                   min_weight=None, min_conn_ratio=None,
+                   min_traversal_prob=None, **kwargs):
+        ups = {str(u) for u in upstream_bodyIds}
+        fetch_calls.append(sorted(ups))
+        weight_floor = int(min_weight) if min_weight else 1
+        rows = [(u, v, w) for (u, v, w) in edge_set
+                if u in ups and w >= weight_floor]
+        if min_weight and min_weight > 1 \
+                and len(rows) < len([e for e in edge_set if e[0] in ups]):
+            # mimic the real fetch: exclusions flip the per-run flag
+            self._min_synapse_excluded = True
+        if not rows:
+            return pd.DataFrame(columns=["bodyId_pre", "bodyId_post",
+                                         "weight", "type_pre", "type_post"])
+        return pd.DataFrame({
+            "bodyId_pre": [r[0] for r in rows],
+            "bodyId_post": [r[1] for r in rows],
+            "weight": [r[2] for r in rows],
+            "type_pre": [_PIPELINE_TYPES[r[0]] for r in rows],
+            "type_post": [_PIPELINE_TYPES[r[1]] for r in rows],
+        })
+
+    def fake_neurons(self, bodyIds, columns=None, **kwargs):
+        ids = [str(b) for b in bodyIds]
+        return pd.DataFrame({
+            "bodyId": ids,
+            "type": [_PIPELINE_TYPES.get(b, b) for b in ids],
+            "post": [100] * len(ids),
+        })
+
+    def fake_enrich(conn, traversal_probability_threshold=None, dataset=None,
+                    script_path=None, target_neurons_df=None, label_mapper=None,
+                    global_incoming_weights=None, separate_hemispheres=False,
+                    global_incoming_body_weights=None, aggregate_method=None,
+                    engine=None, **kwargs):
+        conn_e = conn.with_columns([
+            pl.lit(0.5).alias("traversal_probability"),
+            pl.lit(0.5).alias("connection_ratio"),
+        ])
+        conn_t = (conn_e.group_by(["type_pre", "type_post"])
+                  .agg(pl.col("weight").sum())
+                  .with_columns([
+                      pl.lit(0.5).alias("traversal_probability"),
+                      pl.lit(0.5).alias("connection_ratio"),
+                  ]))
+        return conn_e, conn_t, None
+
+    class FakeVisualizePath:
+        def __init__(self, *args, **kwargs):
+            self.G_network = None
+
+        def visualize(self, **kwargs):
+            pass
+
+    monkeypatch.setattr(coana.FindNeuronConnection,
+                        "_fetch_connections_with_cache", fake_fetch)
+    monkeypatch.setattr(coana.FindNeuronConnection,
+                        "_fetch_neurons_local_or_api", fake_neurons)
+    monkeypatch.setattr(coana.FindNeuronConnection,
+                        "_fetch_total_incoming_weight_by_type",
+                        lambda self, *a, **k: None)
+    monkeypatch.setattr(coana.FindNeuronConnection,
+                        "_fetch_total_incoming_weight",
+                        lambda self, *a, **k: None)
+    monkeypatch.setattr(coana.sv, "EnrichConnectionTable", fake_enrich)
+    monkeypatch.setattr(coana, "VisualizePath", FakeVisualizePath)
+
+    fc = object.__new__(coana.FindNeuronConnection)
+    logs = []
+    fc._vprint = lambda msg="", level="full", end="\n", flush=False: logs.append(str(msg))
+    fc.source_df = pd.DataFrame({"bodyId": ["S"], "type": ["TS"]})
+    fc.target_df = pd.DataFrame({"bodyId": list(target_ids),
+                                 "type": [_PIPELINE_TYPES[t] for t in target_ids]})
+    fc.saveas = ""
+    fc.output_dir = str(tmp_path)
+    fc.source_fname = "src"
+    fc.target_fname = "tgt"
+    fc.dataset = "test:v1"
+    fc._dataset_safe = "test_v1"
+    fc.max_interlayer = max_interlayer
+    fc.min_synapse_num = min_synapse
+    fc.min_ratio = 0.0
+    fc.min_traversal_probability = 0.0
+    fc.separate_hemispheres = False
+    fc.hemisphere_filter = "both"
+    fc.filter_by = "bodyId"
+    fc.exclude_intra_type_connections = False
+    fc.parameter_dict = {}
+    fc.parameter_df = pd.DataFrame()
+    fc.find_reciprocal = False
+    fc.visualize_before_reconstruct = False
+    fc.pathfinding = "MemoizedDFS"
+    fc.graph_edge_limit_bodyid = graph_edge_limit
+    fc.edgeN_limit = 0
+    fc.network_layout = "hierarchical"
+    fc.showfig = False
+    fc.output_format = "csv"
+    fc.skip_bodyId = True
+    fc.pathN_to_show = 0
+    fc.keyword_in_path_to_remove = ["None"]
+    fc.label_mapper = None
+    fc.symmetry_analysis = False
+    fc.keep_only_hemisphere_conserved_connections = False
+    fc.script_path = str(PROJECT_ROOT)
+    fc.use_cache = True
+    fc.cache_only = False
+    fc.verbose_mode = "silent"
+    fc._warn_notes = []
+    return fc, fetch_calls, logs
+
+
+_CHAIN_EDGES = [("S", "A", 5), ("A", "B", 5), ("B", "C", 5), ("C", "T", 5),
+                ("T", "Z", 5)]
+
+
+class TestFindShortestPathPipeline:
+    def setup_method(self):
+        _FINDALLPATH_GRAPH_CACHE.clear()
+
+    def teardown_method(self):
+        _FINDALLPATH_GRAPH_CACHE.clear()
+
+    def test_shortest_early_stops_at_target_discovery(self, monkeypatch, tmp_path):
+        fc, fetch_calls, logs = _make_pipeline_fc(
+            monkeypatch, tmp_path, _CHAIN_EDGES, max_interlayer=99)
+        fc.FindShortestPath()
+
+        # Early stop: layers S, A, B, C fetched; T's outgoing (T->Z) never.
+        assert fetch_calls == [["S"], ["A"], ["B"], ["C"]]
+        assert any("stopping discovery early" in m for m in logs)
+        # Depth-aware cache records the fetched depth + completeness.
+        entry = next(iter(_FINDALLPATH_GRAPH_CACHE.values()))
+        assert entry["depth"] == 4 and entry["complete"] is True
+        # High bound (semi-unlimited) -> exact L{bound} folder name.
+        assert os.path.basename(fc.allpath_folder).startswith("findshortestpath_")
+        assert "_L99" in os.path.basename(fc.allpath_folder)
+        # The one shortest path (TS->TA->TB->TC->TT) was saved.
+        path_csv = os.path.join(fc.allpath_folder, "src_to_tgt_allpaths_type.csv")
+        assert os.path.exists(path_csv)
+        df = pl.read_csv(path_csv)
+        assert len(df) == 1
+        assert "TS->TA->TB->TC->TT" in str(df.row(0))
+
+    def test_shortest_cache_extension_resumes_from_cached_depth(
+            self, monkeypatch, tmp_path):
+        # Run 1: capped at 1 intermediate layer -> discovery stops at the
+        # depth cap WITHOUT finding the target (depth=2, incomplete).
+        fc1, fetch_calls1, _ = _make_pipeline_fc(
+            monkeypatch, tmp_path, _CHAIN_EDGES, max_interlayer=1)
+        fc1.FindShortestPath()
+        assert fetch_calls1 == [["S"], ["A"]]
+        entry = next(iter(_FINDALLPATH_GRAPH_CACHE.values()))
+        assert entry["depth"] == 2 and entry["complete"] is False
+
+        # Run 2: high bound (semi-unlimited) on the same query -> the shallow
+        # cache must be EXTENDED (resume at layer 2), not reused or rebuilt.
+        fc2, fetch_calls2, logs2 = _make_pipeline_fc(
+            monkeypatch, tmp_path, _CHAIN_EDGES, max_interlayer=99)
+        fc2.FindShortestPath()
+        assert any("Extending cached graph" in m for m in logs2)
+        assert fetch_calls2 == [["B"], ["C"]]  # resumed, no re-fetch of S/A
+        entry = next(iter(_FINDALLPATH_GRAPH_CACHE.values()))
+        assert entry["depth"] == 4 and entry["complete"] is True
+        path_csv = os.path.join(fc2.allpath_folder, "src_to_tgt_allpaths_type.csv")
+        df = pl.read_csv(path_csv)
+        assert len(df) == 1  # the full chain path survived the extension
+
+    def test_shortest_edge_limit_off_by_default_and_opt_in_warns(
+            self, monkeypatch, tmp_path):
+        # Default (limit=0): no trim, no shortest-trim warning note.
+        fc, _, _ = _make_pipeline_fc(
+            monkeypatch, tmp_path, _CHAIN_EDGES, max_interlayer=99,
+            graph_edge_limit=0)
+        fc.FindShortestPath()
+        assert not any("shortest mode + graph edge limit" in n
+                       for n in fc._warn_notes)
+
+        _FINDALLPATH_GRAPH_CACHE.clear()
+        # Opt-in limit: trimming applies and the distance-inflation note is
+        # recorded (chain graph survives the integrity-preserving trim).
+        fc2, _, _ = _make_pipeline_fc(
+            monkeypatch, tmp_path, _CHAIN_EDGES, max_interlayer=99,
+            graph_edge_limit=2)
+        fc2.FindShortestPath()
+        assert any("shortest mode + graph edge limit" in n
+                   for n in fc2._warn_notes)
+        path_csv = os.path.join(fc2.allpath_folder, "src_to_tgt_allpaths_type.csv")
+        assert len(pl.read_csv(path_csv)) == 1
+
+    def test_shortest_cap_boundary_warns_to_raise_the_bound(
+            self, monkeypatch, tmp_path):
+        """A pair whose shortest path reaches the Max Layers cap triggers an
+        always-visible warning suggesting a higher bound (0 = unlimited)."""
+        # Chain S->A->B->C->T = 4 hops; cap 3 intermediate layers -> the
+        # found path (4 edges) hits the bound.
+        fc, _, logs = _make_pipeline_fc(
+            monkeypatch, tmp_path, _CHAIN_EDGES, max_interlayer=3)
+        fc.FindShortestPath()
+        assert any("reach the Max Layers bound" in m for m in logs)
+        assert any("Increase Max Layers" in m for m in logs)
+
+        _FINDALLPATH_GRAPH_CACHE.clear()
+        # With an adequate bound the warning must NOT fire.
+        fc2, _, logs2 = _make_pipeline_fc(
+            monkeypatch, tmp_path, _CHAIN_EDGES, max_interlayer=4)
+        fc2.FindShortestPath()
+        assert not any("reach the Max Layers bound" in m for m in logs2)
+
+    def test_shortest_mode_unset_limit_defaults_to_no_trim(
+            self, monkeypatch, tmp_path):
+        """path_mode='shortest' with graph_edge_limit_bodyid unset (None)
+        behaves like 0 — no trimming, no warning note."""
+        import sys
+        sys.path.insert(0, str(PROJECT_ROOT / "src"))
+        import coana
+        import polars as pl
+
+        layers = [pl.DataFrame({
+            "bodyId_pre": ["S", "S", "A", "B"],
+            "bodyId_post": ["A", "B", "T", "T"],
+            "weight": [1, 3, 4, 2],
+        })]
+        for path_mode in ("shortest", "all"):
+            fc = object.__new__(coana.FindNeuronConnection)
+            fc.max_interlayer = 3
+            fc.graph_edge_limit_bodyid = None  # unset -> per-mode default
+            fc._vprint = lambda *a, **k: None
+            fc._warn_notes = []
+            out = fc._trim_bodyid_edges(layers, ["S"], ["T"], path_mode=path_mode)
+            rows = out.height if hasattr(out, "height") else len(out)
+            # 4 rows, nothing trimmed in either mode at this size
+            assert rows == 4, (path_mode, rows)
+            if path_mode == "shortest":
+                # the whole point: unset limit in shortest mode must not
+                # even enter the trim path (no warning note)
+                assert not fc._warn_notes, fc._warn_notes
+
+    def test_normalized_keyword_filter_sentinel_is_noop(self):
+        """The 'None' sentinel (field default / UI convention) must never
+        reach path_filter as a literal keyword — paths containing 'None'
+        must not be dropped when the user left the filter empty."""
+        import sys
+        sys.path.insert(0, str(PROJECT_ROOT / "src"))
+        import coana
+
+        fc = object.__new__(coana.FindNeuronConnection)
+        for raw in (None, "None", ["None"], [], ["DN1p"]):
+            fc.keyword_in_path_to_remove = raw
+            out = fc._normalized_keyword_filter()
+            if raw == ["DN1p"]:
+                assert out == ["DN1p"]
+            else:
+                assert out is None, raw
+
+    def test_shortest_cache_rebuilds_when_threshold_rises(
+            self, monkeypatch, tmp_path):
+        """A shortest cache early-stopped at threshold t must NOT be reused
+        (filter-up) for a higher threshold: dropping the edges that triggered
+        the early stop would hide the deeper layers the higher threshold
+        needs. The run must rebuild discovery from scratch."""
+        edges = [("S", "A", 5), ("A", "T", 5),          # t5 route (2 hops)
+                 ("S", "B", 10), ("B", "C", 10), ("C", "T", 10)]  # t10 route (3 hops)
+
+        # Run 1 @ threshold 5: early-stops at depth 2 with S->A->T.
+        fc1, fetch_calls1, _ = _make_pipeline_fc(
+            monkeypatch, tmp_path, edges, max_interlayer=99, min_synapse=5)
+        fc1.FindShortestPath()
+        # Layer 1 discovers both A (t5 route) and B (S->B has weight 10);
+        # the early stop fires after the layer-2 fetch finds T via A.
+        assert fetch_calls1 == [["S"], ["A", "B"]]
+        entry = next(iter(_FINDALLPATH_GRAPH_CACHE.values()))
+        assert entry["depth"] == 2 and entry["complete"] is True
+        csv1 = os.path.join(fc1.allpath_folder, "src_to_tgt_allpaths_type.csv")
+        df1 = pl.read_csv(csv1)
+        assert len(df1) == 1 and "TS->TA->TT" in str(df1.row(0))
+
+        # Run 2 @ threshold 10 in the SAME process: the t5 cache must be
+        # rebuilt (not filtered up), discovering the deeper 3-hop route.
+        fc2, fetch_calls2, logs2 = _make_pipeline_fc(
+            monkeypatch, tmp_path, edges, max_interlayer=99, min_synapse=10)
+        fc2.FindShortestPath()
+        assert any("rebuilding" in m for m in logs2)
+        assert fetch_calls2[0] == ["S"]          # fresh discovery from layer 0
+        assert ["A"] not in fetch_calls2         # t5-only branch never fetched
+        csv2 = os.path.join(fc2.allpath_folder, "src_to_tgt_allpaths_type.csv")
+        df2 = pl.read_csv(csv2)
+        assert len(df2) == 1
+        assert "TS->TB->TC->TT" in str(df2.row(0))
+
+    def test_shortest_type_paths_filtered_to_pair_minimum(
+            self, monkeypatch, tmp_path):
+        """Two target instances of the SAME type at different distances:
+        bodyId shortest paths are per-instance, but the type-level output
+        keeps only the per-(source type, target type) minimum length."""
+        edges = [("S", "A", 10), ("A", "T", 10),              # TS->TT in 2 hops
+                 ("S", "B", 10), ("B", "C", 10), ("C", "T2", 10)]  # TT via T2 in 3 hops
+        fc, _, logs = _make_pipeline_fc(
+            monkeypatch, tmp_path, edges, max_interlayer=99,
+            target_ids=("T", "T2"))
+        fc.FindShortestPath()
+        assert any("per-type-pair minimum length" in m for m in logs)
+        path_csv = os.path.join(fc.allpath_folder, "src_to_tgt_allpaths_type.csv")
+        df = pl.read_csv(path_csv)
+        assert len(df) == 1
+        assert "TS->TA->TT" in str(df.row(0))
+
+    def test_find_all_path_mode_unchanged_by_refactor(self, monkeypatch, tmp_path):
+        # 'all' mode keeps full-depth discovery (no early stop) and the
+        # findallpath_ folder prefix with the depth in the suffix.
+        fc, fetch_calls, _ = _make_pipeline_fc(
+            monkeypatch, tmp_path, _CHAIN_EDGES, max_interlayer=3)
+        fc.FindAllPath()
+        # bound = 4 layer tables: S, A, B, C (T's layer would be the 5th).
+        assert fetch_calls == [["S"], ["A"], ["B"], ["C"]]
+        base = os.path.basename(fc.allpath_folder)
+        assert base.startswith("findallpath_") and "_L3" in base
+        path_csv = os.path.join(fc.allpath_folder, "src_to_tgt_allpaths_type.csv")
+        assert len(pl.read_csv(path_csv)) == 1
+
+
+class TestLimitReachedFlags:
+    """The per-run flags gating the config-derived warning notes are set only
+    when the limit actually bit: the depth cap ended discovery with a live
+    frontier, and min_synapse_num dropped connections during fetching."""
+
+    def setup_method(self):
+        _FINDALLPATH_GRAPH_CACHE.clear()
+
+    def teardown_method(self):
+        _FINDALLPATH_GRAPH_CACHE.clear()
+
+    def test_depth_cap_flag_false_when_bound_never_hit(self, monkeypatch, tmp_path):
+        # Shortest run, semi-unlimited bound: discovery stops early once all
+        # targets are found — the bound never bit.
+        fc, _, _ = _make_pipeline_fc(
+            monkeypatch, tmp_path, _CHAIN_EDGES, max_interlayer=99)
+        fc.FindShortestPath()
+        assert fc._depth_cap_reached is False
+
+        _FINDALLPATH_GRAPH_CACHE.clear()
+        # All mode, the chain dries up exactly AT the cap boundary (the last
+        # fetch discovers no new neurons): no deeper paths can exist.
+        fc2, _, _ = _make_pipeline_fc(
+            monkeypatch, tmp_path, _CHAIN_EDGES, max_interlayer=5)
+        fc2.FindAllPath()
+        assert fc2._depth_cap_reached is False
+
+    def test_depth_cap_flag_true_with_live_frontier_and_note_written(
+            self, monkeypatch, tmp_path):
+        # max_interlayer=4 on the 5-hop chain: all-mode discovery hits the cap
+        # having just discovered Z (frontier still alive) — deeper paths may
+        # exist but were never searched.
+        fc, _, logs = _make_pipeline_fc(
+            monkeypatch, tmp_path, _CHAIN_EDGES, max_interlayer=4)
+        fc.FindAllPath()
+        assert fc._depth_cap_reached is True
+        assert any("Depth cap reached" in m for m in logs)
+        # cached discovery agrees: stopped at the depth cap (incomplete)
+        entry = next(iter(_FINDALLPATH_GRAPH_CACHE.values()))
+        assert entry["complete"] is False
+        # the [depth] note lands in user_warning_notes.txt
+        path = os.path.join(fc.allpath_folder, "user_warning_notes.txt")
+        text = open(path, encoding="utf-8").read()
+        assert "[depth] max_interlayer=4" in text
+
+    def test_min_synapse_flag_follows_actual_exclusions(self, monkeypatch, tmp_path):
+        # Every fetched edge is >= threshold: nothing excluded, no flag.
+        edges = [("S", "A", 2), ("A", "T", 8),
+                 ("S", "B", 8), ("B", "T", 8)]
+        fc, _, _ = _make_pipeline_fc(
+            monkeypatch, tmp_path, edges, max_interlayer=99, min_synapse=2)
+        fc.FindShortestPath()
+        assert fc._min_synapse_excluded is False
+
+        _FINDALLPATH_GRAPH_CACHE.clear()
+        # Threshold 3 drops the weak S->A edge: exclusions flip the flag.
+        fc2, _, _ = _make_pipeline_fc(
+            monkeypatch, tmp_path, edges, max_interlayer=99, min_synapse=3)
+        fc2.FindShortestPath()
+        assert fc2._min_synapse_excluded is True
