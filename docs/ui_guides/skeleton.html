@@ -117,6 +117,11 @@
     <div class="card">
       <h3>Brain region ROIs</h3>
       <ul>
+        <li><b>ROI Selection Mode</b>: <code>primary</code> lists the common
+          top-level brain regions; <code>detailed</code> lists the full dataset
+          ROI list including non-primary sub-regions (e.g.
+          <code>AL-DA1(L)</code>, <code>EBr3d</code>) for detailed ROI
+          selection, following the selected dataset.</li>
         <li><b>Mesh ROIs</b>: presets or regex (<code>ME.*</code>,
           <code>all</code>, <code>primary</code>).</li>
         <li><b>ROI Colors</b>: Auto gray, or any palette assigned in its exact
@@ -124,6 +129,7 @@
         <li>Each resolved ROI mesh, including bilateral expansions, is a
           separate trace and legend entry.</li>
         <li><b>ROI Mesh Opacity</b>.</li>
+        <li><b>Brain Mesh Color</b>: swatch picker with custom color.</li>
       </ul>
     </div>
   </div>
@@ -134,7 +140,6 @@
     <li><b>Smooth Skeleton</b>, <b>Show Soma</b>, <b>Show Connectors</b>.</li>
     <li><b>Export Method</b>: webdriver (fast, needs Chrome 109+) or kaleido
       (stable fallback). <b>Export Scale</b> and <b>Export Views</b>.</li>
-    <li><b>Brain Mesh Color</b>: swatch picker with custom color.</li>
     <li><b>Individual Profiles</b>: PDF/PPTX per neuron, with images per page
       and camera views.</li>
     <li><b>Rotating Video / GIF</b>: fps, degrees per frame, rotation axis,
