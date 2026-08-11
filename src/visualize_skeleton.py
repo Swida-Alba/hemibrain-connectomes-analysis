@@ -2159,6 +2159,13 @@ class VisualizeSkeleton:
     - NeuPrint datasets: 0.9 (remove 90% of faces)
     
     Recommended: 0.5 - 0.95 for large populations.
+    
+    NeuPrint note: cached skeletons are already stored at the fixed 0.9
+    (simp90) level, so at exactly 0.9 no additional mesh decimation is
+    applied. Values ABOVE 0.9 apply the remaining relative reduction
+    (e.g., 0.95 keeps 50% of the cached-level faces, 0.99 keeps 10%),
+    which is the effective way to shrink output files further.
+    Values below 0.9 re-fetch the raw skeletons transiently.
     '''
     
     soma_mesh_simplification: float = 0.9
@@ -4979,6 +4986,28 @@ class VisualizeSkeleton:
         except Exception:
             return False
 
+    def _effective_render_simplification(self, is_fafb: bool) -> float:
+        """Effective render-time mesh decimation fraction for tube mode.
+
+        For NeuPrint datasets whose skeleton cache already holds the fixed
+        simp90 level, the cache-level reduction is baked into the tube mesh.
+        At exactly that level no further decimation is applied (decimating
+        again would double-reduce: 10% nodes -> ~1% faces). Levels ABOVE
+        the cache level apply the *remaining* relative reduction (same
+        semantics as the FAFB path), so e.g. 0.95 still halves the face
+        count instead of silently doing nothing.
+
+        Returns the fraction of faces to remove (0.0 = keep all).
+        """
+        target = self.skeleton_mesh_simplification
+        if (not is_fafb and self._skeleton_cache_is_simplified()
+                and target >= self.NEUPRINT_SKELETON_CACHE_LEVEL):
+            remaining_after_cache = 1 - self.NEUPRINT_SKELETON_CACHE_LEVEL
+            remaining_target = 1 - target
+            keep_factor = remaining_target / remaining_after_cache
+            return max(0.0, 1.0 - keep_factor)
+        return target
+
     def _load_cached_neurons(self, neuron_df, transformed_target=None,
                              ignore_cache=False):
         """Load cached neuron skeletons if available.
@@ -6524,18 +6553,15 @@ class VisualizeSkeleton:
                     tqdm.write(f'  ⚠️ Mirror failed for layer {i}: {e}')
 
             # Simplify individual neurons if requested (and not merging)
-            # Simplify individual neurons if requested
             # Skip for FAFB - already handled in the FAFB-specific block above
             # NeuPrint: on-disk skeletons are ALREADY at the fixed
-            # 90%-simplified cache level; when the requested simplification
-            # is at or above that level, the render-time decimation is
-            # skipped — otherwise the tube mesh would be decimated twice
-            # (10% nodes -> ~1% faces). Below that level the render ran on
+            # 90%-simplified cache level; at exactly that level the
+            # render-time decimation is skipped (the tube mesh is already
+            # at the cache level and decimating again would double-reduce:
+            # 10% nodes -> ~1% faces). Levels above the cache level apply
+            # the remaining relative reduction; below it the render ran on
             # transient RAW fetches and decimates at the user's level.
-            render_simplification = self.skeleton_mesh_simplification
-            if (not is_fafb and self._skeleton_cache_is_simplified()
-                    and render_simplification >= self.NEUPRINT_SKELETON_CACHE_LEVEL):
-                render_simplification = 0.0
+            render_simplification = self._effective_render_simplification(is_fafb)
             if render_simplification > 0 and self.skeleton_mode == 'tube' and not fafb_already_simplified:
                 try:
                     import trimesh

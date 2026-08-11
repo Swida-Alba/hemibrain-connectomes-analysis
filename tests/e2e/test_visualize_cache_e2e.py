@@ -137,12 +137,23 @@ class TestSimplifiedCacheE2E:
         vs = _vs(tmp_path, simplification=0.9)
         vs._save_cached_neurons(pd.DataFrame({"bodyId": PROBE_IDS}), probe_neurons)
         assert vs._skeleton_cache_is_simplified() is True
-        # the render-time decimation is skipped when the requested level is
-        # at/above the cache level (double-decimation guard)
-        render_simp = vs.skeleton_mesh_simplification
-        if vs._skeleton_cache_is_simplified() and render_simp >= vs.NEUPRINT_SKELETON_CACHE_LEVEL:
-            render_simp = 0.0
-        assert render_simp == 0.0
+        # at exactly the cache level the render-time decimation is skipped
+        # (the tube mesh is already at the cache level; double-decimation guard)
+        assert vs._effective_render_simplification(is_fafb=False) == 0.0
+
+    def test_render_decimation_above_cache_level_applies_remainder(self, tmp_path, probe_neurons):
+        vs = _vs(tmp_path, simplification=0.95)
+        vs._save_cached_neurons(pd.DataFrame({"bodyId": PROBE_IDS}), probe_neurons)
+        assert vs._skeleton_cache_is_simplified() is True
+        # above the cache level only the *remaining* relative reduction is
+        # applied: (1 - 0.95) / (1 - 0.9) = 0.5 kept -> remove 50% of faces
+        assert vs._effective_render_simplification(is_fafb=False) == pytest.approx(0.5)
+
+    def test_render_decimation_below_cache_level_is_direct(self, tmp_path, probe_neurons):
+        # below the cache level the RAW skeletons are re-fetched and the
+        # user's fraction applies directly (no relative adjustment)
+        vs = _vs(tmp_path, simplification=0.5)
+        assert vs._effective_render_simplification(is_fafb=False) == pytest.approx(0.5)
 
     def test_fetch_on_demand_level_semantics(self, tmp_path, probe_neurons):
         vs = _vs(tmp_path)
