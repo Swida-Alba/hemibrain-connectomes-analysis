@@ -10,6 +10,7 @@ light canvas, white surfaces, cobalt accent, segmented navigation,
 focus-panel + contact-sheet workspace.
 """
 
+import logging
 import os
 import sys
 from pathlib import Path
@@ -26,6 +27,36 @@ from nicegui import ui, app
 app.add_static_files("/docs", PROJECT_ROOT / "docs")
 
 from ui.config import APP_TITLE, APP_VERSION, APP_PORT, APP_HOST
+
+
+class _TimerTeardownNoiseFilter(logging.Filter):
+    """Hide the harmless NiceGUI 3.15 timer-teardown race from the console.
+
+    When a browser tab is closed or reloaded, NiceGUI deletes the client's
+    elements and then wakes tasks still waiting in ``client.connected()``;
+    a per-page ``ui.timer`` can enter its loop one last time against an
+    already-deleted parent slot and raise
+    ``RuntimeError: The parent slot of Timer(id=...) has been deleted.``
+    The page is already gone at that point, so the default exception
+    handler's traceback is pure log noise - drop exactly those records.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        message = record.getMessage()
+        return not (
+            "The parent slot of Timer" in message
+            and "has been deleted" in message
+        )
+
+
+def _silence_timer_teardown_noise() -> None:
+    logger = logging.getLogger("nicegui")
+    if not any(isinstance(f, _TimerTeardownNoiseFilter) for f in logger.filters):
+        logger.addFilter(_TimerTeardownNoiseFilter())
+
+
+_silence_timer_teardown_noise()
+
 from ui.tabs import (
     create_find_path_tab,
     create_find_shortest_tab,
