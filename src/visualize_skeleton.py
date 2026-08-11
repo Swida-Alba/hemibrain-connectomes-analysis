@@ -3805,24 +3805,30 @@ class VisualizeSkeleton:
             errors.append(f"verbose must be True, False, 'full', or 'simple', got {repr(self.verbose)}")
             
         # === Color validations (now more flexible - accepts multiple formats) ===
+        # Empty/invalid values are coerced to defaults in _normalize_color_inputs();
+        # anything still malformed here warns and falls back instead of failing.
         # neuron_colors: can be tuple, list, or single color string
         if isinstance(self.neuron_colors, str):
             # Single color string - will be wrapped in a list later
             pass  # Valid
         elif isinstance(self.neuron_colors, (tuple, list)):
             if len(self.neuron_colors) == 0:
-                errors.append("neuron_colors cannot be empty")
+                self._vprint("\033[33m⚠️  Warning: neuron_colors is empty; falling back to default palette.\033[0m", level='simple')
+                self.neuron_colors = None
         else:
-            errors.append(f"neuron_colors must be a tuple, list, or color string, got {type(self.neuron_colors).__name__}")
+            self._vprint(f"\033[33m⚠️  Warning: neuron_colors must be a tuple, list, or color string, got {type(self.neuron_colors).__name__}; falling back to default palette.\033[0m", level='simple')
+            self.neuron_colors = None
             
         # synapse_colors: same flexibility
         if isinstance(self.synapse_colors, str):
             pass  # Valid - single color string
         elif isinstance(self.synapse_colors, (tuple, list)):
             if len(self.synapse_colors) == 0:
-                errors.append("synapse_colors cannot be empty")
+                self._vprint("\033[33m⚠️  Warning: synapse_colors is empty; falling back to default palette.\033[0m", level='simple')
+                self.synapse_colors = list(bokeh.palettes.Category10[10])
         else:
-            errors.append(f"synapse_colors must be a tuple, list, or color string, got {type(self.synapse_colors).__name__}")
+            self._vprint(f"\033[33m⚠️  Warning: synapse_colors must be a tuple, list, or color string, got {type(self.synapse_colors).__name__}; falling back to default palette.\033[0m", level='simple')
+            self.synapse_colors = list(bokeh.palettes.Category10[10])
             
         # === mesh_roi validation ===
         if self.mesh_roi is not None and not isinstance(self.mesh_roi, (list, str)):
@@ -3873,7 +3879,8 @@ class VisualizeSkeleton:
             errors.append(f"transforms_dir must be a string, got {type(self.transforms_dir).__name__}")
             
         # === Color validations for brain_mesh_color and vnc_mesh_color (flexible formats) ===
-        # These now accept: 'auto', named colors, hex, rgba strings, tuples
+        # These now accept: 'auto', named colors, hex, rgba strings, tuples.
+        # Malformed values warn and fall back to 'auto' instead of failing.
         def _validate_mesh_color(color, name):
             """Helper to validate flexible color format."""
             if isinstance(color, str):
@@ -3881,9 +3888,11 @@ class VisualizeSkeleton:
             elif isinstance(color, (tuple, list)):
                 if len(color) >= 3:
                     return  # Valid tuple format
-                errors.append(f"{name} tuple must have at least 3 values (RGB), got {len(color)}")
+                self._vprint(f"\033[33m⚠️  Warning: {name} tuple must have at least 3 values (RGB), got {len(color)}; falling back to 'auto'.\033[0m", level='simple')
+                setattr(self, name, 'auto')
             else:
-                errors.append(f"{name} must be a string, tuple, or list, got {type(color).__name__}")
+                self._vprint(f"\033[33m⚠️  Warning: {name} must be a string, tuple, or list, got {type(color).__name__}; falling back to 'auto'.\033[0m", level='simple')
+                setattr(self, name, 'auto')
         
         _validate_mesh_color(self.brain_mesh_color, 'brain_mesh_color')
         _validate_mesh_color(self.vnc_mesh_color, 'vnc_mesh_color')
@@ -3903,17 +3912,121 @@ class VisualizeSkeleton:
                     if len(self.mesh_color) >= 4:
                         r, g, b, a = self.mesh_color[0], self.mesh_color[1], self.mesh_color[2], self.mesh_color[3]
                         if not 0 <= a <= 1:
-                            errors.append(f"mesh_color alpha must be 0-1, got {a}")
+                            self._vprint(f"\033[33m⚠️  Warning: mesh_color alpha must be 0-1, got {a}; using mesh_alpha instead.\033[0m", level='simple')
+                            self.mesh_color = (r, g, b)
                 # else: list of colors, validated later when standardizing
         else:
-            errors.append(f"mesh_color must be a tuple, list, or string, got {type(self.mesh_color).__name__}")
+            self._vprint(f"\033[33m⚠️  Warning: mesh_color must be a tuple, list, or string, got {type(self.mesh_color).__name__}; falling back to default gray.\033[0m", level='simple')
+            self.mesh_color = (100, 100, 100)
         
         # === Raise all errors together ===
         if errors:
             error_msg = "VisualizeSkeleton input validation failed:\n  - " + "\n  - ".join(errors)
             raise ValueError(error_msg)
 
+    def _is_valid_color(self, color) -> bool:
+        """Return True if `color` parses to a usable color (any supported format)."""
+        try:
+            standardize_color(color)
+            return True
+        except Exception:
+            return False
+
+    def _normalize_color_inputs(self):
+        """
+        Coerce empty or invalid color inputs to their defaults before validation.
+
+        Empty lists (e.g., the UI sends synapse_colors=[] for a single layer)
+        and unparseable values never hard-fail: each falls back to the
+        parameter's default palette with a warning, regardless of skip_synapse.
+        """
+        def warn(name, detail, fallback_label):
+            self._vprint(
+                f"\033[33m⚠️  Warning: {name} {detail}; falling back to default ({fallback_label}).\033[0m",
+                level='simple'
+            )
+
+        def normalize_sequence(value, name, fallback, fallback_label, allow_none=False, silent_empty=False):
+            """Normalize a parameter that accepts a single color or a list of colors."""
+            if value is None:
+                return None if allow_none else fallback
+            # Single color string
+            if isinstance(value, str):
+                if self._is_valid_color(value):
+                    return value
+                warn(name, f"contains an invalid color '{value}'", fallback_label)
+                return fallback
+            if isinstance(value, (tuple, list)):
+                # Single RGB(A) color tuple: 3-4 numeric values
+                if len(value) in (3, 4) and all(isinstance(x, (int, float)) for x in value):
+                    if self._is_valid_color(value):
+                        return value
+                    warn(name, f"contains an invalid color {value!r}", fallback_label)
+                    return fallback
+                if len(value) == 0:
+                    if not silent_empty:
+                        warn(name, "is empty", fallback_label)
+                    return fallback
+                # List of colors: drop unparseable entries, keep the rest
+                valid = [c for c in value if self._is_valid_color(c)]
+                dropped = len(value) - len(valid)
+                if dropped and valid:
+                    self._vprint(
+                        f"\033[33m⚠️  Warning: {name} contains {dropped} invalid color(s) that were dropped.\033[0m",
+                        level='simple'
+                    )
+                elif dropped:
+                    warn(name, f"contains {dropped} invalid color(s)", fallback_label)
+                return valid if valid else fallback
+            warn(name, f"has unsupported type {type(value).__name__}", fallback_label)
+            return fallback
+
+        def normalize_single(value, name, fallback='auto'):
+            """Normalize a parameter that accepts exactly one color (or 'auto')."""
+            if isinstance(value, str):
+                if value.strip().lower() == 'auto' or self._is_valid_color(value):
+                    return value
+                warn(name, f"contains an invalid color '{value}'", f"'{fallback}'")
+                return fallback
+            if isinstance(value, (tuple, list)):
+                if len(value) in (3, 4) and all(isinstance(x, (int, float)) for x in value) \
+                        and self._is_valid_color(value):
+                    return value
+                warn(name, f"contains an invalid color {value!r}", f"'{fallback}'")
+                return fallback
+            warn(name, f"has unsupported type {type(value).__name__}", f"'{fallback}'")
+            return fallback
+
+        # neuron_colors: None triggers the background-dependent default palette below
+        self.neuron_colors = normalize_sequence(
+            self.neuron_colors, 'neuron_colors', None, 'default palette', allow_none=True
+        )
+        # synapse_colors: fall back to the field default palette. An empty
+        # list is the expected input when there is only one neuron layer
+        # (no inter-layer connections), so fall back silently in that case.
+        n_layers = len(self.neuron_layers) if isinstance(self.neuron_layers, list) else 1
+        self.synapse_colors = normalize_sequence(
+            self.synapse_colors, 'synapse_colors',
+            list(bokeh.palettes.Category10[10]), 'Category10 palette',
+            silent_empty=(n_layers <= 1)
+        )
+        # mesh_color: fall back to the default gray (None is resolved by validation)
+        self.mesh_color = normalize_sequence(
+            self.mesh_color, 'mesh_color', (100, 100, 100), '(100, 100, 100)', allow_none=True
+        )
+        # brain/VNC mesh colors: 'auto' or a single valid color
+        self.brain_mesh_color = normalize_single(self.brain_mesh_color, 'brain_mesh_color')
+        self.vnc_mesh_color = normalize_single(self.vnc_mesh_color, 'vnc_mesh_color')
+        # background_color: any parseable color string, else white
+        if not isinstance(self.background_color, str) or not self._is_valid_color(self.background_color):
+            warn('background_color', f"value {self.background_color!r} is not a valid color", "'white'")
+            self.background_color = 'white'
+
     def __post_init__(self):
+        # Empty or invalid color inputs fall back to their default palettes
+        # (with warnings) instead of failing validation.
+        self._normalize_color_inputs()
+
         # Default neuron palette follows the background color: bokeh
         # Category10 on white, bokeh Set3 on black (resolved before the
         # color validation below runs).
