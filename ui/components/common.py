@@ -567,6 +567,13 @@ def neuron_list_input(
                          'popup-content-class="drocat-native-popup-hidden"')
         with ui.menu() as suggest_menu:
             pass
+        # The menu must NEVER take focus from the editor: QMenu focuses itself
+        # on open by default, which blurs the QSelect, clears the typed text
+        # and swallows further keystrokes. no-focus keeps the editor focused
+        # while the menu overlays; the explicit target anchors the menu to the
+        # input (it would otherwise anchor to the container column).
+        suggest_menu.props('no-focus')
+        suggest_menu.props(f'target="#{chip_input.id}"')
         suggest_menu.style("max-height: 360px; overflow-y: auto;")
 
         def _commit_suggestion(value):
@@ -578,6 +585,10 @@ def neuron_list_input(
                 merged = current + [value]
                 if max_items is not None:
                     merged = merged[:max_items]
+                # Quasar's new-value-mode re-adds the leftover editor text as
+                # a chip when the model changes externally; wipe it first so
+                # only the picked value lands in the list.
+                chip_input.run_method("clearInputValue")
                 sync_options(merged)
                 chip_input.set_value(merged)
             pending_input["value"] = ""
@@ -637,6 +648,10 @@ def neuron_list_input(
             _show_suggestions(suggestions(text.strip()) or [])
 
         def _on_suggest_focus(_event):
+            # The menu is already showing suggestions (e.g. after a pick) —
+            # do not flip it back to the history list.
+            if suggest_menu.value:
+                return
             # No editor text yet -> offer the persistent query history.
             if not pending_input["value"]:
                 _show_history()

@@ -2434,6 +2434,10 @@ class TestComponents:
         menus = [el for el in client.elements.values()
                  if type(el).__name__ == "Menu"]
         menu = menus[-1]
+        # The suggestion menu must not steal focus from the editor (typing
+        # would die) and anchors to the input, not the container.
+        assert menu._props.get("no-focus") is True
+        assert menu._props.get("target") == f"#{chip.id}"
 
         # One character is below the threshold: no suggestion menu.
         chip._handle_event({"listener_id": suggest_input.id, "args": "a"})
