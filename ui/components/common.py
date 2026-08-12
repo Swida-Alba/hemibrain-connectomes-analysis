@@ -323,12 +323,13 @@ def neuron_list_input(
       "3 thresholds" instead of "3 neurons").
     - ``suggestions``: optional provider ``typed_text -> [(value, hint)]``
       powering the auto-suggest dropdown (dataset type/instance/bodyId names
-      with the searched column as a gray hint). Suggestions appear only after
-      ``suggestion_min_chars`` characters (default 2) and at most
-      ``suggestion_limit`` entries are shown. With a provider, focusing the
-      empty field opens the persistent query history (last 10 + most
-      frequent) and the native QSelect popup is replaced by the custom
-      suggestion menu.
+      with the searched column as a gray hint). The provider is prefiltered
+      from the first character, but dataset suggestions stay hidden until
+      ``suggestion_min_chars`` characters (default 2); below that threshold
+      only matching query history is shown. At most ``suggestion_limit``
+      entries are shown. With a provider, focusing the empty field opens the
+      persistent query history (last 10 + most frequent) and the native
+      QSelect popup is replaced by the custom suggestion menu.
 
     Returns container with .get_value() -> (filter_mode, neuron_list).
     """
@@ -366,15 +367,21 @@ def neuron_list_input(
             # renders chips whose values exist in its options (model-value is
             # filtered against them), so committed values must be added there.
             initial_values = [_normalize_neuron_value(item) for item in (initial or [])]
-            chip_input = ui.select(
-                options=list(initial_values),
-                value=list(initial_values),
-                label=label,
-                multiple=True,
-            ).props(
-                'use-chips use-input new-value-mode="add-unique" '
-                'input-debounce="0"'
-            ).classes("flex-grow drocat-select drocat-chip-input").tooltip(hint)
+            # Keep a private anchor around each QSelect. The custom QMenu is
+            # rendered into this wrapper below, rather than into the shared
+            # input row; otherwise two neuron inputs on the same page would
+            # anchor their menus to the same row and one popup could obscure
+            # the other input during a focus change.
+            with ui.element("div").classes("relative flex-grow") as chip_input_anchor:
+                chip_input = ui.select(
+                    options=list(initial_values),
+                    value=list(initial_values),
+                    label=label,
+                    multiple=True,
+                ).props(
+                    'use-chips use-input new-value-mode="add-unique" '
+                    'input-debounce="0"'
+                ).classes("w-full drocat-select drocat-chip-input").tooltip(hint)
 
             filter_mode = None
             if show_filter:
@@ -577,14 +584,19 @@ def neuron_list_input(
         # (CSS rule in ui/app.py) and drive the custom menu instead.
         chip_input.props('hide-dropdown-icon '
                          'popup-content-class="drocat-native-popup-hidden"')
-        with ui.menu() as suggest_menu:
-            pass
+        # Re-enter the per-input wrapper so QMenu uses this field as its
+        # anchor. NiceGUI/Quasar portals the menu to the body at runtime, but
+        # its position and outside-focus lifecycle still come from the parent.
+        with chip_input_anchor:
+            with ui.menu() as suggest_menu:
+                pass
+        suggest_menu.classes("drocat-suggest-menu")
         # The menu must NEVER take focus from the editor: QMenu focuses itself
         # on open by default, which blurs the QSelect, clears the typed text
         # and swallows further keystrokes. no-focus keeps the editor focused
         # while the menu overlays. (No explicit target: NiceGUI 3.15 renders
-        # no DOM ids, so Quasar's target= selector cannot resolve — the menu
-        # anchors to its parent container like the paste/upload menus.)
+        # no DOM ids, so the menu anchors to the per-input wrapper instead of
+        # relying on a selector target.
         suggest_menu.props('no-focus')
         suggest_menu.style("max-height: 360px; overflow-y: auto;")
 
@@ -654,10 +666,21 @@ def neuron_list_input(
                                     "text-caption text-grey-6")
             _refresh_menu()
 
-        def _show_history():
+        def _show_history(query: str = ""):
             from ..history_store import recent as _recent, frequent as _frequent
-            recents = _recent()
-            freqs = [v for v in _frequent() if v not in recents]
+
+            def matches_query(value: str) -> bool:
+                # History filtering follows the same strict prefix behavior
+                # as the first suggestion stage. It is intentionally kept
+                # to history only while the editor has fewer than the
+                # minimum number of characters for dataset suggestions.
+                return not query or str(value).startswith(query)
+
+            recents = [v for v in _recent() if matches_query(v)]
+            freqs = [
+                v for v in _frequent()
+                if v not in recents and matches_query(v)
+            ]
             if not recents and not freqs:
                 _close_suggest()
                 return
@@ -688,17 +711,22 @@ def neuron_list_input(
                 return
             text = str(getattr(event, "args", "") or "")
             if len(text.strip()) < suggestion_min_chars:
-                # Below the threshold only an empty field offers history —
-                # and only while the field still has focus (Quasar re-emits
-                # an empty input-value on blur-reset).
-                if not text.strip() and _focused["value"]:
-                    _show_history()
+                # Warm the provider's strict prefix candidate set from the
+                # first character, but deliberately render only matching
+                # history until the input is precise enough to be useful.
+                # This keeps a one-character query such as "a" responsive
+                # without dumping an ambiguous list of dataset names.
+                if text.strip():
+                    suggestions(text.strip())
+                if _focused["value"]:
+                    _show_history(text.strip())
                 else:
                     _close_suggest()
                 return
             _show_suggestions(suggestions(text.strip()) or [])
 
         def _on_suggest_focus(_event):
+            _close_other_suggestion_menus()
             _focused["value"] = True
             if not _suggestions_enabled():
                 return
@@ -712,6 +740,11 @@ def neuron_list_input(
 
         def _on_suggest_blur(_event):
             if not _suggestions_enabled():
+                # The setting can be changed from the Settings tab while a
+                # menu is open. Treat the next focus change as a real blur
+                # even in that disabled state so no stale popup survives.
+                _focused["value"] = False
+                _close_suggest()
                 return
             # Focus moved INTO the menu: a pick is about to happen; keep the
             # field "focused" so the finished-input handler offers Recent.
@@ -722,6 +755,31 @@ def neuron_list_input(
             # the pending text like a plain blur.
             _close_suggest()
             commit_pending_text()
+
+        def _deactivate_for_focus_change():
+            """Hide this menu when another neuron input receives focus."""
+            _focused["value"] = False
+            _pointer_in_menu["value"] = False
+            _close_suggest()
+            # If Quasar skipped the old field's blur event, preserve the
+            # normal finished-input behavior and commit its editor text now.
+            commit_pending_text()
+
+        def _close_other_suggestion_menus():
+            """Make this input the only active suggestion-menu owner."""
+            client = suggest_menu.client
+            # Store the registry on the client itself: it is naturally scoped
+            # to one page connection and disappears with that client, while
+            # a module-level registry could retain page closures.
+            registrations = getattr(client, "_drocat_suggestion_menus", [])
+            alive = []
+            for menu, deactivate in registrations:
+                if getattr(menu, "_deleted", False):
+                    continue
+                alive.append((menu, deactivate))
+                if menu is not suggest_menu:
+                    deactivate()
+            client._drocat_suggestion_menus = alive
 
         def _on_menu_hide(_event):
             _pointer_in_menu["value"] = False
@@ -747,10 +805,19 @@ def neuron_list_input(
             else:
                 _close_suggest()
 
+        registry = getattr(suggest_menu.client, "_drocat_suggestion_menus", [])
+        registry.append((suggest_menu, _deactivate_for_focus_change))
+        suggest_menu.client._drocat_suggestion_menus = registry
+
         chip_input.on("input", _on_suggest_input,
                       js_handler="(event) => emit(event?.target?.value ?? '')")
         chip_input.on("focus", _on_suggest_focus)
         chip_input.on("blur", _on_suggest_blur)
+        # QSelect's component-level blur is not emitted consistently when a
+        # second QSelect is focused. Native focusout bubbles from its search
+        # input, so listen to both paths to guarantee stale suggestions are
+        # hidden on every focus transition.
+        chip_input.on("focusout", _on_suggest_blur)
         suggest_menu.on("mousedown",
                         lambda _e: _pointer_in_menu.__setitem__("value", True),
                         js_handler="(event) => emit(0)")
@@ -792,6 +859,7 @@ def neuron_list_input(
     container.chip_input = chip_input
     container.filter_mode = filter_mode
     container.uploaded_neurons = uploaded_neurons
+    container.suggest_menu = suggest_menu
     return container
 
 

@@ -1,8 +1,9 @@
-"""Tests for the dataset type-name suggestion pools (ui/type_suggestions.py).
+"""Tests for dataset auto-suggestion pools and staged matching.
 
-Covers the matching rules (type-first, expand-on-no-type-match, bodyId ->
-instance hints) and the local pool sources (cache neuron_index.parquet
-first, dataset tables as fallback, mtime-keyed caching).
+Covers strict type-first prefixes, cross-column prefix expansion, the final
+case-insensitive substring fallback, bodyId -> instance hints, and the local
+pool sources (cache neuron_index.parquet first, dataset tables as fallback,
+mtime-keyed caching).
 """
 
 import polars as pl
@@ -60,13 +61,66 @@ class TestMatchSuggestions:
         assert match_suggestions("AP", POOLS) == [("APL", "type"), ("APL2", "type")]
 
     def test_case_sensitive_prefix(self):
-        """Type names are canonical ('aMe12'): the suggestions only surface
-        names whose case matches the typed prefix, like the backend search."""
+        """Prefix completion is canonical, then substring fallback recovers
+        case-insensitively when no prefix exists."""
         assert match_suggestions("aMe", POOLS) == [("aMe12", "type")]
-        assert match_suggestions("ame", POOLS) == []
+        assert match_suggestions("ame", POOLS) == [
+            ("aMe12", "type"), ("aMe12_1", "instance"),
+        ]
         assert match_suggestions("AMMC", POOLS) == []
         assert match_suggestions("APL", POOLS)[0] == ("APL", "type")
-        assert match_suggestions("Apl2", POOLS) == []
+        assert match_suggestions("Apl2", POOLS) == [("APL2", "type")]
+
+    def test_type_prefix_is_strictly_first(self):
+        """A type prefix suppresses every less-specific column candidate."""
+        pools = {
+            "type": [("aMe12", "type"), ("aMeClock", "type")],
+            "instance": [("aMe12_L", "instance")],
+            "bodyId": [("aMe12_body", "aMe12_L")],
+            "flywireType": [("aMe12_fw", "flywireType")],
+        }
+        assert match_suggestions("aMe", pools) == [
+            ("aMe12", "type"), ("aMeClock", "type"),
+        ]
+
+    def test_other_column_prefixes_expand_only_after_type_prefixes_fail(self):
+        """Instance/bodyId/extra prefixes are returned before substrings."""
+        pools = {
+            "type": [("CellAlpha", "type")],
+            "instance": [("aMe12_L", "instance")],
+            "bodyId": [("aMe12_body", "aMe12_L")],
+            "flywireType": [("aMe12_fw", "flywireType")],
+        }
+        assert match_suggestions("aMe", pools) == [
+            ("aMe12_L", "instance"),
+            ("aMe12_body", "aMe12_L"),
+            ("aMe12_fw", "flywireType"),
+        ]
+
+    def test_prefix_stage_wins_over_substring_stage(self):
+        """A non-type prefix suppresses a type substring fallback."""
+        pools = {
+            "type": [("CellAlpha", "type")],
+            "instance": [("alpha_instance", "instance")],
+        }
+        assert match_suggestions("alpha", pools) == [("alpha_instance", "instance")]
+
+    def test_substring_fallback_is_last_and_type_preferred(self):
+        """Only when every prefix fails do case-insensitive substrings appear."""
+        pools = {
+            "type": [("CellAlpha", "type"), ("BetaCell", "type")],
+            "instance": [("alpha_instance", "instance")],
+            "bodyId": [("9900", "Alpha_1")],
+        }
+        assert match_suggestions("ALPH", pools) == [
+            ("CellAlpha", "type"), ("alpha_instance", "instance"),
+        ]
+
+    def test_prefix_miss_can_use_case_insensitive_substring(self):
+        assert match_suggestions("aMe12_", POOLS) == [("aMe12_1", "instance")]
+        assert match_suggestions("AME", POOLS) == [
+            ("aMe12", "type"), ("aMe12_1", "instance"),
+        ]
 
     def test_expand_only_when_no_type_match_and_auto(self):
         # "aMe12_" matches no type -> the range expands to instance.
@@ -87,6 +141,18 @@ class TestMatchSuggestions:
         assert match_suggestions("mbon", POOLS, "instance") == []
         assert match_suggestions("mbon", POOLS, "bodyId") == []
         assert match_suggestions("APL", POOLS, "type") == [("APL", "type"), ("APL2", "type")]
+
+    def test_explicit_scope_uses_prefix_then_substring_in_that_column(self):
+        assert match_suggestions("pl_", POOLS, "instance") == [("APL_1", "instance")]
+        assert match_suggestions("me12_", POOLS, "instance") == [("aMe12_1", "instance")]
+
+    def test_auto_bodyid_entries_keep_instance_hints(self):
+        out = match_suggestions("58130123", POOLS)
+        assert out == [
+            ("5813012345", "aMe12_1"),
+            ("5813012346", "bodyId"),
+            ("5813012399", "bodyId"),
+        ]
 
     def test_scope_case_insensitive_and_unknown_falls_back_to_auto(self):
         assert match_suggestions("APL", POOLS, "TYPE") == [("APL", "type"), ("APL2", "type")]
@@ -119,12 +185,16 @@ class TestPoolSources:
             "bodyId": [5813012345, 5813012346],
             "type": ["APL", "MBON01"],
             "instance": ["APL_1", "MBON01_1"],
+            "flywireType": ["FW_APL", "FW_MBON"],
         }).write_parquet(cache / folder / "neuron_index.parquet")
 
         pools = _folder_pools(folder)
         assert pools["type"] == [("APL", "type"), ("MBON01", "type")]
         assert pools["bodyId"] == [
             ("5813012345", "APL_1"), ("5813012346", "MBON01_1"),
+        ]
+        assert pools["flywireType"] == [
+            ("FW_APL", "flywireType"), ("FW_MBON", "flywireType"),
         ]
 
     def test_table_fallback_pools(self, local_dirs):
