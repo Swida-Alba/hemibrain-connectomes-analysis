@@ -71,10 +71,12 @@
       query or exported at run time — into
       <code>cache/user_mappings/group_history.json</code>. Selecting an entry
       loads that group's members onto the board for reuse or editing; no name
-      is asked and nothing is saved manually. A label maps to every dataset it
-      was ever defined for; defining it again with different members
-      <b>covers</b> (replaces) the previous value for the datasets on the
-      board. Auto-named <code>Group_N</code> rows are never recorded.</li>
+      is asked and nothing is saved manually. Each entry also has an
+      <b>“x”</b> that removes it from the history after a confirmation
+      popup. A label maps to every dataset it was ever defined for; defining
+      it again with different members <b>covers</b> (replaces) the previous
+      value for the datasets on the board. Auto-named <code>Group_N</code>
+      rows are never recorded.</li>
     <li><b>Use groups in the query:</b> each group row carries
       <i>Add to Source</i> / <i>Add to Target</i> (or <i>Add to Query</i>)
       buttons that append the group's <b>label</b> as a single chip to the

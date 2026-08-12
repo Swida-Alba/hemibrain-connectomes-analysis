@@ -188,8 +188,8 @@ class TestSelectorGate:
                 tab_key="gate", datasets_provider=lambda: [DS_A])
         assert dialog.value is False
         assert "none" in button.text
-        # The panel hosts the history pulldown and the board.
-        assert dialog.history_select.value is None
+        # The panel hosts the history loader menu and the board.
+        assert dialog.history_menu is not None
         assert dialog.inline_grouper is not None
         with client:
             dialog.open()
@@ -286,29 +286,41 @@ class TestRunResolution:
         assert Path(path2).exists() and Path(path3).exists()
 
     def test_history_select_loads_group_onto_board(self, isolated_store):
-        """The history pulldown (former preset) loads a recorded group's
-        members onto the board; nothing is named or saved manually."""
+        """The history loader (former preset) loads a recorded group's members
+        onto the board; nothing is named or saved manually."""
         gh.record([("ortho", {DS_A: ["aMe12", "aMe10"]})], origin="inline")
         client, _button, dialog, resolve = self._build("/res-history")
         grouper = dialog.inline_grouper
         with client:
-            dialog.open()  # refreshes history options
-        assert "ortho" in dialog.history_select.options
+            dialog.open()
+        # Load via the history menu's load action.
         with client:
-            dialog.history_select.value = "ortho"
-        # The group row was upserted onto the board with its members.
+            dialog.load_history_group("ortho")
         names = [r["name"] for r in grouper.handle.rows]
         assert "ortho" in names
         row = next(r for r in grouper.handle.rows if r["name"] == "ortho")
         assert row["cells"][DS_A] == ["aMe12", "aMe10"]
-        # Selecting resets the pulldown so it can be re-used.
-        assert dialog.history_select.value is None
         # Resolve now exports the loaded group.
         with client:
             path, ok = resolve()
         assert ok and path
         data = json.loads(Path(path).read_text(encoding="utf-8"))
         assert data["source_mapping"]["custom_label"] == ["ortho"]
+
+    def test_history_removal_requires_confirmation(self, isolated_store):
+        """The 'x' opens a confirmation; the label is removed only on confirm."""
+        gh.record([("gone", {DS_A: ["aMe12"]})], origin="inline")
+        client, _button, dialog, _resolve = self._build("/res-remove")
+        with client:
+            dialog.open()
+        # Requesting removal opens the confirm dialog but does NOT delete yet.
+        with client:
+            dialog.request_remove_history("gone")
+        assert gh.list_recent() == ["gone"]
+        # Confirming deletes it from the history store.
+        with client:
+            dialog.confirm_remove_history()
+        assert gh.list_recent() == []
 
     def test_push_records_group_into_history(self, isolated_store):
         """Pushing a group to a query records it into the history immediately."""

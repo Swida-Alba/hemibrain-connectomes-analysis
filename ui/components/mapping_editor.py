@@ -132,15 +132,20 @@ def custom_grouping_block(
                 ui.button(icon="close", on_click=dialog.close).props(
                     "flat round dense")
             with ui.row().classes("w-full items-center gap-3"):
-                # The former "preset" control is now a HISTORY loader: it lists
-                # previously-used custom groups (recorded automatically when a
-                # group is pushed to a query / exported). Selecting one loads it
-                # onto the board; nothing is named or saved manually.
-                history_select = ui.select(
-                    options=[],
-                    value=None,
-                    label="Load a saved group (history)",
-                ).classes("drocat-select").style("min-width: 320px")
+                # The former "preset" control is now a HISTORY loader: a button
+                # opening a menu of previously-used groups (recorded
+                # automatically when a group is pushed to a query / exported).
+                # Each entry has a load action and an "x" that removes it from
+                # the history after a confirmation popup; nothing is named or
+                # saved manually.
+                history_button = ui.button(
+                    "Load a saved group (history)", icon="history"
+                ).props("outline no-caps").style(
+                    "min-width: 320px; justify-content: flex-start")
+                with history_button:
+                    with ui.menu() as history_menu:
+                        history_list = ui.column().classes("gap-0").style(
+                            "min-width: 300px")
                 ui.link(
                     "📖 Custom grouping instructions",
                     MAPPING_GUIDE_URL,
@@ -153,28 +158,67 @@ def custom_grouping_block(
         datasets_provider or (lambda: []),
         watch_elements=watch_elements,
     )
+
+    # Confirmation popup for history removal (overlays the panel dialog).
+    remove_dialog = ui.dialog()
+    with remove_dialog:
+        with ui.card().classes("q-pa-md"):
+            remove_msg = ui.label("").classes("text-body2")
+            with ui.row().classes("justify-end gap-2 q-mt-sm"):
+                ui.button("Cancel", on_click=remove_dialog.close).props(
+                    "flat dense")
+                ui.button("Remove", icon="delete",
+                          on_click=lambda: _confirm_remove()).props(
+                    "flat dense color=negative")
+
     # Test/DOM hooks.
     dialog.inline_grouper = grouper
-    dialog.history_select = history_select
+    dialog.history_menu = history_menu
 
-    def _refresh_history() -> None:
-        # set_options() (not a bare .options assignment) so the client QSelect
-        # actually receives the refreshed history list.
-        history_select.set_options(group_history.list_recent(), value=None)
+    def _render_history() -> None:
+        history_list.clear()
+        with history_list:
+            recent = group_history.list_recent()
+            if not recent:
+                ui.label("No group history yet.").classes(
+                    "text-caption drocat-muted px-3 py-2")
+                return
+            for lab in recent:
+                with ui.row().classes("items-center gap-1 w-full"):
+                    ui.button(
+                        lab, on_click=lambda _e, l=lab: _load_group(l)
+                    ).props("flat dense no-caps align=left").classes("flex-grow")
+                    ui.button(
+                        icon="close",
+                        on_click=lambda _e, l=lab: _ask_remove(l)
+                    ).props("flat dense round").tooltip("Remove from history")
 
-    def _on_history_select(event) -> None:
-        lab = event.value
-        if not lab:
-            return
+    def _load_group(lab: str) -> None:
         rec = group_history.get_label(lab)
         if rec:
             grouper.handle.upsert_row(lab, rec.get("members") or {})
             grouper.resync()
             _update_button_label()
-        # Reset so the same entry can be re-selected later.
-        history_select.value = None
+        history_menu.close()
 
-    history_select.on_value_change(_on_history_select)
+    def _ask_remove(lab: str) -> None:
+        pending_remove["label"] = lab
+        remove_msg.set_text(f"Remove group '{lab}' from the history?")
+        remove_dialog.open()
+
+    def _confirm_remove() -> None:
+        lab = pending_remove["label"]
+        if lab:
+            group_history.remove_label(lab)
+            ui.notify(f"Group '{lab}' removed from history", type="positive")
+            pending_remove["label"] = None
+            _render_history()
+        remove_dialog.close()
+
+    pending_remove = {"label": None}
+    dialog.load_history_group = _load_group
+    dialog.request_remove_history = _ask_remove
+    dialog.confirm_remove_history = _confirm_remove
 
     def _group_count() -> int:
         return sum(
@@ -191,7 +235,7 @@ def custom_grouping_block(
 
     def _on_dialog_toggle(event) -> None:
         if event.value:  # opening
-            _refresh_history()
+            _render_history()
             # First-open convenience: seed a single empty row for editing, but
             # only when the board is empty (never on top of existing groups).
             if not grouper.handle.rows:
@@ -199,6 +243,7 @@ def custom_grouping_block(
             grouper.resync()
         _update_button_label()
 
+    history_button.on_click(lambda: (_render_history(), history_menu.open()))
     open_button.on_click(_open_panel)
     dialog.on_value_change(_on_dialog_toggle)
     _update_button_label()
