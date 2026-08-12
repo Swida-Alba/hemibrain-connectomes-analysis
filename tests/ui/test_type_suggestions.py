@@ -1,7 +1,7 @@
 """Tests for dataset auto-suggestion pools and staged matching.
 
 Covers strict type-first prefixes, cross-column prefix expansion, the final
-case-insensitive substring fallback, bodyId -> instance hints, and the local
+case-sensitive substring fallback, bodyId -> instance hints, and the local
 pool sources (cache neuron_index.parquet first, dataset tables as fallback,
 mtime-keyed caching).
 """
@@ -10,8 +10,8 @@ import polars as pl
 import pytest
 
 from ui.type_suggestions import (
-    _POOL_CACHE, _folder_pools, entry_hint, get_dataset_pools,
-    match_suggestions, suggestion_pool,
+    _POOL_CACHE, _folder_pools, entry_hint, filter_candidate_entries,
+    get_dataset_pools, match_suggestions, suggestion_pool,
 )
 
 # Synthetic pools mirroring a cache neuron_index (type/instance/bodyId).
@@ -61,15 +61,15 @@ class TestMatchSuggestions:
         assert match_suggestions("AP", POOLS) == [("APL", "type"), ("APL2", "type")]
 
     def test_case_sensitive_prefix(self):
-        """Prefix completion is canonical, then substring fallback recovers
-        case-insensitively when no prefix exists."""
+        """Both prefix and substring stages preserve input capitalization."""
         assert match_suggestions("aMe", POOLS) == [("aMe12", "type")]
-        assert match_suggestions("ame", POOLS) == [
+        assert match_suggestions("ame", POOLS) == []
+        assert match_suggestions("Me12", POOLS) == [
             ("aMe12", "type"), ("aMe12_1", "instance"),
         ]
         assert match_suggestions("AMMC", POOLS) == []
         assert match_suggestions("APL", POOLS)[0] == ("APL", "type")
-        assert match_suggestions("Apl2", POOLS) == [("APL2", "type")]
+        assert match_suggestions("Apl2", POOLS) == []
 
     def test_type_prefix_is_strictly_first(self):
         """A type prefix suppresses every less-specific column candidate."""
@@ -106,21 +106,30 @@ class TestMatchSuggestions:
         assert match_suggestions("alpha", pools) == [("alpha_instance", "instance")]
 
     def test_substring_fallback_is_last_and_type_preferred(self):
-        """Only when every prefix fails do case-insensitive substrings appear."""
+        """Only when every prefix fails do case-sensitive substrings appear."""
         pools = {
             "type": [("CellAlpha", "type"), ("BetaCell", "type")],
-            "instance": [("alpha_instance", "instance")],
+            "instance": [("xAlpha_instance", "instance")],
             "bodyId": [("9900", "Alpha_1")],
         }
-        assert match_suggestions("ALPH", pools) == [
-            ("CellAlpha", "type"), ("alpha_instance", "instance"),
+        assert match_suggestions("Alpha", pools) == [
+            ("CellAlpha", "type"), ("xAlpha_instance", "instance"),
         ]
 
-    def test_prefix_miss_can_use_case_insensitive_substring(self):
-        assert match_suggestions("aMe12_", POOLS) == [("aMe12_1", "instance")]
-        assert match_suggestions("AME", POOLS) == [
-            ("aMe12", "type"), ("aMe12_1", "instance"),
+    def test_prefix_miss_uses_case_sensitive_substring(self):
+        assert match_suggestions("Me12_", POOLS) == [("aMe12_1", "instance")]
+        assert match_suggestions("AME", POOLS) == []
+
+    def test_filter_candidate_entries_narrows_case_sensitively(self):
+        candidates = [
+            ("aMe12", "type"), ("aMe10", "type"),
+            ("aMap", "type"), ("Ame12", "type"),
         ]
+        assert filter_candidate_entries("aM", candidates) == candidates[:3]
+        assert filter_candidate_entries("aMe1", candidates) == [
+            ("aMe12", "type"), ("aMe10", "type"),
+        ]
+        assert filter_candidate_entries("am", candidates) == []
 
     def test_expand_only_when_no_type_match_and_auto(self):
         # "aMe12_" matches no type -> the range expands to instance.
@@ -143,8 +152,8 @@ class TestMatchSuggestions:
         assert match_suggestions("APL", POOLS, "type") == [("APL", "type"), ("APL2", "type")]
 
     def test_explicit_scope_uses_prefix_then_substring_in_that_column(self):
-        assert match_suggestions("pl_", POOLS, "instance") == [("APL_1", "instance")]
-        assert match_suggestions("me12_", POOLS, "instance") == [("aMe12_1", "instance")]
+        assert match_suggestions("PL_", POOLS, "instance") == [("APL_1", "instance")]
+        assert match_suggestions("Me12_", POOLS, "instance") == [("aMe12_1", "instance")]
 
     def test_auto_bodyid_entries_keep_instance_hints(self):
         out = match_suggestions("58130123", POOLS)
@@ -161,6 +170,17 @@ class TestMatchSuggestions:
     def test_limit(self):
         assert len(match_suggestions("5813", POOLS, limit=2)) == 2
         assert len(match_suggestions("AP", POOLS, limit=1)) == 1
+
+    def test_unbounded_limit_keeps_all_continuation_candidates(self):
+        pools = {
+            "type": [(f"aType{i:02d}", "type") for i in range(60)],
+        }
+        assert len(match_suggestions("a", pools)) == 50
+        all_entries = match_suggestions("a", pools, limit=None)
+        assert len(all_entries) == 60
+        assert filter_candidate_entries("aType59", all_entries) == [
+            ("aType59", "type"),
+        ]
 
 
 class TestEntryHint:
@@ -186,6 +206,9 @@ class TestPoolSources:
             "type": ["APL", "MBON01"],
             "instance": ["APL_1", "MBON01_1"],
             "flywireType": ["FW_APL", "FW_MBON"],
+            "hemilineage": ["AL", "MB"],
+            "last_fetched": ["2026-08-12", "2026-08-12"],
+            "roiInfo": ["large payload", "large payload"],
         }).write_parquet(cache / folder / "neuron_index.parquet")
 
         pools = _folder_pools(folder)
@@ -196,23 +219,29 @@ class TestPoolSources:
         assert pools["flywireType"] == [
             ("FW_APL", "flywireType"), ("FW_MBON", "flywireType"),
         ]
+        assert pools["hemilineage"] == [
+            ("AL", "hemilineage"), ("MB", "hemilineage"),
+        ]
+        assert "last_fetched" not in pools
+        assert "roiInfo" not in pools
 
     def test_table_fallback_pools(self, local_dirs):
         """datasets/<folder> neuron tables (no cache index) build pools
-        including extra type-like columns (e.g. flywireType)."""
+        including every searchable string column (e.g. hemilineage)."""
         cache, datasets = local_dirs
         folder = "test_v1"
         ds_dir = datasets / folder
         ds_dir.mkdir()
         (ds_dir / "test_neuron_df.csv").write_text(
-            "bodyId,type,instance,flywireType\n"
-            "1,APL,APL_1,FW_APL\n"
-            "2,MBON01,MBON01_1,FW_MBON\n"
+            "bodyId,type,instance,flywireType,hemilineage\n"
+            "1,APL,APL_1,FW_APL,AL\n"
+            "2,MBON01,MBON01_1,FW_MBON,MB\n"
         )
 
         pools = _folder_pools(folder)
         assert pools["type"] == [("APL", "type"), ("MBON01", "type")]
         assert pools["flywireType"] == [("FW_APL", "flywireType"), ("FW_MBON", "flywireType")]
+        assert pools["hemilineage"] == [("AL", "hemilineage"), ("MB", "hemilineage")]
         assert pools["bodyId"] == [("1", "APL_1"), ("2", "MBON01_1")]
 
     def test_cache_index_preferred_over_table(self, local_dirs):
@@ -228,7 +257,59 @@ class TestPoolSources:
             "bodyId,type,instance\n1,MBON01,MBON01_1\n"
         )
 
-        assert _folder_pools(folder)["type"] == [("APL", "type")]
+        # Cache values stay first, while the table fills missing names.
+        assert _folder_pools(folder)["type"] == [
+            ("APL", "type"), ("MBON01", "type"),
+        ]
+
+    def test_sparse_cache_index_falls_back_to_table_names(self, local_dirs):
+        """A metadata-empty cache must not hide the dataset's type table."""
+        cache, datasets = local_dirs
+        folder = "test_v1"
+        (cache / folder).mkdir()
+        pl.DataFrame({
+            "bodyId": [1, 2], "type": ["", ""], "instance": ["", ""],
+        }).write_parquet(cache / folder / "neuron_index.parquet")
+        ds_dir = datasets / folder
+        ds_dir.mkdir()
+        (ds_dir / "x_neuron_df.csv").write_text(
+            "bodyId,type,instance\n"
+            "1,aMe12,aMe12_L\n"
+            "2,aMe10,aMe10_R\n"
+        )
+
+        pools = _folder_pools(folder)
+        assert pools["type"] == [("aMe10", "type"), ("aMe12", "type")]
+        assert pools["instance"] == [
+            ("aMe10_R", "instance"), ("aMe12_L", "instance"),
+        ]
+
+    def test_partial_cache_index_is_augmented_for_aMe_prefix(self, local_dirs):
+        """A cache with unrelated names still exposes table-only aMe types."""
+        cache, datasets = local_dirs
+        folder = "test_v1"
+        (cache / folder).mkdir()
+        pl.DataFrame({
+            "bodyId": [1], "type": ["hDeltaM"], "instance": ["hDeltaM_C1"],
+        }).write_parquet(cache / folder / "neuron_index.parquet")
+        ds_dir = datasets / folder
+        ds_dir.mkdir()
+        (ds_dir / "x_neuron_df.csv").write_text(
+            "bodyId,type,instance\n"
+            "1,hDeltaM,hDeltaM_C1\n"
+            "2,aMe12,aMe12_L\n"
+        )
+
+        pools = _folder_pools(folder)
+        assert match_suggestions("aM", pools) == [("aMe12", "type")]
+        assert match_suggestions("aMe", pools) == [("aMe12", "type")]
+
+    def test_type_prefix_suppresses_substring_candidates(self):
+        pools = {
+            "type": [("aMe12", "type")],
+            "instance": [("hDeltaM_C1", "instance")],
+        }
+        assert match_suggestions("aM", pools) == [("aMe12", "type")]
 
     def test_missing_folder_returns_empty(self, local_dirs, monkeypatch):
         assert get_dataset_pools("hemibrain:v1.2.1") == {}

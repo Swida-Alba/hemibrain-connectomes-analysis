@@ -149,6 +149,15 @@ html, body {
     white-space: nowrap;
 }
 .drocat-doc-link:hover { text-decoration: underline !important; }
+.drocat-inline-link {
+    color: var(--drocat-cobalt) !important;
+    font-size: 12px;
+    font-weight: 650;
+    text-decoration: none !important;
+}
+.drocat-inline-link:hover { text-decoration: underline !important; }
+.drocat-data-viewer-table .q-table__middle { max-height: 52vh; }
+.drocat-data-viewer-table th { white-space: nowrap; }
 
 /* ---------- Grouped navigation: layered cards ---------- */
 /* Every tab group is its own tinted card: the group header sits on top of

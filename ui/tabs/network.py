@@ -28,7 +28,9 @@ def create_network_tab():
         when no type matched and the search scope is 'auto'."""
         ds = dataset.value if dataset is not None else ""
         scope = search_columns.value if search_columns is not None else "auto"
-        return match_suggestions(text, get_dataset_pools(ds), scope)
+        # Keep the complete candidate pool for local continuation filtering;
+        # the input menu, not the backend matcher, limits visible rows.
+        return match_suggestions(text, get_dataset_pools(ds), scope, limit=None)
 
     form_col, results_col = tool_page(
         "Network",
@@ -54,6 +56,7 @@ def create_network_tab():
                 hint="The network is built from the direct connections WITHIN this set. "
                      "Enter neuron types, bodyIds, or patterns; upload CSV/TSV/Excel for large lists.",
                 suggestions=_type_suggest,
+                available_neurons=lambda: dataset.value if dataset is not None else "",
             )
             with param_grid(2):
                 dataset = dataset_selector(

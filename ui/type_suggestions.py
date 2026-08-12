@@ -3,14 +3,15 @@
 Suggestion entries are ``(value, hint)`` pairs so the dropdown can render the
 matched name with a gray hint of the searched column (for bodyId matches the
 hint is the corresponding instance). Pools are read from LOCAL dataset files
-only — ``cache/<dataset>/neuron_index.parquet`` first, falling back to the
-``datasets/<dataset>`` neuron tables — and cached per (dataset, file mtime);
-the server is never contacted, so a dataset that has not been pulled yet
-simply yields no suggestions.
+only — ``cache/<dataset>/neuron_index.parquet`` first, supplemented by the
+``datasets/<dataset>`` neuron tables when the cache is incomplete — and cached
+per (dataset, file mtime); the server is never contacted, so a dataset that
+has not been pulled yet simply yields no suggestions.
 """
 
 from __future__ import annotations
 
+import csv
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 
@@ -28,10 +29,15 @@ _POOL_CACHE: Dict[tuple, Dict[str, List[Entry]]] = {}
 
 # Columns whose distinct values become suggestion pools (hint = column name).
 _TYPE_COLUMNS = ("type", "instance")
-# Extra type-like columns from the dataset tables (e.g. flywireType,
-# hemibrainType, mancType) — the backend 'auto' search covers them too.
-_EXTRA_TYPE_COLUMNS_PATTERN = ("type", "cell_type", "celltype")
-
+# Cache bookkeeping and serialized metadata are not neuron identifiers even
+# though they can be stored as strings in local files. Exclude them from
+# suggestions; retaining them would both produce unusable rows (e.g. an
+# entire ROI list) and force large CSV fields into memory on every dataset
+# pool build.
+_NON_IDENTIFIER_COLUMNS = frozenset({
+    "last_fetched", "roiinfo", "inputrois", "outputrois", "synonyms",
+    "matchingnotes", "notes", "unnamed: 0",
+})
 _EMPTY_POOLS: Dict[str, List[Entry]] = {}
 
 
@@ -91,14 +97,14 @@ def _index_pools(folder: str) -> Optional[Dict[str, List[Entry]]]:
                 continue
             values = frame[col].drop_nulls().to_list()
             pools[col] = [(v, col) for v in _clean(values)]
-        # Extra type-like columns are present in some cached indexes (for
-        # example flywireType/hemibrainType). Keep them in the same search
-        # universe as the backend's auto-column lookup.
+        # The backend's auto scope searches every remaining string column
+        # after type/instance/bodyId (for example flywireType, hemilineage,
+        # or cell_class), so keep those columns in the suggestion universe.
         for col in sorted(cols):
-            if col in ("bodyId", "type", "instance"):
+            if (col in ("bodyId", "type", "instance")
+                    or str(col).casefold() in _NON_IDENTIFIER_COLUMNS):
                 continue
-            low = str(col).lower()
-            if any(key in low for key in _EXTRA_TYPE_COLUMNS_PATTERN):
+            if frame[col].dtype in (pl.Utf8, pl.String, pl.Categorical, pl.Enum):
                 values = frame[col].drop_nulls().to_list()
                 pools[col] = [(v, col) for v in _clean(values)]
         # bodyId pool: string-form ids, hint = the corresponding instance.
@@ -116,6 +122,27 @@ def _index_pools(folder: str) -> Optional[Dict[str, List[Entry]]]:
         return None
 
 
+def _index_has_search_projection(folder: str) -> bool:
+    """Whether the cache index already contains the pulled metadata fields."""
+    index = _CACHE_DIR / folder / "neuron_index.parquet"
+    if not index.exists():
+        return False
+    try:
+        import polars as pl
+
+        columns = set(pl.scan_parquet(index).collect_schema().names())
+        # Legacy connection indexes contain only bodyId/type/instance/post and
+        # cache bookkeeping.  A generated projection has at least one extra
+        # metadata field and therefore does not need a second CSV scan.
+        legacy = {
+            "bodyId", "type", "instance", "post", "downstream_complete",
+            "last_fetched", "connection_count",
+        }
+        return bool(columns - legacy)
+    except Exception:
+        return False
+
+
 def _table_pools(folder: str) -> Optional[Dict[str, List[Entry]]]:
     """Pools from the datasets/<folder> neuron tables (None when absent)."""
     ds_dir = _DATASETS_DIR / folder
@@ -130,33 +157,90 @@ def _table_pools(folder: str) -> Optional[Dict[str, List[Entry]]]:
         return None
     for table in candidates:
         try:
+            import polars as pl
             if table.suffix == ".parquet":
-                df = __import__("pandas").read_parquet(table)
+                frame = pl.read_parquet(table)
             else:
-                df = __import__("pandas").read_csv(table)
-            cols = set(df.columns)
+                with table.open("r", newline="", encoding="utf-8") as stream:
+                    header = next(csv.reader(stream))
+                columns = [
+                    column for column in header
+                    if column and str(column).casefold()
+                    not in _NON_IDENTIFIER_COLUMNS
+                ]
+                frame = pl.read_csv(
+                    table,
+                    columns=columns,
+                    schema_overrides={"bodyId": pl.Utf8},
+                    infer_schema_length=1000,
+                    try_parse_dates=False,
+                )
+            cols = set(frame.columns)
             if not {"bodyId", "type"}.issubset(cols):
                 continue
             pools: Dict[str, List[Entry]] = {}
             for col in _TYPE_COLUMNS:
                 if col in cols:
-                    pools[col] = [(v, col) for v in _clean(df[col].tolist())]
+                    values = frame[col].cast(pl.Utf8, strict=False).to_list()
+                    pools[col] = [(v, col) for v in _clean(values)]
             for col in sorted(cols):
-                low = col.lower()
-                if col not in pools and any(k in low for k in _EXTRA_TYPE_COLUMNS_PATTERN):
-                    pools[col] = [(v, col) for v in _clean(df[col].tolist())]
+                if (col in pools or col in ("bodyId", "type", "instance")
+                        or str(col).casefold() in _NON_IDENTIFIER_COLUMNS):
+                    continue
+                if frame[col].dtype in (
+                        pl.Utf8, pl.String, pl.Categorical, pl.Enum):
+                    values = frame[col].drop_nulls().to_list()
+                    pools[col] = [(v, col) for v in _clean(values)]
             if "bodyId" in cols:
-                inst_series = df["instance"].astype(str) if "instance" in cols \
-                    else None
+                body_ids = frame["bodyId"].cast(pl.Utf8, strict=False).to_list()
+                inst_series = (
+                    frame["instance"].cast(pl.Utf8, strict=False).to_list()
+                    if "instance" in cols else [None] * len(body_ids)
+                )
                 pools["bodyId"] = _body_id_entries(
-                    df["bodyId"].tolist(),
-                    inst_series.tolist() if inst_series is not None
-                    else [None] * len(df),
+                    body_ids,
+                    inst_series,
                 )
             return pools
         except Exception:
             continue
     return None
+
+
+def _merge_pools(
+    primary: Dict[str, List[Entry]],
+    fallback: Dict[str, List[Entry]],
+) -> Dict[str, List[Entry]]:
+    """Supplement a cache pool with values from the local neuron table.
+
+    The cache remains first: duplicate values keep its ordering and hint.
+    Missing values from the table are appended so a partially populated
+    connection index cannot hide valid names. BodyId hints are upgraded when
+    the cache only has the generic ``bodyId`` label but the table knows the
+    corresponding instance.
+    """
+    merged: Dict[str, List[Entry]] = {}
+    for column in dict.fromkeys((*primary.keys(), *fallback.keys())):
+        primary_entries = list(primary.get(column, []))
+        fallback_entries = list(fallback.get(column, []))
+        fallback_by_value = {value: hint for value, hint in fallback_entries}
+        entries: List[Entry] = []
+        seen = set()
+        for value, hint in primary_entries:
+            if (column == "bodyId" and hint == "bodyId"
+                    and fallback_by_value.get(value)
+                    and fallback_by_value[value] != "bodyId"):
+                hint = fallback_by_value[value]
+            if value not in seen:
+                entries.append((value, hint))
+                seen.add(value)
+        for value, hint in fallback_entries:
+            if value not in seen:
+                entries.append((value, hint))
+                seen.add(value)
+        if entries:
+            merged[column] = entries
+    return merged
 
 
 def _folder_pools(folder: str) -> Dict[str, List[Entry]]:
@@ -175,9 +259,22 @@ def _folder_pools(folder: str) -> Dict[str, List[Entry]]:
     key = ("pools", folder, tuple(sorted(sources)))
     if key in _POOL_CACHE:
         return _POOL_CACHE[key]
-    pools = _index_pools(folder)
-    if pools is None:
-        pools = _table_pools(folder)
+    index_pools = _index_pools(folder)
+    if index_pools is not None and _index_has_search_projection(folder):
+        # The generated rich index already contains the pulled metadata; do
+        # not scan a 500+ MiB CSV again just to rebuild identical value pools.
+        pools = index_pools
+    else:
+        table_pools = _table_pools(folder)
+        # A legacy connection cache may be complete for bodyIds but only
+        # partial for names. Supplement it instead of letting it mask the
+        # full local table; otherwise valid names such as ``aMe12`` disappear.
+        if index_pools is not None and table_pools is not None:
+            pools = _merge_pools(index_pools, table_pools)
+        elif index_pools is not None:
+            pools = index_pools
+        else:
+            pools = table_pools
     if pools is None:
         pools = _EMPTY_POOLS
     _POOL_CACHE[key] = pools
@@ -205,11 +302,28 @@ def suggestion_pool(datasets: Sequence[str]) -> Dict[str, List[Entry]]:
     return merged
 
 
+def filter_candidate_entries(
+    text: str,
+    candidates: Sequence[Entry],
+) -> List[Entry]:
+    """Narrow an existing candidate list with a case-sensitive prefix.
+
+    This is intentionally smaller than :func:`match_suggestions`: it is the
+    fast path used while a user appends characters to the same query. The
+    caller must fall back to the full matcher when the query is not a strict
+    continuation or this list produces no matches.
+    """
+    query = str(text).strip()
+    if not query:
+        return []
+    return [entry for entry in candidates if str(entry[0]).startswith(query)]
+
+
 def match_suggestions(
     text: str,
     pools: Dict[str, List[Entry]],
     search_columns: str = "auto",
-    limit: int = 50,
+    limit: Optional[int] = 50,
 ) -> List[Entry]:
     """Match ``text`` against the pools with the backend's column priority.
 
@@ -217,18 +331,23 @@ def match_suggestions(
 
     1. strict, case-sensitive type prefixes;
     2. strict, case-sensitive prefixes in the remaining auto-search columns;
-    3. case-insensitive substring matches, with type still preferred before
+    3. case-sensitive substring matches, with type still preferred before
        the remaining columns.
 
     The stages are global rather than per-column: a type substring cannot
     hide a more precise instance/bodyId prefix. Canonical names such as
     ``aMe12`` therefore stay precise while a mistyped or mid-name query can
-    still recover.
+    still recover without changing the user's capitalization.
 
     - numeric input -> bodyId (hint = the instance)
     - string input -> type FIRST; only when no type matches and the search
       scope is 'auto', expand to instance / bodyId / extra type columns
     - explicit scope ('type' / 'instance' / 'bodyId') -> that column only
+
+    ``limit=None`` returns the complete candidate pool. The UI providers use
+    this mode because the input component applies its own display limit after
+    each continuation is narrowed; limiting here would make names outside
+    the first page impossible to reach by typing more characters.
     """
     text = str(text).strip()
     if not text or not pools:
@@ -242,9 +361,8 @@ def match_suggestions(
         return [entry for entry in entries if entry[0].startswith(text)]
 
     def substring_matches(entries: List[Entry]) -> List[Entry]:
-        """Forgiving fallback stage, reached only after all prefixes fail."""
-        folded = text.casefold()
-        return [entry for entry in entries if folded in entry[0].casefold()]
+        """Substring fallback, preserving the input's exact case."""
+        return [entry for entry in entries if text in entry[0]]
 
     def ordered_columns() -> List[str]:
         """Search columns in the same priority used by the backend."""
@@ -259,7 +377,7 @@ def match_suggestions(
         out: List[Entry] = []
         for column in columns:
             out.extend(matcher(pools.get(column, [])))
-            if len(out) >= limit:
+            if limit is not None and len(out) >= limit:
                 return out[:limit]
         return out
 

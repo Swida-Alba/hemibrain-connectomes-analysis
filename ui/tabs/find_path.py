@@ -26,7 +26,10 @@ def create_find_path_tab():
         when no type matched and the search scope is 'auto'."""
         ds = dataset.value if dataset is not None else ""
         scope = search_columns.value if search_columns is not None else "auto"
-        return match_suggestions(text, get_dataset_pools(ds), scope)
+        # Keep the complete candidate pool for local continuation filtering;
+        # neuron_list_input applies the display limit after it narrows the
+        # pool, so valid names beyond the first page remain reachable.
+        return match_suggestions(text, get_dataset_pools(ds), scope, limit=None)
 
     form_col, results_col = tool_page(
         "Find All Paths",
@@ -44,12 +47,14 @@ def create_find_path_tab():
                     placeholder="Type or upload CSV/TSV/Excel (e.g., aMe12, aMe10)",
                     hint="Enter neuron types, bodyIds, or patterns. Upload CSV/TSV/Excel for large lists.",
                     suggestions=_type_suggest,
+                    available_neurons=lambda: dataset.value if dataset is not None else "",
                 )
                 target_input = neuron_list_input(
                     label="Target Neurons",
                     placeholder="Type or upload CSV/TSV/Excel (e.g., PPL101, DN1p)",
                     hint="Enter neuron types, bodyIds, or patterns. Upload CSV/TSV/Excel for large lists.",
                     suggestions=_type_suggest,
+                    available_neurons=lambda: dataset.value if dataset is not None else "",
                 )
             with param_grid(2):
                 dataset = dataset_selector(

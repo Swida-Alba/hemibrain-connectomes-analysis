@@ -303,6 +303,7 @@ def neuron_list_input(
     max_items: Optional[int] = None,
     initial: Optional[List] = None,
     suggestions: Optional[Callable[[str], List[Tuple[str, str]]]] = None,
+    available_neurons: Optional[Callable[[], object]] = None,
     suggestion_min_chars: int = 2,
     suggestion_limit: int = 50,
 ) -> ui.element:
@@ -330,6 +331,9 @@ def neuron_list_input(
       entries are shown. With a provider, focusing the empty field opens the
       persistent query history (last 10 + most frequent) and the native
       QSelect popup is replaced by the custom suggestion menu.
+    - ``available_neurons``: optional zero-argument dataset getter. When
+      supplied, a ``See available neurons`` link opens the rendered,
+      searchable cached neuron-index viewer for the current dataset.
 
     Returns container with .get_value() -> (filter_mode, neuron_list).
     """
@@ -470,6 +474,12 @@ def neuron_list_input(
                 "Clear",
                 icon="clear_all",
             ).props("flat dense").classes("drocat-clear-btn")
+            if available_neurons is not None:
+                # Import lazily to keep the common input component independent
+                # from the optional viewer's Polars-backed data layer.
+                from .neuron_index_viewer import create_neuron_index_viewer_link
+
+                create_neuron_index_viewer_link(available_neurons)
 
     pending_input = {"value": ""}
     # Bulk list changes (paste / clear) must not pop the Recent list open.
@@ -596,8 +606,12 @@ def neuron_list_input(
         # and swallows further keystrokes. no-focus keeps the editor focused
         # while the menu overlays. (No explicit target: NiceGUI 3.15 renders
         # no DOM ids, so the menu anchors to the per-input wrapper instead of
-        # relying on a selector target.
-        suggest_menu.props('no-focus')
+        # relying on a selector target.)
+        # ``no-focus`` keeps the popup from taking the editor focus when it
+        # opens. ``no-refocus`` is equally important when a second QSelect is
+        # clicked: closing the first popup must not put focus back on its old
+        # editor after the new field has already been selected.
+        suggest_menu.props('no-focus no-refocus')
         suggest_menu.style("max-height: 360px; overflow-y: auto;")
 
         # Server-side closes (1-char gating, rebuilds, picks) must NOT commit
@@ -610,17 +624,61 @@ def neuron_list_input(
         # Whether the editor currently has focus (the Recent list only
         # reopens after a finished input while the field is still in use).
         _focused = {"value": False}
+        # QSelect forwards editor changes through ``input-value`` while the
+        # native input also emits ``input``. Both are wired below because
+        # either event can be skipped by a browser/Quasar transition; this
+        # guard prevents the same keystroke from rebuilding the menu twice.
+        _last_suggest_text = {"value": None}
+        # Each input owns its own candidate history. Appended characters can
+        # filter this list locally; a full backend match is needed only after
+        # the continuation no longer has candidates.
+        _candidate_state = {"text": None, "entries": []}
 
         def _suggestions_enabled() -> bool:
             """Settings toggle: the whole feature can be switched off live."""
             from ..config import get_auto_suggest_enabled
             return get_auto_suggest_enabled()
 
+        def _reset_candidate_state():
+            _candidate_state["text"] = None
+            _candidate_state["entries"] = []
+
+        def _get_suggestions(text: str) -> List[Tuple[str, str]]:
+            """Reuse a case-sensitive continuation candidate list when it
+            still narrows; otherwise ask the backend for a fresh staged set.
+            """
+            query = str(text).strip()
+            if not query:
+                _reset_candidate_state()
+                return []
+
+            previous_text = _candidate_state["text"]
+            previous_entries = _candidate_state["entries"]
+            if previous_text == query:
+                return list(previous_entries)
+
+            if previous_text and query.startswith(previous_text):
+                from ..type_suggestions import filter_candidate_entries
+
+                narrowed = filter_candidate_entries(query, previous_entries)
+                if narrowed:
+                    _candidate_state["text"] = query
+                    _candidate_state["entries"] = narrowed
+                    return narrowed
+
+            entries = list(suggestions(query) or [])
+            _candidate_state["text"] = query
+            _candidate_state["entries"] = entries
+            return entries
+
         def _refresh_menu():
             """Show freshly rebuilt content even when the menu is already
             open: clearing an open q-menu empties it (Quasar hides an empty
             menu) and open() on an open menu is a no-op — so close it
-            (guarded, no commit) and reopen it."""
+            (guarded, no commit) and reopen it. The menu's no-focus and
+            no-refocus props keep the active QSelect editor in control during
+            this close/open cycle without issuing a delayed focus command that
+            could steal focus from the other input during a rapid handoff."""
             if suggest_menu.value:
                 _close_suggest()
             suggest_menu.open()
@@ -646,15 +704,19 @@ def neuron_list_input(
                 sync_options(merged)
                 chip_input.set_value(merged)
             pending_input["value"] = ""
+            _reset_candidate_state()
             update_status()
             # The menu state is managed by the finished-input handler: an
             # empty editor falls back to the Recent list.
 
         def _show_suggestions(entries):
+            # Always discard the previous query before handling the new one.
+            # This matters when a narrower query has no candidates: the menu
+            # is hidden, but its old rows must not survive into a later reopen.
+            suggest_menu.clear()
             if not entries:
                 _close_suggest()
                 return
-            suggest_menu.clear()
             with suggest_menu:
                 for value, hint in entries[:suggestion_limit]:
                     with ui.item().props("dense").on_click(
@@ -707,9 +769,13 @@ def neuron_list_input(
             # The editor text changed: refresh the list immediately (the
             # settings toggle switches the whole feature off at runtime).
             if not _suggestions_enabled():
+                _reset_candidate_state()
                 _close_suggest()
                 return
             text = str(getattr(event, "args", "") or "")
+            if text == _last_suggest_text["value"]:
+                return
+            _last_suggest_text["value"] = text
             if len(text.strip()) < suggestion_min_chars:
                 # Warm the provider's strict prefix candidate set from the
                 # first character, but deliberately render only matching
@@ -717,13 +783,32 @@ def neuron_list_input(
                 # This keeps a one-character query such as "a" responsive
                 # without dumping an ambiguous list of dataset names.
                 if text.strip():
-                    suggestions(text.strip())
+                    _get_suggestions(text.strip())
+                else:
+                    # A manual clear starts a new query. Do not let the next
+                    # query reuse candidates from the text that was erased.
+                    _reset_candidate_state()
                 if _focused["value"]:
                     _show_history(text.strip())
                 else:
                     _close_suggest()
                 return
-            _show_suggestions(suggestions(text.strip()) or [])
+            _show_suggestions(_get_suggestions(text.strip()))
+
+        def _on_suggest_input_value(event):
+            """Handle Quasar's component event only while this field owns
+            focus.
+
+            The event can be delivered after a QSelect-to-QSelect focus
+            transition. In that case the shared ``document.activeElement``
+            value belongs to the other field; ignoring the event prevents it
+            from resurrecting this field's menu.
+            """
+            if not _focused["value"]:
+                _reset_candidate_state()
+                _close_suggest()
+                return
+            _on_suggest_input(event)
 
         def _on_suggest_focus(_event):
             _close_other_suggestion_menus()
@@ -736,6 +821,7 @@ def neuron_list_input(
                 return
             # No editor text yet -> offer the persistent query history.
             if not pending_input["value"]:
+                _reset_candidate_state()
                 _show_history()
 
         def _on_suggest_blur(_event):
@@ -744,6 +830,7 @@ def neuron_list_input(
                 # menu is open. Treat the next focus change as a real blur
                 # even in that disabled state so no stale popup survives.
                 _focused["value"] = False
+                _reset_candidate_state()
                 _close_suggest()
                 return
             # Focus moved INTO the menu: a pick is about to happen; keep the
@@ -751,6 +838,7 @@ def neuron_list_input(
             if _pointer_in_menu["value"]:
                 return
             _focused["value"] = False
+            _reset_candidate_state()
             # Focus left the field: hide the list automatically, then commit
             # the pending text like a plain blur.
             _close_suggest()
@@ -760,6 +848,7 @@ def neuron_list_input(
             """Hide this menu when another neuron input receives focus."""
             _focused["value"] = False
             _pointer_in_menu["value"] = False
+            _reset_candidate_state()
             _close_suggest()
             # If Quasar skipped the old field's blur event, preserve the
             # normal finished-input behavior and commit its editor text now.
@@ -795,6 +884,7 @@ def neuron_list_input(
             # A chip was added or removed (Enter / pick / x): the input
             # finished. With an empty editor and the field still in use,
             # offer the Recent list again; otherwise hide the menu.
+            _reset_candidate_state()
             if not _suggestions_enabled():
                 _close_suggest()
             elif _suppress_history_popup["value"]:
@@ -811,6 +901,18 @@ def neuron_list_input(
 
         chip_input.on("input", _on_suggest_input,
                       js_handler="(event) => emit(event?.target?.value ?? '')")
+        # This is Quasar's canonical QSelect editor event. Keep it as a
+        # second input source so updates continue even when the native DOM
+        # input event is swallowed during popup/selection transitions.
+        chip_input.on(
+            "input-value",
+            _on_suggest_input_value,
+            # Quasar can emit this Vue event with the value from the previous
+            # render while the native editor already contains the next
+            # character. Read the focused editor at dispatch time so a stale
+            # payload cannot reopen the previous query's rows.
+            js_handler="() => emit(document.activeElement?.value ?? '')",
+        )
         chip_input.on("focus", _on_suggest_focus)
         chip_input.on("blur", _on_suggest_blur)
         # QSelect's component-level blur is not emitted consistently when a
@@ -833,7 +935,11 @@ def neuron_list_input(
         remember_user_input,
         js_handler="(event) => emit(event?.target?.value ?? '')",
     )
-    chip_input.on("input-value", remember_quasar_input)
+    chip_input.on(
+        "input-value",
+        remember_quasar_input,
+        js_handler="() => emit(document.activeElement?.value ?? '')",
+    )
     chip_input.on_value_change(handle_value_change)
     # Registered AFTER handle_value_change so the pending text is already
     # cleared when the "finished input" decision runs.

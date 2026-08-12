@@ -9,6 +9,7 @@ import time
 import gc
 import logging
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -62,6 +63,19 @@ if vispath_src not in sys.path:
 from vispath_pkg import VisualizePath
 
 from connection_map import ThresholdedConnectionMap
+
+try:
+    from .neuron_index_builder import (
+        metadata_columns,
+        metadata_path,
+        read_metadata_projection,
+    )
+except ImportError:
+    from neuron_index_builder import (
+        metadata_columns,
+        metadata_path,
+        read_metadata_projection,
+    )
 
 
 class _FetchCancelled(Exception):
@@ -1956,6 +1970,10 @@ class FindNeuronConnection:
             self._vprint(f'Cache enabled: {self.cache_folder}', level='full')
             # Ensure complete dataset with ALL neurons exists (including type=None)
             self._ensure_complete_dataset()
+            # Build the compact searchable neuron index as soon as the pulled
+            # metadata exists.  Connection fetching updates only the separate
+            # state file, so this rich index is not rewritten once per batch.
+            self._ensure_neuron_index_from_metadata()
         if self.exclude_intra_type_connections:
             self._vprint('⚠️  Intra-type connections will be excluded (type_pre == type_post)', level='full')
         if self.sourceNeurons is None or self.targetNeurons is None:
@@ -2136,7 +2154,315 @@ class FindNeuronConnection:
     def _get_neuron_index_path(self):
         '''Get path to neuron index (tracks cached neurons)'''
         return os.path.join(self.cache_folder, 'neuron_index.parquet')
-    
+
+    def _get_neuron_index_state_path(self):
+        '''Get the small, frequently updated cache-progress sidecar.'''
+        return os.path.join(
+            os.path.dirname(self._get_neuron_index_path()),
+            'neuron_index_state.parquet',
+        )
+
+    @staticmethod
+    def _neuron_index_state_columns():
+        return [
+            'bodyId',
+            'downstream_complete',
+            'last_fetched',
+            'connection_count',
+        ]
+
+    def _read_neuron_index_disk(self):
+        """Read the materialized index and overlay any batch-progress state.
+
+        ``neuron_index.parquet`` is now a static-ish metadata projection.  A
+        pull can update thousands of completion flags without rewriting all
+        searchable metadata by storing those four fields in the sidecar.  The
+        sidecar is deliberately transparent to callers: they still receive
+        one pandas frame with the historical schema.
+        """
+        index_path = self._get_neuron_index_path()
+        state_path = self._get_neuron_index_state_path()
+        index_columns = [
+            'bodyId', 'type', 'instance', 'post',
+            'downstream_complete', 'last_fetched', 'connection_count',
+        ]
+
+        if os.path.exists(index_path):
+            try:
+                index_df = pd.read_parquet(index_path)
+            except Exception:
+                index_df = pd.DataFrame()
+        else:
+            index_df = pd.DataFrame()
+
+        if os.path.exists(state_path):
+            try:
+                state_df = pd.read_parquet(state_path)
+            except Exception:
+                state_df = pd.DataFrame()
+        else:
+            state_df = pd.DataFrame()
+
+        if 'bodyId' in index_df.columns:
+            index_df['bodyId'] = index_df['bodyId'].astype(str)
+        if 'bodyId' in state_df.columns:
+            state_df['bodyId'] = state_df['bodyId'].astype(str)
+
+        # A state file can be the only durable artifact after an interrupted
+        # build that started before the metadata projection was materialized.
+        if index_df.empty and not state_df.empty:
+            index_df = state_df.copy()
+
+        if not index_df.empty and not state_df.empty and 'bodyId' in index_df.columns:
+            state_df = state_df[
+                [c for c in self._neuron_index_state_columns() if c in state_df.columns]
+            ].drop_duplicates('bodyId', keep='last')
+            state_by_id = state_df.set_index('bodyId')
+            index_df = index_df.set_index('bodyId')
+            for column in self._neuron_index_state_columns()[1:]:
+                if column not in index_df.columns:
+                    index_df[column] = pd.NA
+                if column in state_by_id.columns:
+                    values = state_by_id[column].reindex(index_df.index)
+                    mask = values.notna()
+                    index_df.loc[mask, column] = values[mask]
+            index_df = index_df.reset_index()
+
+        if 'bodyId' not in index_df.columns:
+            index_df = pd.DataFrame(columns=index_columns)
+        for column in index_columns:
+            if column not in index_df.columns:
+                if column == 'downstream_complete':
+                    index_df[column] = False
+                elif column in ('post', 'connection_count'):
+                    index_df[column] = 0
+                else:
+                    index_df[column] = ''
+        index_df['bodyId'] = index_df['bodyId'].astype(str)
+        index_df['downstream_complete'] = index_df['downstream_complete'].fillna(False).astype(bool)
+        index_df['last_fetched'] = index_df['last_fetched'].fillna('').astype(str)
+        index_df['connection_count'] = pd.to_numeric(
+            index_df['connection_count'], errors='coerce'
+        ).fillna(0)
+        return index_df
+
+    @staticmethod
+    def _atomic_pandas_parquet(frame, path, compression='gzip'):
+        """Write a pandas frame atomically so a cancelled pull is resumable."""
+        temporary = f'{path}.tmp-{os.getpid()}-{threading.get_ident()}'
+        try:
+            frame.to_parquet(temporary, index=False, compression=compression)
+            os.replace(temporary, path)
+        finally:
+            if os.path.exists(temporary):
+                try:
+                    os.remove(temporary)
+                except OSError:
+                    pass
+
+    def _save_neuron_index_state(self, index_df):
+        """Persist only cache-progress fields and refresh in-memory indexes."""
+        state_columns = [
+            column for column in self._neuron_index_state_columns()
+            if column in index_df.columns
+        ]
+        state = index_df[state_columns].copy()
+        if 'bodyId' in state.columns:
+            state['bodyId'] = state['bodyId'].astype(str)
+        state_path = self._get_neuron_index_state_path()
+        os.makedirs(os.path.dirname(state_path), exist_ok=True)
+        self._atomic_pandas_parquet(state, state_path, compression='gzip')
+
+        self._neuron_index_cache = index_df
+        self._build_neuron_index_dict()
+
+    def _ensure_neuron_index_from_metadata(self):
+        """Create/update the compact searchable index after metadata pull.
+
+        The dataset CSV/Parquet is authoritative for neuron metadata.  This
+        method runs before connection fetching, so the viewer and suggestion
+        providers become usable immediately after the metadata download.  An
+        existing cache-progress state is joined back by bodyId, preserving
+        resume behavior when the source table is refreshed.
+        """
+        if not self.use_cache or not self.cache_folder:
+            return False
+
+        datasets_dir = os.path.join(self.script_path, 'datasets')
+        source = metadata_path(self.dataset, Path(datasets_dir))
+        if source is None:
+            return False
+
+        index_path = self._get_neuron_index_path()
+        try:
+            source_columns = set(metadata_columns(source))
+            existing_columns = set()
+            index_mtime = 0
+            if os.path.exists(index_path):
+                index_mtime = os.stat(index_path).st_mtime_ns
+                existing_columns = set(pl.scan_parquet(index_path).collect_schema().names())
+            # The source mtime check avoids rebuilding on every FNC instance;
+            # the column check upgrades old seven-column cache indexes.
+            if (
+                source_columns.issubset(existing_columns)
+                and {'bodyId', 'type', 'instance'}.issubset(existing_columns)
+                and index_mtime >= source.stat().st_mtime_ns
+            ):
+                return False
+        except Exception as exc:
+            self._vprint(f'  ⚠️ Could not inspect neuron metadata index: {exc}', level='full')
+
+        try:
+            old = self._read_neuron_index_disk()
+            frame = read_metadata_projection(source)
+            frame = frame.unique(subset=['bodyId'], keep='first')
+
+            # Preserve cache state and any labels obtained from the API when
+            # the freshly pulled table leaves a field blank.
+            old_columns = [
+                column for column in (
+                    'bodyId', 'type', 'instance', 'post',
+                    *self._neuron_index_state_columns()[1:],
+                )
+                if column in old.columns
+            ]
+            if old_columns and not old.empty:
+                old_pl = pl.from_pandas(old[old_columns]).with_columns(
+                    pl.col('bodyId').cast(pl.Utf8, strict=False).alias('bodyId')
+                ).unique(subset=['bodyId'], keep='last')
+                old_pl = old_pl.rename({
+                    column: f'__old_{column}'
+                    for column in old_pl.columns
+                    if column != 'bodyId'
+                })
+                frame = frame.join(old_pl, on='bodyId', how='left')
+
+                for column in ('type', 'instance', 'post'):
+                    old_column = f'__old_{column}'
+                    if old_column not in frame.columns:
+                        continue
+                    if column not in frame.columns:
+                        frame = frame.with_columns(
+                            pl.col(old_column).alias(column)
+                        )
+                    else:
+                        if column == 'post':
+                            current = pl.col(column)
+                            old_value = pl.col(old_column)
+                        else:
+                            current = pl.col(column).cast(pl.Utf8, strict=False).fill_null('')
+                            old_value = pl.col(old_column).cast(pl.Utf8, strict=False).fill_null('')
+                        frame = frame.with_columns(
+                            pl.when(
+                                current.cast(pl.Utf8, strict=False)
+                                .fill_null('')
+                                .str.strip_chars() == ''
+                            )
+                            .then(old_value)
+                            .otherwise(current)
+                            .alias(column)
+                        )
+
+                for column, default in (
+                    ('downstream_complete', False),
+                    ('last_fetched', ''),
+                    ('connection_count', 0),
+                ):
+                    old_column = f'__old_{column}'
+                    if old_column in frame.columns:
+                        frame = frame.with_columns(
+                            pl.col(old_column).fill_null(default).alias(column)
+                        )
+                    else:
+                        frame = frame.with_columns(pl.lit(default).alias(column))
+                frame = frame.drop([
+                    column for column in frame.columns
+                    if column.startswith('__old_')
+                ])
+            else:
+                frame = frame.with_columns(
+                    pl.lit(False).alias('downstream_complete'),
+                    pl.lit('').alias('last_fetched'),
+                    pl.lit(0).alias('connection_count'),
+                )
+
+            # Ensure the cache schema exists even when a small custom metadata
+            # table has no post column or status fields.
+            if 'post' not in frame.columns:
+                frame = frame.with_columns(pl.lit(0).alias('post'))
+            frame = frame.with_columns(
+                pl.col('bodyId').cast(pl.Utf8, strict=False).fill_null('').alias('bodyId'),
+                pl.col('type').cast(pl.Utf8, strict=False).fill_null('').alias('type'),
+                pl.col('instance').cast(pl.Utf8, strict=False).fill_null('').alias('instance'),
+                pl.col('downstream_complete').fill_null(False).cast(pl.Boolean).alias('downstream_complete'),
+                pl.col('last_fetched').cast(pl.Utf8, strict=False).fill_null('').alias('last_fetched'),
+                pl.col('connection_count').cast(pl.Int64, strict=False).fill_null(0).alias('connection_count'),
+            )
+
+            # Keep identifiers and cache state first; the remaining metadata
+            # columns stay in their source order for a stable viewer schema.
+            front = [
+                'bodyId', 'type', 'instance', 'post',
+                'downstream_complete', 'last_fetched', 'connection_count',
+            ]
+            ordered = [*front, *[column for column in frame.columns if column not in front]]
+            frame = frame.select(ordered)
+
+            temporary = f'{index_path}.tmp-{os.getpid()}-{threading.get_ident()}'
+            try:
+                os.makedirs(os.path.dirname(index_path), exist_ok=True)
+                frame.write_parquet(temporary, compression='zstd')
+                os.replace(temporary, index_path)
+            finally:
+                if os.path.exists(temporary):
+                    try:
+                        os.remove(temporary)
+                    except OSError:
+                        pass
+
+            # The materialized index now includes the state used to build it.
+            # A leftover sidecar is no longer needed at this boundary.
+            state_path = self._get_neuron_index_state_path()
+            if os.path.exists(state_path):
+                try:
+                    os.remove(state_path)
+                except OSError:
+                    pass
+            self._neuron_index_cache = None
+            self._neuron_index_dict = {}
+            if self._dataset_safe in _FNC_CACHE:
+                _FNC_CACHE[self._dataset_safe]['neuron_index'] = None
+                _FNC_CACHE[self._dataset_safe]['neuron_dict'] = {}
+            self._vprint(
+                f'  ✓ Built searchable neuron index ({frame.height:,} neurons, '
+                f'{len(frame.columns):,} columns)', level='full'
+            )
+            return True
+        except Exception as exc:
+            # Metadata should not make a connection pull unusable. The legacy
+            # bodyId/status index path remains available as a fallback.
+            self._vprint(f'  ⚠️ Failed to build searchable neuron index: {exc}', level='always')
+            return False
+
+    def _materialize_neuron_index(self, remove_state=True):
+        """Fold progress state into the canonical index after a pull."""
+        frame = self._read_neuron_index_disk()
+        if frame.empty or 'bodyId' not in frame.columns:
+            return False
+        index_path = self._get_neuron_index_path()
+        os.makedirs(os.path.dirname(index_path), exist_ok=True)
+        self._atomic_pandas_parquet(frame, index_path, compression='gzip')
+        if remove_state:
+            state_path = self._get_neuron_index_state_path()
+            if os.path.exists(state_path):
+                try:
+                    os.remove(state_path)
+                except OSError:
+                    pass
+        self._neuron_index_cache = frame
+        self._build_neuron_index_dict()
+        return True
+
     def _load_connection_db(self, force_reload=False):
         '''
         Load unified connection database with in-memory caching and O(1) index.
@@ -2643,16 +2969,14 @@ class FindNeuronConnection:
                 except Exception as e:
                     self._vprint(f'  ⚠️ Error importing FlyWire Index: {e}', level='full')
 
-        if os.path.exists(index_path):
+        if os.path.exists(index_path) or os.path.exists(self._get_neuron_index_state_path()):
             try:
-                file_size_mb = os.path.getsize(index_path) / (1024 * 1024)
+                size_path = index_path if os.path.exists(index_path) else self._get_neuron_index_state_path()
+                file_size_mb = os.path.getsize(size_path) / (1024 * 1024)
                 if file_size_mb > 1:
                     self._vprint(f'  ⏳ Loading neuron index ({file_size_mb:.1f} MB)...', level='full')
-                df = pd.read_parquet(index_path)
+                df = self._read_neuron_index_disk()
                 
-                if 'bodyId' in df.columns:
-                    df['bodyId'] = df['bodyId'].astype(str)
-                    
                 if file_size_mb > 1:
                     self._vprint(f'  ✓ Loaded index for {len(df):,} neurons', level='full')
                 
@@ -2728,7 +3052,14 @@ class FindNeuronConnection:
         '''
         index_path = self._get_neuron_index_path()
         try:
-            index_df.to_parquet(index_path, index=False, compression='gzip')
+            os.makedirs(os.path.dirname(index_path), exist_ok=True)
+            self._atomic_pandas_parquet(index_df, index_path, compression='gzip')
+            state_path = self._get_neuron_index_state_path()
+            if os.path.exists(state_path):
+                try:
+                    os.remove(state_path)
+                except OSError:
+                    pass
             self._vprint(f'  ✓ Neuron index saved successfully', level='full')
         except Exception as e:
             # Never let a disk failure freeze the in-memory state: the module
@@ -2952,37 +3283,53 @@ class FindNeuronConnection:
         '''
         neuron_index = self._load_neuron_index()
         
-        # Get neuron info from complete dataset
-        dataset_safe = self.dataset.replace(':', '_').replace('.', '_')
-        dataset_path = os.path.join(
-            self.script_path,
-            'datasets',
-            dataset_safe,
-            f"{dataset_safe}_allneurons_neuron_df.csv"
-        )
-        
-        self._vprint(f'  ⏳ Loading neuron metadata for {len(upstream_bodyIds):,} neurons...', level='full')
-        if os.path.exists(dataset_path):
-            # Check if it's FAFB to decide on index_col (FAFB utils saves without index)
-            is_fafb = 'fafb' in self.dataset.lower() or 'flywire' in self.dataset.lower()
-            
-            if is_fafb:
-                ndf_complete = self._read_csv(dataset_path, header=0, index_col=None, dtype={'bodyId': str}, low_memory=False)
-            else:
-                ndf_complete = self._read_csv(dataset_path, header=0, index_col=0, low_memory=False)
-
-            # Ensure bodyId is string in local dataset
-            if 'bodyId' in ndf_complete.columns:
-                ndf_complete['bodyId'] = ndf_complete['bodyId'].astype(str)
-            
-            neuron_info = ndf_complete[ndf_complete['bodyId'].isin(upstream_bodyIds)][['bodyId', 'type', 'instance', 'post']].copy()
+        # Prefer the already materialized compact index.  This avoids opening
+        # the large pulled CSV during every fetch/update call.
+        upstream_ids = {str(body_id) for body_id in upstream_bodyIds}
+        if (
+            not neuron_index.empty
+            and {'bodyId', 'type', 'instance', 'post'}.issubset(neuron_index.columns)
+        ):
+            neuron_info = neuron_index[
+                neuron_index['bodyId'].astype(str).isin(upstream_ids)
+            ][['bodyId', 'type', 'instance', 'post']].copy()
+            found_ids = set(neuron_info['bodyId'].astype(str))
+            missing_ids = upstream_ids - found_ids
         else:
-            # Fallback: fetch from API (batched to bound query/response size)
-            try:
-                ndf = self._fetch_neurons_batched(upstream_bodyIds)
-                neuron_info = ndf[['bodyId', 'type', 'instance', 'post']].copy()
-            except Exception:
-                neuron_info = pd.DataFrame(columns=['bodyId', 'type', 'instance', 'post'])
+            neuron_info = pd.DataFrame(columns=['bodyId', 'type', 'instance', 'post'])
+            missing_ids = upstream_ids
+
+        # Legacy/API-only caches may not have the compact metadata projection.
+        # Keep the old fallback for those entries, but only fetch missing IDs.
+        if missing_ids:
+            dataset_safe = self.dataset.replace(':', '_').replace('.', '_')
+            dataset_path = os.path.join(
+                self.script_path,
+                'datasets',
+                dataset_safe,
+                f"{dataset_safe}_allneurons_neuron_df.csv"
+            )
+            self._vprint(f'  ⏳ Loading neuron metadata for {len(missing_ids):,} neurons...', level='full')
+            if os.path.exists(dataset_path):
+                is_fafb = 'fafb' in self.dataset.lower() or 'flywire' in self.dataset.lower()
+                if is_fafb:
+                    ndf_complete = self._read_csv(dataset_path, header=0, index_col=None, dtype={'bodyId': str}, low_memory=False)
+                else:
+                    ndf_complete = self._read_csv(dataset_path, header=0, index_col=0, low_memory=False)
+                if 'bodyId' in ndf_complete.columns:
+                    ndf_complete['bodyId'] = ndf_complete['bodyId'].astype(str)
+                extra = ndf_complete[
+                    ndf_complete['bodyId'].isin(missing_ids)
+                ][['bodyId', 'type', 'instance', 'post']].copy()
+                neuron_info = pd.concat([neuron_info, extra], ignore_index=True)
+            else:
+                # Fallback: fetch from API (batched to bound query/response size)
+                try:
+                    ndf = self._fetch_neurons_batched(list(missing_ids))
+                    extra = ndf[['bodyId', 'type', 'instance', 'post']].copy()
+                    neuron_info = pd.concat([neuron_info, extra], ignore_index=True)
+                except Exception:
+                    pass
         
         # Count connections per neuron
         self._vprint(f'  ⏳ Counting connections per neuron...', level='full')
@@ -3017,10 +3364,15 @@ class FindNeuronConnection:
                     neuron_index.loc[neuron_index['bodyId'] == bodyId, 'downstream_complete'] = True
                 neuron_index.loc[neuron_index['bodyId'] == bodyId, 'last_fetched'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                 neuron_index.loc[neuron_index['bodyId'] == bodyId, 'connection_count'] = conn_count
-                neuron_index.loc[neuron_index['bodyId'] == bodyId, 'type'] = neuron_type
-                neuron_index.loc[neuron_index['bodyId'] == bodyId, 'instance'] = neuron_instance
-                neuron_index.loc[neuron_index['bodyId'] == bodyId, 'instance'] = neuron_instance
-                neuron_index.loc[neuron_index['bodyId'] == bodyId, 'post'] = neuron_post
+                # A pulled metadata table can legitimately leave labels
+                # blank.  Do not erase a non-empty label already present in
+                # the index when a later fetch returns an empty value.
+                if str(neuron_type or '').strip():
+                    neuron_index.loc[neuron_index['bodyId'] == bodyId, 'type'] = neuron_type
+                if str(neuron_instance or '').strip():
+                    neuron_index.loc[neuron_index['bodyId'] == bodyId, 'instance'] = neuron_instance
+                if neuron_post is not None and not pd.isna(neuron_post):
+                    neuron_index.loc[neuron_index['bodyId'] == bodyId, 'post'] = neuron_post
             else:
                 # Add new entry
                 new_entry = pd.DataFrame([{
@@ -3036,8 +3388,8 @@ class FindNeuronConnection:
                 # Ensure consistent bool dtype after concat to avoid FutureWarning
                 neuron_index['downstream_complete'] = neuron_index['downstream_complete'].astype(bool)
         
-        self._vprint(f'  ⏳ Saving neuron index ({len(neuron_index):,} total neurons)...', level='full')
-        self._save_neuron_index(neuron_index)
+        self._vprint(f'  ⏳ Saving neuron index state ({len(neuron_index):,} total neurons)...', level='full')
+        self._save_neuron_index_state(neuron_index)
         
         if mark_complete:
             # Explicitly cast to bool to avoid FutureWarning about object-dtype columns
@@ -3061,38 +3413,48 @@ class FindNeuronConnection:
         '''
         neuron_index = self._load_neuron_index()
         
-        # Get neuron info from complete dataset
-        dataset_safe = self.dataset.replace(':', '_').replace('.', '_')
-        dataset_path = os.path.join(
-            self.script_path,
-            'datasets',
-            dataset_safe,
-            f"{dataset_safe}_allneurons_neuron_df.csv"
-        )
-        
-        # Try parquet first (faster)
-        parquet_path = dataset_path.replace('.csv', '.parquet')
-        
         bodyids_str = [str(x) for x in bodyids]
         bodyids_set = set(bodyids_str)
-        
-        if os.path.exists(parquet_path):
-            ndf_complete = pd.read_parquet(parquet_path)
-            if 'bodyId' in ndf_complete.columns:
-                ndf_complete['bodyId'] = ndf_complete['bodyId'].astype(str)
-        elif os.path.exists(dataset_path):
-            # Cached, mtime-aware load (same table enrichment reads; avoids
-            # re-parsing the CSV for every batch during cache building)
-            is_fafb = 'fafb' in self.dataset.lower() or 'flywire' in self.dataset.lower()
-            ndf_complete = self._load_local_neuron_df(dataset_path, is_fafb)
-        else:
-            ndf_complete = pd.DataFrame(columns=['bodyId', 'type', 'instance', 'post'])
-        
-        # Filter to only the bodyIds we need
-        if not ndf_complete.empty and 'bodyId' in ndf_complete.columns:
-            neuron_info = ndf_complete[ndf_complete['bodyId'].isin(bodyids_set)].copy()
+
+        # The compact index already contains the metadata projection.  Reuse
+        # it for every batch instead of reparsing the pulled neuron CSV.
+        if (
+            not neuron_index.empty
+            and {'bodyId', 'type', 'instance', 'post'}.issubset(neuron_index.columns)
+        ):
+            neuron_info = neuron_index[
+                neuron_index['bodyId'].astype(str).isin(bodyids_set)
+            ][['bodyId', 'type', 'instance', 'post']].copy()
+            missing_ids = bodyids_set - set(neuron_info['bodyId'].astype(str))
         else:
             neuron_info = pd.DataFrame(columns=['bodyId', 'type', 'instance', 'post'])
+            missing_ids = bodyids_set
+
+        # Legacy/API-only caches retain the local table fallback, but only for
+        # IDs absent from the compact index.
+        if missing_ids:
+            dataset_safe = self.dataset.replace(':', '_').replace('.', '_')
+            dataset_path = os.path.join(
+                self.script_path,
+                'datasets',
+                dataset_safe,
+                f"{dataset_safe}_allneurons_neuron_df.csv"
+            )
+            parquet_path = dataset_path.replace('.csv', '.parquet')
+            if os.path.exists(parquet_path):
+                ndf_complete = pd.read_parquet(parquet_path)
+                if 'bodyId' in ndf_complete.columns:
+                    ndf_complete['bodyId'] = ndf_complete['bodyId'].astype(str)
+            elif os.path.exists(dataset_path):
+                is_fafb = 'fafb' in self.dataset.lower() or 'flywire' in self.dataset.lower()
+                ndf_complete = self._load_local_neuron_df(dataset_path, is_fafb)
+            else:
+                ndf_complete = pd.DataFrame(columns=['bodyId', 'type', 'instance', 'post'])
+            if not ndf_complete.empty and 'bodyId' in ndf_complete.columns:
+                extra = ndf_complete[
+                    ndf_complete['bodyId'].astype(str).isin(missing_ids)
+                ].copy()
+                neuron_info = pd.concat([neuron_info, extra], ignore_index=True)
         
         # Create a dict for fast lookup using vectorized access
         neuron_info_dict = {}
@@ -3151,7 +3513,7 @@ class FindNeuronConnection:
             neuron_index = pd.concat([neuron_index, new_df], ignore_index=True)
             neuron_index['downstream_complete'] = neuron_index['downstream_complete'].astype(bool)
         
-        self._save_neuron_index(neuron_index)
+        self._save_neuron_index_state(neuron_index)
     
     # ============================================================================
     # Enrichment with Type/Instance
@@ -5034,11 +5396,14 @@ class FindNeuronConnection:
             _print("Force rebuild - clearing existing cache...")
             conn_path = self._get_connection_db_path()
             index_path = self._get_neuron_index_path()
+            state_path = self._get_neuron_index_state_path()
             batch_dir = os.path.join(os.path.dirname(conn_path), '_batch_files')
             if os.path.exists(conn_path):
                 os.remove(conn_path)
             if os.path.exists(index_path):
                 os.remove(index_path)
+            if os.path.exists(state_path):
+                os.remove(state_path)
             if os.path.exists(batch_dir):
                 import shutil
                 shutil.rmtree(batch_dir)
@@ -5047,6 +5412,7 @@ class FindNeuronConnection:
             self._conn_index = {}
             self._neuron_index_cache = None
             self._neuron_index_dict = {}
+            self._ensure_neuron_index_from_metadata()
         else:
             # Check for pending batch files from interrupted previous run
             conn_path = self._get_connection_db_path()
@@ -5070,27 +5436,42 @@ class FindNeuronConnection:
         elif neuron_types is not None:
             _print(f"Fetching bodyIds for {len(neuron_types)} neuron types...")
             target_bodyIds = []
+            metadata_index = None
+            try:
+                index_path = self._get_neuron_index_path()
+                if os.path.exists(index_path):
+                    index_columns = set(pl.scan_parquet(index_path).collect_schema().names())
+                    legacy_columns = {
+                        'bodyId', 'type', 'instance', 'post',
+                        'downstream_complete', 'last_fetched', 'connection_count',
+                    }
+                    if index_columns - legacy_columns:
+                        metadata_index = self._load_neuron_index()
+            except Exception:
+                metadata_index = None
             for ntype in neuron_types:
                 try:
                     # Get bodyIds for this type from the dataset's neuron_df
                     all_bodyids = self._get_all_dataset_bodyids()
                     if all_bodyids:
                         # Load neuron_df and filter by type
-                        dataset_safe = self.dataset.replace(':', '_').replace('.', '_')
-                        parquet_path = os.path.join(
-                            self.script_path, 'datasets', dataset_safe,
-                            f"{dataset_safe}_allneurons_neuron_df.parquet"
-                        )
-                        csv_path = os.path.join(
-                            self.script_path, 'datasets', dataset_safe,
-                            f"{dataset_safe}_allneurons_neuron_df.csv"
-                        )
-                        
-                        ndf = None
-                        if os.path.exists(parquet_path):
-                            ndf = pd.read_parquet(parquet_path)
-                        elif os.path.exists(csv_path):
-                            ndf = self._read_csv(csv_path, index_col=0, low_memory=False)
+                        if metadata_index is not None:
+                            ndf = metadata_index[['bodyId', 'type']].copy()
+                        else:
+                            dataset_safe = self.dataset.replace(':', '_').replace('.', '_')
+                            parquet_path = os.path.join(
+                                self.script_path, 'datasets', dataset_safe,
+                                f"{dataset_safe}_allneurons_neuron_df.parquet"
+                            )
+                            csv_path = os.path.join(
+                                self.script_path, 'datasets', dataset_safe,
+                                f"{dataset_safe}_allneurons_neuron_df.csv"
+                            )
+                            ndf = None
+                            if os.path.exists(parquet_path):
+                                ndf = pd.read_parquet(parquet_path)
+                            elif os.path.exists(csv_path):
+                                ndf = self._read_csv(csv_path, index_col=0, low_memory=False)
                         
                         if ndf is not None and 'type' in ndf.columns:
                             type_neurons = ndf[ndf['type'] == ntype]
@@ -5137,6 +5518,10 @@ class FindNeuronConnection:
         _print(f"  Need to fetch: {len(uncached):,}")
         
         if not uncached:
+            # The metadata index is normally built during initialization.  A
+            # final materialization also folds in any state sidecar left by a
+            # previous interrupted run before reporting completion.
+            self._materialize_neuron_index(remove_state=True)
             elapsed = time.time() - start_time
             _print("All target neurons already cached!")
             return {
@@ -5329,6 +5714,12 @@ class FindNeuronConnection:
             if hasattr(self, '_bulk_conn_cache'):
                 self._bulk_conn_cache = None
                 gc.collect()
+
+        # Keep the rich metadata index stable while the batch state is flushed
+        # incrementally.  On normal completion fold the four status columns
+        # into it and remove the tiny sidecar; after cancellation retain the
+        # sidecar so the next run can resume exactly from the checkpoint.
+        self._materialize_neuron_index(remove_state=not cancelled)
         
         elapsed = time.time() - start_time
         
@@ -5496,6 +5887,24 @@ class FindNeuronConnection:
     def _get_all_dataset_bodyids(self) -> list:
         """Get all bodyIds from dataset's neuron_df file."""
         dataset_safe = self.dataset.replace(':', '_').replace('.', '_')
+
+        # A metadata-backed index contains the authoritative full neuron list
+        # and is already columnar.  Reuse it instead of parsing the large CSV
+        # again when a cache build asks for all target bodyIds.
+        try:
+            index_path = self._get_neuron_index_path()
+            if os.path.exists(index_path):
+                index_columns = set(pl.scan_parquet(index_path).collect_schema().names())
+                legacy_columns = {
+                    'bodyId', 'type', 'instance', 'post',
+                    'downstream_complete', 'last_fetched', 'connection_count',
+                }
+                if index_columns - legacy_columns:
+                    index = self._load_neuron_index()
+                    if not index.empty and 'bodyId' in index.columns:
+                        return [str(x) for x in index['bodyId'].astype(str).unique().tolist()]
+        except Exception:
+            pass
         
         # Try parquet first, then CSV
         parquet_path = os.path.join(

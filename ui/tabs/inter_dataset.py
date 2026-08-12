@@ -23,7 +23,9 @@ def create_inter_dataset_tab():
         when no type matched and the search scope is 'auto'."""
         ds = datasets_select.value if datasets_select is not None else []
         scope = search_columns.value if search_columns is not None else "auto"
-        return match_suggestions(text, suggestion_pool(ds), scope)
+        # Keep the complete candidate pool for local continuation filtering;
+        # the input menu, not the backend matcher, limits visible rows.
+        return match_suggestions(text, suggestion_pool(ds), scope, limit=None)
 
     form_col, results_col = tool_page(
         "Cross-Dataset Comparison",
@@ -53,12 +55,14 @@ def create_inter_dataset_tab():
                 placeholder="Type or upload CSV/TSV/Excel with neuron types/bodyIds",
                 hint="Source neurons for pathfinding. Upload a CSV/TSV/Excel file (first column) or type comma-separated.",
                 suggestions=_type_suggest,
+                available_neurons=lambda: datasets_select.value if datasets_select is not None else [],
             )
             target_input = neuron_list_input(
                 label="Target Neurons",
                 placeholder="Type or upload CSV/TSV/Excel with neuron types/bodyIds",
                 hint="Target neurons for pathfinding. Upload a CSV/TSV/Excel file (first column) or type comma-separated.",
                 suggestions=_type_suggest,
+                available_neurons=lambda: datasets_select.value if datasets_select is not None else [],
             )
             output_dir = dir_input()
             mapping_select = mapping_selector()

@@ -1144,12 +1144,12 @@ class TestRunner:
         from ui.tabs.network import create_network_tab
 
         builders = [
-            ("/wire-find-path", create_find_path_tab),
-            ("/wire-find-shortest", create_find_shortest_tab),
-            ("/wire-network", create_network_tab),
-            ("/wire-inter-dataset", create_inter_dataset_tab),
+            ("/wire-find-path", create_find_path_tab, 2),
+            ("/wire-find-shortest", create_find_shortest_tab, 2),
+            ("/wire-network", create_network_tab, 1),
+            ("/wire-inter-dataset", create_inter_dataset_tab, 2),
         ]
-        for route, builder in builders:
+        for route, builder, expected_viewer_links in builders:
             client = Client(page(route))
             with client:
                 builder()
@@ -1173,6 +1173,14 @@ class TestRunner:
                 for el in client.elements.values()
             ]
             assert "Match by" in labels, route
+            viewer_links = [
+                el for el in client.elements.values()
+                if getattr(el, "text", "") == "See available neurons"
+            ]
+            assert len(viewer_links) == expected_viewer_links, route
+            assert all(
+                hasattr(link, "neuron_index_dialog") for link in viewer_links
+            )
 
 
 # =============================================================================
@@ -2472,6 +2480,7 @@ class TestComponents:
         # would die); NiceGUI 3.15 renders no DOM ids, so it anchors to its
         # parent like the paste/upload menus (no target prop).
         assert menu._props.get("no-focus") is True
+        assert menu._props.get("no-refocus") is True
         assert "target" not in menu._props
 
         # One character is below the threshold: no suggestion menu.
@@ -2539,10 +2548,13 @@ class TestComponents:
         def fake_suggest(text):
             calls.append(text)
             return {
-                "a": [("AmbiguousType", "type")],
-                "aM": [("aMe12", "type"), ("aMe10", "type")],
-                "aMe": [("aMe12", "type")],
-                "aMe1": [("aMe12", "type")],
+                "a": [
+                    ("aMe12", "type"), ("aMap", "type"),
+                    ("AmbiguousType", "type"),
+                ],
+                # This entry proves the full provider is not called for a
+                # strict continuation while the previous list still matches.
+                "aMe12x": [("BackendFallback", "type")],
             }.get(text, [])
 
         client = Client(page("/neuron-input-suggest-staged"))
@@ -2575,21 +2587,33 @@ class TestComponents:
 
         # aM: all matching type suggestions appear with their column hints.
         chip._handle_event({"listener_id": suggest_input.id, "args": "aM"})
-        assert calls == ["a", "aM"]
-        assert "aMe12" in texts() and "aMe10" in texts()
+        assert calls == ["a"]
+        assert "aMe12" in texts() and "aMap" in texts()
         assert "type" in texts() and "Recent" not in texts()
 
         # aMe -> aMe1 -> aMe12: each edit replaces the previous menu.
         chip._handle_event({"listener_id": suggest_input.id, "args": "aMe"})
-        assert calls == ["a", "aM", "aMe"]
-        assert "aMe12" in texts() and "aMe10" not in texts()
+        assert calls == ["a"]
+        assert "aMe12" in texts() and "aMap" not in texts()
         chip._handle_event({"listener_id": suggest_input.id, "args": "aMe1"})
-        assert calls == ["a", "aM", "aMe", "aMe1"]
-        assert "aMe12" in texts() and "aMe10" not in texts()
+        assert calls == ["a"]
+        assert "aMe12" in texts() and "aMap" not in texts()
         chip._handle_event({"listener_id": suggest_input.id, "args": "aMe12"})
-        assert calls == ["a", "aM", "aMe", "aMe1", "aMe12"]
-        assert "aMe12" in texts() and "aMe10" not in texts()
+        assert calls == ["a"]
+        assert "aMe12" in texts() and "aMap" not in texts()
+
+        # Once the reused list has no continuation match, the provider is
+        # asked for a fresh staged search.
+        chip._handle_event({"listener_id": suggest_input.id, "args": "aMe12x"})
+        assert calls == ["a", "aMe12x"]
+        assert "BackendFallback" in texts()
         assert container.get_value() == ("exact", [])
+
+        # Clearing the editor starts a new candidate search; the old "aMe12x"
+        # result must not be reused if the user begins a different query.
+        chip._handle_event({"listener_id": suggest_input.id, "args": ""})
+        chip._handle_event({"listener_id": suggest_input.id, "args": "a"})
+        assert calls == ["a", "aMe12x", "a"]
 
     def test_neuron_list_input_suggestions_single_popup_on_focus_change(
         self, tmp_path, monkeypatch
@@ -2638,6 +2662,68 @@ class TestComponents:
         )
         assert source.suggest_menu.value is False
         assert target.suggest_menu.value is True
+
+    def test_neuron_list_input_suggestions_quasar_input_value_updates(
+        self, tmp_path, monkeypatch
+    ):
+        """Quasar's input-value event also refreshes each query stage."""
+        from nicegui import Client
+        from nicegui.page import page
+        import ui.config as cfg_mod
+        from ui.components.common import neuron_list_input
+
+        monkeypatch.setattr(cfg_mod, "LOCAL_CONFIG_FILE", tmp_path / "local_config.json")
+        calls = []
+
+        def fake_suggest(text):
+            calls.append(text)
+            return {
+                "aM": [("aMe12", "type"), ("aMap", "type")],
+            }.get(text, [])
+
+        client = Client(page("/neuron-input-suggest-input-value"))
+        with client:
+            container = neuron_list_input(
+                label="Source Neurons", suggestions=fake_suggest
+            )
+
+        chip = container.chip_input
+        focus = next(l for l in chip._event_listeners.values() if l.type == "focus")
+        native_input = next(
+            l for l in chip._event_listeners.values()
+            if l.type == "input" and l.handler.__name__ == "_on_suggest_input"
+        )
+        input_value = next(
+            l for l in chip._event_listeners.values()
+            if l.type == "inputValue"
+            and l.handler.__name__ == "_on_suggest_input_value"
+        )
+        menu = [el for el in client.elements.values() if type(el).__name__ == "Menu"][-1]
+
+        chip._handle_event({"listener_id": focus.id, "args": None})
+
+        # Simulate the native event followed by Quasar's canonical event for
+        # the same keystroke: the dedupe guard must refresh exactly once.
+        chip._handle_event({"listener_id": native_input.id, "args": "aM"})
+        chip._handle_event({"listener_id": input_value.id, "args": "aM"})
+        assert calls == ["aM"]
+        assert menu.value is True
+        texts = [el.text for el in client.elements.values() if getattr(el, "text", "")]
+        assert "aMe12" in texts and "aMap" in texts
+
+        # A later input-value event must replace the previous result set.
+        chip._handle_event({"listener_id": input_value.id, "args": "aMe"})
+        assert calls == ["aM"]
+        texts = [el.text for el in client.elements.values() if getattr(el, "text", "")]
+        assert "aMe12" in texts and "aMap" not in texts
+
+        # A no-match update also removes the previous rows instead of
+        # leaving stale suggestions attached to the next popup.
+        chip._handle_event({"listener_id": input_value.id, "args": "zZ"})
+        assert calls == ["aM", "zZ"]
+        assert menu.value is False
+        texts = [el.text for el in client.elements.values() if getattr(el, "text", "")]
+        assert "aMe12" not in texts and "aMap" not in texts
 
     def test_neuron_list_input_suggestions_finish_and_focus(self, tmp_path, monkeypatch):
         """Graceful lifecycle: a finished input (suggestion pick) falls back
