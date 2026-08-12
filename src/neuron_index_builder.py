@@ -3,8 +3,11 @@
 The pulled ``*_allneurons_neuron_df.csv`` file remains the authoritative
 dataset metadata.  This module creates a typed, columnar copy for local
 search and display.  All source metadata columns are retained, including
-numeric and serialized fields; only accidental index columns and cache-state
-fields owned by the connection cache are excluded from the source projection.
+numeric fields.  Large serialized ROI annotations are excluded because they
+make the local viewer unnecessarily large and slow; the pulled source table
+remains the authoritative copy of those annotations.  Accidental index
+columns and cache-state fields owned by the connection cache are also
+excluded from the source projection.
 
 Cache completion state is kept by :class:`FindNeuronConnection`; this module
 only owns metadata-source discovery and the list of columns that make up the
@@ -29,6 +32,15 @@ SEARCH_EXCLUDED_COLUMNS = frozenset({
     "",
 })
 
+# ROI annotations are serialized lists/maps rather than compact metadata. In
+# the local releases they are the only fields that grow into multi-kilobyte or
+# multi-hundred-kilobyte strings (especially male-cns ``roiInfo`` and
+# ``outputRois``). Keep the source CSV untouched, but omit every ROI-named
+# field from the index used by suggestions and the rendered viewer. Matching
+# and display remain fast while ordinary numeric and string metadata stays
+# available in its source order.
+LARGE_SERIALIZED_COLUMN_MARKERS = ("roi",)
+
 # FlyWire releases have historically used several spellings for their stable
 # neuron identifier.  The cache has one canonical name (``bodyId``), while
 # source metadata can use any of these aliases.
@@ -50,6 +62,12 @@ OPERATIONAL_COLUMNS = (
 def _normalized_column_name(column: str) -> str:
     """Normalize a metadata name for case/spacing/punctuation comparisons."""
     return re.sub(r"[^a-z0-9]", "", str(column).casefold())
+
+
+def is_large_serialized_metadata_column(column: str) -> bool:
+    """Whether a source field is a serialized, oversized metadata payload."""
+    normalized = _normalized_column_name(column)
+    return any(marker in normalized for marker in LARGE_SERIALIZED_COLUMN_MARKERS)
 
 
 def body_id_column(columns: Iterable[str]) -> Optional[str]:
@@ -217,7 +235,11 @@ def searchable_columns(columns: Iterable[str]) -> List[str]:
     seen = set()
     for column in columns:
         name = str(column)
-        if name.casefold() in SEARCH_EXCLUDED_COLUMNS or name in seen:
+        if (
+            name.casefold() in SEARCH_EXCLUDED_COLUMNS
+            or is_large_serialized_metadata_column(name)
+            or name in seen
+        ):
             continue
         result.append(name)
         seen.add(name)
@@ -242,10 +264,11 @@ def _metadata_schema(path: Path):
 def _metadata_source_columns(path: Path) -> List[str]:
     """Return all source metadata columns in their original order.
 
-    The only source fields omitted are accidental CSV index columns and cache
-    state columns.  Keeping the source order here means the later projection
-    can promote only the useful identity/taxonomy fields without reordering
-    the rest of the dataset's metadata for readability.
+    The source fields omitted are accidental CSV index columns, cache state
+    columns, and large serialized ROI payloads. Keeping the source order here
+    means the later projection can promote only the useful identity/taxonomy
+    fields without reordering the rest of the dataset's metadata for
+    readability.
     """
     schema = _metadata_schema(path)
     names = list(schema.names())
@@ -255,7 +278,10 @@ def _metadata_source_columns(path: Path) -> List[str]:
 
     return [
         name for name in names
-        if str(name).casefold() not in SEARCH_EXCLUDED_COLUMNS
+        if (
+            str(name).casefold() not in SEARCH_EXCLUDED_COLUMNS
+            and not is_large_serialized_metadata_column(name)
+        )
     ]
 
 
@@ -263,8 +289,9 @@ def read_metadata_projection(path: Path):
     """Read all retained source metadata as a Polars DataFrame.
 
     The caller adds cache bookkeeping fields and writes the result to the
-    cache index.  Only the identity/taxonomy group is reordered; every other
-    source column and value is preserved.
+    cache index. Only the identity/taxonomy group is reordered; every other
+    retained source column and value is preserved. ROI payloads have already
+    been excluded by :func:`_metadata_source_columns`.
     """
     import polars as pl
 

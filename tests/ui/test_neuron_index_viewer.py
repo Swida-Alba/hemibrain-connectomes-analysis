@@ -30,11 +30,12 @@ def _write_priority_index(tmp_path, dataset="priority:v1.0"):
     index_path = cache_dir / "neuron_index.parquet"
     pl.DataFrame(
         {
-            "bodyId": ["aMe-body", "100", "200", "300"],
-            "type": ["", "aMe-type", "", ""],
-            "instance": ["hint", "", "aMe-instance", ""],
-            "hemilineage": ["", "", "", "aMe-other"],
-            "post": [1, 2, 3, 4],
+            "bodyId": ["aMe-body", "100", "200", "300", "400"],
+            "type": ["", "aMe-type", "", "", ""],
+            "instance": ["hint", "", "aMe-instance", "", ""],
+            "flywireType": ["", "", "", "aMe-other", ""],
+            "hemilineage": ["", "", "", "", "aMe-ignored"],
+            "post": [1, 2, 3, 4, 5],
         }
     ).write_parquet(index_path)
     return dataset
@@ -137,17 +138,18 @@ class TestNeuronIndexData:
         result = query_neuron_index(index, search="ame", page_size=10)
 
         assert [row["bodyId"] for row in result.rows] == [
-            "aMe-body", "200", "300", "100",
+            "aMe-body", "100", "200", "300",
         ]
         assert [row["match_value"] for row in result.rows] == [
-            "aMe-body", "aMe-instance", "aMe-other", "aMe-type",
+            "aMe-body", "aMe-type", "aMe-instance", "aMe-other",
         ]
         assert [row["match_column"] for row in result.rows] == [
-            "hint", "instance", "hemilineage", "type",
+            "hint", "type", "instance", "flywireType",
         ]
         assert [row["match_column_key"] for row in result.rows] == [
-            "bodyId", "instance", "hemilineage", "type",
+            "bodyId", "type", "instance", "flywireType",
         ]
+        assert result.total == 4
 
     def test_explicit_sort_overrides_matched_value_default(
         self, isolated_index_root
@@ -162,6 +164,34 @@ class TestNeuronIndexData:
 
         assert [row["bodyId"] for row in result.rows] == [
             "100", "200", "300", "aMe-body",
+        ]
+
+    def test_matched_value_sort_groups_priority_then_sorts_each_group(
+        self, isolated_index_root
+    ):
+        from ui.neuron_index import load_cached_neuron_index, query_neuron_index
+
+        dataset = "grouped:v1.0"
+        folder = dataset.replace(":", "_").replace(".", "_")
+        cache_dir = isolated_index_root / "cache" / folder
+        cache_dir.mkdir(parents=True)
+        pl.DataFrame(
+            {
+                "bodyId": ["aMe-body", "100", "200", "300", "301"],
+                "type": ["", "aMe-z", "", "aMe-a", ""],
+                "instance": ["", "", "aMe-z-instance", "", "aMe-a-instance"],
+                "flywireType": ["", "", "", "", ""],
+            }
+        ).write_parquet(cache_dir / "neuron_index.parquet")
+
+        index = load_cached_neuron_index(dataset, enrich=False)
+        result = query_neuron_index(index, search="ame", page_size=10)
+
+        assert [row["match_column_key"] for row in result.rows] == [
+            "bodyId", "type", "type", "instance", "instance",
+        ]
+        assert [row["match_value"] for row in result.rows] == [
+            "aMe-body", "aMe-a", "aMe-z", "aMe-a-instance", "aMe-z-instance",
         ]
 
     def test_load_refreshes_when_progress_sidecar_changes(self, isolated_index_root):
@@ -220,7 +250,7 @@ class TestNeuronIndexViewer:
         labels = [
             getattr(el, "_props", {}).get("label") for el in client.elements.values()
         ]
-        assert "Search all columns" in labels
+        assert "Search identities & taxonomy" in labels
         assert "Filter column" in labels
         assert "Sort by" in labels
         tables = [el for el in client.elements.values() if type(el).__name__ == "Table"]

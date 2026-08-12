@@ -364,15 +364,17 @@ def _contains_expression(frame, columns: List[str], text: str):
 
 
 def _ordered_match_columns(columns: List[str]) -> List[str]:
-    """Return the viewer's deterministic column-priority search order."""
+    """Return only the viewer's identity/taxonomy search scope.
+
+    The full cache remains available for display and explicit column filters,
+    but global viewer search must not scan operational, measurement, notes, or
+    other arbitrary metadata. Keeping this list small also avoids repeatedly
+    decoding large non-search fields for every keystroke.
+    """
     priority = priority_metadata_columns(columns)
     return [
         *[column for column in _MATCH_PRIORITY_COLUMNS if column in columns],
         *[column for column in priority if column not in _MATCH_PRIORITY_COLUMNS],
-        *sorted(
-            column for column in columns
-            if column not in _MATCH_PRIORITY_COLUMNS and column not in priority
-        ),
     ]
 
 
@@ -438,11 +440,12 @@ def query_neuron_index(
     """Filter, sort, and page a cached index without sending all rows to JS.
 
     Search and column filters use case-insensitive substring matching. Global
-    search results are ranked by matching column in this order: bodyId, type,
-    instance, then the remaining columns. When a query is present and no
-    explicit ``sort_by`` is supplied, rows are sorted ascending by their
-    matched value. An explicit sort column becomes the primary sort and
-    matching priority is used only as a tie-breaker.
+    search uses only bodyId, type, instance, and useful type/class taxonomy
+    fields, in that order. An explicit column filter may still target any
+    retained metadata column. When a query is present and no explicit sort is
+    supplied, rows are grouped by matched-column priority and sorted by
+    matched value within each group. An explicit sort column becomes the
+    primary sort and matching priority is used only as a tie-breaker.
     """
     import polars as pl
 
@@ -452,13 +455,18 @@ def query_neuron_index(
     filtered = frame
 
     search_text = str(search or "").strip()
+    search_columns = _ordered_match_columns(columns)
     if search_text:
-        filtered = filtered.filter(_contains_expression(filtered, columns, search_text))
+        filtered = filtered.filter(
+            _contains_expression(filtered, search_columns, search_text)
+        )
 
     filter_text = str(filter_text or "").strip()
     if filter_text:
         if not filter_column or filter_column in {"__all__", "All columns"}:
-            filtered = filtered.filter(_contains_expression(filtered, columns, filter_text))
+            filtered = filtered.filter(
+                _contains_expression(filtered, search_columns, filter_text)
+            )
         elif filter_column in filtered.columns:
             expression = (
                 pl.col(filter_column)
@@ -500,12 +508,13 @@ def query_neuron_index(
     )
     sort_columns = []
     sort_directions = []
-    if match_text and not manual_sort:
-        # The standalone viewer is a result browser: the default order should
-        # make the actual values being searched easy to scan.  Keep matching
-        # column priority as the deterministic tie-breaker.
-        sort_columns.extend(("match_value", "__match_priority"))
-        sort_directions.extend((False, False))
+    if match_text and (not manual_sort or manual_match_value_sort):
+        # Keep each match-column subset together in bodyId → type → instance →
+        # taxonomy order, then sort the actual matched values within that
+        # subset. If the UI explicitly requests descending matched values,
+        # reverse only the values inside each priority group.
+        sort_columns.extend(("__match_priority", "match_value"))
+        sort_directions.extend((False, bool(descending) if manual_match_value_sort else False))
     else:
         if selected_sort == "bodyId":
             # Body IDs are stored as strings in the cache to preserve large
@@ -563,6 +572,14 @@ def query_neuron_index(
         page=current_page,
         pages=pages,
         page_size=page_size,
-        sort_by=("match_value" if match_text and not manual_sort else selected_sort),
-        descending=(False if match_text and not manual_sort else bool(descending)),
+        sort_by=(
+            "match_value"
+            if match_text and (not manual_sort or manual_match_value_sort)
+            else selected_sort
+        ),
+        descending=(
+            bool(descending)
+            if match_text and manual_match_value_sort
+            else (False if match_text and not manual_sort else bool(descending))
+        ),
     )

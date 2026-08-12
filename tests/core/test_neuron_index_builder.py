@@ -3,7 +3,7 @@
 import polars as pl
 
 
-def test_metadata_projection_keeps_all_metadata_columns_and_source_order(tmp_path):
+def test_metadata_projection_keeps_metadata_except_large_roi_fields(tmp_path):
     from src.neuron_index_builder import read_metadata_projection
 
     source = tmp_path / "sample_allneurons_neuron_df.csv"
@@ -18,6 +18,7 @@ def test_metadata_projection_keeps_all_metadata_columns_and_source_order(tmp_pat
             "somaSide": ["L", "R"],
             "roiInfo": ["{\"AL\": 1}", "{\"MB\": 2}"],
             "inputRois": ["[AL]", "[MB]"],
+            "outputRois": ["[AL]", "[MB]"],
             "notes": ["large note", "another note"],
             "matchingNotes": ["match one", "match two"],
             "synonyms": ["syn one", "syn two"],
@@ -29,15 +30,16 @@ def test_metadata_projection_keeps_all_metadata_columns_and_source_order(tmp_pat
 
     assert projection.columns == [
         "bodyId", "type", "instance", "post", "size", "confidence",
-        "somaSide", "roiInfo", "inputRois", "notes", "matchingNotes",
+        "somaSide", "notes", "matchingNotes",
         "synonyms",
     ]
     assert projection["bodyId"].to_list() == ["12345678901234567890", "42"]
     assert projection["type"].to_list() == ["aMe12", "APL"]
     assert projection["size"].to_list() == [100, 200]
     assert projection["confidence"].to_list() == [0.9, 0.8]
-    assert "roiInfo" in projection.columns
-    assert "inputRois" in projection.columns
+    assert "roiInfo" not in projection.columns
+    assert "inputRois" not in projection.columns
+    assert "outputRois" not in projection.columns
     assert "notes" in projection.columns
     assert "matchingNotes" in projection.columns
     assert "synonyms" in projection.columns

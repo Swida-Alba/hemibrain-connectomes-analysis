@@ -182,9 +182,11 @@ def _render_index(
                 refresh_query_preview()
         ui.label(
             "Search and column filters use case-insensitive substring matching. "
-            "Search results prioritize bodyId, type, instance, then other columns. "
-            "With a query, rows default to ascending matched-value order; choose "
-            "a metadata column in Sort by to override it. "
+            "Global search covers bodyId, type, instance, and useful type/taxonomy "
+            "fields; explicit column filters can target any retained field. "
+            "With a query, rows stay grouped by match priority and sort matched "
+            "values within each group; choose a metadata column in Sort by to "
+            "override it. "
             "The Match details panel shows the highest-priority match for each "
             "visible row; bodyId matches show their corresponding instance when "
             "available. The original matched cell is highlighted and stays visible "
@@ -193,10 +195,10 @@ def _render_index(
 
         with ui.row().classes("w-full items-end gap-2 flex-wrap"):
             search_input = ui.input(
-                "Search all columns",
+                "Search identities & taxonomy",
                 placeholder="e.g. aMe12 or 5813",
             ).props("clearable input-debounce=180").classes("flex-grow drocat-input")
-            filter_options = {"__all__": "All columns"}
+            filter_options = {"__all__": "Search fields"}
             filter_options.update({column: _column_label(column) for column in columns})
             filter_column = ui.select(
                 options=filter_options,
@@ -314,7 +316,20 @@ def _render_index(
                     with ui.row().classes("items-center gap-2"):
                         ui.icon("manage_search", color="primary").classes("text-lg")
                         ui.label("Match details").classes("text-subtitle2 font-bold")
-                    ui.badge("per visible row", color="primary").props("outline")
+                    with ui.row().classes("items-center gap-2"):
+                        if add_to_query is not None:
+                            selection_status = ui.label("0 selected").classes(
+                                "text-caption drocat-muted"
+                            )
+                            add_selected_button = ui.button(
+                                "Add selected to query",
+                                icon="playlist_add",
+                                on_click=add_selected_matches,
+                            ).props("outline dense color=primary").classes(
+                                "drocat-neuron-add-query"
+                            )
+                            add_selected_button.set_enabled(False)
+                        ui.badge("per visible row", color="primary").props("outline")
                 ui.label(
                     "The highest-priority match for each row. Select one or more "
                     "rows to append their matched values to the current query. "
@@ -328,17 +343,6 @@ def _render_index(
                     on_select=handle_match_selection,
                     pagination=None,
                 ).classes("w-full drocat-neuron-match-table")
-                if add_to_query is not None:
-                    with ui.row().classes("w-full items-center justify-between gap-2 mt-2"):
-                        selection_status = ui.label("0 selected").classes(
-                            "text-caption drocat-muted"
-                        )
-                        add_selected_button = ui.button(
-                            "Add selected to query",
-                            icon="playlist_add",
-                            on_click=add_selected_matches,
-                        ).props("flat dense color=primary")
-                        add_selected_button.set_enabled(False)
 
             with ui.element("section").classes("drocat-neuron-full-panel"):
                 with ui.row().classes("w-full items-center gap-2"):
