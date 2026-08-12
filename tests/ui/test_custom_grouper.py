@@ -179,29 +179,29 @@ def isolated_store(tmp_path, monkeypatch):
 
 
 class TestSelectorGate:
-    def test_sentinel_option_present_and_card_collapsed(self, isolated_store):
+    def test_sentinel_option_present_and_dialog_closed(self, isolated_store):
         from nicegui import Client
         from nicegui.page import page
         client = Client(page("/grouper-gate"))
         with client:
-            selector, card, _resolve = me.custom_grouping_block(
+            selector, dialog, _resolve = me.custom_grouping_block(
                 tab_key="gate", datasets_provider=lambda: [DS_A])
         assert me.INLINE_MAPPING in selector.options
         assert me.NONE_MAPPING in selector.options
         assert selector.value == me.NONE_MAPPING
-        assert card.visible is False
+        assert dialog.value is False
 
-    def test_selecting_sentinel_expands_and_other_collapses(self, isolated_store):
+    def test_selecting_sentinel_opens_and_other_closes(self, isolated_store):
         from nicegui import Client
         from nicegui.page import page
         client = Client(page("/grouper-toggle"))
         with client:
-            selector, card, _resolve = me.custom_grouping_block(
+            selector, dialog, _resolve = me.custom_grouping_block(
                 tab_key="toggle", datasets_provider=lambda: [DS_A])
             selector.value = me.INLINE_MAPPING
-            assert card.visible is True
+            assert dialog.value is True
             selector.value = me.NONE_MAPPING
-            assert card.visible is False
+            assert dialog.value is False
 
 
 class TestRunResolution:

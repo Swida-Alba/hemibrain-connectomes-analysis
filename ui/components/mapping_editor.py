@@ -98,16 +98,15 @@ def custom_grouping_block(
     tab_key: str = "tab",
     watch_elements: Optional[List] = None,
     query_inputs: Optional[Dict[str, object]] = None,
-) -> Tuple[ui.select, ui.card, Callable[[], Tuple[Optional[str], bool]]]:
+) -> Tuple[ui.select, ui.dialog, Callable[[], Tuple[Optional[str], bool]]]:
     """Custom Grouping selector + collapsible inline grouper.
 
-    Returns ``(selector, grouper_card, resolve_mapping_path)``:
+    Returns ``(selector, grouper_dialog, resolve_mapping_path)``:
 
-    - Selecting ``INLINE_MAPPING`` shows the inline grouper card; any other
-      choice collapses it (state is preserved, visibility-toggled only).
-    - The grouper card mounts FULL-WIDTH below the two-column workspace when
-      the tab uses ``tool_page`` (the form column carries ``_drocat_page``);
-      otherwise it renders inline at the call site.
+    - Selecting ``INLINE_MAPPING`` opens the inline grouper as a wide popup
+      dialog (same panel design as the "See available neurons" viewer) and
+      reveals an "Edit groups" link for reopening it; any other choice
+      closes the dialog (board state is preserved).
     - ``resolve_mapping_path()`` -> ``(path, ok)``. ``ok=False`` means the
       run must be aborted (errors were already notified). Inline: validates,
       exports the canonical JSON (script-loadable), records the group
@@ -137,34 +136,24 @@ def custom_grouping_block(
             MAPPING_GUIDE_URL,
             new_tab=True,
         ).classes("text-caption text-primary")
+        edit_link = ui.button(
+            "Edit groups", icon="group_work", on_click=lambda: dialog.open()
+        ).props("flat dense no-caps").classes("drocat-inline-link")
+        edit_link.set_visibility(False)
 
     grouper = LiteCustomGrouper(tab_key=tab_key, require_names=require_names,
                                 query_inputs=query_inputs)
 
-    def _find_page_column(element) -> Optional[ui.column]:
-        """tool_page stashes the page column on the workspace columns so
-        full-width blocks can mount below the two-column grid."""
-        def _parent(el):
-            slot = getattr(el, "parent_slot", None)
-            return slot.parent if slot is not None else None
-        while element is not None:
-            page = getattr(element, "_drocat_page", None)
-            if page is not None:
-                return page
-            element = _parent(element)
-        return None
-
-    page_col = _find_page_column(selector)
-    # Mount below the two-column workspace (full width) when the tab uses
-    # tool_page; otherwise fall back to the current (form) slot.
-    mount = page_col if page_col is not None else None
-    if mount is not None:
-        with mount:
-            with ui.card().classes("w-full drocat-card") as grouper_card:
-                with ui.column().classes("w-full gap-1") as grouper_container:
-                    pass
-    else:
-        with ui.card().classes("w-full drocat-card") as grouper_card:
+    # Popup panel design (mirrors the "See available neurons" viewer): the
+    # board lives in a wide dialog instead of a card pinned to the page
+    # bottom, so it is always at hand while configuring the query.
+    dialog = ui.dialog()
+    with dialog:
+        with ui.card().classes("w-[min(98vw,1400px)] max-w-none"):
+            with ui.row().classes("w-full items-center justify-between gap-3"):
+                ui.label("Inline Custom Groups").classes("text-h6")
+                ui.button(icon="close", on_click=dialog.close).props(
+                    "flat round dense")
             with ui.column().classes("w-full gap-1") as grouper_container:
                 pass
     grouper.create(
@@ -172,15 +161,17 @@ def custom_grouping_block(
         datasets_provider or (lambda: []),
         watch_elements=watch_elements,
     )
-    grouper_card.set_visibility(False)
-    # Test/DOM hook: the board behind this card.
-    grouper_card.inline_grouper = grouper
+    # Test/DOM hook: the board behind this dialog.
+    dialog.inline_grouper = grouper
 
     def _toggle(event) -> None:
         inline = event.value == INLINE_MAPPING
-        grouper_card.set_visibility(inline)
+        edit_link.set_visibility(inline)
         if inline:
             grouper.resync()
+            dialog.open()
+        else:
+            dialog.close()
 
     selector.on_value_change(_toggle)
 
@@ -204,7 +195,7 @@ def custom_grouping_block(
             return path, True
         return selected_mapping_file_path(selector.value), True
 
-    return selector, grouper_card, resolve_mapping_path
+    return selector, dialog, resolve_mapping_path
 
 
 
