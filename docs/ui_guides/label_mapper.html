@@ -44,6 +44,43 @@
     (<code>label_map.json</code> / <code>parameters.json</code> record the
     mapping used).</p>
 
+  <h2>Inline groups &amp; history (query-local grouper)</h2>
+  <p>Every tab with a <b>Custom Grouping</b> dropdown also offers
+    <code>✏️ Define groups inline…</code>. Selecting it expands a lightweight
+    group editor (one row per label: a group name plus one neuron box per
+    dataset); any other choice collapses it. Inline groups are ideal for
+    one-off queries — no trip to the Settings tab needed.</p>
+  <ul>
+    <li><b>Same label, all datasets:</b> one label governs every dataset
+      column on the board. On the Cross-Dataset tab the columns follow the
+      selected datasets, and <b>label names are compulsory</b> (the shared
+      label is what aligns datasets). On single-dataset tabs names are
+      optional — blank rows auto-name to <code>Group_N</code>.</li>
+    <li><b>Uniform format:</b> at run time the board is exported to the same
+      LabelMapper JSON schema as presets, at
+      <code>cache/user_mappings/_inline/&lt;tab&gt;_&lt;timestamp&gt;.json</code>.
+      Scripts load that file directly:
+      <code>LabelMapper(overall_mapping_json="…")</code> — no conversion.</li>
+    <li><b>Reload:</b> <b>Load…</b> parses any mapping JSON (inline export,
+      preset export, or hand-written) back onto the board, so a run is
+      exactly reproducible from its exported file.</li>
+    <li><b>History:</b> after each inline run, the named labels are recorded
+      in <code>cache/user_mappings/group_history.json</code> and offered via
+      <b>Add from history…</b>. A label maps to every dataset it was ever
+      defined for; defining it again with different members <b>covers</b>
+      (replaces) the previous value for the datasets on the board.
+      Auto-named <code>Group_N</code> rows are never recorded.</li>
+    <li><b>Save as preset…</b> promotes the current board into the named
+      preset store above. Presets and history are independent tiers.</li>
+  </ul>
+  <div class="callout info">
+    <b>Division of labor:</b> the inline grouper writes identical groups to
+    the <i>source</i> and <i>target</i> roles only. Asymmetric source/target
+    or intermediate mappings stay the Settings preset editor's domain.
+    Empty boxes export as empty groups, which keeps cross-dataset validation
+    happy when a label has members in only some datasets.
+  </div>
+
   <h2>Preset file format (JSON)</h2>
   <p>The exported preset uses LabelMapper's native JSON schema — one mapping
     per role, a <code>custom_label</code> list of group names, and one list of

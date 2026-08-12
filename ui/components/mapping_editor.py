@@ -9,15 +9,30 @@ schema directly:
         "hemibrain:v1.2.1": [["aMe12", "aMe12_R"], ["aMe12_L"]]
     }
 """
-from typing import Dict, List, Optional
+from datetime import datetime
+from typing import Callable, Dict, List, Optional, Tuple
 
 from nicegui import ui
 
-from .. import mapping_store
+from .. import group_history, mapping_store
+from ..config import PROJECT_ROOT
+from .custom_grouper import LiteCustomGrouper
 
 _LABEL_KEYS = ("custom_label", "std_label")
 
 NONE_MAPPING = "(No custom mapping)"
+INLINE_MAPPING = "✏️ Define groups inline…"
+
+# Transient per-run exports of the inline grouper (canonical LabelMapper
+# format — directly loadable by scripts); newest per tab wins.
+_INLINE_DIR = PROJECT_ROOT / "cache" / "user_mappings" / "_inline"
+
+
+def inline_mapping_path(tab_key: str) -> str:
+    """Timestamped export path for one tab's inline groups."""
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    return str(_INLINE_DIR / f"{tab_key}_{stamp}.json")
+
 
 # Local documentation served by the app (ui/app.py registers /docs).
 # The guide's "UI workflow" section explains the preset workflow; it is an
@@ -67,9 +82,102 @@ def mapping_selector(
 
 def selected_mapping_file_path(selection: Optional[str]) -> Optional[str]:
     """Export path for the chosen preset, or None when no mapping is chosen."""
-    if not selection or selection == NONE_MAPPING:
+    if not selection or selection in (NONE_MAPPING, INLINE_MAPPING):
         return None
     return mapping_store.mapping_file_path(selection)
+
+
+def custom_grouping_block(
+    label: str = "Custom Grouping",
+    hint: str = (
+        "Reuse a saved custom type mapping (manage them in the Settings tab) "
+        "or define groups inline for this query."
+    ),
+    datasets_provider: Optional[Callable[[], List[str]]] = None,
+    require_names: bool = False,
+    tab_key: str = "tab",
+    watch_elements: Optional[List] = None,
+) -> Tuple[ui.select, ui.card, Callable[[], Tuple[Optional[str], bool]]]:
+    """Custom Grouping selector + collapsible inline grouper.
+
+    Returns ``(selector, grouper_card, resolve_mapping_path)``:
+
+    - Selecting ``INLINE_MAPPING`` shows the inline grouper card; any other
+      choice collapses it (state is preserved, visibility-toggled only).
+    - ``resolve_mapping_path()`` -> ``(path, ok)``. ``ok=False`` means the
+      run must be aborted (errors were already notified). Inline: validates,
+      exports the canonical JSON (script-loadable), records the group
+      history, returns the export path. Preset: returns its exported file.
+      None/(no mapping): ``(None, True)``.
+    """
+    options = [NONE_MAPPING, INLINE_MAPPING] + mapping_store.list_mappings()
+    active = mapping_store.get_active_mapping() or NONE_MAPPING
+    selector = ui.select(
+        options=options,
+        value=active if active in options else NONE_MAPPING,
+        label=label,
+    ).classes("w-full drocat-select").tooltip(hint)
+
+    def _refresh_options():
+        current = selector.value
+        available = [NONE_MAPPING, INLINE_MAPPING] + mapping_store.list_mappings()
+        if current not in available:
+            selector.value = NONE_MAPPING
+        selector.options = available
+
+    selector.on("click", _refresh_options)
+
+    with ui.row().classes("items-center w-full"):
+        ui.link(
+            "📖 Custom grouping instructions",
+            MAPPING_GUIDE_URL,
+            new_tab=True,
+        ).classes("text-caption text-primary")
+
+    grouper = LiteCustomGrouper(tab_key=tab_key, require_names=require_names)
+    with ui.card().classes("w-full drocat-card") as grouper_card:
+        ui.label("Inline Custom Groups").classes("drocat-card-title")
+        with ui.column().classes("w-full gap-1") as grouper_container:
+            pass
+    grouper.create(
+        grouper_container,
+        datasets_provider or (lambda: []),
+        watch_elements=watch_elements,
+    )
+    grouper_card.set_visibility(False)
+    # Test/DOM hook: the board behind this card.
+    grouper_card.inline_grouper = grouper
+
+    def _toggle(event) -> None:
+        inline = event.value == INLINE_MAPPING
+        grouper_card.set_visibility(inline)
+        if inline:
+            grouper.resync()
+
+    selector.on_value_change(_toggle)
+
+    def resolve_mapping_path() -> Tuple[Optional[str], bool]:
+        if selector.value == INLINE_MAPPING:
+            if grouper.is_empty():
+                ui.notify(
+                    "Inline grouping is selected but no groups are defined — "
+                    "add groups or switch back to '(No custom mapping)'.",
+                    type="warning")
+                return None, False
+            errors = grouper.validate()
+            if errors:
+                for err in errors:
+                    ui.notify(err, type="negative")
+                return None, False
+            path = grouper.export_to(inline_mapping_path(tab_key))
+            # History stores user intent at export time (label-keyed,
+            # cell-granularity upsert; auto-named groups are skipped).
+            group_history.record(grouper.history_payload(), origin="inline")
+            return path, True
+        return selected_mapping_file_path(selector.value), True
+
+    return selector, grouper_card, resolve_mapping_path
+
 
 
 class MappingGridEditor:

@@ -582,6 +582,10 @@ class LabelMapper:
                 raise ValueError(f"Dataset '{dataset}' has {len(groups)} groups but {len(std_labels)} std_labels")
             
             for i, (label, group) in enumerate(zip(std_labels, groups)):
+                # Touch the slot so EMPTY groups still register the dataset
+                # for this label (validate_datasets must see every compared
+                # dataset even when a group has no members there).
+                mapping[label][dataset]
                 if isinstance(group, list):
                     for neuron_id in group:
                         mapping[label][dataset].append(neuron_id)
@@ -661,6 +665,9 @@ class LabelMapper:
                 labels = labels + [f'{role}_grp{i+1}' for i in range(len(labels), len(groups))]
             
             for label, group in zip(labels, groups):
+                # Touch the slot so EMPTY groups still register the dataset
+                # for this label (parity with the JSON loading path).
+                mapping[label][dataset]
                 for neuron_id in group:
                     mapping[label][dataset].append(neuron_id)
     

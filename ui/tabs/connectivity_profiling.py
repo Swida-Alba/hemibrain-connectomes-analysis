@@ -6,7 +6,7 @@ from ..components.common import (
     dataset_multi_selector, neuron_list_input, number_input, select_input, checkbox_input,
     dir_input, apply_filter_mode, section_header, param_grid, tool_page,
 )
-from ..components.mapping_editor import mapping_selector, selected_mapping_file_path
+from ..components.mapping_editor import custom_grouping_block
 from ..components.output_panel import OutputPanel
 from ..runner import ScriptRunner
 
@@ -105,10 +105,14 @@ def create_connectivity_profiling_tab():
             custom_group_box = ui.card().classes("w-full drocat-card").props('id=card-custom-group')
             with custom_group_box:
                 section_header("Custom Groups (LabelMapper)", "group_work")
-                mapping_select = mapping_selector(
+                mapping_select, _grouper_card, resolve_grouping = custom_grouping_block(
                     label="Custom Grouping Preset",
-                    hint="Saved LabelMapper preset (manage in the Settings tab). Each "
-                         "source-side group becomes one row of the comparison matrix.",
+                    hint="Saved LabelMapper preset (manage in the Settings tab) or inline "
+                         "groups. Each source-side group becomes one row of the comparison "
+                         "matrix.",
+                    tab_key="profiling",
+                    datasets_provider=lambda: list(datasets_select.value or []),
+                    watch_elements=[datasets_select],
                 )
                 ui.label(
                     "Groups are read from the preset's source mapping: each custom label "
@@ -138,6 +142,19 @@ def create_connectivity_profiling_tab():
             "skip": True,
             "compute": False,
         }.get(skip_bodyid_level.value, "auto")
+
+        # Custom-group mode needs a mapping (preset or inline); resolve it
+        # before the running state so an invalid board aborts cleanly.
+        mapping_path = None
+        if aggregation_level.value == "custom group":
+            mapping_path, mapping_ok = resolve_grouping()
+            if not mapping_ok:
+                return
+            if not mapping_path:
+                ui.notify(
+                    "Select a LabelMapper preset or define inline groups for "
+                    "the custom groups", type="warning")
+                return
 
         output_panel.clear()
         output_panel.set_running(True)
@@ -175,10 +192,6 @@ def create_connectivity_profiling_tab():
         }
 
         if aggregation_level.value == "custom group":
-            mapping_path = selected_mapping_file_path(mapping_select.value)
-            if not mapping_path:
-                ui.notify("Please select a LabelMapper preset for the custom groups", type="warning")
-                return
             constructor_params["custom_mapping_file"] = mapping_path
 
         result = await output_panel.run(runner, "connectivity_profiling", constructor_params, "run",

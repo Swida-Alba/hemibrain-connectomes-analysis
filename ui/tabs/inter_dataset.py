@@ -7,7 +7,7 @@ from ..components.common import (
     checkbox_input, dir_input, section_header, param_grid, tool_page,
     apply_filter_mode,
 )
-from ..components.mapping_editor import mapping_selector, selected_mapping_file_path
+from ..components.mapping_editor import custom_grouping_block
 from ..components.output_panel import OutputPanel
 from ..runner import ScriptRunner
 from ..type_suggestions import suggestion_pool, match_suggestions
@@ -65,7 +65,12 @@ def create_inter_dataset_tab():
                 available_neurons=lambda: datasets_select.value if datasets_select is not None else [],
             )
             output_dir = dir_input()
-            mapping_select = mapping_selector()
+            mapping_select, _grouper_card, resolve_grouping = custom_grouping_block(
+                datasets_provider=lambda: list(datasets_select.value or []),
+                require_names=True,
+                tab_key="inter_dataset",
+                watch_elements=[datasets_select],
+            )
 
         with ui.card().classes("w-full drocat-card"):
             section_header("Core Parameters", "tune")
@@ -276,6 +281,12 @@ def create_inter_dataset_tab():
             ui.notify(f"Nickname count ({len(nicknames)}) must match dataset count ({len(datasets)})", type="warning")
             return
 
+        # Resolve custom grouping (preset or inline); inline group labels are
+        # compulsory for cross-dataset comparisons and validated here.
+        mapping_path, mapping_ok = resolve_grouping()
+        if not mapping_ok:
+            return
+
         output_panel.clear()
         output_panel.set_running(True)
 
@@ -308,7 +319,6 @@ def create_inter_dataset_tab():
         }
         if nicknames:
             constructor_params["datasets_nickname"] = nicknames
-        mapping_path = selected_mapping_file_path(mapping_select.value)
         if mapping_path:
             constructor_params["overall_mapping_json"] = mapping_path
 

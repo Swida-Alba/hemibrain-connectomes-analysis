@@ -11,7 +11,7 @@ from ..components.common import (
     dataset_selector, neuron_list_input, number_input, select_input,
     checkbox_input, dir_input, apply_filter_mode, section_header, param_grid, tool_page,
 )
-from ..components.mapping_editor import mapping_selector, selected_mapping_file_path
+from ..components.mapping_editor import custom_grouping_block
 from ..components.output_panel import OutputPanel
 from ..runner import ScriptRunner
 from ..type_suggestions import get_dataset_pools, match_suggestions
@@ -63,7 +63,12 @@ def create_find_shortest_tab():
                     allow_custom=True,
                 )
                 output_dir = dir_input()
-                mapping_select = mapping_selector(label="Custom Grouping")
+                mapping_select, _grouper_card, resolve_grouping = custom_grouping_block(
+                    label="Custom Grouping",
+                    tab_key="find_shortest",
+                    datasets_provider=lambda: [dataset.value] if dataset.value else [],
+                    watch_elements=[dataset],
+                )
 
         with ui.card().classes("w-full drocat-card").props('id="card-findshortest-core"'):
             section_header("Core Parameters", "tune")
@@ -252,6 +257,12 @@ def create_find_shortest_tab():
         from ..history_store import record as _record_history
         _record_history([str(v) for v in src_neurons + tgt_neurons])
 
+        # Resolve custom grouping first: an invalid inline board aborts the
+        # run before the output panel enters its running state.
+        mapping_path, mapping_ok = resolve_grouping()
+        if not mapping_ok:
+            return
+
         output_panel.clear()
         output_panel.set_running(True)
 
@@ -288,7 +299,6 @@ def create_find_shortest_tab():
             "symmetry_analysis": symmetry_analysis.value,
             "find_reciprocal": find_reciprocal.value,
         }
-        mapping_path = selected_mapping_file_path(mapping_select.value)
         if mapping_path:
             constructor_params["custom_mapping_file"] = mapping_path
 

@@ -152,3 +152,77 @@ class TestStoreExportToEnrichment:
         pairs_pl = sorted(zip(ct_pl["type_pre"].to_list(), ct_pl["type_post"].to_list()))
         # mapped A/B -> SRC, X -> TGT; unmapped C stays C, Y stays Y
         assert pairs_pd == pairs_pl == [("C", "Y"), ("SRC", "TGT")]
+
+
+class TestCanonicalInlineFormat:
+    """The lite grouper's canonical export (LabelMapper overall-JSON plus the
+    additive ``format``/``groups_meta`` keys) must load exactly like a named
+    preset file — format uniformity between UI and scripts."""
+
+    def _canonical_file(self, tmp_path, labels, per_ds):
+        mapping = {
+            "format": "drocat_custom_groups/v1",
+            "groups_meta": {"updated_at": "2026-08-12T00:00:00", "origin": "inline"},
+            "source_mapping": {"custom_label": labels, **per_ds},
+            "target_mapping": {"custom_label": labels, **per_ds},
+        }
+        path = tmp_path / "inline.json"
+        path.write_text(json.dumps(mapping), encoding="utf-8")
+        return str(path)
+
+    def test_additive_meta_keys_do_not_break_loading(self, tmp_path):
+        from comparison.label_mapper import LabelMapper
+        path = self._canonical_file(
+            tmp_path, ["grpA"], {"hemibrain:v1.2.1": [["aMe12", "aMe12_R"]]})
+        lm = LabelMapper(overall_mapping_json=path)
+        assert sorted(lm.get_neurons_for_label("grpA", "hemibrain:v1.2.1", "source")) \
+            == ["aMe12", "aMe12_R"]
+        # both roles identical -> target resolves the same
+        assert sorted(lm.get_neurons_for_label("grpA", "hemibrain:v1.2.1", "target")) \
+            == ["aMe12", "aMe12_R"]
+
+    def test_auto_named_inline_equals_named_preset(self, tmp_path):
+        from comparison.label_mapper import LabelMapper
+        # auto-named single group vs an explicitly named preset: the mapper
+        # only cares about label->members, so membership is identical
+        inline = self._canonical_file(
+            tmp_path, ["Group_1"], {"male-cns:v0.9": [["aMe12"]]})
+        preset = tmp_path / "preset.json"
+        preset.write_text(json.dumps({
+            "source_mapping": {"custom_label": ["Group_1"],
+                               "male-cns:v0.9": [["aMe12"]]},
+            "target_mapping": {"custom_label": ["Group_1"],
+                               "male-cns:v0.9": [["aMe12"]]},
+        }), encoding="utf-8")
+        lm_inline = LabelMapper(overall_mapping_json=inline)
+        lm_preset = LabelMapper(overall_mapping_json=str(preset))
+        for role in ("source", "target"):
+            assert (lm_inline.get_neurons_for_label("Group_1", "male-cns:v0.9", role)
+                    == lm_preset.get_neurons_for_label("Group_1", "male-cns:v0.9", role)
+                    == ["aMe12"])
+
+    def test_empty_group_for_missing_dataset_passes_validation(self, tmp_path):
+        """Cross-dataset runs require every dataset present in a role; an
+        empty group [] satisfies that without members."""
+        from comparison.label_mapper import LabelMapper
+        path = self._canonical_file(tmp_path, ["grpA"], {
+            "male-cns:v0.9": [["aMe12"]],
+            "hemibrain:v1.2.1": [[]],
+        })
+        lm = LabelMapper(overall_mapping_json=path)
+        lm.validate_datasets(["male-cns:v0.9", "hemibrain:v1.2.1"], role="both")
+        assert lm.get_neurons_for_label("grpA", "hemibrain:v1.2.1", "source") == []
+
+    def test_fnc_loads_canonical_file(self, tmp_path, monkeypatch):
+        from coana import FindNeuronConnection
+        path = self._canonical_file(
+            tmp_path, ["grpA"], {"male-cns:v0.9": [["aMe12"]]})
+        fc = FindNeuronConnection.__new__(FindNeuronConnection)
+        fc.custom_mapping_file = path
+        fc.label_mapper = None
+        # mirror the __post_init__ snippet that materializes the mapper
+        from comparison.label_mapper import LabelMapper
+        if fc.custom_mapping_file and fc.label_mapper is None:
+            fc.label_mapper = LabelMapper(overall_mapping_json=fc.custom_mapping_file)
+        assert fc.label_mapper is not None and not fc.label_mapper.is_empty
+        assert fc.label_mapper.get_neurons_for_label("grpA", "male-cns:v0.9", "source") == ["aMe12"]
