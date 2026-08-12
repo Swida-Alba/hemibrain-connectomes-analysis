@@ -219,30 +219,44 @@ class TestPoolSources:
         assert pools["flywireType"] == [
             ("FW_APL", "flywireType"), ("FW_MBON", "flywireType"),
         ]
-        assert pools["hemilineage"] == [
-            ("AL", "hemilineage"), ("MB", "hemilineage"),
-        ]
+        assert "hemilineage" not in pools
         assert "last_fetched" not in pools
         assert "roiInfo" not in pools
 
     def test_table_fallback_pools(self, local_dirs):
         """datasets/<folder> neuron tables (no cache index) build pools
-        including every searchable string column (e.g. hemilineage)."""
+        for type/class taxonomy columns, not arbitrary metadata."""
         cache, datasets = local_dirs
         folder = "test_v1"
         ds_dir = datasets / folder
         ds_dir.mkdir()
         (ds_dir / "test_neuron_df.csv").write_text(
-            "bodyId,type,instance,flywireType,hemilineage\n"
-            "1,APL,APL_1,FW_APL,AL\n"
-            "2,MBON01,MBON01_1,FW_MBON,MB\n"
+            "bodyId,type,instance,flywireType,class,hemilineage\n"
+            "1,APL,APL_1,FW_APL,Kenyon,AL\n"
+            "2,MBON01,MBON01_1,FW_MBON,Projection,MB\n"
         )
 
         pools = _folder_pools(folder)
         assert pools["type"] == [("APL", "type"), ("MBON01", "type")]
         assert pools["flywireType"] == [("FW_APL", "flywireType"), ("FW_MBON", "flywireType")]
-        assert pools["hemilineage"] == [("AL", "hemilineage"), ("MB", "hemilineage")]
+        assert pools["class"] == [("Kenyon", "class"), ("Projection", "class")]
+        assert "hemilineage" not in pools
         assert pools["bodyId"] == [("1", "APL_1"), ("2", "MBON01_1")]
+
+    def test_table_fallback_accepts_flywire_body_id_alias(self, local_dirs):
+        _, datasets = local_dirs
+        folder = "flywire_test_v1"
+        ds_dir = datasets / folder
+        ds_dir.mkdir()
+        (ds_dir / "flywire_test_neuron_df.csv").write_text(
+            "root_id,type,instance,super_class\n"
+            "720575940000000001,aMe12,aMe12_L,optic\n"
+        )
+
+        pools = _folder_pools(folder)
+        assert pools["bodyId"] == [
+            ("720575940000000001", "aMe12_L"),
+        ]
 
     def test_cache_index_preferred_over_table(self, local_dirs):
         cache, datasets = local_dirs

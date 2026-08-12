@@ -156,6 +156,85 @@ html, body {
     text-decoration: none !important;
 }
 .drocat-inline-link:hover { text-decoration: underline !important; }
+.drocat-neuron-results-layout {
+    display: grid;
+    grid-template-columns: minmax(260px, 310px) minmax(0, 1fr);
+    gap: 12px;
+    align-items: stretch;
+}
+.drocat-neuron-match-panel,
+.drocat-neuron-full-panel {
+    min-width: 0;
+    border: 1px solid var(--drocat-line);
+    border-radius: 12px;
+    padding: 12px;
+    background: var(--drocat-surface);
+}
+.drocat-neuron-match-panel {
+    background: linear-gradient(180deg, var(--drocat-cobalt-soft), var(--drocat-surface));
+    border-color: var(--drocat-line-strong);
+    box-shadow: 0 3px 12px rgba(11, 31, 58, .06);
+}
+.drocat-neuron-query-preview {
+    margin: 10px 0 2px;
+    padding: 10px 12px;
+    border: 1px solid var(--drocat-line-strong);
+    border-radius: 10px;
+    background: linear-gradient(135deg, rgba(232, 241, 255, .78), rgba(255, 255, 255, .92));
+}
+.drocat-neuron-query-chip {
+    display: inline-flex;
+    align-items: center;
+    min-height: 26px;
+    padding: 3px 9px;
+    border: 1px solid rgba(69, 126, 191, .38);
+    border-radius: 999px;
+    background: #fff;
+    color: var(--drocat-navy);
+    font-size: 12px;
+    font-weight: 650;
+    line-height: 1.2;
+}
+.drocat-neuron-full-panel {
+    background: rgba(255, 255, 255, .72);
+}
+.drocat-neuron-match-table .q-table__middle {
+    max-height: 52vh;
+    overflow: auto;
+    margin-top: 8px;
+    border: 1px solid var(--drocat-line);
+    border-radius: 8px;
+    background: rgba(255, 255, 255, .78);
+}
+.drocat-neuron-match-table th {
+    position: sticky;
+    top: 0;
+    z-index: 2;
+    background: var(--drocat-cobalt-soft) !important;
+    color: var(--drocat-navy) !important;
+    white-space: nowrap;
+}
+.drocat-neuron-match-table td,
+.drocat-neuron-match-table th {
+    height: 40px;
+    padding: 7px 9px;
+}
+.drocat-neuron-match-table td.drocat-neuron-match-by {
+    color: var(--drocat-muted);
+    font-size: 12px;
+    font-weight: 650;
+    white-space: nowrap;
+}
+.drocat-neuron-match-table td.drocat-neuron-match-value {
+    color: var(--drocat-navy);
+    font-weight: 700;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.drocat-neuron-match-panel .q-table__control {
+    color: var(--drocat-cobalt);
+}
 .drocat-data-viewer-scroll {
     position: relative;
     max-width: 100%;
@@ -168,44 +247,13 @@ html, body {
     overflow: auto;
 }
 .drocat-data-viewer-table th { white-space: nowrap; }
-.drocat-data-viewer-table th.drocat-neuron-match-by,
-.drocat-data-viewer-table td.drocat-neuron-match-by {
-    position: sticky;
-    left: 0;
-    z-index: 5;
-    min-width: 150px;
-    max-width: 150px;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    background: var(--drocat-surface) !important;
-    box-shadow: 1px 0 0 var(--drocat-line);
-}
-.drocat-data-viewer-table th.drocat-neuron-match-value,
-.drocat-data-viewer-table td.drocat-neuron-match-value {
-    position: sticky;
-    left: 150px;
-    z-index: 5;
-    min-width: 190px;
-    max-width: 190px;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    background: var(--drocat-cobalt-soft) !important;
-    box-shadow: 1px 0 0 var(--drocat-line-strong);
-}
-.drocat-data-viewer-table th.drocat-neuron-match-by,
-.drocat-data-viewer-table th.drocat-neuron-match-value {
-    z-index: 7;
-}
 .drocat-data-viewer-table td.drocat-neuron-hit-cell {
     /* The matched source cell follows the scroll until it would leave the
-       viewport, then sticks between the pinned metadata and the right edge.
-       This keeps the actual highlighted cell visible in both scroll
-       directions; the pinned Matched value column remains the fallback when
-       the table is narrower than the two sticky boundaries. */
+       viewport, then floats at the nearest horizontal edge. This keeps the
+       actual highlighted cell visible in both scroll directions without
+       changing the full table's column layout. */
     position: sticky;
-    left: 340px;
+    left: 0;
     right: 0;
     z-index: 4;
     background: #fff1b8 !important;
@@ -213,8 +261,13 @@ html, body {
     font-weight: 700;
     box-shadow: inset 0 0 0 2px #eab308;
 }
-.drocat-data-viewer-table td.drocat-neuron-match-value.drocat-neuron-hit-cell {
-    background: #ffe082 !important;
+@media (max-width: 900px) {
+    .drocat-neuron-results-layout {
+        grid-template-columns: 1fr;
+    }
+    .drocat-neuron-match-panel {
+        position: static;
+    }
 }
 
 /* ---------- Grouped navigation: layered cards ---------- */

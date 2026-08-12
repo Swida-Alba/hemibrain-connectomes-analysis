@@ -1,10 +1,10 @@
-"""Build the compact local neuron index used by the UI and cache layer.
+"""Build the local neuron index used by the UI and cache layer.
 
 The pulled ``*_allneurons_neuron_df.csv`` file remains the authoritative
-dataset metadata.  This module creates a typed, columnar projection for local
-search and display.  Serialized/blob-like columns are intentionally omitted:
-they are not useful suggestion identifiers and can dominate the size of the
-source CSV (for example ``roiInfo`` and ``inputRois``).
+dataset metadata.  This module creates a typed, columnar copy for local
+search and display.  All source metadata columns are retained, including
+numeric and serialized fields; only accidental index columns and cache-state
+fields owned by the connection cache are excluded from the source projection.
 
 Cache completion state is kept by :class:`FindNeuronConnection`; this module
 only owns metadata-source discovery and the list of columns that make up the
@@ -13,23 +13,148 @@ search projection so the UI and backend use the same scope.
 
 from __future__ import annotations
 
-import csv
+import re
 from pathlib import Path
 from typing import Iterable, List, Optional
 
 
-# These fields are serialized collections or bookkeeping rather than useful
-# viewer/search columns.  Small scalar text fields such as synonyms and
-# matchingNotes remain in the projection so the viewer truly searches all
-# scalar metadata columns; the suggestion layer filters those separately.
+# These are not source metadata fields.  The viewer can retain and display
+# serialized values, but these generated/bookkeeping fields are owned by the
+# connection cache and are added back at the end of the materialized index.
 SEARCH_EXCLUDED_COLUMNS = frozenset({
+    "downstream_complete",
     "last_fetched",
-    "roiinfo",
-    "inputrois",
-    "outputrois",
+    "connection_count",
     "unnamed: 0",
     "",
 })
+
+# FlyWire releases have historically used several spellings for their stable
+# neuron identifier.  The cache has one canonical name (``bodyId``), while
+# source metadata can use any of these aliases.
+_BODY_ID_ALIASES = (
+    "bodyid", "body_id", "rootid", "root_id", "flywireid", "flywire_id",
+)
+
+# These are cache fields rather than source metadata.  ``post`` is also a
+# source column in most releases, so it stays in its source position when it
+# exists there; the other three fields are appended as cache state.
+CACHE_STATE_COLUMNS = (
+    "downstream_complete", "last_fetched", "connection_count",
+)
+OPERATIONAL_COLUMNS = (
+    "post", *CACHE_STATE_COLUMNS,
+)
+
+
+def _normalized_column_name(column: str) -> str:
+    """Normalize a metadata name for case/spacing/punctuation comparisons."""
+    return re.sub(r"[^a-z0-9]", "", str(column).casefold())
+
+
+def body_id_column(columns: Iterable[str]) -> Optional[str]:
+    """Find the source column that identifies one neuron.
+
+    ``bodyId`` is the canonical output name.  ``root_id``/``rootId`` and
+    other FlyWire spellings are accepted so a new local release does not
+    silently produce an index with blank identifiers.
+    """
+    names = [str(column) for column in columns]
+    for name in names:
+        if name == "bodyId":
+            return name
+    normalized = {_normalized_column_name(alias) for alias in _BODY_ID_ALIASES}
+    for name in names:
+        if _normalized_column_name(name) in normalized:
+            return name
+    return None
+
+
+def is_priority_metadata_column(column: str) -> bool:
+    """Whether a field is useful for type-oriented search priority.
+
+    The viewer still displays every retained string field.  This predicate is
+    deliberately narrower: it keeps suggestion expansion focused on canonical
+    type/class taxonomy instead of values such as confidence scores, counts,
+    coordinates, notes, or arbitrary annotations.  A field such as
+    ``celltypePredictedNt`` remains useful, while similarly named measurement
+    fields such as ``celltypePredictedNtConfidence`` do not.
+    """
+    normalized = _normalized_column_name(column)
+    if any(token in normalized for token in (
+        "confidence", "score", "count", "prediction",
+    )):
+        return False
+    return (
+        "type" in normalized
+        or normalized == "class"
+        or normalized == "superclass"
+        or normalized.endswith("class")
+    )
+
+
+def priority_metadata_columns(columns: Iterable[str]) -> List[str]:
+    """Order type/class metadata columns for display and matching.
+
+    Cross-dataset names are promoted in the requested order, followed by
+    other ``*type`` fields, then class/superclass fields.  Ties retain source
+    order so two releases with different metadata schemas remain stable.
+    """
+    names = [str(column) for column in columns]
+
+    def rank(column: str) -> int:
+        normalized = _normalized_column_name(column)
+        explicit = {
+            "flywiretype": 0,
+            "hemibraintype": 1,
+            "manctype": 2,
+        }
+        if normalized in explicit:
+            return explicit[normalized]
+        if "type" in normalized:
+            return 3
+        if normalized == "class":
+            return 4
+        if normalized == "superclass":
+            return 6
+        return 5
+
+    selected = [
+        column for column in names
+        if column not in {"bodyId", "type", "instance"}
+        and is_priority_metadata_column(column)
+    ]
+    return [
+        column for _, column in sorted(
+            enumerate(selected), key=lambda item: (rank(item[1]), item[0])
+        )
+    ]
+
+
+def ordered_projection_columns(columns: Iterable[str]) -> List[str]:
+    """Return the canonical cache/viewer order for a projected schema.
+
+    Identity fields come first, followed by the type/class taxonomy used for
+    suggestion expansion.  Remaining retained metadata stays visible after
+    that group in its original source order.  Cache state fields are kept at
+    the end; ``post`` is not moved because it is part of the original
+    metadata order.
+    """
+    names = [str(column) for column in columns]
+    identity = ["bodyId", "type", "instance"]
+    cache_state = list(CACHE_STATE_COLUMNS)
+    priority = priority_metadata_columns(names)
+    return [
+        *[column for column in identity if column in names],
+        *[column for column in priority if column in names],
+        *[
+            column for column in names
+            if column not in identity
+            and column not in priority
+            and column not in cache_state
+        ],
+        *[column for column in cache_state if column in names],
+    ]
 
 
 def dataset_folder(dataset: str) -> str:
@@ -77,25 +202,17 @@ def metadata_path(dataset: str, datasets_dir: Path) -> Optional[Path]:
 
 
 def metadata_columns(path: Path) -> List[str]:
-    """Return source columns without materializing the metadata table."""
-    import polars as pl
-
-    path = Path(path)
-    if path.suffix.lower() == ".parquet":
-        return searchable_columns(pl.scan_parquet(path).collect_schema().names())
-    # Header-only discovery avoids a schema-inference pass over a 500+ MiB
-    # CSV.  The actual projection read below still parses the selected fields
-    # once, with bodyId forced to text.
-    with path.open("r", newline="", encoding="utf-8-sig") as stream:
-        try:
-            names = next(csv.reader(stream))
-        except StopIteration:
-            names = []
-    return searchable_columns(names)
+    """Return canonical columns retained by the local projection."""
+    source_columns = _metadata_source_columns(path)
+    source_body_id = body_id_column(source_columns)
+    return [
+        "bodyId" if column == source_body_id else column
+        for column in source_columns
+    ]
 
 
 def searchable_columns(columns: Iterable[str]) -> List[str]:
-    """Return metadata columns retained in the compact search projection."""
+    """Return source columns retained in the local metadata projection."""
     result: List[str] = []
     seen = set()
     for column in columns:
@@ -107,35 +224,73 @@ def searchable_columns(columns: Iterable[str]) -> List[str]:
     return result
 
 
-def read_metadata_projection(path: Path):
-    """Read the compact metadata projection as a Polars DataFrame.
-
-    Only columns in :func:`searchable_columns` are materialized.  The caller
-    adds cache bookkeeping fields and writes the result to the cache index.
-    """
+def _metadata_schema(path: Path):
+    """Read only the source schema needed to choose projection columns."""
     import polars as pl
 
     path = Path(path)
     if path.suffix.lower() == ".parquet":
-        schema = pl.scan_parquet(path).collect_schema()
-        columns = searchable_columns(schema.names())
-        frame = pl.read_parquet(path, columns=columns)
+        return pl.scan_parquet(path).collect_schema()
+    return pl.scan_csv(
+        path,
+        infer_schema_length=1000,
+        ignore_errors=True,
+        try_parse_dates=False,
+    ).collect_schema()
+
+
+def _metadata_source_columns(path: Path) -> List[str]:
+    """Return all source metadata columns in their original order.
+
+    The only source fields omitted are accidental CSV index columns and cache
+    state columns.  Keeping the source order here means the later projection
+    can promote only the useful identity/taxonomy fields without reordering
+    the rest of the dataset's metadata for readability.
+    """
+    schema = _metadata_schema(path)
+    names = list(schema.names())
+    source_body_id = body_id_column(names)
+    if source_body_id is None:
+        return []
+
+    return [
+        name for name in names
+        if str(name).casefold() not in SEARCH_EXCLUDED_COLUMNS
+    ]
+
+
+def read_metadata_projection(path: Path):
+    """Read all retained source metadata as a Polars DataFrame.
+
+    The caller adds cache bookkeeping fields and writes the result to the
+    cache index.  Only the identity/taxonomy group is reordered; every other
+    source column and value is preserved.
+    """
+    import polars as pl
+
+    path = Path(path)
+    source_columns = _metadata_source_columns(path)
+    source_body_id = body_id_column(source_columns)
+    if source_body_id is None:
+        raise ValueError(f"Neuron metadata has no body ID column: {path}")
+    if path.suffix.lower() == ".parquet":
+        frame = pl.read_parquet(path, columns=source_columns)
     else:
-        columns = metadata_columns(path)
+        schema_overrides = {source_body_id: pl.Utf8}
         frame = pl.read_csv(
             path,
-            columns=columns,
+            columns=source_columns,
             # Body IDs can exceed signed 64-bit and JavaScript's safe integer
             # range.  Read them as text before any projection/cast so Polars
             # never turns an out-of-range value into null.
-            schema_overrides={"bodyId": pl.Utf8},
+            schema_overrides=schema_overrides,
             infer_schema_length=1000,
             ignore_errors=True,
             try_parse_dates=False,
         )
 
-    if "bodyId" not in frame.columns:
-        raise ValueError(f"Neuron metadata has no bodyId column: {path}")
+    if source_body_id != "bodyId":
+        frame = frame.rename({source_body_id: "bodyId"})
 
     # Large FlyWire IDs must remain exact.  The UI also uses strings so the
     # browser never rounds a value beyond JavaScript's safe integer range.
@@ -149,4 +304,4 @@ def read_metadata_projection(path: Path):
             )
         else:
             frame = frame.with_columns(pl.lit("").alias(column))
-    return frame
+    return frame.select(ordered_projection_columns(frame.columns))

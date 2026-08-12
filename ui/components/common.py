@@ -465,6 +465,29 @@ def neuron_list_input(
                             "docs/ui_guides/input_formats.html",
                         ).classes("drocat-doc-link px-3 pb-2")
 
+        def append_to_query(values):
+            """Append viewer selections without replacing existing chips."""
+            current = list(chip_input.value or [])
+            existing = {str(value) for value in current}
+            existing.update(str(value) for value in uploaded_neurons)
+            added = 0
+            for item in values or []:
+                value = _normalize_neuron_value(item)
+                if str(value) in existing:
+                    continue
+                if max_items is not None and len(current) >= max_items:
+                    break
+                current.append(value)
+                existing.add(str(value))
+                added += 1
+            sync_options(current)
+            _suppress_history_popup["value"] = True
+            chip_input.run_method("updateInputValue", "")
+            chip_input.set_value(current)
+            pending_input["value"] = ""
+            update_status()
+            return added
+
         # Status row: live count + upload status + clear
         with ui.row().classes("w-full items-center gap-2"):
             count_badge = ui.badge(f"0 {_unit(0)}", color="grey-6").props("outline")
@@ -479,7 +502,15 @@ def neuron_list_input(
                 # from the optional viewer's Polars-backed data layer.
                 from .neuron_index_viewer import create_neuron_index_viewer_link
 
-                create_neuron_index_viewer_link(available_neurons)
+                create_neuron_index_viewer_link(
+                    available_neurons,
+                    query_values_getter=lambda: [
+                        *uploaded_neurons,
+                        *(chip_input.value or []),
+                    ],
+                    add_to_query=append_to_query,
+                    query_label=label,
+                )
 
     pending_input = {"value": ""}
     # Bulk list changes (paste / clear) must not pop the Recent list open.

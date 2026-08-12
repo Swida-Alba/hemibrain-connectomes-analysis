@@ -68,12 +68,16 @@ try:
     from .neuron_index_builder import (
         metadata_columns,
         metadata_path,
+        OPERATIONAL_COLUMNS,
+        ordered_projection_columns,
         read_metadata_projection,
     )
 except ImportError:
     from neuron_index_builder import (
         metadata_columns,
         metadata_path,
+        OPERATIONAL_COLUMNS,
+        ordered_projection_columns,
         read_metadata_projection,
     )
 
@@ -1970,9 +1974,10 @@ class FindNeuronConnection:
             self._vprint(f'Cache enabled: {self.cache_folder}', level='full')
             # Ensure complete dataset with ALL neurons exists (including type=None)
             self._ensure_complete_dataset()
-            # Build the compact searchable neuron index as soon as the pulled
-            # metadata exists.  Connection fetching updates only the separate
-            # state file, so this rich index is not rewritten once per batch.
+            # Build the materialized searchable neuron index as soon as the
+            # pulled metadata exists.  Connection fetching updates only the
+            # separate state file, so this rich index is not rewritten once
+            # per batch.
             self._ensure_neuron_index_from_metadata()
         if self.exclude_intra_type_connections:
             self._vprint('⚠️  Intra-type connections will be excluded (type_pre == type_post)', level='full')
@@ -2277,7 +2282,7 @@ class FindNeuronConnection:
         self._build_neuron_index_dict()
 
     def _ensure_neuron_index_from_metadata(self):
-        """Create/update the compact searchable index after metadata pull.
+        """Create/update the local searchable index after metadata pull.
 
         The dataset CSV/Parquet is authoritative for neuron metadata.  This
         method runs before connection fetching, so the viewer and suggestion
@@ -2295,17 +2300,19 @@ class FindNeuronConnection:
 
         index_path = self._get_neuron_index_path()
         try:
-            source_columns = set(metadata_columns(source))
-            existing_columns = set()
+            source_columns = metadata_columns(source)
+            expected_columns = list(dict.fromkeys((*source_columns, *OPERATIONAL_COLUMNS)))
+            expected_order = ordered_projection_columns(expected_columns)
+            existing_order = []
             index_mtime = 0
             if os.path.exists(index_path):
                 index_mtime = os.stat(index_path).st_mtime_ns
-                existing_columns = set(pl.scan_parquet(index_path).collect_schema().names())
+                existing_order = list(pl.scan_parquet(index_path).collect_schema().names())
             # The source mtime check avoids rebuilding on every FNC instance;
-            # the column check upgrades old seven-column cache indexes.
+            # exact schema/order comparison upgrades old indexes to the full
+            # source metadata projection and its canonical front-column order.
             if (
-                source_columns.issubset(existing_columns)
-                and {'bodyId', 'type', 'instance'}.issubset(existing_columns)
+                existing_order == expected_order
                 and index_mtime >= source.stat().st_mtime_ns
             ):
                 return False
@@ -2399,14 +2406,7 @@ class FindNeuronConnection:
                 pl.col('connection_count').cast(pl.Int64, strict=False).fill_null(0).alias('connection_count'),
             )
 
-            # Keep identifiers and cache state first; the remaining metadata
-            # columns stay in their source order for a stable viewer schema.
-            front = [
-                'bodyId', 'type', 'instance', 'post',
-                'downstream_complete', 'last_fetched', 'connection_count',
-            ]
-            ordered = [*front, *[column for column in frame.columns if column not in front]]
-            frame = frame.select(ordered)
+            frame = frame.select(ordered_projection_columns(frame.columns))
 
             temporary = f'{index_path}.tmp-{os.getpid()}-{threading.get_ident()}'
             try:

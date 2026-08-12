@@ -127,7 +127,7 @@ class TestNeuronIndexData:
         body_sorted = query_neuron_index(index, sort_by="bodyId", page_size=4)
         assert [row["bodyId"] for row in body_sorted.rows] == ["100", "200", "300", "400"]
 
-    def test_search_results_rank_bodyid_type_instance_then_other_columns(
+    def test_search_results_default_to_matched_value_ascending(
         self, isolated_index_root
     ):
         from ui.neuron_index import load_cached_neuron_index, query_neuron_index
@@ -137,16 +137,31 @@ class TestNeuronIndexData:
         result = query_neuron_index(index, search="ame", page_size=10)
 
         assert [row["bodyId"] for row in result.rows] == [
-            "aMe-body", "100", "200", "300",
-        ]
-        assert [row["match_column"] for row in result.rows] == [
-            "hint", "type", "instance", "hemilineage",
-        ]
-        assert [row["match_column_key"] for row in result.rows] == [
-            "bodyId", "type", "instance", "hemilineage",
+            "aMe-body", "200", "300", "100",
         ]
         assert [row["match_value"] for row in result.rows] == [
-            "aMe-body", "aMe-type", "aMe-instance", "aMe-other",
+            "aMe-body", "aMe-instance", "aMe-other", "aMe-type",
+        ]
+        assert [row["match_column"] for row in result.rows] == [
+            "hint", "instance", "hemilineage", "type",
+        ]
+        assert [row["match_column_key"] for row in result.rows] == [
+            "bodyId", "instance", "hemilineage", "type",
+        ]
+
+    def test_explicit_sort_overrides_matched_value_default(
+        self, isolated_index_root
+    ):
+        from ui.neuron_index import load_cached_neuron_index, query_neuron_index
+
+        dataset = _write_priority_index(isolated_index_root)
+        index = load_cached_neuron_index(dataset, enrich=False)
+        result = query_neuron_index(
+            index, search="ame", sort_by="bodyId", page_size=10
+        )
+
+        assert [row["bodyId"] for row in result.rows] == [
+            "100", "200", "300", "aMe-body",
         ]
 
     def test_load_refreshes_when_progress_sidecar_changes(self, isolated_index_root):
@@ -209,13 +224,86 @@ class TestNeuronIndexViewer:
         assert "Filter column" in labels
         assert "Sort by" in labels
         tables = [el for el in client.elements.values() if type(el).__name__ == "Table"]
-        assert tables
-        assert tables[0]._props["columns"][0]["name"] == "match_column"
-        assert tables[0]._props["columns"][0]["label"] == "Matched by"
-        assert tables[0]._props["columns"][1]["name"] == "match_value"
-        assert tables[0]._props["columns"][1]["label"] == "Matched value"
-        assert "body" in tables[0].slots
-        assert "drocat-neuron-hit-cell" in tables[0].slots["body"].template
+        assert len(tables) == 2
+        match_table = next(
+            table for table in tables
+            if table._props["columns"][0]["name"] == "match_column"
+        )
+        full_table = next(
+            table for table in tables
+            if table._props["columns"][0]["name"] == "bodyId"
+        )
+        assert match_table._props["columns"][0]["label"] == "Matched by"
+        assert match_table._props["columns"][1]["name"] == "match_value"
+        assert match_table._props["columns"][1]["label"] == "Matched value"
+        assert full_table._props["columns"][0]["name"] == "bodyId"
+        assert "match_column" not in {
+            column["name"] for column in full_table._props["columns"]
+        }
+        assert "body" in full_table.slots
+        assert "drocat-neuron-hit-cell" in full_table.slots["body"].template
+
+    def test_match_panel_supports_multi_select_and_appends_to_query(
+        self, isolated_index_root, monkeypatch
+    ):
+        from nicegui import Client
+        from nicegui.page import page
+        import ui.components.neuron_index_viewer as viewer
+        from ui.components.neuron_index_viewer import create_neuron_index_viewer_link
+
+        dataset, _, _ = _write_index(isolated_index_root)
+        monkeypatch.setattr(viewer, "PROJECT_ROOT", isolated_index_root)
+        current_query = ["existing"]
+        added_batches = []
+
+        def add_to_query(values):
+            added_batches.append(list(values))
+            for value in values:
+                if value not in current_query:
+                    current_query.append(value)
+            return len(values)
+
+        client = Client(page("/neuron-index-viewer-selection"))
+        with client:
+            link = create_neuron_index_viewer_link(
+                lambda: dataset,
+                query_values_getter=lambda: current_query,
+                add_to_query=add_to_query,
+                query_label="Source Neurons",
+            )
+        self._click(link)
+
+        tables = [el for el in client.elements.values() if type(el).__name__ == "Table"]
+        match_table = next(
+            table for table in tables
+            if table._props["columns"][0]["name"] == "match_column"
+        )
+        assert match_table._props["selection"] == "multiple"
+
+        add_button = next(
+            el for el in client.elements.values()
+            if getattr(el, "text", "") == "Add selected to query"
+        )
+        selected = [
+            {"bodyId": "100", "match_value": "aMe10"},
+            {"bodyId": "200", "match_value": "aMe12"},
+        ]
+        match_table._selection_handlers[0](SimpleNamespace(selection=selected))
+        self._click(add_button)
+
+        expected = [row["match_value"] for row in selected]
+        assert added_batches == [expected]
+        assert current_query == ["existing", *expected]
+        assert any(
+            getattr(el, "text", "") == "Current query · Source Neurons"
+            for el in client.elements.values()
+        )
+        preview_text = [
+            getattr(el, "text", "")
+            for el in client.elements.values()
+            if "drocat-neuron-query-chip" in getattr(el, "_classes", set())
+        ]
+        assert preview_text == current_query
 
     def test_link_explains_how_to_build_a_missing_cache(
         self, isolated_index_root, monkeypatch

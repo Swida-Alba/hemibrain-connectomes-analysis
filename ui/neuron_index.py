@@ -3,9 +3,10 @@
 The auto-suggestion backend and the available-neurons viewer intentionally
 share the same local cache boundary: a viewer is available only when
 ``cache/<dataset>/neuron_index.parquet`` exists.  The viewer never serves the
-raw dataset file to the browser.  The cache index is built from the searchable
-projection of the prepared local neuron table; an older/partial cache can
-still be enriched from that table to fill blank ``type``/``instance`` values.
+raw dataset file to the browser.  The cache index is built from the
+materialized projection of the prepared local neuron table; an older/partial
+cache can still be enriched from that table to fill blank ``type``/``instance``
+values.
 """
 
 from __future__ import annotations
@@ -19,9 +20,19 @@ from .config import PROJECT_ROOT
 from .dataset_service import dataset_to_folder
 
 try:
-    from src.neuron_index_builder import metadata_columns
+    from src.neuron_index_builder import (
+        metadata_columns,
+        ordered_projection_columns,
+        priority_metadata_columns,
+        read_metadata_projection,
+    )
 except ImportError:
-    from neuron_index_builder import metadata_columns
+    from neuron_index_builder import (
+        metadata_columns,
+        ordered_projection_columns,
+        priority_metadata_columns,
+        read_metadata_projection,
+    )
 
 
 @dataclass(frozen=True)
@@ -133,35 +144,23 @@ def _is_blank(expression):
 
 
 def _read_metadata_table(path: Path):
-    """Read the searchable projection from a generated local neuron table."""
+    """Read the materialized projection from a generated local neuron table."""
     import polars as pl
 
-    if path.suffix.lower() == ".parquet":
-        available = metadata_columns(path)
-        reader = pl.read_parquet
-    else:
-        available = metadata_columns(path)
-        reader = pl.read_csv
-
-    columns = [column for column in available if column]
-    if "bodyId" not in columns:
+    try:
+        frame = read_metadata_projection(path)
+    except Exception:
         return None
-
-    if path.suffix.lower() == ".parquet":
-        frame = reader(path, columns=columns)
-    else:
-        frame = reader(
-            path,
-            columns=columns,
-            schema_overrides={"bodyId": pl.Utf8},
-            infer_schema_length=1000,
-            ignore_errors=True,
-            try_parse_dates=False,
-        )
+    if "bodyId" not in frame.columns:
+        return None
     frame = frame.with_columns(
         pl.col("bodyId").cast(pl.Utf8, strict=False).fill_null("").alias("bodyId")
     )
-    rename = {column: f"__metadata_{column}" for column in columns if column != "bodyId"}
+    rename = {
+        column: f"__metadata_{column}"
+        for column in frame.columns
+        if column != "bodyId"
+    }
     return frame.rename(rename).unique(subset=["bodyId"], keep="first")
 
 
@@ -312,6 +311,10 @@ def load_cached_neuron_index(
     if not frame.columns:
         raise ValueError("The cached neuron index has no columns")
 
+    # Legacy indexes may have been enriched from a source table after load;
+    # apply the same order as newly generated caches before exposing columns.
+    frame = frame.select(ordered_projection_columns(frame.columns))
+
     # Keep the schema stable and JSON-friendly for the UI.  Index values are
     # displayed as strings for bodyId/type/instance so large IDs are never
     # rounded by browser JavaScript.
@@ -362,11 +365,13 @@ def _contains_expression(frame, columns: List[str], text: str):
 
 def _ordered_match_columns(columns: List[str]) -> List[str]:
     """Return the viewer's deterministic column-priority search order."""
+    priority = priority_metadata_columns(columns)
     return [
         *[column for column in _MATCH_PRIORITY_COLUMNS if column in columns],
+        *[column for column in priority if column not in _MATCH_PRIORITY_COLUMNS],
         *sorted(
             column for column in columns
-            if column not in _MATCH_PRIORITY_COLUMNS
+            if column not in _MATCH_PRIORITY_COLUMNS and column not in priority
         ),
     ]
 
@@ -434,8 +439,10 @@ def query_neuron_index(
 
     Search and column filters use case-insensitive substring matching. Global
     search results are ranked by matching column in this order: bodyId, type,
-    instance, then the remaining columns. The selected sort is the tie-breaker
-    within that priority order and is applied before pagination.
+    instance, then the remaining columns. When a query is present and no
+    explicit ``sort_by`` is supplied, rows are sorted ascending by their
+    matched value. An explicit sort column becomes the primary sort and
+    matching priority is used only as a tie-breaker.
     """
     import polars as pl
 
@@ -486,13 +493,20 @@ def query_neuron_index(
             pl.lit("").alias("match_value"),
         )
 
-    selected_sort = sort_by if sort_by in columns else ("bodyId" if "bodyId" in columns else columns[0])
+    manual_match_value_sort = sort_by == "__match_value__"
+    manual_sort = manual_match_value_sort or sort_by in columns
+    selected_sort = "match_value" if manual_match_value_sort else (
+        sort_by if manual_sort else ("bodyId" if "bodyId" in columns else columns[0])
+    )
     sort_columns = []
     sort_directions = []
-    if match_text:
-        sort_columns.append("__match_priority")
-        sort_directions.append(False)
-    try:
+    if match_text and not manual_sort:
+        # The standalone viewer is a result browser: the default order should
+        # make the actual values being searched easy to scan.  Keep matching
+        # column priority as the deterministic tie-breaker.
+        sort_columns.extend(("match_value", "__match_priority"))
+        sort_directions.extend((False, False))
+    else:
         if selected_sort == "bodyId":
             # Body IDs are stored as strings in the cache to preserve large
             # values in the browser.  Sort them numerically so 10001 follows
@@ -504,6 +518,12 @@ def query_neuron_index(
         else:
             sort_columns.append(selected_sort)
         sort_directions.append(bool(descending))
+        if match_text:
+            # An explicit sort column is primary; matching priority only
+            # resolves rows with the same selected-column value.
+            sort_columns.append("__match_priority")
+            sort_directions.append(False)
+    try:
         try:
             filtered = filtered.sort(
                 sort_columns,
@@ -543,6 +563,6 @@ def query_neuron_index(
         page=current_page,
         pages=pages,
         page_size=page_size,
-        sort_by=selected_sort,
-        descending=bool(descending),
+        sort_by=("match_value" if match_text and not manual_sort else selected_sort),
+        descending=(False if match_text and not manual_sort else bool(descending)),
     )

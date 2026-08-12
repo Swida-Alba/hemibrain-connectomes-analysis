@@ -11,12 +11,22 @@ has not been pulled yet simply yields no suggestions.
 
 from __future__ import annotations
 
-import csv
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 
 from .config import PROJECT_ROOT
 from .dataset_service import dataset_to_folder
+
+try:
+    from src.neuron_index_builder import (
+        priority_metadata_columns,
+        read_metadata_projection,
+    )
+except ImportError:
+    from neuron_index_builder import (
+        priority_metadata_columns,
+        read_metadata_projection,
+    )
 
 # (value, hint) — the hint is the searched column name, except for bodyId
 # matches where it is the corresponding instance.
@@ -29,15 +39,6 @@ _POOL_CACHE: Dict[tuple, Dict[str, List[Entry]]] = {}
 
 # Columns whose distinct values become suggestion pools (hint = column name).
 _TYPE_COLUMNS = ("type", "instance")
-# Cache bookkeeping and serialized metadata are not neuron identifiers even
-# though they can be stored as strings in local files. Exclude them from
-# suggestions; retaining them would both produce unusable rows (e.g. an
-# entire ROI list) and force large CSV fields into memory on every dataset
-# pool build.
-_NON_IDENTIFIER_COLUMNS = frozenset({
-    "last_fetched", "roiinfo", "inputrois", "outputrois", "synonyms",
-    "matchingnotes", "notes", "unnamed: 0",
-})
 _EMPTY_POOLS: Dict[str, List[Entry]] = {}
 
 
@@ -89,7 +90,18 @@ def _index_pools(folder: str) -> Optional[Dict[str, List[Entry]]]:
     try:
         import polars as pl
 
-        frame = pl.read_parquet(index)
+        schema_columns = pl.scan_parquet(index).collect_schema().names()
+        selected_columns = [
+            column for column in (
+                "bodyId", "type", "instance",
+                *priority_metadata_columns(schema_columns),
+            )
+            if column in schema_columns
+        ]
+        frame = pl.read_parquet(
+            index,
+            columns=list(dict.fromkeys(selected_columns)),
+        )
         cols = set(frame.columns)
         pools: Dict[str, List[Entry]] = {}
         for col in _TYPE_COLUMNS:
@@ -97,16 +109,14 @@ def _index_pools(folder: str) -> Optional[Dict[str, List[Entry]]]:
                 continue
             values = frame[col].drop_nulls().to_list()
             pools[col] = [(v, col) for v in _clean(values)]
-        # The backend's auto scope searches every remaining string column
-        # after type/instance/bodyId (for example flywireType, hemilineage,
-        # or cell_class), so keep those columns in the suggestion universe.
-        for col in sorted(cols):
-            if (col in ("bodyId", "type", "instance")
-                    or str(col).casefold() in _NON_IDENTIFIER_COLUMNS):
+        # Auto-suggestion expands beyond the canonical type column only into
+        # type/class taxonomy fields.  The viewer still displays every
+        # retained string field and searches it when explicitly requested.
+        for col in priority_metadata_columns(frame.columns):
+            if col not in cols:
                 continue
-            if frame[col].dtype in (pl.Utf8, pl.String, pl.Categorical, pl.Enum):
-                values = frame[col].drop_nulls().to_list()
-                pools[col] = [(v, col) for v in _clean(values)]
+            values = frame[col].cast(pl.Utf8, strict=False).to_list()
+            pools[col] = [(v, col) for v in _clean(values)]
         # bodyId pool: string-form ids, hint = the corresponding instance.
         if "bodyId" in cols:
             bid_col = frame["bodyId"].cast(pl.Utf8, strict=False)
@@ -158,23 +168,7 @@ def _table_pools(folder: str) -> Optional[Dict[str, List[Entry]]]:
     for table in candidates:
         try:
             import polars as pl
-            if table.suffix == ".parquet":
-                frame = pl.read_parquet(table)
-            else:
-                with table.open("r", newline="", encoding="utf-8") as stream:
-                    header = next(csv.reader(stream))
-                columns = [
-                    column for column in header
-                    if column and str(column).casefold()
-                    not in _NON_IDENTIFIER_COLUMNS
-                ]
-                frame = pl.read_csv(
-                    table,
-                    columns=columns,
-                    schema_overrides={"bodyId": pl.Utf8},
-                    infer_schema_length=1000,
-                    try_parse_dates=False,
-                )
+            frame = read_metadata_projection(table)
             cols = set(frame.columns)
             if not {"bodyId", "type"}.issubset(cols):
                 continue
@@ -183,14 +177,11 @@ def _table_pools(folder: str) -> Optional[Dict[str, List[Entry]]]:
                 if col in cols:
                     values = frame[col].cast(pl.Utf8, strict=False).to_list()
                     pools[col] = [(v, col) for v in _clean(values)]
-            for col in sorted(cols):
-                if (col in pools or col in ("bodyId", "type", "instance")
-                        or str(col).casefold() in _NON_IDENTIFIER_COLUMNS):
+            for col in priority_metadata_columns(frame.columns):
+                if col in pools or col in ("bodyId", "type", "instance"):
                     continue
-                if frame[col].dtype in (
-                        pl.Utf8, pl.String, pl.Categorical, pl.Enum):
-                    values = frame[col].drop_nulls().to_list()
-                    pools[col] = [(v, col) for v in _clean(values)]
+                values = frame[col].cast(pl.Utf8, strict=False).to_list()
+                pools[col] = [(v, col) for v in _clean(values)]
             if "bodyId" in cols:
                 body_ids = frame["bodyId"].cast(pl.Utf8, strict=False).to_list()
                 inst_series = (
@@ -366,10 +357,18 @@ def match_suggestions(
 
     def ordered_columns() -> List[str]:
         """Search columns in the same priority used by the backend."""
+        priority = priority_metadata_columns(pools)
         return [
             *[col for col in ("type", "instance", "bodyId") if col in pools],
-            *sorted(col for col in pools
-                    if col not in ("type", "instance", "bodyId")),
+            *[
+                col for col in priority
+                if col not in ("type", "instance", "bodyId")
+            ],
+            *sorted(
+                col for col in pools
+                if col not in ("type", "instance", "bodyId")
+                and col not in priority
+            ),
         ]
 
     def collect(columns: Sequence[str], matcher) -> List[Entry]:

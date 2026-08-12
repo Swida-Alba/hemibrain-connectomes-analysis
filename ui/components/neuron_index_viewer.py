@@ -47,6 +47,33 @@ def _relative_source(path: Path) -> str:
         return str(path)
 
 
+def _query_preview_values(getter: Callable[[], object] | None) -> List[str]:
+    """Read the current query values for the viewer's compact preview."""
+    if getter is None:
+        return []
+    try:
+        value = getter()
+    except Exception:
+        return []
+    if value is None:
+        return []
+    if isinstance(value, (str, int, float)):
+        values = [value]
+    else:
+        try:
+            values = list(value)
+        except TypeError:
+            values = [value]
+    result = []
+    seen = set()
+    for item in values:
+        text = str(item or "").strip()
+        if text and text not in seen:
+            result.append(text)
+            seen.add(text)
+    return result
+
+
 def _render_missing_cache(content, dataset: str, path: Path) -> None:
     with content:
         ui.icon("database", color="orange").classes("text-4xl")
@@ -83,7 +110,14 @@ def _render_missing_cache(content, dataset: str, path: Path) -> None:
         ).classes("text-caption drocat-muted")
 
 
-def _render_index(content, dataset: str) -> None:
+def _render_index(
+    content,
+    dataset: str,
+    *,
+    query_values_getter: Callable[[], object] | None = None,
+    add_to_query: Callable[[List[str]], object] | None = None,
+    query_label: str = "Current query",
+) -> None:
     """Render the current dataset's index or its cache-missing state."""
     content.clear()
     path = neuron_index_path(dataset)
@@ -121,12 +155,40 @@ def _render_index(content, dataset: str) -> None:
                     "Blank type/instance values are filled from local prepared metadata."
                 ).classes("text-caption drocat-muted")
 
+        if query_values_getter is not None:
+            with ui.element("section").classes("drocat-neuron-query-preview"):
+                with ui.row().classes("w-full items-center justify-between gap-2"):
+                    with ui.row().classes("items-center gap-2"):
+                        ui.icon("playlist_add_check", color="primary").classes("text-lg")
+                        ui.label(f"Current query · {query_label}").classes(
+                            "text-subtitle2 font-bold"
+                        )
+                    ui.badge("mirrors input", color="primary").props("outline")
+                query_preview = ui.row().classes(
+                    "w-full items-center gap-1 flex-wrap mt-1"
+                )
+                query_preview_empty = ui.label(
+                    "No values in the query yet. Selected matches will be appended."
+                ).classes("text-caption drocat-muted mt-1")
+
+                def refresh_query_preview() -> None:
+                    values = _query_preview_values(query_values_getter)
+                    query_preview.clear()
+                    query_preview_empty.set_visibility(not values)
+                    with query_preview:
+                        for value in values:
+                            ui.label(value).classes("drocat-neuron-query-chip")
+
+                refresh_query_preview()
         ui.label(
             "Search and column filters use case-insensitive substring matching. "
             "Search results prioritize bodyId, type, instance, then other columns. "
-            "The Matched by column shows the highest-priority match; bodyId "
-            "matches show their corresponding instance when available. The "
-            "matched value is pinned beside it and the original cell is highlighted."
+            "With a query, rows default to ascending matched-value order; choose "
+            "a metadata column in Sort by to override it. "
+            "The Match details panel shows the highest-priority match for each "
+            "visible row; bodyId matches show their corresponding instance when "
+            "available. The original matched cell is highlighted and stays visible "
+            "while the full table is scrolled."
         ).classes("text-caption drocat-muted")
 
         with ui.row().classes("w-full items-end gap-2 flex-wrap"):
@@ -147,9 +209,11 @@ def _render_index(content, dataset: str) -> None:
             ).props("clearable input-debounce=180").classes("drocat-input").style(
                 "min-width: 170px"
             )
+            sort_options = {"__match_value__": "Matched value (default)"}
+            sort_options.update({column: _column_label(column) for column in columns})
             sort_column = ui.select(
-                options={column: _column_label(column) for column in columns},
-                value="bodyId" if "bodyId" in columns else columns[0],
+                options=sort_options,
+                value="__match_value__",
                 label="Sort by",
             ).classes("drocat-select").style("min-width: 150px")
             direction = ui.select(
@@ -164,16 +228,16 @@ def _render_index(content, dataset: str) -> None:
             ).classes("drocat-select").style("min-width: 120px")
 
         initial = query_neuron_index(index, page_size=50)
-        table_columns = [
+        match_columns = [
             {
                 "name": "match_column",
                 "label": "Matched by",
                 "field": "match_column",
                 "align": "left",
-                "classes": "text-grey-6 text-caption drocat-neuron-match-by",
-                "headerClasses": "text-grey-6 drocat-neuron-match-by",
-                "style": "width: 150px; min-width: 150px",
-                "headerStyle": "width: 150px; min-width: 150px",
+                "classes": "drocat-neuron-match-by",
+                "headerClasses": "drocat-neuron-match-by",
+                "style": "width: 135px; min-width: 135px",
+                "headerStyle": "width: 135px; min-width: 135px",
                 "sortable": False,
             },
             {
@@ -187,6 +251,8 @@ def _render_index(content, dataset: str) -> None:
                 "headerStyle": "width: 190px; min-width: 190px",
                 "sortable": False,
             },
+        ]
+        table_columns = [
             *[
                 {
                     "name": column,
@@ -199,42 +265,117 @@ def _render_index(content, dataset: str) -> None:
                 for column in columns
             ],
         ]
-        with ui.element("div").classes("w-full drocat-data-viewer-scroll"):
-            table = ui.table(
-                rows=initial.rows,
-                columns=table_columns,
-                row_key="bodyId" if "bodyId" in columns else columns[0],
-                pagination=None,
-            ).classes("w-full drocat-data-viewer-table")
-            # Render the table body explicitly so the match metadata remains
-            # pinned at the left while the actual matched source cell receives
-            # a row-specific highlight.  The pinned matched value is a stable
-            # floating representation when the source column is horizontally
-            # outside the current viewport.
-            table.add_slot(
-                "body",
-                r"""
-                <q-tr :props="props">
-                  <q-td
-                    v-for="col in props.cols"
-                    :key="col.name"
-                    :props="props"
-                    :class="{
-                      'drocat-neuron-match-by': col.name === 'match_column',
-                      'drocat-neuron-match-value': col.name === 'match_value',
-                      'drocat-neuron-hit-cell': col.name === props.row.match_column_key,
-                    }"
-                    :data-match-column="col.name === props.row.match_column_key ? col.name : null"
-                  >
-                    {{ col.name === 'match_column'
-                        ? props.row.match_column
-                        : col.name === 'match_value'
-                          ? props.row.match_value
-                          : props.row[col.field] }}
-                  </q-td>
-                </q-tr>
-                """,
+        selected_match_rows = []
+        selection_status = None
+        add_selected_button = None
+
+        def handle_match_selection(event) -> None:
+            selected_match_rows[:] = list(getattr(event, "selection", []) or [])
+            has_values = any(
+                str(row.get("match_value", "") or "").strip()
+                for row in selected_match_rows
             )
+            if selection_status is not None:
+                selection_status.text = f"{len(selected_match_rows)} selected"
+                selection_status.update()
+            if add_selected_button is not None:
+                add_selected_button.set_enabled(bool(selected_match_rows) and has_values)
+
+        def add_selected_matches() -> None:
+            values = []
+            seen = set()
+            for row in selected_match_rows:
+                value = str(row.get("match_value", "") or "").strip()
+                if value and value not in seen:
+                    values.append(value)
+                    seen.add(value)
+            if not values or add_to_query is None:
+                return
+            result = add_to_query(values)
+            added = len(values) if result is None else int(result)
+            selected_match_rows.clear()
+            match_table.selected = []
+            match_table.update()
+            if selection_status is not None:
+                selection_status.text = "0 selected"
+                selection_status.update()
+            if add_selected_button is not None:
+                add_selected_button.set_enabled(False)
+            if query_values_getter is not None:
+                refresh_query_preview()
+            ui.notify(
+                f"Added {added} value{'s' if added != 1 else ''} to {query_label}.",
+                type="positive",
+            )
+
+        with ui.element("div").classes("w-full drocat-neuron-results-layout"):
+            with ui.element("section").classes("drocat-neuron-match-panel"):
+                with ui.row().classes("w-full items-center justify-between gap-2"):
+                    with ui.row().classes("items-center gap-2"):
+                        ui.icon("manage_search", color="primary").classes("text-lg")
+                        ui.label("Match details").classes("text-subtitle2 font-bold")
+                    ui.badge("per visible row", color="primary").props("outline")
+                ui.label(
+                    "The highest-priority match for each row. Select one or more "
+                    "rows to append their matched values to the current query. "
+                    "The highlighted cell remains in the full table."
+                ).classes("text-caption drocat-muted")
+                match_table = ui.table(
+                    rows=initial.rows,
+                    columns=match_columns,
+                    row_key="bodyId" if "bodyId" in columns else columns[0],
+                    selection="multiple",
+                    on_select=handle_match_selection,
+                    pagination=None,
+                ).classes("w-full drocat-neuron-match-table")
+                if add_to_query is not None:
+                    with ui.row().classes("w-full items-center justify-between gap-2 mt-2"):
+                        selection_status = ui.label("0 selected").classes(
+                            "text-caption drocat-muted"
+                        )
+                        add_selected_button = ui.button(
+                            "Add selected to query",
+                            icon="playlist_add",
+                            on_click=add_selected_matches,
+                        ).props("flat dense color=primary")
+                        add_selected_button.set_enabled(False)
+
+            with ui.element("section").classes("drocat-neuron-full-panel"):
+                with ui.row().classes("w-full items-center gap-2"):
+                    ui.icon("table_view", color="primary").classes("text-lg")
+                    ui.label("Full neuron metadata").classes("text-subtitle2 font-bold")
+                ui.label(
+                    "Scroll horizontally to inspect every retained metadata field."
+                ).classes("text-caption drocat-muted")
+                with ui.element("div").classes("w-full drocat-data-viewer-scroll"):
+                    table = ui.table(
+                        rows=initial.rows,
+                        columns=table_columns,
+                        row_key="bodyId" if "bodyId" in columns else columns[0],
+                        pagination=None,
+                    ).classes("w-full drocat-data-viewer-table")
+                    # The match panel carries the two metadata fields. The
+                    # full table only renders source columns, while the
+                    # row-specific target cell remains highlighted and can
+                    # float at either horizontal edge during scrolling.
+                    table.add_slot(
+                        "body",
+                        r"""
+                        <q-tr :props="props">
+                          <q-td
+                            v-for="col in props.cols"
+                            :key="col.name"
+                            :props="props"
+                            :class="{
+                              'drocat-neuron-hit-cell': col.name === props.row.match_column_key,
+                            }"
+                            :data-match-column="col.name === props.row.match_column_key ? col.name : null"
+                          >
+                            {{ props.row[col.field] }}
+                          </q-td>
+                        </q-tr>
+                        """,
+                    )
 
         with ui.row().classes("w-full items-center justify-between gap-3 flex-wrap"):
             page_info = ui.label("").classes("text-caption drocat-muted")
@@ -249,7 +390,7 @@ def _render_index(content, dataset: str) -> None:
                 "flat dense"
             )
 
-    state = {"page": initial.page, "page_size": 50}
+        state = {"page": initial.page, "page_size": 50}
 
     def refresh(_event=None, *, reset_page: bool = False):
         if reset_page:
@@ -259,17 +400,32 @@ def _render_index(content, dataset: str) -> None:
         except (TypeError, ValueError):
             current_page_size = 50
         state["page_size"] = current_page_size
+        requested_sort = sort_column.value
+        if requested_sort == "__match_value__":
+            # Ascending matched-value order is the implicit default. Preserve
+            # an explicitly chosen descending direction for that same sort.
+            requested_sort = (
+                "__match_value__" if direction.value == "desc" else None
+            )
         result = query_neuron_index(
             index,
             search=search_input.value or "",
             filter_column=filter_column.value,
             filter_text=filter_input.value or "",
-            sort_by=sort_column.value,
+            sort_by=requested_sort,
             descending=direction.value == "desc",
             page=state["page"],
             page_size=current_page_size,
         )
         state["page"] = result.page
+        match_table.update_rows(result.rows)
+        match_table.update()
+        selected_match_rows.clear()
+        if selection_status is not None:
+            selection_status.text = "0 selected"
+            selection_status.update()
+        if add_selected_button is not None:
+            add_selected_button.set_enabled(False)
         table.update_rows(result.rows)
         table.update()
         page_position.text = f"Page {result.page:,} of {result.pages:,}"
@@ -308,12 +464,17 @@ def create_neuron_index_viewer_link(
     dataset_getter: Callable[[], object],
     *,
     label: str = "See available neurons",
+    query_values_getter: Callable[[], object] | None = None,
+    add_to_query: Callable[[List[str]], object] | None = None,
+    query_label: str = "Current query",
 ):
     """Create a link-like control that opens the cached-index viewer.
 
     ``dataset_getter`` is evaluated at click time, so changing the dataset in
     a tool tab immediately changes the viewer target.  A multi-dataset getter
     (the Cross-Dataset tab) gets a dataset selector inside the dialog.
+    When query callbacks are supplied, the match panel supports multi-select
+    and appends selected matched values to the owning query input.
     """
     dialog = ui.dialog()
     with dialog:
@@ -362,7 +523,13 @@ def create_neuron_index_viewer_link(
     def _open_dataset(dataset: str):
         title.text = f"Available neurons · {dataset}"
         title.update()
-        _render_index(content, dataset)
+        _render_index(
+            content,
+            dataset,
+            query_values_getter=query_values_getter,
+            add_to_query=add_to_query,
+            query_label=query_label,
+        )
 
     link = ui.button(label, icon="table_view", on_click=open_viewer).props(
         "flat dense no-caps"
