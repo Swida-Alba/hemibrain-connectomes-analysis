@@ -121,6 +121,11 @@ def custom_grouping_block(
     open_button.tooltip(hint)
 
     dialog = ui.dialog()
+    # Persistent: the panel must not close on outside-click / ESC, because the
+    # suggestion and history menus portal to the body (outside the dialog DOM)
+    # and clicking them would otherwise dismiss the panel mid-edit. It closes
+    # only via the X button.
+    dialog.props("persistent")
     with dialog:
         with ui.card().classes("w-[min(98vw,1400px)] max-w-none"):
             with ui.row().classes("w-full items-center justify-between gap-3"):

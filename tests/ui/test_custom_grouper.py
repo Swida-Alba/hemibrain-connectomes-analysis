@@ -369,9 +369,9 @@ class TestQueryPushWorkflow:
         grouper.resync()
         with client:
             pushed = grouper.push_to_query("source", 0)
-        # Union across dataset cells, deduplicated, order preserved.
-        assert pushed == ["aMe12", "aMe10", "aMe9"]
-        assert source.get_value()[1] == ["aMe12", "aMe10", "aMe9"]
+        # The group LABEL is pushed (backend expands it into members).
+        assert pushed == ["aMe"]
+        assert source.get_value()[1] == ["aMe"]
         assert target.get_value()[1] == []
 
     def test_push_twice_does_not_duplicate(self, isolated_store):
@@ -393,7 +393,7 @@ class TestQueryPushWorkflow:
         with client:
             grouper.push_to_query("source", 0)
             grouper.push_to_query("source", 0)
-        assert source.get_value()[1] == ["aMe12"]
+        assert source.get_value()[1] == ["aMe"]
 
     def test_push_empty_group_warns_and_adds_nothing(self, isolated_store):
         from nicegui import Client

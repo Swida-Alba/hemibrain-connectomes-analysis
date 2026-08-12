@@ -303,25 +303,27 @@ class LiteCustomGrouper:
         self._cell_widgets.append(widgets)
 
     def push_to_query(self, key: str, row_index: int) -> List[str]:
-        """Append a row's group members (union over dataset cells) to the
-        named query input; returns the pushed values."""
+        """Add a row's group LABEL to the named query input.
+
+        The label (not the raw members) is pushed so the query chip reads as
+        the group; the backend expands the label into its member neurons via
+        the active mapping (``FindNeuronConnection._expand_group_labels``)
+        and the exported tables/visualizations show the group label.
+        Returns the pushed label list.
+        """
         target = self.query_inputs.get(key)
         if target is None or not hasattr(target, "add_values"):
             return []
         rows = self._collect_rows()
         if not (0 <= row_index < len(rows)):
             return []
-        values = list(dict.fromkeys(
-            v for vals in (rows[row_index].get("cells") or {}).values()
-            for v in vals))
-        if not values:
+        if not any(vals for vals in (rows[row_index].get("cells") or {}).values()):
             ui.notify("This group has no members to add", type="warning")
             return []
-        target.add_values(values)
         label = rows[row_index]["name"] or auto_label(row_index + 1)
-        ui.notify(f"Group '{label}' added to {key.title()} ({len(values)} members)",
-                  type="positive")
-        return values
+        target.add_values([label])
+        ui.notify(f"Group '{label}' added to {key.title()}", type="positive")
+        return [label]
 
     # --------------------------------------------------------------- actions
     def _add_group(self) -> None:

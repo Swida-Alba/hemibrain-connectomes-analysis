@@ -226,3 +226,24 @@ class TestCanonicalInlineFormat:
             fc.label_mapper = LabelMapper(overall_mapping_json=fc.custom_mapping_file)
         assert fc.label_mapper is not None and not fc.label_mapper.is_empty
         assert fc.label_mapper.get_neurons_for_label("grpA", "male-cns:v0.9", "source") == ["aMe12"]
+
+    def test_group_label_query_expands_to_members(self, tmp_path):
+        """A query token equal to a custom label expands to its members so a
+        pushed group label resolves as a pathfinding query."""
+        from coana import FindNeuronConnection
+        path = self._canonical_file(
+            tmp_path, ["aMe"], {"male-cns:v0.9": [["aMe12", "aMe10"]]})
+        fc = FindNeuronConnection.__new__(FindNeuronConnection)
+        fc.custom_mapping_file = path
+        fc.label_mapper = None
+        from comparison.label_mapper import LabelMapper
+        fc.label_mapper = LabelMapper(overall_mapping_json=path)
+        fc.dataset = "male-cns:v0.9"
+        expanded = fc._expand_group_labels(["aMe"], "source")
+        assert expanded == ["aMe12", "aMe10"]
+        # Non-label tokens pass through untouched.
+        assert fc._expand_group_labels(["aMe", "PPL101"], "source") == \
+            ["aMe12", "aMe10", "PPL101"]
+        # Without a mapper the query is unchanged.
+        fc.label_mapper = None
+        assert fc._expand_group_labels(["aMe"], "source") == ["aMe"]

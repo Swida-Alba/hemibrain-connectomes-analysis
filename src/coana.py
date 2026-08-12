@@ -6233,12 +6233,42 @@ class FindNeuronConnection:
             'elapsed_time': elapsed
         }
 
+    def _expand_group_labels(self, neurons, role: str):
+        """Expand custom-group labels in a query into their member neurons.
+
+        When a label_mapper is active, a query token that equals one of its
+        standard labels (e.g. a group pushed from the inline grouper) is
+        replaced by that label's member neurons for the current dataset and
+        role, so the group acts as a first-class query. Tokens that are not
+        labels pass through untouched. Non-list queries (dict filters) are
+        returned unchanged.
+        """
+        if not (self.label_mapper and not self.label_mapper.is_empty):
+            return neurons
+        if not isinstance(neurons, list):
+            return neurons
+        expanded = []
+        for tok in neurons:
+            if isinstance(tok, str):
+                members = self.label_mapper.get_neurons_for_label(
+                    tok, self.dataset, role)
+                if members:
+                    expanded.extend(str(m) for m in members)
+                    continue
+            expanded.append(tok)
+        return list(dict.fromkeys(expanded))
+
     def InitializeNeuronInfo(self):
         # Ensure neuprint Client is set for the CORRECT dataset
         if self.client_type != 'flywire':
             self._ensure_neuprint_client()
         ''' initialize neuron info '''
         self._vprint('Fetching source and target neurons...', level='simple')
+
+        # Expand custom-group labels (from an active mapping) into members so
+        # a pushed group label resolves as a query.
+        self.sourceNeurons = self._expand_group_labels(self.sourceNeurons, 'source')
+        self.targetNeurons = self._expand_group_labels(self.targetNeurons, 'target')
 
         if not self.separate_hemispheres:
             if self._query_has_hemisphere_suffix(self.sourceNeurons) or self._query_has_hemisphere_suffix(self.targetNeurons):
