@@ -69,6 +69,7 @@ def create_network_tab():
                     tab_key="network",
                     datasets_provider=lambda: [dataset.value] if dataset.value else [],
                     watch_elements=[dataset],
+                    query_inputs={"query": query_input},
                 )
 
         with ui.card().classes("w-full drocat-card").props('id="card-network-core"'):

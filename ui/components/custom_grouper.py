@@ -188,9 +188,13 @@ class LiteGroupHandle:
 class LiteCustomGrouper:
     """The inline group board; one instance per tab."""
 
-    def __init__(self, tab_key: str, require_names: bool = False):
+    def __init__(self, tab_key: str, require_names: bool = False,
+                 query_inputs: Optional[Dict[str, object]] = None):
         self.tab_key = tab_key
         self.require_names = require_names
+        # Optional named query inputs (e.g. {"source": ..., "target": ...})
+        # that group rows can push their members into.
+        self.query_inputs = dict(query_inputs or {})
         self.handle = LiteGroupHandle()
         self._datasets_provider: Callable[[], List[str]] = lambda: []
         self._container: Optional[ui.column] = None
@@ -231,28 +235,33 @@ class LiteCustomGrouper:
         self._cell_widgets = []
         datasets = self.datasets()
         with container:
+            # Single-row toolbar: title + compact functional icons.
+            with ui.row().classes("items-center gap-1 w-full flex-nowrap"):
+                ui.label("Inline Custom Groups").classes("drocat-card-title")
+                ui.space()
+                ui.button(icon="add", on_click=self._add_group).props(
+                    "flat dense round").tooltip("Add group")
+                self._history_button()
+                self._load_button()
+                self._save_preset_button()
             ui.label(
                 "One row per group label; one neuron box per dataset. The "
                 "same label governs every dataset column — empty boxes "
                 "export as empty groups."
             ).classes("text-caption drocat-muted")
             with ui.row().classes("items-center gap-2 w-full flex-wrap"):
-                ui.button("Add Group", icon="add",
-                          on_click=self._add_group).props("flat dense color=primary")
-                self._history_button()
-                self._load_button()
-                self._save_preset_button()
-            with ui.row().classes("items-center gap-2 w-full flex-wrap"):
                 ui.label("Group Name").classes(
                     "text-caption font-bold drocat-muted").style("width: 170px")
                 for ds in datasets:
                     ui.label(ds).classes(
-                        "text-caption font-bold drocat-muted").style("min-width: 220px")
+                        "text-caption font-bold drocat-muted").classes("flex-grow")
             for i, row in enumerate(self.handle.rows):
                 self._render_row(i, row, datasets)
             if not self.handle.rows:
                 ui.label("No groups yet — click 'Add Group' or pull one from "
                          "history.").classes("drocat-empty")
+
+    _QUERY_ICONS = {"source": "login", "target": "logout", "query": "hub"}
 
     def _render_row(self, i: int, row: dict, datasets: List[str]) -> None:
         widgets: Dict[str, ui.element] = {}
@@ -264,7 +273,7 @@ class LiteCustomGrouper:
             ).classes("drocat-input").style("width: 170px")
             self._name_inputs.append(name_input)
             for ds in datasets:
-                with ui.element("div").style("min-width: 220px"):
+                with ui.element("div").classes("flex-grow").style("min-width: 200px"):
                     widget = neuron_list_input(
                         label=ds,
                         unit_label="member",
@@ -274,7 +283,14 @@ class LiteCustomGrouper:
                         suggestions=self._cell_suggest(ds),
                     )
                 widgets[ds] = widget
-            with ui.column().classes("gap-0"):
+            with ui.row().classes("items-center gap-0 flex-nowrap"):
+                for key, target in self.query_inputs.items():
+                    icon = self._QUERY_ICONS.get(key, "add")
+                    ui.button(
+                        icon=icon,
+                        on_click=lambda _e, k=key, idx=i: self.push_to_query(k, idx),
+                    ).props("flat dense round").tooltip(
+                        f"Add this group's members to the {key.title()} input")
                 ui.button(icon="delete",
                           on_click=lambda _e, idx=i: self._remove_group(idx)
                           ).props("flat dense round").tooltip("Remove group")
@@ -285,6 +301,27 @@ class LiteCustomGrouper:
                           on_click=lambda _e, idx=i: self._move_group(idx, 1)
                           ).props("flat dense round").tooltip("Move down")
         self._cell_widgets.append(widgets)
+
+    def push_to_query(self, key: str, row_index: int) -> List[str]:
+        """Append a row's group members (union over dataset cells) to the
+        named query input; returns the pushed values."""
+        target = self.query_inputs.get(key)
+        if target is None or not hasattr(target, "add_values"):
+            return []
+        rows = self._collect_rows()
+        if not (0 <= row_index < len(rows)):
+            return []
+        values = list(dict.fromkeys(
+            v for vals in (rows[row_index].get("cells") or {}).values()
+            for v in vals))
+        if not values:
+            ui.notify("This group has no members to add", type="warning")
+            return []
+        target.add_values(values)
+        label = rows[row_index]["name"] or auto_label(row_index + 1)
+        ui.notify(f"Group '{label}' added to {key.title()} ({len(values)} members)",
+                  type="positive")
+        return values
 
     # --------------------------------------------------------------- actions
     def _add_group(self) -> None:
@@ -303,7 +340,8 @@ class LiteCustomGrouper:
         self._render()
 
     def _history_button(self) -> None:
-        with ui.button("Add from history", icon="history").props("flat dense"):
+        with ui.button(icon="history").props("flat dense round").tooltip(
+                "Add from history"):
             with ui.menu() as menu:
                 def _fill():
                     menu.clear()
@@ -336,7 +374,8 @@ class LiteCustomGrouper:
         ui.notify(f"Group '{label}' loaded from history", type="positive")
 
     def _load_button(self) -> None:
-        with ui.button("Load…", icon="upload_file").props("flat dense"):
+        with ui.button(icon="upload_file").props("flat dense round").tooltip(
+                "Load… (mapping JSON)"):
             with ui.menu():
                 ui.label("Load groups from a mapping JSON (canonical or "
                          "legacy preset format)").classes(
@@ -360,7 +399,8 @@ class LiteCustomGrouper:
             ui.notify(f"Could not load mapping file: {exc}", type="negative")
 
     def _save_preset_button(self) -> None:
-        with ui.button("Save as preset…", icon="bookmark_add").props("flat dense"):
+        with ui.button(icon="bookmark_add").props("flat dense round").tooltip(
+                "Save as preset…"):
             with ui.menu() as menu:
                 ui.label("Save the current groups as a named preset "
                          "(managed in Settings)").classes(
@@ -449,13 +489,20 @@ class LiteCustomGrouper:
         return to_canonical_dict(rows, self.datasets(), origin=origin)
 
     def export_to(self, path) -> str:
-        """Validate, write the canonical JSON and prune stale same-tab files."""
+        """Validate, write the canonical JSON and sweep stale same-tab files.
+
+        Only files older than 24 h are removed: an in-flight run may still
+        need the export it was handed (the runner subprocess reads the file
+        seconds later), so unconditional pruning could delete a live run's
+        mapping out from under it.
+        """
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
-        # Prune earlier inline exports of this tab (latest wins).
+        cutoff = datetime.now().timestamp() - 24 * 3600
         for stale in path.parent.glob(f"{self.tab_key}_*.json"):
             try:
-                stale.unlink()
+                if stale.stat().st_mtime < cutoff:
+                    stale.unlink()
             except OSError:
                 pass
         payload = self.to_canonical()

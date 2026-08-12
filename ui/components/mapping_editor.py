@@ -97,6 +97,7 @@ def custom_grouping_block(
     require_names: bool = False,
     tab_key: str = "tab",
     watch_elements: Optional[List] = None,
+    query_inputs: Optional[Dict[str, object]] = None,
 ) -> Tuple[ui.select, ui.card, Callable[[], Tuple[Optional[str], bool]]]:
     """Custom Grouping selector + collapsible inline grouper.
 
@@ -104,6 +105,9 @@ def custom_grouping_block(
 
     - Selecting ``INLINE_MAPPING`` shows the inline grouper card; any other
       choice collapses it (state is preserved, visibility-toggled only).
+    - The grouper card mounts FULL-WIDTH below the two-column workspace when
+      the tab uses ``tool_page`` (the form column carries ``_drocat_page``);
+      otherwise it renders inline at the call site.
     - ``resolve_mapping_path()`` -> ``(path, ok)``. ``ok=False`` means the
       run must be aborted (errors were already notified). Inline: validates,
       exports the canonical JSON (script-loadable), records the group
@@ -134,11 +138,35 @@ def custom_grouping_block(
             new_tab=True,
         ).classes("text-caption text-primary")
 
-    grouper = LiteCustomGrouper(tab_key=tab_key, require_names=require_names)
-    with ui.card().classes("w-full drocat-card") as grouper_card:
-        ui.label("Inline Custom Groups").classes("drocat-card-title")
-        with ui.column().classes("w-full gap-1") as grouper_container:
-            pass
+    grouper = LiteCustomGrouper(tab_key=tab_key, require_names=require_names,
+                                query_inputs=query_inputs)
+
+    def _find_page_column(element) -> Optional[ui.column]:
+        """tool_page stashes the page column on the workspace columns so
+        full-width blocks can mount below the two-column grid."""
+        def _parent(el):
+            slot = getattr(el, "parent_slot", None)
+            return slot.parent if slot is not None else None
+        while element is not None:
+            page = getattr(element, "_drocat_page", None)
+            if page is not None:
+                return page
+            element = _parent(element)
+        return None
+
+    page_col = _find_page_column(selector)
+    # Mount below the two-column workspace (full width) when the tab uses
+    # tool_page; otherwise fall back to the current (form) slot.
+    mount = page_col if page_col is not None else None
+    if mount is not None:
+        with mount:
+            with ui.card().classes("w-full drocat-card") as grouper_card:
+                with ui.column().classes("w-full gap-1") as grouper_container:
+                    pass
+    else:
+        with ui.card().classes("w-full drocat-card") as grouper_card:
+            with ui.column().classes("w-full gap-1") as grouper_container:
+                pass
     grouper.create(
         grouper_container,
         datasets_provider or (lambda: []),

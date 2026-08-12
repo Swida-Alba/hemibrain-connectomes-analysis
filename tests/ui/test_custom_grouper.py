@@ -245,14 +245,23 @@ class TestRunResolution:
         # History: named label recorded, auto label skipped.
         assert gh.list_recent() == ["aMe"]
         assert gh.get_label("aMe")["members"][DS_A] == ["aMe12"]
-        # Stale same-tab exports are pruned on each export.
+        # Recent same-tab exports are KEPT (an in-flight run may still read
+        # them); only files older than 24 h are swept on export.
         selector.value = me.NONE_MAPPING
         selector.value = me.INLINE_MAPPING
         with client:
             path2, ok2 = resolve()
         assert ok2 and path2 != path
-        exports = list(Path(path).parent.glob("*.json"))
-        assert exports == [Path(path2)]
+        exports = set(Path(path).parent.glob("*.json"))
+        assert {Path(path), Path(path2)} <= exports
+        import os, time
+        old = Path(path)
+        past = time.time() - 25 * 3600
+        os.utime(old, (past, past))
+        with client:
+            path3, ok3 = resolve()
+        assert ok3 and not old.exists(), "stale export must be swept"
+        assert Path(path2).exists() and Path(path3).exists()
 
     def test_require_names_blocks_blank_labels(self, isolated_store):
         client, selector, card, resolve = self._build("/res-names", require_names=True)
@@ -311,3 +320,109 @@ class TestReloadIntoBoard:
         # Export from the reloaded board reproduces the payload's sides.
         out = grouper.to_canonical()
         assert out["source_mapping"] == payload["source_mapping"]
+
+
+# =============================================================================
+# Workflow: pushing group members into query inputs
+# =============================================================================
+class TestQueryPushWorkflow:
+    def test_push_to_query_adds_union_of_members(self, isolated_store):
+        from nicegui import Client
+        from nicegui.page import page
+        from ui.components.common import neuron_list_input
+
+        client = Client(page("/grouper-push"))
+        with client:
+            source = neuron_list_input(label="Source Neurons",
+                                       show_filter=False, show_upload=False)
+            target = neuron_list_input(label="Target Neurons",
+                                       show_filter=False, show_upload=False)
+            _selector, card, _resolve = me.custom_grouping_block(
+                tab_key="push",
+                datasets_provider=lambda: [DS_A, DS_B],
+                query_inputs={"source": source, "target": target})
+        grouper = card.inline_grouper
+        grouper.handle.add_row("aMe", {DS_A: ["aMe12", "aMe10"],
+                                        DS_B: ["aMe12", "aMe9"]})
+        grouper.resync()
+        with client:
+            pushed = grouper.push_to_query("source", 0)
+        # Union across dataset cells, deduplicated, order preserved.
+        assert pushed == ["aMe12", "aMe10", "aMe9"]
+        assert source.get_value()[1] == ["aMe12", "aMe10", "aMe9"]
+        assert target.get_value()[1] == []
+
+    def test_push_twice_does_not_duplicate(self, isolated_store):
+        from nicegui import Client
+        from nicegui.page import page
+        from ui.components.common import neuron_list_input
+
+        client = Client(page("/grouper-push2"))
+        with client:
+            source = neuron_list_input(label="Source Neurons",
+                                       show_filter=False, show_upload=False)
+            _selector, card, _resolve = me.custom_grouping_block(
+                tab_key="push2",
+                datasets_provider=lambda: [DS_A],
+                query_inputs={"source": source})
+        grouper = card.inline_grouper
+        grouper.handle.add_row("aMe", {DS_A: ["aMe12"]})
+        grouper.resync()
+        with client:
+            grouper.push_to_query("source", 0)
+            grouper.push_to_query("source", 0)
+        assert source.get_value()[1] == ["aMe12"]
+
+    def test_push_empty_group_warns_and_adds_nothing(self, isolated_store):
+        from nicegui import Client
+        from nicegui.page import page
+        from ui.components.common import neuron_list_input
+
+        client = Client(page("/grouper-push3"))
+        with client:
+            source = neuron_list_input(label="Source Neurons",
+                                       show_filter=False, show_upload=False)
+            _selector, card, _resolve = me.custom_grouping_block(
+                tab_key="push3",
+                datasets_provider=lambda: [DS_A],
+                query_inputs={"source": source})
+        grouper = card.inline_grouper
+        grouper.handle.add_row("empty", {DS_A: []})
+        grouper.resync()
+        with client:
+            assert grouper.push_to_query("source", 0) == []
+        assert source.get_value()[1] == []
+
+
+class TestSuggestionAnchoring:
+    def test_suggest_menu_targets_its_input_wrapper(self, isolated_store):
+        """The custom suggestion menu must carry an explicit target selector
+        for its own input wrapper (robust anchoring inside nested rebuilds)."""
+        from nicegui import Client
+        from nicegui.page import page
+        from ui.components.common import neuron_list_input
+
+        client = Client(page("/grouper-anchor"))
+        with client:
+            box = neuron_list_input(
+                label="Source Neurons", show_filter=False, show_upload=False,
+                suggestions=lambda text: [("aMe12", "type")])
+        menu = box.suggest_menu
+        anchor = box.chip_input.parent_slot.parent
+        assert menu._props.get("target") == f"#{anchor.html_id}"
+
+    def test_grouper_cell_menus_are_anchored(self, isolated_store):
+        from nicegui import Client
+        from nicegui.page import page
+
+        client = Client(page("/grouper-anchor2"))
+        with client:
+            _selector, card, _resolve = me.custom_grouping_block(
+                tab_key="anchor2", datasets_provider=lambda: [DS_A])
+        grouper = card.inline_grouper
+        grouper.handle.add_row("aMe", {DS_A: ["aMe12"]})
+        grouper.resync()
+        cell = grouper._cell_widgets[0][DS_A]
+        menu = cell.suggest_menu
+        anchor = cell.chip_input.parent_slot.parent
+        assert menu._props.get("target") == f"#{anchor.html_id}"

@@ -70,6 +70,7 @@ def create_inter_dataset_tab():
                 require_names=True,
                 tab_key="inter_dataset",
                 watch_elements=[datasets_select],
+                query_inputs={"source": source_input, "target": target_input},
             )
 
         with ui.card().classes("w-full drocat-card"):

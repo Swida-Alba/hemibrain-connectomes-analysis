@@ -68,6 +68,7 @@ def create_find_shortest_tab():
                     tab_key="find_shortest",
                     datasets_provider=lambda: [dataset.value] if dataset.value else [],
                     watch_elements=[dataset],
+                    query_inputs={"source": source_input, "target": target_input},
                 )
 
         with ui.card().classes("w-full drocat-card").props('id="card-findshortest-core"'):

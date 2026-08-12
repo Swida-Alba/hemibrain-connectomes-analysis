@@ -41,7 +41,7 @@ def tool_page(
     where the user configures a run; the results column is the "contact
     sheet" showing status, log and output files.
     """
-    with ui.column().classes("w-full drocat-page gap-0"):
+    with ui.column().classes("w-full drocat-page gap-0") as page_col:
         with ui.row().classes("w-full items-center gap-3 drocat-page-head"):
             with ui.element("div").classes("drocat-page-mark"):
                 ui.icon(icon).classes("text-white")
@@ -60,6 +60,10 @@ def tool_page(
         with ui.row().classes("w-full drocat-workspace items-start"):
             form_col = ui.column().classes("drocat-form gap-3")
             results_col = ui.column().classes("drocat-results gap-3")
+    # Let full-width blocks (e.g. the inline custom grouper) mount themselves
+    # below the two-column workspace instead of squeezing into the form column.
+    form_col._drocat_page = page_col
+    results_col._drocat_page = page_col
     return form_col, results_col
 
 
@@ -632,6 +636,11 @@ def neuron_list_input(
             with ui.menu() as suggest_menu:
                 pass
         suggest_menu.classes("drocat-suggest-menu")
+        # Anchor the popup to THIS input's wrapper explicitly. Parent-component
+        # anchoring alone can detach (menu renders at the page origin) when the
+        # input is rebuilt inside nested containers (e.g. the inline grouper's
+        # cells); a selector target resolves the anchor element directly.
+        suggest_menu.props(f'target="#{chip_input_anchor.html_id}"')
         # The menu must NEVER take focus from the editor: QMenu focuses itself
         # on open by default, which blurs the QSelect, clears the typed text
         # and swallows further keystrokes. no-focus keeps the editor focused
@@ -998,6 +1007,25 @@ def neuron_list_input(
     container.filter_mode = filter_mode
     container.uploaded_neurons = uploaded_neurons
     container.suggest_menu = suggest_menu
+
+    def add_values(values) -> List:
+        """Merge *values* into the chip list (programmatic append)."""
+        current = list(chip_input.value or [])
+        existing = {str(c) for c in current}
+        for v in values:
+            v = _normalize_neuron_value(v)
+            if str(v) not in existing:
+                current.append(v)
+                existing.add(str(v))
+        if max_items is not None:
+            current = current[:max_items]
+        _suppress_history_popup["value"] = True
+        sync_options(current)
+        chip_input.set_value(current)
+        update_status()
+        return current
+
+    container.add_values = add_values
     return container
 
 

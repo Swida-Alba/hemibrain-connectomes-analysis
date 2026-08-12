@@ -113,6 +113,7 @@ def create_connectivity_profiling_tab():
                     tab_key="profiling",
                     datasets_provider=lambda: list(datasets_select.value or []),
                     watch_elements=[datasets_select],
+                    query_inputs={"query": query_input},
                 )
                 ui.label(
                     "Groups are read from the preset's source mapping: each custom label "
