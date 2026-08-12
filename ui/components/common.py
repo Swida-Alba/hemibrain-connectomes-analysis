@@ -915,11 +915,12 @@ def neuron_list_input(
         )
         chip_input.on("focus", _on_suggest_focus)
         chip_input.on("blur", _on_suggest_blur)
-        # QSelect's component-level blur is not emitted consistently when a
-        # second QSelect is focused. Native focusout bubbles from its search
-        # input, so listen to both paths to guarantee stale suggestions are
-        # hidden on every focus transition.
-        chip_input.on("focusout", _on_suggest_blur)
+        # Keep the lifecycle on QSelect's component-level focus/blur events.
+        # A native focusout also fires during QSelect's first internal editor
+        # handoff; treating that transient event as a real blur makes the
+        # Recent menu flash once and then disappear until the next click.
+        # The per-client menu registry above handles a QSelect-to-QSelect
+        # transition even when the old component's blur is skipped.
         suggest_menu.on("mousedown",
                         lambda _e: _pointer_in_menu.__setitem__("value", True),
                         js_handler="(event) => emit(0)")

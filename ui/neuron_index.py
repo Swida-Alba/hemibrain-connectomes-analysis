@@ -53,6 +53,10 @@ class NeuronIndexPage:
 # either the cache index or its optional metadata table changes.
 _INDEX_CACHE: Dict[Tuple, CachedNeuronIndex] = {}
 
+# Search-result priority intentionally differs from the suggestion input's
+# string-first expansion: the viewer has a stable, visible result order.
+_MATCH_PRIORITY_COLUMNS = ("bodyId", "type", "instance")
+
 
 def clear_neuron_index_cache() -> None:
     """Clear the process-local viewer cache (primarily useful for tests)."""
@@ -356,6 +360,65 @@ def _contains_expression(frame, columns: List[str], text: str):
     return pl.any_horizontal(expressions)
 
 
+def _ordered_match_columns(columns: List[str]) -> List[str]:
+    """Return the viewer's deterministic column-priority search order."""
+    return [
+        *[column for column in _MATCH_PRIORITY_COLUMNS if column in columns],
+        *sorted(
+            column for column in columns
+            if column not in _MATCH_PRIORITY_COLUMNS
+        ),
+    ]
+
+
+def _match_metadata(frame, columns: List[str], text: str, scope=None):
+    """Build match-priority and display metadata expressions for a query.
+
+    The first matching column in the ordered scope wins.  For bodyId matches,
+    the displayed hint mirrors auto-suggestion: show the corresponding
+    instance when one exists, otherwise show ``bodyId``.  The match key and
+    value are kept separately so the viewer can highlight the actual source
+    cell while showing the compact hint in its pinned info columns.
+    """
+    import polars as pl
+
+    ordered = [
+        column for column in (scope or _ordered_match_columns(columns))
+        if column in frame.columns
+    ]
+    if not ordered:
+        empty = pl.lit("")
+        return pl.lit(0), empty, empty, empty
+
+    needle = str(text).strip().lower()
+    priority = pl.lit(len(ordered))
+    match_column = pl.lit("")
+    match_column_key = pl.lit("")
+    match_value = pl.lit("")
+    for rank, column in reversed(list(enumerate(ordered))):
+        display_value = (
+            pl.col(column)
+            .cast(pl.Utf8, strict=False)
+            .fill_null("")
+        )
+        matched = display_value.str.to_lowercase().str.contains(needle, literal=True)
+        if column == "bodyId" and "instance" in frame.columns:
+            instance = (
+                pl.col("instance")
+                .cast(pl.Utf8, strict=False)
+                .fill_null("")
+                .str.strip_chars()
+            )
+            hint = pl.when(instance != "").then(instance).otherwise(pl.lit("bodyId"))
+        else:
+            hint = pl.lit(column)
+        priority = pl.when(matched).then(pl.lit(rank)).otherwise(priority)
+        match_column = pl.when(matched).then(hint).otherwise(match_column)
+        match_column_key = pl.when(matched).then(pl.lit(column)).otherwise(match_column_key)
+        match_value = pl.when(matched).then(display_value).otherwise(match_value)
+    return priority, match_column, match_column_key, match_value
+
+
 def query_neuron_index(
     index: CachedNeuronIndex,
     *,
@@ -369,9 +432,10 @@ def query_neuron_index(
 ) -> NeuronIndexPage:
     """Filter, sort, and page a cached index without sending all rows to JS.
 
-    Search and column filters use case-insensitive substring matching. Sorting
-    is applied before pagination, so changing pages does not merely sort the
-    currently visible slice.
+    Search and column filters use case-insensitive substring matching. Global
+    search results are ranked by matching column in this order: bodyId, type,
+    instance, then the remaining columns. The selected sort is the tie-breaker
+    within that priority order and is applied before pagination.
     """
     import polars as pl
 
@@ -380,8 +444,9 @@ def query_neuron_index(
     columns = list(index.columns)
     filtered = frame
 
-    if str(search or "").strip():
-        filtered = filtered.filter(_contains_expression(filtered, columns, search))
+    search_text = str(search or "").strip()
+    if search_text:
+        filtered = filtered.filter(_contains_expression(filtered, columns, search_text))
 
     filter_text = str(filter_text or "").strip()
     if filter_text:
@@ -397,7 +462,36 @@ def query_neuron_index(
             )
             filtered = filtered.filter(expression)
 
+    # The info column describes the global query when present.  If only a
+    # column filter is active, describe that filter instead; this keeps the
+    # table useful even when the top search box is empty.
+    match_text = search_text or filter_text
+    match_scope = None
+    if not search_text and filter_text and filter_column not in (None, "__all__", "All columns"):
+        match_scope = [filter_column]
+    if match_text:
+        match_priority, match_column, match_column_key, match_value = _match_metadata(
+            filtered, columns, match_text, scope=match_scope
+        )
+        filtered = filtered.with_columns(
+            match_priority.alias("__match_priority"),
+            match_column.alias("match_column"),
+            match_column_key.alias("match_column_key"),
+            match_value.alias("match_value"),
+        )
+    else:
+        filtered = filtered.with_columns(
+            pl.lit("").alias("match_column"),
+            pl.lit("").alias("match_column_key"),
+            pl.lit("").alias("match_value"),
+        )
+
     selected_sort = sort_by if sort_by in columns else ("bodyId" if "bodyId" in columns else columns[0])
+    sort_columns = []
+    sort_directions = []
+    if match_text:
+        sort_columns.append("__match_priority")
+        sort_directions.append(False)
     try:
         if selected_sort == "bodyId":
             # Body IDs are stored as strings in the cache to preserve large
@@ -405,18 +499,32 @@ def query_neuron_index(
             # 9999 instead of appearing between 10000 and 100011.
             filtered = filtered.with_columns(
                 pl.col(selected_sort).cast(pl.UInt64, strict=False).alias("__body_id_sort")
-            ).sort("__body_id_sort", descending=bool(descending), nulls_last=True).drop(
-                "__body_id_sort"
             )
+            sort_columns.append("__body_id_sort")
         else:
-            filtered = filtered.sort(selected_sort, descending=bool(descending), nulls_last=True)
+            sort_columns.append(selected_sort)
+        sort_directions.append(bool(descending))
+        try:
+            filtered = filtered.sort(
+                sort_columns,
+                descending=sort_directions,
+                nulls_last=[True] * len(sort_columns),
+            )
+        except TypeError:  # compatibility with older Polars releases
+            filtered = filtered.sort(sort_columns, descending=sort_directions)
     except TypeError:  # compatibility with older Polars releases
-        filtered = filtered.sort(selected_sort, descending=bool(descending))
+        filtered = filtered.sort(sort_columns, descending=sort_directions)
 
     total = int(filtered.height)
     pages = max(1, (total + page_size - 1) // page_size)
     current_page = max(1, min(int(page or 1), pages))
-    rows = filtered.slice((current_page - 1) * page_size, page_size).to_dicts()
+    output_columns = ["match_column", "match_value", "match_column_key", *columns]
+    rows = (
+        filtered
+        .select(output_columns)
+        .slice((current_page - 1) * page_size, page_size)
+        .to_dicts()
+    )
 
     def json_value(value):
         if value is None:

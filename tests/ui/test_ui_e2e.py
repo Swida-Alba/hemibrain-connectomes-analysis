@@ -2572,6 +2572,14 @@ class TestComponents:
         focus = next(l for l in chip._event_listeners.values() if l.type == "focus")
         menu = [el for el in client.elements.values() if type(el).__name__ == "Menu"][-1]
 
+        # Do not bind the native focusout path: QSelect emits a transient
+        # focusout during its first internal editor handoff, which used to
+        # close the Recent menu immediately after it opened.
+        assert not any(
+            listener.type == "focusout"
+            for listener in chip._event_listeners.values()
+        )
+
         def texts():
             return [el.text for el in client.elements.values() if getattr(el, "text", "")]
 

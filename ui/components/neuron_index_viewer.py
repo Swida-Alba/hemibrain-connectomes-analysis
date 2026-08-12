@@ -123,7 +123,10 @@ def _render_index(content, dataset: str) -> None:
 
         ui.label(
             "Search and column filters use case-insensitive substring matching. "
-            "Sorting is applied to the full cached index before paging."
+            "Search results prioritize bodyId, type, instance, then other columns. "
+            "The Matched by column shows the highest-priority match; bodyId "
+            "matches show their corresponding instance when available. The "
+            "matched value is pinned beside it and the original cell is highlighted."
         ).classes("text-caption drocat-muted")
 
         with ui.row().classes("w-full items-end gap-2 flex-wrap"):
@@ -163,22 +166,75 @@ def _render_index(content, dataset: str) -> None:
         initial = query_neuron_index(index, page_size=50)
         table_columns = [
             {
-                "name": column,
-                "label": _column_label(column),
-                "field": column,
-                # Full-index sorting is controlled above; enabling Quasar's
-                # client-side header sort here would sort only the current page.
+                "name": "match_column",
+                "label": "Matched by",
+                "field": "match_column",
+                "align": "left",
+                "classes": "text-grey-6 text-caption drocat-neuron-match-by",
+                "headerClasses": "text-grey-6 drocat-neuron-match-by",
+                "style": "width: 150px; min-width: 150px",
+                "headerStyle": "width: 150px; min-width: 150px",
                 "sortable": False,
-            }
-            for column in columns
+            },
+            {
+                "name": "match_value",
+                "label": "Matched value",
+                "field": "match_value",
+                "align": "left",
+                "classes": "drocat-neuron-match-value",
+                "headerClasses": "drocat-neuron-match-value",
+                "style": "width: 190px; min-width: 190px",
+                "headerStyle": "width: 190px; min-width: 190px",
+                "sortable": False,
+            },
+            *[
+                {
+                    "name": column,
+                    "label": _column_label(column),
+                    "field": column,
+                    # Full-index sorting is controlled above; enabling Quasar's
+                    # client-side header sort here would sort only the current page.
+                    "sortable": False,
+                }
+                for column in columns
+            ],
         ]
-        with ui.element("div").classes("w-full overflow-auto"):
+        with ui.element("div").classes("w-full drocat-data-viewer-scroll"):
             table = ui.table(
                 rows=initial.rows,
                 columns=table_columns,
                 row_key="bodyId" if "bodyId" in columns else columns[0],
                 pagination=None,
             ).classes("w-full drocat-data-viewer-table")
+            # Render the table body explicitly so the match metadata remains
+            # pinned at the left while the actual matched source cell receives
+            # a row-specific highlight.  The pinned matched value is a stable
+            # floating representation when the source column is horizontally
+            # outside the current viewport.
+            table.add_slot(
+                "body",
+                r"""
+                <q-tr :props="props">
+                  <q-td
+                    v-for="col in props.cols"
+                    :key="col.name"
+                    :props="props"
+                    :class="{
+                      'drocat-neuron-match-by': col.name === 'match_column',
+                      'drocat-neuron-match-value': col.name === 'match_value',
+                      'drocat-neuron-hit-cell': col.name === props.row.match_column_key,
+                    }"
+                    :data-match-column="col.name === props.row.match_column_key ? col.name : null"
+                  >
+                    {{ col.name === 'match_column'
+                        ? props.row.match_column
+                        : col.name === 'match_value'
+                          ? props.row.match_value
+                          : props.row[col.field] }}
+                  </q-td>
+                </q-tr>
+                """,
+            )
 
         with ui.row().classes("w-full items-center justify-between gap-3 flex-wrap"):
             page_info = ui.label("").classes("text-caption drocat-muted")

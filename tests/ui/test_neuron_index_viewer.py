@@ -23,6 +23,23 @@ def _write_index(tmp_path, dataset="test:v1.0"):
     return dataset, folder, index_path
 
 
+def _write_priority_index(tmp_path, dataset="priority:v1.0"):
+    folder = dataset.replace(":", "_").replace(".", "_")
+    cache_dir = tmp_path / "cache" / folder
+    cache_dir.mkdir(parents=True)
+    index_path = cache_dir / "neuron_index.parquet"
+    pl.DataFrame(
+        {
+            "bodyId": ["aMe-body", "100", "200", "300"],
+            "type": ["", "aMe-type", "", ""],
+            "instance": ["hint", "", "aMe-instance", ""],
+            "hemilineage": ["", "", "", "aMe-other"],
+            "post": [1, 2, 3, 4],
+        }
+    ).write_parquet(index_path)
+    return dataset
+
+
 @pytest.fixture
 def isolated_index_root(tmp_path, monkeypatch):
     import ui.neuron_index as neuron_index
@@ -100,8 +117,37 @@ class TestNeuronIndexData:
         assert filtered.total == 1
         assert filtered.rows[0]["bodyId"] == "300"
 
+        column_filtered = query_neuron_index(
+            index,
+            filter_column="type",
+            filter_text="APL",
+        )
+        assert column_filtered.rows[0]["match_column"] == "type"
+
         body_sorted = query_neuron_index(index, sort_by="bodyId", page_size=4)
         assert [row["bodyId"] for row in body_sorted.rows] == ["100", "200", "300", "400"]
+
+    def test_search_results_rank_bodyid_type_instance_then_other_columns(
+        self, isolated_index_root
+    ):
+        from ui.neuron_index import load_cached_neuron_index, query_neuron_index
+
+        dataset = _write_priority_index(isolated_index_root)
+        index = load_cached_neuron_index(dataset, enrich=False)
+        result = query_neuron_index(index, search="ame", page_size=10)
+
+        assert [row["bodyId"] for row in result.rows] == [
+            "aMe-body", "100", "200", "300",
+        ]
+        assert [row["match_column"] for row in result.rows] == [
+            "hint", "type", "instance", "hemilineage",
+        ]
+        assert [row["match_column_key"] for row in result.rows] == [
+            "bodyId", "type", "instance", "hemilineage",
+        ]
+        assert [row["match_value"] for row in result.rows] == [
+            "aMe-body", "aMe-type", "aMe-instance", "aMe-other",
+        ]
 
     def test_load_refreshes_when_progress_sidecar_changes(self, isolated_index_root):
         from ui.neuron_index import (
@@ -162,7 +208,14 @@ class TestNeuronIndexViewer:
         assert "Search all columns" in labels
         assert "Filter column" in labels
         assert "Sort by" in labels
-        assert any(type(el).__name__ == "Table" for el in client.elements.values())
+        tables = [el for el in client.elements.values() if type(el).__name__ == "Table"]
+        assert tables
+        assert tables[0]._props["columns"][0]["name"] == "match_column"
+        assert tables[0]._props["columns"][0]["label"] == "Matched by"
+        assert tables[0]._props["columns"][1]["name"] == "match_value"
+        assert tables[0]._props["columns"][1]["label"] == "Matched value"
+        assert "body" in tables[0].slots
+        assert "drocat-neuron-hit-cell" in tables[0].slots["body"].template
 
     def test_link_explains_how_to_build_a_missing_cache(
         self, isolated_index_root, monkeypatch

@@ -156,8 +156,66 @@ html, body {
     text-decoration: none !important;
 }
 .drocat-inline-link:hover { text-decoration: underline !important; }
-.drocat-data-viewer-table .q-table__middle { max-height: 52vh; }
+.drocat-data-viewer-scroll {
+    position: relative;
+    max-width: 100%;
+    overflow: auto;
+    border: 1px solid var(--drocat-line);
+    border-radius: 10px;
+}
+.drocat-data-viewer-table .q-table__middle {
+    max-height: 52vh;
+    overflow: auto;
+}
 .drocat-data-viewer-table th { white-space: nowrap; }
+.drocat-data-viewer-table th.drocat-neuron-match-by,
+.drocat-data-viewer-table td.drocat-neuron-match-by {
+    position: sticky;
+    left: 0;
+    z-index: 5;
+    min-width: 150px;
+    max-width: 150px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    background: var(--drocat-surface) !important;
+    box-shadow: 1px 0 0 var(--drocat-line);
+}
+.drocat-data-viewer-table th.drocat-neuron-match-value,
+.drocat-data-viewer-table td.drocat-neuron-match-value {
+    position: sticky;
+    left: 150px;
+    z-index: 5;
+    min-width: 190px;
+    max-width: 190px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    background: var(--drocat-cobalt-soft) !important;
+    box-shadow: 1px 0 0 var(--drocat-line-strong);
+}
+.drocat-data-viewer-table th.drocat-neuron-match-by,
+.drocat-data-viewer-table th.drocat-neuron-match-value {
+    z-index: 7;
+}
+.drocat-data-viewer-table td.drocat-neuron-hit-cell {
+    /* The matched source cell follows the scroll until it would leave the
+       viewport, then sticks between the pinned metadata and the right edge.
+       This keeps the actual highlighted cell visible in both scroll
+       directions; the pinned Matched value column remains the fallback when
+       the table is narrower than the two sticky boundaries. */
+    position: sticky;
+    left: 340px;
+    right: 0;
+    z-index: 4;
+    background: #fff1b8 !important;
+    color: var(--drocat-navy) !important;
+    font-weight: 700;
+    box-shadow: inset 0 0 0 2px #eab308;
+}
+.drocat-data-viewer-table td.drocat-neuron-match-value.drocat-neuron-hit-cell {
+    background: #ffe082 !important;
+}
 
 /* ---------- Grouped navigation: layered cards ---------- */
 /* Every tab group is its own tinted card: the group header sits on top of
