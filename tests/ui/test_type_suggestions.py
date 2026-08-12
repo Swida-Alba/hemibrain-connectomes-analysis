@@ -57,11 +57,16 @@ class TestMatchSuggestions:
         assert out[1][1] == "bodyId"
 
     def test_string_input_type_first(self):
-        assert match_suggestions("ap", POOLS) == [("APL", "type"), ("APL2", "type")]
+        assert match_suggestions("AP", POOLS) == [("APL", "type"), ("APL2", "type")]
 
-    def test_string_input_case_insensitive_prefix(self):
+    def test_case_sensitive_prefix(self):
+        """Type names are canonical ('aMe12'): the suggestions only surface
+        names whose case matches the typed prefix, like the backend search."""
+        assert match_suggestions("aMe", POOLS) == [("aMe12", "type")]
+        assert match_suggestions("ame", POOLS) == []
+        assert match_suggestions("AMMC", POOLS) == []
         assert match_suggestions("APL", POOLS)[0] == ("APL", "type")
-        assert match_suggestions("Apl2", POOLS) == [("APL2", "type")]
+        assert match_suggestions("Apl2", POOLS) == []
 
     def test_expand_only_when_no_type_match_and_auto(self):
         # "aMe12_" matches no type -> the range expands to instance.
@@ -85,11 +90,11 @@ class TestMatchSuggestions:
 
     def test_scope_case_insensitive_and_unknown_falls_back_to_auto(self):
         assert match_suggestions("APL", POOLS, "TYPE") == [("APL", "type"), ("APL2", "type")]
-        assert match_suggestions("ap", POOLS, "bogus") == [("APL", "type"), ("APL2", "type")]
+        assert match_suggestions("AP", POOLS, "bogus") == [("APL", "type"), ("APL2", "type")]
 
     def test_limit(self):
         assert len(match_suggestions("5813", POOLS, limit=2)) == 2
-        assert len(match_suggestions("ap", POOLS, limit=1)) == 1
+        assert len(match_suggestions("AP", POOLS, limit=1)) == 1
 
 
 class TestEntryHint:

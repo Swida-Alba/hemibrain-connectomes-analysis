@@ -15,7 +15,9 @@ to end:
 
 Similar-neuron finding (``MorphologyComparer``):
 4. A bodyId query BUILDS its vector: ``fetch_skeleton_on_demand`` fetches
-   raw, persists the simplified skeleton AND appends the raw vector.
+   raw, persists the simplified skeleton AND emits the raw vector. Both
+   writes are SANDBOXED (tmp skeleton dir + in-memory vector append), so
+   the test never mutates the production caches.
 5. The search REUSES the vector: with the fetcher patched to raise, the
    query still returns same-type neurons — pure vector-cache hits, and the
    second run reproduces identical results.
@@ -26,6 +28,7 @@ import sys
 import time
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -213,53 +216,152 @@ class TestVisualizationCacheBuildReuse:
 # Similar-neuron finding: build vector, then reuse it
 # ---------------------------------------------------------------------------
 
-def _pick_uncached_bid(neuprint_client, seed=3):
-    """A hemibrain bodyId NOT in the vector cache whose type has >= 3 members
-    in the cache (so same-type hits are assertable)."""
-    import numpy as np
+# A type whose cached members disagree this much about their own shape
+# (median intra-type standardized cosine below this bound) cannot be used
+# for the same-type top-N assertion: for such types the pipeline may
+# LEGITIMATELY rank other types above the query's own members (observed for
+# PAM08_e: median pairwise cosine 0.072 across its 10 cached members).
+MIN_INTRA_TYPE_COHERENCE = 0.45
+
+
+def _type_coherence(X: np.ndarray, row_idxs) -> float:
+    """Median pairwise standardized cosine among a type's cached members."""
+    sims = []
+    for i in range(len(row_idxs)):
+        for j in range(i + 1, len(row_idxs)):
+            a, b = X[row_idxs[i]], X[row_idxs[j]]
+            sims.append(float(
+                np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b) + 1e-12)
+            ))
+    return float(np.median(sims)) if sims else 0.0
+
+
+def _pick_uncached_bid(seed=3):
+    """A hemibrain bodyId NOT in the vector cache whose type is
+    morphologically COHERENT and has >= 3 cached members — so the same-type
+    top-N assertion is a property of the pipeline, not of type-label noise.
+    The cache is never mutated by this test, so the seeded selection is
+    reproducible across runs and machines."""
     vc = morph.SkeletonVectorCache(DATASET, project_root=str(PROJECT_ROOT), verbose=False)
     data = vc.load()
     assert data is not None and len(data["bodyIds"]) > 0
+    X = np.asarray(data["X"], dtype=float)
     by_type = {}
-    for bid, t in zip(data["bodyIds"], data["types"]):
+    for row_i, (bid, t) in enumerate(zip(data["bodyIds"], data["types"])):
         if t:
-            by_type.setdefault(t, []).append(int(bid))
+            by_type.setdefault(t, []).append((int(bid), row_i))
     tmap, _ = morph._load_neuron_type_map(DATASET, str(PROJECT_ROOT))
     cached_ids = set(int(b) for b in data["bodyIds"])
     rng = np.random.default_rng(seed)
     types = [t for t, v in by_type.items() if len(v) >= 3]
     rng.shuffle(types)
     for t in types:
+        coherence = _type_coherence(X, [i for _, i in by_type[t]])
+        if coherence < MIN_INTRA_TYPE_COHERENCE:
+            continue
         members = [int(b) for b in tmap if tmap[b] == t]
         rng.shuffle(members)
         for bid in members:
             if bid not in cached_ids:
                 return bid, t
-    pytest.fail("no uncached typed bodyId found (cache too complete?)")
+    pytest.fail("no uncached bodyId in a coherent type (cache too complete?)")
 
 
 class TestSimilarFindingCacheBuildReuse:
     def test_query_builds_vector_then_reuses_it(self, tmp_path,
                                                 neuprint_client, monkeypatch):
-        bid, qtype = _pick_uncached_bid(neuprint_client)
-        vc = morph.SkeletonVectorCache(DATASET, project_root=str(PROJECT_ROOT),
-                                       verbose=False)
+        bid, qtype = _pick_uncached_bid()
 
-        # ---- BUILD: fetch raw -> persist simplified + append raw vector ----
+        # ---- Sandbox: BUILD must never mutate the production caches ----
+        # Vector appends are captured in memory and merged into load()
+        # results (mirroring append_vectors semantics: dedupe by bodyId,
+        # types refreshed from the neuron-index map, meta stats untouched);
+        # the simplified skeleton pickle is written under tmp_path.
+        captured = []
+        real_load = morph.SkeletonVectorCache.load
+
+        def captured_append(self, records, vector_basis=morph.VECTOR_BASIS_RAW):
+            captured.extend(
+                (int(b), np.asarray(v, dtype=float), str(r)) for b, v, r in records
+            )
+            return len(records)
+
+        def merged_load(self):
+            base = real_load(self)
+            if base is None or not captured:
+                return base
+            known = set(int(b) for b in base["bodyIds"])
+            new = [c for c in captured if c[0] not in known]
+            if not new:
+                return base
+            meta = base["meta"]
+            mean = np.asarray(meta["mean"], dtype=float)
+            std = np.asarray(meta["std"], dtype=float)
+            std = np.where(std <= 0, 1.0, std)
+            type_map, instance_map = morph._load_neuron_type_map(
+                self.dataset, str(PROJECT_ROOT))
+            rows = []
+            for cbid, vec, rep in new:
+                row = {"bodyId": cbid, "rep": rep}
+                for i, name in enumerate(morph.MORPHOMETRIC_FEATURES):
+                    row[name] = float(vec[i])
+                for i in range(morph.PERSISTENCE_DIM):
+                    row[f"pv_{i}"] = float(
+                        vec[len(morph.MORPHOMETRIC_FEATURES) + i])
+                row["type"] = (type_map or {}).get(cbid, "")
+                row["instance"] = (instance_map or {}).get(cbid, "")
+                rows.append(row)
+            df_new = pd.DataFrame(rows)[list(base["df"].columns)]
+            df = pd.concat([base["df"], df_new], ignore_index=True)
+            raw_new = morph.SkeletonVectorCache._raw_matrix(df_new)
+            # Legacy caches may lack the 'rep' column (load() uses .get()).
+            if "rep" in df.columns:
+                reps = df["rep"].fillna("").astype(str).tolist()
+            else:
+                reps = [""] * len(df)
+            return {
+                "meta": meta,
+                "df": df,
+                "raw": np.vstack([base["raw"], raw_new]),
+                "X": np.vstack([base["X"], (raw_new - mean) / std]),
+                "bodyIds": df["bodyId"].astype(np.int64).to_numpy(),
+                "types": df.get("type", pd.Series([""] * len(df)))
+                          .fillna("").astype(str).tolist(),
+                "instances": df.get("instance", pd.Series([""] * len(df)))
+                             .fillna("").astype(str).tolist(),
+                "rep": reps,
+                "dataset_rep": base["dataset_rep"],
+            }
+
+        monkeypatch.setattr(morph.SkeletonVectorCache, "append_vectors",
+                            captured_append)
+        monkeypatch.setattr(morph.SkeletonVectorCache, "load", merged_load)
+        sandbox = tmp_path / "sandbox"
+        sandbox.mkdir()
+
+        # ---- BUILD: fetch raw -> persist simplified + emit raw vector ----
         nrn = morph.fetch_skeleton_on_demand(DATASET, bid, level="raw",
-                                             persist=True)
+                                             persist=True,
+                                             project_root=str(sandbox))
         assert nrn is not None
-        cache_file = (PROJECT_ROOT / "cache" / FOLDER / "skeletons" / f"{bid}.pkl")
+        cache_file = sandbox / "cache" / FOLDER / "skeletons" / f"{bid}.pkl"
         assert cache_file.exists()
-        assert morph._skeleton_folder_level(DATASET, str(PROJECT_ROOT)) == "simp90"
+        assert morph._skeleton_folder_level(DATASET, str(sandbox)) == "simp90"
         with open(cache_file, "rb") as f:
             simp = pickle.load(f)
         assert len(simp.nodes) <= max(10, len(nrn.nodes) // 2)
-        data = vc.load()
+        data = morph.SkeletonVectorCache(DATASET, project_root=str(PROJECT_ROOT),
+                                         verbose=False).load()
         assert int(bid) in set(int(b) for b in data["bodyIds"]), \
-            "fetch must append the raw vector to the cache"
+            "fetch must expose the raw vector to the cache layer"
         assert ((data.get("meta") or {}).get("vector_basis")
                 or "raw") == "raw"
+        # The production vector cache itself stays untouched.
+        prod_df = pd.read_parquet(
+            PROJECT_ROOT / "cache" / FOLDER / "morphology"
+            / "skeleton_vectors.parquet")
+        assert int(bid) not in set(int(b) for b in prod_df["bodyId"]), \
+            "BUILD leaked into the production vector cache"
 
         # ---- REUSE: cache-only search, zero fetches, deterministic ----
         def forbidden_fetch(*args, **kwargs):
@@ -279,3 +381,34 @@ class TestSimilarFindingCacheBuildReuse:
         # second run: identical results (pure cache reuse)
         res2 = comparer.find_similar()
         pd.testing.assert_frame_equal(res1, res2)
+
+
+# ---------------------------------------------------------------------------
+# Uncached-bid selection: deterministic + morphologically coherent
+# ---------------------------------------------------------------------------
+
+class TestUncachedBidSelection:
+    def test_coherence_metric_synthetic(self):
+        """Identical members -> 1.0; orthogonal members -> 0.0."""
+        same = np.vstack([np.ones(8), np.ones(8) * 2, np.ones(8) * 0.5])
+        assert abs(_type_coherence(same, [0, 1, 2]) - 1.0) < 1e-9
+        ortho = np.eye(3)
+        assert abs(_type_coherence(ortho, [0, 1, 2]) - 0.0) < 1e-9
+
+    def test_selection_is_deterministic(self):
+        # The test never mutates the cache, so the seeded pick is stable.
+        assert _pick_uncached_bid() == _pick_uncached_bid()
+
+    def test_selected_type_is_coherent_and_has_uncached_member(self):
+        bid, qtype = _pick_uncached_bid()
+        vc = morph.SkeletonVectorCache(DATASET, project_root=str(PROJECT_ROOT),
+                                       verbose=False)
+        data = vc.load()
+        X = np.asarray(data["X"], dtype=float)
+        rows = [i for i, t in enumerate(data["types"]) if t == qtype]
+        assert len(rows) >= 3
+        assert _type_coherence(X, rows) >= MIN_INTRA_TYPE_COHERENCE, \
+            f"{qtype} is too incoherent for a same-type top-N assertion"
+        assert int(bid) not in set(int(b) for b in data["bodyIds"])
+        tmap, _ = morph._load_neuron_type_map(DATASET, str(PROJECT_ROOT))
+        assert tmap.get(int(bid)) == qtype

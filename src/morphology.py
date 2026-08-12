@@ -1754,25 +1754,28 @@ class MorphologyComparer:
             if roi_filter == ["*"] or roi_filter == "*":
                 conn = conn.filter(pl.col("roi").is_not_null() & (pl.col("roi") != ""))
             else:
-                conn = conn.filter(pl.col("roi").is_in(roi_filter))
+                conn = conn.filter(pl.col("roi").is_in(pl.Series("roi_filter", roi_filter).implode()))
 
         query_ids = [int(b) for b in query_df["bodyId"].tolist()]
         q = pl.Series("q", query_ids, dtype=pl.Int64)
+        # implode() marks the Series unambiguously as a single membership
+        # collection (polars >=1.30 deprecates same-dtype scalar semantics).
+        q_coll = q.implode()
         conn = conn.with_columns([
             pl.col("bodyId_pre").cast(pl.Int64, strict=False),
             pl.col("bodyId_post").cast(pl.Int64, strict=False),
         ]).drop_nulls(["bodyId_pre", "bodyId_post"])
         conn = conn.filter(pl.col("weight") >= min_weight)
 
-        up = conn.filter(pl.col("bodyId_post").is_in(q))      # partners -> query
-        down = conn.filter(pl.col("bodyId_pre").is_in(q))     # query -> partners
+        up = conn.filter(pl.col("bodyId_post").is_in(q_coll))      # partners -> query
+        down = conn.filter(pl.col("bodyId_pre").is_in(q_coll))     # query -> partners
 
         def _shared(partner_col: str, candidate_col: str, partner_ids) -> "pl.DataFrame":
             if len(partner_ids) == 0:
                 return pl.DataFrame({candidate_col: [], "n_shared": []})
             shared = (conn
-                      .filter(pl.col(partner_col).is_in(partner_ids)
-                              & ~pl.col(candidate_col).is_in(q))
+                      .filter(pl.col(partner_col).is_in(partner_ids.implode())
+                              & ~pl.col(candidate_col).is_in(q_coll))
                       .group_by([candidate_col, partner_col])
                       .agg(pl.len().alias("_w"))
                       .group_by(candidate_col)

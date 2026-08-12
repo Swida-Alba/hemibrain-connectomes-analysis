@@ -189,6 +189,10 @@ def match_suggestions(
 ) -> List[Entry]:
     """Match ``text`` against the pools with the backend's column priority.
 
+    Matching is CASE-SENSITIVE: the backend resolves names with exact string
+    comparison / regex, so suggestions only surface names the search would
+    actually find (type names are canonical, e.g. ``aMe12``).
+
     - numeric input -> bodyId (hint = the instance)
     - string input -> type FIRST; only when no type matches and the search
       scope is 'auto', expand to instance / bodyId / extra type columns
@@ -197,13 +201,12 @@ def match_suggestions(
     text = str(text).strip()
     if not text or not pools:
         return []
-    lower = text.lower()
     scope = str(search_columns or "auto").strip().lower()
     if scope not in ("auto", "type", "instance", "bodyid"):
         scope = "auto"
 
     def matches(entries: List[Entry]) -> List[Entry]:
-        return [e for e in entries if e[0].lower().startswith(lower)]
+        return [e for e in entries if e[0].startswith(text)]
 
     is_numeric = text.replace(".", "").isdigit()
 

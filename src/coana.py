@@ -1175,7 +1175,7 @@ class FindNeuronConnection:
         if level != 'bodyId':
             try:
                 # Use sum aggregation for weights to handle duplicates (e.g. same connection in multiple layers)
-                mat_weight = pl_df.pivot(values='weight', index=index_col, columns=columns_col, aggregate_function='sum').fill_null(0)
+                mat_weight = pl_df.pivot(values='weight', index=index_col, on=columns_col, aggregate_function='sum').fill_null(0)
                 mat_weight.write_csv(os.path.join(folder, f'conn_mat_{level}_weight.csv'))
             except Exception as e:
                 print(f" Failed: {e}", flush=True)
@@ -1184,7 +1184,7 @@ class FindNeuronConnection:
         if level != 'bodyId' and 'connection_ratio' in df.columns:
             try:
                 # Use max for ratios to show the strongest connection ratio found
-                mat_ratio = pl_df.pivot(values='connection_ratio', index=index_col, columns=columns_col, aggregate_function='max').fill_null(0)
+                mat_ratio = pl_df.pivot(values='connection_ratio', index=index_col, on=columns_col, aggregate_function='max').fill_null(0)
                 mat_ratio.write_csv(os.path.join(folder, f'conn_mat_{level}_ratio.csv'))
             except Exception as e:
                 print(f" Failed: {e}", flush=True)
@@ -1193,7 +1193,7 @@ class FindNeuronConnection:
         if level != 'bodyId' and 'traversal_probability' in df.columns:
             try:
                 # Use max for probabilities
-                mat_prob = pl_df.pivot(values='traversal_probability', index=index_col, columns=columns_col, aggregate_function='max').fill_null(0)
+                mat_prob = pl_df.pivot(values='traversal_probability', index=index_col, on=columns_col, aggregate_function='max').fill_null(0)
                 mat_prob.write_csv(os.path.join(folder, f'conn_mat_{level}_prob.csv'))
             except Exception as e:
                 print(f" Failed: {e}", flush=True)
@@ -1202,7 +1202,7 @@ class FindNeuronConnection:
         if 'nt_type' in df.columns:
             try:
                 # Use first for strings
-                mat_nt = pl_df.pivot(values='nt_type', index=index_col, columns=columns_col, aggregate_function='first')
+                mat_nt = pl_df.pivot(values='nt_type', index=index_col, on=columns_col, aggregate_function='first')
                 mat_nt.write_csv(os.path.join(folder, f'conn_mat_{level}_nt.csv'))
             except Exception as e:
                 print(f" Failed: {e}", flush=True)

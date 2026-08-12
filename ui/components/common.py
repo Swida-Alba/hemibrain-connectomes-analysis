@@ -297,6 +297,7 @@ def neuron_list_input(
         "Use the playlist button to paste lists, or upload a CSV/TSV/Excel "
         "file (first column)."
     ),
+    unit_label: str = "neuron",
     show_filter: bool = True,
     show_upload: bool = True,
     max_items: Optional[int] = None,
@@ -316,7 +317,10 @@ def neuron_list_input(
     - ``initial`` seeds the chip list with pre-existing values.
     - ``max_items`` caps the list (used for single-input tabs); additional
       values are rejected once the cap is reached.
-    - A live count badge and a Clear button keep the list manageable.
+    - A live count badge and a Clear button keep the list manageable. The
+      badge names items with ``unit_label`` ("neuron" by default; pass e.g.
+      "threshold" for non-neuron chip inputs so the counter reads
+      "3 thresholds" instead of "3 neurons").
     - ``suggestions``: optional provider ``typed_text -> [(value, hint)]``
       powering the auto-suggest dropdown (dataset type/instance/bodyId names
       with the searched column as a gray hint). Suggestions appear only after
@@ -328,6 +332,10 @@ def neuron_list_input(
 
     Returns container with .get_value() -> (filter_mode, neuron_list).
     """
+    def _unit(count: int) -> str:
+        """Pluralized unit label for count displays."""
+        return f"{unit_label}{'s' if count != 1 else ''}"
+
     uploaded_neurons: List = []
 
     async def handle_upload(e):
@@ -338,7 +346,7 @@ def neuron_list_input(
             # Mutate in place so container.uploaded_neurons remains current.
             uploaded_neurons[:] = loaded
             upload_label.text = (
-                f"✓ {len(uploaded_neurons)} neurons loaded from {filename}"
+                f"✓ {len(uploaded_neurons)} {_unit(len(uploaded_neurons))} loaded from {filename}"
             )
             upload_label.classes(replace="text-caption drocat-ok")
         except Exception as exc:
@@ -448,7 +456,7 @@ def neuron_list_input(
 
         # Status row: live count + upload status + clear
         with ui.row().classes("w-full items-center gap-2"):
-            count_badge = ui.badge("0 neurons", color="grey-6").props("outline")
+            count_badge = ui.badge(f"0 {_unit(0)}", color="grey-6").props("outline")
             upload_label = ui.label("").classes("text-caption drocat-muted")
             upload_label.set_visibility(False)
             clear_button = ui.button(
@@ -479,7 +487,7 @@ def neuron_list_input(
         combined = [normalize_neuron(item) for item in uploaded_neurons]
         combined.extend(normalize_neuron(item) for item in (chip_input.value or []))
         count = len(dict.fromkeys(combined))
-        count_badge.text = f"{count} neuron{'s' if count != 1 else ''}"
+        count_badge.text = f"{count} {_unit(count)}"
         count_badge.props(f"color={'primary' if count else 'grey-6'}")
 
     def clear_all():
@@ -596,6 +604,15 @@ def neuron_list_input(
             from ..config import get_auto_suggest_enabled
             return get_auto_suggest_enabled()
 
+        def _refresh_menu():
+            """Show freshly rebuilt content even when the menu is already
+            open: clearing an open q-menu empties it (Quasar hides an empty
+            menu) and open() on an open menu is a no-op — so close it
+            (guarded, no commit) and reopen it."""
+            if suggest_menu.value:
+                _close_suggest()
+            suggest_menu.open()
+
         def _close_suggest():
             _close_guard["value"] = True
             suggest_menu.close()
@@ -635,7 +652,7 @@ def neuron_list_input(
                             if hint:
                                 ui.label(str(hint)).classes(
                                     "text-caption text-grey-6")
-            suggest_menu.open()
+            _refresh_menu()
 
         def _show_history():
             from ..history_store import recent as _recent, frequent as _frequent
@@ -656,7 +673,7 @@ def neuron_list_input(
                         "text-caption drocat-muted")
                     for v in freqs:
                         _history_item(v)
-            suggest_menu.open()
+            _refresh_menu()
 
         def _history_item(value):
             with ui.item().props("dense").on_click(

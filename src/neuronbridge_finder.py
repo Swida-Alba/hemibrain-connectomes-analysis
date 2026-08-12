@@ -309,6 +309,24 @@ def _create_mountain_order(scores, labels):
     return result_scores, result_labels
 
 
+def image_summary_skip_note(summary_format, download_images) -> Optional[str]:
+    """Explain why a requested PDF/PPTX summary will not be generated.
+
+    The image summary contact sheets are built FROM downloaded line images;
+    when image download is disabled a requested summary format is a silent
+    no-op. Returns a one-line user-facing note in that case, else ``None``.
+    """
+    formats = summary_format if isinstance(summary_format, list) else [summary_format]
+    formats = [str(f).lower() for f in formats if f]
+    if formats and not download_images:
+        return (
+            f"⚠️  Note: summary format {formats} requested but image download "
+            "is disabled. The PDF/PPTX summary is built from downloaded images "
+            "and will be skipped — enable image download to generate it."
+        )
+    return None
+
+
 @dataclass
 class NeuronBridgeFinder:
     """
@@ -1138,12 +1156,12 @@ class NeuronBridgeFinder:
                 pl.col('score').mean().alias('agg_mean_score'),
                 pl.col('score').max().alias('agg_max_score'),
                 pl.col('source_bodyId').cast(pl.Utf8).drop_nulls().n_unique().alias('match_count'),
-                pl.col('source_bodyId').cast(pl.Utf8).drop_nulls().unique().sort().str.concat(',').alias('matched_bodyIds'),
+                pl.col('source_bodyId').cast(pl.Utf8).drop_nulls().unique().sort().str.join(',').alias('matched_bodyIds'),
             ]
             
             if 'source_type' in pl_df.columns:
                 agg_exprs.append(
-                    pl.col('source_type').drop_nulls().filter(pl.col('source_type') != '').unique().sort().str.concat(',').alias('matched_types')
+                    pl.col('source_type').drop_nulls().filter(pl.col('source_type') != '').unique().sort().str.join(',').alias('matched_types')
                 )
             
             if self.separate_splitgal4 and 'line_type' in pl_df.columns:
@@ -1152,7 +1170,7 @@ class NeuronBridgeFinder:
             if is_multi_dataset and 'source_dataset' in pl_df.columns:
                 agg_exprs.extend([
                     pl.col('source_dataset').drop_nulls().n_unique().alias('datasets_labeled'),
-                    pl.col('source_dataset').drop_nulls().unique().sort().str.concat(',').alias('matched_datasets'),
+                    pl.col('source_dataset').drop_nulls().unique().sort().str.join(',').alias('matched_datasets'),
                 ])
             
             # Perform aggregation
@@ -8938,6 +8956,13 @@ class NeuronBridgeFinder:
                             split_gal4_stats.to_csv(split_summary, index=False)
                             self._vprint(f"   Split-GAL4 summary: {split_summary} ({len(split_gal4_stats)} unique)")
             
+            # A summary format without image download is a silent no-op:
+            # the PDF/PPTX contact sheets are built FROM the downloaded
+            # images, so tell the user why no summary file will appear.
+            _skip_note = image_summary_skip_note(summary_format, download_images)
+            if _skip_note:
+                self._vprint(f"\n{_skip_note}")
+
             # Download images if requested
             if download_images and output_path:
                 # Normalize download_images parameter (case-insensitive)

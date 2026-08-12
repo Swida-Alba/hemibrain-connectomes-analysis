@@ -87,6 +87,7 @@ def create_inter_dataset_tab():
                 thresholds_input = neuron_list_input(
                     label="Synapse Thresholds",
                     initial=[3, 5, 10],
+                    unit_label="threshold",
                     show_filter=False,
                     show_upload=False,
                     hint="List of min synapse thresholds to analyze. "

@@ -242,7 +242,10 @@ html, body {
 .drocat-tint-settings .drocat-group-tab.drocat-active { color: #475467 !important; }
 
 @media (max-width: 1100px) {
-    .drocat-nav { gap: 4px; }
+    /* Cards no longer fit side by side: let the nav strip scroll instead
+       of squeezing the segments until their labels collide. */
+    .drocat-nav { overflow-x: auto; scrollbar-width: none; }
+    .drocat-group-card { min-width: 160px; }
     .drocat-group-head { font-size: 10px; letter-spacing: .05em; }
     .drocat-group-head.drocat-head-nb::after { font-size: 8px; padding: 0 5px; margin-left: 4px; }
     .drocat-group-tab { min-height: 46px; padding: 4px 3px; }
@@ -555,6 +558,23 @@ def main_page():
 
     # Global theme
     ui.add_head_html(f"<style>{DROCAT_CSS}</style>")
+    # Quasar's anchor helper logs a console error when a q-tooltip's static
+    # target id (#cNN) no longer exists. NiceGUI 3.15 binds .tooltip() via
+    # an id string, and the first render of each tab panel recreates some
+    # inputs with fresh ids, leaving the original tooltip orphaned (it
+    # simply never shows — no functional impact). Silence only that exact
+    # error; everything else still reaches the console.
+    ui.add_head_html(
+        "<script>"
+        "(function(){"
+        "const _err=console.error;"
+        "console.error=function(...a){"
+        "if(typeof a[0]==='string'&&a[0].startsWith('Anchor: target '))return;"
+        "_err.apply(console,a);"
+        "};"
+        "})();"
+        "</script>"
+    )
 
     # Header
     with ui.header(elevated=False).classes("drocat-header items-center justify-between"):
