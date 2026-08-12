@@ -188,12 +188,31 @@ class TestSelectorGate:
                 tab_key="gate", datasets_provider=lambda: [DS_A])
         assert dialog.value is False
         assert "none" in button.text
-        # The panel hosts the preset selector and the board.
-        assert dialog.preset_select.value == me.NONE_MAPPING
+        # The panel hosts the history pulldown and the board.
+        assert dialog.history_select.value is None
         assert dialog.inline_grouper is not None
         with client:
             dialog.open()
         assert dialog.value is True
+
+    def test_open_seeds_single_empty_row_when_empty(self, isolated_store):
+        """First open with an empty board seeds exactly one empty row for
+        editing; a second open must not stack more empty rows."""
+        from nicegui import Client
+        from nicegui.page import page
+        client = Client(page("/grouper-seed"))
+        with client:
+            _button, dialog, _resolve = me.custom_grouping_block(
+                tab_key="seed", datasets_provider=lambda: [DS_A])
+        grouper = dialog.inline_grouper
+        with client:
+            dialog.open()
+        assert len(grouper.handle.rows) == 1
+        assert grouper.handle.rows[0]["name"] == ""
+        with client:
+            dialog.close()
+            dialog.open()
+        assert len(grouper.handle.rows) == 1  # no stacking
 
     def test_button_label_tracks_inline_groups(self, isolated_store):
         from nicegui import Client
@@ -266,25 +285,51 @@ class TestRunResolution:
         assert ok3 and not old.exists(), "stale export must be swept"
         assert Path(path2).exists() and Path(path3).exists()
 
-    def test_preset_wins_over_inline_board(self, isolated_store, monkeypatch):
-        from ui import mapping_store as ms
-        store_dir = isolated_store / "store"
-        monkeypatch.setattr(ms, "_store_dir", store_dir)
-        monkeypatch.setattr(ms, "_store_file", store_dir / "user_mappings.json")
-        ms.save_mapping("ortho", {
-            "source_mapping": {"custom_label": ["g"], DS_A: [["aMe12"]]},
-            "target_mapping": {"custom_label": ["g"], DS_A: [["aMe12"]]},
-        })
-        client, _button, dialog, resolve = self._build("/res-preset")
+    def test_history_select_loads_group_onto_board(self, isolated_store):
+        """The history pulldown (former preset) loads a recorded group's
+        members onto the board; nothing is named or saved manually."""
+        gh.record([("ortho", {DS_A: ["aMe12", "aMe10"]})], origin="inline")
+        client, _button, dialog, resolve = self._build("/res-history")
         grouper = dialog.inline_grouper
-        grouper.handle.add_row("inlineG", {DS_A: ["x1"]})
-        dialog.preset_select.value = "ortho"
+        with client:
+            dialog.open()  # refreshes history options
+        assert "ortho" in dialog.history_select.options
+        with client:
+            dialog.history_select.value = "ortho"
+        # The group row was upserted onto the board with its members.
+        names = [r["name"] for r in grouper.handle.rows]
+        assert "ortho" in names
+        row = next(r for r in grouper.handle.rows if r["name"] == "ortho")
+        assert row["cells"][DS_A] == ["aMe12", "aMe10"]
+        # Selecting resets the pulldown so it can be re-used.
+        assert dialog.history_select.value is None
+        # Resolve now exports the loaded group.
         with client:
             path, ok = resolve()
-        assert ok is True
-        assert path == ms.mapping_file_path("ortho")
-        # No inline export happened while a preset is selected.
-        assert list((isolated_store / "_inline").glob("res_preset_*.json")) == []
+        assert ok and path
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+        assert data["source_mapping"]["custom_label"] == ["ortho"]
+
+    def test_push_records_group_into_history(self, isolated_store):
+        """Pushing a group to a query records it into the history immediately."""
+        from nicegui import Client
+        from nicegui.page import page
+        from ui.components.common import neuron_list_input
+        client = Client(page("/res-pushhist"))
+        with client:
+            source = neuron_list_input(label="Source Neurons",
+                                       show_filter=False, show_upload=False)
+            _b, dialog, _r = me.custom_grouping_block(
+                tab_key="pushhist", datasets_provider=lambda: [DS_A],
+                query_inputs={"source": source})
+        grouper = dialog.inline_grouper
+        grouper.handle.add_row("clock", {DS_A: ["DN1p"]})
+        grouper.resync()
+        assert gh.list_recent() == []
+        with client:
+            grouper.push_to_query("source", 0)
+        assert gh.list_recent() == ["clock"]
+        assert gh.get_label("clock")["members"][DS_A] == ["DN1p"]
 
     def test_require_names_blocks_blank_labels(self, isolated_store):
         client, selector, card, resolve = self._build("/res-names", require_names=True)

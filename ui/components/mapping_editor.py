@@ -122,9 +122,8 @@ def custom_grouping_block(
 
     dialog = ui.dialog()
     # Persistent: the panel must not close on outside-click / ESC, because the
-    # suggestion and history menus portal to the body (outside the dialog DOM)
-    # and clicking them would otherwise dismiss the panel mid-edit. It closes
-    # only via the X button.
+    # suggestion menus portal to the body (outside the dialog DOM) and clicking
+    # them would otherwise dismiss the panel mid-edit. It closes only via X.
     dialog.props("persistent")
     with dialog:
         with ui.card().classes("w-[min(98vw,1400px)] max-w-none"):
@@ -133,10 +132,14 @@ def custom_grouping_block(
                 ui.button(icon="close", on_click=dialog.close).props(
                     "flat round dense")
             with ui.row().classes("w-full items-center gap-3"):
-                preset_select = ui.select(
-                    options=[NONE_MAPPING] + mapping_store.list_mappings(),
-                    value=mapping_store.get_active_mapping() or NONE_MAPPING,
-                    label="Saved preset (optional — wins over inline groups)",
+                # The former "preset" control is now a HISTORY loader: it lists
+                # previously-used custom groups (recorded automatically when a
+                # group is pushed to a query / exported). Selecting one loads it
+                # onto the board; nothing is named or saved manually.
+                history_select = ui.select(
+                    options=[],
+                    value=None,
+                    label="Load a saved group (history)",
                 ).classes("drocat-select").style("min-width: 320px")
                 ui.link(
                     "📖 Custom grouping instructions",
@@ -152,15 +155,26 @@ def custom_grouping_block(
     )
     # Test/DOM hooks.
     dialog.inline_grouper = grouper
-    dialog.preset_select = preset_select
+    dialog.history_select = history_select
 
-    def _refresh_presets() -> None:
-        current = preset_select.value
-        available = [NONE_MAPPING] + mapping_store.list_mappings()
-        if current not in available:
-            current = NONE_MAPPING
-        preset_select.options = available
-        preset_select.value = current
+    def _refresh_history() -> None:
+        # set_options() (not a bare .options assignment) so the client QSelect
+        # actually receives the refreshed history list.
+        history_select.set_options(group_history.list_recent(), value=None)
+
+    def _on_history_select(event) -> None:
+        lab = event.value
+        if not lab:
+            return
+        rec = group_history.get_label(lab)
+        if rec:
+            grouper.handle.upsert_row(lab, rec.get("members") or {})
+            grouper.resync()
+            _update_button_label()
+        # Reset so the same entry can be re-selected later.
+        history_select.value = None
+
+    history_select.on_value_change(_on_history_select)
 
     def _group_count() -> int:
         return sum(
@@ -168,29 +182,28 @@ def custom_grouping_block(
             if any(vals for vals in (row.get("cells") or {}).values()))
 
     def _update_button_label() -> None:
-        if preset_select.value not in (None, NONE_MAPPING):
-            state = f"preset “{preset_select.value}”"
-        elif _group_count():
-            state = f"inline · {_group_count()} group(s)"
-        else:
-            state = "none"
-        open_button.text = f"{label} · {state}"
+        n = _group_count()
+        open_button.text = (
+            f"{label} · inline · {n} group(s)" if n else f"{label} · none")
 
     def _open_panel() -> None:
-        _refresh_presets()
-        grouper.resync()
-        _update_button_label()
         dialog.open()
 
+    def _on_dialog_toggle(event) -> None:
+        if event.value:  # opening
+            _refresh_history()
+            # First-open convenience: seed a single empty row for editing, but
+            # only when the board is empty (never on top of existing groups).
+            if not grouper.handle.rows:
+                grouper.handle.add_row()
+            grouper.resync()
+        _update_button_label()
+
     open_button.on_click(_open_panel)
-    dialog.on_value_change(
-        lambda event: _update_button_label() if not event.value else None)
-    preset_select.on_value_change(lambda _e: _update_button_label())
+    dialog.on_value_change(_on_dialog_toggle)
     _update_button_label()
 
     def resolve_mapping_path() -> Tuple[Optional[str], bool]:
-        if preset_select.value not in (None, NONE_MAPPING):
-            return selected_mapping_file_path(preset_select.value), True
         if grouper.is_empty():
             return None, True
         errors = grouper.validate()

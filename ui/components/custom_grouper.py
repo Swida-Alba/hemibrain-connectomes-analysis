@@ -37,7 +37,7 @@ from typing import Callable, Dict, List, Optional
 
 from nicegui import ui
 
-from .. import group_history, mapping_store
+from .. import group_history
 from ..type_suggestions import get_dataset_pools, match_suggestions
 from .common import neuron_list_input
 
@@ -241,9 +241,7 @@ class LiteCustomGrouper:
                 ui.space()
                 ui.button(icon="add", on_click=self._add_group).props(
                     "flat dense round").tooltip("Add group")
-                self._history_button()
                 self._load_button()
-                self._save_preset_button()
             ui.label(
                 "One row per group label; one neuron box per dataset. The "
                 "same label governs every dataset column — empty boxes "
@@ -322,6 +320,11 @@ class LiteCustomGrouper:
             return []
         label = rows[row_index]["name"] or auto_label(row_index + 1)
         target.add_values([label])
+        # Record the group into the history the moment it is pushed to a
+        # query, so it immediately appears in the panel's history pulldown.
+        group_history.record(
+            [(rows[row_index]["name"], rows[row_index].get("cells") or {})],
+            origin="inline")
         ui.notify(f"Group '{label}' added to {key.title()}", type="positive")
         return [label]
 
@@ -340,40 +343,6 @@ class LiteCustomGrouper:
         self._collect_rows()
         self.handle.move_row(index, delta)
         self._render()
-
-    def _history_button(self) -> None:
-        with ui.button(icon="history").props("flat dense round").tooltip(
-                "Add from history"):
-            with ui.menu() as menu:
-                def _fill():
-                    menu.clear()
-                    with menu:
-                        recent = group_history.list_recent()
-                        if not recent:
-                            ui.label("No group history yet — labels are "
-                                     "recorded after each inline run.").classes(
-                                "text-caption drocat-muted px-3 py-2")
-                            return
-                        for label in recent:
-                            rec = group_history.get_label(label) or {}
-                            n = sum(len(v) for v in rec.get("members", {}).values())
-                            with ui.item(on_click=lambda _e, lab=label:
-                                         self._add_from_history(lab)).props("dense"):
-                                with ui.item_section():
-                                    ui.label(label)
-                                with ui.item_section().props("side"):
-                                    ui.label(f"{n} members").classes(
-                                        "text-caption drocat-muted")
-                menu.on("show", _fill)
-
-    def _add_from_history(self, label: str) -> None:
-        rec = group_history.get_label(label)
-        if not rec:
-            return
-        self._collect_rows()
-        self.handle.upsert_row(label, rec.get("members") or {})
-        self._render()
-        ui.notify(f"Group '{label}' loaded from history", type="positive")
 
     def _load_button(self) -> None:
         with ui.button(icon="upload_file").props("flat dense round").tooltip(
@@ -399,46 +368,6 @@ class LiteCustomGrouper:
             ui.notify(f"Loaded {len(rows)} group(s)", type="positive")
         except Exception as exc:
             ui.notify(f"Could not load mapping file: {exc}", type="negative")
-
-    def _save_preset_button(self) -> None:
-        with ui.button(icon="bookmark_add").props("flat dense round").tooltip(
-                "Save as preset…"):
-            with ui.menu() as menu:
-                ui.label("Save the current groups as a named preset "
-                         "(managed in Settings)").classes(
-                    "text-caption drocat-muted px-3 pt-2")
-                name_input = ui.input(label="Preset name").classes(
-                    "w-72 drocat-input px-3")
-
-                def _save():
-                    errors = self.validate()
-                    if errors:
-                        for err in errors:
-                            ui.notify(err, type="negative")
-                        return
-                    name = (name_input.value or "").strip()
-                    if not name:
-                        ui.notify("Preset name is required", type="negative")
-                        return
-                    payload = self.to_canonical(origin="preset")
-                    mapping_data = {
-                        "source_mapping": payload["source_mapping"],
-                        "target_mapping": payload["target_mapping"],
-                    }
-                    verrs = mapping_store.validate_mapping(mapping_data)
-                    if verrs:
-                        for err in verrs:
-                            ui.notify(err, type="negative")
-                        return
-                    if mapping_store.save_mapping(name, mapping_data):
-                        ui.notify(f"Preset '{name}' saved", type="positive")
-                        name_input.value = ""
-                        menu.close()
-                    else:
-                        ui.notify("Saving the preset failed", type="negative")
-
-                ui.button("Save", icon="save", on_click=_save).props(
-                    "flat dense color=primary").classes("px-3 pb-2")
 
     # ---------------------------------------------------------------- state
     def _collect_rows(self) -> List[dict]:
@@ -466,11 +395,17 @@ class LiteCustomGrouper:
         return rows
 
     # --------------------------------------------------------------- export
+    def _active_rows(self) -> List[dict]:
+        """Rows that carry a name or members; drops the seeded empty
+        placeholder row so it never exports as a stray ``Group_N``."""
+        return [r for r in self._collect_rows()
+                if r["name"] or any((r.get("cells") or {}).values())]
+
     def validate(self) -> List[str]:
         """Collect state and report blocking errors (empty when valid)."""
-        rows = self._collect_rows()
+        rows = self._active_rows()
         errors = []
-        if not rows or self.handle.is_empty():
+        if not rows:
             errors.append("Define at least one non-empty custom group")
             return errors
         labels = []
@@ -487,7 +422,7 @@ class LiteCustomGrouper:
         return errors
 
     def to_canonical(self, origin: str = "inline") -> dict:
-        rows = self._collect_rows()
+        rows = self._active_rows()
         return to_canonical_dict(rows, self.datasets(), origin=origin)
 
     def export_to(self, path) -> str:
@@ -515,8 +450,7 @@ class LiteCustomGrouper:
     def history_payload(self) -> List[tuple]:
         """(original_label, cells) pairs; blank labels stay blank so the
         history store can skip auto-named groups."""
-        return [(row["name"], row["cells"]) for row in self._collect_rows()]
+        return [(row["name"], row["cells"]) for row in self._active_rows()]
 
     def is_empty(self) -> bool:
-        self._collect_rows()
-        return self.handle.is_empty()
+        return not self._active_rows()
