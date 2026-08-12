@@ -187,8 +187,12 @@ class TestGeneratedHtmlStructure:
         assert "syncSelectedGeometryInputs(element)" in js
         assert "syncSelectedGeometryInputs(evt.target)" in js
         assert "syncSelectedGeometryInputs(null)" in js
-        # align-button enabled state follows any selection change
-        assert "cy.on('select unselect', 'node'" in js
+        # align-button enabled state follows any selection change (nodes
+        # AND edges), and the size/position modifiers + confirm button are
+        # hidden while nothing is selected
+        assert "cy.on('select unselect', 'node, edge'" in js
+        assert 'id="applyGeometryBtn"' in html
+        assert "applyGeom.style.display = anySelected ? 'block' : 'none'" in js
         # manual edge widths are marked so they are recognizable as custom
         assert "e.data('customSize', true)" in js
 

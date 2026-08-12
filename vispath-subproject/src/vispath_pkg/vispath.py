@@ -4931,7 +4931,7 @@ class VisualizePath:
                             <button class="btn" id="alignVBtn" onclick="alignSelectedNodes('v')" title="Align selected nodes vertically (same X)" style="font-size: 10px; padding: 5px; background: #00897b; opacity: 0.4;">⇕ Align V</button>
                         </div>
                         <button class="apply-btn" onclick="applyIndividualColor()">Apply to Selected</button>
-                        <button class="apply-btn" onclick="applySelectedGeometry()" style="background: #00838f;">Apply Size/Position</button>
+                        <button class="apply-btn" id="applyGeometryBtn" onclick="applySelectedGeometry()" style="background: #00838f;">Apply Size/Position</button>
                         <button class="clear-selection-btn" onclick="clearSelection()">Clear Selection</button>
                     </div>
                 </div>
@@ -6327,7 +6327,7 @@ class VisualizePath:
         // Keep the align buttons' enabled state in sync with ANY selection
         // change (shift/box selection, programmatic) — tap selections are
         // additionally refreshed via syncSelectedGeometryInputs.
-        cy.on('select unselect', 'node', function() {{
+        cy.on('select unselect', 'node, edge', function() {{
             updateAlignButtons();
         }});
 
@@ -7615,13 +7615,25 @@ class VisualizePath:
             updateAlignButtons();
         }}
 
-        // Align buttons are only enabled with 2+ selected nodes
+        // Align buttons are only enabled with 2+ selected nodes; the
+        // size/position modifiers and their confirm button are hidden
+        // entirely while nothing is selected (they would otherwise keep
+        // showing stale values after a deselect).
         function updateAlignButtons() {{
             const enabled = cy.$('node:selected').length >= 2;
             ['alignHBtn', 'alignVBtn'].forEach(id => {{
                 const btn = document.getElementById(id);
                 if (btn) btn.style.opacity = enabled ? '1' : '0.4';
             }});
+            const anySelected = cy.$(':selected').length > 0;
+            const applyGeom = document.getElementById('applyGeometryBtn');
+            if (applyGeom) applyGeom.style.display = anySelected ? 'block' : 'none';
+            if (!anySelected) {{
+                const ng = document.getElementById('geomNodeGroup');
+                const eg = document.getElementById('geomEdgeGroup');
+                if (ng) ng.style.display = 'none';
+                if (eg) eg.style.display = 'none';
+            }}
         }}
 
         // Apply the numeric size/position values to the selection as ONE

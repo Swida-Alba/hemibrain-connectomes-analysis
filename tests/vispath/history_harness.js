@@ -89,6 +89,8 @@ function buildScope(cy) {
         return {
             undo, redo, pushHistory, pushStateHistory, captureState, restoreState,
             registerDragHistory, alignSelectedNodes, captureStyleBypass,
+            updateAlignButtons,
+            getEl: (id) => els[id] || makeEl(id),
             jumpToHistory, updateIgnoredEdges, syncToggleButtons,
             getUndoStack: () => undoStack, getRedoStack: () => redoStack,
             getFilterInput: () => els['ignoreEdgesInput'] || makeEl('ignoreEdgesInput'),
@@ -348,6 +350,15 @@ function check(name, got, expected) {
     api.alignSelectedNodes('v');
     check('aligned to mean X', cy.nodes().map(n => n.position().x), [50, 50, 50]);
     check('Y untouched', cy.nodes().map(n => n.position().y), [10, 30, 50]);
+    // geometry modifiers + confirm button hide when nothing is selected
+    cy.$(':selected').unselect();
+    api.updateAlignButtons();
+    check('geometry apply hidden with no selection', api.getEl('applyGeometryBtn').style.display, 'none');
+    check('node geometry group hidden', api.getEl('geomNodeGroup').style.display, 'none');
+    check('edge geometry group hidden', api.getEl('geomEdgeGroup').style.display, 'none');
+    cy.getElementById('A').select();
+    api.updateAlignButtons();
+    check('geometry apply shown with selection', api.getEl('applyGeometryBtn').style.display, 'block');
 }
 
 // ===== Test L: computed (non-bypass) style entries are NOT snapshotted =====
