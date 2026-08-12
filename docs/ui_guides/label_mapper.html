@@ -45,11 +45,12 @@
     mapping used).</p>
 
   <h2>Inline groups &amp; history (query-local grouper)</h2>
-  <p>Every tab with a <b>Custom Grouping</b> dropdown also offers
-    <code>✏️ Define groups inline…</code>. Selecting it expands a lightweight
-    group editor (one row per label: a group name plus one neuron box per
-    dataset); any other choice collapses it. Inline groups are ideal for
-    one-off queries — no trip to the Settings tab needed.</p>
+  <p>Every tab with a <b>Custom Grouping</b> button opens a popup panel
+    (same design as the neuron-index viewer). The panel offers an optional
+    saved-preset selector and a lightweight group editor — one row per
+    label: a group name plus one neuron box per dataset. The button's label
+    mirrors the current state (none / preset / inline). A selected preset
+    wins; otherwise the inline groups apply.</p>
   <ul>
     <li><b>Same label, all datasets:</b> one label governs every dataset
       column on the board. On the Cross-Dataset tab the columns follow the
@@ -72,11 +73,12 @@
       Auto-named <code>Group_N</code> rows are never recorded.</li>
     <li><b>Save as preset…</b> promotes the current board into the named
       preset store above. Presets and history are independent tiers.</li>
-    <li><b>Use groups in the query:</b> each group row carries small arrows
-      that append the group's members (union over its dataset cells) to the
-      tab's Source / Target / Query neuron inputs, so a freshly defined
-      group can drive the run directly. With the mapping active, outputs
-      aggregate those neurons under the group label.</li>
+    <li><b>Use groups in the query:</b> each group row carries
+      <i>Add to Source</i> / <i>Add to Target</i> (or <i>Add to Query</i>)
+      buttons that append the group's members (union over its dataset cells)
+      to the tab's neuron inputs, so a freshly defined group can drive the
+      run directly. With the mapping active, outputs aggregate those neurons
+      under the group label.</li>
   </ul>
   <div class="callout info">
     <b>Division of labor:</b> the inline grouper writes identical groups to

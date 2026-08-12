@@ -179,29 +179,35 @@ def isolated_store(tmp_path, monkeypatch):
 
 
 class TestSelectorGate:
-    def test_sentinel_option_present_and_dialog_closed(self, isolated_store):
+    def test_button_opens_panel_and_label_mirrors_state(self, isolated_store):
         from nicegui import Client
         from nicegui.page import page
         client = Client(page("/grouper-gate"))
         with client:
-            selector, dialog, _resolve = me.custom_grouping_block(
+            button, dialog, _resolve = me.custom_grouping_block(
                 tab_key="gate", datasets_provider=lambda: [DS_A])
-        assert me.INLINE_MAPPING in selector.options
-        assert me.NONE_MAPPING in selector.options
-        assert selector.value == me.NONE_MAPPING
         assert dialog.value is False
+        assert "none" in button.text
+        # The panel hosts the preset selector and the board.
+        assert dialog.preset_select.value == me.NONE_MAPPING
+        assert dialog.inline_grouper is not None
+        with client:
+            dialog.open()
+        assert dialog.value is True
 
-    def test_selecting_sentinel_opens_and_other_closes(self, isolated_store):
+    def test_button_label_tracks_inline_groups(self, isolated_store):
         from nicegui import Client
         from nicegui.page import page
-        client = Client(page("/grouper-toggle"))
+        client = Client(page("/grouper-gate2"))
         with client:
-            selector, dialog, _resolve = me.custom_grouping_block(
-                tab_key="toggle", datasets_provider=lambda: [DS_A])
-            selector.value = me.INLINE_MAPPING
-            assert dialog.value is True
-            selector.value = me.NONE_MAPPING
-            assert dialog.value is False
+            button, dialog, _resolve = me.custom_grouping_block(
+                tab_key="gate2", datasets_provider=lambda: [DS_A])
+        grouper = dialog.inline_grouper
+        grouper.handle.add_row("aMe", {DS_A: ["aMe12"]})
+        with client:
+            dialog.open()
+            dialog.close()  # closing refreshes the button label
+        assert "inline · 1 group(s)" in button.text
 
 
 class TestRunResolution:
@@ -222,16 +228,15 @@ class TestRunResolution:
             path, ok = resolve()
         assert ok is True and path is None
 
-    def test_inline_empty_board_blocks_the_run(self, isolated_store):
+    def test_empty_board_resolves_to_no_mapping(self, isolated_store):
+        """No preset + empty board = simply no mapping (no run blocking)."""
         client, selector, _card, resolve = self._build("/res-empty")
-        selector.value = me.INLINE_MAPPING
         with client:
             path, ok = resolve()
-        assert ok is False and path is None
+        assert ok is True and path is None
 
     def test_inline_valid_board_exports_and_records_history(self, isolated_store):
         client, selector, card, resolve = self._build("/res-valid")
-        selector.value = me.INLINE_MAPPING
         grouper = card.inline_grouper
         grouper.handle.add_row("aMe", {DS_A: ["aMe12"], DS_B: ["aMe12"]})
         grouper.handle.add_row("", {DS_A: ["DN1p"]})  # auto-named
@@ -247,8 +252,6 @@ class TestRunResolution:
         assert gh.get_label("aMe")["members"][DS_A] == ["aMe12"]
         # Recent same-tab exports are KEPT (an in-flight run may still read
         # them); only files older than 24 h are swept on export.
-        selector.value = me.NONE_MAPPING
-        selector.value = me.INLINE_MAPPING
         with client:
             path2, ok2 = resolve()
         assert ok2 and path2 != path
@@ -263,9 +266,28 @@ class TestRunResolution:
         assert ok3 and not old.exists(), "stale export must be swept"
         assert Path(path2).exists() and Path(path3).exists()
 
+    def test_preset_wins_over_inline_board(self, isolated_store, monkeypatch):
+        from ui import mapping_store as ms
+        store_dir = isolated_store / "store"
+        monkeypatch.setattr(ms, "_store_dir", store_dir)
+        monkeypatch.setattr(ms, "_store_file", store_dir / "user_mappings.json")
+        ms.save_mapping("ortho", {
+            "source_mapping": {"custom_label": ["g"], DS_A: [["aMe12"]]},
+            "target_mapping": {"custom_label": ["g"], DS_A: [["aMe12"]]},
+        })
+        client, _button, dialog, resolve = self._build("/res-preset")
+        grouper = dialog.inline_grouper
+        grouper.handle.add_row("inlineG", {DS_A: ["x1"]})
+        dialog.preset_select.value = "ortho"
+        with client:
+            path, ok = resolve()
+        assert ok is True
+        assert path == ms.mapping_file_path("ortho")
+        # No inline export happened while a preset is selected.
+        assert list((isolated_store / "_inline").glob("res_preset_*.json")) == []
+
     def test_require_names_blocks_blank_labels(self, isolated_store):
         client, selector, card, resolve = self._build("/res-names", require_names=True)
-        selector.value = me.INLINE_MAPPING
         grouper = card.inline_grouper
         grouper.handle.add_row("", {DS_A: ["aMe12"]})
         grouper.resync()

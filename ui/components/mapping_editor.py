@@ -21,7 +21,6 @@ from .custom_grouper import LiteCustomGrouper
 _LABEL_KEYS = ("custom_label", "std_label")
 
 NONE_MAPPING = "(No custom mapping)"
-INLINE_MAPPING = "✏️ Define groups inline…"
 
 # Transient per-run exports of the inline grouper (canonical LabelMapper
 # format — directly loadable by scripts); newest per tab wins.
@@ -82,7 +81,7 @@ def mapping_selector(
 
 def selected_mapping_file_path(selection: Optional[str]) -> Optional[str]:
     """Export path for the chosen preset, or None when no mapping is chosen."""
-    if not selection or selection in (NONE_MAPPING, INLINE_MAPPING):
+    if not selection or selection == NONE_MAPPING:
         return None
     return mapping_store.mapping_file_path(selection)
 
@@ -90,70 +89,55 @@ def selected_mapping_file_path(selection: Optional[str]) -> Optional[str]:
 def custom_grouping_block(
     label: str = "Custom Grouping",
     hint: str = (
-        "Reuse a saved custom type mapping (manage them in the Settings tab) "
-        "or define groups inline for this query."
+        "Open the grouping panel: reuse a saved custom type mapping (manage "
+        "them in the Settings tab) or define groups inline for this query."
     ),
     datasets_provider: Optional[Callable[[], List[str]]] = None,
     require_names: bool = False,
     tab_key: str = "tab",
     watch_elements: Optional[List] = None,
     query_inputs: Optional[Dict[str, object]] = None,
-) -> Tuple[ui.select, ui.dialog, Callable[[], Tuple[Optional[str], bool]]]:
-    """Custom Grouping selector + collapsible inline grouper.
+) -> Tuple[ui.button, ui.dialog, Callable[[], Tuple[Optional[str], bool]]]:
+    """Custom Grouping button + popup grouping panel.
 
-    Returns ``(selector, grouper_dialog, resolve_mapping_path)``:
+    Returns ``(open_button, grouper_dialog, resolve_mapping_path)``:
 
-    - Selecting ``INLINE_MAPPING`` opens the inline grouper as a wide popup
-      dialog (same panel design as the "See available neurons" viewer) and
-      reveals an "Edit groups" link for reopening it; any other choice
-      closes the dialog (board state is preserved).
+    - The control is a BUTTON: clicking it opens the panel directly (same
+      popup design as the "See available neurons" viewer). The panel hosts
+      an optional saved-preset selector plus the inline group board; the
+      button label mirrors the current state (none / preset / inline).
     - ``resolve_mapping_path()`` -> ``(path, ok)``. ``ok=False`` means the
-      run must be aborted (errors were already notified). Inline: validates,
-      exports the canonical JSON (script-loadable), records the group
-      history, returns the export path. Preset: returns its exported file.
-      None/(no mapping): ``(None, True)``.
+      run must be aborted (errors were already notified). A selected preset
+      wins; otherwise a non-empty inline board is validated, exported to
+      the canonical JSON (script-loadable), recorded in the group history,
+      and its path returned. No preset + empty board: ``(None, True)``.
     """
-    options = [NONE_MAPPING, INLINE_MAPPING] + mapping_store.list_mappings()
-    active = mapping_store.get_active_mapping() or NONE_MAPPING
-    selector = ui.select(
-        options=options,
-        value=active if active in options else NONE_MAPPING,
-        label=label,
-    ).classes("w-full drocat-select").tooltip(hint)
-
-    def _refresh_options():
-        current = selector.value
-        available = [NONE_MAPPING, INLINE_MAPPING] + mapping_store.list_mappings()
-        if current not in available:
-            selector.value = NONE_MAPPING
-        selector.options = available
-
-    selector.on("click", _refresh_options)
-
-    with ui.row().classes("items-center w-full"):
-        ui.link(
-            "📖 Custom grouping instructions",
-            MAPPING_GUIDE_URL,
-            new_tab=True,
-        ).classes("text-caption text-primary")
-        edit_link = ui.button(
-            "Edit groups", icon="group_work", on_click=lambda: dialog.open()
-        ).props("flat dense no-caps").classes("drocat-inline-link")
-        edit_link.set_visibility(False)
-
     grouper = LiteCustomGrouper(tab_key=tab_key, require_names=require_names,
                                 query_inputs=query_inputs)
 
-    # Popup panel design (mirrors the "See available neurons" viewer): the
-    # board lives in a wide dialog instead of a card pinned to the page
-    # bottom, so it is always at hand while configuring the query.
+    open_button = ui.button(icon="group_work").props(
+        "outline no-caps").classes("w-full").style(
+        "justify-content: flex-start; min-height: 40px")
+    open_button.tooltip(hint)
+
     dialog = ui.dialog()
     with dialog:
         with ui.card().classes("w-[min(98vw,1400px)] max-w-none"):
             with ui.row().classes("w-full items-center justify-between gap-3"):
-                ui.label("Inline Custom Groups").classes("text-h6")
+                ui.label("Custom Grouping").classes("text-h6")
                 ui.button(icon="close", on_click=dialog.close).props(
                     "flat round dense")
+            with ui.row().classes("w-full items-center gap-3"):
+                preset_select = ui.select(
+                    options=[NONE_MAPPING] + mapping_store.list_mappings(),
+                    value=mapping_store.get_active_mapping() or NONE_MAPPING,
+                    label="Saved preset (optional — wins over inline groups)",
+                ).classes("drocat-select").style("min-width: 320px")
+                ui.link(
+                    "📖 Custom grouping instructions",
+                    MAPPING_GUIDE_URL,
+                    new_tab=True,
+                ).classes("text-caption text-primary")
             with ui.column().classes("w-full gap-1") as grouper_container:
                 pass
     grouper.create(
@@ -161,41 +145,61 @@ def custom_grouping_block(
         datasets_provider or (lambda: []),
         watch_elements=watch_elements,
     )
-    # Test/DOM hook: the board behind this dialog.
+    # Test/DOM hooks.
     dialog.inline_grouper = grouper
+    dialog.preset_select = preset_select
 
-    def _toggle(event) -> None:
-        inline = event.value == INLINE_MAPPING
-        edit_link.set_visibility(inline)
-        if inline:
-            grouper.resync()
-            dialog.open()
+    def _refresh_presets() -> None:
+        current = preset_select.value
+        available = [NONE_MAPPING] + mapping_store.list_mappings()
+        if current not in available:
+            current = NONE_MAPPING
+        preset_select.options = available
+        preset_select.value = current
+
+    def _group_count() -> int:
+        return sum(
+            1 for row in grouper.handle.rows
+            if any(vals for vals in (row.get("cells") or {}).values()))
+
+    def _update_button_label() -> None:
+        if preset_select.value not in (None, NONE_MAPPING):
+            state = f"preset “{preset_select.value}”"
+        elif _group_count():
+            state = f"inline · {_group_count()} group(s)"
         else:
-            dialog.close()
+            state = "none"
+        open_button.text = f"{label} · {state}"
 
-    selector.on_value_change(_toggle)
+    def _open_panel() -> None:
+        _refresh_presets()
+        grouper.resync()
+        _update_button_label()
+        dialog.open()
+
+    open_button.on_click(_open_panel)
+    dialog.on_value_change(
+        lambda event: _update_button_label() if not event.value else None)
+    preset_select.on_value_change(lambda _e: _update_button_label())
+    _update_button_label()
 
     def resolve_mapping_path() -> Tuple[Optional[str], bool]:
-        if selector.value == INLINE_MAPPING:
-            if grouper.is_empty():
-                ui.notify(
-                    "Inline grouping is selected but no groups are defined — "
-                    "add groups or switch back to '(No custom mapping)'.",
-                    type="warning")
-                return None, False
-            errors = grouper.validate()
-            if errors:
-                for err in errors:
-                    ui.notify(err, type="negative")
-                return None, False
-            path = grouper.export_to(inline_mapping_path(tab_key))
-            # History stores user intent at export time (label-keyed,
-            # cell-granularity upsert; auto-named groups are skipped).
-            group_history.record(grouper.history_payload(), origin="inline")
-            return path, True
-        return selected_mapping_file_path(selector.value), True
+        if preset_select.value not in (None, NONE_MAPPING):
+            return selected_mapping_file_path(preset_select.value), True
+        if grouper.is_empty():
+            return None, True
+        errors = grouper.validate()
+        if errors:
+            for err in errors:
+                ui.notify(err, type="negative")
+            return None, False
+        path = grouper.export_to(inline_mapping_path(tab_key))
+        # History stores user intent at export time (label-keyed,
+        # cell-granularity upsert; auto-named groups are skipped).
+        group_history.record(grouper.history_payload(), origin="inline")
+        return path, True
 
-    return selector, dialog, resolve_mapping_path
+    return open_button, dialog, resolve_mapping_path
 
 
 

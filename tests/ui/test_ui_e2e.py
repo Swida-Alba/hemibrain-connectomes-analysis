@@ -2205,12 +2205,13 @@ class TestTabs:
         assert card[0].visible is False
         agg_sel.value = "custom group"
         assert card[0].visible is True
-        # the card hosts the LabelMapper preset selector
-        labels = [
-            getattr(el, "_props", {}).get("label")
+        # the card hosts the Custom Grouping button that opens the panel
+        # (the panel hosts the saved-preset selector + inline board)
+        texts = [
+            getattr(el, "text", "")
             for el in client.elements.values()
         ]
-        assert "Custom Grouping Preset" in labels
+        assert any("Custom Grouping Preset" in t for t in texts)
 
 
 

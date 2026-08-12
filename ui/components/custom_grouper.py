@@ -283,13 +283,13 @@ class LiteCustomGrouper:
                         suggestions=self._cell_suggest(ds),
                     )
                 widgets[ds] = widget
-            with ui.row().classes("items-center gap-0 flex-nowrap"):
+            with ui.row().classes("items-center gap-0 flex-wrap"):
                 for key, target in self.query_inputs.items():
                     icon = self._QUERY_ICONS.get(key, "add")
                     ui.button(
-                        icon=icon,
+                        f"Add to {key.title()}", icon=icon,
                         on_click=lambda _e, k=key, idx=i: self.push_to_query(k, idx),
-                    ).props("flat dense round").tooltip(
+                    ).props("flat dense no-caps").tooltip(
                         f"Add this group's members to the {key.title()} input")
                 ui.button(icon="delete",
                           on_click=lambda _e, idx=i: self._remove_group(idx)
