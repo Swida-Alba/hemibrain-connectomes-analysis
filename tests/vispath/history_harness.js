@@ -88,7 +88,7 @@ function buildScope(cy) {
     const src = prelude + fnSources + `
         return {
             undo, redo, pushHistory, pushStateHistory, captureState, restoreState,
-            registerDragHistory, alignSelectedNodes,
+            registerDragHistory, alignSelectedNodes, captureStyleBypass,
             jumpToHistory, updateIgnoredEdges, syncToggleButtons,
             getUndoStack: () => undoStack, getRedoStack: () => redoStack,
             getFilterInput: () => els['ignoreEdgesInput'] || makeEl('ignoreEdgesInput'),
@@ -348,6 +348,27 @@ function check(name, got, expected) {
     api.alignSelectedNodes('v');
     check('aligned to mean X', cy.nodes().map(n => n.position().x), [50, 50, 50]);
     check('Y untouched', cy.nodes().map(n => n.position().y), [10, 30, 50]);
+}
+
+// ===== Test L: computed (non-bypass) style entries are NOT snapshotted =====
+// Regression: Cytoscape's default :active rule writes overlay-color /
+// overlay-opacity into _private.style while a node is grabbed, and those
+// entries linger after the drag; capturing them turned the transient drag
+// shading into a permanent bypass that survived undo AND deselection.
+{
+    const cy = buildGraph({ A: 'intermediate' }, []);
+    const api = buildScope(cy);
+    const A = cy.getElementById('A');
+    A.style({ 'width': '60px' });  // real bypass
+    // simulate the lingering computed :active entries (no bypass flag);
+    // inspect captureStyleBypass directly — feeding such entries back into
+    // the style engine would crash it, so no engine call after poisoning
+    A._private.style['overlay-opacity'] = { name: 'overlay-opacity', value: 0.25 };
+    A._private.style['overlay-color'] = { name: 'overlay-color', value: [0, 0, 0] };
+    const snap = api.captureStyleBypass(A);
+    check('real bypass captured', snap.width, 60);
+    check('computed overlay-opacity skipped', 'overlay-opacity' in snap, false);
+    check('computed overlay-color skipped', 'overlay-color' in snap, false);
 }
 
 console.log(failures === 0 ? 'ALL HISTORY TESTS PASSED' : failures + ' HISTORY TEST(S) FAILED');

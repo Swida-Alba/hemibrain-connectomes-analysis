@@ -212,10 +212,31 @@ class TestGeneratedHtmlStructure:
         # edits round-trip through undo/redo
         assert "function captureStyleBypass" in js
         assert "el._private && el._private.style" in js
+        # computed (non-bypass) entries such as the default :active overlay
+        # must never be snapshotted, or undo turns the transient drag
+        # shading into a permanent bypass
+        assert "if (!v || v.bypass !== true) return;" in js
         assert "style: captureStyleBypass(n)" in js
         assert "style: captureStyleBypass(e)" in js
         assert "if (n.style) cy.getElementById(n.data.id).style(n.style)" in js
         assert "if (e.style) cy.getElementById(e.data.id).style(e.style)" in js
+
+    def test_selection_highlight_visible(self, network_html):
+        """Selection feedback must be clearly visible: the default highlight
+        color is a saturated orange (the old light-yellow #FFFFE0 was nearly
+        invisible on the white canvas), selected nodes get a thick border
+        plus an overlay halo, selected edges a thicker line."""
+        js = _script_text(network_html)
+        assert "#FFFFE0" not in js
+        node_sel = js.index("selector: 'node:selected'")
+        nblock = js[node_sel:node_sel + 800]
+        assert "'border-width': '4px'" in nblock
+        assert "'overlay-color': '#FF9800'" in nblock
+        assert "'overlay-opacity': 0.25" in nblock
+        edge_sel = js.index("selector: 'edge:selected'")
+        eblock = js[edge_sel:edge_sel + 500]
+        assert "'line-color': '#FF9800'" in eblock
+        assert "3, 16" in eblock
 
     def test_dead_end_fixpoint_is_order_independent(self, network_html):
         js = _script_text(network_html)

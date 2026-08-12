@@ -342,7 +342,7 @@ class VisualizePath:
         highlight_color : str, optional
             Color for highlighted/selected nodes and edges in network visualization.
             Used when clicking on nodes or edges to highlight them.
-            Default: '#FFFFE0' (light yellow)
+            Default: '#FF9800' (orange)
             Format: Any valid CSS color (hex, rgb, rgba, named)
             
         node_color : list of str, optional
@@ -592,8 +592,10 @@ class VisualizePath:
         self.edge_color = link_hex  # Hex color for network edges
         self.edge_opacity = link_opacity  # Opacity for network edges
         
-        # Parse highlight color - default to light yellow
-        highlight_hex, highlight_opacity = parse_color_to_hex_opacity(highlight_color or '#FFFFE0')
+        # Parse highlight color - default to a saturated orange that stays
+        # clearly visible against the white canvas (the old light-yellow
+        # default was nearly invisible)
+        highlight_hex, highlight_opacity = parse_color_to_hex_opacity(highlight_color or '#FF9800')
         self.highlight_color = highlight_hex  # Hex color for highlighted elements
         self.highlight_opacity = highlight_opacity  # Opacity for highlighted elements
         
@@ -5085,8 +5087,15 @@ class VisualizePath:
                 {{
                     selector: 'node:selected',
                     style: {{
-                        'border-width': '3px',
-                        'border-color': '{self.highlight_color}'
+                        // Visible selection: a thick colored border plus a
+                        // soft overlay halo (the overlay alone was the only
+                        // feedback and the thin light-yellow border was
+                        // invisible against the white canvas)
+                        'border-width': '4px',
+                        'border-color': '{self.highlight_color}',
+                        'overlay-color': '{self.highlight_color}',
+                        'overlay-opacity': 0.25,
+                        'overlay-padding': '6px'
                     }}
                 }},
                 {{
@@ -5172,7 +5181,7 @@ class VisualizePath:
                     style: {{
                         'line-color': '{self.highlight_color}',
                         'target-arrow-color': '{self.highlight_color}',
-                        'width': 'mapData(scaled_width, {min_scaled_width}, {max_scaled_width}, 2, 15)'
+                        'width': 'mapData(scaled_width, {min_scaled_width}, {max_scaled_width}, 3, 16)'
                     }}
                 }},
                 {{
@@ -6146,6 +6155,12 @@ class VisualizePath:
             // 3.28.1, so read them directly and deep-copy: the object is a
             // live reference into the element and later edits would otherwise
             // corrupt earlier snapshots.
+            // IMPORTANT: _private.style also receives COMPUTED (non-bypass)
+            // entries — e.g. the default :active overlay (black,
+            // overlay-opacity 0.25) written while a node is grabbed — and
+            // those linger after the drag ends. Copying them would turn the
+            // transient drag shading into a permanent bypass on undo, so
+            // only entries flagged bypass === true are captured.
             const st = el._private && el._private.style;
             if (!st) return null;
             const keys = Object.keys(st);
@@ -6153,8 +6168,10 @@ class VisualizePath:
             const out = {{}};
             keys.forEach(k => {{
                 const v = st[k];
+                if (!v || v.bypass !== true) return;
                 out[k] = (v && typeof v === 'object' && 'value' in v) ? v.value : v;
             }});
+            if (Object.keys(out).length === 0) return null;
             return JSON.parse(JSON.stringify(out));
         }}
 
@@ -6714,7 +6731,9 @@ class VisualizePath:
                 }})
                 .selector('edge:selected')
                 .style({{
-                    'width': `mapData(scaled_width, ${{minScaled}}, ${{maxScaled}}, ${{minWidth * 1.5}}, ${{maxWidth * 1.5}})`
+                    // selected edges must stay clearly visible: floor the
+                    // width range so thin edges do not vanish on white
+                    'width': `mapData(scaled_width, ${{minScaled}}, ${{maxScaled}}, ${{Math.max(minWidth * 1.5, 3)}}, ${{Math.max(maxWidth * 1.5, 5)}})`
                 }})
                 .selector('edge.highlighted')
                 .style({{
@@ -6875,7 +6894,9 @@ class VisualizePath:
                 }})
                 .selector('edge:selected')
                 .style({{
-                    'width': `mapData(scaled_width, ${{minScaled}}, ${{maxScaled}}, ${{minEdgeWidth * 1.5}}, ${{maxEdgeWidth * 1.5}})`
+                    // selected edges must stay clearly visible: floor the
+                    // width range so thin edges do not vanish on white
+                    'width': `mapData(scaled_width, ${{minScaled}}, ${{maxScaled}}, ${{Math.max(minEdgeWidth * 1.5, 3)}}, ${{Math.max(maxEdgeWidth * 1.5, 5)}})`
                 }})
                 .selector('edge.highlighted')
                 .style({{
