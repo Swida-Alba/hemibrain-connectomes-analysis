@@ -6,7 +6,9 @@ from ..config import (
     DATASETS,
     DEFAULT_OUTPUT_DIR,
     PROJECT_ROOT,
+    get_auto_suggest_enabled,
     get_default_output_dir,
+    set_auto_suggest_enabled,
     set_default_output_dir,
 )
 from ..components.common import section_header, dataset_status_card, dir_input, sync_output_dir_fields
@@ -286,6 +288,36 @@ def create_settings_tab():
 
             save_default_btn.on_click(save_default_dir)
             reset_default_btn.on_click(reset_default_dir)
+
+        # App Settings
+        with ui.card().classes("w-full drocat-card"):
+            section_header("App Settings", "tune")
+            ui.label(
+                "Auto-suggestion shows dataset type/instance/bodyId names while "
+                "typing in the pathfinding neuron inputs, plus a Recent/Frequent "
+                "query history when the field is empty. The change applies "
+                "immediately to every input."
+            ).classes("text-caption drocat-muted")
+            auto_suggest_cb = ui.checkbox(
+                "Input Auto-Suggestion",
+                value=get_auto_suggest_enabled(),
+            ).tooltip(
+                "Type-ahead suggestions (dataset type names + query history) in "
+                "the pathfinding neuron inputs. Disabling restores plain chip "
+                "inputs."
+            )
+
+            def _toggle_auto_suggest(e):
+                enabled = bool(e.value)
+                if set_auto_suggest_enabled(enabled):
+                    ui.notify(
+                        "Input auto-suggestion " + ("enabled" if enabled else "disabled"),
+                        type="positive" if enabled else "warning",
+                    )
+                else:
+                    ui.notify("Failed to save the setting", type="negative")
+
+            auto_suggest_cb.on_value_change(_toggle_auto_suggest)
 
         # Custom type mappings (LabelMapper presets, reusable across runs)
         with ui.card().classes("w-full drocat-card"):

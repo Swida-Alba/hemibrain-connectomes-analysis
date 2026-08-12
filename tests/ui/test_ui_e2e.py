@@ -1272,6 +1272,37 @@ class TestDatasetService:
             for el in client.elements.values()
         )
 
+    def test_settings_auto_suggest_toggle(self, tmp_path, monkeypatch):
+        """The Settings tab exposes the input auto-suggestion toggle and
+        persists it to the local config (isolated from the real config)."""
+        from nicegui import Client
+        from nicegui.page import page
+        from ui.tabs.settings import create_settings_tab
+        import ui.config as cfg_mod
+
+        monkeypatch.setattr(cfg_mod, "LOCAL_CONFIG_FILE", tmp_path / "local_config.json")
+        client = Client(page("/settings-auto-suggest"))
+        with client:
+            create_settings_tab()
+
+        texts = [el.text for el in client.elements.values() if getattr(el, "text", "")]
+        assert "App Settings" in texts
+        checkboxes = [
+            el for el in client.elements.values()
+            if type(el).__name__ == "Checkbox"
+        ]
+        suggest_cb = next(
+            el for el in checkboxes
+            if getattr(el, "text", "") == "Input Auto-Suggestion"
+        )
+        assert suggest_cb.value is True  # on by default
+
+        # Toggling off persists the setting.
+        suggest_cb.value = False
+        assert cfg_mod.get_auto_suggest_enabled() is False
+        suggest_cb.value = True
+        assert cfg_mod.get_auto_suggest_enabled() is True
+
     def test_settings_token_status_is_non_sensitive(self):
         from ui.tabs.settings import _token_status
 
@@ -2404,6 +2435,9 @@ class TestComponents:
         from ui.components.common import neuron_list_input
 
         monkeypatch.setattr(hs, "_HISTORY_PATH", tmp_path / "neuron_history.json")
+        monkeypatch.setattr(
+            "ui.config.LOCAL_CONFIG_FILE", tmp_path / "local_config.json"
+        )
         hs.record(["aMe12", "aMe10"], now="2026-08-11T10:00:00")
         hs.record(["aMe12"], now="2026-08-11T10:05:00")
 
@@ -2435,9 +2469,10 @@ class TestComponents:
                  if type(el).__name__ == "Menu"]
         menu = menus[-1]
         # The suggestion menu must not steal focus from the editor (typing
-        # would die) and anchors to the input, not the container.
+        # would die); NiceGUI 3.15 renders no DOM ids, so it anchors to its
+        # parent like the paste/upload menus (no target prop).
         assert menu._props.get("no-focus") is True
-        assert menu._props.get("target") == f"#{chip.id}"
+        assert "target" not in menu._props
 
         # One character is below the threshold: no suggestion menu.
         chip._handle_event({"listener_id": suggest_input.id, "args": "a"})
@@ -2474,6 +2509,132 @@ class TestComponents:
         texts = [el.text for el in client.elements.values() if getattr(el, "text", "")]
         assert "Recent" in texts
         assert "aMe12" in texts and "aMe10" in texts
+
+        # Typing the first character closes the history menu WITHOUT
+        # committing it as a chip (server-side close guard).
+        chip._handle_event({"listener_id": suggest_input.id, "args": "a"})
+        assert menu.value is False
+        assert container.get_value() == ("exact", ["APL"])
+
+    def test_neuron_list_input_suggestions_finish_and_focus(self, tmp_path, monkeypatch):
+        """Graceful lifecycle: a finished input (suggestion pick) falls back
+        to the Recent list, and a focus change hides the list automatically."""
+        from nicegui import Client
+        from nicegui.page import page
+        import ui.config as cfg_mod
+        from ui.components.common import neuron_list_input
+
+        monkeypatch.setattr(cfg_mod, "LOCAL_CONFIG_FILE", tmp_path / "local_config.json")
+        import ui.history_store as hs
+        monkeypatch.setattr(hs, "_HISTORY_PATH", tmp_path / "neuron_history.json")
+        hs.record(["aMe12", "aMe10"], now="2026-08-11T10:00:00")
+
+        def fake_suggest(text):
+            if text == "ap":
+                return [("APL", "type")]
+            return []
+
+        client = Client(page("/neuron-input-suggest-lifecycle"))
+        with client:
+            container = neuron_list_input(label="Source Neurons", suggestions=fake_suggest)
+
+        chip = container.chip_input
+        input_listeners = [
+            listener for listener in chip._event_listeners.values()
+            if listener.type == "input"
+        ]
+        suggest_input = input_listeners[0]
+        menus = [el for el in client.elements.values() if type(el).__name__ == "Menu"]
+        menu = menus[-1]
+        focus = next(l for l in chip._event_listeners.values() if l.type == "focus")
+
+        # Focus the empty field -> Recent list opens.
+        chip._handle_event({"listener_id": focus.id, "args": None})
+        assert menu.value is True
+        texts = [el.text for el in client.elements.values() if getattr(el, "text", "")]
+        assert "Recent" in texts
+
+        # Type 2 chars -> suggestions replace the history.
+        chip._handle_event({"listener_id": suggest_input.id, "args": "ap"})
+        assert menu.value is True
+        texts = [el.text for el in client.elements.values() if getattr(el, "text", "")]
+        assert "APL" in texts and "Recent" not in texts
+
+        # Pick the suggestion -> exactly one chip, and the finished input
+        # falls back to the Recent list (field still in use).
+        def _subtree_texts(el):
+            out = [getattr(el, "text", "")]
+            for child in el.default_slot.children:
+                out.extend(_subtree_texts(child))
+            return out
+
+        item = next(
+            el for el in client.elements.values()
+            if type(el).__name__ == "Item" and "APL" in _subtree_texts(el)
+        )
+        click = next(l for l in item._event_listeners.values() if l.type == "click")
+        from types import SimpleNamespace
+        click.handler(SimpleNamespace())
+        assert container.get_value() == ("exact", ["APL"])
+        assert menu.value is True  # back to Recent
+        texts = [el.text for el in client.elements.values() if getattr(el, "text", "")]
+        assert "Recent" in texts
+        assert "aMe12" in texts and "aMe10" in texts
+
+        # Focus change (no pointer in the menu) hides the list automatically
+        # and does not commit anything extra.
+        blur = next(l for l in chip._event_listeners.values() if l.type == "blur")
+        chip._handle_event({"listener_id": blur.id, "args": None})
+        assert menu.value is False
+        assert container.get_value() == ("exact", ["APL"])
+
+        # A blur with pending text commits it like a plain blur (and hides).
+        # Real typing fires both input listeners: the suggestion driver and
+        # the pending-text tracker.
+        chip._handle_event({"listener_id": focus.id, "args": None})
+        chip._handle_event({"listener_id": suggest_input.id, "args": "aMe"})
+        chip._handle_event({"listener_id": input_listeners[1].id, "args": "aMe"})
+        chip._handle_event({"listener_id": blur.id, "args": None})
+        assert menu.value is False
+        assert container.get_value() == ("exact", ["APL", "aMe"])
+
+    def test_neuron_list_input_suggestions_settings_toggle(self, tmp_path, monkeypatch):
+        """The Settings toggle switches the auto-suggest off/on at runtime."""
+        from nicegui import Client
+        from nicegui.page import page
+        import ui.config as cfg_mod
+        from ui.components.common import neuron_list_input
+
+        monkeypatch.setattr(cfg_mod, "LOCAL_CONFIG_FILE", tmp_path / "local_config.json")
+        cfg_mod.set_auto_suggest_enabled(False)
+
+        def fake_suggest(text):
+            return [("APL", "type")]
+
+        client = Client(page("/neuron-input-suggest-toggle"))
+        with client:
+            container = neuron_list_input(label="Source Neurons", suggestions=fake_suggest)
+
+        chip = container.chip_input
+        input_listeners = [
+            listener for listener in chip._event_listeners.values()
+            if listener.type == "input"
+        ]
+        suggest_input = input_listeners[0]
+        focus = next(l for l in chip._event_listeners.values() if l.type == "focus")
+        menus = [el for el in client.elements.values() if type(el).__name__ == "Menu"]
+        menu = menus[-1]
+
+        # Disabled: focus and typing never open the menu.
+        chip._handle_event({"listener_id": focus.id, "args": None})
+        chip._handle_event({"listener_id": suggest_input.id, "args": "ap"})
+        assert menu.value is False
+        assert container.get_value() == ("exact", [])
+
+        # Re-enabled: the very next keystroke works again.
+        cfg_mod.set_auto_suggest_enabled(True)
+        chip._handle_event({"listener_id": suggest_input.id, "args": "ap"})
+        assert menu.value is True
 
     def test_parse_neuron_upload_text_and_excel(self):
         import asyncio

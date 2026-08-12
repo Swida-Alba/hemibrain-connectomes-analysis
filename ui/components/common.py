@@ -415,6 +415,7 @@ def neuron_list_input(
                             if max_items is not None:
                                 current = current[:max_items]
                             sync_options(current)
+                            _suppress_history_popup["value"] = True
                             chip_input.value = current
                             update_status()
                             paste_area.value = ""
@@ -456,6 +457,8 @@ def neuron_list_input(
             ).props("flat dense").classes("drocat-clear-btn")
 
     pending_input = {"value": ""}
+    # Bulk list changes (paste / clear) must not pop the Recent list open.
+    _suppress_history_popup = {"value": False}
 
     def normalize_neuron(item):
         return _normalize_neuron_value(item)
@@ -481,6 +484,7 @@ def neuron_list_input(
 
     def clear_all():
         uploaded_neurons.clear()
+        _suppress_history_popup["value"] = True
         chip_input.set_value([])
         upload_label.text = ""
         upload_label.set_visibility(False)
@@ -570,11 +574,32 @@ def neuron_list_input(
         # The menu must NEVER take focus from the editor: QMenu focuses itself
         # on open by default, which blurs the QSelect, clears the typed text
         # and swallows further keystrokes. no-focus keeps the editor focused
-        # while the menu overlays; the explicit target anchors the menu to the
-        # input (it would otherwise anchor to the container column).
+        # while the menu overlays. (No explicit target: NiceGUI 3.15 renders
+        # no DOM ids, so Quasar's target= selector cannot resolve — the menu
+        # anchors to its parent container like the paste/upload menus.)
         suggest_menu.props('no-focus')
-        suggest_menu.props(f'target="#{chip_input.id}"')
         suggest_menu.style("max-height: 360px; overflow-y: auto;")
+
+        # Server-side closes (1-char gating, rebuilds, picks) must NOT commit
+        # the pending editor text; only genuine client-side closes (outside
+        # click / ESC) commit it, like a plain blur.
+        _close_guard = {"value": False}
+        # Whether the pointer is inside the menu: a blur caused by clicking a
+        # suggestion must not hide the menu before the click lands.
+        _pointer_in_menu = {"value": False}
+        # Whether the editor currently has focus (the Recent list only
+        # reopens after a finished input while the field is still in use).
+        _focused = {"value": False}
+
+        def _suggestions_enabled() -> bool:
+            """Settings toggle: the whole feature can be switched off live."""
+            from ..config import get_auto_suggest_enabled
+            return get_auto_suggest_enabled()
+
+        def _close_suggest():
+            _close_guard["value"] = True
+            suggest_menu.close()
+            _close_guard["value"] = False
 
         def _commit_suggestion(value):
             """Commit a picked suggestion/history value as a chip."""
@@ -588,16 +613,17 @@ def neuron_list_input(
                 # Quasar's new-value-mode re-adds the leftover editor text as
                 # a chip when the model changes externally; wipe it first so
                 # only the picked value lands in the list.
-                chip_input.run_method("clearInputValue")
+                chip_input.run_method("updateInputValue", "")
                 sync_options(merged)
                 chip_input.set_value(merged)
             pending_input["value"] = ""
             update_status()
-            suggest_menu.close()
+            # The menu state is managed by the finished-input handler: an
+            # empty editor falls back to the Recent list.
 
         def _show_suggestions(entries):
             if not entries:
-                suggest_menu.close()
+                _close_suggest()
                 return
             suggest_menu.clear()
             with suggest_menu:
@@ -616,7 +642,7 @@ def neuron_list_input(
             recents = _recent()
             freqs = [v for v in _frequent() if v not in recents]
             if not recents and not freqs:
-                suggest_menu.close()
+                _close_suggest()
                 return
             suggest_menu.clear()
             with suggest_menu:
@@ -638,16 +664,27 @@ def neuron_list_input(
                 ui.label(str(value)).classes("text-body2")
 
         def _on_suggest_input(event):
+            # The editor text changed: refresh the list immediately (the
+            # settings toggle switches the whole feature off at runtime).
+            if not _suggestions_enabled():
+                _close_suggest()
+                return
             text = str(getattr(event, "args", "") or "")
             if len(text.strip()) < suggestion_min_chars:
-                if not text.strip():
+                # Below the threshold only an empty field offers history —
+                # and only while the field still has focus (Quasar re-emits
+                # an empty input-value on blur-reset).
+                if not text.strip() and _focused["value"]:
                     _show_history()
                 else:
-                    suggest_menu.close()
+                    _close_suggest()
                 return
             _show_suggestions(suggestions(text.strip()) or [])
 
         def _on_suggest_focus(_event):
+            _focused["value"] = True
+            if not _suggestions_enabled():
+                return
             # The menu is already showing suggestions (e.g. after a pick) —
             # do not flip it back to the history list.
             if suggest_menu.value:
@@ -656,20 +693,50 @@ def neuron_list_input(
             if not pending_input["value"]:
                 _show_history()
 
+        def _on_suggest_blur(_event):
+            if not _suggestions_enabled():
+                return
+            # Focus moved INTO the menu: a pick is about to happen; keep the
+            # field "focused" so the finished-input handler offers Recent.
+            if _pointer_in_menu["value"]:
+                return
+            _focused["value"] = False
+            # Focus left the field: hide the list automatically, then commit
+            # the pending text like a plain blur.
+            _close_suggest()
+            commit_pending_text()
+
         def _on_menu_hide(_event):
-            # The menu closed without a suggestion pick (outside click): the
-            # typed text is still pending — commit it like a plain blur.
-            # Suggestion commits clear pending_input first, so they no-op.
-            if not suggest_menu.value and pending_input["value"]:
+            _pointer_in_menu["value"] = False
+            # The menu closed without a suggestion pick and NOT via a
+            # server-side rebuild/close: the typed text is still pending —
+            # commit it like a plain blur. Suggestion commits clear
+            # pending_input first, so they no-op.
+            if (not suggest_menu.value and pending_input["value"]
+                    and not _close_guard["value"]):
                 commit_pending_text()
 
-        def _close_suggest_menu(_event):
-            suggest_menu.close()
+        def _finished_input(_event):
+            # A chip was added or removed (Enter / pick / x): the input
+            # finished. With an empty editor and the field still in use,
+            # offer the Recent list again; otherwise hide the menu.
+            if not _suggestions_enabled():
+                _close_suggest()
+            elif _suppress_history_popup["value"]:
+                _suppress_history_popup["value"] = False
+                _close_suggest()
+            elif not pending_input["value"] and _focused["value"]:
+                _show_history()
+            else:
+                _close_suggest()
 
         chip_input.on("input", _on_suggest_input,
                       js_handler="(event) => emit(event?.target?.value ?? '')")
         chip_input.on("focus", _on_suggest_focus)
-        chip_input.on_value_change(_close_suggest_menu)
+        chip_input.on("blur", _on_suggest_blur)
+        suggest_menu.on("mousedown",
+                        lambda _e: _pointer_in_menu.__setitem__("value", True),
+                        js_handler="(event) => emit(0)")
         suggest_menu.on_value_change(_on_menu_hide)
 
     # Capture the editor text while the user types. The native ``input`` event
@@ -684,6 +751,10 @@ def neuron_list_input(
     )
     chip_input.on("input-value", remember_quasar_input)
     chip_input.on_value_change(handle_value_change)
+    # Registered AFTER handle_value_change so the pending text is already
+    # cleared when the "finished input" decision runs.
+    if suggestions is not None:
+        chip_input.on_value_change(_finished_input)
     # Commit the remembered editor text when the field loses focus, so a value
     # is added as a chip without requiring Enter. ``blur`` is a Quasar field
     # event and fires reliably when focus moves elsewhere.

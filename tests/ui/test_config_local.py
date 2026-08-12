@@ -80,3 +80,24 @@ class TestSetDefaultOutputDir:
         target = tmp_path / "not_created"
         cfg.set_default_output_dir(str(target), create=False)
         assert not target.exists()
+
+
+class TestAutoSuggestSetting:
+    """The input auto-suggestion toggle persists in the local config."""
+
+    def test_defaults_to_enabled(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(cfg, "LOCAL_CONFIG_FILE", tmp_path / "local_config.json")
+        assert cfg.get_auto_suggest_enabled() is True
+
+    def test_toggle_roundtrip(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(cfg, "LOCAL_CONFIG_FILE", tmp_path / "local_config.json")
+        assert cfg.set_auto_suggest_enabled(False) is True
+        assert cfg.get_auto_suggest_enabled() is False
+        assert cfg.set_auto_suggest_enabled(True) is True
+        assert cfg.get_auto_suggest_enabled() is True
+
+    def test_other_keys_survive_toggle(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(cfg, "LOCAL_CONFIG_FILE", tmp_path / "local_config.json")
+        cfg.save_local_config({"default_output_dir": "/custom/out"})
+        cfg.set_auto_suggest_enabled(False)
+        assert cfg.get_default_output_dir() == "/custom/out"

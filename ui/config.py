@@ -75,6 +75,18 @@ def set_default_output_dir(value: str, create: bool = True) -> tuple:
     saved = save_local_config(config)
     return saved, str(path) if saved else None
 
+
+def get_auto_suggest_enabled() -> bool:
+    """Whether the neuron-input auto-suggest + history is enabled (Settings)."""
+    return bool(load_local_config().get("auto_suggest_enabled", True))
+
+
+def set_auto_suggest_enabled(enabled: bool) -> bool:
+    """Persist the input auto-suggestion toggle; applies immediately."""
+    config = load_local_config()
+    config["auto_suggest_enabled"] = bool(enabled)
+    return save_local_config(config)
+
 # Available datasets (static fallback - use dataset_service for dynamic fetching)
 DATASETS = [
     "male-cns:v1.0",
