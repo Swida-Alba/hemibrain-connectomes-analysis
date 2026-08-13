@@ -13,6 +13,7 @@ SRC_DIR = PROJECT_ROOT / "src"
 DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "local_data"
 TOKEN_FILE = PROJECT_ROOT / "token_info.txt"
 LOCAL_CONFIG_FILE = PROJECT_ROOT / "ui" / "local_config.json"
+TAB_OUTPUT_DIRS_KEY = "tab_output_dirs"
 
 
 def load_local_config() -> dict:
@@ -47,6 +48,14 @@ def get_default_output_dir() -> str:
     return str(DEFAULT_OUTPUT_DIR)
 
 
+def _resolve_output_path(value: str) -> str:
+    """Normalize a user-entered output path without touching the filesystem."""
+    path = Path(value).expanduser()
+    if not path.is_absolute():
+        path = (PROJECT_ROOT / path).resolve()
+    return str(path)
+
+
 def set_default_output_dir(value: str, create: bool = True) -> tuple:
     """Persist the UI default output directory permanently (across sessions).
 
@@ -62,9 +71,7 @@ def set_default_output_dir(value: str, create: bool = True) -> tuple:
         config.pop("default_output_dir", None)
         saved = save_local_config(config)
         return saved, str(DEFAULT_OUTPUT_DIR) if saved else None
-    path = Path(raw).expanduser()
-    if not path.is_absolute():
-        path = (PROJECT_ROOT / path).resolve()
+    path = Path(_resolve_output_path(raw))
     if create:
         try:
             path.mkdir(parents=True, exist_ok=True)
@@ -74,6 +81,77 @@ def set_default_output_dir(value: str, create: bool = True) -> tuple:
     config["default_output_dir"] = str(path)
     saved = save_local_config(config)
     return saved, str(path) if saved else None
+
+
+def get_tab_output_override(scope: str | None) -> str | None:
+    """Return a persisted tab-specific output directory, if one exists."""
+    key = str(scope or "").strip()
+    if not key:
+        return None
+    overrides = load_local_config().get(TAB_OUTPUT_DIRS_KEY, {})
+    if not isinstance(overrides, dict):
+        return None
+    value = overrides.get(key)
+    if not isinstance(value, str) or not value.strip():
+        return None
+    path = Path(value).expanduser()
+    return str(path) if path.is_absolute() else None
+
+
+def has_tab_output_override(scope: str | None) -> bool:
+    """Whether *scope* has its own path instead of inheriting the default."""
+    return get_tab_output_override(scope) is not None
+
+
+def get_tab_output_dir(scope: str | None) -> str:
+    """Resolve a tab path, falling back to the global output default."""
+    return get_tab_output_override(scope) or get_default_output_dir()
+
+
+def set_tab_output_dir(
+    scope: str | None,
+    value: str,
+    create: bool = False,
+) -> tuple:
+    """Persist or clear one tab's output-directory override.
+
+    An empty value removes the override and makes the tab inherit the global
+    default again.  Tab overrides never modify ``default_output_dir``.
+    """
+    key = str(scope or "").strip()
+    if not key:
+        return False, None
+    raw = (value or "").strip()
+    config = load_local_config()
+    overrides = config.get(TAB_OUTPUT_DIRS_KEY, {})
+    if not isinstance(overrides, dict):
+        overrides = {}
+    if not raw:
+        overrides.pop(key, None)
+        if overrides:
+            config[TAB_OUTPUT_DIRS_KEY] = overrides
+        else:
+            config.pop(TAB_OUTPUT_DIRS_KEY, None)
+        saved = save_local_config(config)
+        return saved, get_default_output_dir() if saved else None
+
+    path = Path(_resolve_output_path(raw))
+    if create:
+        try:
+            path.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            return False, None
+    overrides[key] = str(path)
+    config[TAB_OUTPUT_DIRS_KEY] = overrides
+    saved = save_local_config(config)
+    return saved, str(path) if saved else None
+
+
+def clear_tab_output_overrides() -> bool:
+    """Clear every tab override so all tabs inherit the global default."""
+    config = load_local_config()
+    config.pop(TAB_OUTPUT_DIRS_KEY, None)
+    return save_local_config(config)
 
 
 def get_auto_suggest_enabled() -> bool:

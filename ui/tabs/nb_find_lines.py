@@ -46,7 +46,7 @@ def create_nb_find_lines_tab():
                     label="Dataset (optional)", default=None, datasets=["(all)"] + DATASETS,
                     hint="Restrict search to one dataset, or select (all) to search everywhere.",
                 )
-                output_dir = dir_input()
+                output_dir = dir_input(scope="nb_find_lines")
 
         with ui.card().classes("w-full drocat-card"):
             section_header("Search Parameters", "tune")

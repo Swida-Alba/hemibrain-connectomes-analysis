@@ -48,7 +48,7 @@ def create_connectivity_profiling_tab():
                          "compared both within each dataset (intra) and across datasets "
                          "(inter, same neuron).",
                 )
-                output_dir = dir_input()
+                output_dir = dir_input(scope="connectivity_profiling")
 
         with ui.card().classes("w-full drocat-card"):
             section_header("Profile Construction", "build")

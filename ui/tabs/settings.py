@@ -6,6 +6,7 @@ from ..config import (
     DATASETS,
     DEFAULT_OUTPUT_DIR,
     PROJECT_ROOT,
+    clear_tab_output_overrides,
     get_auto_suggest_enabled,
     get_default_output_dir,
     set_auto_suggest_enabled,
@@ -258,9 +259,14 @@ def create_settings_tab():
         # Output
         with ui.card().classes("w-full drocat-card"):
             section_header("Output Settings", "folder")
-            default_dir = dir_input(label="Default Output Directory", default=get_default_output_dir())
+            default_dir = dir_input(
+                label="Default Output Directory",
+                default=get_default_output_dir(),
+                global_default=True,
+            )
             ui.label(
-                "This directory is pre-filled in every tool tab. "
+                "This directory is inherited by tool tabs until a tab-specific "
+                "override is saved. Reset clears every tab override. "
                 f"Project root: {PROJECT_ROOT}"
             ).classes("text-caption drocat-muted")
             with ui.row():
@@ -282,8 +288,13 @@ def create_settings_tab():
 
             def reset_default_dir():
                 set_default_output_dir("")
+                clear_tab_output_overrides()
                 default_dir.value = str(DEFAULT_OUTPUT_DIR)
-                sync_output_dir_fields(default_dir, str(DEFAULT_OUTPUT_DIR))
+                sync_output_dir_fields(
+                    default_dir,
+                    str(DEFAULT_OUTPUT_DIR),
+                    force=True,
+                )
                 ui.notify("Default output directory reset", type="positive")
 
             save_default_btn.on_click(save_default_dir)

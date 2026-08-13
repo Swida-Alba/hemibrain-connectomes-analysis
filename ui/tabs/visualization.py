@@ -94,7 +94,7 @@ def create_skeleton_tab():
             layer_tree = layer_tree_editor()
             with param_grid(2):
                 dataset = dataset_selector()
-                output_dir = dir_input()
+                output_dir = dir_input(scope="visualization_skeleton")
             with param_grid(3):
                 filter_mode = select_input(
                     "Match by",
@@ -701,7 +701,10 @@ def create_net_viz_tab():
         with ui.card().classes("w-full drocat-card").props('id="card-net-viz-rendering"'):
             section_header("Rendering Options", "palette")
             with param_grid(2):
-                path_output_dir = dir_input(label="Path Output Directory")
+                path_output_dir = dir_input(
+                    label="Path Output Directory",
+                    scope="visualization_path",
+                )
                 path_layout = select_input(
                     "Network Layout",
                     NETWORK_LAYOUTS + ["hierarchical"],

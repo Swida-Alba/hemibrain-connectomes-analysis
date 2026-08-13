@@ -65,7 +65,7 @@ def create_network_tab():
                     hint="Select the connectome dataset.",
                     allow_custom=True,
                 )
-                output_dir = dir_input()
+                output_dir = dir_input(scope="network")
                 mapping_select, _grouper_card, resolve_grouping = custom_grouping_block(
                     label="Custom Grouping",
                     tab_key="network",

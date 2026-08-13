@@ -63,7 +63,7 @@ def create_find_path_tab():
                     hint="Select the connectome dataset.",
                     allow_custom=True,
                 )
-                output_dir = dir_input()
+                output_dir = dir_input(scope="find_path")
                 mapping_select, _grouper_card, resolve_grouping = custom_grouping_block(
                     label="Custom Grouping",
                     tab_key="find_path",

@@ -66,7 +66,7 @@ def create_inter_dataset_tab():
                 suggestions=_type_suggest,
                 available_neurons=lambda: datasets_select.value if datasets_select is not None else [],
             )
-            output_dir = dir_input()
+            output_dir = dir_input(scope="inter_dataset")
             mapping_select, _grouper_card, resolve_grouping = custom_grouping_block(
                 datasets_provider=lambda: list(datasets_select.value or []),
                 require_names=True,

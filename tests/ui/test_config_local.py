@@ -82,6 +82,57 @@ class TestSetDefaultOutputDir:
         assert not target.exists()
 
 
+class TestTabOutputDirs:
+    """Tab overrides stay independent from the Settings default."""
+
+    def test_tab_override_does_not_change_global_default(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(cfg, "LOCAL_CONFIG_FILE", tmp_path / "local_config.json")
+        default = tmp_path / "default"
+        tab_path = tmp_path / "pathfinding"
+        cfg.set_default_output_dir(str(default), create=False)
+
+        saved, effective = cfg.set_tab_output_dir("find_path", str(tab_path))
+        assert saved is True
+        assert effective == str(tab_path)
+        assert cfg.get_tab_output_dir("find_path") == str(tab_path)
+        assert cfg.get_tab_output_dir("find_shortest") == str(default)
+        assert cfg.get_default_output_dir() == str(default)
+        assert cfg.has_tab_output_override("find_path") is True
+
+    def test_empty_tab_value_restores_inheritance(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(cfg, "LOCAL_CONFIG_FILE", tmp_path / "local_config.json")
+        default = tmp_path / "default"
+        cfg.set_default_output_dir(str(default), create=False)
+        cfg.set_tab_output_dir("network", str(tmp_path / "network"))
+
+        saved, effective = cfg.set_tab_output_dir("network", "")
+        assert saved is True
+        assert effective == str(default)
+        assert cfg.has_tab_output_override("network") is False
+        assert cfg.get_tab_output_dir("network") == str(default)
+
+    def test_reset_clears_all_tab_overrides_and_preserves_default(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(cfg, "LOCAL_CONFIG_FILE", tmp_path / "local_config.json")
+        default = tmp_path / "default"
+        cfg.set_default_output_dir(str(default), create=False)
+        cfg.set_tab_output_dir("find_path", str(tmp_path / "one"))
+        cfg.set_tab_output_dir("network", str(tmp_path / "two"))
+
+        assert cfg.clear_tab_output_overrides() is True
+        assert cfg.has_tab_output_override("find_path") is False
+        assert cfg.has_tab_output_override("network") is False
+        assert cfg.get_default_output_dir() == str(default)
+        assert cfg.load_local_config() == {"default_output_dir": str(default)}
+
+    def test_relative_tab_path_resolves_against_project_root(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(cfg, "LOCAL_CONFIG_FILE", tmp_path / "local_config.json")
+        saved, effective = cfg.set_tab_output_dir("flylight", "relative/out")
+        expected = str((cfg.PROJECT_ROOT / "relative/out").resolve())
+        assert saved is True
+        assert effective == expected
+        assert cfg.get_tab_output_dir("flylight") == expected
+
+
 class TestAutoSuggestSetting:
     """The input auto-suggestion toggle persists in the local config."""
 

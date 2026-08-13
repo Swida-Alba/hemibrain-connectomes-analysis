@@ -86,7 +86,7 @@ def create_flylight_tab():
                 "Comma-separated. R-lines (Gen1 GAL4) and SS-lines (Split-GAL4) "
                 "come from the S3 bucket, VT lines from the HTTP CDN (auto-detected)."
             )
-            output_dir = dir_input()
+            output_dir = dir_input(scope="flylight")
 
         with ui.card().classes("w-full drocat-card"):
             section_header("File Filters", "filter_alt")

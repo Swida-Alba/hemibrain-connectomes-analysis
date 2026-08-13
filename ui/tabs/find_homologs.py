@@ -43,7 +43,7 @@ def create_find_homologs_tab():
             with param_grid(2):
                 source_dataset = dataset_selector(label="Source Dataset", hint="Dataset where the source neuron lives.")
                 target_dataset = dataset_selector(label="Target Dataset", default=DATASETS[1], hint="Dataset to search for homologs in.")
-            output_dir = dir_input()
+            output_dir = dir_input(scope="find_homologs")
 
         with ui.card().classes("w-full drocat-card"):
             section_header("Search Parameters", "tune")

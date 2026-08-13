@@ -41,7 +41,7 @@ def create_nb_colabel_tab():
                         "statistics always use all datasets in NeuronBridge."
                     ),
                 )
-                output_dir = dir_input()
+                output_dir = dir_input(scope="nb_colabel")
 
         with ui.card().classes("w-full drocat-card"):
             section_header("Analysis Settings", "tune")

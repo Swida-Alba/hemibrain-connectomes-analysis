@@ -8,6 +8,7 @@ a focus-panel + contact-sheet workspace layout.
 import asyncio
 import os
 import re
+import shutil
 
 from nicegui import ui
 from typing import List, Optional, Callable, Tuple
@@ -18,10 +19,18 @@ import platform
 import subprocess
 
 from .. import group_history
-from ..config import PROJECT_ROOT, get_default_output_dir, set_default_output_dir
+from ..config import (
+    PROJECT_ROOT,
+    get_default_output_dir,
+    get_tab_output_dir,
+    has_tab_output_override,
+    set_default_output_dir,
+    set_tab_output_dir,
+)
 
 
-# Every dir_input instance (all output-directory fields stay in sync).
+# Registered output-directory fields let the Settings tab update inherited
+# values without overwriting a tab-specific override.
 _OUTPUT_DIR_INPUTS = []
 
 
@@ -854,6 +863,7 @@ def neuron_list_input(
                 frequent as _frequent,
                 prune_orphaned_custom as _prune_orphaned_custom,
                 recent as _recent,
+                remove as _remove,
             )
 
             valid_custom_labels = group_history.valid_labels()
@@ -874,28 +884,78 @@ def neuron_list_input(
             if not recents and not freqs:
                 _close_suggest()
                 return
+
+            def _remove_history_value(value: str):
+                # Removing an item is deliberately independent from picking
+                # it. The client-side stopPropagation below keeps the parent
+                # q-item from committing the value before this rerender.
+                _remove(value)
+                _show_history(query)
+
+            def _history_hint(value: str) -> str | None:
+                """Return the cached instance hint for a body-ID history row."""
+                if not re.fullmatch(r"\d+(?:\.0+)?", str(value).strip()):
+                    return None
+                if suggestions is None:
+                    return None
+                try:
+                    for candidate, hint in suggestions(str(value)) or []:
+                        if str(candidate) == str(value) and hint:
+                            # Body-ID pools use the corresponding instance as
+                            # their hint; do not display the generic fallback.
+                            if str(hint).casefold() != "bodyid":
+                                return str(hint)
+                except Exception:
+                    # History must remain usable when a dataset is not local.
+                    return None
+                return None
+
             suggest_menu.clear()
             with suggest_menu:
                 if recents:
                     ui.item("Recent").props("dense disabled").classes(
                         "text-caption drocat-muted")
                     for v in recents:
-                        _history_item(v, v in valid_custom_labels)
+                        _history_item(
+                            v,
+                            v in valid_custom_labels,
+                            _history_hint(v),
+                            _remove_history_value,
+                        )
                 if freqs:
                     ui.item("Frequent").props("dense disabled").classes(
                         "text-caption drocat-muted")
                     for v in freqs:
-                        _history_item(v, v in valid_custom_labels)
+                        _history_item(
+                            v,
+                            v in valid_custom_labels,
+                            _history_hint(v),
+                            _remove_history_value,
+                        )
             _refresh_menu()
 
-        def _history_item(value, is_custom=False):
+        def _history_item(value, is_custom=False, hint=None, remove_handler=None):
             with ui.item().props("dense").on_click(
                     lambda v=value: _commit_suggestion(v)):
                 with ui.row().classes("items-center gap-2 no-wrap w-full"):
-                    ui.label(str(value)).classes("text-body2")
+                    ui.label(str(value)).classes("text-body2 flex-grow")
+                    if hint:
+                        ui.label(str(hint)).classes("text-caption text-grey-6")
                     if is_custom:
                         ui.badge("custom", color="grey-6").props(
                             "outline dense")
+                    if remove_handler is not None:
+                        remove_button = ui.button(icon="close")
+                        remove_button.props("flat round dense size=sm")
+                        remove_button.tooltip("Remove from query history")
+                        remove_button.on(
+                            "click",
+                            lambda _event, v=value: remove_handler(v),
+                            js_handler=(
+                                "(event) => { event.stopPropagation(); "
+                                "emit(null); }"
+                            ),
+                        )
 
         def _on_suggest_input(event):
             # The editor text changed: refresh the list immediately (the
@@ -1224,16 +1284,142 @@ def _list_subdirs(path: str) -> List[str]:
         return []
 
 
+def _shell_quote_applescript(value: str) -> str:
+    """Quote a path for an AppleScript string literal."""
+    return '"' + str(value).replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def _shell_quote_powershell(value: str) -> str:
+    """Quote a path for a single-quoted PowerShell string literal."""
+    return "'" + str(value).replace("'", "''") + "'"
+
+
+def _native_directory_picker_sync(
+    title: str,
+    initial: str,
+) -> Tuple[bool, Optional[str]]:
+    """Run a desktop folder picker without blocking NiceGUI's event loop.
+
+    The boolean reports whether a supported picker was available. A supported
+    picker returning no path means the user cancelled it; callers should not
+    silently open a second dialog in that case.
+    """
+    initial_path = (
+        Path(os.path.expanduser(initial)) if str(initial or "").strip()
+        else Path.home()
+    )
+    if not initial_path.is_dir():
+        initial_path = initial_path.parent if initial_path.parent.is_dir() else Path.home()
+    system = platform.system()
+
+    if system == "Darwin":
+        executable = shutil.which("osascript")
+        if not executable:
+            return False, None
+        script = (
+            f"set startFolder to POSIX file {_shell_quote_applescript(str(initial_path))}\n"
+            f"set chosenFolder to choose folder with prompt "
+            f"{_shell_quote_applescript(title)} default location startFolder\n"
+            "POSIX path of chosenFolder"
+        )
+        try:
+            completed = subprocess.run(
+                [executable, "-e", script],
+                capture_output=True,
+                text=True,
+                timeout=120,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return False, None
+        if completed.returncode == 0:
+            selected = completed.stdout.strip()
+            return True, selected or None
+        # macOS uses -128 for the normal Cancel action.
+        if "-128" in completed.stderr or "User canceled" in completed.stderr:
+            return True, None
+        return False, None
+
+    if system == "Windows":
+        executable = shutil.which("powershell") or shutil.which("pwsh")
+        if not executable:
+            return False, None
+        script = (
+            "Add-Type -AssemblyName System.Windows.Forms; "
+            "$dialog = New-Object System.Windows.Forms.FolderBrowserDialog; "
+            f"$dialog.Description = {_shell_quote_powershell(title)}; "
+            f"$dialog.SelectedPath = {_shell_quote_powershell(str(initial_path))}; "
+            "if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) "
+            "{ [Console]::WriteLine($dialog.SelectedPath) }"
+        )
+        try:
+            completed = subprocess.run(
+                [executable, "-NoProfile", "-STA", "-Command", script],
+                capture_output=True,
+                text=True,
+                timeout=120,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return False, None
+        if completed.returncode == 0:
+            selected = completed.stdout.strip()
+            return True, selected or None
+        return True, None
+
+    # Linux desktop environments commonly expose one of these helpers. A
+    # browser-only deployment normally has neither, so the in-app fallback is
+    # still the portable path.
+    zenity = shutil.which("zenity")
+    kdialog = shutil.which("kdialog")
+    if zenity:
+        command = [
+            zenity,
+            "--file-selection",
+            "--directory",
+            f"--title={title}",
+            f"--filename={str(initial_path)}{os.sep}",
+        ]
+    elif kdialog:
+        command = [kdialog, "--getexistingdirectory", str(initial_path), title]
+    else:
+        return False, None
+    try:
+        completed = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            timeout=120,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False, None
+    if completed.returncode == 0:
+        selected = completed.stdout.strip()
+        return True, selected or None
+    return True, None
+
+
+async def native_directory_picker(
+    title: str = "Select Directory",
+    initial: str = "",
+) -> Tuple[bool, Optional[str]]:
+    """Open a local desktop directory chooser without blocking the UI."""
+    return await asyncio.to_thread(
+        _native_directory_picker_sync,
+        title,
+        initial,
+    )
+
+
 async def dir_browser_dialog(title: str = "Select Directory",
                              initial: str = "",
                              default_output: str = "") -> Optional[str]:
-    """Open an in-browser directory picker (server-side folder listing).
+    """Open a polished in-browser directory picker.
 
-    Replaces the old tkinter dialog, which blocked the whole web server
-    until dismissed and could hang (no visible window) — freezing the app.
-    This picker is fully in-browser and non-blocking: navigate subfolders,
-    jump to a typed path, or select the currently shown folder. Returns the
-    selected path or None when cancelled.
+    This is the portable fallback for browsers that cannot access the server's
+    filesystem. It provides path navigation, filtering, quick roots, and an
+    optional desktop-picker button without blocking the NiceGUI event loop.
     """
     state = {"path": ""}
     result = {"path": None}
@@ -1242,35 +1428,53 @@ async def dir_browser_dialog(title: str = "Select Directory",
     def _norm(p: str) -> str:
         p = os.path.expanduser((p or "").strip())
         if not p:
-            return default_output or str(Path.home())
-        return os.path.abspath(p)
+            p = default_output or str(Path.home())
+        p = os.path.abspath(p)
+        if not os.path.isdir(p):
+            p = os.path.dirname(p) or str(Path.home())
+        return p
 
     def _render(p: str):
         p = _norm(p)
         state["path"] = p
         path_input.value = p
+        current_path.text = p
         status.text = ""
         dir_list.clear()
+        filter_text = str(folder_filter.value or "").strip().casefold()
         parent = os.path.dirname(p)
         if parent != p:
             with dir_list:
-                ui.button(f"⬆️  {parent}", on_click=lambda pp=parent: _render(pp)) \
-                    .props("flat align=left dense").classes("w-full justify-start")
-        subs = _list_subdirs(p)
-        if not subs and parent == p:
-            status.text = "(empty folder)"
+                ui.button(
+                    f"Up to {parent}",
+                    icon="arrow_upward",
+                    on_click=lambda pp=parent: _render(pp),
+                ).props("flat align=left dense").classes("w-full justify-start")
+        subs = [entry for entry in _list_subdirs(p)
+                if not filter_text or filter_text in entry.casefold()]
+        folder_count.text = f"{len(subs):,} folder{'s' if len(subs) != 1 else ''}"
+        if not subs:
+            status.text = "No matching subfolders"
         for entry in subs:
             full = os.path.join(p, entry)
             with dir_list:
-                ui.button(f"📁  {entry}", on_click=lambda f=full: _render(f)) \
-                    .props("flat align=left dense").classes("w-full justify-start")
+                ui.button(
+                    entry,
+                    icon="folder",
+                    on_click=lambda f=full: _render(f),
+                ).props("flat align=left dense").classes("w-full justify-start")
 
     def _go():
-        p = _norm(path_input.value)
+        raw = os.path.expanduser(str(path_input.value or "").strip())
+        if not raw:
+            _render(default_output or str(Path.home()))
+            return
+        p = os.path.abspath(raw)
         if os.path.isdir(p):
             _render(p)
         else:
             status.text = f"Not a directory: {p}"
+            status.update()
 
     def _select():
         result["path"] = state["path"]
@@ -1281,15 +1485,74 @@ async def dir_browser_dialog(title: str = "Select Directory",
         dialog.close()
         done.set()
 
-    with ui.dialog() as dialog, ui.card().classes("w-[600px] max-w-[92vw] drocat-card"):
-        ui.label(title).classes("text-h6")
-        path_input = ui.input("Path", value="").classes("w-full drocat-input")
-        dir_list = ui.column().classes("w-full max-h-72 overflow-auto")
+    async def _use_system_picker():
+        available, selected = await native_directory_picker(title, state["path"])
+        if selected:
+            result["path"] = _norm(selected)
+            dialog.close()
+            done.set()
+        elif not available:
+            status.text = (
+                "No desktop picker is available here. Use the path field or "
+                "choose a folder from the list."
+            )
+            status.update()
+
+    with ui.dialog() as dialog, ui.card().classes(
+        "w-[min(94vw,760px)] max-w-none drocat-card drocat-dir-picker"
+    ):
+        with ui.row().classes("w-full items-center justify-between gap-3"):
+            with ui.row().classes("items-center gap-2"):
+                ui.icon("folder_open", color="primary").classes("text-xl")
+                with ui.column().classes("gap-0"):
+                    ui.label(title).classes("text-h6")
+                    ui.label(
+                        "Choose where this tool will save its results."
+                    ).classes("text-caption drocat-muted")
+            ui.button(icon="close", on_click=_cancel).props("flat round dense")
+
+        with ui.row().classes("w-full items-end gap-2"):
+            path_input = ui.input("Current folder", value="").classes(
+                "flex-grow drocat-input"
+            )
+            ui.button("Go", icon="arrow_forward", on_click=_go).props(
+                "outline dense"
+            )
+        with ui.row().classes("w-full items-center gap-2 flex-wrap"):
+            ui.button(
+                "Home", icon="home", on_click=lambda: _render(str(Path.home()))
+            ).props("flat dense")
+            ui.button(
+                "Project", icon="folder_special",
+                on_click=lambda: _render(str(PROJECT_ROOT)),
+            ).props("flat dense")
+            ui.button(
+                "System picker", icon="open_in_new", on_click=_use_system_picker
+            ).props("flat dense").tooltip(
+                "Use the macOS/Windows/Linux folder chooser when the UI runs on your desktop"
+            )
+        with ui.element("div").classes("w-full drocat-dir-current"):
+            with ui.row().classes("items-center gap-2"):
+                ui.icon("folder", color="primary")
+                current_path = ui.label("").classes("font-medium break-all")
+        with ui.row().classes("w-full items-center justify-between gap-2"):
+            ui.label("Folders in this location").classes("text-subtitle2")
+            folder_count = ui.label("").classes("text-caption drocat-muted")
+            folder_filter = ui.input(
+                "Filter folders", placeholder="Type to narrow the list"
+            ).props("dense clearable").classes("w-56 drocat-input")
+        with ui.element("div").classes(
+            "w-full h-72 overflow-auto drocat-dir-list"
+        ):
+            dir_list = ui.column().classes("w-full gap-1")
         status = ui.label("").classes("text-caption drocat-muted")
-        with ui.row().classes("w-full gap-2 justify-end"):
-            ui.button("Go", on_click=_go).props("outline dense")
-            ui.button("Select This Folder", on_click=_select).props("color=primary dense")
-            ui.button("Cancel", on_click=_cancel).props("flat dense")
+        with ui.row().classes("w-full items-center justify-end gap-2"):
+            ui.button("Select this folder", icon="check", on_click=_select).props(
+                "color=primary"
+            )
+            ui.button("Cancel", on_click=_cancel).props("flat")
+
+    folder_filter.on_value_change(lambda _event: _render(state["path"]))
 
     _render(initial)
     dialog.open()
@@ -1300,59 +1563,145 @@ async def dir_browser_dialog(title: str = "Select Directory",
 def dir_input(
     label: str = "Output Directory",
     default: Optional[str] = None,
-    hint: str = "Where results will be saved. Click folder icon to browse. Changes are saved permanently as the default.",
+    hint: str = "Where results will be saved. Use the folder buttons to choose a directory.",
+    scope: Optional[str] = None,
+    global_default: bool = False,
 ) -> ui.input:
-    """Create a directory input with an in-browser browse button.
+    """Create a tab-local output directory input.
 
-    Changing the value (typed + blur, or picked with the browse button)
-    persists it permanently as the default output directory and synchronizes
-    every other output-directory field in the UI.
+    Tool tabs persist their own override under ``scope`` and otherwise inherit
+    the Settings-tab default. The Settings tab passes ``global_default=True``;
+    only that field may change the global default for inherited paths.
     """
-    default_path = default or get_default_output_dir()
+    scope = str(scope or "").strip() or None
+    default_path = default or (
+        get_default_output_dir()
+        if global_default
+        else get_tab_output_dir(scope)
+    )
+
+    tooltip_text = hint
+    if scope and not global_default:
+        tooltip_text = (
+            f"{hint} This value overrides the Settings default for this tab; "
+            "use the reset button to inherit it again."
+        )
+    elif global_default:
+        tooltip_text = (
+            f"{hint} This field controls the default used by tabs without "
+            "their own override."
+        )
 
     inp = ui.input(
         label=label,
         value=default_path,
-    ).classes("w-full drocat-input drocat-output-dir").tooltip(hint)
+    ).classes("w-full drocat-input drocat-output-dir").tooltip(tooltip_text)
 
-    # All output-directory fields stay in sync: changing one persists the
-    # value and updates the others (nicegui propagates the value to the DOM).
-    _OUTPUT_DIR_INPUTS.append(inp)
+    inherited = global_default or not has_tab_output_override(scope)
+    inp.classes(
+        add="drocat-output-dir-inherited" if inherited
+        else "drocat-output-dir-override"
+    )
+    _OUTPUT_DIR_INPUTS.append({
+        "input": inp,
+        "scope": scope,
+        "global": global_default,
+    })
 
     def _persist_output_dir():
-        saved, effective = set_default_output_dir(inp.value or "", create=False)
+        raw = (inp.value or "").strip()
+        if global_default:
+            saved, effective = set_default_output_dir(raw, create=False)
+            if saved and effective:
+                inp.value = effective
+                sync_output_dir_fields(inp, effective)
+            return
+        if scope:
+            saved, effective = set_tab_output_dir(scope, raw, create=False)
+            if saved and effective:
+                inp.value = effective
+                inp.classes(
+                    add="drocat-output-dir-override" if raw
+                    else "drocat-output-dir-inherited",
+                    remove="drocat-output-dir-inherited" if raw
+                    else "drocat-output-dir-override",
+                )
+
+    def _set_selected(selected: str):
+        inp.value = selected
+        _persist_output_dir()
+
+    async def browse_system():
+        available, selected = await native_directory_picker(
+            title=f"Select {label}",
+            initial=inp.value or str(PROJECT_ROOT),
+        )
+        if selected:
+            _set_selected(selected)
+        elif not available:
+            await browse_panel()
+
+    async def browse_panel():
+        selected = await dir_browser_dialog(
+            title=f"Select {label}",
+            initial=inp.value or str(PROJECT_ROOT),
+            default_output=inp.value or get_default_output_dir(),
+        )
+        if selected:
+            _set_selected(selected)
+
+    def reset_tab_override():
+        if not scope or global_default:
+            return
+        saved, effective = set_tab_output_dir(scope, "", create=False)
         if saved and effective:
-            sync_output_dir_fields(inp, effective)
+            inp.value = effective
+            inp.classes(
+                add="drocat-output-dir-inherited",
+                remove="drocat-output-dir-override",
+            )
+            inp.update()
+            ui.notify("This tab now uses the Settings default", type="positive")
 
     with inp.add_slot("append"):
-        async def browse(*args):
-            selected = await dir_browser_dialog(
-                title=f"Select {label}",
-                initial=inp.value or str(PROJECT_ROOT),
-                default_output=inp.value or get_default_output_dir(),
-            )
-            if selected:
-                inp.value = selected
-                _persist_output_dir()
-        ui.button(icon="folder_open", on_click=browse).props("flat dense").tooltip("Browse")
+        ui.button(icon="folder_open", on_click=browse_system).props(
+            "flat dense"
+        ).tooltip("Open the system folder picker")
+        ui.button(icon="folder_tree", on_click=browse_panel).props(
+            "flat dense"
+        ).tooltip("Browse folders inside DROCAT")
+        if scope and not global_default:
+            ui.button(icon="restart_alt", on_click=reset_tab_override).props(
+                "flat dense"
+            ).tooltip("Use the Settings default for this tab")
 
     inp.on("blur", _persist_output_dir)
 
     return inp
 
 
-def sync_output_dir_fields(source, value: str) -> None:
-    """Update every output-directory field except *source* to *value*.
+def sync_output_dir_fields(source, value: str, force: bool = False) -> None:
+    """Update inherited output fields after a Settings-tab change.
 
-    Backend values are set directly; the client DOM is updated explicitly
-    because Quasar inputs can keep stale native values when the value prop
-    changes (especially in inactive tab panels). The input event keeps the
-    client model in sync with the backend.
+    A normal global save updates fields that still inherit the default. A
+    forced reset clears the distinction and updates every tab, including old
+    persisted overrides.
     """
-    for other in _OUTPUT_DIR_INPUTS:
-        if other is not source and getattr(other, "value", None) != value:
+    for record in _OUTPUT_DIR_INPUTS:
+        other = record["input"]
+        eligible = (
+            force
+            or record["global"]
+            or not has_tab_output_override(record["scope"])
+        )
+        if eligible and other is not source:
             try:
-                other.value = value
+                if getattr(other, "value", None) != value:
+                    other.value = value
+                other.classes(
+                    add="drocat-output-dir-inherited",
+                    remove="drocat-output-dir-override",
+                )
             except Exception:
                 # Lazy tab panels keep their elements unmounted until first
                 # activation: nicegui updates the server-side props but then
@@ -1360,9 +1709,10 @@ def sync_output_dir_fields(source, value: str) -> None:
                 # the value is already correct when the panel mounts.
                 pass
     try:
+        selector = ".drocat-output-dir input" if force else ".drocat-output-dir-inherited input"
         ui.run_javascript(
             f"""
-            document.querySelectorAll('.drocat-output-dir input').forEach(inp => {{
+            document.querySelectorAll({json.dumps(selector)}).forEach(inp => {{
                 if (inp.value !== {json.dumps(value)}) {{
                     inp.value = {json.dumps(value)};
                     inp.dispatchEvent(new Event('input', {{ bubbles: true }}));

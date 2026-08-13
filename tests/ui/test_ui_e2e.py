@@ -1104,8 +1104,15 @@ class TestRunner:
         assert not hasattr(runner_mod, "pick_directory")
         assert not hasattr(runner_mod, "pick_file")
 
-        from ui.components.common import dir_browser_dialog, _list_subdirs
+        from ui.components.common import (
+            _list_subdirs,
+            _native_directory_picker_sync,
+            dir_browser_dialog,
+            native_directory_picker,
+        )
         assert callable(dir_browser_dialog)
+        assert callable(native_directory_picker)
+        assert callable(_native_directory_picker_sync)
         # folder listing helper: sorted subdirs only, tolerant of bad paths
         a = tmp_path / "b_dir"; a.mkdir()
         (tmp_path / "a_dir").mkdir()
@@ -1114,9 +1121,37 @@ class TestRunner:
         assert _list_subdirs(str(tmp_path / "nope")) == []
         assert _list_subdirs(str(tmp_path / "a_file.txt")) == []
 
+    def test_native_directory_picker_uses_desktop_adapter(self, tmp_path, monkeypatch):
+        """The direct picker is isolated behind a platform adapter so it can
+        be tested without opening a real desktop dialog."""
+        import ui.components.common as common
+
+        calls = []
+
+        class Completed:
+            returncode = 0
+            stdout = str(tmp_path) + "\n"
+            stderr = ""
+
+        monkeypatch.setattr(common.platform, "system", lambda: "Darwin")
+        monkeypatch.setattr(common.shutil, "which", lambda name: "/usr/bin/osascript")
+
+        def fake_run(command, **kwargs):
+            calls.append((command, kwargs))
+            return Completed()
+
+        monkeypatch.setattr(common.subprocess, "run", fake_run)
+        available, selected = common._native_directory_picker_sync(
+            "Choose output", str(tmp_path)
+        )
+        assert available is True
+        assert selected == str(tmp_path)
+        assert calls and calls[0][0][0] == "/usr/bin/osascript"
+        assert "choose folder" in calls[0][0][-1]
+
     def test_dir_input_still_builds_with_browse_button(self):
         """dir_input keeps its folder-open browse button (now opening the
-        in-browser dialog) and remains usable as a plain text input."""
+        optional system picker) plus an in-browser fallback."""
         from nicegui import Client
         from nicegui.page import page
         from ui.tabs.find_path import create_find_path_tab
@@ -1130,6 +1165,7 @@ class TestRunner:
             for el in client.elements.values()
         ]
         assert "folder_open" in icons  # the browse button is still there
+        assert "folder_tree" in icons
 
     def test_pathfinding_tabs_wire_auto_suggest(self):
         """All four pathfinding tabs pass a suggestions provider to their
@@ -2536,6 +2572,54 @@ class TestComponents:
         assert "aMe12" in texts and "aMe10" in texts
         assert container.get_value() == ("exact", ["APL"])
 
+    def test_history_body_id_has_instance_hint_and_removable_entry(self, tmp_path, monkeypatch):
+        """Blank-input history rows expose the cached body-ID instance and a
+        close action that removes only that history value."""
+        from nicegui import Client
+        from nicegui.page import page
+        import ui.history_store as hs
+        from ui.components.common import neuron_list_input
+
+        monkeypatch.setattr(hs, "_HISTORY_PATH", tmp_path / "neuron_history.json")
+        monkeypatch.setattr(
+            "ui.config.LOCAL_CONFIG_FILE", tmp_path / "local_config.json"
+        )
+        hs.record(["5813", "aMe12"], now="2026-08-11T10:00:00")
+
+        def fake_suggest(text):
+            return [("5813", "aMe12_L")] if text == "5813" else []
+
+        client = Client(page("/neuron-history-remove-test"))
+        with client:
+            container = neuron_list_input(
+                label="Source Neurons", suggestions=fake_suggest
+            )
+
+        chip = container.chip_input
+        focus = next(l for l in chip._event_listeners.values() if l.type == "focus")
+        chip._handle_event({"listener_id": focus.id, "args": None})
+
+        def _subtree_texts(el):
+            out = [getattr(el, "text", "")]
+            for child in el.default_slot.children:
+                out.extend(_subtree_texts(child))
+            return out
+
+        history_item = next(
+            el for el in client.elements.values()
+            if type(el).__name__ == "Item" and "5813" in _subtree_texts(el)
+        )
+        texts = _subtree_texts(history_item)
+        assert "aMe12_L" in texts
+        close = next(
+            el for el in client.elements.values()
+            if type(el).__name__ == "Button"
+            and getattr(el, "_props", {}).get("icon") == "close"
+        )
+        click = next(l for l in close._event_listeners.values() if l.type == "click")
+        click.handler(None)
+        assert "5813" not in hs.recent()
+
     def test_viewer_selection_keeps_display_name_until_backend_resolution(
         self, monkeypatch
     ):
@@ -2753,9 +2837,12 @@ class TestComponents:
         from nicegui import Client
         from nicegui.page import page
         import ui.config as cfg_mod
+        import ui.history_store as hs
         from ui.components.common import neuron_list_input
 
         monkeypatch.setattr(cfg_mod, "LOCAL_CONFIG_FILE", tmp_path / "local_config.json")
+        monkeypatch.setattr(hs, "_HISTORY_PATH", tmp_path / "neuron_history.json")
+        hs.record(["aMe12", "aMe10"], now="2026-08-11T10:00:00")
         calls = []
 
         def fake_suggest(text):
@@ -3066,9 +3153,8 @@ class TestComponents:
         assert panel.progress_row.visible is False
 
     def test_output_dir_fields_sync_and_persist(self, tmp_path, monkeypatch):
-        """Output-directory fields share one persisted default: setting one
-        field updates every other field, and the value survives as the new
-        default (permanent, not just the current run)."""
+        """Global changes update inherited fields but leave tab overrides
+        alone; a forced Settings reset updates every field."""
         import ui.config as cfg
         from nicegui import Client
         from nicegui.page import page
@@ -3078,8 +3164,8 @@ class TestComponents:
 
         client = Client(page("/dir-sync-test"))
         with client:
-            field_a = dir_input()
-            field_b = dir_input()
+            field_a = dir_input(scope="tab_a")
+            field_b = dir_input(scope="tab_b")
 
         # The blur/persist handler runs the same helper the test calls now.
         target = tmp_path / "permanent_outputs"
@@ -3090,10 +3176,33 @@ class TestComponents:
         assert field_b.value == effective
         assert cfg.get_default_output_dir() == effective
 
+        override = tmp_path / "tab_a_override"
+        saved, _ = cfg.set_tab_output_dir("tab_a", str(override), create=False)
+        assert saved is True
+        field_a.value = str(override)
+        field_a.classes(
+            add="drocat-output-dir-override",
+            remove="drocat-output-dir-inherited",
+        )
+
+        newer_default = tmp_path / "new_default"
+        saved, effective = cfg.set_default_output_dir(
+            str(newer_default), create=False
+        )
+        assert saved is True
+        sync_output_dir_fields(field_a, effective)
+        assert field_a.value == str(override)
+        assert field_b.value == effective
+
+        cfg.clear_tab_output_overrides()
+        sync_output_dir_fields(field_b, effective, force=True)
+        assert field_a.value == effective
+        assert field_b.value == effective
+
         # A second dir_input built later picks up the persisted default.
         client2 = Client(page("/dir-sync-test-2"))
         with client2:
-            field_c = dir_input()
+            field_c = dir_input(scope="tab_c")
         assert field_c.value == effective
 
     def test_output_panel_log_is_pointer_resizable(self):

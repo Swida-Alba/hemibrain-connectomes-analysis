@@ -65,7 +65,7 @@ def create_find_similar_tab():
                     dataset = dataset_selector(
                         hint="Dataset to search for similar neurons in.",
                     )
-                    morph_output_dir = dir_input()
+                    morph_output_dir = dir_input(scope="find_similar_morphology")
 
             with ui.card().classes("w-full drocat-card"):
                 section_header("Similarity Parameters", "tune")
@@ -337,7 +337,7 @@ def create_find_similar_tab():
                         hint="Dataset to search in. Leave as the source for a "
                              "within-dataset search.",
                     )
-                profile_output_dir = dir_input()
+                profile_output_dir = dir_input(scope="find_similar_profiling")
 
             with ui.card().classes("w-full drocat-card"):
                 section_header("Search Parameters", "tune")

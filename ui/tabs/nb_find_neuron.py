@@ -31,7 +31,7 @@ def create_nb_find_neuron_tab():
                 show_upload=False,
                 hint="Type a driver line name and press Enter (or leave the field) to add it as a chip.",
             )
-            output_dir = dir_input()
+            output_dir = dir_input(scope="nb_find_neuron")
 
         with ui.card().classes("w-full drocat-card"):
             section_header("Search Parameters", "tune")
