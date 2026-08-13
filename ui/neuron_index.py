@@ -31,6 +31,7 @@ from .search_logic import (
 try:
     from src.neuron_index_builder import (
         build_search_cache_frame,
+        is_search_cache_compatible,
         metadata_columns,
         ordered_projection_columns,
         read_metadata_projection,
@@ -39,6 +40,7 @@ try:
 except ImportError:
     from neuron_index_builder import (
         build_search_cache_frame,
+        is_search_cache_compatible,
         metadata_columns,
         ordered_projection_columns,
         read_metadata_projection,
@@ -357,11 +359,7 @@ def load_cached_neuron_index(
     try:
         if search_path.is_file():
             search_frame = pl.read_parquet(search_path)
-            required = {
-                "__neuron_rows", "search_column", "search_priority",
-                "search_value", "search_value_folded",
-            }
-            if not required.issubset(set(search_frame.columns)):
+            if not is_search_cache_compatible(search_frame, frame.columns):
                 search_frame = None
     except Exception:
         search_frame = None

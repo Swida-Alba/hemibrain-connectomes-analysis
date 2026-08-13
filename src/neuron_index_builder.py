@@ -202,6 +202,57 @@ def search_cache_path(index_path: Path) -> Path:
     return index_path.with_name(SEARCH_CACHE_FILENAME)
 
 
+def is_search_cache_compatible(search_frame, source_columns: Iterable[str]) -> bool:
+    """Check that a search sidecar covers the current canonical projection.
+
+    Search sidecars are deliberately version-light parquet files.  A cache can
+    therefore outlive a metadata projection rebuild, especially when a new
+    FlyWire release adds a ``*Type`` or taxonomy field.  Checking only the
+    sidecar schema is not enough in that case: the file may be readable while
+    silently omitting a newly promoted search column.  Keep this validation in
+    the builder module so the UI and analysis resolver apply the same rule.
+    """
+    required = {
+        "__neuron_rows", "search_column", "search_priority", "search_value",
+        "search_value_folded",
+    }
+    if search_frame is None or not required.issubset(set(search_frame.columns)):
+        return False
+
+    expected = viewer_search_columns(source_columns)
+    try:
+        priority_rows = (
+            search_frame
+            .select(["search_column", "search_priority"])
+            .unique(subset=["search_column"], maintain_order=True)
+            .sort("search_priority")
+            .to_dicts()
+        )
+    except Exception:
+        return False
+
+    expected_priority = {column: position for position, column in enumerate(expected)}
+    seen = set()
+    for row in priority_rows:
+        column = str(row.get("search_column") or "")
+        if column in seen or column not in expected_priority:
+            return False
+        seen.add(column)
+        try:
+            priority = int(row.get("search_priority"))
+        except (TypeError, ValueError):
+            return False
+        if priority != expected_priority[column]:
+            return False
+
+    return (
+        [str(row.get("search_column") or "") for row in priority_rows]
+        == expected
+        and [int(row.get("search_priority")) for row in priority_rows]
+        == list(range(len(expected)))
+    )
+
+
 def _search_display_expression(frame, column: str):
     """Return the string representation used by the shared search matcher."""
     import polars as pl
@@ -216,10 +267,13 @@ def build_search_cache_frame(frame, columns: Optional[Iterable[str]] = None):
     """Build the ordered, compact search sidecar from a Polars frame.
 
     The sidecar has one row per non-empty searchable value, with the source
-    row ordinals stored as a compact list. Its input order is the query order
-    for the viewer: canonical column priority, then strict value order. A
-    query can therefore filter a small distinct-value table and explode only
-    the matching row lists; it never sorts the full metadata frame.
+    row ordinals stored as a compact list. It also keeps one empty marker row
+    for a projected column whose values are all blank. Those tiny markers
+    make the sidecar schema self-describing, so an older sidecar cannot hide a
+    newly added type/taxonomy field. Its input order is the query order for
+    the viewer: canonical column priority, then strict value order. A query
+    can therefore filter a small distinct-value table and explode only the
+    matching row lists; it never sorts the full metadata frame.
 
     ``__neuron_rows`` contains the stable source-row ordinals used to join the
     sidecar back to the complete metadata table. It avoids copying every
@@ -257,7 +311,7 @@ def build_search_cache_frame(frame, columns: Optional[Iterable[str]] = None):
     result = pl.concat(parts, how="vertical_relaxed").with_columns(
         pl.col("search_value").str.to_lowercase().alias("search_value_folded")
     )
-    return (
+    result = (
         result.group_by(
             [
                 "search_column", "search_priority", "search_value",
@@ -273,6 +327,30 @@ def build_search_cache_frame(frame, columns: Optional[Iterable[str]] = None):
         )
         .sort(["search_priority", "search_value"])
     )
+    present = set(result.get_column("search_column").to_list())
+    missing = [
+        (priority, column)
+        for priority, column in enumerate(ordered)
+        if column not in present
+    ]
+    if missing:
+        markers = pl.DataFrame({
+            "search_column": [column for _, column in missing],
+            "search_priority": pl.Series(
+                "search_priority",
+                [priority for priority, _ in missing],
+                dtype=pl.UInt16,
+            ),
+            "search_value": ["" for _ in missing],
+            "search_value_folded": ["" for _ in missing],
+            "__neuron_rows": pl.Series(
+                "__neuron_rows",
+                [[] for _ in missing],
+                dtype=pl.List(pl.UInt32),
+            ),
+        })
+        result = pl.concat([result, markers], how="vertical_relaxed")
+    return result.sort(["search_priority", "search_value"])
 
 
 def dataset_folder(dataset: str) -> str:

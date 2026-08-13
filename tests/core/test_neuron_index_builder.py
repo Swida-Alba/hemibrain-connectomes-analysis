@@ -160,3 +160,25 @@ def test_search_cache_is_distinct_and_presorted_by_viewer_priority():
         ordered,
         key=lambda row: (row["search_priority"], row["search_value"]),
     )
+
+
+def test_search_cache_compatibility_rejects_stale_priority_columns():
+    from src.neuron_index_builder import (
+        build_search_cache_frame,
+        is_search_cache_compatible,
+        viewer_search_columns,
+    )
+
+    frame = pl.DataFrame({
+        "bodyId": ["1"],
+        "type": ["aMe17a"],
+        "instance": ["aMe17a_L"],
+        "flywireType": ["aMe17a1"],
+        "locationType": ["aMe17a-central"],
+    })
+    current_columns = viewer_search_columns(frame.columns)
+    current = build_search_cache_frame(frame)
+    stale = build_search_cache_frame(frame, current_columns[:-1])
+
+    assert is_search_cache_compatible(current, frame.columns)
+    assert not is_search_cache_compatible(stale, frame.columns)

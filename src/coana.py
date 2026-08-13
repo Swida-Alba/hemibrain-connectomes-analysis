@@ -68,6 +68,7 @@ from connection_map import ThresholdedConnectionMap
 try:
     from .neuron_index_builder import (
         build_search_cache_frame,
+        is_search_cache_compatible,
         metadata_columns,
         metadata_path,
         OPERATIONAL_COLUMNS,
@@ -78,6 +79,7 @@ try:
 except ImportError:
     from neuron_index_builder import (
         build_search_cache_frame,
+        is_search_cache_compatible,
         metadata_columns,
         metadata_path,
         OPERATIONAL_COLUMNS,
@@ -453,7 +455,8 @@ class FindNeuronConnection:
             note = (
                 f'- [search priority] {role} query "{query}" resolved via '
                 f'"{column}" after bodyId -> type -> instance '
-                f'({int((info or {}).get("match_count") or 0):,} body IDs).'
+                '-> flywireType -> hemibrainType -> mancType -> other *Type '
+                f'-> taxonomy ({int((info or {}).get("match_count") or 0):,} body IDs).'
             )
             if note not in self._warn_notes:
                 self._warn_notes.append(note)
@@ -2379,8 +2382,16 @@ class FindNeuronConnection:
             ):
                 # Migrate an existing rich index to the compact search cache
                 # without reopening the authoritative CSV.
+                search_ready = False
+                if os.path.exists(search_path):
+                    try:
+                        search_ready = is_search_cache_compatible(
+                            pl.read_parquet(search_path), existing_order
+                        )
+                    except Exception:
+                        search_ready = False
                 if (
-                    not os.path.exists(search_path)
+                    not search_ready
                     or os.stat(search_path).st_mtime_ns < index_mtime
                 ):
                     self._write_neuron_search_cache(pl.read_parquet(index_path))
@@ -6386,11 +6397,51 @@ class FindNeuronConnection:
         except Exception:
             return str(value)
 
+    @staticmethod
+    def _readable_query_name(query, fallback: str = "") -> str:
+        """Choose a stable human-readable name from the original query.
+
+        Resolution produces body IDs for execution, but output names are part
+        of the user's audit trail and folder structure.  Prefer the first
+        original string token (including a custom-group label) whenever one
+        exists; use the resolver's name only for numeric/dict-only queries or
+        an empty input.
+        """
+        if isinstance(query, dict):
+            return str(fallback or "filter_result")
+        values = query if isinstance(query, (list, tuple)) else [query]
+        flattened = []
+        for value in values:
+            if isinstance(value, (list, tuple)):
+                flattened.extend(value)
+            else:
+                flattened.append(value)
+        meaningful = [value for value in flattened if str(value or "").strip()]
+        if not meaningful:
+            return str(fallback or "")
+        first = str(meaningful[0]).strip().replace(".*", "")
+        if not first:
+            return str(fallback or "")
+        if len(meaningful) > 1 and not first.endswith("_etc"):
+            first += "_etc"
+        return first
+
+    def _resolved_body_ids_for_export(self, role: str):
+        """Return the concrete body IDs used by one initialized query set."""
+        frame = getattr(self, f"{role}_df", None)
+        if frame is None or not hasattr(frame, "columns") or "bodyId" not in frame.columns:
+            return []
+        try:
+            values = frame["bodyId"].tolist()
+        except Exception:
+            return []
+        return [str(value) for value in values if str(value or "").strip()]
+
     def _add_custom_group_parameters(self):
         """Add explicit custom-group/query provenance to run parameters."""
-        grouping = self._custom_group_export_payload()
-        if grouping is None:
-            return
+        # These fields are useful for every run, not only runs with a mapping
+        # file.  Keep the original query and the concrete execution inputs
+        # side by side so a body-ID conversion never hides what the user typed.
         self.parameter_dict.update({
             "requested source neurons": str(
                 self._requested_query_for_export("source")
@@ -6398,8 +6449,19 @@ class FindNeuronConnection:
             "requested target neurons": str(
                 self._requested_query_for_export("target")
             ),
-            "resolved source neurons": str(self.sourceNeurons),
-            "resolved target neurons": str(self.targetNeurons),
+            "resolved source neurons": str(getattr(self, "sourceNeurons", [])),
+            "resolved target neurons": str(getattr(self, "targetNeurons", [])),
+            "resolved source bodyIds": str(
+                self._resolved_body_ids_for_export("source")
+            ),
+            "resolved target bodyIds": str(
+                self._resolved_body_ids_for_export("target")
+            ),
+        })
+        grouping = self._custom_group_export_payload()
+        if grouping is None:
+            return
+        self.parameter_dict.update({
             "custom mapping file": grouping["mapping_file"],
             "custom source groups": json.dumps(
                 grouping["source_groups"], ensure_ascii=False
@@ -6429,6 +6491,12 @@ class FindNeuronConnection:
         )
         public_attrs["resolved_target_neurons"] = deepcopy(
             getattr(self, "targetNeurons", [])
+        )
+        public_attrs["resolved_source_bodyIds"] = self._resolved_body_ids_for_export(
+            "source"
+        )
+        public_attrs["resolved_target_bodyIds"] = self._resolved_body_ids_for_export(
+            "target"
         )
         grouping = self._custom_group_export_payload()
         if grouping is not None:
@@ -6515,6 +6583,17 @@ class FindNeuronConnection:
             )
             self._record_search_priority_warnings("source", source_search_infos)
             self._record_search_priority_warnings("target", target_search_infos)
+
+        # getNeurons uses the same query for matching and for a convenient
+        # auto-name.  Re-derive that name from the untouched user query so a
+        # caller that supplies an exact viewer name never gets a body-ID name
+        # after a later execution-stage conversion.
+        source_fname_auto = self._readable_query_name(
+            self._requested_query_for_export("source"), source_fname_auto
+        )
+        target_fname_auto = self._readable_query_name(
+            self._requested_query_for_export("target"), target_fname_auto
+        )
         
         # Apply label mapping if available
         if self.label_mapper and not self.label_mapper.is_empty:
@@ -6608,9 +6687,13 @@ class FindNeuronConnection:
         
         # Prepare parameter dictionary (will be saved in method-specific subfolders)
         self.parameter_dict = {
-            'source neurons': str(self.sourceNeurons),
+            'source neurons': str(
+                self._requested_query_for_export("source")
+            ),
             'source name': self.source_fname,
-            'target neurons': str(self.targetNeurons),
+            'target neurons': str(
+                self._requested_query_for_export("target")
+            ),
             'target name': self.target_fname,
             'min synapse number': str(self.min_synapse_num),
             'min connection ratio': str(self.min_ratio),
@@ -8224,6 +8307,12 @@ class FindNeuronConnection:
         all_attributes_dict = {
             'source_fname': self.source_fname,
             'target_fname': self.target_fname,
+            'requested_source_neurons': self._requested_query_for_export('source'),
+            'requested_target_neurons': self._requested_query_for_export('target'),
+            'resolved_source_neurons': deepcopy(self.sourceNeurons),
+            'resolved_target_neurons': deepcopy(self.targetNeurons),
+            'resolved_source_bodyIds': self._resolved_body_ids_for_export('source'),
+            'resolved_target_bodyIds': self._resolved_body_ids_for_export('target'),
             'max_interlayer': self.max_interlayer,
             'min_synapse_num': self.min_synapse_num,
             'min_ratio': self.min_ratio,
@@ -8244,8 +8333,20 @@ class FindNeuronConnection:
         with open(os.path.join(self.path_folder, 'parameters.txt'), 'w') as f:
             f.write(f"Analysis Parameters for FindPath\n")
             f.write(f"=" * 50 + "\n\n")
-            f.write(f"Source neurons: {self.source_fname}\n")
-            f.write(f"Target neurons: {self.target_fname}\n")
+            f.write(
+                f"Source query: {self._requested_query_for_export('source')}\n"
+            )
+            f.write(f"Source name: {self.source_fname}\n")
+            f.write(
+                f"Resolved source bodyIds: {self._resolved_body_ids_for_export('source')}\n"
+            )
+            f.write(
+                f"Target query: {self._requested_query_for_export('target')}\n"
+            )
+            f.write(f"Target name: {self.target_fname}\n")
+            f.write(
+                f"Resolved target bodyIds: {self._resolved_body_ids_for_export('target')}\n"
+            )
             f.write(f"Maximum interlayer: {self.max_interlayer}\n")
             f.write(f"Minimum synapse number: {self.min_synapse_num}\n")
             f.write(f"Minimum connection ratio: {self.min_ratio}\n")

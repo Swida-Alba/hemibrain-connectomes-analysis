@@ -185,14 +185,19 @@ html, body {
     grid-template-columns: minmax(480px, 520px) minmax(0, 1fr);
     gap: 12px;
     align-items: stretch;
+    min-height: 0;
 }
 .drocat-neuron-match-panel,
 .drocat-neuron-full-panel {
     min-width: 0;
+    min-height: 0;
     border: 1px solid var(--drocat-line);
     border-radius: 12px;
     padding: 12px;
     background: var(--drocat-surface);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
 }
 .drocat-neuron-match-panel {
     background: linear-gradient(180deg, var(--drocat-cobalt-soft), var(--drocat-surface));
@@ -258,8 +263,30 @@ html, body {
 .drocat-neuron-full-panel {
     background: rgba(255, 255, 255, .72);
 }
+.drocat-neuron-viewer-card {
+    max-height: 94vh;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+}
+.drocat-neuron-viewer-content {
+    min-height: 0;
+    overflow: auto;
+    padding-bottom: 4px;
+}
+.drocat-neuron-panel-toolbar {
+    flex: 0 0 auto;
+    min-height: 34px;
+    margin-top: 6px;
+    padding: 4px 6px;
+    border: 1px solid var(--drocat-line);
+    border-radius: 8px;
+    background: rgba(247, 249, 252, .92);
+}
 .drocat-neuron-match-table .q-table__middle {
-    max-height: 52vh;
+    max-height: min(58vh, 680px);
+    min-height: 0;
+    flex: 1 1 auto;
     overflow-x: hidden;
     overflow-y: auto;
     margin-top: 8px;
@@ -366,6 +393,12 @@ html, body {
     font-weight: 500;
 }
 .drocat-neuron-match-table tbody tr.drocat-neuron-match-secondary-row
+    .drocat-neuron-match-value-line,
+.drocat-neuron-match-table tbody tr.drocat-neuron-match-secondary-row
+    .drocat-neuron-match-first {
+    padding-left: 12px;
+}
+.drocat-neuron-match-table tbody tr.drocat-neuron-match-secondary-row
     .drocat-neuron-match-jump {
     min-height: 21px;
     padding: 0 3px;
@@ -401,7 +434,9 @@ html, body {
     border-radius: 10px;
 }
 .drocat-data-viewer-table .q-table__middle {
-    max-height: 52vh;
+    max-height: min(58vh, 680px);
+    min-height: 0;
+    flex: 1 1 auto;
     overflow: auto;
 }
 .drocat-data-viewer-table .q-table__middle thead tr:first-child th {
@@ -490,13 +525,24 @@ html, body {
     font-weight: 750;
 }
 @keyframes drocat-neuron-focus-breathe {
-    0%, 100% { outline-color: transparent; outline-width: 0; }
-    38%, 62% { outline-color: rgba(100, 110, 125, .72); outline-width: 4px; }
+    0%, 100% { opacity: 0; }
+    32%, 68% { opacity: 1; }
 }
 .drocat-data-viewer-table tr.drocat-neuron-focus-flash > td {
-    outline-style: solid;
-    outline-offset: -2px;
+    position: relative;
+}
+.drocat-data-viewer-table tr.drocat-neuron-focus-flash > td::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    z-index: 3;
+    pointer-events: none;
+    background: rgba(148, 163, 184, .20);
     animation: drocat-neuron-focus-breathe 1.35s ease-in-out 1;
+}
+.drocat-data-viewer-table tr.drocat-neuron-focus-flash > td > * {
+    position: relative;
+    z-index: 4;
 }
 @media (max-width: 1100px) {
     .drocat-neuron-results-layout {

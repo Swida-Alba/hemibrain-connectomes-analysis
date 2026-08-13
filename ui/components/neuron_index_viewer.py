@@ -563,15 +563,21 @@ def _render_index(
             # Selection and clicking a matched value use the same focus path:
             # resolve the first exact member, compute its sorted data page,
             # then scroll the actual metadata row into view.
-            focus_key = ""
-            for row in selected_rows:
-                value = str(row.get("match_value", "") or "").strip()
-                members = tuple(group_members.get(value, ()))
-                if members:
-                    focus_key = members[0]
-                    break
-            if focus_key:
-                refresh(focus_key=focus_key)
+            focus_keys: List[str] = []
+            for value in selected_match_values:
+                members = tuple(
+                    selected_match_members.get(value, set())
+                    or group_members.get(value, ())
+                )
+                for member in members:
+                    member = str(member or "").strip()
+                    if member and member not in focus_keys:
+                        focus_keys.append(member)
+            if focus_keys:
+                refresh(
+                    focus_key=focus_keys[0],
+                    focus_keys=tuple(focus_keys),
+                )
             else:
                 refresh_table_selection()
 
@@ -602,9 +608,21 @@ def _render_index(
                 forget_match(value)
             sync_query_selection()
             if bool(args.get("selected")):
-                members = tuple(group_members.get(value, ()))
-                if members:
-                    refresh(focus_key=members[0])
+                focus_keys: List[str] = []
+                for selected_value in selected_match_values:
+                    members = tuple(
+                        selected_match_members.get(selected_value, set())
+                        or group_members.get(selected_value, ())
+                    )
+                    for member in members:
+                        member = str(member or "").strip()
+                        if member and member not in focus_keys:
+                            focus_keys.append(member)
+                if focus_keys:
+                    refresh(
+                        focus_key=focus_keys[0],
+                        focus_keys=tuple(focus_keys),
+                    )
                     return
             refresh_table_selection()
 
@@ -667,9 +685,22 @@ def _render_index(
                             selection_status = ui.label("0 selected").classes(
                                 "text-caption drocat-muted"
                             )
-                match_status = ui.label("No matched names").classes(
-                    "text-caption drocat-muted"
-                )
+                with ui.row().classes(
+                    "w-full items-center justify-between gap-2 flex-wrap drocat-neuron-panel-toolbar"
+                ):
+                    match_status = ui.label("No matched names").classes(
+                        "text-caption drocat-muted flex-grow"
+                    )
+                    match_page_position = ui.label("Page 1 of 1").classes(
+                        "text-caption drocat-muted"
+                    )
+                    with ui.row().classes("items-center gap-1"):
+                        match_previous_button = ui.button(
+                            "Previous matches", icon="chevron_left"
+                        ).props("flat dense")
+                        match_next_button = ui.button(
+                            "Next matches", icon="chevron_right"
+                        ).props("flat dense")
                 match_table = ui.table(
                     rows=current_groups,
                     columns=match_columns,
@@ -688,21 +719,21 @@ def _render_index(
                       }"
                     >
                       <q-td auto-width class="drocat-neuron-match-select-cell">
-                      <q-icon
-                        v-if="props.row.match_role === 'secondary'"
-                        name="arrow_right_alt"
-                        class="drocat-neuron-match-secondary-arrow"
-                        size="18px"
-                      />
                       <q-checkbox
-                        v-else
+                        v-if="props.row.match_role !== 'secondary'"
                         :model-value="props.selected"
                         dense
                         @click.stop="$parent.$emit('match-selection-toggle', { row: props.row, selected: !props.selected })"
                       />
                       </q-td>
-                      <q-td key="match_column" :props="props">
+                      <q-td key="match_column" :props="props" class="drocat-neuron-match-by">
                         <div class="drocat-neuron-match-source">
+                          <q-icon
+                            v-if="props.row.match_role === 'secondary'"
+                            name="arrow_right_alt"
+                            class="drocat-neuron-match-secondary-arrow"
+                            size="18px"
+                          />
                           {{ props.row.match_column }}
                         </div>
                       </q-td>
@@ -726,20 +757,6 @@ def _render_index(
                     </q-tr>
                     """,
                 )
-                with ui.row().classes(
-                    "w-full items-center justify-between gap-2 flex-wrap"
-                ):
-                    match_page_position = ui.label("Page 1 of 1").classes(
-                        "text-caption drocat-muted"
-                    )
-                    with ui.row().classes("items-center gap-1"):
-                        match_previous_button = ui.button(
-                            "Previous matches", icon="chevron_left"
-                        ).props("flat dense")
-                        match_next_button = ui.button(
-                            "Next matches", icon="chevron_right"
-                        ).props("flat dense")
-
             with ui.element("section").classes("drocat-neuron-full-panel"):
                 with ui.row().classes("w-full items-center gap-2"):
                     ui.icon("table_view", color="primary").classes("text-lg")
@@ -747,6 +764,25 @@ def _render_index(
                 ui.label(
                     "Scroll horizontally to inspect every retained metadata field."
                 ).classes("text-caption drocat-muted")
+                with ui.row().classes(
+                    "w-full items-center justify-between gap-2 flex-wrap drocat-neuron-panel-toolbar"
+                ):
+                    page_info = ui.label("").classes(
+                        "text-caption drocat-muted flex-grow"
+                    )
+                    no_results = ui.label(
+                        "No rows match the current search/filter."
+                    ).classes("text-caption drocat-warn")
+                    page_position = ui.label("").classes(
+                        "text-caption drocat-muted"
+                    )
+                    with ui.row().classes("items-center gap-1"):
+                        previous_button = ui.button(
+                            "Previous page", icon="chevron_left"
+                        ).props("flat dense")
+                        next_button = ui.button(
+                            "Next page", icon="chevron_right"
+                        ).props("flat dense")
                 with ui.element("div").classes("w-full drocat-data-viewer-scroll"):
                     table = ui.table(
                         rows=initial.rows,
@@ -799,39 +835,98 @@ def _render_index(
                         """,
                     )
 
-        with ui.row().classes("w-full items-center justify-between gap-3 flex-wrap"):
-            page_info = ui.label("").classes("text-caption drocat-muted")
-            no_results = ui.label("No rows match the current search/filter.").classes(
-                "text-caption drocat-warn"
-            )
-            page_position = ui.label("").classes("text-caption drocat-muted")
-            previous_button = ui.button("Previous page", icon="chevron_left").props(
-                "flat dense"
-            )
-            next_button = ui.button("Next page", icon="chevron_right").props(
-                "flat dense"
-            )
-
         state = {"page": initial.page, "page_size": 50}
 
-    def scroll_to_table_row(focus_key: str) -> None:
-        """Scroll the focused metadata row into the visible table viewport."""
-        encoded_key = json.dumps(str(focus_key or ""))
+    def scroll_to_table_rows(focus_keys) -> None:
+        """Focus every visible member row after the table finishes scrolling.
+
+        ``scrollIntoView({behavior: 'smooth'})`` is asynchronous. Starting the
+        animation on the same tick makes the shade disappear while the row is
+        still moving, and repeated NiceGUI/QTable events can queue a second
+        flash. A small client-side request token, duplicate cooldown, and
+        settle poll make one click produce one post-scroll flash. Rows outside
+        the current page are intentionally ignored by the DOM lookup; the
+        server first moves the page to the first member, so every member on
+        that focused page is shaded together.
+        """
+        keys = []
+        for key in focus_keys or ():
+            value = str(key or "").strip()
+            if value and value not in keys:
+                keys.append(value)
+        if not keys:
+            return
+        encoded_keys = json.dumps(keys)
         ui.run_javascript(
             f"""
             setTimeout(() => {{
-                const key = {encoded_key};
+                const keys = {encoded_keys};
                 const root = document.querySelector('.drocat-neuron-full-panel .drocat-data-viewer-scroll');
                 if (!root) return;
-                const row = Array.from(root.querySelectorAll('tr[data-neuron-key]'))
-                    .find(candidate => candidate.dataset.neuronKey === key);
-                if (row) {{
-                    row.scrollIntoView({{ behavior: 'smooth', block: 'center', inline: 'nearest' }});
-                    row.classList.remove('drocat-neuron-focus-flash');
-                    void row.offsetWidth;
-                    row.classList.add('drocat-neuron-focus-flash');
-                    window.setTimeout(() => row.classList.remove('drocat-neuron-focus-flash'), 1400);
-                }}
+                const state = window.__drocatNeuronFocusState || (window.__drocatNeuronFocusState = {{
+                    token: 0, signature: '', requestedAt: 0, timer: null
+                }});
+                const signature = keys.join('\\u0001');
+                const now = performance.now();
+                // Selection and click events can arrive as two separate
+                // browser messages. Keep one focus action for the same
+                // matched bundle long enough to cover the full 1.35s breathe
+                // animation plus its cleanup timer.
+                if (state.signature === signature && now - state.requestedAt < 2600) return;
+                state.signature = signature;
+                state.requestedAt = now;
+                state.token += 1;
+                const token = state.token;
+                if (state.timer) window.clearTimeout(state.timer);
+                root.querySelectorAll('.drocat-neuron-focus-flash').forEach(row =>
+                    row.classList.remove('drocat-neuron-focus-flash'));
+
+                let attempts = 0;
+                const locate = () => Array.from(root.querySelectorAll('tr[data-neuron-key]'))
+                    .filter(row => keys.includes(row.dataset.neuronKey));
+                const findRows = () => {{
+                    if (state.token !== token) return;
+                    const rows = locate();
+                    if (!rows.length && attempts++ < 15) {{
+                        window.setTimeout(findRows, 60);
+                        return;
+                    }}
+                    if (!rows.length) return;
+                    rows[0].scrollIntoView({{ behavior: 'smooth', block: 'center', inline: 'nearest' }});
+                    let lastRect = '';
+                    let stableFrames = 0;
+                    const started = performance.now();
+                    const flash = () => {{
+                        if (state.token !== token) return;
+                        root.querySelectorAll('.drocat-neuron-focus-flash').forEach(row =>
+                            row.classList.remove('drocat-neuron-focus-flash'));
+                        rows.forEach(row => {{
+                            row.classList.remove('drocat-neuron-focus-flash');
+                            void row.offsetWidth;
+                            row.classList.add('drocat-neuron-focus-flash');
+                        }});
+                        state.timer = window.setTimeout(() => {{
+                            if (state.token !== token) return;
+                            rows.forEach(row => row.classList.remove('drocat-neuron-focus-flash'));
+                            state.timer = null;
+                        }}, 1400);
+                    }};
+                    const waitForSettle = () => {{
+                        if (state.token !== token) return;
+                        const rect = rows[0].getBoundingClientRect();
+                        const currentRect = `${{Math.round(rect.top)}}:${{Math.round(rect.left)}}`;
+                        stableFrames = currentRect === lastRect ? stableFrames + 1 : 0;
+                        lastRect = currentRect;
+                        if ((stableFrames >= 3 && performance.now() - started >= 120)
+                            || performance.now() - started >= 1200) {{
+                            flash();
+                            return;
+                        }}
+                        window.requestAnimationFrame(waitForSettle);
+                    }};
+                    window.requestAnimationFrame(waitForSettle);
+                }};
+                findRows();
             }}, 80);
             """
         )
@@ -859,7 +954,13 @@ def _render_index(
         match_previous_button.set_enabled(match_state["page"] > 1)
         match_next_button.set_enabled(match_state["page"] < pages)
 
-    def refresh(_event=None, *, reset_page: bool = False, focus_key: str | None = None):
+    def refresh(
+        _event=None,
+        *,
+        reset_page: bool = False,
+        focus_key: str | None = None,
+        focus_keys=None,
+    ):
         if reset_page:
             state["page"] = 1
             match_state["page"] = 1
@@ -918,12 +1019,14 @@ def _render_index(
         })
         render_match_page()
         table.update_rows(current_rows)
-        if focus_key:
-            scroll_to_table_row(focus_key)
+        if focus_keys is None and focus_key:
+            focus_keys = (focus_key,)
         # Restore selections after replacing the rows. On a different page,
         # only matching visible rows are checked; the underlying selection
         # sets still retain entries selected on other pages.
         refresh_table_selection()
+        if focus_keys:
+            scroll_to_table_rows(focus_keys)
         page_position.text = f"Page {result.page:,} of {result.pages:,}"
         page_position.update()
         previous_button.set_enabled(result.page > 1)
@@ -947,7 +1050,7 @@ def _render_index(
         value = str(row.get("match_value", "") or "").strip()
         member_keys = tuple(group_members.get(value, ()))
         if member_keys:
-            refresh(focus_key=member_keys[0])
+            refresh(focus_key=member_keys[0], focus_keys=member_keys)
 
     search_input.on_value_change(reset_and_refresh)
     def handle_filter_column_change(event):
@@ -1002,12 +1105,16 @@ def create_neuron_index_viewer_link(
     """
     dialog = ui.dialog()
     with dialog:
-        with ui.card().classes("w-[min(98vw,1800px)] max-w-none"):
+        with ui.card().classes(
+            "w-[min(98vw,1800px)] max-w-none drocat-neuron-viewer-card"
+        ):
             with ui.row().classes("w-full items-center justify-between gap-3"):
                 title = ui.label("Available neurons").classes("text-h6")
                 ui.button(icon="close", on_click=dialog.close).props("flat round dense")
             dataset_picker_slot = ui.row().classes("w-full items-center")
-            content = ui.column().classes("w-full gap-2")
+            content = ui.column().classes(
+                "w-full gap-2 drocat-neuron-viewer-content"
+            )
 
     def open_viewer():
         try:

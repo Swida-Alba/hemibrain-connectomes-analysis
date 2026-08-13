@@ -24,6 +24,7 @@ try:
         build_search_cache_frame,
         body_id_column,
         dataset_folder,
+        is_search_cache_compatible,
         priority_metadata_columns,
         search_cache_path,
         viewer_search_columns,
@@ -33,6 +34,7 @@ except ImportError:  # pragma: no cover - supports src/ on sys.path imports
         build_search_cache_frame,
         body_id_column,
         dataset_folder,
+        is_search_cache_compatible,
         priority_metadata_columns,
         search_cache_path,
         viewer_search_columns,
@@ -503,7 +505,17 @@ def get_cached_neuron_search(
         )
         if sidecar_path.is_file():
             search_frame = pl.read_parquet(sidecar_path)
-            search_source = sidecar_path
+            source_columns = pl.scan_parquet(index_path).collect_schema().names()
+            if is_search_cache_compatible(search_frame, source_columns):
+                search_source = sidecar_path
+            else:
+                # A readable but stale sidecar must not hide a newly added
+                # flywireType/taxonomy column. Rebuild only the narrow search
+                # frame in memory; the pull/cache pipeline will materialize it
+                # on its next normal cache-maintenance pass.
+                full_frame = pl.read_parquet(index_path)
+                search_frame = build_search_cache_frame(full_frame)
+                search_source = None
         else:
             full_frame = pl.read_parquet(index_path)
             search_frame = build_search_cache_frame(full_frame)

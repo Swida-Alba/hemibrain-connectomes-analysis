@@ -123,3 +123,34 @@ def test_get_neurons_uses_cache_resolver_before_dataframe_scan(tmp_path, monkeyp
         verbose=False,
     )
     assert neurons["bodyId"].tolist() == ["100"]
+
+
+def test_stale_sidecar_rebuilds_for_new_priority_fields(tmp_path):
+    from src.neuron_index_builder import build_search_cache_frame, search_cache_path
+    from src.neuron_search import get_cached_neuron_search, resolve_neuron_query
+
+    dataset = "stale-sidecar:v1.0"
+    folder = dataset.replace(":", "_").replace(".", "_")
+    cache_dir = tmp_path / "cache" / folder
+    cache_dir.mkdir(parents=True)
+    index_path = cache_dir / "neuron_index.parquet"
+    frame = pl.DataFrame({
+        "bodyId": ["100"],
+        "type": [""],
+        "instance": [""],
+        "flywireType": [""],
+        "locationType": ["new-location-type"],
+    })
+    frame.write_parquet(index_path)
+    # Simulate a sidecar produced before locationType was added to the
+    # canonical *Type projection. It is readable, but semantically stale.
+    build_search_cache_frame(
+        frame, ["bodyId", "type", "instance", "flywireType"]
+    ).write_parquet(search_cache_path(index_path))
+
+    cache = get_cached_neuron_search(dataset, cache_root=tmp_path / "cache")
+    assert cache is not None
+    assert cache.search_path is None
+    ids, info = resolve_neuron_query(cache, "new-location-type")
+    assert ids == ["100"]
+    assert info["matched_column"] == "locationType"

@@ -2536,7 +2536,7 @@ class TestComponents:
         assert "aMe12" in texts and "aMe10" in texts
         assert container.get_value() == ("exact", ["APL"])
 
-    def test_viewer_selection_keeps_display_name_but_executes_exact_body_ids(
+    def test_viewer_selection_keeps_display_name_until_backend_resolution(
         self, monkeypatch
     ):
         """A viewer name cannot be re-resolved through the wrong metadata column."""
@@ -2565,7 +2565,10 @@ class TestComponents:
         callbacks["query_selection"](["MTe01a"])
         callbacks["query_resolution"](["100", "200", "300"])
         assert container.chip_input.value == ["MTe01a"]
-        assert container.get_value() == ("exact", [100, 200, 300])
+        # The input surface keeps the readable name.  Resolution is performed
+        # later by the shared analysis backend, so logs and run names cannot
+        # be replaced by the viewer's body-ID snapshot.
+        assert container.get_value() == ("exact", ["MTe01a"])
 
         callbacks["query_selection"]([])
         callbacks["query_resolution"]([])
@@ -2578,7 +2581,7 @@ class TestComponents:
         callbacks["query_selection"](["MTe01a"])
         callbacks["query_resolution"](["100", "200"])
         assert container.chip_input.value == ["MTe01a"]
-        assert container.get_value() == ("exact", [100, 200])
+        assert container.get_value() == ("exact", ["MTe01a"])
         callbacks["query_selection"]([])
         callbacks["query_resolution"]([])
         assert container.get_value() == ("exact", ["MTe01a"])

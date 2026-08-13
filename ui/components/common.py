@@ -1106,14 +1106,14 @@ def neuron_list_input(
     def get_value():
         display_values = [*uploaded_neurons, *(chip_input.value or [])]
         combined = []
-        for item in display_values:
-            # Viewer names are display-only. The corresponding verified body
-            # IDs are appended below, so a duplicated/colliding name can
-            # never trigger a second priority-based string lookup.
-            if str(item) in viewer_selected_values:
-                continue
-            combined.append(normalize_neuron(item))
-        combined.extend(viewer_owned_body_ids)
+        # Keep the query surface readable.  A viewer selection may have an
+        # exact body-ID snapshot in ``viewer_owned_body_ids`` for UI display
+        # and safeguards, but execution must receive the selected name here.
+        # The shared resolver converts that name to body IDs later, after it
+        # has applied bodyId -> type -> instance -> metadata priority.  This
+        # prevents type queries from leaking body IDs into logs, parameters,
+        # attributes, and auto-named output folders.
+        combined.extend(normalize_neuron(item) for item in display_values)
         combined = list(dict.fromkeys(combined))
         if max_items is not None:
             combined = combined[:max_items]
