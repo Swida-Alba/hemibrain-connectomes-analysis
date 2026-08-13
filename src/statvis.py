@@ -155,6 +155,56 @@ def clear_neuron_cache(dataset: str = None):
         del _NEURON_DF_CACHE[dataset]
 
 
+def _get_cached_neuron_search(dataset: str):
+    """Return the shared parquet search reader when a local cache exists."""
+    try:
+        from src.neuron_search import get_cached_neuron_search
+    except ImportError:
+        try:
+            from neuron_search import get_cached_neuron_search
+        except ImportError:
+            return None
+    return get_cached_neuron_search(dataset)
+
+
+def _resolve_single_neuron(
+    required_neuron,
+    ndf_alltypes,
+    body_id_alltypes,
+    *,
+    dataset,
+    cached_search=None,
+    verbose=True,
+    search_columns='auto',
+    search_info_sink=None,
+):
+    """Resolve through the shared cache, validating it against the frame."""
+    try:
+        from src.neuron_search import resolve_cached_or_dataframe_query
+    except ImportError:  # pragma: no cover - ``src/`` on sys.path imports
+        from neuron_search import resolve_cached_or_dataframe_query
+    body_ids, search_info = resolve_cached_or_dataframe_query(
+        cached_search,
+        ndf_alltypes,
+        required_neuron,
+        search_columns=search_columns,
+    )
+    if search_info_sink is not None:
+        search_info_sink.append(dict(search_info or {}))
+    if verbose:
+        if body_ids:
+            column = search_info.get('matched_column') or 'metadata'
+            source = 'cached search' if search_info.get('cache') else 'dataframe search'
+            print(
+                f'Found {len(body_ids)} neurons for "{required_neuron}" '
+                f'({source}; first: {column})'
+            )
+        else:
+            print(
+                f'No neurons found for "{required_neuron}" in the shared neuron index'
+            )
+    return body_ids, search_info
+
 def _get_dataset_path_body(dataset: str) -> tuple[str, str, str]:
     """Return normalized dataset name, dataset directory, and file prefix."""
     dataset_normalized = dataset.replace(':', '_').replace('.', '_')
@@ -371,6 +421,7 @@ def get_types(
         query = [query]
     
     bodyId_alltypes = ndf['bodyId'].tolist()
+    cached_search = _get_cached_neuron_search(dataset)
     
     # Process each query item
     type_set = set()
@@ -378,7 +429,14 @@ def get_types(
     
     for item in query:
         # Get matching bodyIds
-        bodyId_list, search_info = _process_single_neuron(item, ndf, bodyId_alltypes, verbose=verbose)
+        bodyId_list, search_info = _resolve_single_neuron(
+            item,
+            ndf,
+            bodyId_alltypes,
+            dataset=dataset,
+            cached_search=cached_search,
+            verbose=verbose,
+        )
         
         if bodyId_list:
             # Get types for these bodyIds
@@ -482,6 +540,7 @@ def get_bodyIds(
         query = [query]
     
     bodyId_alltypes = ndf['bodyId'].tolist()
+    cached_search = _get_cached_neuron_search(dataset)
     
     # Process each query item
     all_bodyIds = []
@@ -489,7 +548,14 @@ def get_bodyIds(
     
     for item in query:
         # Get matching bodyIds
-        bodyId_list, search_info = _process_single_neuron(item, ndf, bodyId_alltypes, verbose=verbose)
+        bodyId_list, search_info = _resolve_single_neuron(
+            item,
+            ndf,
+            bodyId_alltypes,
+            dataset=dataset,
+            cached_search=cached_search,
+            verbose=verbose,
+        )
         
         for bid in bodyId_list:
             all_bodyIds.append(bid)
@@ -599,6 +665,7 @@ def get_instances(
         query = [query]
     
     bodyId_alltypes = ndf['bodyId'].tolist()
+    cached_search = _get_cached_neuron_search(dataset)
     
     # Process each query item
     instance_set = set()
@@ -606,7 +673,14 @@ def get_instances(
     
     for item in query:
         # Get matching bodyIds
-        bodyId_list, search_info = _process_single_neuron(item, ndf, bodyId_alltypes, verbose=verbose)
+        bodyId_list, search_info = _resolve_single_neuron(
+            item,
+            ndf,
+            bodyId_alltypes,
+            dataset=dataset,
+            cached_search=cached_search,
+            verbose=verbose,
+        )
         
         if bodyId_list:
             # Get instances for these bodyIds
@@ -713,11 +787,19 @@ def get_info(
         query = [query]
     
     bodyId_alltypes = ndf['bodyId'].tolist()
+    cached_search = _get_cached_neuron_search(dataset)
     
     # Process each query item and collect bodyIds
     all_bodyIds = []
     for item in query:
-        bodyId_list, _ = _process_single_neuron(item, ndf, bodyId_alltypes, verbose=verbose)
+        bodyId_list, _ = _resolve_single_neuron(
+            item,
+            ndf,
+            bodyId_alltypes,
+            dataset=dataset,
+            cached_search=cached_search,
+            verbose=verbose,
+        )
         all_bodyIds.extend(bodyId_list)
     
     # Remove duplicates
@@ -1200,7 +1282,7 @@ def pull_dataset(dataset, save_path=None, omitNoneType=False, client=None, batch
     roi_count_df.to_csv(save_path + '_roi_count_df.csv',index=True)
     print('Done!')
 
-def getNeurons(requiredNeurons, dataset='hemibrain:v1.2.1', custom_group_names=None, client=None, verbose=True, search_columns='auto'):
+def getNeurons(requiredNeurons, dataset='hemibrain:v1.2.1', custom_group_names=None, client=None, verbose=True, search_columns='auto', search_info_sink=None):
     '''get neurons locally from a given dataset
     
     Parameters
@@ -1233,10 +1315,15 @@ def getNeurons(requiredNeurons, dataset='hemibrain:v1.2.1', custom_group_names=N
         Whether to print progress messages (default: True)
     search_columns : str, optional
         Which columns to search when resolving neuron names:
-        'auto' (default) searches all columns with priority
-        bodyId -> type -> instance -> other string columns
-        (e.g. flywireType, hemibrainType, mancType); 'type', 'instance'
+        'auto' (default) searches the prioritized identity/type/taxonomy
+        columns: bodyId -> type -> instance -> flywireType -> hemibrainType
+        -> mancType -> other *Type -> class/subclass/superclass; 'type', 'instance'
         and 'bodyId' restrict the search to that single column.
+    search_info_sink : list, optional
+        Internal collector for the shared resolver's match metadata. When
+        supplied, one dictionary is appended for each name resolution; this
+        lets the analysis run record when a query was resolved after the
+        identity columns without changing the public return tuple.
         
     Returns
     -------
@@ -1259,7 +1346,7 @@ def getNeurons(requiredNeurons, dataset='hemibrain:v1.2.1', custom_group_names=N
     >>> neuron_df, _, _, _ = getNeurons({'type': {'startswith': ['aMe', 'Mi']}}, dataset='hemibrain:v1.2.1')
     '''
     from neuprint import NeuronCriteria as NC
-    
+
     # Check if requiredNeurons is a dict-based filter
     if isinstance(requiredNeurons, dict):
         # Use NeuronFilter for dict-based queries
@@ -1378,12 +1465,22 @@ def getNeurons(requiredNeurons, dataset='hemibrain:v1.2.1', custom_group_names=N
                     else:
                         flat_list.append(item)
                 
-                # Use comprehensive search for each item
-                # This searches: bodyId -> type -> instance -> other columns with proper priority
+                # Use the shared priority search for each item:
+                # bodyId -> type -> instance -> useful type/taxonomy fields.
                 bodyId_alltypes = full_neuron_df['bodyId'].astype(str).tolist()
+                cached_search = _get_cached_neuron_search(dataset)
                 
                 for item in flat_list:
-                    item_bodyIds, search_info = _process_single_neuron(item, full_neuron_df, bodyId_alltypes, verbose=verbose, search_columns=search_columns)
+                    item_bodyIds, search_info = _resolve_single_neuron(
+                        item,
+                        full_neuron_df,
+                        bodyId_alltypes,
+                        dataset=dataset,
+                        cached_search=cached_search,
+                        verbose=verbose,
+                        search_columns=search_columns,
+                        search_info_sink=search_info_sink,
+                    )
                     if item_bodyIds:
                         # Get matching rows
                         item_df = full_neuron_df[full_neuron_df['bodyId'].astype(str).isin([str(b) for b in item_bodyIds])].copy()
@@ -1447,6 +1544,7 @@ def getNeurons(requiredNeurons, dataset='hemibrain:v1.2.1', custom_group_names=N
     # Use in-memory cache for neuron DataFrames (avoids repeated CSV reads)
     ndf_alltypes, rdf_alltypes = _get_cached_neuron_df(dataset_normalized, dataset_path_body)
     bodyId_alltypes = ndf_alltypes['bodyId'].tolist()
+    cached_search = _get_cached_neuron_search(dataset)
     
     if len(requiredNeurons) == 0:
         # Empty list = all typed neurons (neurons with non-null type)
@@ -1479,7 +1577,16 @@ def getNeurons(requiredNeurons, dataset='hemibrain:v1.2.1', custom_group_names=N
                     
                     for item in requiredNeuron:
                         group_items.append(str(item).replace('.*', ''))
-                        item_bodyIds, _ = _process_single_neuron(item, ndf_alltypes, bodyId_alltypes, verbose=verbose, search_columns=search_columns)
+                        item_bodyIds, _ = _resolve_single_neuron(
+                            item,
+                            ndf_alltypes,
+                            bodyId_alltypes,
+                            dataset=dataset,
+                            cached_search=cached_search,
+                            verbose=verbose,
+                            search_columns=search_columns,
+                            search_info_sink=search_info_sink,
+                        )
                         group_bodyIds.extend(item_bodyIds)
                     
                     # Generate group name
@@ -1499,7 +1606,16 @@ def getNeurons(requiredNeurons, dataset='hemibrain:v1.2.1', custom_group_names=N
                     print(f'Custom group "{group_name}": {len(group_bodyIds)} neurons from {len(requiredNeuron)} items')
                 else:
                     # Regular item
-                    item_bodyIds, _ = _process_single_neuron(requiredNeuron, ndf_alltypes, bodyId_alltypes, verbose=verbose, search_columns=search_columns)
+                    item_bodyIds, _ = _resolve_single_neuron(
+                        requiredNeuron,
+                        ndf_alltypes,
+                        bodyId_alltypes,
+                        dataset=dataset,
+                        cached_search=cached_search,
+                        verbose=verbose,
+                        search_columns=search_columns,
+                        search_info_sink=search_info_sink,
+                    )
                     bodyId_list.extend(item_bodyIds)
                     group_names.append(str(requiredNeuron).replace('.*', ''))
             
@@ -1533,7 +1649,16 @@ def getNeurons(requiredNeurons, dataset='hemibrain:v1.2.1', custom_group_names=N
                     # Get bodyIds for this custom group
                     group_bodyIds = []
                     for item in requiredNeuron:
-                        item_bodyIds, _ = _process_single_neuron(item, ndf_alltypes, bodyId_alltypes, verbose=verbose, search_columns=search_columns)
+                        item_bodyIds, _ = _resolve_single_neuron(
+                            item,
+                            ndf_alltypes,
+                            bodyId_alltypes,
+                            dataset=dataset,
+                            cached_search=cached_search,
+                            verbose=verbose,
+                            search_columns=search_columns,
+                            search_info_sink=search_info_sink,
+                        )
                         group_bodyIds.extend(item_bodyIds)
                     
                     # Ensure type consistency for .isin() matching
@@ -1563,7 +1688,16 @@ def getNeurons(requiredNeurons, dataset='hemibrain:v1.2.1', custom_group_names=N
                 elif i == 1:
                     auto_name += '_etc'
                 
-                item_bodyIds, _ = _process_single_neuron(requiredNeuron, ndf_alltypes, bodyId_alltypes, verbose=verbose, search_columns=search_columns)
+                item_bodyIds, _ = _resolve_single_neuron(
+                    requiredNeuron,
+                    ndf_alltypes,
+                    bodyId_alltypes,
+                    dataset=dataset,
+                    cached_search=cached_search,
+                    verbose=verbose,
+                    search_columns=search_columns,
+                    search_info_sink=search_info_sink,
+                )
                 bodyId_list.extend(item_bodyIds)
             
             # Ensure bodyId_list type matches DataFrame's bodyId column type for .isin() to work
@@ -1586,203 +1720,43 @@ def getNeurons(requiredNeurons, dataset='hemibrain:v1.2.1', custom_group_names=N
         pass
     return neuron_df, roi_count_df, auto_name, criteria
 
-def _process_single_neuron(requiredNeuron, ndf_alltypes, bodyId_alltypes, verbose=True, search_columns='auto'):
-    '''Helper function to process a single neuron identifier and return bodyIds.
-    
-    Search scope ('search_columns'):
-    - 'auto' (default): search ALL columns with priority
-      1. bodyId (numeric) - exact match first, then regex if contains .*
-      2. type - exact match first, then regex if contains .*
-      3. instance - exact match first, then regex if contains .*
-      4. Other string columns (e.g. flywireType, hemibrainType, mancType) -
-         exact AND regex match (exact used to stop at type/instance only,
-         which silently missed names stored in cross-dataset type columns)
-    - 'type': search only the type column
-    - 'instance': search only the instance column
-    - 'bodyId': search only the bodyId column
-    
-    Parameters
-    ----------
-    requiredNeuron : str, int, or np.integer
-        The neuron identifier to search for (bodyId, type, instance, or regex pattern)
-    ndf_alltypes : pd.DataFrame
-        DataFrame containing all neurons with columns like bodyId, type, instance, etc.
-    bodyId_alltypes : list
-        List of all bodyIds for quick lookup
-    verbose : bool
-        Whether to print progress messages
-    search_columns : str
-        Which columns to search: 'auto' (all), 'type', 'instance', or 'bodyId'
-        
-    Returns
-    -------
-    tuple : (list of bodyIds, dict with search info)
-        Search info contains: {'search_term': str, 'matched_column': str, 'match_count': int}
-    '''
-    
-    # Column scope: 'auto' searches every string column with the priority
-    # above; the named scopes restrict the search to that single column.
-    scope = str(search_columns or 'auto').strip().lower()
-    if scope not in ('auto', 'type', 'instance', 'bodyid'):
-        scope = 'auto'
-    if scope == 'auto':
-        restrict = None
-    else:
-        # Canonical case: 'bodyid' -> 'bodyId' (column name is camelCase).
-        restrict = 'bodyId' if scope == 'bodyid' else scope
-    
-    bodyId_list = []
-    search_info = {
-        'search_term': str(requiredNeuron),
-        'matched_column': None,
-        'match_count': 0
-    }
-    
-    # Check if it's a numeric bodyId (int, np.int64, or numeric string)
-    is_numeric = False
-    if isinstance(requiredNeuron, (int, np.integer)):
-        is_numeric = True
-    elif isinstance(requiredNeuron, str) and requiredNeuron.replace('.', '').isdigit():
-        # String that looks like a number (e.g., "535898" or "720575940634984800")
-        is_numeric = True
-    
-    # Check if pattern contains regex wildcard
-    has_regex = isinstance(requiredNeuron, str) and ('.*' in requiredNeuron or '*' in requiredNeuron)
-    
-    # Convert input to string for consistent handling
-    search_str = str(requiredNeuron)
-    
-    # Helper function for regex matching
-    def try_regex_match(df, column, pattern):
-        """Try regex match on a column, return matching rows."""
-        try:
-            # Convert pattern with * to proper regex (e.g., "aMe*" -> "aMe.*")
-            regex_pattern = pattern.replace('*', '.*') if '*' in pattern and '.*' not in pattern else pattern
-            # Ensure pattern matches from start if not starting with .* 
-            if not regex_pattern.startswith('.*') and not regex_pattern.startswith('^'):
-                regex_pattern = '^' + regex_pattern
-            # Match against column, handling both string and numeric columns
-            col_str = df[column].astype(str)
-            matches = col_str.str.match(regex_pattern, na=False)
-            return df[matches]
-        except Exception:
-            return pd.DataFrame()
-    
-    # Helper function for exact match
-    def try_exact_match(df, column, value):
-        """Try exact match on a column, return matching rows."""
-        try:
-            # Always convert both sides to string for consistent comparison
-            col_str = df[column].astype(str)
-            value_str = str(value)
-            # For numeric values, normalize (remove .0 suffix) but avoid float conversion
-            # for large integers (FlyWire IDs exceed float precision ~2^53)
-            if is_numeric:
-                if '.' in value_str:
-                    # Only use int(float()) for actual floats with decimals
-                    value_str = str(int(float(value_str)))
-                else:
-                    # For integer strings, just strip any whitespace
-                    value_str = value_str.strip()
-            result = df[col_str == value_str]
-            return result
-        except Exception:
-            return pd.DataFrame()
-    
-    # Priority 1: bodyId (for numeric inputs or explicit bodyId patterns)
-    if restrict in (None, 'bodyId') and (is_numeric or (has_regex and search_str.replace('.*', '').replace('*', '').replace('^', '').replace('$', '').isdigit())):
-        if is_numeric and not has_regex:
-            # Exact bodyId lookup - always use string comparison for consistency
-            # Avoid float conversion for large integers (FlyWire IDs exceed float precision)
-            bodyid_str = search_str.strip() if '.' not in search_str else str(int(float(search_str)))
-            
-            # Convert bodyId_alltypes to strings for comparison, but return original format
-            if bodyId_alltypes:
-                bodyId_alltypes_str = [str(x) for x in bodyId_alltypes]
-                if bodyid_str in bodyId_alltypes_str:
-                    # Return the original format from the list
-                    idx = bodyId_alltypes_str.index(bodyid_str)
-                    bodyId_list.append(bodyId_alltypes[idx])
-                    search_info['matched_column'] = 'bodyId'
-                    search_info['match_count'] = 1
-            
-            if bodyId_list:
-                if verbose:
-                    print(f'Found 1 neuron with bodyId "{search_str}"')
-                return bodyId_list, search_info
-            # If not found as bodyId, fall through to try other columns
-    
-    # Priority 2: type column
-    if restrict in (None, 'type') and 'type' in ndf_alltypes.columns:
-        if has_regex:
-            find_df = try_regex_match(ndf_alltypes, 'type', search_str)
-        else:
-            find_df = try_exact_match(ndf_alltypes, 'type', search_str)
-        
-        if len(find_df) > 0:
-            bodyId_list = find_df['bodyId'].tolist()
-            search_info['matched_column'] = 'type'
-            search_info['match_count'] = len(bodyId_list)
-            if verbose:
-                match_type = 'regex' if has_regex else 'exact'
-                print(f'Found {len(find_df)} neurons of type "{search_str}" ({match_type} match)')
-            return bodyId_list, search_info
-    
-    # Priority 3: instance column
-    if restrict in (None, 'instance') and 'instance' in ndf_alltypes.columns:
-        if has_regex:
-            find_df = try_regex_match(ndf_alltypes, 'instance', search_str)
-        else:
-            find_df = try_exact_match(ndf_alltypes, 'instance', search_str)
-        
-        if len(find_df) > 0:
-            bodyId_list = find_df['bodyId'].tolist()
-            search_info['matched_column'] = 'instance'
-            search_info['match_count'] = len(bodyId_list)
-            if verbose:
-                match_type = 'regex' if has_regex else 'exact'
-                print(f'Found {len(find_df)} neurons of instance "{search_str}" ({match_type} match)')
-            return bodyId_list, search_info
-    
-    # Priority 4: bodyId column with regex (for patterns like "7205759406.*")
-    if restrict in (None, 'bodyId') and has_regex and 'bodyId' in ndf_alltypes.columns:
-        find_df = try_regex_match(ndf_alltypes, 'bodyId', search_str)
-        if len(find_df) > 0:
-            bodyId_list = find_df['bodyId'].tolist()
-            search_info['matched_column'] = 'bodyId'
-            search_info['match_count'] = len(bodyId_list)
-            if verbose:
-                print(f'Found {len(find_df)} neurons with bodyId matching "{search_str}" (regex match)')
-            return bodyId_list, search_info
-    
-    # Priority 5: other string columns (auto scope only). Both exact and
-    # regex search — previously exact matches stopped at type/instance, so
-    # names stored in cross-dataset type columns (flywireType, hemibrainType,
-    # mancType, ...) were silently missed.
-    if restrict is None:
-        string_columns = [col for col in ndf_alltypes.columns 
-                        if col not in ['bodyId', 'type', 'instance'] 
-                        and ndf_alltypes[col].dtype == 'object']
-        
-        for col in string_columns:
-            if has_regex:
-                find_df = try_regex_match(ndf_alltypes, col, search_str)
-            else:
-                find_df = try_exact_match(ndf_alltypes, col, search_str)
-            if len(find_df) > 0:
-                bodyId_list = find_df['bodyId'].tolist()
-                search_info['matched_column'] = col
-                search_info['match_count'] = len(bodyId_list)
-                if verbose:
-                    match_type = 'regex' if has_regex else 'exact'
-                    print(f'Found {len(find_df)} neurons matching "{search_str}" in column "{col}" ({match_type} match)')
-                return bodyId_list, search_info
-    
-    # Not found in any column
+def _process_single_neuron(
+    requiredNeuron,
+    ndf_alltypes,
+    bodyId_alltypes,
+    verbose=True,
+    search_columns='auto',
+):
+    """Resolve one neuron query using the shared dataframe contract.
+
+    The public helper is retained for notebook/backward compatibility.  The
+    implementation is intentionally thin: cache-backed callers use
+    ``resolve_neuron_query`` directly, while dataframe callers use the same
+    ``resolve_dataframe_query`` fallback.
+    """
+    try:
+        from src.neuron_search import resolve_dataframe_query
+    except ImportError:  # pragma: no cover - ``src/`` on sys.path imports
+        from neuron_search import resolve_dataframe_query
+    resolved_ids, resolved_info = resolve_dataframe_query(
+        ndf_alltypes,
+        requiredNeuron,
+        search_columns=search_columns,
+        verbose=verbose,
+    )
     if verbose:
-        print(f'\033[33m"{search_str}" not found in any column, please check your input (skipped)\033[0m')
-    
-    return bodyId_list, search_info
+        if resolved_ids:
+            print(
+                f'Found {len(resolved_ids)} neurons for "{requiredNeuron}" '
+                f'(dataframe search; first: '
+                f'{resolved_info.get("matched_column") or "metadata"})'
+            )
+        else:
+            print(
+                f'\033[33m"{requiredNeuron}" not found in any column, '
+                'please check your input (skipped)\033[0m'
+            )
+    return resolved_ids, resolved_info
 
 def removeSearchedNeurons(conn_df,searchedNeurons,exempt_neurons=None):
     '''remove neurons on searched layers, except those in exempt_neurons'''

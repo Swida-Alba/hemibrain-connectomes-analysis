@@ -5393,104 +5393,62 @@ class NeuronBridgeFinder:
                     seen.add(key)
                     unique_results.append(r)
             return unique_results
-        
-        if isinstance(query, int):
-            # For direct body ID, we don't know the dataset - return for all with matching ID
-            results = []
-            for ds_folder in datasets_to_search:
-                neuron_df = self._load_neuron_df_for_dataset(ds_folder)
-                if neuron_df is not None and not neuron_df.empty:
-                    if str(query) in neuron_df['bodyId'].astype(str).values:
-                        ds_name = self._folder_to_dataset_name(ds_folder)
-                        results.append({'bodyId': str(query), 'dataset': ds_name, 'dataset_folder': ds_folder})
-            # If not found in any, still return it
-            if not results:
-                results = [{'bodyId': str(query), 'dataset': 'unknown', 'dataset_folder': ''}]
-            return results
-        
-        query_str = str(query)
-        matched_results = []
-        
-        # Try exact bodyId match first
-        if query_str.isdigit():
-            for ds_folder in datasets_to_search:
-                neuron_df = self._load_neuron_df_for_dataset(ds_folder)
-                if neuron_df is not None and not neuron_df.empty:
-                    if query_str in neuron_df['bodyId'].astype(str).values:
-                        ds_name = self._folder_to_dataset_name(ds_folder)
-                        matched_results.append({
-                            'bodyId': query_str, 
-                            'dataset': ds_name,
-                            'dataset_folder': ds_folder
-                        })
-            if matched_results:
-                return matched_results
-        
-        # Search in type/instance columns across all datasets
+
+        # NeuronBridge used to maintain a separate case-insensitive exact
+        # matcher over only ``type`` and ``instance``.  Route it through the
+        # same priority-aware resolver as pathfinding, morphology, skeleton
+        # visualization, the inline suggestions, and the neuron-index viewer.
+        # This also makes explicit ``name.*``/contains patterns obey the same
+        # strict/case-sensitive contract instead of silently broadening them.
+        try:
+            from src.neuron_search import (
+                get_cached_neuron_search,
+                resolve_cached_or_dataframe_query,
+            )
+        except ImportError:  # pragma: no cover - ``src/`` on sys.path imports
+            from neuron_search import (
+                get_cached_neuron_search,
+                resolve_cached_or_dataframe_query,
+            )
+
+        shared_results = []
         for ds_folder in datasets_to_search:
             neuron_df = self._load_neuron_df_for_dataset(ds_folder)
             if neuron_df is None or neuron_df.empty:
                 continue
-            
+            cached_search = get_cached_neuron_search(ds_folder)
+            body_ids, _search_info = resolve_cached_or_dataframe_query(
+                cached_search,
+                neuron_df,
+                query,
+                search_columns="auto",
+            )
             ds_name = self._folder_to_dataset_name(ds_folder)
-            
-            # Search in 'type' column
-            if 'type' in neuron_df.columns:
-                try:
-                    type_matches = neuron_df[
-                        neuron_df['type'].astype(str).str.match(f'^{query_str}$', case=False, na=False)
-                    ]
-                    for body_id in type_matches['bodyId'].astype(str).tolist():
-                        matched_results.append({
-                            'bodyId': body_id, 
-                            'dataset': ds_name,
-                            'dataset_folder': ds_folder
-                        })
-                except re.error:
-                    type_matches = neuron_df[
-                        neuron_df['type'].astype(str).str.lower() == query_str.lower()
-                    ]
-                    for body_id in type_matches['bodyId'].astype(str).tolist():
-                        matched_results.append({
-                            'bodyId': body_id, 
-                            'dataset': ds_name,
-                            'dataset_folder': ds_folder
-                        })
-            
-            # Search in 'instance' column
-            if 'instance' in neuron_df.columns:
-                try:
-                    instance_matches = neuron_df[
-                        neuron_df['instance'].astype(str).str.match(f'^{query_str}$', case=False, na=False)
-                    ]
-                    for body_id in instance_matches['bodyId'].astype(str).tolist():
-                        matched_results.append({
-                            'bodyId': body_id, 
-                            'dataset': ds_name,
-                            'dataset_folder': ds_folder
-                        })
-                except re.error:
-                    instance_matches = neuron_df[
-                        neuron_df['instance'].astype(str).str.lower() == query_str.lower()
-                    ]
-                    for body_id in instance_matches['bodyId'].astype(str).tolist():
-                        matched_results.append({
-                            'bodyId': body_id, 
-                            'dataset': ds_name,
-                            'dataset_folder': ds_folder
-                        })
-        
-        # Remove duplicates (same bodyId + dataset)
+            for body_id in body_ids:
+                shared_results.append({
+                    "bodyId": str(body_id),
+                    "dataset": ds_name,
+                    "dataset_folder": ds_folder,
+                })
+
+        deduplicated = []
         seen = set()
-        unique_results = []
-        for r in matched_results:
-            key = (r['bodyId'], r['dataset'])
+        for result in shared_results:
+            key = (result["bodyId"], result["dataset"])
             if key not in seen:
                 seen.add(key)
-                unique_results.append(r)
-        
-        return unique_results
-    
+                deduplicated.append(result)
+        if deduplicated or not isinstance(query, int):
+            return deduplicated
+        # Preserve the historical NeuronBridge behavior for an integer bodyId
+        # that is not present in any local dataset: downstream code displays a
+        # useful unknown-dataset result rather than silently dropping it.
+        return [{
+            "bodyId": str(query),
+            "dataset": "unknown",
+            "dataset_folder": "",
+        }]
+
     def _dataset_name_to_folder(self, dataset_name: str) -> Optional[str]:
         """Convert display dataset name to folder name."""
         # Try direct lookup via reverse mapping

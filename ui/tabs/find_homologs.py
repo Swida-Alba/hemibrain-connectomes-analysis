@@ -8,11 +8,17 @@ from ..components.common import (
 )
 from ..components.output_panel import OutputPanel
 from ..runner import ScriptRunner
+from ..type_suggestions import dataset_suggestions
 
 
 def create_find_homologs_tab():
     runner = ScriptRunner()
     output_panel = OutputPanel("Homolog Output")
+    source_dataset = None
+
+    def _type_suggest(text):
+        dataset_name = source_dataset.value if source_dataset is not None else ""
+        return dataset_suggestions(text, dataset_name, limit=None)
 
     form_col, results_col = tool_page(
         "Homolog Finding",
@@ -29,6 +35,9 @@ def create_find_homologs_tab():
                 show_filter=False,
                 show_upload=False,
                 max_items=1,
+                suggestions=_type_suggest,
+                available_neurons=lambda: source_dataset.value
+                if source_dataset is not None else "",
                 hint="Single neuron type or bodyId to find cross-dataset homologs for. Only one value is accepted.",
             )
             with param_grid(2):

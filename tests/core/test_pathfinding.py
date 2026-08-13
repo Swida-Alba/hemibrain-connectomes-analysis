@@ -864,7 +864,9 @@ def test_write_user_warning_notes_lists_tilting_operations(tmp_path):
     text = path.read_text(encoding="utf-8")
     assert "user warning notes" in text
     assert "[graph edge limit]" in text and "weight >= 20 synapses" in text
-    assert "[threshold] min_synapse_num=3" in text
+    # Synapse-count cutoff is an execution parameter, not a warning-note
+    # threshold; ratio and traversal-probability thresholds remain explicit.
+    assert "[threshold] min_synapse_num" not in text
     assert "[threshold] min_ratio=0.05" in text
     assert "[threshold] min_traversal_probability=0.1" in text
     assert "[depth] max_interlayer=4" in text
@@ -874,6 +876,28 @@ def test_write_user_warning_notes_lists_tilting_operations(tmp_path):
     # inactive operations are NOT listed
     assert "hemisphere" not in text and "reciprocal" not in text
     assert "skip_bodyId" not in text and "cache_only" not in text
+
+
+def test_late_priority_neuron_match_is_written_to_warning_notes(tmp_path):
+    """Names resolved in taxonomy columns remain visible in run caveats."""
+    import sys
+    sys.path.insert(0, str(PROJECT_ROOT / "src"))
+    import coana
+
+    fc = object.__new__(coana.FindNeuronConnection)
+    fc._vprint = lambda *a, **k: None
+    fc._warn_notes = []
+    fc._record_search_priority_warnings(
+        "source",
+        [{
+            "search_term": "MTe07",
+            "matched_column": "flywireType",
+            "match_count": 2,
+        }],
+    )
+    fc._write_user_warning_notes(str(tmp_path))
+    text = (tmp_path / "user_warning_notes.txt").read_text(encoding="utf-8")
+    assert '[search priority] source query "MTe07" resolved via "flywireType"' in text
 
 
 def test_write_user_warning_notes_skipped_when_nothing_applies(tmp_path):

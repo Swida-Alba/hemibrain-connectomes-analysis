@@ -119,3 +119,44 @@ def test_priority_columns_leave_measurements_in_source_order():
         "size", "celltypePredictedNtConfidence", "celltypeTotalNtPredictions",
         "notes",
     ]
+
+
+def test_search_cache_is_distinct_and_presorted_by_viewer_priority():
+    from src.neuron_index_builder import build_search_cache_frame
+
+    frame = pl.DataFrame(
+        {
+            "bodyId": ["2", "1", "3"],
+            "type": ["MeVPaMe2", "aMe01", "aMe01"],
+            "instance": ["MeVPaMe2_L", "aMe01_L", ""],
+            "flywireType": ["aMe19a", "", "aMe01"],
+            "post": [1, 2, 3],
+        }
+    )
+
+    cache = build_search_cache_frame(frame)
+
+    assert cache.columns == [
+        "search_column", "search_priority", "search_value",
+        "search_value_folded", "__neuron_rows",
+    ]
+    columns_by_priority = (
+        cache.group_by("search_column")
+        .agg(pl.col("search_priority").first())
+        .sort("search_priority")["search_column"]
+        .to_list()
+    )
+    assert columns_by_priority == [
+        "bodyId", "type", "instance", "flywireType",
+    ]
+    type_a_me = cache.filter(
+        (pl.col("search_column") == "type")
+        & (pl.col("search_value") == "aMe01")
+    )
+    assert type_a_me.height == 1
+    assert type_a_me["__neuron_rows"].to_list() == [[1, 2]]
+    ordered = cache.select(["search_priority", "search_value"]).to_dicts()
+    assert ordered == sorted(
+        ordered,
+        key=lambda row: (row["search_priority"], row["search_value"]),
+    )

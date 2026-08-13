@@ -41,6 +41,22 @@ def _write_priority_index(tmp_path, dataset="priority:v1.0"):
     return dataset
 
 
+def _write_paged_index(tmp_path, dataset="paged:v1.0", row_count=60):
+    folder = dataset.replace(":", "_").replace(".", "_")
+    cache_dir = tmp_path / "cache" / folder
+    cache_dir.mkdir(parents=True)
+    index_path = cache_dir / "neuron_index.parquet"
+    pl.DataFrame(
+        {
+            "bodyId": [str(1000 + i) for i in range(row_count)],
+            "type": [f"aMe{i:03d}" for i in range(row_count)],
+            "instance": [f"aMe{i:03d}_L" for i in range(row_count)],
+            "post": list(range(row_count)),
+        }
+    ).write_parquet(index_path)
+    return dataset
+
+
 @pytest.fixture
 def isolated_index_root(tmp_path, monkeypatch):
     import ui.neuron_index as neuron_index
@@ -52,6 +68,17 @@ def isolated_index_root(tmp_path, monkeypatch):
 
 
 class TestNeuronIndexData:
+    def test_hit_rendering_marks_only_matching_characters_and_escapes_values(self):
+        from ui.neuron_index import _highlight_text_html
+
+        rendered = _highlight_text_html("MeVPaMe2_L <note>", "aMe", "global")
+
+        assert rendered == (
+            "MeVP"
+            '<mark class="drocat-neuron-match-text">aMe</mark>'
+            "2_L &lt;note&gt;"
+        )
+
     def test_viewer_requires_cached_index_even_when_metadata_table_exists(
         self, isolated_index_root
     ):
@@ -125,8 +152,207 @@ class TestNeuronIndexData:
         )
         assert column_filtered.rows[0]["match_column"] == "type"
 
+        # A filter value without a selected target must not become a second
+        # global search, so it cannot interfere with the main search.
+        no_target = query_neuron_index(index, filter_text="APL")
+        assert no_target.total == 4
+
         body_sorted = query_neuron_index(index, sort_by="bodyId", page_size=4)
         assert [row["bodyId"] for row in body_sorted.rows] == ["100", "200", "300", "400"]
+
+    def test_focus_key_returns_page_for_match_value_jump(self, isolated_index_root):
+        from ui.neuron_index import load_cached_neuron_index, query_neuron_index
+
+        dataset = _write_paged_index(isolated_index_root, row_count=60)
+        index = load_cached_neuron_index(dataset, enrich=False)
+        result = query_neuron_index(
+            index,
+            search="aMe",
+            page_size=10,
+            focus_key="1050::50",
+        )
+
+        assert result.focus_page == 6
+        assert result.page == 1
+        focused = query_neuron_index(index, search="aMe", page=6, page_size=10)
+        assert focused.rows[0]["bodyId"] == "1050"
+
+    def test_global_search_returns_prefixes_then_substring_matches(
+        self, isolated_index_root
+    ):
+        """The viewer keeps every match, with strict prefixes at the top."""
+        from ui.neuron_index import load_cached_neuron_index, query_neuron_index
+
+        dataset = "prefix-and-substring:v1.0"
+        folder = dataset.replace(":", "_").replace(".", "_")
+        cache_dir = isolated_index_root / "cache" / folder
+        cache_dir.mkdir(parents=True)
+        pl.DataFrame(
+            {
+                "bodyId": ["100", "200", "300", "400", "500", "600"],
+                "type": [
+                    "aMe01", "MeVPaMe1", "Other", "aMe02", "NoMatch", "MeVPaMe2",
+                ],
+                "instance": [
+                    "aMe01_L", "MeVPaMe1_R", "aMe03_L", "aMe02_R", "aMe04_L",
+                    "MeVPaMe2_L",
+                ],
+                "flywireType": [
+                    "", "", "aMe-taxonomy", "", "aMe-taxonomy-2", "aMe19a",
+                ],
+            }
+        ).write_parquet(cache_dir / "neuron_index.parquet")
+
+        index = load_cached_neuron_index(dataset, enrich=False)
+        result = query_neuron_index(index, search="aMe", page_size=20)
+
+        # Results are grouped by bodyId → type → instance → taxonomy. Within
+        # each field priority, strict prefixes precede substring matches.
+        assert result.total == 6
+        assert [row["bodyId"] for row in result.rows] == [
+            "100", "400", "200", "600", "300", "500",
+        ]
+        assert [row["match_column_key"] for row in result.rows] == [
+            "type", "type", "type", "type", "instance", "instance",
+        ]
+        type_substring_row = next(
+            row for row in result.rows if row["bodyId"] == "200"
+        )
+        assert type_substring_row["type"] == "MeVPaMe1"
+        assert type_substring_row["match_value"] == "MeVPaMe1"
+        secondary_row = next(row for row in result.rows if row["bodyId"] == "600")
+        assert secondary_row["match_column_keys"] == [
+            "type", "instance", "flywireType",
+        ]
+        assert secondary_row["secondary_match_column_keys"] == [
+            "flywireType",
+        ]
+        assert secondary_row["secondary_match_values"] == [
+            "aMe19a",
+        ]
+        assert '<mark class="drocat-neuron-match-text">aMe</mark>' in (
+            secondary_row["__highlighted_cells"]["instance"]
+        )
+        assert '<mark class="drocat-neuron-match-text">aMe</mark>' in (
+            secondary_row["__highlighted_cells"]["flywireType"]
+        )
+        match_values = {group["match_value"] for group in result.match_groups}
+        assert {"MeVPaMe1", "MeVPaMe2"}.issubset(match_values)
+        assert "MeVPaMe2_L" not in match_values
+        mevpa2_group = next(
+            group for group in result.match_groups
+            if group["match_value"] == "MeVPaMe2"
+        )
+        assert mevpa2_group["match_column_key"] == "type"
+        assert mevpa2_group["match_role"] == "primary"
+        assert mevpa2_group["first_body_id"] == "600"
+        assert mevpa2_group["body_count"] == 1
+        assert result.match_group_body_ids["MeVPaMe2"] == ("600",)
+        assert result.match_group_related["MeVPaMe2"] == (
+            "MeVPaMe2", "aMe19a",
+        )
+        assert result.match_group_primary["MeVPaMe2"] == ("MeVPaMe2",)
+        ordered_match_values = [
+            group["match_value"] for group in result.match_groups
+        ]
+        assert ordered_match_values == [
+            "aMe01", "aMe02", "MeVPaMe1", "MeVPaMe2", "aMe19a",
+            "aMe03_L", "aMe-taxonomy", "aMe04_L", "aMe-taxonomy-2",
+        ]
+        assert ordered_match_values.index("aMe19a") == (
+            ordered_match_values.index("MeVPaMe2") + 1
+        )
+        assert next(
+            group for group in result.match_groups
+            if group["match_value"] == "aMe19a"
+        )["match_role"] == "secondary"
+
+        scoped_prefix = query_neuron_index(
+            index,
+            search="aMe",
+            search_column="type",
+            search_operator="prefix",
+            page_size=20,
+        )
+        assert scoped_prefix.total == 2
+        assert [row["bodyId"] for row in scoped_prefix.rows] == ["100", "400"]
+        assert all(row["match_column_key"] == "type" for row in scoped_prefix.rows)
+
+        scoped_contains = query_neuron_index(
+            index,
+            search="aMe",
+            search_column="type",
+            search_operator="contains",
+            page_size=20,
+        )
+        assert scoped_contains.total == 4
+        assert [row["bodyId"] for row in scoped_contains.rows] == [
+            "100", "400", "200", "600",
+        ]
+        assert all(row["match_column_key"] == "type" for row in scoped_contains.rows)
+
+    def test_column_filter_operators_are_targeted_and_anded_with_global_search(
+        self, isolated_index_root
+    ):
+        from ui.neuron_index import load_cached_neuron_index, query_neuron_index
+
+        dataset, _, _ = _write_index(isolated_index_root, "operators:v1.0")
+        index = load_cached_neuron_index(dataset, enrich=False)
+
+        prefix = query_neuron_index(
+            index,
+            filter_column="type",
+            filter_text="aMe",
+            filter_operator="starts_with",
+            page_size=10,
+        )
+        assert [row["type"] for row in prefix.rows] == ["aMe10", "aMe12"]
+
+        suffix = query_neuron_index(
+            index,
+            filter_column="instance",
+            filter_text="_L",
+            filter_operator="ends with",
+            page_size=10,
+        )
+        assert [row["bodyId"] for row in suffix.rows] == ["400"]
+
+        exact = query_neuron_index(
+            index,
+            filter_column="type",
+            filter_text="APL",
+            filter_operator="exact",
+            page_size=10,
+        )
+        assert [row["bodyId"] for row in exact.rows] == ["300"]
+
+        contains = query_neuron_index(
+            index,
+            filter_column="type",
+            filter_text="ME10",
+            filter_operator="contains",
+            page_size=10,
+        )
+        assert [row["bodyId"] for row in contains.rows] == ["200"]
+
+        regex = query_neuron_index(
+            index,
+            filter_column="type",
+            filter_text=r"^aMe1[02]$",
+            filter_operator="regex",
+            page_size=10,
+        )
+        assert [row["bodyId"] for row in regex.rows] == ["200", "400"]
+
+        combined = query_neuron_index(
+            index,
+            search="aMe",
+            filter_column="instance",
+            filter_text="_R",
+            filter_operator="suffix",
+            page_size=10,
+        )
+        assert [row["bodyId"] for row in combined.rows] == ["200"]
 
     def test_search_results_default_to_matched_value_ascending(
         self, isolated_index_root
@@ -194,6 +420,216 @@ class TestNeuronIndexData:
             "aMe-body", "aMe-a", "aMe-z", "aMe-a-instance", "aMe-z-instance",
         ]
 
+    def test_broad_prefix_group_membership_keeps_large_duplicate_group_complete(
+        self, isolated_index_root
+    ):
+        """A broad prefix must not degrade while deduplicating body membership."""
+        from ui.neuron_index import load_cached_neuron_index, query_neuron_index
+
+        dataset = "broad:v1.0"
+        folder = dataset.replace(":", "_").replace(".", "_")
+        cache_dir = isolated_index_root / "cache" / folder
+        cache_dir.mkdir(parents=True)
+        row_count = 2000
+        pl.DataFrame(
+            {
+                "bodyId": [str(10000 + i) for i in range(row_count)],
+                "type": ["a"] * row_count,
+                "instance": [""] * row_count,
+                "post": list(range(row_count)),
+            }
+        ).write_parquet(cache_dir / "neuron_index.parquet")
+
+        index = load_cached_neuron_index(dataset, enrich=False)
+        result = query_neuron_index(index, search="a", page_size=10)
+
+        assert result.total == row_count
+        group = next(
+            group for group in result.match_groups
+            if group["match_value"] == "a"
+        )
+        assert group["body_count"] == row_count
+        assert len(result.match_group_members["a"]) == row_count
+        assert len(result.match_group_body_ids["a"]) == row_count
+
+    def test_shared_match_stage_deduplicates_names_and_verifies_body_ids(
+        self, isolated_index_root
+    ):
+        from ui.neuron_index import load_cached_neuron_index, query_neuron_index
+
+        dataset = "shared:v1.0"
+        folder = dataset.replace(":", "_").replace(".", "_")
+        cache_dir = isolated_index_root / "cache" / folder
+        cache_dir.mkdir(parents=True)
+        pl.DataFrame(
+            {
+                "bodyId": ["100", "200", "not-a-body"],
+                "type": ["aMeType", "aMeOther", "NoDigits"],
+                "instance": ["", "aMeType", "NoDigits_1"],
+            }
+        ).write_parquet(cache_dir / "neuron_index.parquet")
+
+        index = load_cached_neuron_index(dataset, enrich=False)
+        result = query_neuron_index(index, search="ME", page_size=1)
+
+        # The lower/upper-case query has no strict prefix, so the shared
+        # matcher uses its case-insensitive substring stage. A matched value
+        # is deduplicated by its matched column: a type selection must not
+        # absorb a row where the same spelling only occurs in instance.
+        assert result.total == 2
+        assert {group["match_value"] for group in result.match_groups} == {
+            "aMeOther", "aMeType",
+        }
+        type_group = next(
+            group for group in result.match_groups
+            if group["match_value"] == "aMeType"
+        )
+        assert type_group["body_count"] == 1
+        assert set(result.match_group_members["aMeType"]) == {
+            "100::0",
+        }
+
+        strict = query_neuron_index(index, search="aMe", page_size=10)
+        strict_group = next(
+            group for group in strict.match_groups
+            if group["match_value"] == "aMeType"
+        )
+        assert strict_group["body_count"] == 1
+        assert set(strict.match_group_members["aMeType"]) == {
+            "100::0",
+        }
+
+        # A numeric query is guarded to bodyId; it must not match the text
+        # “NoDigits” or a type/instance containing the same digits.
+        numeric = query_neuron_index(index, search="1", page_size=10)
+        assert [row["bodyId"] for row in numeric.rows] == ["100"]
+        assert numeric.rows[0]["match_column_key"] == "bodyId"
+
+    def test_viewer_returns_all_prefix_columns_while_suggestions_stay_type_first(
+        self, isolated_index_root
+    ):
+        from ui.neuron_index import load_cached_neuron_index, query_neuron_index
+        from ui.type_suggestions import match_suggestions
+
+        dataset = "cross-fields:v1.0"
+        folder = dataset.replace(":", "_").replace(".", "_")
+        cache_dir = isolated_index_root / "cache" / folder
+        cache_dir.mkdir(parents=True)
+        frame = pl.DataFrame(
+            {
+                "bodyId": ["100", "200", "300", "400"],
+                "type": ["MTe01a", "", "", "Other"],
+                "instance": ["MTe01a_L", "MTe02_L", "", ""],
+                "flywireType": ["MTe01a", "MTe02", "MTe03", "MTe04"],
+            }
+        )
+        frame.write_parquet(cache_dir / "neuron_index.parquet")
+
+        index = load_cached_neuron_index(dataset, enrich=False)
+        result = query_neuron_index(index, search="MTe", page_size=20)
+        assert result.total == 4
+        assert [group["match_value"] for group in result.match_groups] == [
+            "MTe01a", "MTe02_L", "MTe02", "MTe03", "MTe04",
+        ]
+        assert [row["match_column_key"] for row in result.rows] == [
+            "type", "instance", "flywireType", "flywireType",
+        ]
+
+        pools = {
+            "type": [("MTe01a", "type"), ("Other", "type")],
+            "instance": [("MTe01a_L", "instance"), ("MTe02_L", "instance")],
+            "flywireType": [
+                ("MTe01a", "flywireType"),
+                ("MTe02", "flywireType"),
+                ("MTe03", "flywireType"),
+                ("MTe04", "flywireType"),
+            ],
+        }
+        assert match_suggestions("MTe", pools, limit=None) == [
+            ("MTe01a", "type"),
+        ]
+        assert match_suggestions(
+            "MTe", pools, limit=None, all_prefix_matches=True
+        ) == [
+            ("MTe01a", "type"),
+            ("MTe01a_L", "instance"),
+            ("MTe02_L", "instance"),
+            ("MTe01a", "flywireType"),
+            ("MTe02", "flywireType"),
+            ("MTe03", "flywireType"),
+            ("MTe04", "flywireType"),
+        ]
+
+    def test_viewer_prefix_union_matches_authoritative_metadata_and_exact_resolution(
+        self, isolated_index_root
+    ):
+        import pandas as pd
+        from src.statvis import _process_single_neuron
+        from ui.neuron_index import load_cached_neuron_index, query_neuron_index
+        from ui.type_suggestions import match_suggestions
+
+        dataset = "authoritative:v1.0"
+        folder = dataset.replace(":", "_").replace(".", "_")
+        cache_dir = isolated_index_root / "cache" / folder
+        cache_dir.mkdir(parents=True)
+        source = pd.DataFrame(
+            {
+                "bodyId": ["100", "200", "300", "400", "500"],
+                "type": ["MTe01a", "", "", "Other", ""],
+                "instance": ["", "", "", "", "MTe05_L"],
+                "flywireType": ["MTe01a", "MTe02", "MTe03", "MTe04", "MTe05"],
+            }
+        )
+        pl.from_pandas(source).write_parquet(cache_dir / "neuron_index.parquet")
+
+        index = load_cached_neuron_index(dataset, enrich=False)
+        viewer = query_neuron_index(index, search="MTe", page_size=20)
+        search_columns = ["bodyId", "type", "instance", "flywireType"]
+        authoritative_ids = set(
+            source.loc[
+                source[search_columns].astype(str).apply(
+                    lambda column: column.str.startswith("MTe")
+                ).any(axis=1),
+                "bodyId",
+            ]
+        )
+        viewer_ids = {
+            body_id
+            for body_ids in viewer.match_group_body_ids.values()
+            for body_id in body_ids
+        }
+        assert viewer_ids == authoritative_ids
+
+        pools = {
+            column: [(value, column) for value in sorted(source[column].unique()) if value]
+            for column in search_columns[1:]
+        }
+        assert match_suggestions("MTe", pools, limit=None) == [("MTe01a", "type")]
+
+        prefix_ids, prefix_info = _process_single_neuron(
+            "MTe.*", source, source["bodyId"].tolist(),
+            verbose=False, search_columns="auto",
+        )
+        # The viewer remains broad and exposes all authoritative cross-column
+        # hits. The analysis resolver intentionally stops at the first type
+        # column with a prefix match.
+        assert set(str(value) for value in prefix_ids) == {"100"}
+        assert prefix_info["matched_column"] == "type"
+
+        # The viewer displays names, but its selection resolution is exact:
+        # feeding those resolved IDs through the real metadata resolver gives
+        # exactly the same rows, with no column-priority collision.
+        resolved_ids = sorted(viewer_ids)
+        real_ids = []
+        body_ids = source["bodyId"].tolist()
+        for body_id in resolved_ids:
+            matches, info = _process_single_neuron(
+                body_id, source, body_ids, verbose=False, search_columns="auto"
+            )
+            assert info["matched_column"] == "bodyId"
+            real_ids.extend(str(value) for value in matches)
+        assert set(real_ids) == authoritative_ids
+
     def test_load_refreshes_when_progress_sidecar_changes(self, isolated_index_root):
         from ui.neuron_index import (
             load_cached_neuron_index,
@@ -219,6 +655,43 @@ class TestNeuronIndexData:
         row = second.frame.filter(pl.col("bodyId") == "100").row(0, named=True)
         assert row["downstream_complete"] is False
         assert row["connection_count"] == 17
+
+    def test_viewer_loads_presorted_search_sidecar_and_keeps_query_order(
+        self, isolated_index_root
+    ):
+        from src.neuron_index_builder import build_search_cache_frame, search_cache_path
+        from ui.neuron_index import load_cached_neuron_index, query_neuron_index
+
+        dataset = _write_priority_index(isolated_index_root)
+        folder = dataset.replace(":", "_").replace(".", "_")
+        index_path = isolated_index_root / "cache" / folder / "neuron_index.parquet"
+        source = pl.read_parquet(index_path)
+        build_search_cache_frame(source).write_parquet(search_cache_path(index_path))
+
+        index = load_cached_neuron_index(dataset, enrich=False)
+        assert "__neuron_rows" in index.search_frame.columns
+        result = query_neuron_index(index, search="ame", page_size=10)
+        assert [row["match_value"] for row in result.rows] == [
+            "aMe-body", "aMe-type", "aMe-instance", "aMe-other",
+        ]
+        assert [row["match_column_key"] for row in result.rows] == [
+            "bodyId", "type", "instance", "flywireType",
+        ]
+
+    def test_presorted_search_with_no_hits_keeps_exploded_hit_schema(
+        self, isolated_index_root
+    ):
+        """A valid query with no matches must not crash the sidecar path."""
+        from ui.neuron_index import load_cached_neuron_index, query_neuron_index
+
+        dataset = _write_priority_index(isolated_index_root)
+        index = load_cached_neuron_index(dataset, enrich=False)
+
+        result = query_neuron_index(index, search="not-present-anywhere")
+
+        assert result.total == 0
+        assert result.rows == []
+        assert result.match_groups == []
 
 
 class TestNeuronIndexViewer:
@@ -251,8 +724,21 @@ class TestNeuronIndexViewer:
             getattr(el, "_props", {}).get("label") for el in client.elements.values()
         ]
         assert "Search identities & taxonomy" in labels
-        assert "Filter column" in labels
+        assert "Target column" in labels
+        assert "Match mode" in labels
+        assert "Target column value" not in labels
         assert "Sort by" in labels
+        search_fields = [
+            element for element in client.elements.values()
+            if "drocat-neuron-search-field" in getattr(element, "_classes", set())
+        ]
+        assert len(search_fields) == 6
+        assert all(field._props.get("outlined") is True for field in search_fields)
+        toolbar = next(
+            element for element in client.elements.values()
+            if "drocat-neuron-search-toolbar" in getattr(element, "_classes", set())
+        )
+        assert toolbar._classes
         tables = [el for el in client.elements.values() if type(el).__name__ == "Table"]
         assert len(tables) == 2
         match_table = next(
@@ -266,14 +752,143 @@ class TestNeuronIndexViewer:
         assert match_table._props["columns"][0]["label"] == "Matched by"
         assert match_table._props["columns"][1]["name"] == "match_value"
         assert match_table._props["columns"][1]["label"] == "Matched value"
+        assert match_table._props["columns"][2]["name"] == "body_count"
+        assert "body" in match_table.slots
+        assert "match-value-click" in match_table.slots["body"].template
+        assert "secondary" in match_table.slots["body"].template
+        assert "drocat-neuron-match-secondary-row" in match_table.slots["body"].template
+        assert "arrow_right_alt" in match_table.slots["body"].template
+        assert "first_body_id" in match_table.slots["body"].template
         assert full_table._props["columns"][0]["name"] == "bodyId"
+        assert full_table._props["selection"] == "multiple"
         assert "match_column" not in {
             column["name"] for column in full_table._props["columns"]
         }
         assert "body" in full_table.slots
         assert "drocat-neuron-hit-cell" in full_table.slots["body"].template
+        assert "drocat-neuron-secondary-hit-cell" in full_table.slots["body"].template
+        assert "match_column_keys" in full_table.slots["body"].template
+        assert "secondary_match_column_keys" in full_table.slots["body"].template
+        assert "__highlighted_cells" in full_table.slots["body"].template
+        assert "v-html" in full_table.slots["body"].template
+        assert "data-neuron-key" in full_table.slots["body"].template
+        assert "drocat-neuron-selected-row" in full_table.slots["body"].template
+        assert ':props="props"' not in full_table.slots["body"].template.split(
+            "<q-tr", 1
+        )[1].split(">", 1)[0]
+        assert "q-checkbox" in full_table.slots["body"].template
 
-    def test_match_panel_supports_multi_select_and_appends_to_query(
+    def test_match_value_click_scrolls_the_target_row_after_page_jump(
+        self, isolated_index_root, monkeypatch
+    ):
+        from nicegui import Client
+        from nicegui.page import page
+        import ui.components.neuron_index_viewer as viewer
+        from ui.components.neuron_index_viewer import create_neuron_index_viewer_link
+
+        dataset = _write_paged_index(isolated_index_root, row_count=60)
+        monkeypatch.setattr(viewer, "PROJECT_ROOT", isolated_index_root)
+        scripts = []
+        monkeypatch.setattr(viewer.ui, "run_javascript", scripts.append)
+
+        client = Client(page("/neuron-index-viewer-row-jump"))
+        with client:
+            link = create_neuron_index_viewer_link(lambda: dataset)
+        self._click(link)
+
+        search_input = next(
+            element for element in client.elements.values()
+            if getattr(element, "_props", {}).get("label")
+            == "Search identities & taxonomy"
+        )
+        search_listener = next(iter(search_input._event_listeners.values()))
+        search_input._handle_event({
+            "listener_id": search_listener.id,
+            "args": "aMe",
+        })
+
+        tables = [el for el in client.elements.values() if type(el).__name__ == "Table"]
+        match_table = next(
+            table for table in tables
+            if table._props["columns"][0]["name"] == "match_column"
+        )
+        match_next = next(
+            element for element in client.elements.values()
+            if getattr(element, "text", "") == "Next matches"
+        )
+        self._click(match_next)
+        target = next(
+            row for row in match_table._props["rows"]
+            if row["match_value"] == "aMe050"
+        )
+        click_listener = next(
+            listener for listener in match_table._event_listeners.values()
+            if listener.type == "matchValueClick"
+        )
+        match_table._handle_event({
+            "listener_id": click_listener.id,
+            "args": target,
+        })
+
+        assert any("scrollIntoView" in script for script in scripts)
+        assert any("1050::50" in script for script in scripts)
+        full_table = next(
+            table for table in tables
+            if table._props["columns"][0]["name"] == "bodyId"
+        )
+        assert full_table._props["rows"][0]["bodyId"] == "1050"
+
+    def test_broad_search_bounds_match_panel_payload_without_dropping_rows(
+        self, isolated_index_root, monkeypatch
+    ):
+        from nicegui import Client
+        from nicegui.page import page
+        import ui.components.neuron_index_viewer as viewer
+        from ui.components.neuron_index_viewer import (
+            MATCH_GROUP_PAGE_SIZE,
+            create_neuron_index_viewer_link,
+        )
+
+        dataset = _write_paged_index(isolated_index_root, row_count=300)
+        monkeypatch.setattr(viewer, "PROJECT_ROOT", isolated_index_root)
+
+        client = Client(page("/neuron-index-viewer-broad-search"))
+        with client:
+            link = create_neuron_index_viewer_link(lambda: dataset)
+        self._click(link)
+
+        search_input = next(
+            element for element in client.elements.values()
+            if getattr(element, "_props", {}).get("label")
+            == "Search identities & taxonomy"
+        )
+        search_listener = next(iter(search_input._event_listeners.values()))
+        search_input._handle_event({
+            "listener_id": search_listener.id,
+            "args": "a",
+        })
+
+        tables = [el for el in client.elements.values() if type(el).__name__ == "Table"]
+        match_table = next(
+            table for table in tables
+            if table._props["columns"][0]["name"] == "match_column"
+        )
+        full_table = next(
+            table for table in tables
+            if table._props["columns"][0]["name"] == "bodyId"
+        )
+        assert len(match_table._props["rows"]) == MATCH_GROUP_PAGE_SIZE
+        assert len(full_table._props["rows"]) == 50
+        status_text = [
+            getattr(element, "text", "")
+            for element in client.elements.values()
+            if "matched names" in getattr(element, "text", "")
+        ]
+        assert status_text == [
+            "Showing 1–50 of 300 matched names"
+        ]
+
+    def test_match_panel_deduplicates_and_syncs_query_selection(
         self, isolated_index_root, monkeypatch
     ):
         from nicegui import Client
@@ -283,25 +898,40 @@ class TestNeuronIndexViewer:
 
         dataset, _, _ = _write_index(isolated_index_root)
         monkeypatch.setattr(viewer, "PROJECT_ROOT", isolated_index_root)
+        scripts = []
+        monkeypatch.setattr(viewer.ui, "run_javascript", scripts.append)
         current_query = ["existing"]
-        added_batches = []
+        selection_batches = []
+        resolution_batches = []
 
-        def add_to_query(values):
-            added_batches.append(list(values))
-            for value in values:
-                if value not in current_query:
-                    current_query.append(value)
-            return len(values)
+        def sync_query(values):
+            selection_batches.append(list(values))
+            current_query[:] = ["existing", *values]
+
+        def sync_resolution(values):
+            resolution_batches.append(list(values))
 
         client = Client(page("/neuron-index-viewer-selection"))
         with client:
             link = create_neuron_index_viewer_link(
                 lambda: dataset,
                 query_values_getter=lambda: current_query,
-                add_to_query=add_to_query,
+                query_selection=sync_query,
+                query_resolution=sync_resolution,
                 query_label="Source Neurons",
             )
         self._click(link)
+
+        search_input = next(
+            element for element in client.elements.values()
+            if getattr(element, "_props", {}).get("label")
+            == "Search identities & taxonomy"
+        )
+        search_listener = next(iter(search_input._event_listeners.values()))
+        search_input._handle_event({
+            "listener_id": search_listener.id,
+            "args": "ame",
+        })
 
         tables = [el for el in client.elements.values() if type(el).__name__ == "Table"]
         match_table = next(
@@ -309,21 +939,36 @@ class TestNeuronIndexViewer:
             if table._props["columns"][0]["name"] == "match_column"
         )
         assert match_table._props["selection"] == "multiple"
-
-        add_button = next(
-            el for el in client.elements.values()
-            if getattr(el, "text", "") == "Add selected to query"
+        full_table = next(
+            table for table in tables
+            if table._props["columns"][0]["name"] == "bodyId"
         )
-        selected = [
-            {"bodyId": "100", "match_value": "aMe10"},
-            {"bodyId": "200", "match_value": "aMe12"},
+        assert [row["match_value"] for row in match_table._props["rows"]] == [
+            "aMe10", "aMe12",
         ]
-        match_table._selection_handlers[0](SimpleNamespace(selection=selected))
-        self._click(add_button)
+        assert [row["body_count"] for row in match_table._props["rows"]] == [1, 1]
+        assert not any(
+            getattr(el, "text", "") == "Add selected to query"
+            for el in client.elements.values()
+        )
+        assert not any(
+            "per visible row" in getattr(el, "text", "")
+            for el in client.elements.values()
+        )
 
-        expected = [row["match_value"] for row in selected]
-        assert added_batches == [expected]
-        assert current_query == ["existing", *expected]
+        selected_groups = [
+            match_table._props["rows"][0],
+            match_table._props["rows"][1],
+        ]
+        match_table._selection_handlers[0](SimpleNamespace(selection=selected_groups))
+
+        assert selection_batches[-1] == ["aMe10", "aMe12"]
+        assert resolution_batches[-1] == ["200", "400"]
+        assert current_query == ["existing", "aMe10", "aMe12"]
+        assert {
+            str(row["bodyId"]) for row in full_table.selected
+        } == {"200", "400"}
+        assert any("scrollIntoView" in script for script in scripts)
         assert any(
             getattr(el, "text", "") == "Current query · Source Neurons"
             for el in client.elements.values()
@@ -334,6 +979,341 @@ class TestNeuronIndexViewer:
             if "drocat-neuron-query-chip" in getattr(el, "_classes", set())
         ]
         assert preview_text == current_query
+
+        # Deselecting the side-panel groups removes viewer-owned values.
+        match_table._selection_handlers[0](SimpleNamespace(selection=[]))
+        assert selection_batches[-1] == []
+        assert resolution_batches[-1] == []
+        assert current_query == ["existing"]
+
+        # A table checkbox selects one bodyId, not the shared matched name;
+        # clearing it removes that viewer-owned body ID again.
+        full_table._selection_handlers[0](
+            SimpleNamespace(selection=[full_table._props["rows"][0]])
+        )
+        assert selection_batches[-1] == ["200"]
+        assert resolution_batches[-1] == ["200"]
+        assert [str(row["bodyId"]) for row in full_table.selected] == ["200"]
+        full_table._selection_handlers[0](SimpleNamespace(selection=[]))
+        assert selection_batches[-1] == []
+        assert resolution_batches[-1] == []
+
+    def test_overlapping_match_groups_resolve_to_deduplicated_body_ids(
+        self, isolated_index_root, monkeypatch
+    ):
+        from nicegui import Client
+        from nicegui.page import page
+        import ui.components.neuron_index_viewer as viewer
+        from ui.components.neuron_index_viewer import create_neuron_index_viewer_link
+
+        dataset = "overlapping-groups:v1.0"
+        folder = dataset.replace(":", "_").replace(".", "_")
+        cache_dir = isolated_index_root / "cache" / folder
+        cache_dir.mkdir(parents=True)
+        pl.DataFrame(
+            {
+                "bodyId": ["1", "2", "3"],
+                "type": ["MeVPaMe2", "MeVPaMe2", "Other"],
+                "instance": ["MeVPaMe2_L", "MeVPaMe2_R", ""],
+                "flywireType": ["aMe19a", "aMe19a", ""],
+            }
+        ).write_parquet(cache_dir / "neuron_index.parquet")
+        monkeypatch.setattr(viewer, "PROJECT_ROOT", isolated_index_root)
+        monkeypatch.setattr(viewer.ui, "run_javascript", lambda script: None)
+
+        current_query = []
+        resolved_ids = []
+        client = Client(page("/neuron-index-viewer-overlapping-selection"))
+        with client:
+            link = create_neuron_index_viewer_link(
+                lambda: dataset,
+                query_selection=lambda values: current_query.__setitem__(
+                    slice(None), list(values)
+                ),
+                query_resolution=lambda values: resolved_ids.__setitem__(
+                    slice(None), list(values)
+                ),
+            )
+        self._click(link)
+
+        search_input = next(
+            element for element in client.elements.values()
+            if getattr(element, "_props", {}).get("label")
+            == "Search identities & taxonomy"
+        )
+        search_listener = next(iter(search_input._event_listeners.values()))
+        search_input._handle_event({
+            "listener_id": search_listener.id,
+            "args": "aMe",
+        })
+
+        match_table = next(
+            table for table in client.elements.values()
+            if type(table).__name__ == "Table"
+            and table._props["columns"][0]["name"] == "match_column"
+        )
+        groups = {
+            row["match_value"]: row for row in match_table._props["rows"]
+        }
+        assert {"aMe19a", "MeVPaMe2"}.issubset(groups)
+        # MeVPaMe2 is the primary type match and aMe19a is its secondary
+        # flywireType match. They form one selection bundle, but only the
+        # primary name is sent to the owning query input.
+        match_table._selection_handlers[0](SimpleNamespace(selection=[
+            groups["MeVPaMe2"],
+        ]))
+
+        assert current_query == ["MeVPaMe2"]
+        assert {
+            row["match_value"] for row in match_table.selected
+        } == {"MeVPaMe2"}
+        match_table._selection_handlers[0](SimpleNamespace(selection=[]))
+        match_table._selection_handlers[0](SimpleNamespace(selection=[
+            groups["aMe19a"],
+        ]))
+        # Secondary rows are accessory display rows, not independently
+        # selectable. A synthetic selection event for one is ignored.
+        assert current_query == []
+        assert match_table.selected == []
+        # The earlier primary selection was explicitly cleared before the
+        # synthetic secondary event; no secondary checkbox can restore it.
+        assert resolved_ids == []
+
+    def test_independent_primary_types_do_not_cross_select_shared_taxonomy_names(
+        self, isolated_index_root, monkeypatch
+    ):
+        """A type remains independent when its spelling is secondary elsewhere."""
+        from nicegui import Client
+        from nicegui.page import page
+        import ui.components.neuron_index_viewer as viewer
+        from ui.components.neuron_index_viewer import create_neuron_index_viewer_link
+
+        dataset = "independent-groups:v1.0"
+        folder = dataset.replace(":", "_").replace(".", "_")
+        cache_dir = isolated_index_root / "cache" / folder
+        cache_dir.mkdir(parents=True)
+        pl.DataFrame(
+            {
+                "bodyId": ["1", "2", "3", "4"],
+                "type": ["aMe17a", "aMe17e", "aMe17a", "aMe17e"],
+                "instance": [
+                    "aMe17a_L", "aMe17e_L", "aMe17a_R", "aMe17e_R",
+                ],
+                "flywireType": [
+                    "aMe17a1", "aMe17a2", "aMe17a1", "aMe17a2",
+                ],
+                "hemibrainType": ["", "aMe17a", "", "aMe17a"],
+            }
+        ).write_parquet(cache_dir / "neuron_index.parquet")
+        monkeypatch.setattr(viewer, "PROJECT_ROOT", isolated_index_root)
+        monkeypatch.setattr(viewer.ui, "run_javascript", lambda script: None)
+
+        current_query = []
+        resolved_ids = []
+        client = Client(page("/neuron-index-viewer-independent-selection"))
+        with client:
+            link = create_neuron_index_viewer_link(
+                lambda: dataset,
+                query_selection=lambda values: current_query.__setitem__(
+                    slice(None), list(values)
+                ),
+                query_resolution=lambda values: resolved_ids.__setitem__(
+                    slice(None), list(values)
+                ),
+            )
+        self._click(link)
+
+        search_input = next(
+            element for element in client.elements.values()
+            if getattr(element, "_props", {}).get("label")
+            == "Search identities & taxonomy"
+        )
+        search_listener = next(iter(search_input._event_listeners.values()))
+        search_input._handle_event({
+            "listener_id": search_listener.id,
+            "args": "aMe",
+        })
+
+        tables = [el for el in client.elements.values() if type(el).__name__ == "Table"]
+        match_table = next(
+            table for table in tables
+            if table._props["columns"][0]["name"] == "match_column"
+        )
+        full_table = next(
+            table for table in tables
+            if table._props["columns"][0]["name"] == "bodyId"
+        )
+        groups = {
+            row["match_value"]: row for row in match_table._props["rows"]
+        }
+        assert {"aMe17a", "aMe17e", "aMe17a1", "aMe17a2"} <= set(groups)
+
+        match_table._selection_handlers[0](SimpleNamespace(selection=[
+            groups["aMe17a"],
+        ]))
+        assert current_query == ["aMe17a"]
+        assert resolved_ids == ["1", "3"]
+        assert {
+            row["match_value"] for row in match_table.selected
+        } == {"aMe17a"}
+        assert {
+            str(row["bodyId"]) for row in full_table.selected
+        } == {"1", "3"}
+        assert {
+            row["match_value"] for row in match_table.selected
+        }.isdisjoint({"aMe17e", "aMe17a2"})
+
+        # Clearing the match panel selection must clear the actual selection,
+        # not merely remove chips from the mirrored query.
+        match_table._selection_handlers[0](SimpleNamespace(selection=[]))
+        assert current_query == []
+        assert resolved_ids == []
+        assert full_table.selected == []
+
+        match_table._selection_handlers[0](SimpleNamespace(selection=[
+            groups["aMe17e"],
+        ]))
+        assert current_query == ["aMe17e"]
+        assert resolved_ids == ["2", "4"]
+        assert {
+            row["match_value"] for row in match_table.selected
+        } == {"aMe17e"}
+        assert {
+            str(row["bodyId"]) for row in full_table.selected
+        } == {"2", "4"}
+
+    def test_match_selection_survives_new_search_and_query_chip_is_removable(
+        self, isolated_index_root, monkeypatch
+    ):
+        from nicegui import Client
+        from nicegui.page import page
+        import ui.components.neuron_index_viewer as viewer
+        from ui.components.neuron_index_viewer import create_neuron_index_viewer_link
+
+        dataset, _, _ = _write_index(isolated_index_root)
+        monkeypatch.setattr(viewer, "PROJECT_ROOT", isolated_index_root)
+        monkeypatch.setattr(viewer.ui, "run_javascript", lambda script: None)
+        current_query = []
+        resolved_ids = []
+
+        def sync_query(values):
+            current_query[:] = list(values)
+
+        def sync_resolution(values):
+            resolved_ids[:] = list(values)
+
+        def remove_query(value):
+            current_query[:] = [item for item in current_query if item != value]
+
+        client = Client(page("/neuron-index-viewer-persistent-selection"))
+        with client:
+            link = create_neuron_index_viewer_link(
+                lambda: dataset,
+                query_values_getter=lambda: current_query,
+                query_selection=sync_query,
+                query_resolution=sync_resolution,
+                query_remove=remove_query,
+            )
+        self._click(link)
+
+        search_input = next(
+            element for element in client.elements.values()
+            if getattr(element, "_props", {}).get("label")
+            == "Search identities & taxonomy"
+        )
+        search_listener = next(iter(search_input._event_listeners.values()))
+
+        search_input._handle_event({
+            "listener_id": search_listener.id,
+            "args": "ame",
+        })
+        tables = [el for el in client.elements.values() if type(el).__name__ == "Table"]
+        match_table = next(
+            table for table in tables
+            if table._props["columns"][0]["name"] == "match_column"
+        )
+        a_me_row = next(
+            row for row in match_table._props["rows"]
+            if row["match_value"] == "aMe10"
+        )
+        match_table._selection_handlers[0](SimpleNamespace(selection=[a_me_row]))
+        assert current_query == ["aMe10"]
+        assert resolved_ids == ["200"]
+
+        # Changing the search replaces the displayed match rows but must not
+        # clear the persistent selection or its exact body-ID resolution.
+        search_input._handle_event({
+            "listener_id": search_listener.id,
+            "args": "APL",
+        })
+        assert current_query == ["aMe10"]
+        assert resolved_ids == ["200"]
+
+        chip_remove = next(
+            element for element in client.elements.values()
+            if "drocat-neuron-query-chip-remove" in getattr(element, "_classes", set())
+        )
+        click_listener = next(
+            listener for listener in chip_remove._event_listeners.values()
+            if listener.type == "click"
+        )
+        click_listener.handler(SimpleNamespace())
+        assert current_query == []
+        assert resolved_ids == []
+
+    def test_result_page_navigation_preserves_body_selection(
+        self, isolated_index_root, monkeypatch
+    ):
+        from nicegui import Client
+        from nicegui.page import page
+        import ui.components.neuron_index_viewer as viewer
+        from ui.components.neuron_index_viewer import create_neuron_index_viewer_link
+
+        dataset = _write_paged_index(isolated_index_root)
+        monkeypatch.setattr(viewer, "PROJECT_ROOT", isolated_index_root)
+        current_query = []
+
+        def sync_query(values):
+            current_query[:] = list(values)
+
+        client = Client(page("/neuron-index-viewer-page-selection"))
+        with client:
+            link = create_neuron_index_viewer_link(
+                lambda: dataset,
+                query_selection=sync_query,
+            )
+        self._click(link)
+
+        tables = [el for el in client.elements.values() if type(el).__name__ == "Table"]
+        full_table = next(
+            table for table in tables
+            if table._props["columns"][0]["name"] == "bodyId"
+        )
+        first_row = full_table._props["rows"][0]
+        full_table._selection_handlers[0](SimpleNamespace(selection=[first_row]))
+        assert current_query == ["1000"]
+
+        next_button = next(
+            element for element in client.elements.values()
+            if getattr(element, "text", "") == "Next page"
+        )
+        self._click(next_button)
+        assert current_query == ["1000"]
+        assert not any(
+            str(row.get("bodyId")) == "1000"
+            for row in getattr(full_table, "selected", [])
+        )
+
+        previous_button = next(
+            element for element in client.elements.values()
+            if getattr(element, "text", "") == "Previous page"
+        )
+        self._click(previous_button)
+        assert current_query == ["1000"]
+        assert any(
+            str(row.get("bodyId")) == "1000"
+            for row in getattr(full_table, "selected", [])
+        )
 
     def test_link_explains_how_to_build_a_missing_cache(
         self, isolated_index_root, monkeypatch

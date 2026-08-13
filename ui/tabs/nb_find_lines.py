@@ -9,11 +9,19 @@ from ..components.common import (
 )
 from ..components.output_panel import OutputPanel
 from ..runner import ScriptRunner
+from ..type_suggestions import dataset_suggestions, datasets_suggestions
 
 
 def create_nb_find_lines_tab():
     runner = ScriptRunner()
     output_panel = OutputPanel("Driver Lines Output")
+    dataset = None
+
+    def _type_suggest(text):
+        selected = dataset.value if dataset is not None else "(all)"
+        if selected == "(all)":
+            return datasets_suggestions(text, DATASETS, limit=None)
+        return dataset_suggestions(text, selected, limit=None)
 
     form_col, results_col = tool_page(
         "Find Driver Lines",
@@ -29,6 +37,9 @@ def create_nb_find_lines_tab():
             query_input = neuron_list_input(
                 label="EM Neurons (bodyId, type, or instance)",
                 hint="Enter EM neuron identifiers. Use filter mode for pattern matching across types.",
+                suggestions=_type_suggest,
+                available_neurons=lambda: DATASETS if dataset is not None
+                and dataset.value == "(all)" else (dataset.value if dataset is not None else ""),
             )
             with param_grid(2):
                 dataset = dataset_selector(

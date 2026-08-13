@@ -2435,7 +2435,7 @@ class TestComponents:
 
     def test_neuron_list_input_suggestions_menu_and_history(self, tmp_path, monkeypatch):
         """With a suggestions provider the input replaces the native popup
-        with a custom menu: suggestions appear only after 2+ characters, show
+        with a custom menu: suggestions appear from the first character, show
         a solid value + gray column hint, commit on click; an empty focused
         field offers the persisted query history."""
         from nicegui import Client
@@ -2451,6 +2451,8 @@ class TestComponents:
         hs.record(["aMe12"], now="2026-08-11T10:05:00")
 
         def fake_suggest(text):
+            if text == "a":
+                return [("aMe12", "type"), ("aMe10", "instance")]
             if text == "ap":
                 return [("APL", "type"), ("APL2", "type")]
             return []
@@ -2479,16 +2481,21 @@ class TestComponents:
         menu = menus[-1]
         # The suggestion menu must not steal focus from the editor (typing
         # would die); NiceGUI 3.15 renders no DOM ids, so it anchors to its
-        # parent like the paste/upload menus (no target prop).
+        # private wrapper rather than a shared page target.
         assert menu._props.get("no-focus") is True
         assert menu._props.get("no-refocus") is True
-        assert "target" not in menu._props
+        assert menu._props.get("no-parent-event") is True
+        assert menu._props.get("target", "").startswith("#")
 
-        # One character is below the threshold: no suggestion menu.
+        # The cached provider is fast enough to show suggestions immediately
+        # from the first character; history is reserved for blank focus.
         chip._handle_event({"listener_id": suggest_input.id, "args": "a"})
-        assert menu.value is False
+        assert menu.value is True
+        texts = [el.text for el in client.elements.values() if getattr(el, "text", "")]
+        assert "aMe12" in texts and "aMe10" in texts
 
-        # Two characters open the custom menu with value + gray hint entries.
+        # A matching nonblank query opens the custom menu with value + gray
+        # hint entries.
         chip._handle_event({"listener_id": suggest_input.id, "args": "ap"})
         assert menu.value is True
         texts = [el.text for el in client.elements.values() if getattr(el, "text", "")]
@@ -2510,6 +2517,7 @@ class TestComponents:
         from types import SimpleNamespace
         click.handler(SimpleNamespace())
         assert container.get_value() == ("exact", ["APL"])
+
         assert menu.value is False
 
         # An empty focused field offers the persisted query history.
@@ -2520,20 +2528,71 @@ class TestComponents:
         assert "Recent" in texts
         assert "aMe12" in texts and "aMe10" in texts
 
-        # Typing the first character keeps only matching history visible,
-        # without committing it as a chip (dataset suggestions stay hidden).
+        # Typing the first character renders the cached provider's results,
+        # without committing it as a chip. History is not mixed into search.
         chip._handle_event({"listener_id": suggest_input.id, "args": "a"})
         assert menu.value is True
         texts = [el.text for el in client.elements.values() if getattr(el, "text", "")]
         assert "aMe12" in texts and "aMe10" in texts
         assert container.get_value() == ("exact", ["APL"])
 
+    def test_viewer_selection_keeps_display_name_but_executes_exact_body_ids(
+        self, monkeypatch
+    ):
+        """A viewer name cannot be re-resolved through the wrong metadata column."""
+        from nicegui import Client, ui
+        from nicegui.page import page
+        from ui.components.common import neuron_list_input
+
+        callbacks = {}
+
+        def fake_viewer_link(_dataset_getter, **kwargs):
+            callbacks.update(kwargs)
+            return ui.button("Fake available neurons")
+
+        monkeypatch.setattr(
+            "ui.components.neuron_index_viewer.create_neuron_index_viewer_link",
+            fake_viewer_link,
+        )
+
+        client = Client(page("/neuron-input-viewer-resolution"))
+        with client:
+            container = neuron_list_input(
+                label="Source Neurons",
+                available_neurons=lambda: "test:v1.0",
+            )
+
+        callbacks["query_selection"](["MTe01a"])
+        callbacks["query_resolution"](["100", "200", "300"])
+        assert container.chip_input.value == ["MTe01a"]
+        assert container.get_value() == ("exact", [100, 200, 300])
+
+        callbacks["query_selection"]([])
+        callbacks["query_resolution"]([])
+        assert container.get_value() == ("exact", [])
+
+        # If the user already has the same display name in the query, a
+        # viewer selection must still execute through its verified body IDs;
+        # deselecting restores the pre-existing name rather than deleting it.
+        container.add_values(["MTe01a"])
+        callbacks["query_selection"](["MTe01a"])
+        callbacks["query_resolution"](["100", "200"])
+        assert container.chip_input.value == ["MTe01a"]
+        assert container.get_value() == ("exact", [100, 200])
+        callbacks["query_selection"]([])
+        callbacks["query_resolution"]([])
+        assert container.get_value() == ("exact", ["MTe01a"])
+
+        # The viewer's mirrored-query close button removes the same value
+        # from the owning chip input, including a pre-existing display name.
+        callbacks["query_remove"]("MTe01a")
+        assert container.get_value() == ("exact", [])
+
     def test_neuron_list_input_suggestions_staged_typing(self, tmp_path, monkeypatch):
         """The rendered menu follows the input one character at a time.
 
-        One character prefilters the provider but shows history only; the
-        second character opens dataset suggestions, and every later edit
-        replaces the previous result set.
+        One character immediately opens dataset suggestions, and every later
+        edit replaces or narrows the previous result set.
         """
         from nicegui import Client
         from nicegui.page import page
@@ -2587,12 +2646,24 @@ class TestComponents:
         chip._handle_event({"listener_id": focus.id, "args": None})
         assert menu.value is True
 
-        # a: provider is prefiltered, but only matching history is rendered.
+        # The first QSelect click can emit a transient blur while the native
+        # editor is taking focus. The browser-side focus check marks that
+        # event as internal, so the Recent menu must stay open.
+        blur = next(l for l in chip._event_listeners.values() if l.type == "blur")
+        assert "activeElement" in (blur.js_handler or "")
+        chip._handle_event({
+            "listener_id": blur.id,
+            "args": {"still_inside": True},
+        })
+        assert menu.value is True
+
+        # a: the cached provider is rendered immediately, including all
+        # matching values returned for the one-character query.
         chip._handle_event({"listener_id": suggest_input.id, "args": "a"})
         assert calls == ["a"]
         assert menu.value is True
-        assert "AmbiguousType" not in texts()
-        assert "aMe12" in texts() and "aMe10" in texts() and "DN1p" not in texts()
+        assert "AmbiguousType" in texts()
+        assert "aMe12" in texts() and "aMap" in texts() and "DN1p" not in texts()
 
         # aM: all matching type suggestions appear with their column hints.
         chip._handle_event({"listener_id": suggest_input.id, "args": "aM"})
@@ -2811,7 +2882,10 @@ class TestComponents:
         # Focus change (no pointer in the menu) hides the list automatically
         # and does not commit anything extra.
         blur = next(l for l in chip._event_listeners.values() if l.type == "blur")
-        chip._handle_event({"listener_id": blur.id, "args": None})
+        chip._handle_event({
+            "listener_id": blur.id,
+            "args": {"still_inside": False},
+        })
         assert menu.value is False
         assert container.get_value() == ("exact", ["APL_clock"])
 

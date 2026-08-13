@@ -10,12 +10,14 @@ from ..components.common import (
 from ..components.mapping_editor import custom_grouping_block
 from ..components.output_panel import OutputPanel
 from ..runner import ScriptRunner
-from ..type_suggestions import suggestion_pool, match_suggestions
+from ..type_suggestions import datasets_suggestions
 
 
 def create_inter_dataset_tab():
     runner = ScriptRunner()
     output_panel = OutputPanel("Comparison Output")
+    datasets_select = None
+    search_columns = None
 
     def _type_suggest(text):
         """Auto-suggest across all selected datasets' type names. Type matches
@@ -25,7 +27,7 @@ def create_inter_dataset_tab():
         scope = search_columns.value if search_columns is not None else "auto"
         # Keep the complete candidate pool for local continuation filtering;
         # the input menu, not the backend matcher, limits visible rows.
-        return match_suggestions(text, suggestion_pool(ds), scope, limit=None)
+        return datasets_suggestions(text, ds, scope, limit=None)
 
     form_col, results_col = tool_page(
         "Cross-Dataset Comparison",
@@ -255,10 +257,6 @@ def create_inter_dataset_tab():
             ui.notify("Please add at least 2 datasets to compare", type="warning")
             return
 
-        # Persist the searched neurons for the auto-suggest history.
-        from ..history_store import record as _record_history
-        _record_history([str(v) for v in sources + targets])
-
         # Parse thresholds (chip values are already normalized to integers;
         # split comma-joined chips defensively in case a list was typed into
         # one chip before the run).
@@ -325,6 +323,14 @@ def create_inter_dataset_tab():
 
         result = await output_panel.run(runner, "inter_dataset", constructor_params, "run",
                                         output_dir=output_dir.value)
+
+        # Each dataset-level path analysis initializes its neuron sets before
+        # comparing them. Record only when at least one source/target pair was
+        # resolved to real neurons in that process.
+        match_info = result.get("neuron_match") or {}
+        if match_info.get("any_pair"):
+            from ..history_store import record as _record_history
+            _record_history([str(v) for v in sources + targets])
 
         output_panel.set_running(False)
         output_panel.set_status("Completed" if result["returncode"] == 0 else "Failed",

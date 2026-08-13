@@ -7,6 +7,8 @@ a focus-panel + contact-sheet workspace layout.
 
 import asyncio
 import os
+import re
+
 from nicegui import ui
 from typing import List, Optional, Callable, Tuple
 from pathlib import Path
@@ -309,7 +311,7 @@ def neuron_list_input(
     initial: Optional[List] = None,
     suggestions: Optional[Callable[[str], List[Tuple[str, str]]]] = None,
     available_neurons: Optional[Callable[[], object]] = None,
-    suggestion_min_chars: int = 2,
+    suggestion_min_chars: int = 1,
     suggestion_limit: int = 50,
 ) -> ui.element:
     """
@@ -330,15 +332,17 @@ def neuron_list_input(
     - ``suggestions``: optional provider ``typed_text -> [(value, hint)]``
       powering the auto-suggest dropdown (dataset type/instance/bodyId names
       with the searched column as a gray hint). The provider is prefiltered
-      from the first character, but dataset suggestions stay hidden until
-      ``suggestion_min_chars`` characters (default 2); below that threshold
-      only matching query history is shown. At most ``suggestion_limit``
-      entries are shown. With a provider, focusing the empty field opens the
-      persistent query history (last 10 + most frequent) and the native
+      from the first character and suggestions are shown from the first
+      character by default (``suggestion_min_chars=1``). A blank focused field
+      opens the persistent query history (last 10 + most frequent); history
+      is not mixed into a nonblank dataset search. At most
+      ``suggestion_limit`` entries are shown. With a provider, the native
       QSelect popup is replaced by the custom suggestion menu.
     - ``available_neurons``: optional zero-argument dataset getter. When
       supplied, a ``See available neurons`` link opens the rendered,
       searchable cached neuron-index viewer for the current dataset.
+      The viewer's mirrored query chips can remove values through the same
+      input when it supplies a ``query_remove`` callback.
 
     Returns container with .get_value() -> (filter_mode, neuron_list).
     """
@@ -470,28 +474,89 @@ def neuron_list_input(
                             "docs/ui_guides/input_formats.html",
                         ).classes("drocat-doc-link px-3 pb-2")
 
-        def append_to_query(values):
-            """Append viewer selections without replacing existing chips."""
+        def sync_viewer_selection(values):
+            """Synchronize viewer-owned chips without replacing user values.
+
+            The viewer sends its complete current selection on every checkbox
+            change. Values that were already in the input (or uploaded) are
+            never owned by the viewer, so deselecting a viewer group cannot
+            remove an unrelated pre-existing query chip.
+            """
             current = list(chip_input.value or [])
-            existing = {str(value) for value in current}
-            existing.update(str(value) for value in uploaded_neurons)
-            added = 0
+            previous_viewer_values = set(viewer_owned_values)
+            base = [
+                value for value in current
+                if str(value) not in previous_viewer_values
+            ]
+            base_keys = {str(value) for value in base}
+            uploaded_keys = {str(value) for value in uploaded_neurons}
+            merged = list(base)
+            owned = set()
+            selected_display = set()
             for item in values or []:
                 value = _normalize_neuron_value(item)
-                if str(value) in existing:
+                key = str(value)
+                if key in base_keys or key in uploaded_keys:
+                    # The viewer may select a value that the user already
+                    # entered. Keep the existing chip, but still mark it as
+                    # viewer-selected so execution uses the verified body IDs
+                    # supplied by the index rather than resolving the name
+                    # through a possibly colliding metadata column.
+                    selected_display.add(key)
                     continue
-                if max_items is not None and len(current) >= max_items:
+                if max_items is not None and len(merged) >= max_items:
                     break
-                current.append(value)
-                existing.add(str(value))
-                added += 1
-            sync_options(current)
+                if key in {str(existing) for existing in merged}:
+                    continue
+                merged.append(value)
+                owned.add(key)
+                selected_display.add(key)
+            viewer_owned_values.clear()
+            viewer_owned_values.update(owned)
+            viewer_selected_values.clear()
+            viewer_selected_values.update(selected_display)
+            sync_options(merged)
             _suppress_history_popup["value"] = True
             chip_input.run_method("updateInputValue", "")
-            chip_input.set_value(current)
+            chip_input.set_value(merged)
             pending_input["value"] = ""
             update_status()
-            return added
+            return len(owned)
+
+        def sync_viewer_body_selection(values):
+            """Keep exact body-ID resolution for viewer-owned display chips."""
+            viewer_owned_body_ids[:] = [
+                _normalize_neuron_value(item)
+                for item in (values or [])
+                if str(item or "").strip()
+            ]
+
+        def remove_viewer_query_value(value):
+            """Remove a value from the input when its viewer chip is closed."""
+            target = str(value or "").strip()
+            if not target:
+                return
+            uploaded_neurons[:] = [
+                item for item in uploaded_neurons
+                if str(item or "").strip() != target
+            ]
+            current = list(chip_input.value or [])
+            remaining = [
+                item for item in current
+                if str(item or "").strip() != target
+            ]
+            viewer_owned_values.discard(target)
+            viewer_selected_values.discard(target)
+            viewer_owned_body_ids[:] = [
+                item for item in viewer_owned_body_ids
+                if str(item or "").strip() != target
+            ]
+            if remaining != current:
+                _suppress_history_popup["value"] = True
+                chip_input.run_method("updateInputValue", "")
+                sync_options(remaining)
+                chip_input.set_value(remaining)
+            update_status()
 
         # Status row: live count + upload status + clear
         with ui.row().classes("w-full items-center gap-2"):
@@ -513,11 +578,16 @@ def neuron_list_input(
                         *uploaded_neurons,
                         *(chip_input.value or []),
                     ],
-                    add_to_query=append_to_query,
+                    query_selection=sync_viewer_selection,
+                    query_resolution=sync_viewer_body_selection,
+                    query_remove=remove_viewer_query_value,
                     query_label=label,
                 )
 
     pending_input = {"value": ""}
+    viewer_owned_values = set()
+    viewer_selected_values = set()
+    viewer_owned_body_ids = []
     # Bulk list changes (paste / clear) must not pop the Recent list open.
     _suppress_history_popup = {"value": False}
 
@@ -545,6 +615,9 @@ def neuron_list_input(
 
     def clear_all():
         uploaded_neurons.clear()
+        viewer_owned_values.clear()
+        viewer_selected_values.clear()
+        viewer_owned_body_ids.clear()
         _suppress_history_popup["value"] = True
         chip_input.set_value([])
         upload_label.text = ""
@@ -655,8 +728,11 @@ def neuron_list_input(
         # ``no-focus`` keeps the popup from taking the editor focus when it
         # opens. ``no-refocus`` is equally important when a second QSelect is
         # clicked: closing the first popup must not put focus back on its old
-        # editor after the new field has already been selected.
-        suggest_menu.props('no-focus no-refocus')
+        # editor after the new field has already been selected. The target
+        # wrapper normally gives QMenu its own parent-click toggle; disable
+        # that toggle because it can run after the QSelect focus event and
+        # close a history menu just opened by the server.
+        suggest_menu.props('no-focus no-refocus no-parent-event')
         suggest_menu.style("overflow-y: auto;")
 
         # Server-side closes (1-char gating, rebuilds, picks) must NOT commit
@@ -774,7 +850,14 @@ def neuron_list_input(
             _refresh_menu()
 
         def _show_history(query: str = ""):
-            from ..history_store import recent as _recent, frequent as _frequent
+            from ..history_store import (
+                frequent as _frequent,
+                prune_orphaned_custom as _prune_orphaned_custom,
+                recent as _recent,
+            )
+
+            valid_custom_labels = group_history.valid_labels()
+            _prune_orphaned_custom(valid_custom_labels)
 
             def matches_query(value: str) -> bool:
                 # History filtering follows the same strict prefix behavior
@@ -791,19 +874,18 @@ def neuron_list_input(
             if not recents and not freqs:
                 _close_suggest()
                 return
-            custom_labels = group_history.all_labels()
             suggest_menu.clear()
             with suggest_menu:
                 if recents:
                     ui.item("Recent").props("dense disabled").classes(
                         "text-caption drocat-muted")
                     for v in recents:
-                        _history_item(v, v in custom_labels)
+                        _history_item(v, v in valid_custom_labels)
                 if freqs:
                     ui.item("Frequent").props("dense disabled").classes(
                         "text-caption drocat-muted")
                     for v in freqs:
-                        _history_item(v, v in custom_labels)
+                        _history_item(v, v in valid_custom_labels)
             _refresh_menu()
 
         def _history_item(value, is_custom=False):
@@ -827,11 +909,10 @@ def neuron_list_input(
                 return
             _last_suggest_text["value"] = text
             if len(text.strip()) < suggestion_min_chars:
-                # Warm the provider's strict prefix candidate set from the
-                # first character, but deliberately render only matching
-                # history until the input is precise enough to be useful.
-                # This keeps a one-character query such as "a" responsive
-                # without dumping an ambiguous list of dataset names.
+                # This branch is configurable for callers that intentionally
+                # want a longer minimum. The default is one character, so a
+                # blank focused editor is the only default path that renders
+                # query history instead of dataset suggestions.
                 if text.strip():
                     _get_suggestions(text.strip())
                 else:
@@ -874,7 +955,16 @@ def neuron_list_input(
                 _reset_candidate_state()
                 _show_history()
 
-        def _on_suggest_blur(_event):
+        def _on_suggest_blur(event):
+            # Quasar can emit a component-level blur while it is moving focus
+            # from the QSelect shell to its internal search input. That is not
+            # a real focus change, and closing here causes the history menu to
+            # flash on the first click. The client-side blur listener waits
+            # one tick and reports whether the labelled editor still owns
+            # focus; an actual outside click reports ``still_inside=False``.
+            blur_args = getattr(event, "args", None)
+            if isinstance(blur_args, dict) and blur_args.get("still_inside"):
+                return
             if not _suggestions_enabled():
                 # The setting can be changed from the Settings tab while a
                 # menu is open. Treat the next focus change as a real blur
@@ -964,13 +1054,23 @@ def neuron_list_input(
             js_handler="() => emit(document.activeElement?.value ?? '')",
         )
         chip_input.on("focus", _on_suggest_focus)
-        chip_input.on("blur", _on_suggest_blur)
-        # Keep the lifecycle on QSelect's component-level focus/blur events.
-        # A native focusout also fires during QSelect's first internal editor
-        # handoff; treating that transient event as a real blur makes the
-        # Recent menu flash once and then disappear until the next click.
-        # The per-client menu registry above handles a QSelect-to-QSelect
-        # transition even when the old component's blur is skipped.
+        chip_input.on(
+            "blur",
+            _on_suggest_blur,
+            js_handler=(
+                "(event) => {"
+                f"const label = {json.dumps(label)};"
+                "setTimeout(() => {"
+                "const active = document.activeElement;"
+                "const stillInside = active?.getAttribute?.('aria-label') === label;"
+                "emit({still_inside: Boolean(stillInside)});"
+                "}, 0);"
+                "}"
+            ),
+        )
+        # The menu itself is not focusable, but keep its pointer guard so a
+        # suggestion click is not treated as an outside blur before its item
+        # handler commits the selected value.
         suggest_menu.on("mousedown",
                         lambda _e: _pointer_in_menu.__setitem__("value", True),
                         js_handler="(event) => emit(0)")
@@ -1004,8 +1104,16 @@ def neuron_list_input(
     update_status()
 
     def get_value():
-        combined = [normalize_neuron(item) for item in uploaded_neurons]
-        combined.extend(normalize_neuron(item) for item in (chip_input.value or []))
+        display_values = [*uploaded_neurons, *(chip_input.value or [])]
+        combined = []
+        for item in display_values:
+            # Viewer names are display-only. The corresponding verified body
+            # IDs are appended below, so a duplicated/colliding name can
+            # never trigger a second priority-based string lookup.
+            if str(item) in viewer_selected_values:
+                continue
+            combined.append(normalize_neuron(item))
+        combined.extend(viewer_owned_body_ids)
         combined = list(dict.fromkeys(combined))
         if max_items is not None:
             combined = combined[:max_items]
@@ -1346,18 +1454,41 @@ def parse_neuron_list(text: str) -> List:
 
 
 def apply_filter_mode(neurons: List, mode: str) -> List:
-    """Convert neuron list + filter mode into regex patterns for DROCAT scripts."""
-    if mode == "exact" or not mode:
-        return neurons
+    """Convert an input mode into the backend's query representation.
+
+    Exact (including a missing/unknown mode) deliberately stays a bare value;
+    :func:`statvis._process_single_neuron` treats bare values as strict,
+    case-sensitive matches.  The other UI modes are made explicit as regex
+    patterns so the backend cannot silently reinterpret an exact query as a
+    prefix or substring search.
+    """
+    normalized = str(mode or "exact").strip().lower()
+    normalized = normalized.replace(" ", "")
+    aliases = {
+        "startwith": "startswith",
+        "startswith": "startswith",
+        "endwith": "endswith",
+        "endswith": "endswith",
+        "contains": "contains",
+        "regex": "regex",
+        "exact": "exact",
+    }
+    normalized = aliases.get(normalized, "exact")
+    if normalized == "exact":
+        return list(neurons or [])
     result = []
     for n in neurons:
-        s = str(n)
-        if mode == "startswith":
+        # Starts/contains/ends-with are literal text modes.  Escape user
+        # punctuation so their backend representation cannot accidentally
+        # become a different regex query; the explicit Regex mode remains
+        # available for callers who intentionally need regular expressions.
+        s = re.escape(str(n))
+        if normalized == "startswith":
             result.append(f"{s}.*")
-        elif mode == "contains":
+        elif normalized == "contains":
             result.append(f".*{s}.*")
-        elif mode == "endswith":
-            result.append(f".*{s}")
+        elif normalized == "endswith":
+            result.append(f".*{s}$")
         else:
             result.append(s)
     return result

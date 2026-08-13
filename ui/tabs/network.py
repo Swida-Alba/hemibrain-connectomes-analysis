@@ -14,13 +14,15 @@ from ..components.common import (
 from ..components.mapping_editor import custom_grouping_block
 from ..components.output_panel import OutputPanel
 from ..runner import ScriptRunner
-from ..type_suggestions import get_dataset_pools, match_suggestions
+from ..type_suggestions import dataset_suggestions
 
 
 def create_network_tab():
     """Create the Network tab UI (FindNetwork)."""
     runner = ScriptRunner()
     output_panel = OutputPanel("Network Output")
+    dataset = None
+    search_columns = None
 
     def _type_suggest(text):
         """Auto-suggest from the selected dataset's type names. Type matches
@@ -30,7 +32,7 @@ def create_network_tab():
         scope = search_columns.value if search_columns is not None else "auto"
         # Keep the complete candidate pool for local continuation filtering;
         # the input menu, not the backend matcher, limits visible rows.
-        return match_suggestions(text, get_dataset_pools(ds), scope, limit=None)
+        return dataset_suggestions(text, ds, scope, limit=None)
 
     form_col, results_col = tool_page(
         "Network",
@@ -179,10 +181,6 @@ def create_network_tab():
             ui.notify("Please enter at least one query neuron", type="warning")
             return
 
-        # Persist the searched neurons for the auto-suggest history.
-        from ..history_store import record as _record_history
-        _record_history([str(v) for v in query])
-
         # Resolve custom grouping first: an invalid inline board aborts the
         # run before the output panel enters its running state.
         mapping_path, mapping_ok = resolve_grouping()
@@ -221,6 +219,14 @@ def create_network_tab():
 
         result = await output_panel.run(runner, "find_network", constructor_params, "find_network",
                                         output_dir=output_dir.value)
+
+        # FindNetwork initializes the queried neuron set before looking for
+        # connections. Keep a query only when that resolution found neurons;
+        # zero-match strings are not useful history entries.
+        match_info = result.get("neuron_match") or {}
+        if match_info.get("any_pair"):
+            from ..history_store import record as _record_history
+            _record_history([str(v) for v in query])
 
         output_panel.set_running(False)
         output_panel.set_status("Completed" if result["returncode"] == 0 else "Failed",

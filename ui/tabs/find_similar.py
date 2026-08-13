@@ -13,6 +13,7 @@ from ..components.common import (
 from ..components.output_panel import OutputPanel
 from ..runner import ScriptRunner
 from ..skeleton_pull import SkeletonPuller
+from ..type_suggestions import dataset_suggestions
 
 MORPH_METHODS = ["vector", "nblast"]
 MORPH_METRICS = ["cosine", "pearson"]
@@ -23,6 +24,16 @@ def create_find_similar_tab():
     runner = ScriptRunner()
     output_panel = OutputPanel("Similarity Output")
     skeleton_puller = SkeletonPuller()
+    dataset = None
+    source_dataset = None
+
+    def _morph_suggest(text):
+        dataset_name = dataset.value if dataset is not None else ""
+        return dataset_suggestions(text, dataset_name, limit=None)
+
+    def _profile_suggest(text):
+        dataset_name = source_dataset.value if source_dataset is not None else ""
+        return dataset_suggestions(text, dataset_name, limit=None)
 
     form_col, results_col = tool_page(
         "Similar Neurons",
@@ -46,6 +57,9 @@ def create_find_similar_tab():
                     placeholder="Type or upload CSV/TSV/Excel (e.g., aMe12, 1005174948)",
                     hint="Neuron types, bodyIds, or patterns. Multiple queries "
                          "are ranked independently (same search backend as pathfinding).",
+                    suggestions=_morph_suggest,
+                    available_neurons=lambda: dataset.value
+                    if dataset is not None else "",
                 )
                 with param_grid(2):
                     dataset = dataset_selector(
@@ -308,6 +322,9 @@ def create_find_similar_tab():
                     show_upload=False,
                     max_items=1,
                     hint="Single neuron type or bodyId to find similar neurons for.",
+                    suggestions=_profile_suggest,
+                    available_neurons=lambda: source_dataset.value
+                    if source_dataset is not None else "",
                 )
                 with param_grid(2):
                     source_dataset = dataset_selector(

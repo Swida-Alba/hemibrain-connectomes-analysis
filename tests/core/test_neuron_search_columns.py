@@ -57,6 +57,71 @@ def test_regex_match_finds_flywireType_in_auto():
     assert info["matched_column"] == "flywireType"
 
 
+def test_plain_queries_are_exact_and_explicit_prefixes_expand_the_family():
+    """A bare pathfinding token is exact; prefix mode is explicit."""
+    frame = pd.DataFrame({
+        "bodyId": [11, 12, 13, 14],
+        "type": ["MeVPaMe1", "MeVPaMe2", "Other", "Other"],
+        "instance": ["MeVPaMe1_L", "MeVPaMe2_R", "Other_L", "Other_R"],
+        "flywireType": ["", "", "MeVPaFly", "MeVPaTax"],
+    })
+
+    body_ids, info = _process_single_neuron(
+        "MeVPa", frame, frame["bodyId"].tolist(), verbose=False
+    )
+    assert body_ids == []
+    assert info["matched_column"] is None
+
+    body_ids, info = _process_single_neuron(
+        "MeVPa.*", frame, frame["bodyId"].tolist(), verbose=False
+    )
+    # The type column owns this prefix. Names in later columns are secondary
+    # viewer evidence, not additional pathfinding identities.
+    assert body_ids == [11, 12]
+    assert info["matched_column"] == "type"
+
+    # An explicitly prefixed query remains case-sensitive.
+    body_ids, info = _process_single_neuron(
+        "evpa.*", frame, frame["bodyId"].tolist(), verbose=False
+    )
+    assert body_ids == []
+    assert info["matched_column"] is None
+
+
+def test_startswith_union_does_not_search_arbitrary_metadata():
+    """Auto name resolution uses only the useful type/taxonomy projection."""
+    noisy = DF.copy()
+    noisy["notes"] = ["MTe-noise", "", "", "", ""]
+    body_ids, info = _process_single_neuron(
+        "MTe-noise", noisy, noisy["bodyId"].tolist(), verbose=False
+    )
+    assert body_ids == []
+    assert info["matched_column"] is None
+
+
+def test_numeric_queries_are_guarded_to_bodyid_including_regex_patterns():
+    """A numeric bodyId miss must not resolve a type with the same digits."""
+    numeric = pd.DataFrame({
+        "bodyId": [123, 124, 999],
+        "type": ["123Type", "Other", "9999Type"],
+        "instance": ["123_R", "Other_R", "9999_R"],
+        "flywireType": ["FW123", "FW124", "FW999"],
+    })
+    bids = numeric["bodyId"].tolist()
+
+    body_ids, info = _process_single_neuron(
+        "123.*", numeric, bids, verbose=False, search_columns="auto"
+    )
+    assert body_ids == [123]
+    assert info["matched_column"] == "bodyId"
+
+    body_ids, info = _process_single_neuron(
+        "9999", numeric, bids, verbose=False, search_columns="auto"
+    )
+    assert body_ids == []
+    assert info["matched_column"] is None
+
+
 def test_exact_match_still_prefers_type_in_auto():
     """A name present in `type` must resolve there, not in other columns."""
     body_ids, info = resolve("MBON01")
@@ -120,3 +185,56 @@ def test_not_found_returns_empty():
     assert body_ids == []
     assert info["matched_column"] is None
     assert info["match_count"] == 0
+
+
+def test_input_mode_reaches_backend_as_exact_or_explicit_prefix():
+    """The UI mode conversion must not silently broaden an Exact query."""
+    from ui.components.common import apply_filter_mode
+
+    exact_query = apply_filter_mode(["MeVPa"], "exact")
+    prefix_query = apply_filter_mode(["MeVPa"], "startswith")
+
+    exact_ids = []
+    for token in exact_query:
+        ids, _ = _process_single_neuron(
+            token, DF.assign(type=["MeVPaMe1", "MeVPaMe2", "Other", "Other", None]),
+            BIDS, verbose=False,
+        )
+        exact_ids.extend(ids)
+    prefix_ids = []
+    prefix_frame = DF.assign(
+        type=["MeVPaMe1", "MeVPaMe2", "Other", "Other", None]
+    )
+    for token in prefix_query:
+        ids, _ = _process_single_neuron(
+            token, prefix_frame, BIDS, verbose=False,
+        )
+        prefix_ids.extend(ids)
+
+    assert exact_query == ["MeVPa"]
+    assert exact_ids == []
+    assert set(prefix_ids) == {1, 2}
+
+
+def test_exact_and_prefix_queries_stop_before_later_type_columns():
+    """A type identity must not expand into a matching taxonomy spelling."""
+    frame = pd.DataFrame({
+        "bodyId": [101, 102, 103],
+        "type": ["aMe17a", "aMe17e", "Other"],
+        "instance": ["aMe17a_L", "aMe17e_L", "Other_L"],
+        "flywireType": ["", "", ""],
+        "hemibrainType": ["", "aMe17a", "aMe17a"],
+    })
+    body_ids = frame["bodyId"].tolist()
+
+    exact, exact_info = _process_single_neuron(
+        "aMe17a", frame, body_ids, verbose=False
+    )
+    prefix, prefix_info = _process_single_neuron(
+        "aMe17a.*", frame, body_ids, verbose=False
+    )
+
+    assert exact == [101]
+    assert prefix == [101]
+    assert exact_info["matched_column"] == "type"
+    assert prefix_info["matched_column"] == "type"

@@ -11,27 +11,38 @@ values.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import html
+import re
+from dataclasses import dataclass, field
 from datetime import date, datetime, time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from .config import PROJECT_ROOT
 from .dataset_service import dataset_to_folder
+from .search_logic import (
+    SearchStage,
+    is_numeric_search,
+    normalize_search_text,
+    ordered_search_columns,
+    search_plan,
+)
 
 try:
     from src.neuron_index_builder import (
+        build_search_cache_frame,
         metadata_columns,
         ordered_projection_columns,
-        priority_metadata_columns,
         read_metadata_projection,
+        search_cache_path,
     )
 except ImportError:
     from neuron_index_builder import (
+        build_search_cache_frame,
         metadata_columns,
         ordered_projection_columns,
-        priority_metadata_columns,
         read_metadata_projection,
+        search_cache_path,
     )
 
 
@@ -44,6 +55,7 @@ class CachedNeuronIndex:
     frame: Any  # polars.DataFrame; kept Any so importing the UI does not require Polars eagerly
     columns: Tuple[str, ...]
     enriched: bool = False
+    search_frame: Any = None  # compact presorted Polars search sidecar
 
 
 @dataclass(frozen=True)
@@ -57,17 +69,20 @@ class NeuronIndexPage:
     page_size: int
     sort_by: str
     descending: bool
+    match_groups: List[Dict[str, Any]] = field(default_factory=list)
+    match_group_members: Dict[str, Tuple[str, ...]] = field(default_factory=dict)
+    match_group_body_ids: Dict[str, Tuple[str, ...]] = field(default_factory=dict)
+    # Related match names share at least one exact result row.  The primary
+    # values are the canonical query tokens for a selected related group.
+    match_group_related: Dict[str, Tuple[str, ...]] = field(default_factory=dict)
+    match_group_primary: Dict[str, Tuple[str, ...]] = field(default_factory=dict)
+    focus_page: Optional[int] = None
 
 
 # The largest local indexes are only a few megabytes as Parquet but are read
 # by several UI clients.  Keep one process-local copy and invalidate it when
 # either the cache index or its optional metadata table changes.
 _INDEX_CACHE: Dict[Tuple, CachedNeuronIndex] = {}
-
-# Search-result priority intentionally differs from the suggestion input's
-# string-first expansion: the viewer has a stable, visible result order.
-_MATCH_PRIORITY_COLUMNS = ("bodyId", "type", "instance")
-
 
 def clear_neuron_index_cache() -> None:
     """Clear the process-local viewer cache (primarily useful for tests)."""
@@ -250,6 +265,7 @@ def load_cached_neuron_index(
 
     metadata_signature = _metadata_signature(dataset, datasets_dir) if enrich else None
     state_path = neuron_index_state_path(dataset, cache_dir)
+    search_path = search_cache_path(path)
     try:
         state_signature = (
             (str(state_path), state_path.stat().st_mtime_ns)
@@ -261,6 +277,10 @@ def load_cached_neuron_index(
             path.stat().st_mtime_ns,
             metadata_signature,
             state_signature,
+            (
+                str(search_path),
+                search_path.stat().st_mtime_ns,
+            ) if search_path.is_file() else (str(search_path), None),
             bool(enrich),
         )
     except OSError as exc:
@@ -329,12 +349,32 @@ def load_cached_neuron_index(
                 pl.col(column).cast(pl.Utf8, strict=False).fill_null("").alias(column)
             )
 
+    # Prefer the materialized compact sidecar. Older caches and test fixtures
+    # transparently receive the same structure in memory, so the matcher has
+    # one implementation and can be upgraded without rewriting the full
+    # metadata parquet from the UI process.
+    search_frame = None
+    try:
+        if search_path.is_file():
+            search_frame = pl.read_parquet(search_path)
+            required = {
+                "__neuron_rows", "search_column", "search_priority",
+                "search_value", "search_value_folded",
+            }
+            if not required.issubset(set(search_frame.columns)):
+                search_frame = None
+    except Exception:
+        search_frame = None
+    if search_frame is None:
+        search_frame = build_search_cache_frame(frame)
+
     result = CachedNeuronIndex(
         dataset=dataset,
         path=path,
         frame=frame,
         columns=tuple(frame.columns),
         enriched=enriched,
+        search_frame=search_frame,
     )
     _INDEX_CACHE[signature] = result
     # Remove old versions of this path so a rebuilt index does not accumulate
@@ -345,22 +385,204 @@ def load_cached_neuron_index(
     return result
 
 
-def _contains_expression(frame, columns: List[str], text: str):
+def _match_expression(frame, columns: List[str], text: str, mode: str):
+    """Return the Polars expression for one shared search stage."""
     import polars as pl
 
-    needle = str(text).strip().lower()
     expressions = [
-        pl.col(column)
-        .cast(pl.Utf8, strict=False)
-        .fill_null("")
-        .str.to_lowercase()
-        .str.contains(needle, literal=True)
+        _match_column_expression(frame, column, text, mode)
         for column in columns
         if column in frame.columns
     ]
     if not expressions:
         return pl.lit(False)
-    return pl.any_horizontal(expressions)
+    return pl.any_horizontal(expressions) & _body_id_guard(
+        frame, columns, normalize_search_text(text), mode
+    )
+
+
+def _match_column_expression(frame, column: str, text: str, mode: str):
+    """Return the boolean expression for one column in a search stage."""
+    import re
+
+    import polars as pl
+
+    needle = normalize_search_text(text)
+    display_value = (
+        _display_expression(column, frame)
+        .cast(pl.Utf8, strict=False)
+        .fill_null("")
+    )
+    if mode == "prefix":
+        return display_value.str.starts_with(needle)
+    if mode == "suffix":
+        return display_value.str.ends_with(needle)
+    if mode == "exact":
+        return display_value == needle
+    if mode == "regex":
+        try:
+            re.compile(needle)
+        except re.error:
+            return pl.lit(False)
+        return display_value.str.contains(needle, literal=False)
+    return display_value.str.to_lowercase().str.contains(
+        needle.casefold(), literal=True
+    )
+
+
+def _match_hit_lists(
+    frame,
+    columns: List[str],
+    text: str,
+    mode: str,
+    *,
+    suppress_instance_if_type: bool = False,
+):
+    """Return ordered lists of matched columns and their displayed values.
+
+    The primary match remains in ``match_column_key``/``match_value`` for
+    compatibility with the pinned hint. These lists preserve every field that
+    matched the same row, allowing the table to highlight a prefix hit and a
+    secondary substring hit simultaneously. ``suppress_instance_if_type`` is
+    retained for call-site compatibility, but suppression belongs only to the
+    deduplicated match-panel lists; row-level hit lists must keep instances.
+    """
+    import polars as pl
+
+    available = [column for column in columns if column in frame.columns]
+    empty = pl.lit([], dtype=pl.List(pl.Utf8))
+    if not available:
+        return empty, empty
+
+    needle = normalize_search_text(text)
+    body_guard = _body_id_guard(frame, available, needle, mode)
+    key_items = []
+    value_items = []
+    for column in available:
+        matched = _match_column_expression(frame, column, needle, mode) & body_guard
+        display_value = (
+            _display_expression(column, frame)
+            .cast(pl.Utf8, strict=False)
+            .fill_null("")
+        )
+        key_items.append(
+            pl.when(matched).then(pl.lit(column)).otherwise(pl.lit(""))
+        )
+        value_items.append(
+            pl.when(matched).then(display_value).otherwise(pl.lit(""))
+        )
+
+    def compact(items):
+        return pl.concat_list(items).list.eval(
+            pl.element().filter(pl.element() != "")
+        )
+
+    return compact(key_items), compact(value_items)
+
+
+def _secondary_hit_lists(
+    frame,
+    columns: List[str],
+    text: str,
+    prefix_mode: str = "prefix",
+    substring_mode: str = "substring",
+):
+    """Return useful secondary hits after applying field suppression rules.
+
+    A type name is the canonical identity for a row.  If the same query also
+    matches that row's instance, the instance is redundant and is omitted
+    from the secondary display.  This keeps values such as ``MeVPaMe2_L``
+    and ``MeVPaMe2_R`` from competing with their matched type ``MeVPaMe2``.
+    """
+    import polars as pl
+
+    available = [column for column in columns if column in frame.columns]
+    empty = pl.lit([], dtype=pl.List(pl.Utf8))
+    if not available:
+        return empty, empty
+
+    needle = normalize_search_text(text)
+    body_guard = _body_id_guard(frame, available, needle, substring_mode)
+    type_matches = pl.lit(False)
+    if "type" in frame.columns:
+        type_matches = (
+            (
+                _match_column_expression(frame, "type", needle, prefix_mode)
+                | _match_column_expression(frame, "type", needle, substring_mode)
+            )
+            & _body_id_guard(frame, ["type"], needle, substring_mode)
+        )
+
+    key_items = []
+    value_items = []
+    for column in available:
+        prefix_match = _match_column_expression(
+            frame, column, needle, prefix_mode
+        ) & body_guard
+        substring_match = _match_column_expression(
+            frame, column, needle, substring_mode
+        ) & body_guard
+        matched = substring_match & ~prefix_match
+        if column == "instance":
+            matched = matched & ~type_matches
+        display_value = (
+            _display_expression(column, frame)
+            .cast(pl.Utf8, strict=False)
+            .fill_null("")
+        )
+        key_items.append(
+            pl.when(matched).then(pl.lit(column)).otherwise(pl.lit(""))
+        )
+        value_items.append(
+            pl.when(matched).then(display_value).otherwise(pl.lit(""))
+        )
+
+    def compact(items):
+        return pl.concat_list(items).list.eval(
+            pl.element().filter(pl.element() != "")
+        )
+
+    return compact(key_items), compact(value_items)
+
+
+def _contains_expression(frame, columns: List[str], text: str):
+    """Case-insensitive substring expression for an explicit column filter."""
+    return _match_expression(frame, columns, text, "substring")
+
+
+def _display_expression(column: str, frame):
+    """Return a safe string expression for a retained metadata column.
+
+    Body IDs are always matched and displayed as text.  Numeric-looking body
+    IDs are normalized so a parquet reader that inferred ``123.0`` cannot
+    produce a suggestion/query value that does not verify against the cached
+    identifier ``123``.
+    """
+    import polars as pl
+
+    expression = pl.col(column)
+    if column == "bodyId":
+        return (
+            expression
+            .cast(pl.Utf8, strict=False)
+            .fill_null("")
+            .str.strip_chars()
+            .str.replace(r"\.0+$", "")
+        )
+    return expression
+
+
+def _body_id_guard(frame, columns: List[str], text: str, mode: str):
+    """Prevent numeric searches from matching a non-bodyId display field."""
+    import polars as pl
+
+    if "bodyId" not in columns or not is_numeric_search(text):
+        return pl.lit(True)
+    # A bodyId query is valid only against an actual integer-like bodyId
+    # value. This guards legacy/hand-authored caches where a missing ID was
+    # serialized as a free-form label.
+    value = _display_expression("bodyId", frame)
+    return value.str.contains(r"^\d+$")
 
 
 def _ordered_match_columns(columns: List[str]) -> List[str]:
@@ -371,14 +593,593 @@ def _ordered_match_columns(columns: List[str]) -> List[str]:
     other arbitrary metadata. Keeping this list small also avoids repeatedly
     decoding large non-search fields for every keystroke.
     """
-    priority = priority_metadata_columns(columns)
-    return [
-        *[column for column in _MATCH_PRIORITY_COLUMNS if column in columns],
-        *[column for column in priority if column not in _MATCH_PRIORITY_COLUMNS],
+    return ordered_search_columns(columns)
+
+
+def _normalize_filter_operator(value: str) -> str:
+    """Normalize the viewer's explicit column-filter operator."""
+    aliases = {
+        "starts_with": "prefix",
+        "starts with": "prefix",
+        "prefix": "prefix",
+        "ends_with": "suffix",
+        "ends with": "suffix",
+        "suffix": "suffix",
+        "exact": "exact",
+        "equals": "exact",
+        "contains": "substring",
+        "substring": "substring",
+        "regex": "regex",
+    }
+    return aliases.get(str(value or "").strip().casefold(), "substring")
+
+
+def _highlight_text_html(value: Any, needle: str, mode: str) -> Optional[str]:
+    """Return escaped cell text with only the matched spans marked.
+
+    The table keeps its normal white/blue cell background and uses the cell
+    outline for hit ownership.  This helper deliberately returns escaped HTML
+    so the viewer can render a small ``<mark>`` around the matching characters
+    without exposing metadata values through ``v-html``.
+    """
+    text = "" if value is None else str(value)
+    needle = normalize_search_text(needle)
+    if not text or not needle:
+        return None
+
+    spans: List[Tuple[int, int]] = []
+    if mode == "prefix":
+        if text.startswith(needle):
+            spans = [(0, len(needle))]
+    elif mode == "suffix":
+        if text.endswith(needle):
+            spans = [(len(text) - len(needle), len(text))]
+    elif mode == "exact":
+        if text == needle:
+            spans = [(0, len(text))]
+    elif mode == "regex":
+        try:
+            spans = [match.span() for match in re.finditer(needle, text)]
+        except re.error:
+            spans = []
+    elif mode == "global":
+        # A global row can have been admitted by either stage. Preserve the
+        # strict-prefix visual cue when that exact prefix exists; substring
+        # rows use the same case-insensitive rule as the search backend.
+        if text.startswith(needle):
+            spans = [(0, len(needle))]
+        else:
+            mode = "substring"
+
+    if mode in {"substring", "contains"} and not spans:
+        folded_text = text.casefold()
+        folded_needle = needle.casefold()
+        start = 0
+        while folded_needle:
+            position = folded_text.find(folded_needle, start)
+            if position < 0:
+                break
+            spans.append((position, position + len(needle)))
+            start = position + max(1, len(needle))
+
+    if not spans:
+        return None
+
+    # Normalize overlapping/adjacent spans before escaping the source text.
+    merged: List[Tuple[int, int]] = []
+    for start, end in sorted(spans):
+        if end <= start:
+            continue
+        if merged and start <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((start, end))
+    if not merged:
+        return None
+
+    parts: List[str] = []
+    cursor = 0
+    for start, end in merged:
+        parts.append(html.escape(text[cursor:start], quote=False))
+        parts.append(
+            '<mark class="drocat-neuron-match-text">'
+            f"{html.escape(text[start:end], quote=False)}"
+            "</mark>"
+        )
+        cursor = end
+    parts.append(html.escape(text[cursor:], quote=False))
+    return "".join(parts)
+
+
+def _highlighted_cells(
+    row: Dict[str, Any],
+    needle: str,
+    mode: str,
+    columns: List[str],
+) -> Dict[str, str]:
+    """Build safe HTML only for the searchable cells hit by this row."""
+    hit_columns: List[str] = []
+    for column in (
+        *(row.get("match_column_keys") or []),
+        *(row.get("secondary_match_column_keys") or []),
+    ):
+        column = str(column or "").strip()
+        if column and column in columns and column not in hit_columns:
+            hit_columns.append(column)
+    if not hit_columns:
+        column = str(row.get("match_column_key") or "").strip()
+        if column in columns:
+            hit_columns.append(column)
+
+    highlighted: Dict[str, str] = {}
+    for column in hit_columns:
+        marked = _highlight_text_html(row.get(column), needle, mode)
+        if marked is not None:
+            highlighted[column] = marked
+    return highlighted
+
+
+def _presorted_search_matches(
+    source,
+    search_cache,
+    columns: List[str],
+    text: str,
+    *,
+    include_substrings: bool = True,
+):
+    """Return rows in canonical match order using the presorted sidecar.
+
+    The sidecar is sorted by column priority and value.  For each column we
+    therefore append its strict-prefix slice, then its substring-only slice,
+    and remove row keys already claimed by a higher-priority column.  No
+    result sort or full metadata-column scan is needed for this path.
+
+    ``None`` means the requested mode is not representable by this cache
+    (regex, suffix, and exact searches continue through the general matcher).
+    """
+    import polars as pl
+
+    if search_cache is None or not columns:
+        return None
+    needle = normalize_search_text(text)
+    if not needle:
+        return None
+
+    # The sidecar stores source row ordinals as a list.  The two hit frames
+    # returned by this function are the exploded form used by the downstream
+    # joins.  Keep that schema even when a valid query has no matching value;
+    # returning ``search_cache.head(0)`` here leaves only ``__neuron_rows``
+    # and causes the later aggregation to look for a missing
+    # ``__neuron_row`` column.
+    empty_hits = (
+        search_cache
+        .head(0)
+        .explode("__neuron_rows")
+        .rename({"__neuron_rows": "__neuron_row"})
+        .select("__neuron_row", "search_column", "search_priority", "search_value")
+    )
+    empty_candidates = source.filter(pl.lit(False)).with_columns(
+        pl.lit(0).alias("__match_priority"),
+        pl.lit(0).alias("__match_kind_priority"),
+        pl.lit("").alias("__candidate_column"),
+        pl.lit("").alias("__candidate_value"),
+    )
+
+    available_columns = set(search_cache["search_column"].unique().to_list())
+    ordered = [column for column in columns if column in available_columns]
+    if not ordered:
+        return empty_candidates, empty_hits, empty_hits
+    numeric = is_numeric_search(needle)
+    claimed = None
+    chunks = []
+    hit_parts = []
+    for priority, column in enumerate(ordered):
+        if numeric and column != "bodyId":
+            continue
+        column_frame = search_cache.filter(pl.col("search_column") == column)
+        if numeric:
+            column_frame = column_frame.filter(
+                pl.col("search_value").str.contains(r"^\d+$")
+            )
+        prefix_values = column_frame.filter(
+            pl.col("search_value").str.starts_with(needle)
+        )
+        raw_prefix = (
+            prefix_values
+            .explode("__neuron_rows")
+            .rename({"__neuron_rows": "__neuron_row"})
+            if prefix_values.height else column_frame.head(0)
+        )
+        prefix_keys = raw_prefix.select("__neuron_row").unique(
+            subset=["__neuron_row"], maintain_order=True
+        ) if raw_prefix.height else None
+        if raw_prefix.height:
+            hit_parts.append(raw_prefix.select(
+                "__neuron_row", "search_column", "search_priority", "search_value"
+            ))
+        prefix = raw_prefix
+        if claimed is not None and prefix.height:
+            prefix = prefix.join(claimed, on="__neuron_row", how="anti")
+        prefix = prefix.with_columns(
+            pl.lit(priority).alias("__candidate_priority"),
+            pl.lit(0).alias("__candidate_kind"),
+        )
+        raw_substring_values = column_frame.filter(
+            pl.col("search_value_folded").str.contains(
+                needle.casefold(), literal=True
+            )
+        ) if include_substrings else column_frame.head(0)
+        if prefix_values.height and raw_substring_values.height:
+            raw_substring_values = raw_substring_values.join(
+                prefix_values.select("search_value"),
+                on="search_value",
+                how="anti",
+            )
+        raw_substring = (
+            raw_substring_values
+            .explode("__neuron_rows")
+            .rename({"__neuron_rows": "__neuron_row"})
+            if raw_substring_values.height else column_frame.head(0)
+        )
+        if prefix_keys is not None and raw_substring.height:
+            raw_substring = raw_substring.join(
+                prefix_keys, on="__neuron_row", how="anti"
+            )
+        if raw_substring.height:
+            hit_parts.append(raw_substring.select(
+                "__neuron_row", "search_column", "search_priority", "search_value"
+            ))
+        substring = raw_substring
+        excluded = claimed
+        if prefix_keys is not None:
+            excluded = prefix_keys if excluded is None else pl.concat(
+                [excluded, prefix_keys], how="vertical"
+            ).unique(subset=["__neuron_row"], maintain_order=True)
+        if excluded is not None and substring.height:
+            substring = substring.join(excluded, on="__neuron_row", how="anti")
+        substring = substring.with_columns(
+            pl.lit(priority).alias("__candidate_priority"),
+            pl.lit(1).alias("__candidate_kind"),
+        )
+
+        chunk_parts = [part for part in (prefix, substring) if part.height]
+        if not chunk_parts:
+            continue
+        chunk = pl.concat(chunk_parts, how="vertical_relaxed")
+        # One searchable value exists per row/column, but keep this guard for
+        # legacy sidecars built before that invariant was enforced.
+        chunk = chunk.unique(subset=["__neuron_row"], maintain_order=True)
+        chunks.append(chunk)
+        keys = chunk.select("__neuron_row")
+        claimed = keys if claimed is None else pl.concat(
+            [claimed, keys], how="vertical"
+        ).unique(subset=["__neuron_row"], maintain_order=True)
+
+    if not chunks:
+        return empty_candidates, empty_hits, empty_hits
+    candidate = pl.concat(chunks, how="vertical_relaxed").select(
+        "__neuron_row",
+        pl.col("__candidate_priority").alias("__match_priority"),
+        pl.col("__candidate_kind").alias("__match_kind_priority"),
+        pl.col("search_column").alias("__candidate_column"),
+        pl.col("search_value").alias("__candidate_value"),
+    )
+    raw_hits = pl.concat(hit_parts, how="vertical_relaxed")
+    all_hits = raw_hits
+    type_keys = all_hits.filter(
+        pl.col("search_column") == "type"
+    ).select("__neuron_row").unique(
+        subset=["__neuron_row"], maintain_order=True
+    )
+    if type_keys.height:
+        all_hits = all_hits.filter(
+            ~(
+                (pl.col("search_column") == "instance")
+                & pl.col("__neuron_row").is_in(
+                    type_keys["__neuron_row"].implode()
+                )
+            )
+        )
+    return source.join(
+        candidate,
+        on="__neuron_row",
+        how="inner",
+        maintain_order="right",
+    ), all_hits, raw_hits
+
+
+def _presorted_match_groups(
+    filtered,
+    hit_entries,
+    search_columns: List[str],
+    json_value,
+    membership_entries=None,
+):
+    """Build the match panel from compact searchable-cell hits.
+
+    This is the broad-query companion to :func:`_presorted_search_matches`.
+    It keeps full metadata out of the group pass, but retains exact row and
+    body membership for selection and focus.  ``None`` requests the legacy
+    path (for example, when a caller supplies a hand-built frame without the
+    sidecar hit columns).
+    """
+    import polars as pl
+
+    required = {
+        "__neuron_row", "search_column", "search_priority", "search_value",
+    }
+    if hit_entries is None or not required.issubset(set(hit_entries.columns)):
+        return None
+    if filtered.is_empty() or hit_entries.is_empty():
+        return ([], {}, {}, {}, {})
+
+    row_columns = [
+        "__neuron_row", "__neuron_key", "bodyId", "match_column",
+        "match_column_key", "match_value", "__match_priority",
+        "__match_kind_priority", "__candidate_column", "__candidate_value",
     ]
+    row_columns = [column for column in row_columns if column in filtered.columns]
+    rows = filtered.select(row_columns)
+    hits = hit_entries.join(
+        rows.select("__neuron_row"), on="__neuron_row", how="inner"
+    )
+    if hits.is_empty():
+        return ([], {}, {}, {}, {})
+    hits = hits.join(rows, on="__neuron_row", how="inner", maintain_order="left")
+    hits = hits.with_columns(
+        (
+            (pl.col("search_column") == pl.col("__candidate_column"))
+            & (pl.col("search_value") == pl.col("__candidate_value"))
+        ).cast(pl.Int8).alias("__is_primary_hit"),
+        pl.col("search_value").str.to_lowercase().alias("__match_norm"),
+    )
+    # The first hit for a group is chosen after primary status, canonical
+    # column priority, mode, and source row. The group itself is then sorted
+    # by bodyId/type/instance/taxonomy priority and prefix-vs-substring.
+    hits = hits.sort(
+        [
+            "search_value", "__is_primary_hit", "search_priority",
+            "__match_kind_priority", "__neuron_row",
+        ],
+        descending=[False, True, False, False, False],
+    )
+    summary = hits.group_by("search_value", maintain_order=True).agg(
+        pl.col("search_column").first().alias("__group_column"),
+        pl.col("search_priority").first().alias("__group_priority"),
+        pl.col("__match_kind_priority").first().alias("__group_kind"),
+        pl.col("__is_primary_hit").max().alias("__group_is_primary"),
+        pl.col("__neuron_key").unique(maintain_order=True).alias("__members"),
+        pl.col("bodyId").unique(maintain_order=True).alias("__body_ids"),
+    ).sort(
+        ["__group_priority", "__group_kind", "search_value"],
+        descending=[False, False, False],
+    )
+
+    # Case-insensitive exact-name membership mirrors the normal viewer
+    # selection rule, while the group key preserves the visible spelling.
+    # Membership is column-specific: if a value is a type, selecting it must
+    # select the rows whose *type* is that value, not unrelated rows where
+    # the same spelling happens to occur in hemibrainType/flywireType.
+    # Use raw hits so a secondary group still retains every row sharing that
+    # exact secondary value.
+    membership_hits = membership_entries if membership_entries is not None else hit_entries
+    membership_hits = membership_hits.join(
+        rows.select("__neuron_row"), on="__neuron_row", how="inner"
+    ).join(rows, on="__neuron_row", how="inner", maintain_order="left")
+    membership_hits = membership_hits.with_columns(
+        pl.col("search_value").str.to_lowercase().alias("__match_norm")
+    )
+    membership_map = {}
+    if not membership_hits.is_empty():
+        grouped_members = membership_hits.group_by(
+            ["search_column", "__match_norm"], maintain_order=True
+        ).agg(
+            pl.col("__neuron_key").unique(maintain_order=True).alias("__members"),
+            pl.col("bodyId").unique(maintain_order=True).alias("__body_ids"),
+        )
+        membership_map = {
+            (
+                str(raw.get("search_column") or ""),
+                str(raw.get("__match_norm") or ""),
+            ): (
+                [str(value) for value in (raw.get("__members") or [])],
+                [str(value or "") for value in (raw.get("__body_ids") or [])],
+            )
+            for raw in grouped_members.to_dicts()
+        }
+
+    match_groups: List[Dict[str, Any]] = []
+    group_members: Dict[str, Tuple[str, ...]] = {}
+    group_body_ids: Dict[str, Tuple[str, ...]] = {}
+    group_related_sets: Dict[str, set[str]] = {}
+    group_order: Dict[str, Tuple[int, int, str]] = {}
+    group_rows: Dict[str, List[str]] = {}
+    for raw in summary.to_dicts():
+        value = str(json_value(raw.get("search_value")) or "").strip()
+        if not value:
+            continue
+        column = str(raw.get("__group_column") or "")
+        try:
+            priority = int(raw.get("__group_priority") or len(search_columns))
+        except (TypeError, ValueError):
+            priority = len(search_columns)
+        try:
+            kind = int(raw.get("__group_kind") or 1)
+        except (TypeError, ValueError):
+            kind = 1
+        members, body_ids = membership_map.get(
+            (column, value.casefold()),
+            ([str(item) for item in (raw.get("__members") or [])],
+             [str(item or "") for item in (raw.get("__body_ids") or [])]),
+        )
+        members = tuple(member for member in members if member)
+        body_ids = tuple(
+            item[:-2] if item.endswith(".0") and item[:-2].isdigit() else item
+            for item in body_ids if item
+        )
+        role = "primary" if int(raw.get("__group_is_primary") or 0) else "secondary"
+        match_groups.append({
+            "__match_group_key": value,
+            "match_column": column,
+            "match_column_key": column,
+            "match_value": value,
+            "body_count": len(body_ids),
+            "match_role": role,
+            "first_body_id": body_ids[0] if body_ids else "",
+        })
+        group_members[value] = members
+        group_body_ids[value] = body_ids
+        group_order[value] = (priority, kind, value)
+        group_related_sets[value] = {value}
+        group_rows[value] = list(members)
+
+    group_rank = {
+        str(group["__match_group_key"]): position
+        for position, group in enumerate(match_groups)
+    }
+    # Link each row's canonical primary value only to its own secondary
+    # values.  A value can be primary on one row and secondary on another;
+    # that must not merge two independent primary entries.  In particular,
+    # male-cns rows can have type=aMe17e and hemibrainType=aMe17a while other
+    # rows have type=aMe17a: selecting either type must stay independent.
+    primary_values = {
+        str(json_value(raw.get("search_value")) or "").strip()
+        for raw in summary.to_dicts()
+        if int(raw.get("__group_is_primary") or 0)
+    }
+    row_hits = hits.select(
+        "__neuron_row", "__candidate_value", "search_value"
+    ).unique(maintain_order=True)
+    owner_values: Dict[str, set[str]] = {}
+    for raw in row_hits.to_dicts():
+        primary = str(json_value(raw.get("__candidate_value")) or "").strip()
+        secondary = str(json_value(raw.get("search_value")) or "").strip()
+        if (
+            not primary
+            or not secondary
+            or primary == secondary
+            or primary not in group_rank
+            or secondary not in group_rank
+            or secondary in primary_values
+        ):
+            continue
+        group_related_sets[primary].add(secondary)
+        group_related_sets[secondary].add(primary)
+        owner_values.setdefault(secondary, set()).add(primary)
+
+    match_group_related = {
+        key: tuple(sorted(values, key=lambda value: group_rank.get(value, len(group_rank))))
+        for key, values in group_related_sets.items()
+    }
+    # Keep the relationship local to one primary/secondary bundle.  There is
+    # deliberately no transitive component collapse: two primary names that
+    # happen to share a secondary metadata spelling remain separate query
+    # entries.
+    primary_by_value = {}
+    for key in group_rank:
+        if key in primary_values:
+            primary_by_value[key] = (key,)
+            continue
+        owners = sorted(
+            owner_values.get(key, ()),
+            key=lambda value: group_rank.get(value, len(group_rank)),
+        )
+        primary_by_value[key] = tuple(owners or (key,))
+
+    return (
+        _order_match_groups_with_secondaries(match_groups, primary_by_value),
+        group_members,
+        group_body_ids,
+        match_group_related,
+        primary_by_value,
+    )
 
 
-def _match_metadata(frame, columns: List[str], text: str, scope=None):
+def _order_match_groups_with_secondaries(
+    match_groups: List[Dict[str, Any]],
+    match_group_primary: Dict[str, Tuple[str, ...]],
+) -> List[Dict[str, Any]]:
+    """Place each secondary match directly after its owning primary.
+
+    Match groups are initially ordered for search relevance.  That order is
+    useful for choosing the first page, but it can leave a taxonomy alias far
+    away from the name that owns it.  The panel is easier to read when a
+    secondary is rendered as an accessory row immediately below its primary.
+    The relationship map remains unchanged, so selection continues to lock
+    the whole primary/secondary bundle together.
+
+    A secondary can technically be shared by more than one primary.  Display
+    it after the first owner in the existing priority order and leave the
+    relationship map responsible for the synchronized selection semantics.
+    Any orphaned secondary is retained in its original position at the end
+    rather than being dropped.
+    """
+    if not match_groups:
+        return []
+
+    by_key = {
+        str(group.get("__match_group_key") or group.get("match_value") or ""): group
+        for group in match_groups
+    }
+    secondary_by_owner: Dict[str, List[Dict[str, Any]]] = {}
+    attached_secondary_keys: set[str] = set()
+    for group in match_groups:
+        if str(group.get("match_role") or "") != "secondary":
+            continue
+        key = str(group.get("__match_group_key") or group.get("match_value") or "")
+        owners = match_group_primary.get(key, ())
+        owner = next(
+            (
+                str(candidate or "")
+                for candidate in owners
+                if str(candidate or "") in by_key
+                and str(by_key[str(candidate)].get("match_role") or "") == "primary"
+            ),
+            "",
+        )
+        if owner:
+            secondary_by_owner.setdefault(owner, []).append(group)
+            attached_secondary_keys.add(key)
+
+    ordered: List[Dict[str, Any]] = []
+    seen: set[str] = set()
+    for group in match_groups:
+        key = str(group.get("__match_group_key") or group.get("match_value") or "")
+        if key in seen:
+            continue
+        if (
+            str(group.get("match_role") or "") == "secondary"
+            and key in attached_secondary_keys
+        ):
+            continue
+        ordered.append(group)
+        seen.add(key)
+        for secondary in secondary_by_owner.get(key, ()):
+            secondary_key = str(
+                secondary.get("__match_group_key")
+                or secondary.get("match_value")
+                or ""
+            )
+            if secondary_key not in seen:
+                ordered.append(secondary)
+                seen.add(secondary_key)
+
+    # Preserve every group even when malformed/legacy cache data has a
+    # missing relationship entry or a duplicate display key.
+    for group in match_groups:
+        key = str(group.get("__match_group_key") or group.get("match_value") or "")
+        if key not in seen:
+            ordered.append(group)
+            seen.add(key)
+    return ordered
+
+
+def _match_metadata(
+    frame,
+    columns: List[str],
+    text: str,
+    stage: SearchStage | None = None,
+):
     """Build match-priority and display metadata expressions for a query.
 
     The first matching column in the ordered scope wins.  For bodyId matches,
@@ -390,25 +1191,45 @@ def _match_metadata(frame, columns: List[str], text: str, scope=None):
     import polars as pl
 
     ordered = [
-        column for column in (scope or _ordered_match_columns(columns))
+        column
+        for column in (stage.columns if stage is not None else _ordered_match_columns(columns))
         if column in frame.columns
     ]
     if not ordered:
         empty = pl.lit("")
         return pl.lit(0), empty, empty, empty
 
-    needle = str(text).strip().lower()
+    needle = normalize_search_text(text)
     priority = pl.lit(len(ordered))
     match_column = pl.lit("")
     match_column_key = pl.lit("")
     match_value = pl.lit("")
     for rank, column in reversed(list(enumerate(ordered))):
-        display_value = (
-            pl.col(column)
-            .cast(pl.Utf8, strict=False)
-            .fill_null("")
-        )
-        matched = display_value.str.to_lowercase().str.contains(needle, literal=True)
+        display_value = _display_expression(column, frame).cast(
+            pl.Utf8, strict=False
+        ).fill_null("")
+        mode = stage.mode if stage is not None else "substring"
+        if mode == "prefix":
+            matched = display_value.str.starts_with(needle)
+        elif mode == "suffix":
+            matched = display_value.str.ends_with(needle)
+        elif mode == "exact":
+            matched = display_value == needle
+        elif mode == "regex":
+            import re
+
+            try:
+                re.compile(needle)
+            except re.error:
+                matched = pl.lit(False)
+            else:
+                matched = display_value.str.contains(needle, literal=False)
+        else:
+            matched = display_value.str.to_lowercase().str.contains(
+                needle.casefold(), literal=True
+            )
+        if column == "bodyId" and is_numeric_search(needle):
+            matched = matched & display_value.str.contains(r"^\d+$")
         if column == "bodyId" and "instance" in frame.columns:
             instance = (
                 pl.col("instance")
@@ -426,79 +1247,610 @@ def _match_metadata(frame, columns: List[str], text: str, scope=None):
     return priority, match_column, match_column_key, match_value
 
 
+def _global_match_metadata(frame, columns: List[str], text: str):
+    """Build canonical match metadata for the full viewer search.
+
+    The viewer returns the union of prefix and substring matches, so the
+    stage that admitted a row is not necessarily the row's best match.  For
+    example, ``MeVPaMe2`` can contain ``aMe`` in ``type`` while ``aMe19a`` is
+    a strict prefix in ``flywireType``.  The canonical column order must win
+    first; prefix-vs-substring is only the tie-breaker inside that column.
+
+    Returns expressions for the primary match, its match mode, all useful
+    hits, and the lower-priority secondary hits.  Instance hits are omitted
+    from the deduplicated match panel whenever the row has a type hit, because
+    the type already identifies the neuron more precisely.  They remain in
+    the row-level hit list so the corresponding instance cell can still be
+    outlined and its matching characters highlighted.
+    """
+    import polars as pl
+
+    ordered = [column for column in columns if column in frame.columns]
+    empty = pl.lit([], dtype=pl.List(pl.Utf8))
+    if not ordered:
+        return (
+            pl.lit(0), pl.lit(1), pl.lit(""), pl.lit(""), pl.lit(""),
+            empty, empty, empty, empty,
+        )
+
+    needle = normalize_search_text(text)
+    numeric = is_numeric_search(needle)
+    body_guard = (
+        _body_id_guard(frame, ["bodyId"], needle, "substring")
+        if numeric and "bodyId" in frame.columns
+        else pl.lit(True)
+    )
+    column_matches = {}
+    type_matches = pl.lit(False)
+    for column in ordered:
+        allowed = (not numeric) or column == "bodyId"
+        guard = body_guard if allowed else pl.lit(False)
+        prefix = (
+            _match_column_expression(frame, column, needle, "prefix") & guard
+        )
+        substring = (
+            _match_column_expression(frame, column, needle, "substring") & guard
+        )
+        column_matches[column] = (prefix, substring, prefix | substring)
+        if column == "type":
+            type_matches = prefix | substring
+
+    # Reverse assignment makes the first column in canonical order win.  A
+    # prefix and substring match in the same column are resolved by the mode
+    # expression, with strict prefix ranked first.
+    priority = pl.lit(len(ordered))
+    kind_priority = pl.lit(1)
+    match_column = pl.lit("")
+    match_column_key = pl.lit("")
+    match_value = pl.lit("")
+    for rank, column in reversed(list(enumerate(ordered))):
+        prefix, _substring, matched = column_matches[column]
+        display_value = (
+            _display_expression(column, frame)
+            .cast(pl.Utf8, strict=False)
+            .fill_null("")
+        )
+        if column == "bodyId" and "instance" in frame.columns:
+            instance = (
+                _display_expression("instance", frame)
+                .cast(pl.Utf8, strict=False)
+                .fill_null("")
+                .str.strip_chars()
+            )
+            hint = pl.when(instance != "").then(instance).otherwise(pl.lit("bodyId"))
+        else:
+            hint = pl.lit(column)
+        priority = pl.when(matched).then(pl.lit(rank)).otherwise(priority)
+        kind_priority = pl.when(matched).then(
+            pl.when(prefix).then(pl.lit(0)).otherwise(pl.lit(1))
+        ).otherwise(kind_priority)
+        match_column = pl.when(matched).then(hint).otherwise(match_column)
+        match_column_key = pl.when(matched).then(
+            pl.lit(column)
+        ).otherwise(match_column_key)
+        match_value = pl.when(matched).then(display_value).otherwise(match_value)
+
+    hit_column_items = []
+    hit_value_items = []
+    secondary_column_items = []
+    secondary_value_items = []
+    for rank, column in enumerate(ordered):
+        _prefix, _substring, matched = column_matches[column]
+        all_matched = matched
+        if column == "instance":
+            panel_matched = matched & ~type_matches
+        else:
+            panel_matched = matched
+        display_value = (
+            _display_expression(column, frame)
+            .cast(pl.Utf8, strict=False)
+            .fill_null("")
+        )
+        hit_column_items.append(
+            pl.when(all_matched).then(pl.lit(column)).otherwise(pl.lit(""))
+        )
+        hit_value_items.append(
+            pl.when(all_matched).then(display_value).otherwise(pl.lit(""))
+        )
+        # The primary priority is row-dependent.  Keep only lower-priority
+        # fields in the secondary lists so the match panel can label them
+        # without exposing an instance already covered by type.
+        lower_priority = panel_matched & (pl.lit(rank) > priority)
+        secondary_column_items.append(
+            pl.when(lower_priority).then(pl.lit(column)).otherwise(pl.lit(""))
+        )
+        secondary_value_items.append(
+            pl.when(lower_priority).then(display_value).otherwise(pl.lit(""))
+        )
+
+    def compact(items):
+        if not items:
+            return empty
+        return pl.concat_list(items).list.eval(
+            pl.element().filter(pl.element() != "")
+        ).list.unique(maintain_order=True)
+
+    return (
+        priority,
+        kind_priority,
+        match_column,
+        match_column_key,
+        match_value,
+        compact(hit_column_items),
+        compact(hit_value_items),
+        compact(secondary_column_items),
+        compact(secondary_value_items),
+    )
+
+
 def query_neuron_index(
     index: CachedNeuronIndex,
     *,
     search: str = "",
+    search_column: Optional[str] = None,
+    search_operator: str = "contains",
     filter_column: Optional[str] = None,
     filter_text: str = "",
+    filter_operator: str = "contains",
     sort_by: Optional[str] = None,
     descending: bool = False,
     page: int = 1,
     page_size: int = 50,
+    focus_key: Optional[str] = None,
 ) -> NeuronIndexPage:
     """Filter, sort, and page a cached index without sending all rows to JS.
 
-    Search and column filters use case-insensitive substring matching. Global
-    search uses only bodyId, type, instance, and useful type/class taxonomy
-    fields, in that order. An explicit column filter may still target any
-    retained metadata column. When a query is present and no explicit sort is
-    supplied, rows are grouped by matched-column priority and sorted by
-    matched value within each group. An explicit sort column becomes the
-    primary sort and matching priority is used only as a tie-breaker.
+    Global search follows the shared matcher: every strict case-sensitive
+    prefix match is returned first, followed by substring-only matches. This
+    means a query such as ``aMe`` also returns ``MeVPaMe*`` values while
+    keeping true prefixes at the top. Numeric input is verified against the
+    real bodyId column only. An explicit column filter may target any retained
+    metadata column and uses its selected operator directly on the main search
+    text. With no selected search column, the global prefix-first behavior is
+    used. The legacy ``filter_column``/``filter_text`` pair remains supported
+    as an additional AND restriction for callers that still use it. When a
+    query is present and no explicit sort is supplied, rows are grouped by
+    matched-column priority (bodyId → type → instance → taxonomy), then by
+    strict prefix versus substring, and finally matched value. The result
+    also contains deduplicated matched-value groups plus primary/secondary
+    relationships for the viewer's selection panel.
     """
     import polars as pl
 
     page_size = max(1, min(int(page_size), 500))
-    frame = index.frame
+    frame = index.frame.with_row_index("__neuron_row")
     columns = list(index.columns)
+    # The visible bodyId is the user-facing identity. The private key keeps
+    # table selection safe even if a legacy index accidentally contains a
+    # duplicate or blank bodyId.
+    frame = frame.with_columns(
+        pl.concat_str(
+            [
+                _display_expression("bodyId", frame)
+                if "bodyId" in frame.columns
+                else pl.lit(""),
+                pl.lit("::"),
+                pl.col("__neuron_row").cast(pl.Utf8),
+            ]
+        ).alias("__neuron_key")
+    )
     filtered = frame
 
-    search_text = str(search or "").strip()
+    search_text = normalize_search_text(search)
     search_columns = _ordered_match_columns(columns)
-    if search_text:
+    search_column = str(search_column or "").strip()
+    search_mode = _normalize_filter_operator(search_operator)
+    filter_text = normalize_search_text(filter_text)
+    filter_column = str(filter_column or "").strip()
+    filter_mode = _normalize_filter_operator(filter_operator)
+    if search_column in filtered.columns:
+        search_target_columns = [search_column]
+    else:
+        search_target_columns = []
+    if filter_column in {"__all__", "All columns", "all searchable fields"}:
+        filter_columns = search_columns
+    elif filter_column in filtered.columns:
+        filter_columns = [filter_column]
+    else:
+        filter_columns = []
+    active_column_filter = bool(filter_text and filter_columns)
+    if active_column_filter:
         filtered = filtered.filter(
-            _contains_expression(filtered, search_columns, search_text)
+            _match_expression(filtered, filter_columns, filter_text, filter_mode)
         )
 
-    filter_text = str(filter_text or "").strip()
-    if filter_text:
-        if not filter_column or filter_column in {"__all__", "All columns"}:
+    def all_viewer_matches(source, text: str):
+        """Return prefix rows followed by substring-only rows.
+
+        The inline suggestion menu intentionally stops at the first useful
+        stage. The full viewer has room for the broader result set, so it
+        unions both stages and marks the row kind for stable priority sorting.
+        """
+        stages = search_plan(
+            text,
+            columns,
+            "auto",
+            all_prefix_matches=True,
+        )
+        if not stages:
+            return source.filter(pl.lit(False)), None, None
+        prefix_stage = stages[0]
+        substring_stage = stages[1] if len(stages) > 1 else None
+        prefix_rows = source.filter(
+            _match_expression(source, list(prefix_stage.columns), text, "prefix")
+        ).with_columns(pl.lit(0).alias("__match_kind_priority"))
+        if substring_stage is None:
+            return prefix_rows, prefix_stage, None
+        substring_rows = source.filter(
+            _match_expression(source, list(substring_stage.columns), text, "substring")
+        )
+        if prefix_rows.height:
+            substring_rows = substring_rows.join(
+                prefix_rows.select("__neuron_key").unique(),
+                on="__neuron_key",
+                how="anti",
+            )
+        substring_rows = substring_rows.with_columns(
+            pl.lit(1).alias("__match_kind_priority")
+        )
+        if not prefix_rows.height:
+            return substring_rows, prefix_stage, substring_stage
+        if not substring_rows.height:
+            return prefix_rows, prefix_stage, substring_stage
+        return (
+            pl.concat([prefix_rows, substring_rows], how="vertical"),
+            prefix_stage,
+            substring_stage,
+        )
+
+    scoped_search = bool(search_text and search_target_columns)
+    match_text = search_text or (filter_text if active_column_filter else "")
+    match_stage: SearchStage | None = None
+    prefix_stage: SearchStage | None = None
+    substring_stage: SearchStage | None = None
+    staged_search = False
+    presorted_search = False
+    fast_hit_entries = None
+    fast_membership_entries = None
+    if scoped_search:
+        match_stage = SearchStage(search_mode, tuple(search_target_columns))
+        if search_mode == "substring":
+            # A targeted "contains" search still presents strict,
+            # case-sensitive prefixes first.  The operator controls which
+            # rows qualify; the two stages control their display priority.
+            prefix_stage = SearchStage("prefix", tuple(search_target_columns))
+            substring_stage = SearchStage(
+                "substring", tuple(search_target_columns)
+            )
+            prefix_rows = filtered.filter(
+                _match_expression(
+                    filtered,
+                    search_target_columns,
+                    search_text,
+                    "prefix",
+                )
+            ).with_columns(pl.lit(0).alias("__match_kind_priority"))
+            substring_rows = filtered.filter(
+                _match_expression(
+                    filtered,
+                    search_target_columns,
+                    search_text,
+                    "substring",
+                )
+            )
+            if prefix_rows.height:
+                substring_rows = substring_rows.join(
+                    prefix_rows.select("__neuron_key").unique(),
+                    on="__neuron_key",
+                    how="anti",
+                )
+            substring_rows = substring_rows.with_columns(
+                pl.lit(1).alias("__match_kind_priority")
+            )
+            if prefix_rows.height and substring_rows.height:
+                filtered = pl.concat([prefix_rows, substring_rows], how="vertical")
+            elif prefix_rows.height:
+                filtered = prefix_rows
+            else:
+                filtered = substring_rows
+            staged_search = True
+        else:
             filtered = filtered.filter(
-                _contains_expression(filtered, search_columns, filter_text)
+                _match_expression(
+                    filtered,
+                    search_target_columns,
+                    search_text,
+                    search_mode,
+                )
             )
-        elif filter_column in filtered.columns:
-            expression = (
-                pl.col(filter_column)
-                .cast(pl.Utf8, strict=False)
-                .fill_null("")
-                .str.to_lowercase()
-                .str.contains(filter_text.lower(), literal=True)
+    elif search_text:
+        # The default viewer search can use the compact sidecar. It is
+        # already ordered by the exact match priority used by the UI, so the
+        # first page is available without sorting the full metadata frame.
+        fast_matches = None
+        if not active_column_filter:
+            fast_matches = _presorted_search_matches(
+                filtered,
+                index.search_frame,
+                search_columns,
+                search_text,
+                include_substrings=True,
             )
-            filtered = filtered.filter(expression)
+        if fast_matches is not None:
+            filtered, fast_hit_entries, fast_membership_entries = fast_matches
+            presorted_search = True
+        else:
+            filtered, prefix_stage, substring_stage = all_viewer_matches(
+                filtered, search_text
+            )
+        staged_search = True
+    elif active_column_filter:
+        match_stage = SearchStage(filter_mode, tuple(filter_columns))
 
-    # The info column describes the global query when present.  If only a
-    # column filter is active, describe that filter instead; this keeps the
-    # table useful even when the top search box is empty.
-    match_text = search_text or filter_text
-    match_scope = None
-    if not search_text and filter_text and filter_column not in (None, "__all__", "All columns"):
-        match_scope = [filter_column]
     if match_text:
-        match_priority, match_column, match_column_key, match_value = _match_metadata(
-            filtered, columns, match_text, scope=match_scope
+        empty_hit_list = pl.lit([], dtype=pl.List(pl.Utf8))
+        global_search = bool(search_text and not scoped_search)
+        if global_search:
+            if fast_hit_entries is not None:
+                # The sidecar already knows every eligible cell. Aggregate
+                # those narrow rows instead of re-evaluating every search
+                # expression against the full metadata table.
+                # ``fast_hit_entries`` is the panel projection: it omits an
+                # instance value when the row already has a type match.  The
+                # raw membership entries retain that value for the table's
+                # cell-level outline/highlight.
+                row_hit_entries = (
+                    fast_membership_entries
+                    if fast_membership_entries is not None
+                    else fast_hit_entries
+                )
+                hit_lists = row_hit_entries.group_by(
+                    "__neuron_row", maintain_order=True
+                ).agg(
+                    pl.col("search_column").alias("__fast_hit_columns"),
+                    pl.col("search_value").alias("__fast_hit_values"),
+                )
+                secondary_entries = fast_hit_entries.join(
+                    filtered.select(["__neuron_row", "__match_priority"]),
+                    on="__neuron_row",
+                    how="inner",
+                ).filter(
+                    pl.col("search_priority") > pl.col("__match_priority")
+                )
+                secondary_lists = secondary_entries.group_by(
+                    "__neuron_row", maintain_order=True
+                ).agg(
+                    pl.col("search_column").alias("__fast_secondary_columns"),
+                    pl.col("search_value").alias("__fast_secondary_values"),
+                ) if secondary_entries.height else None
+                filtered = filtered.join(
+                    hit_lists,
+                    on="__neuron_row",
+                    how="left",
+                    maintain_order="left",
+                )
+                if secondary_lists is not None:
+                    filtered = filtered.join(
+                        secondary_lists,
+                        on="__neuron_row",
+                        how="left",
+                        maintain_order="left",
+                    )
+                else:
+                    filtered = filtered.with_columns(
+                        empty_hit_list.alias("__fast_secondary_columns"),
+                        empty_hit_list.alias("__fast_secondary_values"),
+                    )
+                filtered = filtered.with_columns(
+                    pl.when(pl.col("__fast_secondary_columns").is_null())
+                    .then(empty_hit_list)
+                    .otherwise(pl.col("__fast_secondary_columns"))
+                    .alias("__fast_secondary_columns"),
+                    pl.when(pl.col("__fast_secondary_values").is_null())
+                    .then(empty_hit_list)
+                    .otherwise(pl.col("__fast_secondary_values"))
+                    .alias("__fast_secondary_values"),
+                )
+                match_priority = pl.col("__match_priority")
+                global_kind_priority = pl.col("__match_kind_priority")
+                match_column_key = pl.col("__candidate_column")
+                match_value = pl.col("__candidate_value")
+                match_column = pl.when(
+                    pl.col("__candidate_column") == "bodyId"
+                ).then(
+                    pl.when(
+                        _display_expression("instance", filtered)
+                        .cast(pl.Utf8, strict=False)
+                        .fill_null("")
+                        .str.strip_chars() != ""
+                    ).then(
+                        _display_expression("instance", filtered)
+                        .cast(pl.Utf8, strict=False)
+                        .fill_null("")
+                        .str.strip_chars()
+                    ).otherwise(pl.lit("bodyId"))
+                ).otherwise(pl.col("__candidate_column"))
+                all_hit_columns = pl.col("__fast_hit_columns")
+                all_hit_values = pl.col("__fast_hit_values")
+                secondary_hit_columns = pl.col("__fast_secondary_columns")
+                secondary_hit_values = pl.col("__fast_secondary_values")
+                prefix_hit_columns = all_hit_columns
+                prefix_hit_values = all_hit_values
+                substring_hit_columns = empty_hit_list
+                substring_hit_values = empty_hit_list
+                secondary_metadata = (
+                    secondary_hit_columns.list.first().fill_null(""),
+                    secondary_hit_columns.list.first().fill_null(""),
+                    secondary_hit_values.list.first().fill_null(""),
+                )
+            else:
+                (
+                    match_priority,
+                    global_kind_priority,
+                    match_column,
+                    match_column_key,
+                    match_value,
+                    all_hit_columns,
+                    all_hit_values,
+                    secondary_hit_columns,
+                    secondary_hit_values,
+                ) = _global_match_metadata(filtered, search_columns, match_text)
+                # Global search already has one canonical, column-ordered hit
+                # list. The common metadata block below can materialize it
+                # directly without reconstructing separate stage lists.
+                prefix_hit_columns = all_hit_columns
+                prefix_hit_values = all_hit_values
+                substring_hit_columns = empty_hit_list
+                substring_hit_values = empty_hit_list
+                secondary_metadata = (
+                    secondary_hit_columns.list.first().fill_null(""),
+                    secondary_hit_columns.list.first().fill_null(""),
+                    secondary_hit_values.list.first().fill_null(""),
+                )
+        elif staged_search:
+            prefix_metadata = _match_metadata(
+                filtered, columns, match_text, stage=prefix_stage
+            )
+            substring_metadata = _match_metadata(
+                filtered, columns, match_text,
+                stage=substring_stage or SearchStage("substring", tuple(search_columns)),
+            )
+            is_substring = pl.col("__match_kind_priority") == 1
+            match_priority = pl.when(is_substring).then(
+                substring_metadata[0]
+            ).otherwise(prefix_metadata[0])
+            match_column = pl.when(is_substring).then(
+                substring_metadata[1]
+            ).otherwise(prefix_metadata[1])
+            match_column_key = pl.when(is_substring).then(
+                substring_metadata[2]
+            ).otherwise(prefix_metadata[2])
+            match_value = pl.when(is_substring).then(
+                substring_metadata[3]
+            ).otherwise(prefix_metadata[3])
+            prefix_hit_columns, prefix_hit_values = _match_hit_lists(
+                filtered,
+                list(prefix_stage.columns) if prefix_stage is not None else [],
+                match_text,
+                "prefix",
+                suppress_instance_if_type=bool(search_text and not scoped_search),
+            )
+            substring_hit_columns, substring_hit_values = _match_hit_lists(
+                filtered,
+                list(substring_stage.columns)
+                if substring_stage is not None
+                else search_columns,
+                match_text,
+                "substring",
+                suppress_instance_if_type=bool(search_text and not scoped_search),
+            )
+            secondary_hit_columns, secondary_hit_values = _secondary_hit_lists(
+                filtered,
+                list(substring_stage.columns)
+                if substring_stage is not None
+                else search_columns,
+                match_text,
+            )
+            secondary_metadata = (
+                substring_metadata[1],
+                substring_metadata[2],
+                substring_metadata[3],
+            )
+        else:
+            match_priority, match_column, match_column_key, match_value = _match_metadata(
+                filtered, columns, match_text, stage=match_stage
+            )
+            prefix_hit_columns, prefix_hit_values = _match_hit_lists(
+                filtered,
+                list(match_stage.columns) if match_stage is not None else [],
+                match_text,
+                match_stage.mode if match_stage is not None else "substring",
+                suppress_instance_if_type=False,
+            )
+            substring_hit_columns = empty_hit_list
+            substring_hit_values = empty_hit_list
+            secondary_hit_columns = empty_hit_list
+            secondary_hit_values = empty_hit_list
+            secondary_metadata = (pl.lit(""), pl.lit(""))
+
+        if not global_search:
+            filtered = filtered.with_columns(
+                prefix_hit_columns.alias("__prefix_match_columns"),
+                prefix_hit_values.alias("__prefix_match_values"),
+                substring_hit_columns.alias("__substring_match_columns"),
+                substring_hit_values.alias("__substring_match_values"),
+            )
+            all_hit_columns = pl.concat_list(
+                [pl.col("__prefix_match_columns"), pl.col("__substring_match_columns")]
+            ).list.unique(maintain_order=True)
+            all_hit_values = pl.concat_list(
+                [pl.col("__prefix_match_values"), pl.col("__substring_match_values")]
+            ).list.unique(maintain_order=True)
+        secondary_condition = (
+            pl.lit(True)
+            if global_search
+            else pl.lit(False)
         )
+        secondary_hit_columns = pl.when(secondary_condition).then(
+            secondary_hit_columns
+        ).otherwise(empty_hit_list)
+        secondary_hit_values = pl.when(secondary_condition).then(
+            secondary_hit_values
+        ).otherwise(empty_hit_list)
         filtered = filtered.with_columns(
             match_priority.alias("__match_priority"),
             match_column.alias("match_column"),
             match_column_key.alias("match_column_key"),
             match_value.alias("match_value"),
+            all_hit_columns.alias("match_column_keys"),
+            all_hit_values.alias("match_values"),
+            secondary_hit_columns.alias("secondary_match_column_keys"),
+            secondary_hit_values.alias("secondary_match_values"),
+            (
+                global_kind_priority
+                if global_search
+                else (
+                    pl.col("__match_kind_priority")
+                    if staged_search
+                    else pl.lit(0)
+                )
+            ).alias("__match_kind_priority"),
+            (
+                pl.lit(len(search_columns))
+                if global_search
+                else (
+                    substring_metadata[0]
+                    if staged_search
+                    else pl.lit(len(search_columns))
+                )
+            ).alias("__secondary_match_priority"),
+            (
+                secondary_metadata[0]
+                if global_search or staged_search
+                else pl.lit("")
+            ).alias("__secondary_match_column"),
+            (
+                secondary_metadata[1]
+                if global_search or staged_search
+                else pl.lit("")
+            ).alias("__secondary_match_column_key"),
+            (
+                secondary_metadata[2]
+                if global_search or staged_search
+                else pl.lit("")
+            ).alias("__secondary_match_value"),
         )
     else:
         filtered = filtered.with_columns(
+            pl.lit(len(search_columns)).alias("__match_priority"),
+            pl.lit(1).alias("__match_kind_priority"),
             pl.lit("").alias("match_column"),
             pl.lit("").alias("match_column_key"),
             pl.lit("").alias("match_value"),
+            pl.lit([], dtype=pl.List(pl.Utf8)).alias("match_column_keys"),
+            pl.lit([], dtype=pl.List(pl.Utf8)).alias("match_values"),
+            pl.lit([], dtype=pl.List(pl.Utf8)).alias("secondary_match_column_keys"),
+            pl.lit([], dtype=pl.List(pl.Utf8)).alias("secondary_match_values"),
         )
 
     manual_match_value_sort = sort_by == "__match_value__"
@@ -510,11 +1862,20 @@ def query_neuron_index(
     sort_directions = []
     if match_text and (not manual_sort or manual_match_value_sort):
         # Keep each match-column subset together in bodyId → type → instance →
-        # taxonomy order, then sort the actual matched values within that
-        # subset. If the UI explicitly requests descending matched values,
-        # reverse only the values inside each priority group.
-        sort_columns.extend(("__match_priority", "match_value"))
-        sort_directions.extend((False, bool(descending) if manual_match_value_sort else False))
+        # taxonomy order. Within each column subset, strict prefixes precede
+        # case-insensitive substring matches, then values are alphabetical.
+        # This keeps a type substring such as MeVPaMe2 ahead of lower-priority
+        # *type/taxonomy prefixes while still behind aMe* type prefixes.
+        sort_columns.extend(
+            ("__match_priority", "__match_kind_priority", "match_value")
+        )
+        sort_directions.extend(
+            (
+                False,
+                False,
+                bool(descending) if manual_match_value_sort else False,
+            )
+        )
     else:
         if selected_sort == "bodyId":
             # Body IDs are stored as strings in the cache to preserve large
@@ -532,22 +1893,55 @@ def query_neuron_index(
             # resolves rows with the same selected-column value.
             sort_columns.append("__match_priority")
             sort_directions.append(False)
-    try:
+    if not (
+        presorted_search
+        and match_text
+        and not manual_sort
+    ):
         try:
-            filtered = filtered.sort(
-                sort_columns,
-                descending=sort_directions,
-                nulls_last=[True] * len(sort_columns),
-            )
+            try:
+                filtered = filtered.sort(
+                    sort_columns,
+                    descending=sort_directions,
+                    nulls_last=[True] * len(sort_columns),
+                )
+            except TypeError:  # compatibility with older Polars releases
+                filtered = filtered.sort(sort_columns, descending=sort_directions)
         except TypeError:  # compatibility with older Polars releases
             filtered = filtered.sort(sort_columns, descending=sort_directions)
-    except TypeError:  # compatibility with older Polars releases
-        filtered = filtered.sort(sort_columns, descending=sort_directions)
+
+    # A match-group click should reveal the first corresponding metadata row.
+    # Compute the page after the server-side sort so the UI does not need to
+    # download or scan the full table in Python. This is optional and only
+    # runs for an explicit focus request.
+    focus_page = None
+    if focus_key:
+        focus_positions = (
+            filtered
+            .select("__neuron_key")
+            .with_row_index("__sorted_position")
+            .filter(pl.col("__neuron_key") == str(focus_key))
+            .select("__sorted_position")
+            .to_series()
+            .to_list()
+        )
+        if focus_positions:
+            focus_page = int(focus_positions[0]) // page_size + 1
 
     total = int(filtered.height)
     pages = max(1, (total + page_size - 1) // page_size)
     current_page = max(1, min(int(page or 1), pages))
-    output_columns = ["match_column", "match_value", "match_column_key", *columns]
+    output_columns = [
+        "__neuron_key",
+        "match_column",
+        "match_value",
+        "match_column_key",
+        "match_column_keys",
+        "match_values",
+        "secondary_match_column_keys",
+        "secondary_match_values",
+        *columns,
+    ]
     rows = (
         filtered
         .select(output_columns)
@@ -566,6 +1960,404 @@ def query_neuron_index(
         {column: json_value(value) for column, value in row.items()}
         for row in rows
     ]
+
+    def highlight_mode() -> str:
+        if search_text and not scoped_search:
+            return "global"
+        if search_text:
+            return search_mode
+        return filter_mode if active_column_filter else "global"
+
+    if match_text:
+        mode_for_highlight = highlight_mode()
+        for row in safe_rows:
+            row["__highlighted_cells"] = _highlighted_cells(
+                row,
+                match_text,
+                mode_for_highlight,
+                columns,
+            )
+    else:
+        for row in safe_rows:
+            row["__highlighted_cells"] = {}
+
+    # Broad global searches can build their complete match panel directly
+    # from the compact sidecar. This avoids re-evaluating every searchable
+    # expression against the full metadata frame and, importantly, avoids a
+    # Python pass over every wide row before the first page is rendered.
+    if fast_hit_entries is not None:
+        fast_groups = _presorted_match_groups(
+            filtered,
+            fast_hit_entries,
+            search_columns,
+            json_value,
+            membership_entries=fast_membership_entries,
+        )
+        if fast_groups is not None:
+            (
+                fast_match_groups,
+                fast_group_members,
+                fast_group_body_ids,
+                fast_group_related,
+                fast_group_primary,
+            ) = fast_groups
+            return NeuronIndexPage(
+                rows=safe_rows,
+                total=total,
+                page=current_page,
+                pages=pages,
+                page_size=page_size,
+                sort_by=(
+                    "match_value"
+                    if match_text and (not manual_sort or manual_match_value_sort)
+                    else selected_sort
+                ),
+                descending=(
+                    bool(descending)
+                    if match_text and manual_match_value_sort
+                    else (False if match_text and not manual_sort else bool(descending))
+                ),
+                match_groups=fast_match_groups,
+                match_group_members={
+                    key: tuple(values)
+                    for key, values in fast_group_members.items()
+                },
+                match_group_body_ids={
+                    key: tuple(values)
+                    for key, values in fast_group_body_ids.items()
+                },
+                match_group_related=fast_group_related,
+                match_group_primary=fast_group_primary,
+                focus_page=focus_page,
+            )
+
+    # Deduplicate by the exact matched name. A selection of one group means
+    # “all rows sharing this name”, regardless of whether the name was found
+    # in type, instance, class, or another useful taxonomy field.
+    match_groups: List[Dict[str, Any]] = []
+    group_members: Dict[str, List[str]] = {}
+    group_body_ids: Dict[str, List[str]] = {}
+    group_member_sets: Dict[str, set[str]] = {}
+    group_body_id_sets: Dict[str, set[str]] = {}
+    group_related_sets: Dict[str, set[str]] = {}
+    group_primary_sets: Dict[str, set[str]] = {}
+    group_index: Dict[str, Dict[str, Any]] = {}
+    group_columns = [
+        "__neuron_key",
+        "bodyId",
+        "match_column",
+        "match_column_key",
+        "match_value",
+    ]
+    if staged_search:
+        group_columns.extend(
+            [
+                "__match_kind_priority",
+                "__match_priority",
+                "__secondary_match_column",
+                "__secondary_match_column_key",
+                "__secondary_match_value",
+                "__secondary_match_priority",
+                "secondary_match_column_keys",
+                "secondary_match_values",
+            ]
+        )
+    group_source = filtered.select(group_columns).to_dicts()
+    ordered_filtered_keys = [
+        str(json_value(raw.get("__neuron_key")) or "").strip()
+        for raw in group_source
+    ]
+    filtered_key_order = {
+        key: position for position, key in enumerate(ordered_filtered_keys)
+    }
+    group_order: Dict[str, Tuple[int, int, str]] = {}
+    for raw in group_source:
+        candidates = [
+            (
+                raw.get("match_column"),
+                raw.get("match_column_key"),
+                raw.get("match_value"),
+                raw.get("__match_kind_priority", 1),
+                raw.get("__match_priority", len(search_columns)),
+                "primary",
+            )
+        ]
+        if search_text and not scoped_search:
+            primary_value = str(json_value(raw.get("match_value")) or "").strip()
+            primary_column_key = str(raw.get("match_column_key") or "").strip()
+            secondary_column_keys = [
+                str(value or "").strip()
+                for value in (raw.get("secondary_match_column_keys") or [])
+            ]
+            secondary_values = [
+                str(json_value(value) or "").strip()
+                for value in (raw.get("secondary_match_values") or [])
+            ]
+            secondary_candidates = list(zip(secondary_column_keys, secondary_values))
+            if not secondary_candidates:
+                # Keep compatibility with older cached rows that only carry
+                # the original single-secondary fields.
+                secondary_candidates = [
+                    (
+                        str(raw.get("__secondary_match_column_key") or "").strip(),
+                        str(json_value(raw.get("__secondary_match_value")) or "").strip(),
+                    )
+                ]
+            for secondary_column_key, secondary_value in secondary_candidates:
+                if not secondary_value:
+                    continue
+                if (
+                    secondary_value == primary_value
+                    and secondary_column_key == primary_column_key
+                ):
+                    continue
+                try:
+                    secondary_priority = search_columns.index(secondary_column_key)
+                except ValueError:
+                    secondary_priority = len(search_columns)
+                candidates.append(
+                    (
+                        secondary_column_key,
+                        secondary_column_key,
+                        secondary_value,
+                        1,
+                        secondary_priority,
+                        "secondary",
+                    )
+                )
+
+        member_key = str(json_value(raw.get("__neuron_key")) or "")
+        primary_candidate_value = str(
+            json_value(raw.get("match_value")) or ""
+        ).strip()
+        row_candidate_values = []
+        for candidate in candidates:
+            candidate_value = str(json_value(candidate[2]) or "").strip()
+            if candidate_value and candidate_value not in row_candidate_values:
+                row_candidate_values.append(candidate_value)
+        body_id = json_value(raw.get("bodyId"))
+        body_id = str(body_id or "").strip()
+        if body_id.endswith(".0") and body_id[:-2].isdigit():
+            body_id = body_id[:-2]
+        for column, column_key, raw_value, raw_kind, raw_priority, match_role in candidates:
+            value = str(json_value(raw_value) or "").strip()
+            if not value:
+                continue
+            key = value
+            try:
+                kind_priority = int(raw_kind)
+            except (TypeError, ValueError):
+                kind_priority = 1
+            try:
+                column_priority = int(raw_priority)
+            except (TypeError, ValueError):
+                column_priority = len(search_columns)
+            candidate_order = (column_priority, kind_priority, value)
+            if key not in group_index:
+                group_index[key] = {
+                    "__match_group_key": key,
+                    "match_column": str(column or ""),
+                    "match_column_key": str(column_key or ""),
+                    "match_value": value,
+                    "body_count": 0,
+                    "match_role": match_role,
+                }
+                match_groups.append(group_index[key])
+                group_members[key] = []
+                group_body_ids[key] = []
+                group_member_sets[key] = set()
+                group_body_id_sets[key] = set()
+                group_related_sets[key] = set()
+                group_primary_sets[key] = set()
+                group_order[key] = candidate_order
+            elif candidate_order < group_order[key]:
+                group_order[key] = candidate_order
+                group_index[key]["match_column"] = str(column or "")
+                group_index[key]["match_column_key"] = str(column_key or "")
+                group_index[key]["match_role"] = match_role
+            if member_key and member_key not in group_member_sets[key]:
+                group_members[key].append(member_key)
+                group_member_sets[key].add(member_key)
+                group_index[key]["body_count"] += 1
+            if body_id and body_id not in group_body_id_sets[key]:
+                group_body_ids[key].append(body_id)
+                group_body_id_sets[key].add(body_id)
+            # Keep the row's candidate values for the direct primary/secondary
+            # relationship pass below.  Do not union every value into one
+            # connected component: a name can be primary on one row and a
+            # secondary taxonomy value on another row.
+            if primary_candidate_value:
+                group_primary_sets[key].add(primary_candidate_value)
+
+    match_groups.sort(
+        key=lambda group: group_order.get(
+            str(group.get("__match_group_key") or ""),
+            (len(search_columns), 1, str(group.get("match_value") or "")),
+        )
+    )
+    group_rank = {
+        str(group.get("__match_group_key") or ""): position
+        for position, group in enumerate(match_groups)
+    }
+    primary_values = {
+        key for key, group in group_index.items()
+        if group.get("match_role") == "primary"
+    }
+    owner_values: Dict[str, set[str]] = {}
+    for key, owners in group_primary_sets.items():
+        if key not in group_rank:
+            continue
+        for owner in owners:
+            owner = str(owner or "").strip()
+            if (
+                not owner
+                or owner == key
+                or owner not in group_rank
+                or key in primary_values
+            ):
+                continue
+            group_related_sets.setdefault(owner, {owner}).add(key)
+            group_related_sets.setdefault(key, {key}).add(owner)
+            owner_values.setdefault(key, set()).add(owner)
+
+    match_group_related = {
+        key: tuple(
+            sorted(
+                group_related_sets.get(key, {key}),
+                key=lambda value: group_rank.get(
+                    value, len(group_rank)
+                ),
+            )
+        )
+        for key in group_rank
+    }
+    # Keep each primary value independent. A pure secondary value points back
+    # to its owning primary value; a value that is itself primary does not
+    # become an alias for another primary just because it also appears in a
+    # taxonomy column on that row.
+    match_group_primary = {}
+    for key in group_rank:
+        if key in primary_values:
+            match_group_primary[key] = (key,)
+        else:
+            owners = sorted(
+                owner_values.get(key, ()),
+                key=lambda value: group_rank.get(value, len(group_rank)),
+            )
+            match_group_primary[key] = tuple(owners or (key,))
+
+    # Keep the relevance order for primary names, but render each secondary
+    # taxonomy match as an accessory row immediately below its owner.
+    match_groups = _order_match_groups_with_secondaries(
+        match_groups,
+        match_group_primary,
+    )
+
+    # A row's displayed match is intentionally only its highest-priority
+    # match, but selecting a name should include rows where that same name is
+    # present in another searched field as well. Build that membership map
+    # once from the active shared stage instead of making the UI guess from a
+    # page-sized subset.
+    if match_text and match_groups:
+        # A strict type stage determines which rows are returned, but a
+        # matched-name selection should still cover the same name in the other
+        # searchable identity/taxonomy fields. Numeric input remains bodyId
+        # only so a number in a taxonomy field can never bypass the safeguard.
+        if scoped_search:
+            membership_columns = list(search_target_columns)
+        elif search_text:
+            membership_columns = (
+                ["bodyId"] if is_numeric_search(match_text) else search_columns
+            )
+        elif active_column_filter:
+            membership_columns = list(match_stage.columns)
+        else:
+            membership_columns = search_columns
+        scope_columns = [
+            column for column in membership_columns if column in filtered.columns
+        ]
+        # A broad one-character prefix can match most of a large index. Do
+        # not materialize every searchable cell as Python dictionaries here:
+        # that blocks NiceGUI's event loop long enough for the browser socket
+        # to disconnect. Polars performs the same exact-name membership join
+        # column-wise and only returns the compact groups needed by selection.
+        group_names_by_column: Dict[str, set[str]] = {}
+        for group in match_groups:
+            column = str(group.get("match_column_key", "") or "").strip()
+            value = str(group.get("match_value", "") or "").strip()
+            if column in scope_columns and value:
+                group_names_by_column.setdefault(column, set()).add(
+                    value.casefold()
+                )
+        same_name_members: Dict[Tuple[str, str], set[str]] = {}
+        for column in scope_columns:
+            group_norms = sorted(group_names_by_column.get(column, set()))
+            if not group_norms:
+                continue
+            display_value = (
+                _display_expression(column, filtered)
+                .cast(pl.Utf8, strict=False)
+                .fill_null("")
+                .str.strip_chars()
+            )
+            column_matches = (
+                filtered
+                .select(
+                    pl.col("__neuron_key"),
+                    display_value.alias("__match_name"),
+                )
+                .with_columns(
+                    pl.col("__match_name")
+                    .str.to_lowercase()
+                    .alias("__match_norm")
+                )
+                .filter(pl.col("__match_norm").is_in(group_norms))
+            )
+            grouped = column_matches.group_by("__match_norm").agg(
+                pl.col("__neuron_key").alias("__members")
+            )
+            for raw in grouped.to_dicts():
+                name = str(raw.get("__match_norm") or "")
+                members = {
+                    str(member)
+                    for member in (raw.get("__members") or [])
+                    if str(member)
+                }
+                if name and members:
+                    same_name_members[(column, name)] = members
+
+        body_ids_by_key = {}
+        for key, raw_body_id in filtered.select(
+            ["__neuron_key", "bodyId"]
+        ).iter_rows():
+            body_id = str(json_value(raw_body_id) or "").strip()
+            if body_id.endswith(".0") and body_id[:-2].isdigit():
+                body_id = body_id[:-2]
+            body_ids_by_key[str(key or "")] = body_id
+        for group in match_groups:
+            value = str(group.get("match_value", "") or "").strip()
+            column = str(group.get("match_column_key", "") or "").strip()
+            members = same_name_members.get((column, value.casefold()))
+            if members:
+                ordered_members = sorted(
+                    members,
+                    key=lambda key: filtered_key_order.get(
+                        key, len(filtered_key_order)
+                    ),
+                )
+                group_members[value] = ordered_members
+                group["body_count"] = len(members)
+                group_body_ids[value] = [
+                    body_ids_by_key[key]
+                    for key in ordered_members
+                    if body_ids_by_key.get(key)
+                ]
+
+    for group in match_groups:
+        group_key = str(group.get("__match_group_key") or "")
+        body_ids = group_body_ids.get(group_key, [])
+        group["first_body_id"] = body_ids[0] if body_ids else ""
+
     return NeuronIndexPage(
         rows=safe_rows,
         total=total,
@@ -582,4 +2374,14 @@ def query_neuron_index(
             if match_text and manual_match_value_sort
             else (False if match_text and not manual_sort else bool(descending))
         ),
+        match_groups=match_groups,
+        match_group_members={
+            key: tuple(members) for key, members in group_members.items()
+        },
+        match_group_body_ids={
+            key: tuple(body_ids) for key, body_ids in group_body_ids.items()
+        },
+        match_group_related=match_group_related,
+        match_group_primary=match_group_primary,
+        focus_page=focus_page,
     )

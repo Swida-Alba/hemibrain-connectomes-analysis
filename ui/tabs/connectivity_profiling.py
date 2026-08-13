@@ -9,11 +9,17 @@ from ..components.common import (
 from ..components.mapping_editor import custom_grouping_block
 from ..components.output_panel import OutputPanel
 from ..runner import ScriptRunner
+from ..type_suggestions import datasets_suggestions
 
 
 def create_connectivity_profiling_tab():
     runner = ScriptRunner()
     output_panel = OutputPanel("Profiling Output")
+    datasets_select = None
+
+    def _type_suggest(text):
+        selected = datasets_select.value if datasets_select is not None else []
+        return datasets_suggestions(text, selected, limit=None)
 
     form_col, results_col = tool_page(
         "Connectivity Profiling",
@@ -29,6 +35,9 @@ def create_connectivity_profiling_tab():
                 label="Neurons to Compare",
                 placeholder="Type or upload CSV/TSV/Excel (e.g., aMe12, aMe10, aMe9)",
                 hint="Enter 2+ neurons to compare profiles. Upload CSV/TSV/Excel for large lists.",
+                suggestions=_type_suggest,
+                available_neurons=lambda: list(datasets_select.value or [])
+                if datasets_select is not None else [],
             )
             with param_grid(2):
                 datasets_select = dataset_multi_selector(

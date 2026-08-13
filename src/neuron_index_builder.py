@@ -58,6 +58,15 @@ OPERATIONAL_COLUMNS = (
     "post", *CACHE_STATE_COLUMNS,
 )
 
+# Compact sidecar used by the viewer's prefix/substring search path.
+SEARCH_CACHE_FILENAME = "neuron_index_search.parquet"
+
+# Search priority after the three identity columns.  Keep this explicit rather
+# than relying on lexical column order: the same order is consumed by the
+# viewer, auto-suggestions, and the analysis resolver.  Source columns that do
+# not occur in a particular dataset simply drop out of the resulting list.
+TAXONOMY_PRIORITY_COLUMNS = ("class", "subclass", "superclass")
+
 
 def _normalized_column_name(column: str) -> str:
     """Normalize a metadata name for case/spacing/punctuation comparisons."""
@@ -115,8 +124,9 @@ def priority_metadata_columns(columns: Iterable[str]) -> List[str]:
     """Order type/class metadata columns for display and matching.
 
     Cross-dataset names are promoted in the requested order, followed by
-    other ``*type`` fields, then class/superclass fields.  Ties retain source
-    order so two releases with different metadata schemas remain stable.
+    other type fields, then the inner taxonomy fields (class, subclass,
+    superclass). Ties retain source order so two releases with different
+    metadata schemas remain stable.
     """
     names = [str(column) for column in columns]
 
@@ -131,11 +141,9 @@ def priority_metadata_columns(columns: Iterable[str]) -> List[str]:
             return explicit[normalized]
         if "type" in normalized:
             return 3
-        if normalized == "class":
-            return 4
-        if normalized == "superclass":
-            return 6
-        return 5
+        if normalized in TAXONOMY_PRIORITY_COLUMNS:
+            return 4 + TAXONOMY_PRIORITY_COLUMNS.index(normalized)
+        return 7
 
     selected = [
         column for column in names
@@ -173,6 +181,98 @@ def ordered_projection_columns(columns: Iterable[str]) -> List[str]:
         ],
         *[column for column in cache_state if column in names],
     ]
+
+
+def viewer_search_columns(columns: Iterable[str]) -> List[str]:
+    """Return the canonical columns indexed by the viewer search cache."""
+    names = [str(column) for column in columns]
+    result: List[str] = []
+    for column in ("bodyId", "type", "instance"):
+        if column in names and column not in result:
+            result.append(column)
+    for column in priority_metadata_columns(names):
+        if column in names and column not in result:
+            result.append(column)
+    return result
+
+
+def search_cache_path(index_path: Path) -> Path:
+    """Return the compact searchable sidecar next to a neuron index."""
+    index_path = Path(index_path)
+    return index_path.with_name(SEARCH_CACHE_FILENAME)
+
+
+def _search_display_expression(frame, column: str):
+    """Return the string representation used by the shared search matcher."""
+    import polars as pl
+
+    expression = pl.col(column).cast(pl.Utf8, strict=False).fill_null("")
+    if column == "bodyId":
+        expression = expression.str.strip_chars().str.replace(r"\.0+$", "")
+    return expression
+
+
+def build_search_cache_frame(frame, columns: Optional[Iterable[str]] = None):
+    """Build the ordered, compact search sidecar from a Polars frame.
+
+    The sidecar has one row per non-empty searchable value, with the source
+    row ordinals stored as a compact list. Its input order is the query order
+    for the viewer: canonical column priority, then strict value order. A
+    query can therefore filter a small distinct-value table and explode only
+    the matching row lists; it never sorts the full metadata frame.
+
+    ``__neuron_rows`` contains the stable source-row ordinals used to join the
+    sidecar back to the complete metadata table. It avoids copying every
+    retained metadata column into this cache and avoids repeating a value once
+    per neuron.
+    """
+    import polars as pl
+
+    if columns is None:
+        columns = viewer_search_columns(frame.columns)
+    ordered = [column for column in columns if column in frame.columns]
+    if not ordered:
+        return pl.DataFrame(
+            schema={
+                "__neuron_rows": pl.List(pl.UInt32),
+                "search_column": pl.Utf8,
+                "search_priority": pl.UInt16,
+                "search_value": pl.Utf8,
+                "search_value_folded": pl.Utf8,
+            }
+        )
+
+    source = frame.with_row_index("__neuron_row")
+    parts = []
+    for priority, column in enumerate(ordered):
+        display = _search_display_expression(source, column)
+        parts.append(
+            source.select(
+                pl.col("__neuron_row").cast(pl.UInt32, strict=False),
+                pl.lit(column).alias("search_column"),
+                pl.lit(priority).cast(pl.UInt16).alias("search_priority"),
+                display.alias("search_value"),
+            ).filter(pl.col("search_value").str.strip_chars() != "")
+        )
+    result = pl.concat(parts, how="vertical_relaxed").with_columns(
+        pl.col("search_value").str.to_lowercase().alias("search_value_folded")
+    )
+    return (
+        result.group_by(
+            [
+                "search_column", "search_priority", "search_value",
+                "search_value_folded",
+            ],
+            maintain_order=True,
+        )
+        .agg(
+            pl.col("__neuron_row")
+            .cast(pl.UInt32, strict=False)
+            .unique(maintain_order=True)
+            .alias("__neuron_rows")
+        )
+        .sort(["search_priority", "search_value"])
+    )
 
 
 def dataset_folder(dataset: str) -> str:

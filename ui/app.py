@@ -156,9 +156,33 @@ html, body {
     text-decoration: none !important;
 }
 .drocat-inline-link:hover { text-decoration: underline !important; }
+.drocat-neuron-search-toolbar {
+    margin-top: 8px;
+    padding: 10px 12px 8px;
+    border: 1px solid var(--drocat-line-strong);
+    border-radius: 14px;
+    background: linear-gradient(135deg, rgba(234, 240, 255, .78), rgba(255, 255, 255, .96));
+    box-shadow: 0 4px 14px rgba(11, 31, 58, .06);
+}
+.drocat-neuron-search-toolbar .drocat-neuron-search-field {
+    background: rgba(255, 255, 255, .96);
+    border-radius: 10px;
+}
+.drocat-neuron-search-toolbar .q-field--outlined .q-field__control {
+    border-radius: 10px;
+}
+.drocat-neuron-search-toolbar .q-field--outlined .q-field__control:before {
+    border-color: var(--drocat-line-strong);
+}
+.drocat-neuron-search-toolbar .q-field--outlined.q-field--focused .q-field__control:after {
+    border-color: var(--drocat-cobalt);
+}
+.drocat-neuron-search-toolbar .q-field__label {
+    color: var(--drocat-muted);
+}
 .drocat-neuron-results-layout {
     display: grid;
-    grid-template-columns: minmax(260px, 310px) minmax(0, 1fr);
+    grid-template-columns: minmax(480px, 520px) minmax(0, 1fr);
     gap: 12px;
     align-items: stretch;
 }
@@ -195,16 +219,57 @@ html, body {
     font-weight: 650;
     line-height: 1.2;
 }
+.drocat-neuron-query-chip-wrap {
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+    min-height: 26px;
+    padding: 3px 5px 3px 9px;
+    border: 1px solid rgba(69, 126, 191, .38);
+    border-radius: 999px;
+    background: #fff;
+    color: var(--drocat-navy);
+}
+.drocat-neuron-query-chip-wrap .drocat-neuron-query-chip {
+    min-height: auto;
+    padding: 0;
+    border: 0;
+    background: transparent;
+}
+.drocat-neuron-query-chip-remove {
+    min-height: 20px;
+    min-width: 20px;
+    color: var(--drocat-muted);
+}
+.drocat-neuron-query-chip-remove:hover {
+    color: var(--drocat-navy);
+    background: rgba(69, 126, 191, .10);
+}
+.drocat-neuron-match-jump {
+    min-height: 26px;
+    padding: 0 4px;
+    color: var(--drocat-navy);
+    font-weight: 650;
+}
+.drocat-neuron-match-jump:hover {
+    color: var(--drocat-cobalt);
+    background: rgba(69, 126, 191, .10);
+}
 .drocat-neuron-full-panel {
     background: rgba(255, 255, 255, .72);
 }
 .drocat-neuron-match-table .q-table__middle {
     max-height: 52vh;
-    overflow: auto;
+    overflow-x: hidden;
+    overflow-y: auto;
     margin-top: 8px;
     border: 1px solid var(--drocat-line);
     border-radius: 8px;
     background: rgba(255, 255, 255, .78);
+}
+.drocat-neuron-match-table table {
+    width: 100%;
+    table-layout: fixed;
 }
 .drocat-neuron-match-table th {
     position: sticky;
@@ -228,9 +293,102 @@ html, body {
 .drocat-neuron-match-table td.drocat-neuron-match-value {
     color: var(--drocat-navy);
     font-weight: 700;
-    overflow: hidden;
-    text-overflow: ellipsis;
+    overflow: visible;
+    white-space: normal;
+    overflow-wrap: anywhere;
+}
+.drocat-neuron-match-table td.drocat-neuron-match-count {
+    color: var(--drocat-muted);
+    font-variant-numeric: tabular-nums;
+    text-align: right;
     white-space: nowrap;
+}
+.drocat-neuron-match-select-cell {
+    width: 36px;
+    min-width: 36px;
+    padding-left: 7px !important;
+    padding-right: 3px !important;
+    text-align: center;
+}
+.drocat-neuron-match-secondary-arrow {
+    color: var(--drocat-faint);
+    opacity: .9;
+}
+.drocat-neuron-match-source {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    white-space: nowrap;
+}
+.drocat-neuron-match-value-line {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    min-width: 0;
+}
+.drocat-neuron-match-secondary-label {
+    display: inline-flex;
+    align-items: center;
+    min-height: 18px;
+    padding: 1px 5px;
+    border: 1px solid rgba(234, 179, 8, .68);
+    border-radius: 999px;
+    background: #fff8d6;
+    color: #946200;
+    font-size: 10px;
+    font-weight: 750;
+    letter-spacing: .02em;
+    line-height: 1.2;
+    text-transform: uppercase;
+    white-space: nowrap;
+}
+.drocat-neuron-match-first {
+    margin: 1px 0 0 4px;
+    color: var(--drocat-muted);
+    font-size: 10px;
+    font-weight: 500;
+    line-height: 1.2;
+    white-space: nowrap;
+}
+.drocat-neuron-match-table tbody tr.drocat-neuron-match-secondary-row > td {
+    height: 28px;
+    padding-top: 3px;
+    padding-bottom: 3px;
+    color: var(--drocat-faint);
+    font-size: 11px;
+    font-weight: 500;
+    line-height: 1.15;
+}
+.drocat-neuron-match-table tbody tr.drocat-neuron-match-secondary-row
+    .drocat-neuron-match-source {
+    color: var(--drocat-faint);
+    font-size: 11px;
+    font-weight: 500;
+}
+.drocat-neuron-match-table tbody tr.drocat-neuron-match-secondary-row
+    .drocat-neuron-match-jump {
+    min-height: 21px;
+    padding: 0 3px;
+    color: var(--drocat-muted);
+    font-size: 11px;
+    font-weight: 550;
+}
+.drocat-neuron-match-table tbody tr.drocat-neuron-match-secondary-row
+    .drocat-neuron-match-first {
+    margin-top: 0;
+    color: var(--drocat-faint);
+    font-size: 9px;
+}
+.drocat-neuron-match-table tbody tr.drocat-neuron-match-secondary-row
+    .drocat-neuron-match-secondary-label {
+    min-height: 15px;
+    padding: 0 4px;
+    margin-right: 2px;
+    border-color: rgba(234, 179, 8, .42);
+    background: #fffbe8;
+    color: #a07a2c;
+    font-size: 9px;
+    font-weight: 650;
 }
 .drocat-neuron-match-panel .q-table__control {
     color: var(--drocat-cobalt);
@@ -246,7 +404,55 @@ html, body {
     max-height: 52vh;
     overflow: auto;
 }
+.drocat-data-viewer-table .q-table__middle thead tr:first-child th {
+    position: sticky;
+    top: 0;
+    z-index: 8;
+    background: var(--drocat-cobalt-soft) !important;
+    color: var(--drocat-navy) !important;
+    box-shadow: 0 1px 0 var(--drocat-line-strong), 0 3px 8px rgba(11, 31, 58, .08);
+}
 .drocat-data-viewer-table th { white-space: nowrap; }
+.drocat-data-viewer-table td,
+.drocat-data-viewer-table th {
+    height: 40px;
+    padding: 7px 9px;
+}
+.drocat-data-viewer-table tbody tr > td {
+    /* A QTable selection can otherwise leave its default gray row fill in
+       place while the viewer updates its persistent selection sets. The
+       viewer owns the two intentional states below: white for ordinary
+       cells and blue for selected rows. */
+    background: #fff !important;
+    color: var(--drocat-navy) !important;
+}
+.drocat-data-viewer-table.q-table__container,
+.drocat-data-viewer-table .q-table__middle,
+.drocat-data-viewer-table .q-table,
+.drocat-data-viewer-table tbody,
+.drocat-data-viewer-table tbody tr:not(.drocat-neuron-selected-row) {
+    background: #fff !important;
+}
+.drocat-data-viewer-table tbody tr.q-tr--selected:not(.drocat-neuron-selected-row) > td,
+.drocat-data-viewer-table tbody tr[aria-selected="true"]:not(.drocat-neuron-selected-row) > td {
+    background: #fff !important;
+}
+.drocat-data-viewer-table tbody tr:hover > td {
+    background: #fff !important;
+}
+.drocat-data-viewer-table tr.drocat-neuron-selected-row > td {
+    /* Direct body-ID selections and matched-group selections share the same
+       Quasar row-selection state. Keep that state visibly distinct from the
+       yellow cell used for the query match. */
+    background: #dcecff !important;
+    color: var(--drocat-navy) !important;
+}
+.drocat-data-viewer-table tr.drocat-neuron-selected-row:hover > td {
+    background: #cfe3ff !important;
+}
+.drocat-data-viewer-table tr.drocat-neuron-selected-row > td:first-child {
+    box-shadow: inset 3px 0 0 var(--drocat-cobalt);
+}
 .drocat-data-viewer-table td.drocat-neuron-hit-cell {
     /* The matched source cell follows the scroll until it would leave the
        viewport, then floats at the nearest horizontal edge. This keeps the
@@ -256,12 +462,43 @@ html, body {
     left: 0;
     right: 0;
     z-index: 4;
-    background: #fff1b8 !important;
+    /* Keep the cell's normal row background; only the nested mark below is
+       yellow. The outline still identifies every matched cell. */
+    background: #fff !important;
     color: var(--drocat-navy) !important;
-    font-weight: 700;
+    font-weight: 600;
     box-shadow: inset 0 0 0 2px #eab308;
 }
-@media (max-width: 900px) {
+.drocat-data-viewer-table td.drocat-neuron-secondary-hit-cell {
+    position: static;
+    z-index: 1;
+    background: #fff !important;
+    color: var(--drocat-navy) !important;
+    font-weight: 600;
+    box-shadow: inset 0 0 0 2px #eab308;
+}
+.drocat-data-viewer-table tr.drocat-neuron-selected-row > td.drocat-neuron-hit-cell,
+.drocat-data-viewer-table tr.drocat-neuron-selected-row > td.drocat-neuron-secondary-hit-cell {
+    background: #dcecff !important;
+    color: var(--drocat-navy) !important;
+}
+.drocat-data-viewer-table mark.drocat-neuron-match-text {
+    padding: 0 .08em;
+    border-radius: 3px;
+    background: #fff1b8;
+    color: var(--drocat-navy);
+    font-weight: 750;
+}
+@keyframes drocat-neuron-focus-breathe {
+    0%, 100% { outline-color: transparent; outline-width: 0; }
+    38%, 62% { outline-color: rgba(100, 110, 125, .72); outline-width: 4px; }
+}
+.drocat-data-viewer-table tr.drocat-neuron-focus-flash > td {
+    outline-style: solid;
+    outline-offset: -2px;
+    animation: drocat-neuron-focus-breathe 1.35s ease-in-out 1;
+}
+@media (max-width: 1100px) {
     .drocat-neuron-results-layout {
         grid-template-columns: 1fr;
     }
@@ -826,6 +1063,18 @@ def main():
         "no",
         "off",
     }
+
+    # NiceGUI prints its ready line during the server lifespan startup.  This
+    # handler runs immediately afterward, so the launcher output includes a
+    # usable browser fallback directly below that line on macOS, Windows, and
+    # Linux when automatic browser opening is unavailable or disabled.
+    app.on_startup(
+        lambda: print(
+            f"Tip: If the browser did not open automatically, copy and open "
+            f"http://127.0.0.1:{port} in your browser.",
+            flush=True,
+        )
+    )
     ui.run(
         title=APP_TITLE,
         host=host,

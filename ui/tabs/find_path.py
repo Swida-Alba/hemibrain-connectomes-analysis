@@ -12,13 +12,15 @@ from ..components.common import (
 from ..components.mapping_editor import custom_grouping_block
 from ..components.output_panel import OutputPanel
 from ..runner import ScriptRunner
-from ..type_suggestions import get_dataset_pools, match_suggestions
+from ..type_suggestions import dataset_suggestions
 
 
 def create_find_path_tab():
     """Create the FindPath tab UI."""
     runner = ScriptRunner()
     output_panel = OutputPanel("Pathfinding Output")
+    dataset = None
+    search_columns = None
 
     def _type_suggest(text):
         """Auto-suggest from the selected dataset's type names. Type matches
@@ -29,7 +31,7 @@ def create_find_path_tab():
         # Keep the complete candidate pool for local continuation filtering;
         # neuron_list_input applies the display limit after it narrows the
         # pool, so valid names beyond the first page remain reachable.
-        return match_suggestions(text, get_dataset_pools(ds), scope, limit=None)
+        return dataset_suggestions(text, ds, scope, limit=None)
 
     form_col, results_col = tool_page(
         "Find All Paths",
@@ -267,10 +269,6 @@ def create_find_path_tab():
             ui.notify("Please enter at least one target neuron", type="warning")
             return
 
-        # Persist the searched neurons for the auto-suggest history.
-        from ..history_store import record as _record_history
-        _record_history([str(v) for v in src_neurons + tgt_neurons])
-
         # Resolve custom grouping first: an invalid inline board aborts the
         # run before the output panel enters its running state.
         mapping_path, mapping_ok = resolve_grouping()
@@ -319,6 +317,14 @@ def create_find_path_tab():
 
         result = await output_panel.run(runner, "find_path", constructor_params, "find_all_path",
                                         output_dir=output_dir.value)
+
+        # InitializeNeuronInfo runs before the path search and reports the
+        # resolved source/target counts. Record only after that confirmation;
+        # unknown queries that resolve to zero neurons never enter history.
+        match_info = result.get("neuron_match") or {}
+        if match_info.get("any_pair"):
+            from ..history_store import record as _record_history
+            _record_history([str(v) for v in src_neurons + tgt_neurons])
 
         output_panel.set_running(False)
         output_panel.set_status("Completed" if result["returncode"] == 0 else "Failed",

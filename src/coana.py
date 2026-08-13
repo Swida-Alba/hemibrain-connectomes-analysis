@@ -10,6 +10,7 @@ import gc
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
+from copy import deepcopy
 
 import numpy as np
 import pandas as pd
@@ -66,19 +67,23 @@ from connection_map import ThresholdedConnectionMap
 
 try:
     from .neuron_index_builder import (
+        build_search_cache_frame,
         metadata_columns,
         metadata_path,
         OPERATIONAL_COLUMNS,
         ordered_projection_columns,
         read_metadata_projection,
+        search_cache_path,
     )
 except ImportError:
     from neuron_index_builder import (
+        build_search_cache_frame,
         metadata_columns,
         metadata_path,
         OPERATIONAL_COLUMNS,
         ordered_projection_columns,
         read_metadata_projection,
+        search_cache_path,
     )
 
 
@@ -429,6 +434,29 @@ class FindNeuronConnection:
         self._edgeN_limit_reached = False
         self._min_synapse_excluded = False
         self._depth_cap_reached = False
+
+    def _record_search_priority_warnings(self, role, search_infos):
+        """Record analysis queries resolved below the identity columns.
+
+        The index viewer intentionally exposes secondary metadata matches. A
+        pathfinding run, however, executes only the first priority column that
+        matches. Make that less surprising by preserving a concise note in
+        ``user_warning_notes.txt`` whenever the chosen column is beyond
+        ``instance``.
+        """
+        identity_columns = {"bodyId", "type", "instance"}
+        for info in search_infos or []:
+            column = str((info or {}).get("matched_column") or "").strip()
+            query = str((info or {}).get("search_term") or "").strip()
+            if not column or column in identity_columns or not query:
+                continue
+            note = (
+                f'- [search priority] {role} query "{query}" resolved via '
+                f'"{column}" after bodyId -> type -> instance '
+                f'({int((info or {}).get("match_count") or 0):,} body IDs).'
+            )
+            if note not in self._warn_notes:
+                self._warn_notes.append(note)
 
     def _extract_nodes_from_path_graph(self, conn_inpath: pd.DataFrame) -> List[str]:
         """Extract unique bodyIds from path graph edges."""
@@ -1566,8 +1594,9 @@ class FindNeuronConnection:
     _min_synapse_excluded: bool = False
     '''
     Internal: set True when the min_synapse_num threshold actually dropped
-    connections during fetching. Gates the '[threshold] min_synapse_num'
-    note in user_warning_notes.txt. Reset per run.
+    connections during fetching. Kept for runtime diagnostics only; the
+    synapse-count cutoff is intentionally not written to
+    user_warning_notes.txt. Reset per run.
     '''
 
     _depth_cap_reached: bool = False
@@ -1592,10 +1621,11 @@ class FindNeuronConnection:
     search_columns: str = 'auto'
     '''
     Which columns to search when resolving source/target neuron names:
-    - 'auto' (default): all columns with priority bodyId -> type -> instance
-      -> other string columns (e.g. flywireType, hemibrainType, mancType);
-      exact names are matched in every column, so e.g. 'MTe07' finds the
-      flywireType entry of male-cns v1.0
+    - 'auto' (default): the first matching column wins, with priority
+      bodyId -> type -> instance -> flywireType -> hemibrainType -> mancType
+      -> other *Type fields -> class/subclass/superclass taxonomy. The viewer
+      may display later-column matches as secondary evidence, but analysis
+      execution uses only the primary priority result.
     - 'type': only the type column
     - 'instance': only the instance column
     - 'bodyId': only the bodyId column
@@ -2160,6 +2190,37 @@ class FindNeuronConnection:
         '''Get path to neuron index (tracks cached neurons)'''
         return os.path.join(self.cache_folder, 'neuron_index.parquet')
 
+    def _get_neuron_search_cache_path(self):
+        '''Get the compact, presorted viewer-search sidecar.'''
+        return str(search_cache_path(Path(self._get_neuron_index_path())))
+
+    def _write_neuron_search_cache(self, frame):
+        """Materialize the searchable sidecar for a metadata frame.
+
+        This cache contains only non-empty identity/taxonomy values and is
+        rebuilt when the authoritative index schema/rows change. It is
+        independent of the frequently updated connection-progress state.
+        """
+        import polars as pl
+
+        path = self._get_neuron_search_cache_path()
+        temporary = f'{path}.tmp-{os.getpid()}-{threading.get_ident()}'
+        try:
+            if isinstance(frame, pd.DataFrame):
+                source = pl.from_pandas(frame)
+            else:
+                source = frame
+            search = build_search_cache_frame(source)
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            search.write_parquet(temporary, compression='zstd')
+            os.replace(temporary, path)
+        finally:
+            if os.path.exists(temporary):
+                try:
+                    os.remove(temporary)
+                except OSError:
+                    pass
+
     def _get_neuron_index_state_path(self):
         '''Get the small, frequently updated cache-progress sidecar.'''
         return os.path.join(
@@ -2299,6 +2360,7 @@ class FindNeuronConnection:
             return False
 
         index_path = self._get_neuron_index_path()
+        search_path = self._get_neuron_search_cache_path()
         try:
             source_columns = metadata_columns(source)
             expected_columns = list(dict.fromkeys((*source_columns, *OPERATIONAL_COLUMNS)))
@@ -2315,6 +2377,13 @@ class FindNeuronConnection:
                 existing_order == expected_order
                 and index_mtime >= source.stat().st_mtime_ns
             ):
+                # Migrate an existing rich index to the compact search cache
+                # without reopening the authoritative CSV.
+                if (
+                    not os.path.exists(search_path)
+                    or os.stat(search_path).st_mtime_ns < index_mtime
+                ):
+                    self._write_neuron_search_cache(pl.read_parquet(index_path))
                 return False
         except Exception as exc:
             self._vprint(f'  ⚠️ Could not inspect neuron metadata index: {exc}', level='full')
@@ -2420,6 +2489,8 @@ class FindNeuronConnection:
                     except OSError:
                         pass
 
+            self._write_neuron_search_cache(frame)
+
             # The materialized index now includes the state used to build it.
             # A leftover sidecar is no longer needed at this boundary.
             state_path = self._get_neuron_index_state_path()
@@ -2452,6 +2523,7 @@ class FindNeuronConnection:
         index_path = self._get_neuron_index_path()
         os.makedirs(os.path.dirname(index_path), exist_ok=True)
         self._atomic_pandas_parquet(frame, index_path, compression='gzip')
+        self._write_neuron_search_cache(frame)
         if remove_state:
             state_path = self._get_neuron_index_state_path()
             if os.path.exists(state_path):
@@ -3054,6 +3126,7 @@ class FindNeuronConnection:
         try:
             os.makedirs(os.path.dirname(index_path), exist_ok=True)
             self._atomic_pandas_parquet(index_df, index_path, compression='gzip')
+            self._write_neuron_search_cache(index_df)
             state_path = self._get_neuron_index_state_path()
             if os.path.exists(state_path):
                 try:
@@ -5397,6 +5470,7 @@ class FindNeuronConnection:
             conn_path = self._get_connection_db_path()
             index_path = self._get_neuron_index_path()
             state_path = self._get_neuron_index_state_path()
+            search_path = self._get_neuron_search_cache_path()
             batch_dir = os.path.join(os.path.dirname(conn_path), '_batch_files')
             if os.path.exists(conn_path):
                 os.remove(conn_path)
@@ -5404,6 +5478,8 @@ class FindNeuronConnection:
                 os.remove(index_path)
             if os.path.exists(state_path):
                 os.remove(state_path)
+            if os.path.exists(search_path):
+                os.remove(search_path)
             if os.path.exists(batch_dir):
                 import shutil
                 shutil.rmtree(batch_dir)
@@ -6258,12 +6334,126 @@ class FindNeuronConnection:
             expanded.append(tok)
         return list(dict.fromkeys(expanded))
 
+    def _custom_group_export_payload(self):
+        """Return serializable custom-group definitions for run artifacts.
+
+        The UI passes a mapping-file path to the subprocess rather than a
+        live ``LabelMapper`` object.  The old run export therefore serialized
+        ``label_mapper`` as ``<not serializable>`` and left the actual group
+        labels invisible in ``all_attributes.json``/``parameters.txt``.  Read
+        the active mapper back into a compact, role-aware description so the
+        generated results explain which labels and dataset members were used.
+        """
+        mapper = getattr(self, "label_mapper", None)
+        if mapper is None or getattr(mapper, "is_empty", True):
+            return None
+
+        result = {
+            "mapping_file": str(getattr(self, "custom_mapping_file", "") or ""),
+            "dataset": str(self.dataset),
+        }
+        has_groups = False
+        for role in ("source", "target"):
+            groups = []
+            try:
+                labels = mapper.get_all_std_labels(role)
+            except Exception:
+                labels = []
+            for label in labels or []:
+                try:
+                    members = mapper.get_neurons_for_label(
+                        label, self.dataset, role
+                    )
+                except Exception:
+                    members = []
+                groups.append({
+                    "label": str(label),
+                    "members": [str(value) for value in (members or [])],
+                    "member_count": len(members or []),
+                })
+                has_groups = True
+            result[f"{role}_groups"] = groups
+        return result if has_groups else None
+
+    def _requested_query_for_export(self, role: str):
+        """Return the query before custom labels are expanded."""
+        attr = f"_requested_{role}_neurons"
+        value = getattr(self, attr, None)
+        if value is None:
+            value = getattr(self, f"{role}Neurons", [])
+        try:
+            return deepcopy(value)
+        except Exception:
+            return str(value)
+
+    def _add_custom_group_parameters(self):
+        """Add explicit custom-group/query provenance to run parameters."""
+        grouping = self._custom_group_export_payload()
+        if grouping is None:
+            return
+        self.parameter_dict.update({
+            "requested source neurons": str(
+                self._requested_query_for_export("source")
+            ),
+            "requested target neurons": str(
+                self._requested_query_for_export("target")
+            ),
+            "resolved source neurons": str(self.sourceNeurons),
+            "resolved target neurons": str(self.targetNeurons),
+            "custom mapping file": grouping["mapping_file"],
+            "custom source groups": json.dumps(
+                grouping["source_groups"], ensure_ascii=False
+            ),
+            "custom target groups": json.dumps(
+                grouping["target_groups"], ensure_ascii=False
+            ),
+        })
+
+    def _run_export_attributes(self, path_mode: str | None = None):
+        """Build JSON-safe run metadata with custom groups made explicit."""
+        public_attrs = {
+            key: value for key, value in self.__dict__.items()
+            if not key.startswith("_")
+            and key not in (
+                "source_df", "target_df", "client_hemibrain", "client_flywire",
+            )
+        }
+        public_attrs["requested_source_neurons"] = self._requested_query_for_export(
+            "source"
+        )
+        public_attrs["requested_target_neurons"] = self._requested_query_for_export(
+            "target"
+        )
+        public_attrs["resolved_source_neurons"] = deepcopy(
+            getattr(self, "sourceNeurons", [])
+        )
+        public_attrs["resolved_target_neurons"] = deepcopy(
+            getattr(self, "targetNeurons", [])
+        )
+        grouping = self._custom_group_export_payload()
+        if grouping is not None:
+            public_attrs["custom_grouping"] = grouping
+        if path_mode is not None:
+            public_attrs["path_mode"] = path_mode
+        return public_attrs
+
     def InitializeNeuronInfo(self):
         # Ensure neuprint Client is set for the CORRECT dataset
         if self.client_type != 'flywire':
             self._ensure_neuprint_client()
         ''' initialize neuron info '''
         self._vprint('Fetching source and target neurons...', level='simple')
+
+        source_search_infos = []
+        target_search_infos = []
+
+        # Preserve the user-facing labels/raw queries before a custom mapping
+        # expands them into concrete members.  This is used only for run
+        # provenance; the resolved lists below remain the execution inputs.
+        if not hasattr(self, '_requested_source_neurons'):
+            self._requested_source_neurons = deepcopy(self.sourceNeurons)
+        if not hasattr(self, '_requested_target_neurons'):
+            self._requested_target_neurons = deepcopy(self.targetNeurons)
 
         # Expand custom-group labels (from an active mapping) into members so
         # a pushed group label resolves as a query.
@@ -6292,7 +6482,8 @@ class FindNeuronConnection:
                 custom_group_names=self.custom_source_group_names if self.custom_source_group_names else None,
                 client=active_client,
                 verbose=neurons_verbose,
-                search_columns=self.search_columns
+                search_columns=self.search_columns,
+                search_info_sink=source_search_infos,
             )
             # Reuse source data for target.
             # IMPORTANT: copy() - later stages insert status columns
@@ -6301,6 +6492,8 @@ class FindNeuronConnection:
             self.target_df = self.source_df.copy()
             target_fname_auto = source_fname_auto
             self.target_criteria = self.source_criteria
+            self._record_search_priority_warnings("source", source_search_infos)
+            self._record_search_priority_warnings("target", source_search_infos)
         else:
             self.source_df, _, source_fname_auto, self.source_criteria = sv.getNeurons(
                 self.sourceNeurons, 
@@ -6308,7 +6501,8 @@ class FindNeuronConnection:
                 custom_group_names=self.custom_source_group_names if self.custom_source_group_names else None,
                 client=active_client,
                 verbose=neurons_verbose,
-                search_columns=self.search_columns
+                search_columns=self.search_columns,
+                search_info_sink=source_search_infos,
             )
             self.target_df, _, target_fname_auto, self.target_criteria = sv.getNeurons(
                 self.targetNeurons, 
@@ -6316,8 +6510,11 @@ class FindNeuronConnection:
                 custom_group_names=self.custom_target_group_names if self.custom_target_group_names else None,
                 client=active_client,
                 verbose=neurons_verbose,
-                search_columns=self.search_columns
+                search_columns=self.search_columns,
+                search_info_sink=target_search_infos,
             )
+            self._record_search_priority_warnings("source", source_search_infos)
+            self._record_search_priority_warnings("target", target_search_infos)
         
         # Apply label mapping if available
         if self.label_mapper and not self.label_mapper.is_empty:
@@ -6430,6 +6627,7 @@ class FindNeuronConnection:
             'dataset': self.dataset,
             'run date': self.run_date,
         }
+        self._add_custom_group_parameters()
         self.parameter_dict.update(self.kwargs_fetch)
         
         # Create parameter DataFrame (for use in methods)
@@ -7156,10 +7354,7 @@ class FindNeuronConnection:
         self.allpath_folder = network_folder
 
         # Run metadata
-        public_attrs = {
-            k: v for k, v in self.__dict__.items()
-            if not k.startswith('_') and k not in ('source_df', 'target_df', 'client_hemibrain', 'client_flywire')
-        }
+        public_attrs = self._run_export_attributes()
         public_attrs['tool'] = 'findnetwork'
         with open(os.path.join(network_folder, 'all_attributes.json'), 'w') as f:
             json.dump(public_attrs, f, indent=4, default=lambda o: '<not serializable>')
@@ -7550,19 +7745,14 @@ class FindNeuronConnection:
         notes = list(self._warn_notes)
 
         # --- other operations that may tilt the outputs ---
-        # Config-derived notes are written ONLY when the limit/threshold was
-        # actually reached during the run (edges trimmed, connections dropped,
-        # depth cap hit); a limit that never bit needs no caveat.
+        # Config-derived notes are written only when an output-affecting limit
+        # was applied. The synapse-count cutoff is intentionally omitted;
+        # ratio and traversal-probability thresholds remain explicit below.
         if getattr(self, 'edgeN_limit', 0) and getattr(self, '_edgeN_limit_reached', False):
             notes.append(
                 f'- [edge limit per neuron] edgeN_limit={self.edgeN_limit}: at most '
                 f'the strongest {self.edgeN_limit} edges per neuron were considered '
                 f'when fetching connections.'
-            )
-        if getattr(self, 'min_synapse_num', 0) > 1 and getattr(self, '_min_synapse_excluded', False):
-            notes.append(
-                f'- [threshold] min_synapse_num={self.min_synapse_num}: connections '
-                f'with fewer synapses were excluded.'
             )
         if getattr(self, 'min_ratio', 0) > 0:
             notes.append(
@@ -8731,11 +8921,7 @@ class FindNeuronConnection:
         
         # Save all attributes and parameters to the allpaths folder
         # Filter out internal/private attributes (starting with '_') and large cached data
-        public_attrs = {
-            k: v for k, v in self.__dict__.items() 
-            if not k.startswith('_') and k not in ('source_df', 'target_df', 'client_hemibrain', 'client_flywire')
-        }
-        public_attrs['path_mode'] = path_mode
+        public_attrs = self._run_export_attributes(path_mode=path_mode)
         with open(os.path.join(self.allpath_folder, 'all_attributes.json'), 'w') as f:
             json.dump(public_attrs, f, indent=4, default=lambda o: '<not serializable>')
         
