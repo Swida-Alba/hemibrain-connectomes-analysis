@@ -69,6 +69,13 @@ class TestRecord:
         assert store.recent() == []
         assert store.frequent() == []
 
+    def test_remove_deletes_value_from_all_history_views(self, store):
+        store.record(["aMe12", "aMe10"], now="2026-08-11T10:00:00")
+        assert store.remove("aMe12") is True
+        assert store.recent() == ["aMe10"]
+        assert store.frequent() == ["aMe10"]
+        assert store.remove("aMe12") is False
+
 
 class TestResilience:
     def test_missing_file_yields_empty(self, store):

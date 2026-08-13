@@ -84,6 +84,20 @@ def frequent(limit: int = _LIMIT_FREQUENT) -> List[str]:
         return [v for v, _ in ordered[:limit]]
 
 
+def remove(value: str) -> bool:
+    """Remove one value from query history and return whether it existed."""
+    value = str(value or "").strip()
+    if not value:
+        return False
+    with _LOCK:
+        data = _load()
+        if value not in data:
+            return False
+        del data[value]
+        _save(data)
+        return True
+
+
 def clear() -> None:
     """Wipe the history file (used by tests and the UI clear action)."""
     with _LOCK:

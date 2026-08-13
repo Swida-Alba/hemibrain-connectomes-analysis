@@ -14,7 +14,7 @@ from typing import Callable, Dict, List, Optional, Tuple
 
 from nicegui import ui
 
-from .. import group_history, mapping_store
+from .. import group_history, history_store, mapping_store
 from ..config import PROJECT_ROOT
 from .custom_grouper import LiteCustomGrouper
 
@@ -210,6 +210,7 @@ def custom_grouping_block(
         lab = pending_remove["label"]
         if lab:
             group_history.remove_label(lab)
+            history_store.remove(lab)
             ui.notify(f"Group '{lab}' removed from history", type="positive")
             pending_remove["label"] = None
             _render_history()
@@ -248,7 +249,87 @@ def custom_grouping_block(
     dialog.on_value_change(_on_dialog_toggle)
     _update_button_label()
 
+    def _query_history_groups() -> Tuple[List[str], List[str]]:
+        """Materialize custom labels used by the normal query inputs.
+
+        The source/target history intentionally stores a chip as a string.
+        If that string is a known custom-group label, restore its member table
+        onto the active inline board before exporting the mapping file. This
+        makes selecting a custom item directly from a source/target history
+        menu equivalent to loading it in the grouping panel first.
+
+        Returns ``(loaded_labels, labels_without_current_members)``. The
+        second list prevents a label from silently falling through to the
+        ordinary neuron-type resolver when it has no members for the selected
+        dataset(s).
+        """
+        requested = {}
+        for query_input in grouper.query_inputs.values():
+            getter = getattr(query_input, "get_value", None)
+            if not callable(getter):
+                continue
+            try:
+                result = getter()
+            except Exception:  # pragma: no cover - defensive UI boundary
+                continue
+            values = (
+                result[1]
+                if isinstance(result, (tuple, list)) and len(result) > 1
+                else result
+            )
+            if values is None:
+                continue
+            if not isinstance(values, (list, tuple, set)):
+                values = [values]
+            for value in values:
+                label_value = str(value or "").strip()
+                if label_value in requested:
+                    continue
+                record = group_history.get_label(label_value)
+                if record is not None:
+                    requested[label_value] = record
+
+        if not requested:
+            return [], []
+
+        grouper._collect_rows()
+        existing = {
+            str(row.get("name") or "").strip()
+            for row in grouper.handle.rows
+        }
+        for label_value, record in requested.items():
+            # Preserve an explicitly edited inline row with the same label.
+            if label_value not in existing:
+                grouper.handle.add_row(
+                    label_value, record.get("members") or {})
+        grouper.resync()
+        _update_button_label()
+
+        datasets = grouper.datasets()
+        missing = []
+        if datasets:
+            for label_value in requested:
+                row = next(
+                    (r for r in grouper.handle.rows
+                     if str(r.get("name") or "").strip() == label_value),
+                    None,
+                )
+                if row is None or not any(
+                    (row.get("cells") or {}).get(ds) for ds in datasets
+                ):
+                    missing.append(label_value)
+        return list(requested), missing
+
     def resolve_mapping_path() -> Tuple[Optional[str], bool]:
+        _loaded, missing = _query_history_groups()
+        if missing:
+            for label_value in missing:
+                ui.notify(
+                    f"Custom group '{label_value}' has no members for the "
+                    "selected dataset(s)",
+                    type="negative",
+                )
+            return None, False
         if grouper.is_empty():
             return None, True
         errors = grouper.validate()

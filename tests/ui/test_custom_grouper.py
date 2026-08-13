@@ -322,6 +322,137 @@ class TestRunResolution:
             dialog.confirm_remove_history()
         assert gh.list_recent() == []
 
+    def test_history_removal_also_removes_query_history(
+        self, isolated_store, tmp_path, monkeypatch
+    ):
+        """Deleting a custom group invalidates its normal input-history chip."""
+        import ui.history_store as hs
+
+        monkeypatch.setattr(hs, "_HISTORY_PATH", tmp_path / "neuron_history.json")
+        gh.record([("gone", {DS_A: ["aMe12"]})], origin="inline")
+        hs.record(["gone"], now="2026-08-11T10:00:00")
+        client, _button, dialog, _resolve = self._build("/res-remove-query")
+        with client:
+            dialog.open()
+            dialog.request_remove_history("gone")
+            dialog.confirm_remove_history()
+        assert gh.list_recent() == []
+        assert hs.recent() == []
+
+    def test_custom_label_from_query_history_materializes_mapping(
+        self, isolated_store, tmp_path, monkeypatch
+    ):
+        """A custom chip picked in source/target history remains executable."""
+        import ui.history_store as hs
+        from nicegui import Client
+        from nicegui.page import page
+        from ui.components.common import neuron_list_input
+
+        monkeypatch.setattr(hs, "_HISTORY_PATH", tmp_path / "neuron_history.json")
+        gh.record([("ortho", {DS_A: ["aMe12", "aMe10"]})], origin="inline")
+        hs.record(["ortho"], now="2026-08-11T10:00:00")
+
+        client = Client(page("/res-query-history-custom"))
+        with client:
+            source = neuron_list_input(
+                label="Source Neurons", show_filter=False, show_upload=False,
+                suggestions=lambda _text: [],
+            )
+            target = neuron_list_input(
+                label="Target Neurons", show_filter=False, show_upload=False,
+                suggestions=lambda _text: [],
+            )
+            _button, dialog, resolve = me.custom_grouping_block(
+                tab_key="query_history_custom",
+                datasets_provider=lambda: [DS_A],
+                query_inputs={"source": source, "target": target},
+            )
+
+        from types import SimpleNamespace
+
+        def subtree_texts(element):
+            values = [getattr(element, "text", "")]
+            values.extend(
+                text for child in element.default_slot.children
+                for text in subtree_texts(child)
+            )
+            return values
+
+        def pick_custom_history(box):
+            focus = next(
+                listener for listener in box.chip_input._event_listeners.values()
+                if listener.type == "focus"
+            )
+            box.chip_input._handle_event({"listener_id": focus.id, "args": None})
+            item = next(
+                element for element in box.suggest_menu.default_slot.children
+                if type(element).__name__ == "Item"
+                and "ortho" in subtree_texts(element)
+            )
+            click = next(
+                listener for listener in item._event_listeners.values()
+                if listener.type == "click"
+            )
+            click.handler(SimpleNamespace())
+
+        pick_custom_history(source)
+        pick_custom_history(target)
+        assert source.get_value()[1] == ["ortho"]
+        assert target.get_value()[1] == ["ortho"]
+        with client:
+            path, ok = resolve()
+
+        assert ok and path
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+        assert data["source_mapping"]["custom_label"] == ["ortho"]
+        assert data["source_mapping"][DS_A] == [["aMe12", "aMe10"]]
+        assert data["target_mapping"][DS_A] == [["aMe12", "aMe10"]]
+        assert dialog.inline_grouper.handle.rows[0]["name"] == "ortho"
+
+    def test_custom_history_entry_has_gray_custom_tag(
+        self, isolated_store, tmp_path, monkeypatch
+    ):
+        """Known custom labels are visibly distinguished in query history."""
+        import ui.config as cfg
+        import ui.history_store as hs
+        from nicegui import Client
+        from nicegui.page import page
+        from ui.components.common import neuron_list_input
+
+        monkeypatch.setattr(cfg, "LOCAL_CONFIG_FILE", tmp_path / "local_config.json")
+        monkeypatch.setattr(hs, "_HISTORY_PATH", tmp_path / "neuron_history.json")
+        gh.record([("custom_a", {DS_A: ["aMe12"]})], origin="inline")
+        hs.record(["custom_a", "ordinary"], now="2026-08-11T10:00:00")
+
+        client = Client(page("/query-history-custom-tag"))
+        with client:
+            box = neuron_list_input(
+                label="Source Neurons", show_filter=False, show_upload=False,
+                suggestions=lambda _text: [],
+            )
+        focus = next(
+            listener for listener in box.chip_input._event_listeners.values()
+            if listener.type == "focus"
+        )
+        box.chip_input._handle_event({"listener_id": focus.id, "args": None})
+
+        def subtree_texts(el):
+            values = [getattr(el, "text", "")]
+            values.extend(
+                text for child in el.default_slot.children
+                for text in subtree_texts(child)
+            )
+            return values
+
+        items = [
+            el for el in client.elements.values()
+            if type(el).__name__ == "Item"
+        ]
+        custom_item = next(el for el in items if "custom_a" in subtree_texts(el))
+        ordinary_item = next(el for el in items if "ordinary" in subtree_texts(el))
+        assert "custom" in subtree_texts(custom_item)
+        assert "custom" not in subtree_texts(ordinary_item)
+
     def test_push_records_group_into_history(self, isolated_store):
         """Pushing a group to a query records it into the history immediately."""
         from nicegui import Client
@@ -505,3 +636,7 @@ class TestSuggestionAnchoring:
         menu = cell.suggest_menu
         anchor = cell.chip_input.parent_slot.parent
         assert menu._props.get("target") == f"#{anchor.html_id}"
+        assert menu._props.get("anchor") == "bottom start"
+        assert menu._props.get("self") == "top start"
+        assert menu._props.get("fit") is True
+        assert menu._props.get("max-height") == "240px"

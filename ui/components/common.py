@@ -15,6 +15,7 @@ import json
 import platform
 import subprocess
 
+from .. import group_history
 from ..config import PROJECT_ROOT, get_default_output_dir, set_default_output_dir
 
 
@@ -640,7 +641,11 @@ def neuron_list_input(
         # anchoring alone can detach (menu renders at the page origin) when the
         # input is rebuilt inside nested containers (e.g. the inline grouper's
         # cells); a selector target resolves the anchor element directly.
-        suggest_menu.props(f'target="#{chip_input_anchor.html_id}"')
+        suggest_menu.props(
+            f'target="#{chip_input_anchor.html_id}" '
+            'anchor="bottom start" self="top start" fit '
+            'max-height=240px'
+        )
         # The menu must NEVER take focus from the editor: QMenu focuses itself
         # on open by default, which blurs the QSelect, clears the typed text
         # and swallows further keystrokes. no-focus keeps the editor focused
@@ -652,7 +657,7 @@ def neuron_list_input(
         # clicked: closing the first popup must not put focus back on its old
         # editor after the new field has already been selected.
         suggest_menu.props('no-focus no-refocus')
-        suggest_menu.style("max-height: 360px; overflow-y: auto;")
+        suggest_menu.style("overflow-y: auto;")
 
         # Server-side closes (1-char gating, rebuilds, picks) must NOT commit
         # the pending editor text; only genuine client-side closes (outside
@@ -786,24 +791,29 @@ def neuron_list_input(
             if not recents and not freqs:
                 _close_suggest()
                 return
+            custom_labels = group_history.all_labels()
             suggest_menu.clear()
             with suggest_menu:
                 if recents:
                     ui.item("Recent").props("dense disabled").classes(
                         "text-caption drocat-muted")
                     for v in recents:
-                        _history_item(v)
+                        _history_item(v, v in custom_labels)
                 if freqs:
                     ui.item("Frequent").props("dense disabled").classes(
                         "text-caption drocat-muted")
                     for v in freqs:
-                        _history_item(v)
+                        _history_item(v, v in custom_labels)
             _refresh_menu()
 
-        def _history_item(value):
+        def _history_item(value, is_custom=False):
             with ui.item().props("dense").on_click(
                     lambda v=value: _commit_suggestion(v)):
-                ui.label(str(value)).classes("text-body2")
+                with ui.row().classes("items-center gap-2 no-wrap w-full"):
+                    ui.label(str(value)).classes("text-body2")
+                    if is_custom:
+                        ui.badge("custom", color="grey-6").props(
+                            "outline dense")
 
         def _on_suggest_input(event):
             # The editor text changed: refresh the list immediately (the
