@@ -194,7 +194,7 @@ def custom_grouping_block(
                     ).props("flat dense round").tooltip("Remove from history")
 
     def _load_group(lab: str) -> None:
-        rec = group_history.get_label(lab)
+        rec = group_history.valid_labels().get(lab)
         if rec:
             grouper.handle.upsert_row(lab, rec.get("members") or {})
             grouper.resync()
@@ -264,6 +264,7 @@ def custom_grouping_block(
         dataset(s).
         """
         requested = {}
+        valid_custom_labels = group_history.valid_labels()
         for query_input in grouper.query_inputs.values():
             getter = getattr(query_input, "get_value", None)
             if not callable(getter):
@@ -285,7 +286,7 @@ def custom_grouping_block(
                 label_value = str(value or "").strip()
                 if label_value in requested:
                     continue
-                record = group_history.get_label(label_value)
+                record = valid_custom_labels.get(label_value)
                 if record is not None:
                     requested[label_value] = record
 
@@ -340,7 +341,13 @@ def custom_grouping_block(
         path = grouper.export_to(inline_mapping_path(tab_key))
         # History stores user intent at export time (label-keyed,
         # cell-granularity upsert; auto-named groups are skipped).
-        group_history.record(grouper.history_payload(), origin="inline")
+        payload = grouper.history_payload()
+        group_history.record(payload, origin="inline")
+        # The query history may have been recorded just before this mapping
+        # was resolved. Mark matching values now so a later group removal can
+        # prune stale entries even if the original run predates the registry
+        # record.
+        history_store.mark_custom(group_history.valid_labels())
         return path, True
 
     return open_button, dialog, resolve_mapping_path

@@ -34,6 +34,11 @@ import re
 from typing import Union, List, Dict, Any
 import pandas as pd
 
+try:
+    from ..neuron_search import apply_structured_filter, structured_search_columns
+except ImportError:  # pragma: no cover - supports ``src/`` on sys.path imports
+    from neuron_search import apply_structured_filter, structured_search_columns
+
 
 class NeuronFilter:
     """
@@ -46,7 +51,9 @@ class NeuronFilter:
     - {'regex': 'pattern'} - Regex match
     - {'contains': 'DN', 'endswith': '_R'} - AND logic across operators
     
-    Search priority: type > instance > bodyId > other string columns
+    Search priority: bodyId > type > instance > useful type/taxonomy fields,
+    then remaining string metadata for the explicit operator compatibility
+    language.
     
     Examples
     --------
@@ -209,17 +216,8 @@ class NeuronFilter:
         return False
     
     def _get_search_columns(self, df: pd.DataFrame) -> List[str]:
-        """Get columns to search, in priority order."""
-        columns = []
-        # Priority columns first
-        for col in self.SEARCH_COLUMNS:
-            if col in df.columns:
-                columns.append(col)
-        # Add other string columns
-        for col in df.columns:
-            if col not in columns and df[col].dtype == 'object':
-                columns.append(col)
-        return columns
+        """Get columns to search, in the canonical shared priority order."""
+        return structured_search_columns(df)
     
     def _apply_operator(self, df: pd.DataFrame, operator: str, patterns: List) -> pd.Series:
         """Apply a single operator across all searchable columns (OR across columns)."""
@@ -304,25 +302,15 @@ class NeuronFilter:
         pd.DataFrame
             Filtered DataFrame containing only matching neurons
         """
-        if self.match_all:
-            return df.copy()
-        
-        if len(df) == 0:
-            return df.copy()
-        
-        if not self.filter_spec:
-            return df.copy()
-        
-        # Apply each operator (AND logic across operators; legacy lists with
-        # mixed exact+regex groups keep this original semantics too - see
-        # tests/core/test_audit_fixes.py::test_legacy_list_semantics_preserved)
-        mask = pd.Series([True] * len(df), index=df.index)
-        
-        for operator, patterns in self.filter_spec.items():
-            op_mask = self._apply_operator(df, operator, patterns)
-            mask = mask & op_mask
-        
-        return df[mask].copy()
+        # Execution lives in src.neuron_search so structured filters use the
+        # same canonical bodyId/type/instance/taxonomy boundary as the cache
+        # resolver and all analysis/UI callers.  Parsing and the public legacy
+        # API remain here for compatibility.
+        return apply_structured_filter(
+            df,
+            self.filter_spec,
+            match_all=self.match_all,
+        )
     
     def get_bodyIds(self, df: pd.DataFrame) -> List:
         """
@@ -339,8 +327,18 @@ class NeuronFilter:
             List of matching bodyIds
         """
         matched = self.apply(df)
-        if 'bodyId' in matched.columns:
-            return matched['bodyId'].tolist()
+        body_id = next(
+            (column for column in matched.columns if str(column) == 'bodyId'),
+            None,
+        )
+        if body_id is None:
+            try:
+                from ..neuron_index_builder import body_id_column
+            except ImportError:  # pragma: no cover
+                from neuron_index_builder import body_id_column
+            body_id = body_id_column(matched.columns)
+        if body_id is not None:
+            return matched[body_id].tolist()
         return []
     
     def get_types(self, df: pd.DataFrame) -> List[str]:
@@ -428,4 +426,3 @@ def parse_neuron_query(query: Union[None, int, str, List, Dict]) -> NeuronFilter
     >>> filter = parse_neuron_query({'contains': 'DN'})
     """
     return NeuronFilter(query)
-

@@ -43,7 +43,6 @@ from vispath_pkg.fast_graph_core import FastGraph  # noqa: E402
 from vispath_pkg.vispath import VisualizePath  # noqa: E402
 
 HERE = Path(__file__).parent
-NODE_CACHE = Path.home() / ".cache" / "vispath-test-node"
 
 
 # =============================================================================
@@ -85,6 +84,12 @@ def network_html(tmp_path_factory):
     return _build_network_html(out)
 
 
+@pytest.fixture(scope="module")
+def node_cache(tmp_path_factory):
+    """Keep npm's test dependency cache inside pytest's disposable tree."""
+    return tmp_path_factory.mktemp("vispath_node")
+
+
 def _script_text(network_html):
     import re
     html = network_html.read_text(encoding="utf-8")
@@ -93,32 +98,35 @@ def _script_text(network_html):
     return "\n".join(scripts)
 
 
-def _ensure_node_with_cytoscape():
+def _ensure_node_with_cytoscape(node_cache):
     """Return the node executable, installing headless Cytoscape into a
-    cache dir once. Skips when node/npm or network access is missing."""
+    pytest-owned temporary directory once. Skips when node/npm or network
+    access is missing."""
     node = shutil.which("node")
     if not node:
         pytest.skip("node not available")
-    cy_path = NODE_CACHE / "node_modules" / "cytoscape"
+    cy_path = node_cache / "node_modules" / "cytoscape"
     if cy_path.exists():
         return node
     npm = shutil.which("npm")
     if not npm:
         pytest.skip("npm not available for installing cytoscape")
-    NODE_CACHE.mkdir(parents=True, exist_ok=True)
+    node_cache.mkdir(parents=True, exist_ok=True)
+    npm_env = os.environ.copy()
+    npm_env["npm_config_cache"] = str(node_cache / ".npm-cache")
     res = subprocess.run(
-        ["npm", "install", "cytoscape@3.28.1", "--no-audit", "--no-fund", "--prefix", str(NODE_CACHE)],
-        capture_output=True, text=True, timeout=600,
+        ["npm", "install", "cytoscape@3.28.1", "--no-audit", "--no-fund", "--prefix", str(node_cache)],
+        capture_output=True, text=True, timeout=600, env=npm_env,
     )
     if res.returncode != 0 or not cy_path.exists():
         pytest.skip(f"could not install cytoscape for Node tests: {res.stderr[-300:]}")
     return node
 
 
-def _run_node_harness(node, harness_name, network_html):
+def _run_node_harness(node, harness_name, network_html, node_cache):
     harness = HERE / harness_name
     res = subprocess.run(
-        [node, str(harness), str(NODE_CACHE), str(network_html)],
+        [node, str(harness), str(node_cache), str(network_html)],
         capture_output=True, text=True, timeout=300,
     )
     return res
@@ -292,9 +300,9 @@ class TestGeneratedHtmlStructure:
 # =============================================================================
 
 class TestDeadEndLogicNode:
-    def test_all_dead_end_scenarios(self, network_html):
-        node = _ensure_node_with_cytoscape()
-        res = _run_node_harness(node, "deadend_harness.js", network_html)
+    def test_all_dead_end_scenarios(self, network_html, node_cache):
+        node = _ensure_node_with_cytoscape(node_cache)
+        res = _run_node_harness(node, "deadend_harness.js", network_html, node_cache)
         assert res.returncode == 0, (
             f"dead-end harness failed:\n{res.stdout}\n{res.stderr}"
         )
@@ -302,9 +310,9 @@ class TestDeadEndLogicNode:
 
 
 class TestHistoryLogicNode:
-    def test_all_history_scenarios(self, network_html):
-        node = _ensure_node_with_cytoscape()
-        res = _run_node_harness(node, "history_harness.js", network_html)
+    def test_all_history_scenarios(self, network_html, node_cache):
+        node = _ensure_node_with_cytoscape(node_cache)
+        res = _run_node_harness(node, "history_harness.js", network_html, node_cache)
         assert res.returncode == 0, (
             f"history harness failed:\n{res.stdout}\n{res.stderr}"
         )

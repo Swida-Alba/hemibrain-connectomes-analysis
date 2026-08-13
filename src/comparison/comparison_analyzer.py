@@ -642,6 +642,13 @@ class ComparisonAnalyzer:
         # (FindShortestPath likewise includes direct connections as 1-hop
         # shortest paths).
         fnc.InitializeNeuronInfo()
+        source_df = getattr(fnc, "source_df", None)
+        target_df = getattr(fnc, "target_df", None)
+        print(
+            f"[DROCAT][neuron-match] source={len(source_df) if source_df is not None else 0} "
+            f"target={len(target_df) if target_df is not None else 0}",
+            flush=True,
+        )
         if self.parameters.path_mode == 'shortest':
             fnc.FindShortestPath(find_reciprocal=self.parameters.find_reciprocal)
         else:

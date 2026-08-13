@@ -105,6 +105,45 @@ class TestCoanaCustomMappingFile:
         )
         assert fc.label_mapper is direct
 
+    def test_run_exports_custom_group_provenance(self, mapping_file):
+        """Run artifacts must retain group labels, members, and raw queries."""
+        from comparison.label_mapper import LabelMapper
+        from coana import FindNeuronConnection
+
+        fc = FindNeuronConnection.__new__(FindNeuronConnection)
+        fc.dataset = "hemibrain:v1.2.1"
+        fc.custom_mapping_file = mapping_file
+        fc.label_mapper = LabelMapper(overall_mapping_json=mapping_file)
+        fc.sourceNeurons = ["grpA"]
+        fc.targetNeurons = ["tg1"]
+        fc._requested_source_neurons = ["grpA"]
+        fc._requested_target_neurons = ["tg1"]
+
+        attributes = fc._run_export_attributes(path_mode="all")
+        grouping = attributes["custom_grouping"]
+        assert grouping["mapping_file"] == mapping_file
+        assert grouping["dataset"] == "hemibrain:v1.2.1"
+        assert {
+            group["label"]: group["members"]
+            for group in grouping["source_groups"]
+        }["grpA"] == ["aMe12", "aMe12_R"]
+        assert {
+            group["label"]: group["members"]
+            for group in grouping["target_groups"]
+        }["tg1"] == ["MBON01"]
+        assert attributes["requested_source_neurons"] == ["grpA"]
+        assert attributes["requested_target_neurons"] == ["tg1"]
+        assert attributes["resolved_source_neurons"] == ["grpA"]
+        assert attributes["resolved_target_neurons"] == ["tg1"]
+
+        fc.parameter_dict = {}
+        fc._add_custom_group_parameters()
+        assert fc.parameter_dict["custom mapping file"] == mapping_file
+        assert json.loads(fc.parameter_dict["custom source groups"])[0]["label"] == "grpA"
+        assert json.loads(fc.parameter_dict["custom target groups"])[0]["label"] == "tg1"
+        assert fc.parameter_dict["requested source neurons"] == "['grpA']"
+        assert fc.parameter_dict["requested target neurons"] == "['tg1']"
+
 
 class TestStoreExportToEnrichment:
     """The full UI path: store export file -> LabelMapper -> custom grouping

@@ -185,6 +185,76 @@ def test_scope_and_numeric_guards_are_identical_across_surfaces():
     assert match_suggestions("MTe", pools, "type", limit=None) == []
 
 
+def test_structured_filters_use_the_shared_priority_backend_and_alias_guard():
+    """Operator filters and legacy helpers must share one execution path."""
+    from src.neuron_search import (
+        apply_structured_filter,
+        structured_search_columns,
+    )
+    from src.utils.neuron_filter import NeuronFilter
+
+    frame = _metadata()
+    frame["notes"] = ["aMe17a", "aMe17e", "MTe07", "MeVPa", "MTe", "MTe", "MTe"]
+    spec = {"contains": ["MTe"], "endswith": ["_L"]}
+    expected = apply_structured_filter(frame, spec)
+    actual = NeuronFilter(spec).apply(frame)
+    assert actual["bodyId"].tolist() == expected["bodyId"].tolist()
+    assert structured_search_columns(frame)[:7] == [
+        "bodyId", "type", "instance", "flywireType",
+        "hemibrainType", "mancType", "class",
+    ]
+
+    # FlyWire metadata can arrive with root_id before projection. The same
+    # backend must still recognize it as the numeric identity field rather
+    # than searching arbitrary numeric/string columns.
+    aliased = frame.rename(columns={"bodyId": "root_id"})
+    assert structured_search_columns(aliased)[0] == "root_id"
+    assert NeuronFilter([100]).get_bodyIds(aliased) == ["100"]
+
+
+def test_statvis_dict_helpers_agree_with_shared_structured_filter(monkeypatch):
+    """Pathfinding-adjacent public lookup helpers stay behaviorally aligned."""
+    import src.statvis as statvis
+    from src.neuron_search import apply_structured_filter
+
+    frame = _metadata()
+    query = {"contains": "MTe"}
+    expected = apply_structured_filter(frame, {"contains": ["MTe"]})
+    monkeypatch.setattr(statvis, "_get_neuron_df", lambda *_args, **_kwargs: frame.copy())
+
+    assert statvis.get_bodyIds(query, dataset="synthetic:v1", verbose=False, return_simple=True) == expected["bodyId"].tolist()
+    assert statvis.get_types(query, dataset="synthetic:v1", verbose=False, return_simple=True) == sorted(expected["type"].dropna().unique().tolist())
+    assert statvis.get_instances(query, dataset="synthetic:v1", verbose=False, return_simple=True) == sorted(expected["instance"].dropna().unique().tolist())
+    info = statvis.get_info(query, dataset="synthetic:v1", verbose=False)
+    assert info["bodyId"].tolist() == expected["bodyId"].tolist()
+
+
+def test_priority_order_is_schema_driven_for_male_fafb_and_banc_shapes():
+    """The shared order is stable across the three FlyWire metadata layouts."""
+    from src.neuron_search import ordered_search_columns, structured_search_columns
+
+    assert ordered_search_columns([
+        "bodyId", "type", "instance", "hemibrainType", "flywireType",
+        "mancType", "subclass", "class", "superclass", "notes",
+    ]) == [
+        "bodyId", "type", "instance", "flywireType", "hemibrainType",
+        "mancType", "class", "subclass", "superclass",
+    ]
+    assert ordered_search_columns([
+        "bodyId", "type", "instance", "cell_type", "nt_type",
+        "additional_type(s)", "super_class", "cell_class", "notes",
+    ]) == [
+        "bodyId", "type", "instance", "cell_type", "nt_type",
+        "additional_type(s)", "super_class", "cell_class",
+    ]
+    assert structured_search_columns(
+        pl.DataFrame({
+            "root_id": [1], "type": ["A"], "instance": ["A_L"],
+            "cell_type": ["A"], "super_class": ["visual"],
+        }).to_pandas()
+    )[:5] == ["root_id", "type", "instance", "cell_type", "super_class"]
+
+
 def test_stale_cache_falls_back_without_changing_lookup_semantics(tmp_path):
     from src.neuron_search import (
         get_cached_neuron_search,

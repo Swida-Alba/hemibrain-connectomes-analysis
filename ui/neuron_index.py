@@ -23,8 +23,13 @@ from .dataset_service import dataset_to_folder
 from .search_logic import (
     SearchStage,
     is_numeric_search,
+    normalize_search_operator,
     normalize_search_text,
     ordered_search_columns,
+    polars_body_id_guard,
+    polars_display_expression,
+    polars_match_column_expression,
+    polars_match_expression,
     search_plan,
 )
 
@@ -385,47 +390,12 @@ def load_cached_neuron_index(
 
 def _match_expression(frame, columns: List[str], text: str, mode: str):
     """Return the Polars expression for one shared search stage."""
-    import polars as pl
-
-    expressions = [
-        _match_column_expression(frame, column, text, mode)
-        for column in columns
-        if column in frame.columns
-    ]
-    if not expressions:
-        return pl.lit(False)
-    return pl.any_horizontal(expressions) & _body_id_guard(
-        frame, columns, normalize_search_text(text), mode
-    )
+    return polars_match_expression(frame, columns, text, mode)
 
 
 def _match_column_expression(frame, column: str, text: str, mode: str):
     """Return the boolean expression for one column in a search stage."""
-    import re
-
-    import polars as pl
-
-    needle = normalize_search_text(text)
-    display_value = (
-        _display_expression(column, frame)
-        .cast(pl.Utf8, strict=False)
-        .fill_null("")
-    )
-    if mode == "prefix":
-        return display_value.str.starts_with(needle)
-    if mode == "suffix":
-        return display_value.str.ends_with(needle)
-    if mode == "exact":
-        return display_value == needle
-    if mode == "regex":
-        try:
-            re.compile(needle)
-        except re.error:
-            return pl.lit(False)
-        return display_value.str.contains(needle, literal=False)
-    return display_value.str.to_lowercase().str.contains(
-        needle.casefold(), literal=True
-    )
+    return polars_match_column_expression(frame, column, text, mode)
 
 
 def _match_hit_lists(
@@ -556,31 +526,12 @@ def _display_expression(column: str, frame):
     produce a suggestion/query value that does not verify against the cached
     identifier ``123``.
     """
-    import polars as pl
-
-    expression = pl.col(column)
-    if column == "bodyId":
-        return (
-            expression
-            .cast(pl.Utf8, strict=False)
-            .fill_null("")
-            .str.strip_chars()
-            .str.replace(r"\.0+$", "")
-        )
-    return expression
+    return polars_display_expression(column)
 
 
 def _body_id_guard(frame, columns: List[str], text: str, mode: str):
     """Prevent numeric searches from matching a non-bodyId display field."""
-    import polars as pl
-
-    if "bodyId" not in columns or not is_numeric_search(text):
-        return pl.lit(True)
-    # A bodyId query is valid only against an actual integer-like bodyId
-    # value. This guards legacy/hand-authored caches where a missing ID was
-    # serialized as a free-form label.
-    value = _display_expression("bodyId", frame)
-    return value.str.contains(r"^\d+$")
+    return polars_body_id_guard(frame, columns, text)
 
 
 def _ordered_match_columns(columns: List[str]) -> List[str]:
@@ -596,20 +547,7 @@ def _ordered_match_columns(columns: List[str]) -> List[str]:
 
 def _normalize_filter_operator(value: str) -> str:
     """Normalize the viewer's explicit column-filter operator."""
-    aliases = {
-        "starts_with": "prefix",
-        "starts with": "prefix",
-        "prefix": "prefix",
-        "ends_with": "suffix",
-        "ends with": "suffix",
-        "suffix": "suffix",
-        "exact": "exact",
-        "equals": "exact",
-        "contains": "substring",
-        "substring": "substring",
-        "regex": "regex",
-    }
-    return aliases.get(str(value or "").strip().casefold(), "substring")
+    return normalize_search_operator(value)
 
 
 def _highlight_text_html(value: Any, needle: str, mode: str) -> Optional[str]:
@@ -749,12 +687,17 @@ def _presorted_search_matches(
     # returning ``search_cache.head(0)`` here leaves only ``__neuron_rows``
     # and causes the later aggregation to look for a missing
     # ``__neuron_row`` column.
-    empty_hits = (
-        search_cache
-        .head(0)
-        .explode("__neuron_rows")
-        .rename({"__neuron_rows": "__neuron_row"})
-        .select("__neuron_row", "search_column", "search_priority", "search_value")
+    # Do not derive this schema with ``head(0).explode(...)``.  Polars keeps
+    # an empty list column un-exploded in some releases, which leaves
+    # ``__neuron_rows`` in the result and makes the later group/aggregation
+    # fail with ``ColumnNotFoundError: __neuron_row`` on a valid no-hit query.
+    empty_hits = pl.DataFrame(
+        {
+            "__neuron_row": pl.Series([], dtype=pl.UInt32),
+            "search_column": pl.Series([], dtype=pl.Utf8),
+            "search_priority": pl.Series([], dtype=pl.UInt16),
+            "search_value": pl.Series([], dtype=pl.Utf8),
+        }
     )
     empty_candidates = source.filter(pl.lit(False)).with_columns(
         pl.lit(0).alias("__match_priority"),

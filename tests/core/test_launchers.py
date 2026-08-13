@@ -33,6 +33,12 @@ class TestRunDrocatLaunchers:
         assert "CAVE token is optional" in text
         assert "pause" in text
 
+    def test_ui_prints_browser_fallback_after_nicegui_ready(self):
+        text = (ROOT / "ui" / "app.py").read_text(encoding="utf-8")
+        assert "NiceGUI prints its ready line" in text
+        assert "browser did not open automatically" in text
+        assert "copy and open" in text
+
 
 class TestInstallers:
     def test_install_sh_resolves_project_root_and_verifies(self):

@@ -76,6 +76,19 @@ class TestRecord:
         assert store.frequent() == ["aMe10"]
         assert store.remove("aMe12") is False
 
+    def test_custom_provenance_prunes_only_orphaned_custom_values(self, store):
+        store.record(["test", "aMe12"], now="2026-08-11T10:00:00",
+                     custom_values=["test"])
+        raw = json.loads(store._HISTORY_PATH.read_text(encoding="utf-8"))
+        assert raw["values"]["test"]["kind"] == "custom"
+        assert "test" in store.prune_orphaned_custom([])
+        assert store.recent() == ["aMe12"]
+
+    def test_legacy_unknown_values_are_not_assumed_to_be_invalid(self, store):
+        store.record(["ordinary"], now="2026-08-11T10:00:00")
+        assert store.prune_orphaned_custom([]) == []
+        assert store.recent() == ["ordinary"]
+
 
 class TestResilience:
     def test_missing_file_yields_empty(self, store):

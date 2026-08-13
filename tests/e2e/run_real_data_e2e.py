@@ -8,15 +8,17 @@ NeuronBridge data with the tokens in token_info_local.txt.
 
 Usage (from project root, inside the `drocat` conda env):
     python tests/e2e/run_real_data_e2e.py
+    python tests/e2e/run_real_data_e2e.py --keep-output
 
-Outputs:
-    /tmp/drocat_e2e/<tool>/*          - tool outputs
-    /tmp/drocat_e2e/<tool>.log        - streamed subprocess log
-    /tmp/drocat_e2e/results.json      - machine-readable results
+The runner uses one known disposable sandbox at `/tmp/drocat_e2e`. It clears
+that sandbox before every run and removes it afterward. Pass `--keep-output`
+when inspecting artifacts after a run.
 """
 
+import argparse
 import asyncio
 import json
+import shutil
 import sys
 import time
 from pathlib import Path
@@ -28,7 +30,23 @@ sys.path.insert(0, str(PROJECT_ROOT / "src"))
 from ui.runner import ScriptRunner  # noqa: E402
 
 ROOT = Path("/tmp/drocat_e2e")
-ROOT.mkdir(parents=True, exist_ok=True)
+
+
+def reset_output_root() -> None:
+    """Remove stale artifacts from the runner's exact, test-owned sandbox."""
+    if ROOT.is_symlink():
+        raise RuntimeError(f"Refusing to remove symlinked test sandbox: {ROOT}")
+    if ROOT.exists():
+        shutil.rmtree(ROOT)
+    ROOT.mkdir(parents=True, exist_ok=True)
+
+
+def cleanup_output_root() -> None:
+    """Remove the runner sandbox after verification, if it still exists."""
+    if ROOT.is_symlink():
+        raise RuntimeError(f"Refusing to remove symlinked test sandbox: {ROOT}")
+    if ROOT.exists():
+        shutil.rmtree(ROOT)
 
 
 def out(name: str) -> str:
@@ -355,7 +373,7 @@ async def run_tool(spec: dict, runner: ScriptRunner) -> dict:
     return result
 
 
-async def main() -> None:
+async def _run_all(keep_output: bool = False) -> None:
     summary = []
     # PlotPath runs after FindAllPath and consumes its output file.
     plot_path_spec = {
@@ -409,8 +427,25 @@ async def main() -> None:
     )
 
     ok = sum(1 for r in summary if r["status"] == "success")
-    print(f"\nSummary: {ok}/{len(summary)} tools succeeded -> {ROOT / 'results.json'}")
+    print(f"\nSummary: {ok}/{len(summary)} tools succeeded")
+    if keep_output:
+        print(f"Artifacts retained at {ROOT / 'results.json'}")
+
+
+async def main(keep_output: bool = False) -> None:
+    reset_output_root()
+    try:
+        await _run_all(keep_output=keep_output)
+    finally:
+        if not keep_output:
+            cleanup_output_root()
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--keep-output",
+        action="store_true",
+        help="retain /tmp/drocat_e2e artifacts for inspection after the run",
+    )
+    asyncio.run(main(keep_output=parser.parse_args().keep_output))

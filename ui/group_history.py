@@ -36,6 +36,18 @@ AUTO_LABEL_RE = re.compile(r"^Group_\d+$")
 _lock = threading.Lock()
 
 
+def _has_members(record: dict) -> bool:
+    """Whether a stored group contains at least one reusable member."""
+    members = record.get("members") if isinstance(record, dict) else None
+    if not isinstance(members, dict):
+        return False
+    return any(
+        isinstance(values, (list, tuple))
+        and any(str(value).strip() for value in values)
+        for values in members.values()
+    )
+
+
 def _load() -> dict:
     try:
         if HISTORY_PATH.exists():
@@ -99,7 +111,11 @@ def record(groups: List[Tuple[str, Dict[str, List[str]]]],
 def list_recent(limit: int = RECENT_CAP) -> List[str]:
     """Labels ordered by most recently used."""
     with _lock:
-        return list(_load()["recent"][:limit])
+        data = _load()
+        return [
+            label for label in data["recent"]
+            if label in data["labels"] and _has_members(data["labels"][label])
+        ][:limit]
 
 
 def get_label(label: str) -> Optional[dict]:
@@ -116,6 +132,21 @@ def all_labels() -> Dict[str, dict]:
     """A copy of the whole label registry."""
     with _lock:
         return {k: dict(v) for k, v in _load()["labels"].items()}
+
+
+def valid_labels() -> Dict[str, dict]:
+    """Return named groups that can actually be reused from history.
+
+    A record with only empty dataset cells is retained in storage for
+    compatibility with cell-level upsert semantics, but it is not a valid
+    history entry because loading it cannot populate a query or mapping.
+    """
+    with _lock:
+        return {
+            label: dict(record)
+            for label, record in _load()["labels"].items()
+            if _has_members(record)
+        }
 
 
 def remove_label(label: str) -> bool:

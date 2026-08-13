@@ -17,7 +17,7 @@ import re
 from dataclasses import dataclass
 from numbers import Integral
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 try:
     from .neuron_index_builder import (
@@ -302,6 +302,244 @@ def _dataframe_search_columns(frame: Any) -> List[Tuple[str, str]]:
         if column not in {source for _, source in pairs}:
             pairs.append((column, column))
     return pairs
+
+
+def structured_search_columns(frame: Any) -> List[str]:
+    """Return columns used by legacy/operator neuron filters.
+
+    The interactive resolver intentionally searches only the compact
+    identity/type/taxonomy projection.  ``NeuronFilter`` also supports
+    explicit operators such as ``contains`` and ``regex`` over arbitrary
+    string metadata, so its compatibility boundary keeps those columns after
+    the canonical fields.  The order is shared across pandas callers and
+    recognizes FlyWire body-ID aliases without changing the source schema.
+    """
+    names = [str(column) for column in getattr(frame, "columns", [])]
+    actual_body = body_id_column(names)
+    ordered: List[str] = []
+
+    def add(column: Optional[str]) -> None:
+        if column and column in names and column not in ordered:
+            ordered.append(column)
+
+    add(actual_body)
+    add("type")
+    add("instance")
+    for column in priority_metadata_columns(names):
+        if column in {actual_body, "type", "instance"}:
+            continue
+        try:
+            dtype = getattr(frame[column], "dtype", None)
+            import pandas as pd
+            if not (
+                pd.api.types.is_object_dtype(dtype)
+                or pd.api.types.is_string_dtype(dtype)
+            ):
+                continue
+        except Exception:
+            continue
+        add(column)
+
+    # Preserve the old operator-filter contract for ordinary string fields,
+    # but do not turn numeric measurement columns into accidental text search
+    # targets.  Body IDs are the one deliberate numeric exception above.
+    try:
+        import pandas as pd
+
+        for column in names:
+            if column in ordered:
+                continue
+            dtype = getattr(frame[column], "dtype", None)
+            if pd.api.types.is_object_dtype(dtype) or pd.api.types.is_string_dtype(dtype):
+                add(column)
+    except Exception:
+        # Non-pandas callers still receive the canonical fields.  The actual
+        # dataframe resolver remains the fallback for those callers.
+        pass
+    return ordered
+
+
+def _structured_operator_column(series: Any, operator: str, patterns: Sequence[Any]):
+    """Apply one legacy NeuronFilter operator to one pandas Series."""
+    import pandas as pd
+
+    if not patterns:
+        return pd.Series(False, index=series.index, dtype=bool)
+    notna = series.notna()
+    string_series = series.astype(str)
+    string_patterns = [str(pattern) for pattern in patterns]
+
+    if operator == "exact":
+        return (series.isin(list(patterns)) | string_series.isin(string_patterns)) & notna
+    if operator == "contains":
+        pattern = "|".join(re.escape(value) for value in string_patterns)
+        return string_series.str.contains(pattern, na=False) & notna
+    if operator == "not_contains":
+        pattern = "|".join(re.escape(value) for value in string_patterns)
+        return notna & ~string_series.str.contains(pattern, na=False)
+    if operator == "startswith":
+        return string_series.str.startswith(tuple(string_patterns), na=False) & notna
+    if operator == "endswith":
+        return string_series.str.endswith(tuple(string_patterns), na=False) & notna
+    if operator == "regex":
+        result = pd.Series(False, index=series.index, dtype=bool)
+        for pattern in string_patterns:
+            try:
+                result = result | string_series.str.contains(
+                    pattern, regex=True, na=False
+                )
+            except re.error:
+                # Preserve the public NeuronFilter compatibility behavior:
+                # an invalid regex becomes an exact literal for that value.
+                result = result | (string_series == pattern)
+        return result & notna
+    if operator == "not_regex":
+        result = pd.Series(True, index=series.index, dtype=bool)
+        for pattern in string_patterns:
+            try:
+                result = result & ~string_series.str.contains(
+                    pattern, regex=True, na=False
+                )
+            except re.error:
+                result = result & (string_series != pattern)
+        return result & notna
+    return pd.Series(False, index=series.index, dtype=bool)
+
+
+def apply_structured_filter(
+    frame: Any,
+    filter_spec: Optional[Mapping[str, Sequence[Any]]],
+    *,
+    match_all: bool = False,
+) -> Any:
+    """Apply a parsed operator filter through the shared neuron backend.
+
+    This is the execution half of :class:`src.utils.neuron_filter.NeuronFilter`.
+    It deliberately keeps the historical semantics: OR across searchable
+    columns for each operator, AND across operators, exact integer patterns
+    restricted to the real body-ID column, and invalid regular expressions
+    falling back to literal equality.  Keeping that behavior here lets
+    pathfinding, visualization, similarity, and notebook helpers share one
+    implementation without changing their established filter language.
+    """
+    import pandas as pd
+
+    if match_all or frame is None or len(frame) == 0 or not filter_spec:
+        return frame.copy()
+
+    columns = structured_search_columns(frame)
+    if not columns:
+        return frame.copy()
+
+    actual_body = body_id_column([str(column) for column in frame.columns])
+    mask = pd.Series(True, index=frame.index, dtype=bool)
+    for operator, patterns in filter_spec.items():
+        if isinstance(patterns, (str, bytes)):
+            values = [patterns]
+        else:
+            values = list(patterns or [])
+        if not values:
+            mask &= False
+            continue
+        operator_mask = pd.Series(False, index=frame.index, dtype=bool)
+        integer_exact = (
+            operator == "exact"
+            and isinstance(values[0], Integral)
+            and not isinstance(values[0], bool)
+        )
+        for column in columns:
+            if integer_exact and column != actual_body:
+                continue
+            operator_mask |= _structured_operator_column(
+                frame[column], operator, values
+            )
+        mask &= operator_mask
+    return frame[mask].copy()
+
+
+def normalize_search_operator(value: Any) -> str:
+    """Normalize the operator names shared by the UI and core predicates."""
+    aliases = {
+        "starts_with": "prefix",
+        "starts with": "prefix",
+        "startswith": "prefix",
+        "prefix": "prefix",
+        "ends_with": "suffix",
+        "ends with": "suffix",
+        "endswith": "suffix",
+        "suffix": "suffix",
+        "exact": "exact",
+        "equals": "exact",
+        "contains": "substring",
+        "substring": "substring",
+        "regex": "regex",
+    }
+    return aliases.get(str(value or "").strip().casefold(), "substring")
+
+
+def polars_display_expression(column: str):
+    """Return the canonical string expression used by UI search predicates."""
+    import polars as pl
+
+    expression = pl.col(column).cast(pl.Utf8, strict=False).fill_null("")
+    if column == "bodyId":
+        expression = expression.str.strip_chars().str.replace(r"\.0+$", "")
+    return expression
+
+
+def polars_match_column_expression(frame: Any, column: str, text: Any, mode: str):
+    """Build one case-sensitive/insensitive Polars match expression."""
+    import polars as pl
+
+    needle = normalize_search_text(text)
+    display_value = polars_display_expression(column)
+    mode = normalize_search_operator(mode)
+    if mode == "prefix":
+        return display_value.str.starts_with(needle)
+    if mode == "suffix":
+        return display_value.str.ends_with(needle)
+    if mode == "exact":
+        return display_value == needle
+    if mode == "regex":
+        try:
+            re.compile(needle)
+        except re.error:
+            return pl.lit(False)
+        return display_value.str.contains(needle, literal=False)
+    return display_value.str.to_lowercase().str.contains(
+        needle.casefold(), literal=True
+    )
+
+
+def polars_body_id_guard(frame: Any, columns: Iterable[str], text: Any):
+    """Guard numeric UI queries so they can only match integer-like body IDs."""
+    import polars as pl
+
+    columns = list(columns)
+    if "bodyId" not in columns or not is_numeric_search(text):
+        return pl.lit(True)
+    return polars_display_expression("bodyId").str.contains(r"^\d+$")
+
+
+def polars_match_expression(
+    frame: Any,
+    columns: Iterable[str],
+    text: Any,
+    mode: str,
+):
+    """Build a shared OR-across-columns Polars predicate."""
+    import polars as pl
+
+    available = [column for column in columns if column in frame.columns]
+    expressions = [
+        polars_match_column_expression(frame, column, text, mode)
+        for column in available
+    ]
+    if not expressions:
+        return pl.lit(False)
+    return pl.any_horizontal(expressions) & polars_body_id_guard(
+        frame, available, text
+    )
 
 
 def _legacy_regex_pattern(pattern: str) -> str:
@@ -782,15 +1020,22 @@ def resolve_cached_or_dataframe_query(
 __all__ = [
     "CachedNeuronSearch",
     "SearchStage",
+    "apply_structured_filter",
     "clear_cached_neuron_search",
     "filter_candidate_entries",
     "get_cached_neuron_search",
     "is_numeric_search",
     "match_search_pools",
     "normalize_search_text",
+    "normalize_search_operator",
     "ordered_search_columns",
+    "polars_body_id_guard",
+    "polars_display_expression",
+    "polars_match_column_expression",
+    "polars_match_expression",
     "resolve_dataframe_query",
     "resolve_cached_or_dataframe_query",
     "resolve_neuron_query",
     "search_plan",
+    "structured_search_columns",
 ]

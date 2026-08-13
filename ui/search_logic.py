@@ -9,6 +9,11 @@ import path stable for components and third-party extensions.
 try:
     from src.neuron_search import (
         SearchStage,
+        normalize_search_operator,
+        polars_body_id_guard,
+        polars_display_expression,
+        polars_match_column_expression,
+        polars_match_expression,
         filter_candidate_entries,
         is_numeric_search,
         match_search_pools,
@@ -19,6 +24,11 @@ try:
 except ImportError:  # pragma: no cover - supports ``src/`` on sys.path
     from neuron_search import (  # type: ignore
         SearchStage,
+        normalize_search_operator,
+        polars_body_id_guard,
+        polars_display_expression,
+        polars_match_column_expression,
+        polars_match_expression,
         filter_candidate_entries,
         is_numeric_search,
         match_search_pools,
@@ -33,7 +43,12 @@ __all__ = [
     "filter_candidate_entries",
     "is_numeric_search",
     "match_search_pools",
+    "normalize_search_operator",
     "normalize_search_text",
     "ordered_search_columns",
+    "polars_body_id_guard",
+    "polars_display_expression",
+    "polars_match_column_expression",
+    "polars_match_expression",
     "search_plan",
 ]

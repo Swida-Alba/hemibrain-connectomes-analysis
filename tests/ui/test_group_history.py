@@ -60,6 +60,12 @@ class TestRecord:
         gh.record([("aMe", {"male-cns:v0.9": []})])
         assert gh.get_label("aMe")["members"]["male-cns:v0.9"] == []
 
+    def test_recent_shows_only_groups_with_reusable_members(self, history_path):
+        gh.record([("empty", {"male-cns:v0.9": []}),
+                   ("valid", {"male-cns:v0.9": ["aMe12"]})])
+        assert gh.list_recent() == ["valid"]
+        assert set(gh.valid_labels()) == {"valid"}
+
     def test_untouched_datasets_keep_their_members(self, history_path):
         gh.record([("aMe", {"male-cns:v0.9": ["aMe12"]})])
         # A later single-dataset run for another dataset must not wipe the

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 from typing import Callable, List
 
@@ -22,6 +23,18 @@ from ..neuron_index import (
 # Keep the full membership maps for exact selection, but render a fixed page
 # of match details; the panel pager still exposes every matched name.
 MATCH_GROUP_PAGE_SIZE = 50
+
+
+def _normalized_focus_keys(keys) -> tuple[str, ...]:
+    """Return stable, non-empty focus keys without changing their order."""
+    result: list[str] = []
+    seen: set[str] = set()
+    for key in keys or ():
+        value = str(key or "").strip()
+        if value and value not in seen:
+            result.append(value)
+            seen.add(value)
+    return tuple(result)
 
 
 def _dataset_values(value) -> List[str]:
@@ -573,11 +586,8 @@ def _render_index(
                     member = str(member or "").strip()
                     if member and member not in focus_keys:
                         focus_keys.append(member)
-            if focus_keys:
-                refresh(
-                    focus_key=focus_keys[0],
-                    focus_keys=tuple(focus_keys),
-                )
+            if selected_rows and focus_keys:
+                request_focus(focus_keys)
             else:
                 refresh_table_selection()
 
@@ -619,10 +629,7 @@ def _render_index(
                         if member and member not in focus_keys:
                             focus_keys.append(member)
                 if focus_keys:
-                    refresh(
-                        focus_key=focus_keys[0],
-                        focus_keys=tuple(focus_keys),
-                    )
+                    request_focus(focus_keys)
                     return
             refresh_table_selection()
 
@@ -836,8 +843,13 @@ def _render_index(
                     )
 
         state = {"page": initial.page, "page_size": 50}
+        # A QTable click may emit both a value-click and a selection event.
+        # Keep the server-side request boundary idempotent as well as the
+        # client-side JavaScript guard; otherwise two slightly different
+        # member bundles can schedule two animations for one user action.
+        focus_request = {"anchor": "", "requested_at": 0.0}
 
-    def scroll_to_table_rows(focus_keys) -> None:
+    def scroll_to_table_rows(focus_keys, anchor_key: str | None = None) -> None:
         """Focus every visible member row after the table finishes scrolling.
 
         ``scrollIntoView({behavior: 'smooth'})`` is asynchronous. Starting the
@@ -849,24 +861,27 @@ def _render_index(
         server first moves the page to the first member, so every member on
         that focused page is shaded together.
         """
-        keys = []
-        for key in focus_keys or ():
-            value = str(key or "").strip()
-            if value and value not in keys:
-                keys.append(value)
+        keys = list(_normalized_focus_keys(focus_keys))
         if not keys:
             return
         encoded_keys = json.dumps(keys)
+        anchor = str(anchor_key or keys[0]).strip() or keys[0]
+        encoded_anchor = json.dumps(anchor)
         ui.run_javascript(
             f"""
             setTimeout(() => {{
-                const keys = {encoded_keys};
+                const rawKeys = {encoded_keys};
+                const keys = Array.from(new Set(rawKeys)).sort();
+                const anchor = {encoded_anchor};
                 const root = document.querySelector('.drocat-neuron-full-panel .drocat-data-viewer-scroll');
                 if (!root) return;
                 const state = window.__drocatNeuronFocusState || (window.__drocatNeuronFocusState = {{
                     token: 0, signature: '', requestedAt: 0, timer: null
                 }});
-                const signature = keys.join('\\u0001');
+                // The anchor, rather than the member-list order, identifies a
+                // focus action. Selection/click payloads can contain the same
+                // rows in different orders or with a newly expanded bundle.
+                const signature = anchor;
                 const now = performance.now();
                 // Selection and click events can arrive as two separate
                 // browser messages. Keep one focus action for the same
@@ -1043,14 +1058,42 @@ def _render_index(
     def reset_and_refresh(_event=None):
         refresh(reset_page=True)
 
+    def request_focus(focus_keys) -> None:
+        """Run one page-jump/focus request for one user action.
+
+        NiceGUI can deliver a matched-value click and the QTable selection
+        update independently.  Suppress a repeated anchor during the entire
+        scroll/breathe interval so the second event cannot restart the visual
+        effect.  A later click on the same entry remains available after the
+        cooldown.
+        """
+        normalized = tuple(sorted(_normalized_focus_keys(focus_keys)))
+        if not normalized:
+            refresh_table_selection()
+            return
+        anchor = normalized[0]
+        now = time.monotonic()
+        if (
+            focus_request["anchor"] == anchor
+            and now - focus_request["requested_at"] < 2.6
+        ):
+            refresh_table_selection()
+            return
+        focus_request["anchor"] = anchor
+        focus_request["requested_at"] = now
+        refresh(focus_key=anchor, focus_keys=normalized)
+
     def handle_match_value_click(event):
         row = getattr(event, "args", None)
         if not isinstance(row, dict):
             return
         value = str(row.get("match_value", "") or "").strip()
-        member_keys = tuple(group_members.get(value, ()))
+        # ``group_members`` contains the private table-row keys (body ID plus
+        # source ordinal), not display body IDs. Sort the set so a multi-row
+        # click chooses the same anchor every time.
+        member_keys = tuple(sorted(group_members.get(value, ())))
         if member_keys:
-            refresh(focus_key=member_keys[0], focus_keys=member_keys)
+            request_focus(member_keys)
 
     search_input.on_value_change(reset_and_refresh)
     def handle_filter_column_change(event):

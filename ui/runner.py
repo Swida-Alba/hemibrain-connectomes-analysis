@@ -50,6 +50,12 @@ _PROGRESS_LINE_RE = re.compile(
     r")\s*$"
 )
 
+# Emitted by generated FindNeuronConnection scripts immediately after
+# InitializeNeuronInfo() has resolved the source and target query sets.
+_NEURON_MATCH_RE = re.compile(
+    r"^\[DROCAT\]\[neuron-match\]\s+source=(\d+)\s+target=(\d+)$"
+)
+
 
 class _OutputSplitter:
     """Incremental splitter turning raw subprocess output into clean log lines.
@@ -293,6 +299,7 @@ class ScriptRunner:
         self.is_running = False
         self._cancelled = False
         self._run_logs: List[tuple] = []
+        self._neuron_match = None
 
     async def run(
         self,
@@ -327,10 +334,31 @@ class ScriptRunner:
         self.is_running = True
         self._cancelled = False
         self._run_logs = []
+        self._neuron_match = None
         start_time = datetime.now()
 
         def _log(line: str, level: str = "stdout"):
             """Record every log line and forward it to the UI callback."""
+            match = _NEURON_MATCH_RE.match(str(line).strip())
+            if match:
+                source_count = int(match.group(1))
+                target_count = int(match.group(2))
+                if self._neuron_match is None:
+                    self._neuron_match = {
+                        "source": source_count,
+                        "target": target_count,
+                        "any_pair": source_count > 0 and target_count > 0,
+                    }
+                else:
+                    self._neuron_match["source"] = max(
+                        self._neuron_match["source"], source_count)
+                    self._neuron_match["target"] = max(
+                        self._neuron_match["target"], target_count)
+                    self._neuron_match["any_pair"] = (
+                        self._neuron_match["any_pair"]
+                        or (source_count > 0 and target_count > 0)
+                    )
+                return
             self._run_logs.append((level, line))
             if log_callback:
                 log_callback(line, level)
@@ -419,6 +447,7 @@ class ScriptRunner:
                 "duration": duration,
                 "cancelled": self._cancelled,
                 "output_folder": scan_dir,
+                "neuron_match": self._neuron_match,
             }
 
         except Exception as e:
@@ -429,6 +458,7 @@ class ScriptRunner:
                 "duration": 0,
                 "cancelled": False,
                 "output_folder": None,
+                "neuron_match": self._neuron_match,
             }
         finally:
             self.is_running = False
@@ -470,6 +500,14 @@ class ScriptRunner:
         init_call = ""
         if init_method:
             init_call = f"{var}.{init_method}()\n"
+            init_call += f'''_source_df = getattr({var}, "source_df", None)
+_target_df = getattr({var}, "target_df", None)
+print(
+    f"[DROCAT][neuron-match] source={{len(_source_df) if _source_df is not None else 0}} "
+    f"target={{len(_target_df) if _target_df is not None else 0}}",
+    flush=True,
+)
+'''
 
         script = f'''#!/usr/bin/env python
 """Auto-generated DROCAT runner script for {tool_name}."""

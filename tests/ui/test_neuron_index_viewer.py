@@ -832,6 +832,16 @@ class TestNeuronIndexViewer:
 
         assert any("scrollIntoView" in script for script in scripts)
         assert any("1050::50" in script for script in scripts)
+        focus_scripts = [script for script in scripts if "scrollIntoView" in script]
+        assert len(focus_scripts) == 1
+        assert "const signature = anchor" in focus_scripts[0]
+        # A value click followed by the duplicate QTable event must not
+        # restart the breathing row notification.
+        match_table._handle_event({
+            "listener_id": click_listener.id,
+            "args": target,
+        })
+        assert len([script for script in scripts if "scrollIntoView" in script]) == 1
         full_table = next(
             table for table in tables
             if table._props["columns"][0]["name"] == "bodyId"

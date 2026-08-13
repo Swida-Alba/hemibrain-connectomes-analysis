@@ -339,6 +339,36 @@ class TestRunResolution:
         assert gh.list_recent() == []
         assert hs.recent() == []
 
+    def test_orphaned_custom_query_history_is_hidden(
+        self, isolated_store, tmp_path, monkeypatch
+    ):
+        """A removed custom label cannot remain in the input history menu."""
+        import ui.history_store as hs
+        from nicegui import Client
+        from nicegui.page import page
+        from ui.components.common import neuron_list_input
+
+        monkeypatch.setattr(hs, "_HISTORY_PATH", tmp_path / "neuron_history.json")
+        gh.record([("test", {DS_A: ["aMe12"]})], origin="inline")
+        hs.record(["test"], now="2026-08-11T10:00:00",
+                  custom_values=["test"])
+        gh.remove_label("test")
+
+        client = Client(page("/res-orphaned-query-history"))
+        with client:
+            box = neuron_list_input(
+                label="Source Neurons", show_filter=False, show_upload=False,
+                suggestions=lambda _text: [],
+            )
+        focus = next(
+            listener for listener in box.chip_input._event_listeners.values()
+            if listener.type == "focus"
+        )
+        box.chip_input._handle_event({"listener_id": focus.id, "args": None})
+
+        assert hs.recent() == []
+        assert hs.frequent() == []
+
     def test_custom_label_from_query_history_materializes_mapping(
         self, isolated_store, tmp_path, monkeypatch
     ):
