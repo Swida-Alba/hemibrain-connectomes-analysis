@@ -145,6 +145,40 @@ def test_run_path_analysis_selects_find_tool_by_path_mode(monkeypatch):
     assert (lm_shortest is None) == (lm_all is None)
 
 
+def test_single_dataset_pipeline_runs_each_threshold(monkeypatch):
+    """One dataset still runs the complete threshold iteration pipeline."""
+    import pandas as pd
+    from comparison import ComparisonAnalyzer
+
+    params = ComparisonParameters(
+        datasets=['hemibrain:v1.2.1'],
+        source_neurons=['aMe12'],
+        target_neurons=['PPL101'],
+        thresholds=[3, 7],
+        output_folder="",
+        auto_type_mapping=False,
+        verbose=False,
+    )
+    analyzer = ComparisonAnalyzer(params, verbose=False)
+    calls = []
+
+    def fake_run_path_analysis(dataset, threshold, verbose_mode="simple"):
+        calls.append((dataset, threshold, verbose_mode))
+        return pd.DataFrame()
+
+    monkeypatch.setattr(analyzer, "run_path_analysis", fake_run_path_analysis)
+    results = analyzer.run_all_analyses(skip_existing=False)
+    summary = analyzer.run_comparison_analysis()
+
+    assert calls == [
+        ("hemibrain:v1.2.1", 3, "simple"),
+        ("hemibrain:v1.2.1", 7, "silent"),
+    ]
+    assert sorted(results["hemibrain:v1.2.1"]) == [3, 7]
+    assert summary["datasets"] == ["hemibrain:v1.2.1"]
+    assert summary["thresholds"] == [3, 7]
+
+
 def test_aggregate_and_find_paths_shortest_flags_only_shortest_route():
     """In shortest mode an edge is valid only when it lies on a per-pair
     minimum-hop path; 'all' mode keeps every on-path edge. max_layers=None

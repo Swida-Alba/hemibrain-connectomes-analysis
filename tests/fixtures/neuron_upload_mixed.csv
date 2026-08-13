@@ -1,0 +1,6 @@
+type,source_kind
+10001,bodyId
+DNp01,type
+DNp01(GF)_R,instance
+VS1,flywireType
+KC.*,regex

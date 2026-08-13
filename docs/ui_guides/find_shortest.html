@@ -29,13 +29,16 @@
     <li>Click <b>Find Shortest Paths</b>.</li>
   </ol>
 
-  <h2>Depth: unlimited by default</h2>
+  <h2>Depth cap (default: 2 intermediate layers)</h2>
   <ul>
-    <li><b>Max Layers (optional) = 0</b> means unlimited search depth.
+    <li><b>Max Intermediate Layers (optional) = 0</b> means unlimited search depth.
       Layer discovery is a BFS and stops as soon as every target has been
       discovered — a target's first-discovery layer is its exact shortest
       hop distance, so deeper layers cannot change any result.</li>
-    <li>Set <b>Max Layers &gt; 0</b> only as a safety cap when targets may
+    <li>The default is 2, matching the Find All Paths tab. Increase it when a
+      query needs deeper intermediate layers; there is no artificial upper
+      bound on the integer value.</li>
+    <li>Set <b>Max Intermediate Layers &gt; 0</b> only as a safety cap when targets may
       be unreachable (worst case: the whole forward cone of the sources is
       fetched).</li>
   </ul>
@@ -43,7 +46,7 @@
   <h2>Parameters</h2>
   <table>
     <tr><th>Parameter</th><th>Default</th><th>Meaning</th></tr>
-    <tr><td>Max Layers (optional)</td><td>0</td><td>0 = unlimited depth; &gt;0 caps path length at <i>layers + 1</i> edges</td></tr>
+    <tr><td>Max Intermediate Layers (optional)</td><td>2</td><td>0 = unlimited depth; &gt;0 caps path length at <i>layers + 1</i> edges</td></tr>
     <tr><td>Min Synapse Count</td><td>3</td><td>Minimum edge weight</td></tr>
     <tr><td>Min Connection Ratio</td><td>0.0</td><td>Minimum weight/post ratio</td></tr>
     <tr><td>Min Traversal Prob.</td><td>0.0</td><td>Traversal probability threshold</td></tr>

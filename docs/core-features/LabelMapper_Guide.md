@@ -160,21 +160,21 @@ params = ComparisonParameters(
 
 The web UI manages custom mappings as **reusable presets** — no scripting needed:
 
-1. **Settings tab → Custom Type Mappings**: create/edit presets in the table grid
-   (one row per custom group, one column per dataset, cells hold comma-separated
-   neuron types; Source / Target / Intermediate sides). Save → the preset is
-   stored permanently in `cache/user_mappings.json` (gitignored) and exported to
-   `cache/user_mappings/<name>.json` for runs.
-2. **Set Active**: marks a preset as the default; every tool tab pre-selects it.
-3. **Cross-Dataset tab → Custom Type Mapping**: the chosen preset is passed to
+1. **Settings tab → Custom Type Mappings**: choose the **Target datasets** on
+   the left and open **Custom Mapping** on the right. The shared panel has one
+   row per custom group, one aligned member input per selected dataset, outlined
+   chips, and an available-neuron viewer. The outlined **Save Mapping** action
+   saves the stable `Custom Mapping` preset and makes it active; it is stored in
+   `cache/user_mappings.json` (gitignored) and exported for runs.
+2. **Cross-Dataset tab → Custom Type Mapping**: the chosen preset is passed to
    the comparison as `overall_mapping_json`. It acts as a mapping **overlay**:
    your explicit source/target neuron queries stay, and only neurons matching
    the mapping are renamed to their custom groups (unmapped neurons keep their
    identifiers).
-4. **FindPath / FindDirect tabs → Custom Grouping**: the same preset is passed
+3. **FindPath / FindDirect tabs → Custom Grouping**: the same preset is passed
    as `custom_mapping_file`; mapped neurons are grouped at type level via
    `EnrichConnectionTable` (custom_group columns).
 
-Presets can be renamed, deleted, and re-saved at any time; runs always consume
-the exported file, so results stay reproducible (`label_map.json` /
-`parameters.json` record the mapping used).
+The `Custom Mapping` preset can be overwritten by saving an updated board;
+runs always consume the exported file, so results stay reproducible
+(`label_map.json` / `parameters.json` record the mapping used).

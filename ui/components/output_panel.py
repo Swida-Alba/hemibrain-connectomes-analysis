@@ -152,7 +152,7 @@ class OutputPanel:
             # tracks every drag. Kept as a plain, light console that streams
             # reliably; only the height range is capped.
             self.log_wrapper = ui.element("div").classes("w-full").style(
-                "resize: vertical; overflow: hidden; height: 200px; min-height: 100px; max-height: 600px;"
+                "resize: vertical; overflow: hidden; height: 400px; min-height: 100px; max-height: 1800px;"
             )
             with self.log_wrapper:
                 self.log_area = ui.log(max_lines=500).classes(

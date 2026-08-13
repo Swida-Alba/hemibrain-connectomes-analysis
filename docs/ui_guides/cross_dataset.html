@@ -14,14 +14,16 @@
   </header>
   <h1>Cross-Dataset Comparison</h1>
   <p class="lede">
-    Compare connectivity between two or more datasets (e.g.
-    <code>male-cns:v0.9</code> vs <code>hemibrain:v1.2.1</code>) for the
-    same source → target query, across multiple synapse thresholds.
+    Analyze one dataset across multiple synapse thresholds, or compare
+    connectivity between two or more datasets (e.g.
+    <code>male-cns:v0.9</code> vs <code>hemibrain:v1.2.1</code>) for the same
+    source → target query.
   </p>
 
   <h2>Quick start</h2>
   <ol>
-    <li>Select 2+ <b>Datasets</b> (optional nicknames in the same order).</li>
+    <li>Select 1+ <b>Datasets</b>. One dataset is valid for threshold
+      sensitivity; select multiple datasets for cross-dataset comparison.</li>
     <li>Add <b>Source Neurons</b> and <b>Target Neurons</b>.</li>
     <li>Click <b>Run Comparison</b> - a report plus matrices are produced
       for every threshold.</li>
@@ -30,7 +32,7 @@
   <h2>Inputs &amp; examples</h2>
   <table>
     <tr><th>Example</th><th>Behavior</th></tr>
-    <tr><td>Datasets: male-cns:v0.9, hemibrain:v1.2.1; nicknames: MCNS, HEMI</td><td>Two datasets with short display names</td></tr>
+    <tr><td>Datasets: male-cns:v0.9, hemibrain:v1.2.1</td><td>Two datasets compared using their automatic display names</td></tr>
     <tr><td>Thresholds: <code>3, 5, 10</code></td><td>Separate analyses per threshold</td></tr>
     <tr><td>Mode: <code>edge</code></td><td>Edges compared by weight only</td></tr>
     <tr><td>Mode: <code>path</code> (default)</td><td>Edges discovered through paths</td></tr>

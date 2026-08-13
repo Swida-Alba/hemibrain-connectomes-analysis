@@ -21,14 +21,14 @@
   <h2>UI workflow</h2>
   <p>Mappings are managed as <b>reusable presets</b> — no scripting needed:</p>
   <ol>
-    <li><b>Settings tab &rarr; Custom Type Mappings</b>: create/edit presets in
-      the table grid — one row per custom group, one column per dataset, cells
-      hold comma-separated neuron types or regex patterns (Source / Target /
-      Intermediate sides). Save stores the preset permanently in
-      <code>cache/user_mappings.json</code> (gitignored) and exports it to
-      <code>cache/user_mappings/&lt;name&gt;.json</code> for runs.</li>
-    <li><b>Set Active</b>: marks a preset as the default; every tool tab
-      pre-selects it.</li>
+    <li><b>Settings tab &rarr; Custom Type Mappings</b>: choose the
+      <b>Target datasets</b> on the left, then open <b>Custom Mapping</b> on the
+      right — one row per custom group, one aligned member input per selected
+      dataset, outlined chip fields, and a <b>See available neurons</b> lookup.
+      The outlined <b>Save Mapping</b> action sits in the group action row,
+      saves the stable <code>Custom Mapping</code> preset, and makes it active in
+      <code>cache/user_mappings.json</code> (gitignored); it also exports it to
+      <code>cache/user_mappings/</code> for runs.</li>
     <li><b>Cross-Dataset tab &rarr; Custom Type Mapping</b>: the chosen preset
       is passed to the comparison as <code>overall_mapping_json</code>. It acts
       as a mapping <b>overlay</b>: your explicit source/target neuron queries
@@ -39,8 +39,8 @@
       grouped at type level via <code>EnrichConnectionTable</code>
       (custom_group columns).</li>
   </ol>
-  <p>Presets can be renamed, deleted, and re-saved at any time; runs always
-    consume the exported file, so results stay reproducible
+  <p>The <code>Custom Mapping</code> preset can be overwritten by saving an
+    updated board; runs always consume the exported file, so results stay reproducible
     (<code>label_map.json</code> / <code>parameters.json</code> record the
     mapping used).</p>
 
@@ -85,9 +85,8 @@
       exported tables/visualizations aggregate under the group label.</li>
   </ul>
   <div class="callout info">
-    <b>Division of labor:</b> the inline grouper writes identical groups to
-    the <i>source</i> and <i>target</i> roles only. Asymmetric source/target
-    or intermediate mappings stay the Settings preset editor's domain.
+    <b>Division of labor:</b> the shared Custom Mapping panel writes aligned
+    groups to the <i>source</i> and <i>target</i> roles.
     Empty boxes export as empty groups, which keeps cross-dataset validation
     happy when a label has members in only some datasets.
   </div>

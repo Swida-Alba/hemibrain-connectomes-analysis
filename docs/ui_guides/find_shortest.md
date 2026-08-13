@@ -13,14 +13,17 @@ outputs, visualization) with shortest-only enumeration.
 - Distances are hop counts on the threshold-filtered graph (synapse weights
   are edge attributes, not path costs).
 
-## Depth: unlimited by default
+## Depth cap (default: 2 intermediate layers)
 
-- **Max Layers (optional) = 0** means unlimited search depth. Layer
+- **Max Intermediate Layers (optional) = 0** means unlimited search depth. Layer
   discovery is a BFS and stops as soon as *every* target has been
   discovered: a target's first-discovery layer is its exact shortest hop
   distance, so deeper layers cannot change any result. This keeps an
   "unlimited" search cheap in practice.
-- Set `Max Layers > 0` only as a safety cap for queries where targets may be
+- The default is 2, matching the Find All Paths tab. Increase it when a
+  query needs deeper intermediate layers; there is no artificial upper
+  bound on the integer value.
+- Set `Max Intermediate Layers > 0` only as a safety cap for queries where targets may be
   unreachable (the worst case then fetches the whole forward cone of the
   sources).
 

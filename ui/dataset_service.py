@@ -7,7 +7,7 @@ import json
 import threading
 import time
 from pathlib import Path
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Tuple
 from dataclasses import dataclass, field
 from datetime import datetime
 
@@ -71,6 +71,9 @@ def is_flywire_dataset(dataset: str) -> bool:
 class DatasetService:
     """Service for fetching and managing dataset availability."""
 
+    AVAILABILITY_CACHE_FORMAT = "drocat_dataset_availability/v1"
+    AVAILABILITY_CACHE_FILENAME = "dataset_availability.json"
+
     # Known NeuPrint dataset candidates (fallback if /api/dbmeta/datasets fails)
     NEUPRINT_CANDIDATES = [
         "male-cns:v1.0",
@@ -114,6 +117,145 @@ class DatasetService:
         self._available_neuprint: Optional[List[str]] = None
         self._server_datasets: Dict[str, dict] = {}  # Full server response from /api/dbmeta/datasets
         self._last_fetch_time: float = 0
+        self._availability_snapshot: Dict[str, DatasetInfo] = {}
+        self._availability_updated_at: Optional[str] = None
+        self._availability_loaded = False
+
+    @property
+    def availability_cache_path(self) -> Path:
+        """Persistent file containing the last complete availability refresh."""
+        return self._cache_dir / self.AVAILABILITY_CACHE_FILENAME
+
+    @staticmethod
+    def _serialize_info(info: DatasetInfo) -> dict:
+        """Convert a DatasetInfo into the JSON-safe snapshot representation."""
+        return {
+            "name": info.name,
+            "source": info.source,
+            "available": bool(info.available),
+            "neuron_count": int(info.neuron_count or 0),
+            "typed_count": int(info.typed_count or 0),
+            "local_cache": bool(info.local_cache),
+            "local_prepared": bool(info.local_prepared),
+            "display_name": info.display_name or "",
+            "metadata": info.metadata or {},
+            "error": info.error,
+        }
+
+    @staticmethod
+    def _deserialize_info(name: str, data: dict) -> Optional[DatasetInfo]:
+        """Rebuild one DatasetInfo from a persisted snapshot row."""
+        if not isinstance(data, dict):
+            return None
+        try:
+            return DatasetInfo(
+                name=str(data.get("name") or name),
+                source=str(data.get("source") or "unknown"),
+                available=bool(data.get("available", False)),
+                neuron_count=int(data.get("neuron_count", 0) or 0),
+                typed_count=int(data.get("typed_count", 0) or 0),
+                local_cache=bool(data.get("local_cache", False)),
+                local_prepared=bool(data.get("local_prepared", False)),
+                display_name=str(data.get("display_name") or ""),
+                metadata=data.get("metadata") if isinstance(data.get("metadata"), dict) else {},
+                error=data.get("error"),
+            )
+        except (TypeError, ValueError):
+            return None
+
+    def _load_persisted_availability(self) -> None:
+        """Load the last refresh into the runtime cache, if it exists."""
+        if self._availability_loaded:
+            return
+
+        snapshot: Dict[str, DatasetInfo] = {}
+        updated_at: Optional[str] = None
+        path = self.availability_cache_path
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(payload, dict):
+                updated_at = str(payload.get("updated_at") or "") or None
+                rows = payload.get("datasets") or {}
+                if isinstance(rows, dict):
+                    for name, raw in rows.items():
+                        info = self._deserialize_info(str(name), raw)
+                        if info is not None:
+                            snapshot[info.name] = info
+        except (OSError, ValueError, TypeError):
+            # A corrupt or partially-written snapshot must never prevent the
+            # Settings page from loading; the next successful refresh replaces
+            # it atomically.
+            snapshot = {}
+            updated_at = None
+
+        with self._lock:
+            self._availability_snapshot = snapshot
+            self._availability_updated_at = updated_at
+            self._availability_loaded = True
+            # Keep the normal in-memory lookup path useful to selectors and
+            # tools that are opened before the Settings tab.
+            self._cache.update(snapshot)
+
+    def get_cached_availability(self) -> Tuple[Dict[str, DatasetInfo], Optional[str]]:
+        """Return the persisted availability rows and their refresh time."""
+        self._load_persisted_availability()
+        with self._lock:
+            # Settings can clear the transient service cache after a token
+            # change; restore the persisted rows when the next tab asks for
+            # the snapshot so dataset selectors keep the same status labels.
+            self._cache.update(self._availability_snapshot)
+            return dict(self._availability_snapshot), self._availability_updated_at
+
+    def get_availability_updated_at(self) -> Optional[str]:
+        """Return the timestamp of the last successful availability refresh."""
+        _results, updated_at = self.get_cached_availability()
+        return updated_at
+
+    def _persist_availability(
+        self,
+        results: Dict[str, DatasetInfo],
+        replace: bool = True,
+    ) -> str:
+        """Persist a completed refresh and replace the active snapshot."""
+        self._load_persisted_availability()
+        with self._lock:
+            snapshot = dict(results) if replace else {
+                **self._availability_snapshot,
+                **results,
+            }
+        updated_at = datetime.now().astimezone().isoformat(timespec="seconds")
+        payload = {
+            "format": self.AVAILABILITY_CACHE_FORMAT,
+            "updated_at": updated_at,
+            "datasets": {
+                name: self._serialize_info(info)
+                for name, info in snapshot.items()
+            },
+        }
+
+        path = self.availability_cache_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temp_path = path.with_name(f".{path.name}.tmp")
+        try:
+            temp_path.write_text(
+                json.dumps(payload, indent=2, ensure_ascii=False, default=str),
+                encoding="utf-8",
+            )
+            temp_path.replace(path)
+        except OSError:
+            try:
+                temp_path.unlink()
+            except OSError:
+                pass
+            raise
+
+        with self._lock:
+            self._availability_snapshot = snapshot
+            self._availability_updated_at = updated_at
+            self._availability_loaded = True
+            self._cache.clear()
+            self._cache.update(snapshot)
+        return updated_at
 
     def _load_tokens(self):
         """Load tokens from token_info_local.txt or token_info.txt."""
@@ -690,8 +832,11 @@ class DatasetService:
     def refresh_availability(self, datasets: Optional[List[str]] = None) -> Dict[str, DatasetInfo]:
         """
         Refresh availability for all or specific datasets.
-        Also fetches FlyWire dataset list from Codex.
+        Also fetches FlyWire dataset list from Codex. A completed refresh is
+        written to the persistent availability snapshot so the next Settings
+        page load starts from this result instead of an older in-memory value.
         """
+        refresh_all = datasets is None
         with self._lock:
             self._cache.clear()
 
@@ -706,6 +851,10 @@ class DatasetService:
         for dataset in datasets:
             results[dataset] = self.check_dataset_availability(dataset)
 
+        # A full refresh is authoritative and replaces the prior snapshot.
+        # A targeted refresh updates only the requested rows and preserves the
+        # rest of the last complete snapshot.
+        self._persist_availability(results, replace=refresh_all)
         return results
 
     def is_cache_fresh(self, max_age_seconds: int = 300) -> bool:

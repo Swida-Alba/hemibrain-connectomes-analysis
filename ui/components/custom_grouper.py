@@ -37,7 +37,7 @@ from typing import Callable, Dict, List, Optional
 
 from nicegui import ui
 
-from .. import group_history
+from .. import group_history, history_store
 from ..type_suggestions import get_dataset_pools, match_suggestions
 from .common import neuron_list_input
 
@@ -124,6 +124,28 @@ def from_canonical_dict(data: dict) -> List[dict]:
         "No mapping side with 'custom_label'/'std_label' found in file")
 
 
+def datasets_with_members(rows: List[dict]) -> List[str]:
+    """Return datasets that have at least one member in *rows*.
+
+    Mapping files are often rectangular already, so simply collecting every
+    dataset key would select columns that are present only as empty padding.
+    The Settings editor uses this helper when loading a map: non-empty
+    columns are added to the embedded selector, and the renderer then shows
+    every selected column for every group (including empty cells).
+    """
+    datasets: List[str] = []
+    seen = set()
+    for row in rows or []:
+        for dataset, values in (row.get("cells") or {}).items():
+            if not any(str(value).strip() for value in (values or [])):
+                continue
+            dataset = str(dataset).strip()
+            if dataset and dataset not in seen:
+                seen.add(dataset)
+                datasets.append(dataset)
+    return datasets
+
+
 # ---------------------------------------------------------------------------
 # State handle (JS-free, test-driven)
 # ---------------------------------------------------------------------------
@@ -157,6 +179,40 @@ class LiteGroupHandle:
                 return i
         return self.add_row(name, cells)
 
+    @staticmethod
+    def _row_is_blank(row: dict) -> bool:
+        """Whether a row has neither a label nor any member values."""
+        return not str(row.get("name") or "").strip() and not any(
+            str(value).strip()
+            for values in (row.get("cells") or {}).values()
+            for value in (values or [])
+        )
+
+    def load_saved_row(self, name: str,
+                       cells: Dict[str, List[str]]) -> int:
+        """Load one history row, reusing the initial blank placeholder.
+
+        Opening the panel seeds one blank row so it is immediately editable.
+        A saved group should occupy that placeholder instead of being pushed
+        into a second row. Once the first row contains either a label or a
+        member, normal upsert behavior preserves it and appends new groups.
+        """
+        name = (name or "").strip()
+        row = {
+            "name": name,
+            "cells": {str(ds): [str(v) for v in vals]
+                      for ds, vals in (cells or {}).items()},
+        }
+        if self.rows and self._row_is_blank(self.rows[0]):
+            self.rows[0] = row
+            # Avoid a duplicate if the same label was already present later.
+            self.rows[1:] = [
+                existing for existing in self.rows[1:]
+                if existing.get("name") != name
+            ]
+            return 0
+        return self.upsert_row(name, cells)
+
     def remove_row(self, index: int) -> None:
         if 0 <= index < len(self.rows):
             del self.rows[index]
@@ -189,14 +245,25 @@ class LiteCustomGrouper:
     """The inline group board; one instance per tab."""
 
     def __init__(self, tab_key: str, require_names: bool = False,
-                 query_inputs: Optional[Dict[str, object]] = None):
+                 query_inputs: Optional[Dict[str, object]] = None,
+                 row_action_renderers: Optional[List[Callable[[], None]]] = None):
         self.tab_key = tab_key
         self.require_names = require_names
         # Optional named query inputs (e.g. {"source": ..., "target": ...})
         # that group rows can push their members into.
         self.query_inputs = dict(query_inputs or {})
+        # Optional controls rendered alongside the per-row query actions.
+        # Keep the caller's list by reference so Settings can attach actions
+        # after the shared editor has been constructed.
+        self.row_action_renderers = (
+            row_action_renderers
+            if row_action_renderers is not None
+            else []
+        )
         self.handle = LiteGroupHandle()
         self._datasets_provider: Callable[[], List[str]] = lambda: []
+        self._datasets_setter: Optional[Callable[[List[str]], None]] = None
+        self._suspend_dataset_watch = False
         self._container: Optional[ui.column] = None
         self._name_inputs: List[ui.input] = []
         self._cell_widgets: List[Dict[str, ui.element]] = []
@@ -204,16 +271,57 @@ class LiteCustomGrouper:
     # ------------------------------------------------------------ lifecycle
     def create(self, container: ui.column,
                datasets_provider: Callable[[], List[str]],
-               watch_elements: Optional[List] = None) -> "LiteCustomGrouper":
+               watch_elements: Optional[List] = None,
+               datasets_setter: Optional[Callable[[List[str]], None]] = None,
+               ) -> "LiteCustomGrouper":
         self._container = container
         self._datasets_provider = datasets_provider
+        self._datasets_setter = datasets_setter
         for el in (watch_elements or []):
-            el.on_value_change(lambda _e: self.resync())
+            el.on_value_change(lambda _e: self._on_dataset_change())
         self.resync()
         return self
 
     def datasets(self) -> List[str]:
         return [str(d) for d in (self._datasets_provider() or []) if d]
+
+    def _on_dataset_change(self) -> None:
+        if not self._suspend_dataset_watch:
+            self.resync()
+
+    def ensure_datasets(self, datasets: List[str]) -> List[str]:
+        """Add dataset values to the selector without dropping its choices.
+
+        Loading a map can introduce datasets that were not selected before
+        the panel opened. The setter is temporarily guarded so its normal
+        value-change watcher cannot collect the old widgets into the newly
+        loaded rows before the final render.
+        """
+        current = self.datasets()
+        merged = list(current)
+        for dataset in datasets or []:
+            dataset = str(dataset).strip()
+            if dataset and dataset not in merged:
+                merged.append(dataset)
+        if merged == current or self._datasets_setter is None:
+            return current
+        self._suspend_dataset_watch = True
+        try:
+            self._datasets_setter(merged)
+        finally:
+            self._suspend_dataset_watch = False
+        return self.datasets()
+
+    def ensure_row_datasets(self) -> List[str]:
+        """Add every non-empty dataset represented by the current board."""
+        return self.ensure_datasets(datasets_with_members(self.handle.rows))
+
+    def load_rows(self, rows: List[dict]) -> None:
+        """Replace the board and add its non-empty dataset columns."""
+        self._collect_rows()
+        self.handle.replace_rows(rows)
+        self.ensure_row_datasets()
+        self._render()
 
     def resync(self) -> None:
         """Re-render the board (dataset columns and cell widgets follow)."""
@@ -243,18 +351,16 @@ class LiteCustomGrouper:
                     "flat dense round").tooltip("Add group")
                 self._load_button()
             ui.label(
-                "One row per group label; one neuron box per dataset. The "
-                "same label governs every dataset column — empty boxes "
-                "export as empty groups."
+                "Each group starts with a label, followed by one aligned "
+                "member row per dataset. Empty boxes export as empty groups."
             ).classes("text-caption drocat-muted")
-            with ui.row().classes("items-center gap-2 w-full flex-wrap"):
-                ui.label("Group Name").classes(
-                    "text-caption font-bold drocat-muted").style("width: 170px")
-                for ds in datasets:
-                    ui.label(ds).classes(
-                        "text-caption font-bold drocat-muted").classes("flex-grow")
             for i, row in enumerate(self.handle.rows):
                 self._render_row(i, row, datasets)
+            if not datasets:
+                ui.label(
+                    "Select at least one dataset above to add dataset-specific "
+                    "members to a group."
+                ).classes("drocat-empty")
             if not self.handle.rows:
                 ui.label("No groups yet — click 'Add Group' or pull one from "
                          "history.").classes("drocat-empty")
@@ -263,41 +369,69 @@ class LiteCustomGrouper:
 
     def _render_row(self, i: int, row: dict, datasets: List[str]) -> None:
         widgets: Dict[str, ui.element] = {}
-        with ui.row().classes("items-start gap-2 w-full flex-wrap"):
-            name_input = ui.input(
-                value=row["name"],
-                placeholder=auto_label(i + 1)
-                + (" (compulsory)" if self.require_names else " (optional)"),
-            ).classes("drocat-input").style("width: 170px")
-            self._name_inputs.append(name_input)
-            for ds in datasets:
-                with ui.element("div").classes("flex-grow").style("min-width: 200px"):
-                    widget = neuron_list_input(
-                        label=ds,
-                        unit_label="member",
-                        show_filter=False,
-                        show_upload=False,
-                        initial=row["cells"].get(ds, []),
-                        suggestions=self._cell_suggest(ds),
-                    )
-                widgets[ds] = widget
-            with ui.row().classes("items-center gap-0 flex-wrap"):
-                for key, target in self.query_inputs.items():
-                    icon = self._QUERY_ICONS.get(key, "add")
-                    ui.button(
-                        f"Add to {key.title()}", icon=icon,
-                        on_click=lambda _e, k=key, idx=i: self.push_to_query(k, idx),
-                    ).props("flat dense no-caps").tooltip(
-                        f"Add this group's members to the {key.title()} input")
-                ui.button(icon="delete",
-                          on_click=lambda _e, idx=i: self._remove_group(idx)
-                          ).props("flat dense round").tooltip("Remove group")
-                ui.button(icon="arrow_upward",
-                          on_click=lambda _e, idx=i: self._move_group(idx, -1)
-                          ).props("flat dense round").tooltip("Move up")
-                ui.button(icon="arrow_downward",
-                          on_click=lambda _e, idx=i: self._move_group(idx, 1)
-                          ).props("flat dense round").tooltip("Move down")
+        with ui.element("div").classes("w-full drocat-labelmapper-group"):
+            with ui.column().classes("drocat-labelmapper-group-name gap-1"):
+                ui.label("Group name").classes("text-caption drocat-muted")
+                name_input = ui.input(
+                    value=row["name"],
+                    placeholder=auto_label(i + 1)
+                    + (" (compulsory)" if self.require_names else " (optional)"),
+                ).props("outlined").classes("w-full drocat-input")
+                self._name_inputs.append(name_input)
+            with ui.column().classes(
+                "w-full min-w-0 gap-2 drocat-labelmapper-group-members"
+            ):
+                with ui.row().classes(
+                    "w-full items-center gap-4 flex-wrap "
+                    "drocat-labelmapper-row-actions"
+                ):
+                    with ui.row().classes(
+                        "items-center justify-center gap-4 flex-wrap "
+                        "drocat-labelmapper-query-actions"
+                    ):
+                        for key, target in self.query_inputs.items():
+                            icon = self._QUERY_ICONS.get(key, "add")
+                            ui.button(
+                                f"Add to {key.title()}", icon=icon,
+                                on_click=lambda _e, k=key, idx=i: self.push_to_query(k, idx),
+                            ).props("outline no-caps").classes(
+                                "drocat-labelmapper-query-action"
+                            ).tooltip(
+                                f"Add this group's members to the {key.title()} input")
+                        # These are global editor actions (for example Settings'
+                        # Save Mapping), so render them once in the first group's
+                        # action row rather than repeating them for every group.
+                        if i == 0:
+                            for render_action in self.row_action_renderers:
+                                render_action()
+                    with ui.row().classes(
+                        "items-center gap-1 drocat-labelmapper-group-controls"
+                    ):
+                        ui.button(
+                            icon="delete",
+                            on_click=lambda _e, idx=i: self._remove_group(idx),
+                        ).props("flat dense round").tooltip("Remove group")
+            with ui.column().classes(
+                "w-full gap-2 drocat-labelmapper-datasets"
+            ):
+                for ds in datasets:
+                    with ui.row().classes(
+                        "w-full items-start gap-3 drocat-labelmapper-dataset-row"
+                    ):
+                        ui.label(ds).classes("drocat-labelmapper-dataset-label")
+                        with ui.column().classes(
+                            "gap-0 min-w-0 drocat-labelmapper-dataset-input"
+                        ):
+                            widget = neuron_list_input(
+                                label="Neuron members",
+                                unit_label="member",
+                                show_filter=False,
+                                show_upload=False,
+                                initial=row["cells"].get(ds, []),
+                                suggestions=self._cell_suggest(ds),
+                                available_neurons=lambda dataset=ds: dataset,
+                            )
+                        widgets[ds] = widget
         self._cell_widgets.append(widgets)
 
     def push_to_query(self, key: str, row_index: int) -> List[str]:
@@ -325,6 +459,15 @@ class LiteCustomGrouper:
         group_history.record(
             [(rows[row_index]["name"], rows[row_index].get("cells") or {})],
             origin="inline")
+        history_store.record(
+            [label],
+            custom_values=[label],
+            datasets=[
+                dataset for dataset, values in
+                (rows[row_index].get("cells") or {}).items()
+                if any(str(value).strip() for value in (values or []))
+            ],
+        )
         ui.notify(f"Group '{label}' added to {key.title()}", type="positive")
         return [label]
 
@@ -362,9 +505,7 @@ class LiteCustomGrouper:
             rows = from_canonical_dict(data)
             if not rows:
                 raise ValueError("file defines no groups")
-            self._collect_rows()
-            self.handle.replace_rows(rows)
-            self._render()
+            self.load_rows(rows)
             ui.notify(f"Loaded {len(rows)} group(s)", type="positive")
         except Exception as exc:
             ui.notify(f"Could not load mapping file: {exc}", type="negative")

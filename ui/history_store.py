@@ -39,6 +39,94 @@ def _current_custom_values() -> Set[str]:
         return set()
 
 
+def _normalize_datasets(datasets) -> Optional[Set[str]]:
+    """Normalize a dataset selector value for history filtering.
+
+    ``None`` means the caller has no dataset context and keeps the legacy
+    unfiltered behavior. An empty selector is also treated as unscoped so
+    users can inspect existing history before choosing a dataset.
+    """
+    if datasets is None:
+        return None
+    if isinstance(datasets, str):
+        values = [datasets]
+    else:
+        try:
+            values = list(datasets)
+        except TypeError:
+            values = [datasets]
+    normalized = {
+        str(value).strip()
+        for value in values
+        if isinstance(value, str) and str(value).strip()
+    }
+    return normalized or None
+
+
+def _nonempty_group_datasets(value: str) -> Set[str]:
+    """Find datasets carrying members for a saved custom group or mapping."""
+    datasets: Set[str] = set()
+    try:
+        from . import group_history
+
+        record = group_history.get_label(value)
+        members = record.get("members") if isinstance(record, dict) else None
+        if isinstance(members, dict):
+            datasets.update(
+                str(dataset).strip()
+                for dataset, values in members.items()
+                if str(dataset).strip()
+                and any(str(member).strip() for member in (values or []))
+            )
+    except Exception:  # pragma: no cover - history must never break a run
+        pass
+
+    # Named LabelMapper presets use the same dataset-keyed shape as group
+    # history. This covers a saved mapping whose label was used as a query
+    # history value by an older client.
+    try:
+        from . import mapping_store
+
+        mapping = mapping_store.get_mapping(value)
+        if isinstance(mapping, dict):
+            for side_name in mapping_store.MAPPING_SIDES:
+                side = mapping.get(side_name)
+                if not isinstance(side, dict):
+                    continue
+                for dataset, groups in side.items():
+                    if dataset in {"custom_label", "std_label"}:
+                        continue
+                    if isinstance(groups, list) and any(
+                        isinstance(group, (list, tuple))
+                        and any(str(member).strip() for member in group)
+                        for group in groups
+                    ):
+                        datasets.add(str(dataset).strip())
+    except Exception:  # pragma: no cover - optional preset store
+        pass
+    return datasets
+
+
+def _matches_dataset_scope(value: str, entry: dict,
+                           scope: Optional[Set[str]]) -> bool:
+    """Whether one stored value belongs in a dataset-scoped history list."""
+    if scope is None:
+        return True
+
+    recorded = _normalize_datasets(entry.get("datasets")) or set()
+    if recorded and not recorded.intersection(scope):
+        return False
+
+    custom_datasets = _nonempty_group_datasets(value)
+    if custom_datasets and not custom_datasets.intersection(scope):
+        return False
+
+    # Entries written before dataset provenance was introduced remain visible;
+    # new records carry ``datasets`` and are filtered above. Custom entries
+    # additionally use their live group/map member datasets when available.
+    return True
+
+
 def _load() -> Dict[str, dict]:
     try:
         if _HISTORY_PATH.exists():
@@ -61,14 +149,17 @@ def _save(values: Dict[str, dict]) -> None:
 
 
 def record(values: List[str], now: Optional[str] = None,
-           custom_values: Optional[Iterable[str]] = None) -> None:
+           custom_values: Optional[Iterable[str]] = None,
+           datasets=None) -> None:
     """Record searched values (raw chips, pre-pattern): bump the count and
     refresh the last-used timestamp of each value.
 
     Values that are current custom-group labels are marked so a later removal
     can invalidate old query-history entries even when the UI was not open at
     the time of deletion. ``custom_values`` is injectable for callers and
-    tests; omitted values are resolved from the group registry.
+    tests; omitted values are resolved from the group registry. ``datasets``
+    records the selected dataset(s) so later history menus can use the same
+    scope as suggestions.
     """
     if not values:
         return
@@ -95,6 +186,14 @@ def record(values: List[str], now: Optional[str] = None,
                 # its custom group has been removed; do not retain stale
                 # custom provenance in that case.
                 entry.pop("kind", None)
+            dataset_values = _normalize_datasets(datasets)
+            if dataset_values:
+                prior_datasets = {
+                    str(dataset).strip()
+                    for dataset in (entry.get("datasets") or [])
+                    if str(dataset).strip()
+                }
+                entry["datasets"] = sorted(prior_datasets | dataset_values)
             data[value] = entry
         _save(data)
 
@@ -140,18 +239,23 @@ def prune_orphaned_custom(valid_values: Iterable[str]) -> List[str]:
         return stale
 
 
-def recent(limit: int = _LIMIT_RECENT) -> List[str]:
-    """Most recently searched values, newest first."""
+def recent(limit: int = _LIMIT_RECENT, datasets=None) -> List[str]:
+    """Most recently searched values, optionally scoped to datasets."""
+    scope = _normalize_datasets(datasets)
     with _LOCK:
         data = _load()
         ordered = sorted(data.items(),
                          key=lambda kv: str(kv[1].get("last_used", "")),
                          reverse=True)
-        return [v for v, _ in ordered[:limit]]
+        return [
+            value for value, entry in ordered
+            if _matches_dataset_scope(value, entry, scope)
+        ][:limit]
 
 
-def frequent(limit: int = _LIMIT_FREQUENT) -> List[str]:
-    """Most frequently searched values (count desc, recency as tie-break)."""
+def frequent(limit: int = _LIMIT_FREQUENT, datasets=None) -> List[str]:
+    """Most frequently searched values, optionally scoped to datasets."""
+    scope = _normalize_datasets(datasets)
     with _LOCK:
         data = _load()
         ordered = sorted(
@@ -160,7 +264,10 @@ def frequent(limit: int = _LIMIT_FREQUENT) -> List[str]:
                             str(kv[1].get("last_used", ""))),
             reverse=True,
         )
-        return [v for v, _ in ordered[:limit]]
+        return [
+            value for value, entry in ordered
+            if _matches_dataset_scope(value, entry, scope)
+        ][:limit]
 
 
 def remove(value: str) -> bool:

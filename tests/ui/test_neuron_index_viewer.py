@@ -803,6 +803,28 @@ class TestNeuronIndexViewer:
         )[1].split(">", 1)[0]
         assert "q-checkbox" in full_table.slots["body"].template
 
+    def test_multi_dataset_picker_is_outlined(self, isolated_index_root, monkeypatch):
+        from nicegui import Client
+        from nicegui.page import page
+        import ui.components.neuron_index_viewer as viewer
+        from ui.components.neuron_index_viewer import create_neuron_index_viewer_link
+
+        datasets = ["test:v1.0", "other:v1.0"]
+        _write_index(isolated_index_root, datasets[0])
+        monkeypatch.setattr(viewer, "PROJECT_ROOT", isolated_index_root)
+
+        client = Client(page("/neuron-index-viewer-multi-dataset"))
+        with client:
+            link = create_neuron_index_viewer_link(lambda: datasets)
+        self._click(link)
+
+        picker = next(
+            element
+            for element in client.elements.values()
+            if getattr(element, "_props", {}).get("label") == "Dataset to view"
+        )
+        assert picker._props.get("outlined") is True
+
     def test_match_value_click_scrolls_the_target_row_after_page_jump(
         self, isolated_index_root, monkeypatch
     ):

@@ -77,13 +77,9 @@ def create_find_shortest_tab():
             section_header("Core Parameters", "tune")
             with param_grid(3):
                 max_interlayer = number_input(
-                    "Max Layers", 8, 0, 100,
-                    hint="EXACT number of intermediate layers: paths are capped at "
-                         "Max Layers + 1 edges (0 = direct connections only; default 8). "
-                         "Set a high, unreachable number (e.g. 99) for effectively "
-                         "unlimited search — paths never repeat neurons, so a high bound "
-                         "is never reached. If any found path hits the cap, a warning "
-                         "suggests raising it.",
+                    "Max Intermediate Layers", DEFAULTS["max_interlayer"], 0, None,
+                    hint="Maximum number of intermediate neuron layers between source "
+                         "and target. Higher = more paths but slower.",
                 )
                 min_synapse = number_input(
                     "Min Synapse Count", DEFAULTS["min_synapse_num"], 1, 100,
@@ -310,7 +306,10 @@ def create_find_shortest_tab():
         match_info = result.get("neuron_match") or {}
         if match_info.get("any_pair"):
             from ..history_store import record as _record_history
-            _record_history([str(v) for v in src_neurons + tgt_neurons])
+            _record_history(
+                [str(v) for v in src_neurons + tgt_neurons],
+                datasets=[dataset.value] if dataset.value else [],
+            )
 
         output_panel.set_running(False)
         output_panel.set_status("Completed" if result["returncode"] == 0 else "Failed",

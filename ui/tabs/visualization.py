@@ -91,7 +91,13 @@ def create_skeleton_tab():
                 "Render neuron morphology, synapses, and independent brain-region meshes."
             ).classes("text-caption drocat-muted")
             section_header("Neuron Selection (3D)", "hub")
-            layer_tree = layer_tree_editor()
+            # The dataset selector is rendered below the layer editor for the
+            # existing page flow. The shared layer inputs resolve this getter
+            # lazily when suggestions or the neuron viewer are opened.
+            dataset = None
+            layer_tree = layer_tree_editor(
+                dataset_provider=lambda: dataset.value if dataset is not None else ""
+            )
             with param_grid(2):
                 dataset = dataset_selector()
                 output_dir = dir_input(scope="visualization_skeleton")

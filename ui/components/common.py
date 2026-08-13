@@ -145,7 +145,7 @@ def dataset_selector(
         options=sel_options,
         value=default_val,
         label=label,
-    ).classes("w-full drocat-select").tooltip(hint)
+    ).props("outlined").classes("w-full drocat-select").tooltip(hint)
     if allow_custom:
         sel.props('use-input new-value-mode="add-unique"')
     if on_change:
@@ -157,7 +157,12 @@ def dataset_multi_selector(
     label: str = "Datasets",
     default: Optional[List[str]] = None,
     datasets: Optional[List[str]] = None,
-    hint: str = "Select 2+ datasets to compare. Shows [NP]=NeuPrint, [FW]=FlyWire, ✓ local / ☁ server status.",
+    hint: str = (
+        "Select one or more datasets. One dataset with multiple thresholds is "
+        "also supported; "
+        "multiple datasets enable cross-dataset comparison. Shows [NP]=NeuPrint, "
+        "[FW]=FlyWire, ✓ local / ☁ server status."
+    ),
     show_local_status: bool = True,
 ) -> ui.select:
     """Create a multi-select dataset dropdown with local status labels."""
@@ -173,13 +178,19 @@ def dataset_multi_selector(
     else:
         sel_options = options
 
-    default_val = default or (options[:2] if len(options) >= 2 else options)
+    # ``None`` means "use the first two datasets" for callers that want a
+    # convenient default.  An explicit empty list means "start unselected".
+    default_val = default if default is not None else (
+        options[:2] if len(options) >= 2 else options
+    )
     sel = ui.select(
         options=sel_options,
         value=default_val,
         label=label,
         multiple=True,
-    ).classes("w-full drocat-select").props('use-chips use-input').tooltip(hint)
+    ).props("outlined").classes("w-full drocat-select").props(
+        "use-chips use-input"
+    ).tooltip(hint)
     return sel
 
 
@@ -310,8 +321,7 @@ def neuron_list_input(
     hint: str = (
         "Type a name and press Enter or leave the field to add it as a chip. "
         "Commas and spaces are kept as part of the name. "
-        "Use the playlist button to paste lists, or upload a CSV/TSV/Excel "
-        "file (first column)."
+        "Upload a CSV/TSV/Excel file (first column) for a larger list."
     ),
     unit_label: str = "neuron",
     show_filter: bool = True,
@@ -320,6 +330,7 @@ def neuron_list_input(
     initial: Optional[List] = None,
     suggestions: Optional[Callable[[str], List[Tuple[str, str]]]] = None,
     available_neurons: Optional[Callable[[], object]] = None,
+    history_datasets: Optional[Callable[[], object]] = None,
     suggestion_min_chars: int = 1,
     suggestion_limit: int = 50,
 ) -> ui.element:
@@ -329,8 +340,7 @@ def neuron_list_input(
     - Type a name (type, bodyId or pattern) and press Enter or leave the field
       to add it as a chip. The whole typed text becomes ONE chip — commas and
       spaces inside names are preserved, never treated as separators.
-    - Paste a list via the playlist button (one value per line or
-      comma-separated) or upload a CSV/TSV/Excel file (first column).
+    - Upload a CSV/TSV/Excel file (first column) for a larger list.
     - ``initial`` seeds the chip list with pre-existing values.
     - ``max_items`` caps the list (used for single-input tabs); additional
       values are rejected once the cap is reached.
@@ -344,9 +354,11 @@ def neuron_list_input(
       from the first character and suggestions are shown from the first
       character by default (``suggestion_min_chars=1``). A blank focused field
       opens the persistent query history (last 10 + most frequent); history
-      is not mixed into a nonblank dataset search. At most
-      ``suggestion_limit`` entries are shown. With a provider, the native
-      QSelect popup is replaced by the custom suggestion menu.
+      is not mixed into a nonblank dataset search. When ``history_datasets``
+      is omitted, the dataset getter from ``available_neurons`` is reused for
+      history filtering. At most ``suggestion_limit`` entries are shown. With
+      a provider, the native QSelect popup is replaced by the custom suggestion
+      menu.
     - ``available_neurons``: optional zero-argument dataset getter. When
       supplied, a ``See available neurons`` link opens the rendered,
       searchable cached neuron-index viewer for the current dataset.
@@ -409,7 +421,7 @@ def neuron_list_input(
                     multiple=True,
                 ).props(
                     'use-chips use-input new-value-mode="add-unique" '
-                    'input-debounce="0"'
+                    'input-debounce="0" outlined'
                 ).classes("w-full drocat-select drocat-chip-input").tooltip(hint)
 
             # Keep the layout control inside the field itself. A history or
@@ -440,44 +452,6 @@ def neuron_list_input(
                 )
 
             if show_upload:
-                # Paste a whole list (comma / newline separated)
-                with ui.button(icon="playlist_add").props("flat dense round").classes(
-                    "drocat-upload-trigger"
-                ).tooltip("Paste a list of neurons (comma or newline separated)"):
-                    with ui.menu() as paste_menu:
-                        ui.label("Paste neuron list").classes(
-                            "text-caption drocat-muted px-3 pt-2"
-                        )
-                        ui.label(
-                            "One per line or comma-separated — e.g. aMe12, aMe10"
-                        ).classes("text-caption drocat-muted px-3 pb-1")
-                        paste_area = ui.textarea(
-                            placeholder="aMe12, aMe10\nPPL101, PPL103"
-                        ).props("autogrow").classes("w-80 drocat-input")
-
-                        def add_pasted():
-                            items = parse_neuron_list(paste_area.value)
-                            if not items:
-                                return
-                            current = list(chip_input.value or [])
-                            existing = {str(c) for c in current}
-                            for item in items:
-                                if str(item) not in existing:
-                                    current.append(item)
-                                    existing.add(str(item))
-                            if max_items is not None:
-                                current = current[:max_items]
-                            sync_options(current)
-                            _suppress_history_popup["value"] = True
-                            chip_input.value = current
-                            update_status()
-                            paste_area.value = ""
-                            paste_menu.close()
-
-                        ui.button(
-                            "Add to list", icon="add", on_click=add_pasted
-                        ).props("flat dense color=primary")
-
                 # Compact upload: hidden inside a dropdown attached to the input row
                 with ui.button(icon="upload_file").props("flat dense round").classes(
                     "drocat-upload-trigger"
@@ -594,12 +568,13 @@ def neuron_list_input(
             clear_button = ui.button("Clear").props(
                 "flat dense"
             ).classes("drocat-clear-btn")
+            viewer_link = None
             if available_neurons is not None:
                 # Import lazily to keep the common input component independent
                 # from the optional viewer's Polars-backed data layer.
                 from .neuron_index_viewer import create_neuron_index_viewer_link
 
-                create_neuron_index_viewer_link(
+                viewer_link = create_neuron_index_viewer_link(
                     available_neurons,
                     query_values_getter=lambda: [
                         *uploaded_neurons,
@@ -616,7 +591,8 @@ def neuron_list_input(
     viewer_owned_values = set()
     viewer_selected_values = set()
     viewer_owned_body_ids = []
-    # Bulk list changes (paste / clear) must not pop the Recent list open.
+    # Programmatic list changes (uploads, viewer selections, and clear) must
+    # not pop the Recent list open.
     _suppress_history_popup = {"value": False}
 
     def normalize_neuron(item):
@@ -627,7 +603,7 @@ def neuron_list_input(
 
         NiceGUI's QSelect derives the rendered model-value from its options
         (``Select._value_to_model_value`` skips values not in the options
-        list), so any value committed programmatically — blur, paste, seed —
+        list), so any value committed programmatically — blur, upload, seed —
         must be added to ``options`` or the chip stays invisible.
         """
         for value in values:
@@ -947,6 +923,30 @@ def neuron_list_input(
             valid_custom_labels = group_history.valid_labels()
             _prune_orphaned_custom(valid_custom_labels)
 
+            def _history_dataset_scope():
+                getter = history_datasets or available_neurons
+                if getter is None:
+                    return None
+                try:
+                    raw = getter()
+                except Exception:
+                    return None
+                if isinstance(raw, str):
+                    values = [raw]
+                else:
+                    try:
+                        values = list(raw)
+                    except TypeError:
+                        values = [raw]
+                values = [
+                    str(value).strip()
+                    for value in values
+                    if isinstance(value, str) and str(value).strip()
+                ]
+                return values or None
+
+            dataset_scope = _history_dataset_scope()
+
             def matches_query(value: str) -> bool:
                 # History filtering follows the same strict prefix behavior
                 # as the first suggestion stage. It is intentionally kept
@@ -954,9 +954,12 @@ def neuron_list_input(
                 # minimum number of characters for dataset suggestions.
                 return not query or str(value).startswith(query)
 
-            recents = [v for v in _recent() if matches_query(v)]
+            recents = [
+                v for v in _recent(datasets=dataset_scope)
+                if matches_query(v)
+            ]
             freqs = [
-                v for v in _frequent()
+                v for v in _frequent(datasets=dataset_scope)
                 if v not in recents and matches_query(v)
             ]
             if not recents and not freqs:
@@ -1278,6 +1281,7 @@ def neuron_list_input(
     container.filter_mode = filter_mode
     container.uploaded_neurons = uploaded_neurons
     container.suggest_menu = suggest_menu
+    container.neuron_index_link = viewer_link
 
     def add_values(values) -> List:
         """Merge *values* into the chip list (programmatic append)."""
@@ -1308,11 +1312,15 @@ def number_input(
     label: str,
     value: float = 0,
     min_val: float = 0,
-    max_val: float = 1000,
+    max_val: Optional[float] = 1000,
     step: float = 1,
     hint: str = "",
 ) -> ui.number:
-    """Create a numeric input field with tooltip."""
+    """Create a numeric input field with tooltip.
+
+    Pass ``max_val=None`` when the input should have no artificial upper
+    bound.
+    """
     inp = ui.number(
         label=label,
         value=value,
@@ -1880,21 +1888,6 @@ def combo_input(
 # Utility Functions
 # =============================================================================
 
-def parse_neuron_list(text: str) -> List:
-    """Parse neuron input text into a list of neuron names."""
-    if not text or not text.strip():
-        return []
-    neurons = []
-    for part in text.replace("\n", ",").split(","):
-        part = part.strip()
-        if part:
-            try:
-                neurons.append(int(part))
-            except ValueError:
-                neurons.append(part)
-    return neurons
-
-
 def apply_filter_mode(neurons: List, mode: str) -> List:
     """Convert an input mode into the backend's query representation.
 
@@ -1956,15 +1949,28 @@ def dataset_status_card() -> ui.card:
     import threading
 
     service = get_dataset_service()
-    state = {"results": None, "error": None, "done": False, "running": False}
+    cached_results, cached_updated_at = service.get_cached_availability()
+    state = {
+        "results": cached_results or None,
+        "updated_at": cached_updated_at,
+        "error": None,
+        "done": False,
+        "running": False,
+    }
 
     with ui.card().classes("w-full drocat-card") as card:
         with ui.row().classes("w-full items-center justify-between"):
             ui.label("Dataset Availability").classes("drocat-card-title")
-            refresh_btn = ui.button("Refresh", icon="refresh", color="primary").props("flat dense").tooltip(
-                "Check local converted tables and server availability.\n"
-                "NeuPrint server status requires a valid token; FlyWire uses local files."
-            )
+            with ui.row().classes("items-center gap-3"):
+                last_updated = ui.label("Last updated at: not yet refreshed").classes(
+                    "text-caption drocat-muted"
+                )
+                refresh_btn = ui.button(
+                    "Refresh", icon="refresh", color="primary"
+                ).props("flat dense").tooltip(
+                    "Check local converted tables and server availability.\n"
+                    "NeuPrint server status requires a valid token; FlyWire uses local files."
+                )
 
         ui.separator()
         status_container = ui.column().classes("w-full gap-1")
@@ -1974,7 +1980,17 @@ def dataset_status_card() -> ui.card:
                 "Click Refresh to query NeuPrint/Codex; local dataset folders are shown immediately."
             ).classes("text-caption drocat-muted")
 
-        def render_results(results):
+        def _format_updated_at(updated_at):
+            if not updated_at:
+                return "Last updated at: not yet refreshed"
+            # ISO timestamps are persisted with a timezone. Keep the display
+            # compact while retaining the local offset for clarity.
+            return f"Last updated at: {str(updated_at).replace('T', ' ')}"
+
+        def render_results(results, updated_at=None):
+            last_updated.text = _format_updated_at(
+                updated_at if updated_at is not None else state.get("updated_at")
+            )
             status_container.clear()
             with status_container:
                 if not results:
@@ -2021,13 +2037,19 @@ def dataset_status_card() -> ui.card:
 
         # Local status is useful even when the user has not configured a
         # NeuPrint token or is working offline.  Avoid any network call here.
-        local_results = {
-            info.name: info
-            for info in service.get_local_datasets()
-            if info.local_prepared or info.local_cache
-        }
-        if local_results:
-            render_results(local_results)
+        if cached_results:
+            render_results(cached_results, cached_updated_at)
+        else:
+            # Local status is useful even when the user has not configured a
+            # NeuPrint token or is working offline. Avoid any network call on
+            # page load when there is no persisted refresh yet.
+            local_results = {
+                info.name: info
+                for info in service.get_local_datasets()
+                if info.local_prepared or info.local_cache
+            }
+            if local_results:
+                render_results(local_results)
 
         def render_error(msg):
             status_container.clear()
@@ -2038,6 +2060,7 @@ def dataset_status_card() -> ui.card:
             try:
                 results = service.refresh_availability()
                 state["results"] = results
+                state["updated_at"] = service.get_availability_updated_at()
                 state["error"] = None
             except Exception as e:
                 state["results"] = None
@@ -2067,7 +2090,7 @@ def dataset_status_card() -> ui.card:
                 return
             state["done"] = False
             if state["results"] is not None:
-                render_results(state["results"])
+                render_results(state["results"], state.get("updated_at"))
             elif state["error"] is not None:
                 render_error(state["error"])
             refresh_btn.enable()

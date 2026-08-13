@@ -1279,7 +1279,7 @@ def create_neuron_index_viewer_link(
                         options=datasets,
                         value=datasets[0],
                         label="Dataset to view",
-                    ).classes("drocat-select").style("min-width: 280px")
+                    ).props("outlined").classes("drocat-select").style("min-width: 280px")
                 picker.on_value_change(lambda event: _open_dataset(str(event.value)))
             _open_dataset(datasets[0])
         dialog.open()

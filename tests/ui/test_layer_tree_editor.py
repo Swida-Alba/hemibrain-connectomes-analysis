@@ -130,10 +130,16 @@ class TestNameEditing:
 
     def test_name_input_collapsed_by_default(self):
         client, handle = self._build()
-        # Only the per-layer neuron add inputs exist; no name inputs.
+        # The shared chip selectors exist for each layer; no name inputs.
+        layer_inputs = [
+            el for el in client.elements.values()
+            if type(el).__name__ == "Select"
+            and "drocat-chip-input" in getattr(el, "_classes", [])
+        ]
         inputs = [el for el in client.elements.values()
                   if type(el).__name__ == "Input"]
-        assert len(inputs) == 3
+        assert len(layer_inputs) == 3
+        assert not inputs
         assert all(not handle.layers[i].get("name_open", False)
                    for i in range(3))
 
@@ -143,12 +149,18 @@ class TestNameEditing:
         assert handle.layers[0].get("name_open") is True
         inputs = [el for el in client.elements.values()
                   if type(el).__name__ == "Input"]
-        assert len(inputs) == 4  # 3 add inputs + the layer-1 name input
+        layer_inputs = [
+            el for el in client.elements.values()
+            if type(el).__name__ == "Select"
+            and "drocat-chip-input" in getattr(el, "_classes", [])
+        ]
+        assert len(inputs) == 1  # the layer-1 name input
+        assert len(layer_inputs) == 3
         handle.toggle_name_editor(0)
         assert handle.layers[0].get("name_open") is False
         inputs = [el for el in client.elements.values()
                   if type(el).__name__ == "Input"]
-        assert len(inputs) == 3
+        assert len(inputs) == 0
 
     def test_open_state_survives_rerender(self):
         client, handle = self._build()
@@ -157,7 +169,13 @@ class TestNameEditing:
         assert handle.layers[1].get("name_open") is True
         inputs = [el for el in client.elements.values()
                   if type(el).__name__ == "Input"]
-        assert len(inputs) == 4
+        layer_inputs = [
+            el for el in client.elements.values()
+            if type(el).__name__ == "Select"
+            and "drocat-chip-input" in getattr(el, "_classes", [])
+        ]
+        assert len(inputs) == 1
+        assert len(layer_inputs) == 3
 
     def test_set_name_shows_caption_when_closed(self):
         client, handle = self._build()
@@ -252,34 +270,42 @@ class TestTabIntegration:
         ]
         assert "card-skeleton-layers" in ids
 
-    def test_commit_add_rerenders_without_touching_sender(self):
-        """Enter-commit re-renders the board: the old add input is replaced
-        by a fresh empty one and must not be written to afterwards (writing
-        to a deleted element warns and can break the event loop)."""
-        from types import SimpleNamespace
+    def test_layer_inputs_expose_history_suggestions_and_neuron_viewer(self):
+        client = Client(page(f"/layer-tree-neuron-inputs-{id(object())}"))
+        with client:
+            handle = layer_tree_editor(
+                dataset_provider=lambda: "male-cns:v1.0"
+            )
 
+        assert len(handle._layer_inputs) == 3
+        assert all(widget.suggest_menu is not None
+                   for widget in handle._layer_inputs)
+        assert all(
+            widget.neuron_index_link is not None
+            and widget.neuron_index_link.text == "See available neurons"
+            for widget in handle._layer_inputs
+        )
+        rows = [
+            el for el in client.elements.values()
+            if "drocat-layer-row" in getattr(el, "_classes", [])
+        ]
+        assert len(rows) == 3
+        assert all("w-full" in getattr(row, "_classes", []) for row in rows)
+
+    def test_shared_input_values_sync_before_structural_rerender(self):
+        """Shared chip values remain part of the layer model across rebuilds."""
         client = Client(page(f"/layer-tree-commit-{id(object())}"))
         with client:
             handle = layer_tree_editor()
-        add_input = next(
-            el for el in client.elements.values()
-            if type(el).__name__ == "Input"
-        )
-        add_input.value = "aMe12"
-        listener = next(
-            l for l in add_input._event_listeners.values()
-            if l.type == "keydown.enter"
-        )
-        listener.handler(SimpleNamespace(sender=add_input))
+        old_input = handle._layer_inputs[0].chip_input
+        old_input.set_value(["aMe12"])
+        handle._sync_input_state()
 
         assert handle.layers[0]["neurons"] == ["aMe12"]
-        # The committed input was deleted by the re-render...
-        assert add_input not in client.elements.values()
-        # ...and replaced by fresh, empty add inputs (one per layer).
-        inputs = [el for el in client.elements.values()
-                  if type(el).__name__ == "Input"]
-        assert len(inputs) == 3
-        assert all(el.value == "" for el in inputs)
+        handle.add_neuron(0, "aMe10")
+        assert handle.layers[0]["neurons"] == ["aMe12", "aMe10"]
+        assert old_input not in client.elements.values()
+        assert len(handle._layer_inputs) == 3
 
     def test_component_builds_outside_client(self):
         """Handle methods work without a NiceGUI slot (render is a no-op)."""

@@ -263,6 +263,72 @@ class TestRunner:
         assert "path_mode='shortest'" in script
         assert "max_interlayer=0" in script
 
+    def test_generate_inter_dataset_script_supports_single_dataset_thresholds(self):
+        """Script generation preserves a one-dataset threshold-sensitivity run."""
+        from ui.runner import ScriptRunner
+
+        script = ScriptRunner()._generate_inter_dataset_script(
+            {
+                "datasets": ["male-cns:v1.0"],
+                "thresholds": [3, 7],
+            },
+            None,
+        )
+
+        assert "datasets=['male-cns:v1.0']" in script
+        assert "thresholds=[3, 7]" in script
+
+    def test_inter_dataset_tab_hides_nickname_editor_and_starts_unselected(self):
+        """Cross-dataset nicknames stay script-only and dataset selection is opt-in."""
+        from nicegui import Client
+        from nicegui.page import page
+        from ui.tabs.inter_dataset import create_inter_dataset_tab
+
+        client = Client(page("/inter-dataset-defaults"))
+        with client:
+            create_inter_dataset_tab()
+
+        controls = {
+            getattr(el, "_props", {}).get("label"): el
+            for el in client.elements.values()
+            if getattr(el, "_props", {}).get("label")
+        }
+        dataset_control = controls[
+            "Datasets to compare (one dataset with multiple thresholds is also supported)"
+        ]
+        assert dataset_control.value == []
+        assert not any("Nickname" in label for label in controls)
+        assert any(
+            getattr(el, "text", "") == "Custom Mapping · none"
+            for el in client.elements.values()
+        )
+
+    def test_inter_dataset_allows_one_dataset_with_multiple_thresholds(self):
+        """The UI accepts one dataset while retaining multiple thresholds."""
+        from nicegui import Client
+        from nicegui.page import page
+        from ui.tabs.inter_dataset import create_inter_dataset_tab
+
+        client = Client(page("/inter-dataset-single-thresholds"))
+        with client:
+            create_inter_dataset_tab()
+
+        controls = {
+            getattr(el, "_props", {}).get("label"): el
+            for el in client.elements.values()
+            if getattr(el, "_props", {}).get("label")
+        }
+        dataset_control = controls[
+            "Datasets to compare (one dataset with multiple thresholds is also supported)"
+        ]
+        threshold_control = controls["Synapse Thresholds"]
+        dataset_control.value = ["male-cns:v1.0"]
+        threshold_control.value = [3, 5]
+
+        assert dataset_control.value == ["male-cns:v1.0"]
+        assert dataset_control._props.get("multiple") is True
+        assert threshold_control.value == [3, 5]
+
     def test_generate_neuronbridge_script(self):
         from ui.runner import ScriptRunner
         sr = ScriptRunner()
@@ -1273,6 +1339,41 @@ class TestDatasetService:
         from ui.dataset_service import get_dataset_service, DatasetInfo, folder_to_dataset, dataset_to_folder
         assert callable(get_dataset_service)
 
+    def test_availability_snapshot_persists_and_refresh_overwrites(self, tmp_path):
+        """A refresh replaces the saved snapshot used by the next session."""
+        from ui.dataset_service import DatasetInfo, DatasetService
+
+        service = DatasetService()
+        service._cache_dir = tmp_path / "cache"
+        state = {"available": False}
+
+        def fake_check(dataset):
+            return DatasetInfo(
+                name=dataset,
+                source="neuprint",
+                available=state["available"],
+                display_name=dataset,
+            )
+
+        service.check_dataset_availability = fake_check
+        service.refresh_availability(["demo:v1.0"])
+        first, first_updated = service.get_cached_availability()
+        assert first["demo:v1.0"].available is False
+        assert first_updated
+        assert service.availability_cache_path.exists()
+
+        state["available"] = True
+        service.refresh_availability(["demo:v1.0"])
+        second, second_updated = service.get_cached_availability()
+        assert second["demo:v1.0"].available is True
+        assert second_updated
+
+        next_session = DatasetService()
+        next_session._cache_dir = service._cache_dir
+        persisted, persisted_updated = next_session.get_cached_availability()
+        assert persisted["demo:v1.0"].available is True
+        assert persisted_updated == second_updated
+
     def test_folder_to_dataset_conversion(self):
         from ui.dataset_service import folder_to_dataset
         assert folder_to_dataset("hemibrain_v1_2_1") == "hemibrain:v1.2.1"
@@ -1342,6 +1443,7 @@ class TestDatasetService:
 
         assert "card_title" in labels
         assert "Dataset" in labels  # dataset selector
+        assert labels["Dataset"]._props.get("outlined") is True
         assert "Batch size" in labels
         assert "Parallel workers" in labels
         assert any(
@@ -1361,6 +1463,91 @@ class TestDatasetService:
             getattr(el, "text", None) == "Idle"
             for el in client.elements.values()
         )
+
+    def test_settings_shows_availability_timestamp_and_shared_mapping_panel(
+        self, tmp_path, monkeypatch
+    ):
+        """Settings reuses Custom Mapping and renders the persisted refresh time."""
+        from nicegui import Client
+        from nicegui.page import page
+        from ui import dataset_service as dataset_service_module
+        from ui.dataset_service import DatasetInfo, DatasetService
+        from ui.tabs import settings as settings_module
+
+        service = DatasetService()
+        service._cache_dir = tmp_path / "cache"
+        service.check_dataset_availability = lambda dataset: DatasetInfo(
+            name=dataset,
+            source="neuprint",
+            available=True,
+            display_name=dataset,
+        )
+        service.refresh_availability(["demo:v1.0"])
+        monkeypatch.setattr(dataset_service_module, "get_dataset_service", lambda: service)
+        monkeypatch.setattr(settings_module, "get_dataset_service", lambda: service)
+
+        client = Client(page("/settings-availability-mapping"))
+        with client:
+            settings_module.create_settings_tab()
+
+        texts = [el.text for el in client.elements.values() if getattr(el, "text", "")]
+        assert any(text.startswith("Last updated at:") for text in texts)
+        mapping_labels = [
+            getattr(el, "_props", {}).get("label")
+            for el in client.elements.values()
+        ]
+        assert "Saved mappings" not in mapping_labels
+        assert "Mapping name" not in mapping_labels
+        assert "Description (optional)" not in mapping_labels
+        assert not any(
+            getattr(el, "text", "") in {"New", "Rename", "Delete", "Set Active"}
+            for el in client.elements.values()
+        )
+        target_dataset_selects = [
+            el for el in client.elements.values()
+            if getattr(el, "_props", {}).get("label") == "Target datasets"
+        ]
+        assert len(target_dataset_selects) == 1
+        assert target_dataset_selects[0].value == []
+        assert target_dataset_selects[0]._props.get("multiple") is True
+
+        selected_dataset = next(iter(target_dataset_selects[0].options))
+        target_dataset_selects[0].value = [selected_dataset]
+        settings_dialogs = [
+            el for el in client.elements.values()
+            if hasattr(el, "inline_grouper")
+        ]
+        assert len(settings_dialogs) == 1
+        assert settings_dialogs[0].dataset_selector is target_dataset_selects[0]
+        settings_grouper = settings_dialogs[0].inline_grouper
+        settings_grouper.handle.add_row(
+            "demo", {selected_dataset: ["aMe12"]}
+        )
+        settings_grouper.resync()
+        assert settings_grouper.datasets() == [selected_dataset]
+        save_buttons = [
+            el for el in client.elements.values()
+            if getattr(el, "text", "") == "Save Mapping"
+        ]
+        assert len(save_buttons) == 1
+        assert save_buttons[0]._props.get("outline") is True
+        assert any(text == "Custom Mapping · none" for text in texts)
+        assert any(text == "Custom Mapping" for text in texts)
+        mapping_buttons = [
+            el for el in client.elements.values()
+            if getattr(el, "text", "") == "Custom Mapping · none"
+        ]
+        assert len(mapping_buttons) == 1
+        assert "drocat-settings-mapping-button" in mapping_buttons[0]._classes
+
+        from ui.config import APP_DOCS_BRANCH, APP_DOCS_URL
+        docs_links = [
+            el for el in client.elements.values()
+            if getattr(el, "text", "") == "Docs"
+        ]
+        assert len(docs_links) == 1
+        assert docs_links[0]._props.get("href") == APP_DOCS_URL
+        assert APP_DOCS_BRANCH in APP_DOCS_URL
 
     def test_settings_auto_suggest_toggle(self, tmp_path, monkeypatch):
         """The Settings tab exposes the input auto-suggestion toggle and
@@ -2099,26 +2286,35 @@ class TestTabs:
         assert by_label["Visualization Edge Limit"].value == DEFAULTS["edgeN_limit"]
         assert DEFAULTS["edgeN_limit"] == 500
 
-    def test_find_shortest_tab_defaults_max_layers_8(self):
-        """Shortest runs are depth-bounded by default (8 intermediate
-        layers, an EXACT bound: 0 = direct connections only). High values
-        (e.g. 99) are accepted for effectively unlimited search."""
+    def test_path_and_shortest_tabs_use_unbounded_max_intermediate_layers(self):
+        """Both path tabs expose the same unbounded layer control."""
         from nicegui import Client
         from nicegui.page import page
+        from ui.config import DEFAULTS
+        from ui.tabs.find_path import create_find_path_tab
         from ui.tabs.find_shortest import create_find_shortest_tab
 
-        client = Client(page("/findshortest-maxlayers"))
-        with client:
+        shortest_client = Client(page("/findshortest-max-intermediate-layers"))
+        with shortest_client:
             create_find_shortest_tab()
-        layers = [
-            el for el in client.elements.values()
-            if getattr(el, "_props", {}).get("label") == "Max Layers"
+        shortest_layers = [
+            el for el in shortest_client.elements.values()
+            if getattr(el, "_props", {}).get("label") == "Max Intermediate Layers"
         ]
-        assert layers, "Max Layers input missing"
-        assert layers[0].value == 8, layers[0].value
-        # the input accepts the semi-unlimited bound (99)
-        props = layers[0]._props
-        assert props.get("min") == 0 and props.get("max") == 100, props
+
+        path_client = Client(page("/findpath-max-intermediate-layers"))
+        with path_client:
+            create_find_path_tab()
+        path_layers = [
+            el for el in path_client.elements.values()
+            if getattr(el, "_props", {}).get("label") == "Max Intermediate Layers"
+        ]
+
+        assert shortest_layers and path_layers, "Max Intermediate Layers input missing"
+        for layers in (shortest_layers, path_layers):
+            assert layers[0].value == DEFAULTS["max_interlayer"], layers[0].value
+            props = layers[0]._props
+            assert props.get("min") == 0 and props.get("max") is None, props
 
     def test_interdataset_mode_switch_resets_mode_defaults(self):
         """Switching Path Enumeration resets the mode-specific defaults
@@ -2304,22 +2500,63 @@ class TestComponents:
     def test_common_imports(self):
         from ui.components.common import (
             dataset_selector, neuron_input, number_input, select_input,
-            checkbox_input, dir_input, parse_neuron_list, section_header,
+            checkbox_input, dir_input, section_header,
             param_grid, open_folder, dataset_status_card,
         )
         assert all(callable(f) for f in [
             dataset_selector, neuron_input, number_input, select_input,
-            checkbox_input, dir_input, parse_neuron_list, section_header,
+            checkbox_input, dir_input, section_header,
             param_grid, open_folder, dataset_status_card,
         ])
 
-    def test_parse_neuron_list(self):
-        from ui.components.common import parse_neuron_list
-        assert parse_neuron_list("aMe12, aMe10") == ["aMe12", "aMe10"]
-        assert parse_neuron_list("aMe12\naMe10") == ["aMe12", "aMe10"]
-        assert 720575940610453042 in parse_neuron_list("720575940610453042, aMe12")
-        assert parse_neuron_list("") == []
-        assert parse_neuron_list(None) == []
+    def test_dataset_selectors_use_outlined_fields(self):
+        from nicegui import Client
+        from nicegui.page import page
+        from ui.components.common import dataset_multi_selector, dataset_selector
+
+        client = Client(page("/outlined-dataset-selectors"))
+        with client:
+            single = dataset_selector(
+                label="Source Dataset",
+                datasets=["demo:v1.0"],
+                show_local_status=False,
+            )
+            multi = dataset_multi_selector(
+                label="Target Datasets",
+                default=[],
+                datasets=["demo:v1.0", "demo:v2.0"],
+                show_local_status=False,
+            )
+
+        assert single._props.get("outlined") is True
+        assert multi._props.get("outlined") is True
+
+    def test_neuron_list_input_uses_file_upload_not_list_paste(self):
+        from nicegui import Client
+        from nicegui.page import page
+        from ui.components.common import neuron_list_input
+
+        client = Client(page("/neuron-input-upload-controls"))
+        with client:
+            neuron_list_input(show_upload=True)
+
+        icons = {
+            getattr(el, "_props", {}).get("icon")
+            for el in client.elements.values()
+        }
+        texts = [str(getattr(el, "text", "")) for el in client.elements.values()]
+        assert "upload_file" in icons
+        assert "playlist_add" not in icons
+        assert not any("Paste a list" in value for value in texts)
+
+    def test_neuron_upload_accepts_mixed_entries_in_every_supported_format(self):
+        from ui.components.common import parse_neuron_upload
+
+        expected = [10001, "DNp01", "DNp01(GF)_R", "VS1", "KC.*"]
+        fixture_dir = PROJECT_ROOT / "tests" / "fixtures"
+        for suffix in ("csv", "tsv", "xlsx", "xls"):
+            path = fixture_dir / f"neuron_upload_mixed.{suffix}"
+            assert parse_neuron_upload(path.name, path.read_bytes()) == expected
 
     def test_neuron_list_input_commits_pending_text_on_blur(self):
         """Leaving a neuron chip field commits text without requiring Enter."""
@@ -2669,6 +2906,54 @@ class TestComponents:
         texts = [el.text for el in client.elements.values() if getattr(el, "text", "")]
         assert "aMe12" in texts and "aMe10" in texts
         assert container.get_value() == ("exact", ["APL"])
+
+    def test_neuron_list_history_uses_the_active_dataset_scope(
+        self, tmp_path, monkeypatch
+    ):
+        """History rows follow the same dataset scope as auto-suggestions."""
+        from nicegui import Client
+        from nicegui.page import page
+        import ui.group_history as gh
+        import ui.history_store as hs
+        from ui.components.common import neuron_list_input
+
+        dataset_a = "male-cns:v0.9"
+        dataset_b = "hemibrain:v1.2.1"
+        monkeypatch.setattr(hs, "_HISTORY_PATH", tmp_path / "neuron_history.json")
+        monkeypatch.setattr(gh, "HISTORY_PATH", tmp_path / "group_history.json")
+        hs.record(["ordinary_a"], now="2026-08-11T10:00:00",
+                  datasets=[dataset_a])
+        hs.record(["ordinary_b"], now="2026-08-11T10:01:00",
+                  datasets=[dataset_b])
+        gh.record([("custom_a", {dataset_a: ["aMe12"], dataset_b: []})])
+        hs.record(["custom_a"], now="2026-08-11T10:02:00",
+                  custom_values=["custom_a"], datasets=[dataset_a])
+        selected = {"value": dataset_a}
+
+        client = Client(page("/neuron-input-dataset-history"))
+        with client:
+            box = neuron_list_input(
+                label="Source Neurons",
+                suggestions=lambda _text: [],
+                available_neurons=lambda: selected["value"],
+            )
+
+        focus = next(
+            listener for listener in box.chip_input._event_listeners.values()
+            if listener.type == "focus"
+        )
+
+        box.chip_input._handle_event({"listener_id": focus.id, "args": None})
+        texts = [el.text for el in client.elements.values() if getattr(el, "text", "")]
+        assert "ordinary_a" in texts and "custom_a" in texts
+        assert "ordinary_b" not in texts
+
+        box.suggest_menu.close()
+        selected["value"] = dataset_b
+        box.chip_input._handle_event({"listener_id": focus.id, "args": None})
+        texts = [el.text for el in client.elements.values() if getattr(el, "text", "")]
+        assert "ordinary_b" in texts
+        assert "ordinary_a" not in texts and "custom_a" not in texts
 
     def test_history_body_id_has_instance_hint_and_removable_entry(self, tmp_path, monkeypatch):
         """Blank-input history rows expose the cached body-ID instance and a
@@ -3320,9 +3605,9 @@ class TestComponents:
         wrapper_style = panel.log_wrapper._style
         assert wrapper_style.get("resize") == "vertical"
         assert wrapper_style.get("overflow") == "hidden"  # required for resize
-        assert wrapper_style.get("height") == "200px"     # definite start height
+        assert wrapper_style.get("height") == "400px"     # definite start height
         assert wrapper_style.get("min-height") == "100px"
-        assert wrapper_style.get("max-height") == "600px"
+        assert wrapper_style.get("max-height") == "1800px"
 
         # The log tracks the wrapper so every drag changes the console size.
         assert "h-full" in panel.log_area._classes
@@ -3492,6 +3777,8 @@ class TestApp:
         assert ".drocat-tint-nb .drocat-group-tab .q-icon::after" not in DROCAT_CSS
         # Responsive fallback: horizontal scroll only below 700px.
         assert ".drocat-nav { overflow-x: auto; scrollbar-width: none; }" in DROCAT_CSS
+        assert ".q-tooltip {" in DROCAT_CSS
+        assert "font-size: 14px !important;" in DROCAT_CSS
 
     def test_settings_never_prefills_saved_tokens_in_browser_dom(self, tmp_path, monkeypatch):
         """Saved secrets remain server-side instead of entering the client DOM."""

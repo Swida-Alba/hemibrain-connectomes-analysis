@@ -74,6 +74,16 @@ class TestCanonicalSerializer:
         assert back[1]["cells"][DS_A] == []
         assert back[1]["cells"][DS_B] == ["DN1p"]
 
+    def test_datasets_with_members_ignores_empty_padding_columns(self):
+        rows = [
+            {"name": "aMe", "cells": {DS_A: ["aMe12"], DS_B: []}},
+            {"name": "clock", "cells": {DS_A: [], DS_B: ["DN1p"]}},
+        ]
+        assert cg.datasets_with_members(rows) == [DS_A, DS_B]
+        assert cg.datasets_with_members([
+            {"name": "empty", "cells": {DS_A: [], DS_B: []}}
+        ]) == []
+
     def test_reload_legacy_std_label_and_side_precedence(self):
         legacy = {
             "source_mapping": {"std_label": ["grp"], DS_A: [["aMe12"]]},
@@ -156,6 +166,22 @@ class TestLiteGroupHandle:
         assert idx == 0 and len(h.rows) == 1
         assert h.rows[0]["cells"][DS_A] == ["aMe9"]
         assert h.rows[0]["cells"][DS_B] == ["aMe12_R"]
+
+    def test_saved_row_reuses_blank_placeholder_only(self):
+        h = cg.LiteGroupHandle()
+        h.add_row()
+        assert h.load_saved_row("ortho", {DS_A: ["aMe12"]}) == 0
+        assert [row["name"] for row in h.rows] == ["ortho"]
+
+        h = cg.LiteGroupHandle()
+        h.add_row("draft")
+        assert h.load_saved_row("ortho", {DS_A: ["aMe12"]}) == 1
+        assert [row["name"] for row in h.rows] == ["draft", "ortho"]
+
+        h = cg.LiteGroupHandle()
+        h.add_row("", {DS_A: ["already typed"]})
+        assert h.load_saved_row("ortho", {DS_A: ["aMe12"]}) == 1
+        assert [row["name"] for row in h.rows] == ["", "ortho"]
 
     def test_is_empty(self):
         h = cg.LiteGroupHandle()
@@ -297,7 +323,7 @@ class TestRunResolution:
         with client:
             dialog.load_history_group("ortho")
         names = [r["name"] for r in grouper.handle.rows]
-        assert "ortho" in names
+        assert names == ["ortho"]
         row = next(r for r in grouper.handle.rows if r["name"] == "ortho")
         assert row["cells"][DS_A] == ["aMe12", "aMe10"]
         # Resolve now exports the loaded group.
@@ -561,6 +587,52 @@ class TestReloadIntoBoard:
         out = grouper.to_canonical()
         assert out["source_mapping"] == payload["source_mapping"]
 
+    def test_embedded_selector_load_adds_nonempty_datasets_and_rectangularizes_rows(
+        self, isolated_store
+    ):
+        from nicegui import Client, ui
+        from nicegui.page import page
+
+        selected = None
+
+        def render_dataset_selector():
+            nonlocal selected
+            selected = ui.select(
+                options=[DS_A, DS_B],
+                value=[],
+                label="Target datasets",
+                multiple=True,
+            )
+            return selected
+
+        client = Client(page("/grouper-embedded-datasets"))
+        with client:
+            _button, dialog, _resolve = me.custom_grouping_block(
+                tab_key="embedded-datasets",
+                datasets_provider=lambda: list(selected.value or [])
+                if selected is not None else [],
+                dataset_selector_renderer=render_dataset_selector,
+            )
+
+        assert dialog.dataset_selector is selected
+        assert selected.value == []
+        rows = cg.from_canonical_dict(cg.to_canonical_dict(
+            [
+                {"name": "first", "cells": {DS_A: ["aMe12"], DS_B: []}},
+                {"name": "second", "cells": {DS_A: [], DS_B: ["DN1p"]}},
+            ],
+            [DS_A, DS_B],
+        ))
+        grouper = dialog.inline_grouper
+        grouper.load_rows(rows)
+
+        assert selected.value == [DS_A, DS_B]
+        assert grouper.datasets() == [DS_A, DS_B]
+        assert set(grouper._cell_widgets[0]) == {DS_A, DS_B}
+        assert set(grouper._cell_widgets[1]) == {DS_A, DS_B}
+        assert grouper._cell_widgets[0][DS_B].get_value()[1] == []
+        assert grouper._cell_widgets[1][DS_A].get_value()[1] == []
+
 
 # =============================================================================
 # Workflow: pushing group members into query inputs
@@ -670,3 +742,97 @@ class TestSuggestionAnchoring:
         assert menu._props.get("self") == "top start"
         assert menu._props.get("fit") is True
         assert menu._props.get("max-height") == "240px"
+
+
+class TestLabelMapperEditorSurface:
+    def test_optional_row_action_renders_once_in_first_group(self, isolated_store):
+        """Shared editors can add a global action beside query-row actions."""
+        from nicegui import Client
+        from nicegui import ui
+        from nicegui.page import page
+
+        row_actions = []
+
+        def render_save_action():
+            ui.button("Save Mapping", icon="save").props(
+                "outline no-caps"
+            ).classes("drocat-labelmapper-query-action")
+
+        client = Client(page("/grouper-row-action"))
+        with client:
+            _button, dialog, _resolve = me.custom_grouping_block(
+                tab_key="grouper-row-action",
+                datasets_provider=lambda: [DS_A],
+                row_action_renderers=row_actions,
+            )
+
+        row_actions.append(render_save_action)
+        grouper = dialog.inline_grouper
+        grouper.handle.add_row("first", {DS_A: ["aMe12"]})
+        grouper.handle.add_row("second", {DS_A: ["aMe10"]})
+        grouper.resync()
+
+        save_buttons = [
+            el for el in client.elements.values()
+            if getattr(el, "text", None) == "Save Mapping"
+        ]
+        assert len(save_buttons) == 1
+        assert save_buttons[0]._props.get("outline") is True
+        assert "drocat-labelmapper-query-action" in save_buttons[0]._classes
+
+    def test_custom_grouper_uses_aligned_dataset_rows_and_viewers(self, isolated_store):
+        """Each dataset gets an isolated outlined chip field and index viewer."""
+        from nicegui import Client
+        from nicegui.page import page
+
+        client = Client(page("/grouper-layout"))
+        with client:
+            _button, dialog, _resolve = me.custom_grouping_block(
+                tab_key="grouper-layout",
+                datasets_provider=lambda: [DS_A, DS_B],
+                require_names=True,
+            )
+        grouper = dialog.inline_grouper
+        grouper.handle.add_row("aMe", {DS_A: ["aMe12"], DS_B: ["MTe07"]})
+        grouper.resync()
+
+        dataset_rows = [
+            el for el in client.elements.values()
+            if "drocat-labelmapper-dataset-row" in getattr(el, "_classes", set())
+        ]
+        assert len(dataset_rows) == 2
+        for dataset in (DS_A, DS_B):
+            cell = grouper._cell_widgets[0][dataset]
+            assert cell.chip_input._props.get("outlined") is True
+            assert cell.neuron_index_link.text == "See available neurons"
+        assert not any(
+            getattr(el, "_props", {}).get("icon") in {
+                "arrow_upward", "arrow_downward"
+            }
+            for el in client.elements.values()
+        )
+
+    def test_settings_mapping_editor_uses_the_same_member_surface(self, isolated_store):
+        """The Settings LabelMapper editor exposes the same viewer/chip UX."""
+        from nicegui import Client
+        from nicegui.page import page
+
+        client = Client(page("/settings-mapping-layout"))
+        with client:
+            from nicegui import ui as _ui
+
+            container = _ui.column()
+            editor = me.MappingGridEditor("source_mapping")
+            editor.create(container, [DS_A, DS_B])
+            editor._add_group()
+            editor._add_dataset(DS_A)
+
+        cell = editor._cell_widgets[DS_A][0]
+        cell.add_values(["aMe12", "aMe10"])
+        assert cell.chip_input._props.get("outlined") is True
+        assert cell.neuron_index_link.text == "See available neurons"
+        assert editor.get_data()[DS_A] == [["aMe12", "aMe10"]]
+        assert any(
+            "drocat-labelmapper-dataset-row" in getattr(el, "_classes", set())
+            for el in client.elements.values()
+        )

@@ -5,6 +5,10 @@ from nicegui import run, ui
 from ..config import (
     DATASETS,
     DEFAULT_OUTPUT_DIR,
+    APP_DOCS_BRANCH,
+    APP_DOCS_URL,
+    APP_GITHUB_URL,
+    APP_VERSION,
     PROJECT_ROOT,
     clear_tab_output_overrides,
     get_auto_suggest_enabled,
@@ -12,8 +16,16 @@ from ..config import (
     set_auto_suggest_enabled,
     set_default_output_dir,
 )
-from ..components.common import section_header, dataset_status_card, dir_input, sync_output_dir_fields
-from ..components.mapping_editor import MappingGridEditor, MAPPING_GUIDE_URL
+from ..components.common import (
+    dataset_multi_selector,
+    dataset_status_card,
+    dir_input,
+    section_header,
+    sync_output_dir_fields,
+)
+from ..components.custom_grouper import to_canonical_dict
+from ..components.mapping_editor import custom_grouping_block
+from ..dataset_service import get_dataset_service
 from .. import mapping_store
 
 
@@ -69,7 +81,7 @@ def create_settings_tab():
             with ui.row().classes("items-center gap-3 w-full").style("flex-wrap: wrap"):
                 ds_select = ui.select(
                     options=DATASETS, value=DATASETS[0], label="Dataset"
-                ).classes("drocat-select").style("min-width: 260px")
+                ).props("outlined").classes("drocat-select").style("min-width: 260px")
                 force_rebuild = ui.checkbox(
                     "Force rebuild (clear broken cache first)"
                 ).tooltip(
@@ -330,136 +342,105 @@ def create_settings_tab():
 
             auto_suggest_cb.on_value_change(_toggle_auto_suggest)
 
-        # Custom type mappings (LabelMapper presets, reusable across runs)
+        # Custom type mappings (LabelMapper presets, reusable across runs).
+        # Use the same Custom Mapping panel as the tool tabs so Settings and
+        # query-local mapping edits share the outlined member fields, aligned
+        # dataset rows, and available-neuron viewer.
         with ui.card().classes("w-full drocat-card"):
             section_header("Custom Type Mappings", "hub")
             ui.label(
-                "Define custom neuron groups across datasets for cross-dataset comparison and "
-                "pathfinding (LabelMapper format). Presets are saved permanently in "
-                "cache/user_mappings.json and exported to cache/user_mappings/ for runs."
+                "Define reusable neuron groups across datasets. The shared Custom Mapping "
+                "panel keeps the same aligned member inputs and LabelMapper JSON format "
+                "used by the analysis tabs. Saving updates the reusable Custom Mapping "
+                "preset in cache/user_mappings.json and exports it for runs."
             ).classes("text-caption drocat-muted")
-            with ui.row().classes("items-center gap-2"):
-                ui.link(
-                    "📖 Grouping instructions (LabelMapper guide)",
-                    MAPPING_GUIDE_URL,
-                    new_tab=True,
-                ).classes("text-caption text-primary")
 
-            preset_select = ui.select(
-                options=mapping_store.list_mappings(),
-                value=mapping_store.get_active_mapping(),
-                label="Saved mappings",
-            ).classes("w-full drocat-select")
-            with ui.row().classes("items-center gap-2 w-full"):
-                name_input = ui.input(
-                    label="Mapping name", placeholder="e.g. aMe12 orthologs"
-                ).classes("drocat-input").style("width: 300px")
-                desc_input = ui.input(label="Description (optional)").classes("drocat-input")
+            mapping_row_action_renderers = []
 
-            side_tabs = ui.tabs().classes("w-full")
-            with side_tabs:
-                ui.tab("Source")
-                ui.tab("Target")
-                ui.tab("Intermediate")
-            with ui.tab_panels(side_tabs, value="Source").classes("w-full bg-transparent"):
-                with ui.tab_panel("Source").classes("p-0"):
-                    source_container = ui.column().classes("w-full gap-2")
-                with ui.tab_panel("Target").classes("p-0"):
-                    target_container = ui.column().classes("w-full gap-2")
-                with ui.tab_panel("Intermediate").classes("p-0"):
-                    inter_container = ui.column().classes("w-full gap-2")
+            mapping_dataset_select = None
 
-            editors = {
-                "source_mapping": MappingGridEditor("source_mapping"),
-                "target_mapping": MappingGridEditor("target_mapping"),
-                "intermediate_mapping": MappingGridEditor("intermediate_mapping"),
-            }
-            editors["source_mapping"].create(source_container, list(DATASETS))
-            editors["target_mapping"].create(target_container, list(DATASETS))
-            editors["intermediate_mapping"].create(inter_container, list(DATASETS))
+            def _render_mapping_dataset_selector():
+                nonlocal mapping_dataset_select
+                mapping_dataset_select = dataset_multi_selector(
+                    label="Target datasets",
+                    default=[],
+                    hint=(
+                        "Select the datasets this reusable mapping should apply to. "
+                        "The editor renders and saves every selected dataset column for "
+                        "each group, including empty cells."
+                    ),
+                )
+                return mapping_dataset_select
 
-            def _refresh_preset_select(value=None):
-                preset_select.options = mapping_store.list_mappings()
-                preset_select.value = value
+            def _mapping_datasets():
+                values = mapping_dataset_select.value if mapping_dataset_select else []
+                values = values or []
+                if not isinstance(values, (list, tuple, set)):
+                    values = [values]
+                return [str(dataset) for dataset in values if dataset]
 
-            def _load_preset(name):
-                preset = mapping_store.get_mapping(name)
-                if not preset:
+            mapping_button, mapping_dialog, _resolve_mapping = custom_grouping_block(
+                label="Custom Mapping",
+                hint="Open the shared LabelMapper group editor with aligned dataset rows "
+                     "and available-neuron lookup.",
+                datasets_provider=_mapping_datasets,
+                tab_key="settings_mapping",
+                panel_title="Custom Mapping",
+                dataset_selector_renderer=_render_mapping_dataset_selector,
+                row_action_renderers=mapping_row_action_renderers,
+            )
+            mapping_button.classes("drocat-settings-mapping-button")
+            grouper = mapping_dialog.inline_grouper
+
+            def _save_custom_mapping():
+                # Settings intentionally has one reusable mapping surface now;
+                # the old name/description/preset controls are removed from
+                # this card. Save to a stable preset name and make it active.
+                name = "Custom Mapping"
+                if not grouper.datasets():
+                    ui.notify(
+                        "Select at least one target dataset first",
+                        type="warning",
+                    )
                     return
-                name_input.value = preset["name"]
-                desc_input.value = preset.get("description", "")
-                for side in mapping_store.MAPPING_SIDES:
-                    editors[side].set_data(preset.get(side) or {})
-
-            def _new_preset():
-                name_input.value = ""
-                desc_input.value = ""
-                for side in mapping_store.MAPPING_SIDES:
-                    editors[side].set_data({})
-                preset_select.value = None
-
-            def _save_preset():
-                name = (name_input.value or "").strip()
-                if not name:
-                    ui.notify("Enter a mapping name first", type="warning")
-                    return
-                sides = {}
-                for side in mapping_store.MAPPING_SIDES:
-                    if not editors[side].is_empty():
-                        sides[side] = editors[side].get_data()
-                if not sides:
+                if grouper.is_empty():
                     ui.notify("Add at least one group with neurons first", type="warning")
                     return
-                errors = mapping_store.validate_mapping(sides)
+                errors = grouper.validate()
                 if errors:
                     for err in errors:
                         ui.notify(err, type="negative")
                     return
-                if not mapping_store.save_mapping(name, sides, desc_input.value or ""):
+                payload = to_canonical_dict(
+                    grouper._active_rows(),
+                    grouper.datasets(),
+                    origin="settings",
+                )
+                sides = {
+                    "source_mapping": payload["source_mapping"],
+                    "target_mapping": payload["target_mapping"],
+                }
+                if not mapping_store.save_mapping(name, sides):
                     ui.notify("Failed to save mapping", type="negative")
                     return
-                _refresh_preset_select(name)
-                ui.notify(f"Mapping '{name}' saved", type="positive")
-
-            def _rename_preset():
-                old = preset_select.value
-                new = (name_input.value or "").strip()
-                if not old or not new:
-                    ui.notify("Select a preset and enter the new name", type="warning")
-                    return
-                if not mapping_store.rename_mapping(old, new):
-                    ui.notify("Rename failed (name taken or missing)", type="negative")
-                    return
-                _refresh_preset_select(new)
-                name_input.value = new
-                ui.notify(f"Renamed to '{new}'", type="positive")
-
-            def _delete_preset():
-                name = preset_select.value
-                if not name:
-                    ui.notify("Select a preset to delete", type="warning")
-                    return
-                if not mapping_store.delete_mapping(name):
-                    ui.notify("Delete failed", type="negative")
-                    return
-                _refresh_preset_select(None)
-                _new_preset()
-                ui.notify(f"Deleted '{name}'", type="positive")
-
-            def _set_active():
-                name = preset_select.value
-                if not name:
-                    ui.notify("Select a preset to set active", type="warning")
-                    return
                 mapping_store.set_active_mapping(name)
-                ui.notify(f"'{name}' is now the active mapping", type="positive")
+                ui.notify("Custom Mapping saved and set active", type="positive")
 
-            preset_select.on_value_change(lambda e: _load_preset(e.value) if e.value else None)
-            ui.button("Save Mapping", icon="save", color="primary").on_click(_save_preset)
-            ui.button("New", icon="add").on_click(_new_preset)
-            ui.button("Rename", icon="edit").on_click(_rename_preset)
-            ui.button("Delete", icon="delete", color="negative").on_click(_delete_preset)
-            ui.button("Set Active", icon="star").on_click(_set_active)
+            def _render_save_mapping_action():
+                ui.button(
+                    "Save Mapping",
+                    icon="save",
+                    on_click=_save_custom_mapping,
+                ).props("outline no-caps").classes(
+                    "drocat-labelmapper-query-action"
+                ).tooltip(
+                    "Save this mapping using the selected target datasets"
+                )
+
+            mapping_row_action_renderers.append(_render_save_mapping_action)
+            # The first render happens before the callbacks above are defined;
+            # refresh once so an already-open editor receives the new action.
+            grouper.resync()
 
         # Dataset Preparation Guide
         with ui.card().classes("w-full drocat-card"):
@@ -549,10 +530,10 @@ python -c "import sys; sys.path.insert(0, 'src'); from BANC_file_converter impor
         with ui.card().classes("w-full drocat-card"):
             section_header("About", "info")
             ui.label("DROCAT - Drosophila Connectome Analysis Toolkit").classes("text-subtitle1 font-bold")
-            ui.label("Version 4.5.0").classes("text-caption drocat-muted")
+            ui.label(f"Version {APP_VERSION} · branch {APP_DOCS_BRANCH}").classes("text-caption drocat-muted")
             with ui.row().classes("mt-2"):
-                ui.link("GitHub", "https://github.com/Swida-Alba/hemibrain-connectomes-analysis", new_tab=True).classes("text-primary")
-                ui.link("Docs", "https://github.com/Swida-Alba/hemibrain-connectomes-analysis/blob/main/README.md", new_tab=True).classes("text-primary")
+                ui.link("GitHub", APP_GITHUB_URL, new_tab=True).classes("text-primary")
+                ui.link("Docs", APP_DOCS_URL, new_tab=True).classes("text-primary")
 
     def _update_token_status():
         neuprint_status.text = _token_status(token_state["neuprint"])

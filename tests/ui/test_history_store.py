@@ -84,6 +84,60 @@ class TestRecord:
         assert "test" in store.prune_orphaned_custom([])
         assert store.recent() == ["aMe12"]
 
+    def test_dataset_scope_filters_query_history_and_preserves_multi_dataset_use(
+        self, store
+    ):
+        store.record(["only_a"], now="2026-08-11T10:00:00",
+                     datasets=["dataset-a"])
+        store.record(["only_b"], now="2026-08-11T10:01:00",
+                     datasets=["dataset-b"])
+        store.record(["both"], now="2026-08-11T10:02:00",
+                     datasets=["dataset-a", "dataset-b"])
+
+        assert store.recent(datasets=["dataset-a"]) == ["both", "only_a"]
+        assert store.recent(datasets=["dataset-b"]) == ["both", "only_b"]
+
+        # A later run adds a dataset rather than replacing prior provenance.
+        store.record(["only_a"], now="2026-08-11T10:03:00",
+                     datasets=["dataset-b"])
+        assert store.recent(datasets=["dataset-b"])[0] == "only_a"
+
+    def test_custom_group_and_saved_map_follow_their_member_datasets(
+        self, store, tmp_path, monkeypatch
+    ):
+        from ui import group_history, mapping_store
+
+        monkeypatch.setattr(
+            group_history, "HISTORY_PATH", tmp_path / "group_history.json"
+        )
+        monkeypatch.setattr(mapping_store, "_store_dir", tmp_path / "mappings")
+        monkeypatch.setattr(
+            mapping_store, "_store_file", tmp_path / "mappings.json"
+        )
+
+        group_history.record([
+            ("group_a", {"dataset-a": ["aMe12"], "dataset-b": []})
+        ])
+        store.record(["group_a"], now="2026-08-11T10:00:00",
+                     custom_values=["group_a"], datasets=["dataset-a"])
+        mapping_store.save_mapping(
+            "map_a",
+            {
+                "source_mapping": {
+                    "custom_label": ["mapped"],
+                    "dataset-a": [["aMe12"]],
+                    "dataset-b": [[]],
+                }
+            },
+        )
+        store.record(["map_a"], now="2026-08-11T10:01:00",
+                     datasets=["dataset-a"])
+
+        assert "group_a" in store.recent(datasets=["dataset-a"])
+        assert "group_a" not in store.recent(datasets=["dataset-b"])
+        assert "map_a" in store.recent(datasets=["dataset-a"])
+        assert "map_a" not in store.recent(datasets=["dataset-b"])
+
     def test_legacy_unknown_values_are_not_assumed_to_be_invalid(self, store):
         store.record(["ordinary"], now="2026-08-11T10:00:00")
         assert store.prune_orphaned_custom([]) == []

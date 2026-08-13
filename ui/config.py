@@ -5,6 +5,8 @@ Datasets, defaults, and path settings.
 
 from pathlib import Path
 import json
+import os
+import subprocess
 
 # Project root (parent of ui/)
 PROJECT_ROOT = Path(__file__).parent.parent
@@ -274,3 +276,38 @@ APP_TITLE = "DROCAT - Connectome Analysis Toolkit"
 APP_VERSION = "4.5.0"
 APP_PORT = 8080
 APP_HOST = "127.0.0.1"
+
+# Keep external project links aligned with the checkout that is running the
+# UI. Deployments without a .git directory fall back to the matching version
+# branch, so a release build never links back to an unrelated `main` page.
+GITHUB_REPOSITORY_URL = (
+    "https://github.com/Swida-Alba/"
+    "Drosophila-cross-dataset-connectome-analysis"
+)
+
+
+def _current_docs_branch() -> str:
+    """Resolve the branch used by versioned GitHub documentation links."""
+    configured = os.environ.get("DROCAT_DOCS_BRANCH", "").strip()
+    if configured:
+        return configured
+    try:
+        result = subprocess.run(
+            ["git", "branch", "--show-current"],
+            cwd=PROJECT_ROOT,
+            capture_output=True,
+            text=True,
+            timeout=1,
+            check=False,
+        )
+        branch = result.stdout.strip()
+        if branch:
+            return branch
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return f"v{APP_VERSION}"
+
+
+APP_DOCS_BRANCH = _current_docs_branch()
+APP_GITHUB_URL = f"{GITHUB_REPOSITORY_URL}/tree/{APP_DOCS_BRANCH}"
+APP_DOCS_URL = f"{GITHUB_REPOSITORY_URL}/blob/{APP_DOCS_BRANCH}/README.md"

@@ -226,7 +226,10 @@ def create_network_tab():
         match_info = result.get("neuron_match") or {}
         if match_info.get("any_pair"):
             from ..history_store import record as _record_history
-            _record_history([str(v) for v in query])
+            _record_history(
+                [str(v) for v in query],
+                datasets=[dataset.value] if dataset.value else [],
+            )
 
         output_panel.set_running(False)
         output_panel.set_status("Completed" if result["returncode"] == 0 else "Failed",

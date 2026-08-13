@@ -31,7 +31,7 @@ def create_inter_dataset_tab():
 
     form_col, results_col = tool_page(
         "Cross-Dataset Comparison",
-        "Compare connectivity across multiple datasets (2+).",
+        "Analyze one dataset across thresholds or compare connectivity across datasets.",
         icon="sync_alt",
         doc="cross_dataset.md",
     )
@@ -40,14 +40,8 @@ def create_inter_dataset_tab():
         with ui.card().classes("w-full drocat-card"):
             section_header("Datasets", "storage")
             datasets_select = dataset_multi_selector(
-                label="Datasets to compare (select 2+)",
-                default=["male-cns:v0.9", "hemibrain:v1.2.1"],
-            )
-            nicknames_input = neuron_list_input(
-                label="Nicknames (optional)",
-                show_filter=False,
-                show_upload=False,
-                hint="Short display names for each dataset (same order). Leave empty for auto.",
+                label="Datasets to compare (one dataset with multiple thresholds is also supported)",
+                default=[],
             )
 
         with ui.card().classes("w-full drocat-card"):
@@ -55,19 +49,20 @@ def create_inter_dataset_tab():
             source_input = neuron_list_input(
                 label="Source Neurons",
                 placeholder="Type or upload CSV/TSV/Excel with neuron types/bodyIds",
-                hint="Source neurons for pathfinding. Upload a CSV/TSV/Excel file (first column) or type comma-separated.",
+                hint="Source neurons for pathfinding. Type one query per chip or upload a CSV/TSV/Excel file (first column).",
                 suggestions=_type_suggest,
                 available_neurons=lambda: datasets_select.value if datasets_select is not None else [],
             )
             target_input = neuron_list_input(
                 label="Target Neurons",
                 placeholder="Type or upload CSV/TSV/Excel with neuron types/bodyIds",
-                hint="Target neurons for pathfinding. Upload a CSV/TSV/Excel file (first column) or type comma-separated.",
+                hint="Target neurons for pathfinding. Type one query per chip or upload a CSV/TSV/Excel file (first column).",
                 suggestions=_type_suggest,
                 available_neurons=lambda: datasets_select.value if datasets_select is not None else [],
             )
             output_dir = dir_input(scope="inter_dataset")
             mapping_select, _grouper_card, resolve_grouping = custom_grouping_block(
+                label="Custom Mapping",
                 datasets_provider=lambda: list(datasets_select.value or []),
                 require_names=True,
                 tab_key="inter_dataset",
@@ -253,8 +248,8 @@ def create_inter_dataset_tab():
             return
 
         datasets = datasets_select.value or []
-        if len(datasets) < 2:
-            ui.notify("Please add at least 2 datasets to compare", type="warning")
+        if not datasets:
+            ui.notify("Please add at least 1 dataset to analyze", type="warning")
             return
 
         # Parse thresholds (chip values are already normalized to integers;
@@ -272,12 +267,6 @@ def create_inter_dataset_tab():
             return
         if not thresholds:
             ui.notify("Please enter at least one synapse threshold", type="warning")
-            return
-
-        # Parse nicknames
-        nicknames = [str(n) for n in nicknames_input.get_value()[1]] or None
-        if nicknames and len(nicknames) != len(datasets):
-            ui.notify(f"Nickname count ({len(nicknames)}) must match dataset count ({len(datasets)})", type="warning")
             return
 
         # Resolve custom grouping (preset or inline); inline group labels are
@@ -316,8 +305,6 @@ def create_inter_dataset_tab():
             "symmetry_analysis": symmetry_analysis.value,
             "find_reciprocal": find_reciprocal.value,
         }
-        if nicknames:
-            constructor_params["datasets_nickname"] = nicknames
         if mapping_path:
             constructor_params["overall_mapping_json"] = mapping_path
 
@@ -330,7 +317,10 @@ def create_inter_dataset_tab():
         match_info = result.get("neuron_match") or {}
         if match_info.get("any_pair"):
             from ..history_store import record as _record_history
-            _record_history([str(v) for v in sources + targets])
+            _record_history(
+                [str(v) for v in sources + targets],
+                datasets=list(datasets_select.value or []),
+            )
 
         output_panel.set_running(False)
         output_panel.set_status("Completed" if result["returncode"] == 0 else "Failed",

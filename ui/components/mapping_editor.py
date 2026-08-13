@@ -16,6 +16,7 @@ from nicegui import ui
 
 from .. import group_history, history_store, mapping_store
 from ..config import PROJECT_ROOT
+from .common import neuron_list_input
 from .custom_grouper import LiteCustomGrouper
 
 _LABEL_KEYS = ("custom_label", "std_label")
@@ -97,6 +98,9 @@ def custom_grouping_block(
     tab_key: str = "tab",
     watch_elements: Optional[List] = None,
     query_inputs: Optional[Dict[str, object]] = None,
+    panel_title: Optional[str] = None,
+    row_action_renderers: Optional[List[Callable[[], None]]] = None,
+    dataset_selector_renderer: Optional[Callable[[], object]] = None,
 ) -> Tuple[ui.button, ui.dialog, Callable[[], Tuple[Optional[str], bool]]]:
     """Custom Grouping button + popup grouping panel.
 
@@ -104,8 +108,8 @@ def custom_grouping_block(
 
     - The control is a BUTTON: clicking it opens the panel directly (same
       popup design as the "See available neurons" viewer). The panel hosts
-      an optional saved-preset selector plus the inline group board; the
-      button label mirrors the current state (none / preset / inline).
+      an optional embedded dataset selector, saved-group loader, and inline
+      group board; the button label mirrors the current state (none / inline).
     - ``resolve_mapping_path()`` -> ``(path, ok)``. ``ok=False`` means the
       run must be aborted (errors were already notified). A selected preset
       wins; otherwise a non-empty inline board is validated, exported to
@@ -113,7 +117,8 @@ def custom_grouping_block(
       and its path returned. No preset + empty board: ``(None, True)``.
     """
     grouper = LiteCustomGrouper(tab_key=tab_key, require_names=require_names,
-                                query_inputs=query_inputs)
+                                query_inputs=query_inputs,
+                                row_action_renderers=row_action_renderers)
 
     open_button = ui.button(icon="group_work").props(
         "outline no-caps").classes("w-full").style(
@@ -121,6 +126,7 @@ def custom_grouping_block(
     open_button.tooltip(hint)
 
     dialog = ui.dialog()
+    dataset_selector = None
     # Persistent: the panel must not close on outside-click / ESC, because the
     # suggestion menus portal to the body (outside the dialog DOM) and clicking
     # them would otherwise dismiss the panel mid-edit. It closes only via X.
@@ -128,9 +134,12 @@ def custom_grouping_block(
     with dialog:
         with ui.card().classes("w-[min(98vw,1400px)] max-w-none"):
             with ui.row().classes("w-full items-center justify-between gap-3"):
-                ui.label("Custom Grouping").classes("text-h6")
+                ui.label(panel_title or label).classes("text-h6")
                 ui.button(icon="close", on_click=dialog.close).props(
                     "flat round dense")
+            if dataset_selector_renderer is not None:
+                with ui.column().classes("w-full gap-1"):
+                    dataset_selector = dataset_selector_renderer()
             with ui.row().classes("w-full items-center gap-3"):
                 # The former "preset" control is now a HISTORY loader: a button
                 # opening a menu of previously-used groups (recorded
@@ -153,10 +162,21 @@ def custom_grouping_block(
                 ).classes("text-caption text-primary")
             with ui.column().classes("w-full gap-1") as grouper_container:
                 pass
+    watched_elements = list(watch_elements or [])
+    if dataset_selector is not None:
+        watched_elements.append(dataset_selector)
+
+    def _set_embedded_datasets(values: List[str]) -> None:
+        if dataset_selector is not None:
+            dataset_selector.value = list(values)
+
     grouper.create(
         grouper_container,
         datasets_provider or (lambda: []),
-        watch_elements=watch_elements,
+        watch_elements=watched_elements,
+        datasets_setter=(
+            _set_embedded_datasets if dataset_selector is not None else None
+        ),
     )
 
     # Confirmation popup for history removal (overlays the panel dialog).
@@ -174,6 +194,7 @@ def custom_grouping_block(
     # Test/DOM hooks.
     dialog.inline_grouper = grouper
     dialog.history_menu = history_menu
+    dialog.dataset_selector = dataset_selector
 
     def _render_history() -> None:
         history_list.clear()
@@ -196,8 +217,16 @@ def custom_grouping_block(
     def _load_group(lab: str) -> None:
         rec = group_history.valid_labels().get(lab)
         if rec:
-            grouper.handle.upsert_row(lab, rec.get("members") or {})
-            grouper.resync()
+            # The first panel open seeds one blank editing row. Reuse that
+            # placeholder for a loaded history group, but preserve it once a
+            # user has entered either a name or a member.
+            grouper._collect_rows()
+            grouper.handle.load_saved_row(lab, rec.get("members") or {})
+            grouper.ensure_row_datasets()
+            # Render directly: resync would collect the old widgets one more
+            # time and could overwrite the newly loaded row with their blank
+            # values before the replacement inputs are created.
+            grouper._render()
             _update_button_label()
         history_menu.close()
 
@@ -343,6 +372,17 @@ def custom_grouping_block(
         # cell-granularity upsert; auto-named groups are skipped).
         payload = grouper.history_payload()
         group_history.record(payload, origin="inline")
+        for label_value, cells in payload:
+            if not str(label_value or "").strip():
+                continue
+            history_store.record(
+                [str(label_value)],
+                custom_values=[str(label_value)],
+                datasets=[
+                    dataset for dataset, values in (cells or {}).items()
+                    if any(str(value).strip() for value in (values or []))
+                ],
+            )
         # The query history may have been recorded just before this mapping
         # was resolved. Mark matching values now so a later group removal can
         # prune stale entries even if the original run predates the registry
@@ -364,6 +404,7 @@ class MappingGridEditor:
         self._groups: List[str] = []
         self._cells: Dict[str, Dict[int, str]] = {}  # dataset -> {row: "a, b"}
         self._available: List[str] = []
+        self._cell_widgets: Dict[str, Dict[int, ui.element]] = {}
 
     # -- data ---------------------------------------------------------------
 
@@ -372,6 +413,7 @@ class MappingGridEditor:
         self._datasets = []
         self._groups = []
         self._cells = {}
+        self._cell_widgets = {}
         if not data:
             self._rerender()
             return
@@ -388,10 +430,33 @@ class MappingGridEditor:
         for i in range(len(self._groups)):
             for ds in self._datasets:
                 self._cells.setdefault(ds, {}).setdefault(i, "")
+        self._available = [d for d in self._available if d not in self._datasets]
         self._rerender()
+
+    @staticmethod
+    def _parse_cell_text(value: str) -> List[str]:
+        """Convert the legacy comma-separated cell value to input chips."""
+        return [part.strip() for part in str(value or "").split(",") if part.strip()]
+
+    @staticmethod
+    def _encode_cell_values(values) -> str:
+        """Keep the stored LabelMapper representation comma-separated."""
+        return ", ".join(
+            str(value).strip() for value in (values or []) if str(value).strip()
+        )
+
+    def _collect_widgets(self) -> None:
+        """Copy live chip values back into the legacy cell store."""
+        for ds, widgets in self._cell_widgets.items():
+            for idx, widget in widgets.items():
+                if hasattr(widget, "get_value"):
+                    self._cells.setdefault(ds, {})[idx] = self._encode_cell_values(
+                        widget.get_value()[1]
+                    )
 
     def get_data(self) -> dict:
         """Build the LabelMapper side dict from the grid state."""
+        self._collect_widgets()
         data = {"custom_label": [g.strip() for g in self._groups]}
         for ds in self._datasets:
             data[ds] = [
@@ -401,6 +466,7 @@ class MappingGridEditor:
         return data
 
     def is_empty(self) -> bool:
+        self._collect_widgets()
         return not self._groups or all(
             not self._cells.get(ds, {}).get(i, "").strip()
             for i in range(len(self._groups))
@@ -410,6 +476,7 @@ class MappingGridEditor:
     # -- structure ----------------------------------------------------------
 
     def _add_group(self) -> None:
+        self._collect_widgets()
         idx = len(self._groups)
         self._groups.append(f"Group_{idx + 1}")
         for ds in self._datasets:
@@ -417,6 +484,7 @@ class MappingGridEditor:
         self._rerender()
 
     def _remove_group(self, idx: int) -> None:
+        self._collect_widgets()
         if 0 <= idx < len(self._groups):
             self._groups.pop(idx)
             for ds in self._datasets:
@@ -424,6 +492,7 @@ class MappingGridEditor:
         self._rerender()
 
     def _add_dataset(self, ds: Optional[str]) -> None:
+        self._collect_widgets()
         if not ds or ds in self._datasets:
             return
         self._datasets.append(ds)
@@ -444,32 +513,82 @@ class MappingGridEditor:
         if self._container is None:
             return
         self._container.clear()
+        self._cell_widgets = {}
         with self._container:
             ui.label(
                 f"{self.side.replace('_mapping', '').title()} mapping - "
-                "one row per custom group; cells hold comma-separated neuron types"
+                "one group at a time; each dataset has its own member row"
             ).classes("text-caption drocat-muted")
-            with ui.row().classes("items-center gap-2 w-full"):
-                ui.label("Group Name").classes("text-caption font-bold drocat-muted").style("width: 170px")
-                for ds in self._datasets:
-                    ui.label(ds).classes("text-caption font-bold drocat-muted").style("width: 210px")
-                ui.label("").style("width: 36px")
             for i, name in enumerate(self._groups):
-                with ui.row().classes("items-center gap-2 w-full"):
-                    name_input = ui.input(value=name).classes("drocat-input").style("width: 170px")
-                    name_input.on_value_change(lambda e, idx=i: self._set_group_name(idx, e.value))
-                    for ds in self._datasets:
-                        cell = ui.input(value=self._cells[ds].get(i, "")).classes("drocat-input").style("width: 210px")
-                        cell.on_value_change(lambda e, d=ds, idx=i: self._cells[d].__setitem__(idx, e.value))
-                    ui.button(icon="delete", on_click=lambda idx=i: self._remove_group(idx)).props(
-                        "flat dense round"
-                    ).tooltip("Remove group")
-            with ui.row().classes("items-center gap-2"):
+                with ui.element("div").classes("w-full drocat-labelmapper-group"):
+                    with ui.column().classes("drocat-labelmapper-group-name gap-1"):
+                        ui.label("Group name").classes("text-caption drocat-muted")
+                        name_input = ui.input(value=name).props(
+                            "outlined"
+                        ).classes("w-full drocat-input")
+                        name_input.on_value_change(
+                            lambda e, idx=i: self._set_group_name(idx, e.value)
+                        )
+                    with ui.column().classes(
+                        "w-full min-w-0 gap-2 drocat-labelmapper-group-members"
+                    ):
+                        with ui.row().classes(
+                            "w-full items-center gap-4 flex-wrap "
+                            "drocat-labelmapper-row-actions"
+                        ):
+                            with ui.row().classes(
+                                "items-center justify-center gap-4 flex-wrap "
+                                "drocat-labelmapper-query-actions"
+                            ):
+                                pass
+                            with ui.row().classes(
+                                "items-center gap-1 drocat-labelmapper-group-controls"
+                            ):
+                                ui.button(
+                                    icon="delete",
+                                    on_click=lambda idx=i: self._remove_group(idx),
+                                ).props("flat dense round").tooltip("Remove group")
+                    with ui.column().classes(
+                        "w-full gap-2 drocat-labelmapper-datasets"
+                    ):
+                        for ds in self._datasets:
+                            with ui.row().classes(
+                                "w-full items-start gap-3 "
+                                "drocat-labelmapper-dataset-row"
+                            ):
+                                ui.label(ds).classes(
+                                    "drocat-labelmapper-dataset-label"
+                                )
+                                with ui.column().classes(
+                                    "gap-0 min-w-0 "
+                                    "drocat-labelmapper-dataset-input"
+                                ):
+                                    cell = neuron_list_input(
+                                        label="Neuron members",
+                                        unit_label="member",
+                                        show_filter=False,
+                                        show_upload=False,
+                                        initial=self._parse_cell_text(
+                                            self._cells[ds].get(i, "")
+                                        ),
+                                        available_neurons=lambda dataset=ds: dataset,
+                                    )
+                                self._cell_widgets.setdefault(ds, {})[i] = cell
+                                cell.chip_input.on_value_change(
+                                    lambda _e, d=ds, idx=i, widget=cell:
+                                    self._cells[d].__setitem__(
+                                        idx,
+                                        self._encode_cell_values(
+                                            widget.get_value()[1]
+                                        ),
+                                    )
+                                )
+            with ui.row().classes("items-center gap-2 flex-wrap"):
                 ui.button("Add Group", icon="add", on_click=self._add_group).props("flat dense")
                 if self._available:
                     ds_select = ui.select(options=self._available, label="Add dataset column").classes(
                         "drocat-select"
-                    ).style("width: 220px")
+                    ).props("outlined").style("width: 260px")
                     ui.button("Add Column", icon="playlist_add", on_click=lambda: self._add_dataset(ds_select.value)).props(
                         "flat dense"
                     )

@@ -842,7 +842,159 @@ html, body {
 .q-field--focused .q-field__label { color: var(--drocat-cobalt) !important; }
 .q-field__native, .q-field__input { color: var(--drocat-navy) !important; }
 .q-field--dark .q-field__native { color: #fff !important; }
+.q-tooltip {
+    font-size: 14px !important;
+    line-height: 1.35 !important;
+}
 .drocat-param-grid { gap: 14px 16px !important; }
+
+/* ---------- LabelMapper / custom-group editors ---------- */
+.drocat-settings-mapping-controls {
+    align-items: center;
+}
+.drocat-settings-mapping-controls > .q-field,
+.drocat-settings-mapping-controls > .q-btn {
+    flex: 1 1 0;
+    min-width: 280px;
+    width: auto !important;
+}
+.drocat-settings-mapping-button {
+    min-height: 48px !important;
+    font-size: 16px !important;
+}
+.drocat-labelmapper-board {
+    min-width: 0;
+}
+.drocat-labelmapper-group {
+    min-width: 0;
+    position: relative;
+    display: grid !important;
+    grid-template-columns: minmax(220px, 360px) minmax(0, 1fr);
+    grid-template-rows: auto auto;
+    column-gap: 24px;
+    row-gap: 12px;
+    align-items: start;
+    padding: 12px 14px 14px;
+    border: 1px solid var(--drocat-line-strong);
+    border-radius: 14px;
+    background: linear-gradient(180deg, rgba(247, 249, 252, .84), #fff);
+    box-shadow: 0 2px 8px rgba(11, 31, 58, .04);
+}
+.drocat-labelmapper-group-name {
+    grid-column: 1;
+    grid-row: 1;
+    width: 100%;
+    min-width: 0;
+    z-index: 1;
+}
+.drocat-labelmapper-group-members {
+    grid-column: 2;
+    grid-row: 1;
+    min-width: 0;
+    width: 100%;
+    padding-top: 28px;
+}
+.drocat-labelmapper-row-actions {
+    display: grid !important;
+    grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+    align-items: center;
+    width: 100%;
+    max-width: 100%;
+    gap: 16px !important;
+    min-height: 64px;
+    padding: 0;
+    margin-bottom: 0;
+}
+.drocat-labelmapper-query-actions {
+    grid-column: 2;
+    justify-self: center;
+    max-width: 100%;
+}
+.drocat-labelmapper-group-controls {
+    grid-column: 3;
+    justify-self: end;
+    position: static;
+}
+.drocat-labelmapper-query-action {
+    min-height: 40px;
+    padding: 0 16px;
+}
+.drocat-labelmapper-datasets {
+    grid-column: 1 / -1;
+    grid-row: 2;
+    min-width: 0;
+}
+.drocat-labelmapper-dataset-row {
+    display: grid !important;
+    grid-template-columns: minmax(220px, 360px) minmax(0, 1fr);
+    column-gap: 24px;
+    align-items: start;
+    min-width: 0;
+    padding: 8px 0 10px;
+    border-bottom: 1px solid rgba(207, 215, 227, .72);
+}
+.drocat-labelmapper-dataset-row:last-child {
+    padding-bottom: 0;
+    border-bottom: 0;
+}
+.drocat-labelmapper-dataset-label {
+    min-width: 0;
+    padding-top: 20px;
+    padding-left: 32px;
+    color: var(--drocat-navy);
+    font-size: 16px;
+    line-height: 1.25;
+    font-weight: 700;
+    overflow-wrap: anywhere;
+}
+.drocat-labelmapper-dataset-input {
+    min-width: 0;
+    width: 100%;
+}
+.drocat-labelmapper-dataset-input .drocat-chip-input-shell,
+.drocat-labelmapper-dataset-input .drocat-chip-input {
+    min-width: 0;
+}
+.drocat-labelmapper-dataset-input .drocat-neuron-viewer-card {
+    /* Keep the viewer link compact in each mapping row. */
+    margin-top: 1px;
+}
+@media (max-width: 760px) {
+    .drocat-settings-mapping-controls > .q-field,
+    .drocat-settings-mapping-controls > .q-btn {
+        min-width: 100%;
+    }
+    .drocat-labelmapper-group {
+        display: block !important;
+        padding: 10px;
+    }
+    .drocat-labelmapper-group-name {
+        width: 100%;
+        min-width: 0;
+    }
+    .drocat-labelmapper-group-members {
+        width: 100%;
+        margin-top: 14px;
+        padding-top: 0;
+    }
+    .drocat-labelmapper-row-actions {
+        grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+        width: 100%;
+        max-width: none;
+    }
+    .drocat-labelmapper-group-controls {
+        position: static;
+    }
+    .drocat-labelmapper-dataset-row {
+        grid-template-columns: minmax(140px, 38%) minmax(0, 1fr);
+        column-gap: 12px;
+    }
+    .drocat-labelmapper-dataset-label {
+        width: 100%;
+        padding-top: 10px;
+        padding-left: 16px;
+    }
+}
 
 /* ---------- Buttons ---------- */
 .q-btn { border-radius: var(--drocat-radius-sm); font-weight: 650; }
@@ -972,6 +1124,9 @@ html, body {
 /* ---------- Layer tree editor (Skeleton tab) ---------- */
 .drocat-layer-board { min-height: 8px; }
 .drocat-layer-row {
+    width: 100%;
+    max-width: 100%;
+    box-sizing: border-box;
     border: 1px solid var(--drocat-line);
     border-radius: 12px;
     background: var(--drocat-surface);
@@ -981,6 +1136,7 @@ html, body {
 .drocat-layer-row:hover { border-color: var(--drocat-line-strong); }
 .drocat-layer-grip { color: var(--drocat-faint); cursor: grab; }
 .drocat-layer-neurons {
+    width: 100%;
     display: flex;
     flex-wrap: wrap;
     gap: 6px;
@@ -1004,7 +1160,17 @@ html, body {
 }
 .drocat-layer-chip:hover { border-color: var(--drocat-cobalt); }
 .drocat-layer-chip .q-btn { width: 22px; height: 22px; }
-.drocat-layer-add { max-width: 180px; }
+.drocat-layer-neuron-input {
+    width: 100%;
+    min-width: 0;
+}
+.drocat-layer-neuron-input .drocat-chip-input-shell,
+.drocat-layer-neuron-input .drocat-chip-input,
+.drocat-layer-neuron-input .q-field {
+    width: 100%;
+    min-width: 0;
+}
+.drocat-layer-neuron-input .q-chip { cursor: grab; }
 
 /* ---------- Results panel ---------- */
 .drocat-results-head { padding-bottom: 12px; }
